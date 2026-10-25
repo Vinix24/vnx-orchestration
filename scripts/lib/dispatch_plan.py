@@ -1,8 +1,9 @@
 """dispatch_plan.py — compile_plan: pure, total routing decision function.
 
 Maps a ValidatedSpec + RuntimeSnapshot to exactly one ExecutionPlan or one Reject.
-No I/O, no env reads, no filesystem access — every side-effectful input arrives
-via the snapshot argument.
+No env reads and no I/O beyond one existence probe (RS-2: the skill slug is
+resolved inside ``snapshot.repo_root``, the same checkout the door discovers the
+role registry from) — every other side-effectful input arrives via the snapshot.
 
 PR-2 of the single-entry dispatch gate. Nothing imports this module yet.
 ADR-007 not triggered — pure in-process types only.
@@ -25,6 +26,7 @@ from dispatch_spec import (
     ValidatedSpec,
 )
 from event_store import HEADLESS_LANE_TERMINAL
+from skill_prefix import resolve_skill_dir, skill_search_paths
 
 
 def resolve_claude_lane(spec: DispatchSpec) -> tuple[str, str, "str | None"]:
@@ -131,6 +133,10 @@ class RuntimeSnapshot:
     # session (keychain OAuth). The headless lane (claude -p) runs on the SAME
     # Max subscription unless this is True — measured 2026-08-11.
     claude_api_metered: bool = False
+    # RS-2: the checkout whose skill trees (``skills/``, then ``.claude/skills/``)
+    # a declared ``spec.skill`` must exist in — the root the agents/ registry comes
+    # from. None = caller supplied no root; a declared skill is then REFUSED.
+    repo_root: Optional[Path] = None
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,10 @@ class ExecutionPlan:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    skill: Optional[str] = None         # RS-2: the verified skill slug carried to the prompt seam.
+                                        # Only a slug resolve_skill_dir found reaches here. It IS in
+                                        # digest(): a skill injects instructions, so a permit for one
+                                        # skill must not validate a plan naming another.
     requires_mcp: bool = False          # OI-865: True keeps the worker's ambient MCP config instead
                                         # of the force-empty scoped posture. Default False is the
                                         # choice for a MISSING spec field: DispatchSpec.requires_mcp
@@ -207,6 +217,7 @@ class ExecutionPlan:
             "require_worktree": self.require_worktree,
             "seed_materialize": self.seed_materialize,
             "requires_mcp": self.requires_mcp,
+            "skill": self.skill,
             "instruction_delivery": self.instruction_delivery,
             "report_contract": self.report_contract,
             "warmup": self.warmup,
@@ -255,12 +266,29 @@ def claude_auth_is_api_metered(env: Mapping[str, str]) -> bool:
     )
 
 
+def _skill_reject(spec: DispatchSpec, snapshot: RuntimeSnapshot) -> Optional[Reject]:
+    """RS-2: a declared skill must resolve in ``skills/`` or ``.claude/skills/``.
+
+    Uses ``skill_prefix.resolve_skill_dir``, the resolver staging shares, so the
+    two gates cannot disagree. No ``repo_root`` = cannot verify = REFUSE (missing
+    evidence is never a pass); no declared skill = no rule.
+    """
+    if spec.skill is None:
+        return None
+    slug = spec.skill.strip()
+    root = snapshot.repo_root
+    if root is not None and resolve_skill_dir(root, slug) is not None:
+        return None
+    searched = " and ".join(str(c) for c in skill_search_paths(root or Path(), slug))
+    return Reject("unknown-skill", f"skill {slug!r} not found; looked for {searched}")
+
+
 def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPlan | Reject:
     """Map ValidatedSpec + RuntimeSnapshot to exactly one ExecutionPlan or one Reject.
 
-    Pure and total: no I/O, no env reads, no filesystem access. Every input
-    arrives via arguments. First failing hard rule returns a Reject; no None,
-    no fallthrough, no raise.
+    Total: no env reads, and the only filesystem probe is ``_skill_reject`` (RS-2),
+    which resolves the slug inside ``snapshot.repo_root``. First failing hard rule
+    returns a Reject; no None, no fallthrough, no raise.
     """
     spec = vspec.spec
     warnings: list[str] = []
@@ -293,17 +321,19 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
     # task_class declared) is always valid — this only fires on an unknown
     # STRING. snapshot.valid_task_classes=None (registry not provided) skips,
     # mirroring the valid_roles check immediately above.
-    if (
-        snapshot.valid_task_classes is not None
-        and spec.task_class
-        and spec.task_class not in snapshot.valid_task_classes
-    ):
+    if (snapshot.valid_task_classes is not None and spec.task_class
+            and spec.task_class not in snapshot.valid_task_classes):
         valid = ", ".join(sorted(snapshot.valid_task_classes))
         return Reject(
             "unknown-task-class",
             f"task_class {spec.task_class!r} is not a known routing_by_task class; "
             f"valid task classes: {valid or '(none discovered — routing_recommendations.yaml unavailable)'}",
         )
+
+    # RS-2 (ADR-048): a named skill must exist before the lane can inject it.
+    skill_reject = _skill_reject(spec, snapshot)
+    if skill_reject is not None:
+        return skill_reject
 
     # D3 — constraint verdicts; blocking → Reject immediately; warn → collect
     for v in snapshot.constraint_verdicts:
@@ -459,7 +489,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         isolation=isolation,
         require_worktree=require_worktree,
         seed_materialize=seed_materialize,
-        requires_mcp=spec.requires_mcp,
+        requires_mcp=spec.requires_mcp, skill=spec.skill,
         instruction_delivery=instruction_delivery,
         report_contract=report_contract,
         warmup=warmup,

@@ -366,6 +366,10 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
         pr_id = getattr(args, "pr_id", None)
         if pr_id:
             dispatch_metadata["pr_id"] = pr_id
+        # RS-2 (ADR-048): the skill bound by the spec rides to the one prompt seam.
+        skill = (getattr(args, "skill", None) or "").strip()
+        if skill:
+            dispatch_metadata["skill"] = skill
         enriched = _inject_skill_context(
             getattr(args, "terminal_id", ""),
             enriched,
@@ -2204,8 +2208,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--provider",
-        required=True,
+        "--provider", required=True,
         help=(
             "Provider to use for dispatch. "
             "Accepted values: claude, codex, gemini, kimi, litellm:<model>. "
@@ -2268,7 +2271,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "VNX_BENCH_WORKTREE_BASE_REF for the benchmark harness)."
         ),
     )
+    _add_skill_argument(parser)
     return parser
+
+
+def _add_skill_argument(parser: argparse.ArgumentParser) -> None:
+    """RS-2: ``--skill`` carries the spec-bound skill into the prompt seam (kept out
+    of _build_parser's body so the parser stays inside the function-size ratchet)."""
+    parser.add_argument(
+        "--skill", default=None,
+        help="Skill slug bound by the dispatch spec (RS-2). Reaches the prompt seam as "
+             "dispatch_metadata['skill']; unknown slugs are refused at the door.",
+    )
 
 
 def _worker_role_env(
@@ -2866,6 +2880,7 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
         work_ref=getattr(args, "work_ref", None),
+        skill=getattr(args, "skill", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )
@@ -2907,6 +2922,7 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
         work_ref=getattr(args, "work_ref", None),
+        skill=getattr(args, "skill", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )

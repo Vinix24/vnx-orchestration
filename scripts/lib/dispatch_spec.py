@@ -598,7 +598,8 @@ def validate(
     # ``skills/`` or ``.claude/skills/``, so the slug is the id convention plus a
     # ban on ``..``. EXISTENCE is deliberately not checked here: it is a staging
     # rule (stage_spec_bundle refuses an unknown skill at the trust boundary) and
-    # a compile-time rule, exactly as the docstring above states for skill presence.
+    # a compile-time rule (dispatch_plan._skill_reject, RS-2), exactly as the
+    # docstring above states for skill presence.
     if spec.skill is not None:
         _skill_err = _validate_skill_slug(spec.skill.strip())
         if _skill_err is not None:
