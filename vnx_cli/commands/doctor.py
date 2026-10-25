@@ -374,10 +374,10 @@ def _check_state_root_location(data_root: Path) -> Check:
 def _check_legacy_store(project_id: str, central_dir: Path) -> Check:
     """Report a pre-#1437 XDG store of this project (read-only, nothing moved).
 
-    Before PR #1437 (2026-10-08) ``vnx init`` put the runtime store under
-    ``${XDG_DATA_HOME:-~/.local/share}/vnx/<project_id>``; no resolver reads
-    that location any more, so an upgraded operator keeps an abandoned copy
-    with nothing pointing at it. WARN only when it is the project's *only*
+    Before PR #1437 (2026-10-08) ``vnx init`` put the runtime store in the
+    pre-#1437 XDG data-home store (see ``legacy_store_path``); no resolver
+    reads that location any more, so an upgraded operator keeps an abandoned
+    copy with nothing pointing at it. WARN only when it is the project's *only*
     store: alongside a central ``~/.vnx-data/<id>`` store it is inert history
     (PASS, path named), and a directory without ``state/runtime_coordination.db``
     is an empty skeleton, not a store (PASS). Relocating one is
