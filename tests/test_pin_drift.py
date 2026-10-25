@@ -6,6 +6,7 @@ the ``.vnx-data`` runtime tree are never read or written.
 """
 
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -21,9 +22,13 @@ from pin_drift import (
     VERDICT_DEAD,
     VERDICT_LAGGING,
     VERDICT_NON_RELEASE,
+    Mislabel,
     classify_pin,
     current_version,
     load_store,
+    mislabeled,
+    unlabeled,
+    writable,
 )
 
 
@@ -36,6 +41,11 @@ def _make_store(root: Path, dirs, current="v1.7.6") -> Path:
     if current is not None:
         os.symlink(f"versions/{current}", root / "current")
     return root
+
+
+def _write_label(version_dir: Path, text: str) -> None:
+    """Write ``text`` as the dir's ``VERSION`` file, newline-terminated."""
+    (version_dir / "VERSION").write_text(text + "\n", encoding="utf-8")
 
 
 @pytest.fixture()
@@ -161,3 +171,74 @@ def test_current_on_a_rolling_dir_leaves_every_distance_unknown(store):
     release_pin = classify_pin("1.7.5", store)
     assert release_pin.verdict == VERDICT_LAGGING
     assert release_pin.note is not None and "distance unknown" in release_pin.note
+
+
+@pytest.fixture()
+def labeled_store(tmp_path):
+    """The layout a store check has to read: one dir whose ``VERSION``
+    disagrees with its name, one that differs only by the decorative ``v``,
+    one with no ``VERSION`` at all, and the two non-release entries a real
+    store always carries (``.vnx-data`` and ``edge``)."""
+    root = _make_store(tmp_path / "store", ("v1.0.1", "v1.0.2", "v1.0.3"), current="v1.0.2")
+    versions = root / "versions"
+    _write_label(versions / "v1.0.1", "1.0.0")
+    _write_label(versions / "v1.0.2", "v1.0.2")
+    (versions / ".vnx-data").mkdir()
+    (versions / "edge").mkdir()
+    _write_label(versions / "edge", "9.9.9")
+    return root
+
+
+def test_mislabeled_names_the_dir_whose_version_file_disagrees(labeled_store):
+    # ``edge`` holds 9.9.9 and ``.vnx-data`` holds nothing; neither is a
+    # release dir, so neither may show up anywhere.
+    assert mislabeled(labeled_store) == [Mislabel("v1.0.1", "1.0.0")]
+
+
+def test_mislabeled_skips_non_dirs_and_non_version_names(labeled_store):
+    versions = labeled_store / "versions"
+    (versions / "v1.0.6").mkdir()
+    _write_label(versions / "v1.0.6", "1.0.5")
+    (versions / "v1.0.7").write_text("not a dir\n", encoding="utf-8")
+    (versions / "nightly-build").mkdir()
+    _write_label(versions / "nightly-build", "9.9.9")
+
+    assert mislabeled(labeled_store) == sorted(
+        [Mislabel("v1.0.1", "1.0.0"), Mislabel("v1.0.6", "1.0.5")]
+    )
+
+
+def test_unlabeled_lists_dirs_without_a_usable_label(labeled_store):
+    versions = labeled_store / "versions"
+    _write_label(versions / "v1.0.3", "   ")
+    (versions / "v1.0.4").mkdir()
+    (versions / "v1.0.4" / "VERSION").mkdir()  # unreadable: a directory
+    (versions / "v1.0.5").mkdir()
+    (versions / "v1.0.5" / "VERSION").write_bytes(b"\xff\xfe not utf-8 \xff")
+
+    assert unlabeled(labeled_store) == ["v1.0.3", "v1.0.4", "v1.0.5"]
+    # A dir with no label is never guessed into a mislabel finding.
+    assert [finding.dir_name for finding in mislabeled(labeled_store)] == ["v1.0.1"]
+
+
+def test_writable_lists_only_release_dirs_that_are_not_read_only(labeled_store):
+    versions = labeled_store / "versions"
+    locked = versions / "v1.0.1"
+    original = stat.S_IMODE(locked.stat().st_mode)
+    os.chmod(locked, original & ~0o222)
+    try:
+        # ``v1.0.3`` has no VERSION file but is still a release dir; ``edge``
+        # and ``.vnx-data`` are not release dirs at all.
+        assert writable(labeled_store) == ["v1.0.2", "v1.0.3"]
+    finally:
+        os.chmod(locked, original)
+
+
+def test_store_checks_find_nothing_in_a_missing_or_unreadable_store(tmp_path):
+    missing = tmp_path / "no-store"
+    assert (mislabeled(missing), unlabeled(missing), writable(missing)) == ([], [], [])
+
+    plain = tmp_path / "plain-store"
+    plain.mkdir()
+    (plain / "versions").write_text("not a dir\n", encoding="utf-8")
+    assert (mislabeled(plain), unlabeled(plain), writable(plain)) == ([], [], [])

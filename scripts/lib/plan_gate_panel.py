@@ -21,7 +21,8 @@ Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan,
 the configured ``default_seat`` (codex). A second seat, ``escalation_seat``
 (opus), reads the same plan in the same run when the first returns BLOCK, or
 from the start when the plan's dispatch paths fall in the schema or security
-class (P1, ``second_seat_from_start``). Both labels live in
+class (P1) or in an irreversible category (ADR-030, amendment 2026-10-25),
+``second_seat_from_start``. Both labels live in
 ``configs/plan_gate_panel.yaml``; ``--panel-seats`` replaces the composition for
 one run (``compose_panel``).
 
@@ -487,7 +488,7 @@ class PanelComposition:
     ``panel_floor(len(seats))`` for an override, the quorum the rule always had.
 
     ``second_seat`` (P1) names why the escalation seat sits from the start: a
-    schema or security path (``second_seat_from_start``). Both seats are then
+    schema, security or irreversible path (``second_seat_from_start``). Both seats are then
     in ``seats``, ``escalation`` is None, and the quorum is 2, because the
     second voice is the point.
     """
@@ -542,7 +543,7 @@ def compose_panel(
 
     Without ``requested_labels`` (no ``--panel-seats``): the default seat, the
     escalation seat for a BLOCK, quorum 1. When ``dispatch_paths`` fall in the
-    schema or security class (``second_seat_from_start``), both seats sit from
+    schema, security or an irreversible class (``second_seat_from_start``), both seats sit from
     the start, quorum 2. With ``requested_labels``: exactly those seats in
     configured order, no escalation, quorum ``panel_floor(n)``. Both roles must name
     a configured seat whichever way the run goes, so a broken config surfaces on
@@ -2332,19 +2333,32 @@ def second_seat_from_start(dispatch_paths: Optional[List[str]]) -> Optional[str]
     whose dispatch paths fall in the schema or security class
     (``smart_router.plan_scope_path_category``) gets both seats in its first
     round, and so does one with a path that leaves the repository, which no
-    class can clear. Returns the class and the first path that put it there,
+    class can clear. After those, a path in an irreversible category
+    (``smart_router.irreversible_path_category``: schema-migration,
+    receipt-format, fleet-default, in that order) does too (ADR-030, amendment
+    2026-10-25). Returns the class and the first path that put it there,
     normalised as it was classified.
     """
     import smart_router
 
+    paths = list(dispatch_paths or [])
     classes = {
         smart_router.PLAN_SCOPE_SCHEMA, smart_router.PLAN_SCOPE_SECURITY,
         smart_router.PLAN_SCOPE_OUTSIDE_REPO,
     }
-    for path in dispatch_paths or []:
+    for path in paths:
         category = smart_router.plan_scope_path_category(path)
         if category in classes:
             return f"{category} path {smart_router.normalize_dispatch_path(path)}"
+    first_by_category: Dict[str, str] = {}
+    for path in paths:
+        category = smart_router.irreversible_path_category(path)
+        if category:
+            first_by_category.setdefault(category, path)
+    for category in smart_router.IRREVERSIBLE_CATEGORY_PRECEDENCE:
+        if category in first_by_category:
+            path = smart_router.normalize_dispatch_path(first_by_category[category])
+            return f"irreversible {category} path {path}"
     return None
 
 

@@ -340,6 +340,21 @@ def _validate_branch_ref(raw: str) -> "str | None":
         return "contains a character git forbids in a branch name"
     return None
 
+
+def _validate_skill_slug(raw: str) -> "str | None":
+    """Return an error string if *raw* is not a valid skill slug, else None.
+
+    A slug names exactly ONE folder directly under a skill tree (``skills/<name>/``
+    or ``.claude/skills/<name>/``), so it is the id convention plus an explicit ban
+    on ``..``: a slug can never be a path. Existence of the folder is not this
+    function's concern (see validate() Rule 17).
+    """
+    if ".." in raw:
+        return "'..' is not allowed in a skill name"
+    if not _ID_RE.match(raw):
+        return "must start with a letter or digit and contain only [A-Za-z0-9_.-] (max 128)"
+    return None
+
 _BLOCKED_FIRST_COMPONENTS = frozenset({".git", ".vnx-data"})
 
 _VALID_TARGET_SLOTS = frozenset({"T0", "T1", "T2", "T3"})
@@ -539,16 +554,10 @@ def validate(
     if spec.parent_dispatch is not None:
         _parent = spec.parent_dispatch.strip()
         if not _parent or not _ID_RE.match(_parent):
-            return Reject(
-                "bad-parent-dispatch",
-                f"parent_dispatch {spec.parent_dispatch!r} does not match id regex",
-            )
+            return Reject("bad-parent-dispatch", f"parent_dispatch {spec.parent_dispatch!r} does not match id regex")
     for _tier_field, _tier_val in (("tier_from", spec.tier_from), ("tier_to", spec.tier_to)):
         if _tier_val is not None and _tier_val.strip() not in _VALID_TIERS:
-            return Reject(
-                "bad-tier-value",
-                f"{_tier_field} {_tier_val!r} is not one of {sorted(_VALID_TIERS)}",
-            )
+            return Reject("bad-tier-value", f"{_tier_field} {_tier_val!r} is not one of {sorted(_VALID_TIERS)}")
 
     # Rule 15 — work_ref format (OI-1137). An explicit work-ref is a git branch name (may
     # contain "/"), validated with git's own ref rules. Strip a leading origin/ or refs/heads/
@@ -584,6 +593,16 @@ def validate(
             f"gate {spec.gate!r} is not a known review gate{retired_gate_hint(_gate_name)}; "
             f"valid gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}",
         )
+
+    # Rule 17 — skill slug format (RS-1). A staged skill names ONE folder under
+    # ``skills/`` or ``.claude/skills/``, so the slug is the id convention plus a
+    # ban on ``..``. EXISTENCE is deliberately not checked here: it is a staging
+    # rule (stage_spec_bundle refuses an unknown skill at the trust boundary) and
+    # a compile-time rule, exactly as the docstring above states for skill presence.
+    if spec.skill is not None:
+        _skill_err = _validate_skill_slug(spec.skill.strip())
+        if _skill_err is not None:
+            return Reject("bad-skill", f"skill {spec.skill!r} is not a valid skill slug ({_skill_err})")
 
     return ValidatedSpec(
         spec=spec,

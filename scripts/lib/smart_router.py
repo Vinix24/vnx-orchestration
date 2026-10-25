@@ -919,6 +919,14 @@ _IRREVERSIBLE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("scripts/lib/receipt_schema.py", "receipt-format"),
 )
 
+# The category ``irreversible_path_category`` names when one path falls under
+# several prefixes above, and the order in which
+# ``plan_gate_panel.second_seat_from_start`` names one when several paths do.
+# Fixed here, never the order of the table.
+IRREVERSIBLE_CATEGORY_PRECEDENCE: tuple[str, ...] = (
+    "schema-migration", "receipt-format", "fleet-default",
+)
+
 
 def _irreversible_path_category(path: str) -> Optional[str]:
     """Return the irreversible category name a path falls under, else None.
@@ -944,10 +952,11 @@ def _matches_prefix(path: str, prefix: str) -> bool:
 #
 # A build dispatch on a light track makes that track architecture when one of
 # its paths falls in a category below, or when derive_variant gives
-# coding-strict (_GOVERNANCE_CORE_PREFIXES). Schema and security are also the
-# two classes that bring the plan-gate's second seat in from the start
-# (plan_gate_panel.second_seat_from_start). The door and the plan-gate read this
-# one table, so they cannot classify a path differently.
+# coding-strict (_GOVERNANCE_CORE_PREFIXES). Schema and security bring the
+# plan-gate's second seat in from the start, and so do the irreversible
+# categories above (plan_gate_panel.second_seat_from_start, ADR-030 amendment
+# 2026-10-25). The door and the plan-gate read this one table, so they cannot
+# classify a path differently.
 # The review risk class (review_risk_class, R3) reads this table too and nothing
 # else: every category is a high-risk review. So a gate or merge module is listed
 # here even when _GOVERNANCE_CORE_PREFIXES already makes it coding-strict: the
@@ -1074,6 +1083,32 @@ def _repo_relative(path: str) -> Optional[str]:
     None when it leaves the repository."""
     p = normalize_dispatch_path(path)
     return None if _leaves_repo(p) else p
+
+
+def irreversible_path_category(
+    path: str, *, repo_root: Optional[str | Path] = None,
+) -> Optional[str]:
+    """The irreversible category of one dispatch path, else None.
+
+    The reading of ``_IRREVERSIBLE_PREFIXES`` the plan-gate's second seat uses
+    (``plan_gate_panel.second_seat_from_start``). The path is normalised first
+    (``normalize_dispatch_path``), so ".claude/skills/" keeps its dot and is a
+    fleet default next to "skills/". An absolute path is read relative to
+    ``repo_root``, or to the project root when none is given; lexically, so a
+    symlinked ".claude/skills" classifies by its own name. A path outside the
+    repository has no category here (``plan_scope_path_category`` calls it
+    outside-repo). Several matching prefixes: ``IRREVERSIBLE_CATEGORY_PRECEDENCE``.
+    """
+    p = normalize_dispatch_path(path)
+    if p.startswith("/"):
+        if repo_root is None:
+            import project_root
+            repo_root = project_root.resolve_project_root()
+        p = normalize_dispatch_path(posixpath.relpath(p, posixpath.normpath(str(repo_root))))
+    if not p or _leaves_repo(p):
+        return None
+    hits = {category for prefix, category in _IRREVERSIBLE_PREFIXES if _matches_prefix(p, prefix)}
+    return next((c for c in IRREVERSIBLE_CATEGORY_PRECEDENCE if c in hits), None)
 
 
 def security_path_kind(path: str) -> Optional[str]:

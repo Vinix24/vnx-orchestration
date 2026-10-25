@@ -55,25 +55,6 @@ from review_contract import (
 # Shared helpers
 # ---------------------------------------------------------------------------
 
-FEATURE_PLAN_CONTENT = """\
-# Feature: Gate Evidence Accuracy Test Feature
-
-**Status**: Active
-**Risk-Class**: high
-
-## PR-0: Foundation
-**Track**: C
-**Priority**: P1
-**Skill**: @architect
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Dependencies**: []
-
-`gate_pr0_foundation`
-
----
-"""
 
 
 def _write_dispatch(path: Path, pr_id: str, dispatch_id: str) -> None:
@@ -136,10 +117,6 @@ def env(tmp_path, monkeypatch):
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
 
-    (project_root / "FEATURE_PLAN.md").write_text(
-        FEATURE_PLAN_CONTENT, encoding="utf-8"
-    )
-
     monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
     monkeypatch.setenv("PROJECT_ROOT", str(project_root))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
@@ -157,7 +134,6 @@ def env(tmp_path, monkeypatch):
         "dispatch_dir": dispatch_dir,
         "state_dir": state_dir,
         "receipts": state_dir / "t0_receipts.ndjson",
-        "feature_plan": project_root / "FEATURE_PLAN.md",
     }
 
 
@@ -554,7 +530,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -596,7 +571,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -637,7 +611,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -675,7 +648,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -711,7 +683,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -735,7 +706,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -756,7 +726,6 @@ class TestGithubPrCiRequiredForClosure:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=env["dispatch_dir"],
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],

@@ -1188,15 +1188,6 @@ def test_cli_per_pr_forwards_branch_and_require_github_pr(gate_env, tmp_path, mo
     """Finding 4: --branch and --require-github-pr reach verify_pr_closure when --pr-id is set."""
     import closure_verifier as cv
 
-    # Write a minimal FEATURE_PLAN.md
-    feature_plan = tmp_path / "FEATURE_PLAN.md"
-    feature_plan.write_text(
-        "# Feature: F\n\n**Status**: Active\n**Risk-Class**: medium\n\n"
-        "## PR-0: Thing\n**Track**: A\n**Priority**: P1\n**Skill**: @architect\n"
-        "**Risk-Class**: medium\n**Merge-Policy**: human\n**Review-Stack**: codex_gate\n"
-        "**Dependencies**: []\n\n`gate_pr0_thing`\n\n---\n"
-    )
-
     state_dir = tmp_path / "state"
     state_dir.mkdir()
     dispatch_dir = tmp_path / "dispatches"
@@ -1230,7 +1221,6 @@ def test_cli_per_pr_forwards_branch_and_require_github_pr(gate_env, tmp_path, mo
     monkeypatch.setattr(cv, "verify_pr_closure", _fake_verify_pr_closure)
 
     cv.main([
-        "--feature-plan", str(feature_plan),
         "--pr-id", "PR-0",
         "--branch", "feat/test-branch",
         "--require-github-pr",

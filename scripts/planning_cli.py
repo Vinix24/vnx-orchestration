@@ -249,6 +249,8 @@ def _objective_list_json_row(
 def cmd_objective_list(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
+    if getattr(args, "count_blocked", False):
+        return _cmd_list_count_blocked(args, state_dir, project_id)
     tracks = tracks_lib.list_tracks(state_dir, project_id, phase=args.phase)
 
     if args.horizon:
@@ -306,7 +308,19 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             print("Seed from ROADMAP: python3 scripts/seed_tracks_from_roadmap.py --apply")
         return 0
 
-    # Group by horizon band.
+    _print_objective_list(state_dir, project_id, tracks, review_by_track, scope_by_track, hidden_done)
+    return 0
+
+
+def _print_objective_list(
+    state_dir: str | Path,
+    project_id: str,
+    tracks: list[dict[str, Any]],
+    review_by_track: dict[str, str],
+    scope_by_track: dict[str, "plan_scope.ScopeReading"],
+    hidden_done: int,
+) -> None:
+    """Render the grouped-by-horizon table — the non-JSON ``objective list`` view."""
     grouped: dict[Optional[str], list[dict[str, Any]]] = {h: [] for h in _HORIZON_ORDER}
     grouped[None] = []
     for t in tracks:
@@ -344,6 +358,111 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
         )
     if hidden_done:
         print(f"({hidden_done} done hidden — --all or --phase done to show)\n")
+
+
+# --- `objective list --count-blocked` (cluster point 11): one repeatable number.
+#
+# The cluster measures whether the number of blocked tracks FALLS from the 76
+# measured on 14-08. A later number is only comparable when the same definition
+# produces it: every track whose stored derived_status is 'blocked' (exactly
+# what `objective list --all --json` reports — the 76/106 definition) over ALL
+# tracks, never a live re-derivation and never a phase/horizon slice. Each
+# blocked track is counted ONCE, in the first matching category of a fixed
+# order, so the split always adds up to the total; `--json` still lists every
+# reason per track, so overlap (plan gate AND dependency) stays visible.
+
+_BLOCKED_CATEGORIES = ("plan-gate", "dependency", "other")
+
+
+def _blocked_reasons(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every recorded reason a blocked track is blocked (ordered, overlap kept).
+
+    Fail-closed: a track whose stored derived_status is 'blocked' but whose
+    blocker/dependency rows have gone still yields one 'derived' reason, so it
+    is counted under 'other' instead of silently dropping out of the tally.
+    """
+    reasons: list[dict[str, Any]] = []
+    for oi in detail.get("blocking_ois") or []:
+        oi_id = oi.get("oi_id")
+        is_plan = isinstance(oi_id, str) and oi_id.startswith(_PLAN_OI_PREFIX)
+        reasons.append({"kind": "plan-gate" if is_plan else "other", "oi_id": oi_id})
+    for dep in detail.get("blocking_deps") or []:
+        reasons.append({
+            "kind": "dependency",
+            "track_id": dep.get("track_id"),
+            "phase": dep.get("phase"),
+            "edge_kind": dep.get("kind"),
+        })
+    if not reasons:
+        reasons.append({
+            "kind": "derived",
+            "reason": "derived_status is 'blocked' but no open blocker or unmet hard "
+                      "dependency is recorded now; reconcile before trusting a drop",
+        })
+    return reasons
+
+
+def _blocked_category(reasons: list[dict[str, Any]]) -> str:
+    """First matching category of the fixed order plan-gate > dependency > other."""
+    kinds = {reason["kind"] for reason in reasons}
+    if "plan-gate" in kinds:
+        return "plan-gate"
+    if "dependency" in kinds:
+        return "dependency"
+    return "other"
+
+
+def blocked_track_counts(state_dir: str | Path, project_id: str) -> dict[str, Any]:
+    """READ-ONLY tally of blocked tracks plus every reason per track.
+
+    Total is keyed on the STORED derived_status over ALL tracks — the same
+    definition `objective list --all --json` reports, and therefore the same
+    definition behind the 14-08 baseline of 76. No phase write, no reconcile.
+    """
+    blocked = [
+        track for track in tracks_lib.list_tracks(state_dir, project_id)
+        if track.get("derived_status") == "blocked"
+    ]
+    details = track_reconciler.blocking_details_for(
+        state_dir, project_id, [track["track_id"] for track in blocked]
+    )
+    split = {category: 0 for category in _BLOCKED_CATEGORIES}
+    rows: list[dict[str, Any]] = []
+    for track in blocked:
+        reasons = _blocked_reasons(details.get(track["track_id"]) or {})
+        category = _blocked_category(reasons)
+        split[category] += 1
+        rows.append({
+            "track_id": track["track_id"],
+            "title": track["title"],
+            "phase": track["phase"],
+            "derived_status": track["derived_status"],
+            "category": category,
+            "reasons": reasons,
+        })
+    return {"total": len(rows), "split": split, "tracks": rows}
+
+
+def _cmd_list_count_blocked(
+    args: argparse.Namespace, state_dir: Path, project_id: str,
+) -> int:
+    """`objective list --count-blocked`: print the tally (text, or --json)."""
+    if args.horizon or args.phase:
+        print(
+            "objective list --count-blocked counts ALL tracks (the 14-08 definition) "
+            "— --horizon/--phase do not apply",
+            file=sys.stderr,
+        )
+        return 2
+    counts = blocked_track_counts(state_dir, project_id)
+    if args.json:
+        print(json.dumps(counts, indent=2))
+        return 0
+    split = counts["split"]
+    print(
+        f"{counts['total']} blocked ({split['plan-gate']} plan-gate, "
+        f"{split['dependency']} dependency, {split['other']} other)"
+    )
     return 0
 
 
@@ -2668,7 +2787,7 @@ def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
     """What a new deliverable carries: its title, the marker, and the optional fields.
 
     ``dispatch_paths`` is what a plan-gate run on the track reads when the run
-    itself names no paths (the schema/security case for the second seat, P1).
+    itself names no paths (the schema/security/irreversible case for the second seat).
     """
     meta: dict[str, Any] = {"title": args.title, "deliverable": True}
     for key in ("task_class", "routing_floor"):
@@ -4240,7 +4359,8 @@ def _derive_panel_weight(
     run uses the configured default seat, plus the escalation seat on a BLOCK,
     or exactly the seats an operator names with ``--panel-seats``
     (``plan_gate_panel.compose_panel``). Since P1 the escalation seat also sits
-    from the start when the paths fall in the schema or security class: the
+    from the start when the paths fall in the schema, security or an
+    irreversible class (``plan_gate_panel.second_seat_from_start``): the
     run's ``--dispatch-paths``, or, when the run names none, what the
     ``deliverable_paths`` callable returns (read only then). The variant stays in the trace and the round record so the
     history stays readable. The operator's provider switch then removes every
@@ -5672,6 +5792,29 @@ def _add_planning_parsers(sub: Any, obj_sub: Any, common: Any) -> None:
     _add_deliverable_parsers(sub, common)
 
 
+def _add_objective_list_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective list`: the horizon table plus the repeatable blocked-track count.
+
+    Extracted from ``_build_parser``, which is already over the 70-executable-line
+    ratchet limit: a flag added inline there would grow it.
+    """
+    p_list = obj_sub.add_parser("list", help="list objectives grouped by horizon")
+    common(p_list)
+    p_list.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_list.add_argument("--phase", choices=sorted(tracks_lib.VALID_PHASES), default=None)
+    p_list.add_argument("--all", action="store_true",
+                        help="include done tracks (hidden by default)")
+    p_list.add_argument(
+        "--count-blocked", action="store_true", dest="count_blocked",
+        help="print one repeatable count of blocked tracks: every track whose stored "
+             "derived_status is 'blocked', over ALL tracks — the same definition as "
+             "the 14-08 baseline of 76 — split plan-gate (open OI-PLAN-* blocker) > "
+             "dependency (unmet hard dependency) > other, each track counted once; "
+             "--json lists every reason per track",
+    )
+    p_list.set_defaults(func=cmd_objective_list)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -5684,13 +5827,7 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--state-dir", default="")
         p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
-    p_list = obj_sub.add_parser("list", help="list objectives grouped by horizon")
-    _common(p_list)
-    p_list.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
-    p_list.add_argument("--phase", choices=sorted(tracks_lib.VALID_PHASES), default=None)
-    p_list.add_argument("--all", action="store_true",
-                        help="include done tracks (hidden by default)")
-    p_list.set_defaults(func=cmd_objective_list)
+    _add_objective_list_parser(obj_sub, _common)
 
     p_show = obj_sub.add_parser("show", help="show one objective")
     _common(p_show)

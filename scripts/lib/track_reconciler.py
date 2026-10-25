@@ -30,7 +30,7 @@ import sqlite3
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple, TypedDict
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, TypedDict
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
 
@@ -79,7 +79,10 @@ def _delivery_hold(
     Returns None when the track is NOT held; otherwise a dict::
 
         {"held": True, "partial": N, "complete": C, "unmarked": U,
-         "total": M, "reason": "<operator-readable>"}
+         "total": M, "held_prs": [<pr_number>, ...], "reason": "<operator-readable>"}
+
+    ``held_prs`` names the linked PRs that hold the track, sorted, so a
+    reader can say which PR is not done (ADR-047 §3).
 
     (When the hold fires because the table itself is missing — OI-1167 below
     — there is nothing to count: partial/complete are None and an extra
@@ -146,6 +149,7 @@ def _delivery_hold(
             "complete": None,
             "unmarked": total,
             "total": total,
+            "held_prs": sorted(nums),
             "reason": (
                 f"delivery unverifiable: track_pr_delivery table is absent "
                 f"(migration 0032 not applied to this DB) — cannot confirm "
@@ -159,30 +163,7 @@ def _delivery_hold(
         "WHERE track_id = ? AND project_id = ?",
         (track_id, project_id),
     ).fetchall()
-    partial = 0
-    complete = 0
-    corrupt = 0
-    for row in rows:
-        try:
-            pn = int(row["pr_number"])
-        except (TypeError, ValueError):
-            continue
-        if pn not in nums:
-            continue  # stale row from an unlinked PR — must not hold
-        kind = row["delivery_kind"]
-        if kind == "complete":
-            complete += 1
-        elif kind == "partial":
-            partial += 1
-        else:
-            corrupt += 1
-            log.error(
-                "track_pr_delivery: unrecognized delivery_kind %r for "
-                "project_id=%r track_id=%r pr_number=%r — failing closed "
-                "(delivery hold), not raising: this runs inside sweep loops "
-                "with no per-track try/except",
-                kind, project_id, track_id, row["pr_number"],
-            )
+    partial, complete, corrupt, held_prs = _tally_delivery_rows(rows, nums, track_id, project_id)
     held_count = partial + corrupt
     if held_count == 0:
         return None
@@ -200,8 +181,51 @@ def _delivery_hold(
         "complete": complete,
         "unmarked": unmarked,
         "total": total,
+        "held_prs": held_prs,
         "reason": reason,
     }
+
+
+def _tally_delivery_rows(
+    rows: List[sqlite3.Row],
+    nums: FrozenSet[int],
+    track_id: str,
+    project_id: str,
+) -> Tuple[int, int, int, List[int]]:
+    """Count the delivery markings of the currently linked PRs for _delivery_hold.
+
+    Returns ``(partial, complete, corrupt, held_prs)``: ``held_prs`` are the
+    linked PRs marked 'partial' or with an unrecognized delivery_kind, sorted.
+    A row for a PR outside ``nums`` is stale (an unlinked PR) and never holds.
+    """
+    partial = 0
+    complete = 0
+    corrupt = 0
+    held_prs: set = set()
+    for row in rows:
+        try:
+            pn = int(row["pr_number"])
+        except (TypeError, ValueError):
+            continue
+        if pn not in nums:
+            continue  # stale row from an unlinked PR — must not hold
+        kind = row["delivery_kind"]
+        if kind == "complete":
+            complete += 1
+        elif kind == "partial":
+            partial += 1
+            held_prs.add(pn)
+        else:
+            corrupt += 1
+            held_prs.add(pn)
+            log.error(
+                "track_pr_delivery: unrecognized delivery_kind %r for "
+                "project_id=%r track_id=%r pr_number=%r — failing closed "
+                "(delivery hold), not raising: this runs inside sweep loops "
+                "with no per-track try/except",
+                kind, project_id, track_id, row["pr_number"],
+            )
+    return partial, complete, corrupt, sorted(held_prs)
 
 
 def _load_merged_prs_from_gh(
@@ -515,6 +539,26 @@ def _blocking_detail(
         "blocking_deps": deps["blocking"],
         "advisory_deps": deps["advisory"],
     }
+
+
+def blocking_details_for(
+    state_dir: str | Path,
+    project_id: str,
+    track_ids: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    """READ-ONLY: ``_blocking_detail`` for several tracks over ONE connection.
+
+    The bulk sibling of ``peek_derived_status``'s ``blocking_detail`` payload,
+    for callers that count/classify many blocked tracks at once (``objective
+    list --count-blocked``): same reason query shapes, one connection instead of
+    one per track. Writes nothing. Tracks with no row return empty reason lists
+    — the caller decides what an unexplained blocker means (fail-closed).
+    """
+    conn = _get_conn(state_dir)
+    try:
+        return {track_id: _blocking_detail(conn, track_id, project_id) for track_id in track_ids}
+    finally:
+        conn.close()
 
 
 _PLAN_OI_PREFIX = "OI-PLAN-"
