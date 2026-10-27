@@ -68,7 +68,7 @@ CENTRAL_DB_TABLES: Dict[str, bool] = {
 # name via the statement parser below (a documentation-only migration whose SQL
 # is fully commented out; a DROP-INDEX-only down-migration whose index names
 # encode the table by naming convention, not a parseable `ON <table>` clause).
-# Hand-verified against the file text 2026-10-20.
+# Hand-verified against the file text 2026-10-27.
 _MANUAL_TABLE_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     "0016_rebuild_fts5.sql": ("code_snippets",),
     "2026_05_task_subclass_down.sql": ("success_patterns", "antipatterns"),
@@ -83,6 +83,9 @@ _MANUAL_TABLE_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     ),
     # 0035's SQL file is comments only; the work is scripts/lib/migrations/apply_0035.py.
     "0035_review_cap_verdicts.sql": ("review_cap_verdicts",),
+    # 0036's SQL file is comments only; apply_0036.py replaces the deliverables view
+    # over dispatches, and its down turns withdrawn rows expired with an event each.
+    "0036_deliverable_withdrawn.sql": ("dispatches", "coordination_events"),
 }
 
 _COMMENT_RE = re.compile(r"--.*?$", re.MULTILINE)

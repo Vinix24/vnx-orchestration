@@ -47,6 +47,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -2924,9 +2925,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fetch_deliverable_records(
-    state_dir, project_id: str, objective: Optional[str] = None, *, include_metadata: bool = False,
-) -> list[dict]:
+def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
+                               include_metadata: bool = False, include_withdrawn: bool = False) -> list[dict]:
     """The single read path over the deliverable plane — the view rollup when
     migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
@@ -2942,7 +2942,8 @@ def _fetch_deliverable_records(
     parses each deliverable's ``metadata_json`` into ``title`` (always) and
     ``metadata`` (the full parsed dict, so a caller can read fields like
     ``task_class``/``routing_floor`` that are not modeled as their own view
-    columns yet).
+    columns yet). A ``withdrawn`` deliverable is no open or planned work (ADR-049):
+    it is left out unless ``include_withdrawn``.
     """
     conn = _db_conn(state_dir)
     try:
@@ -2982,7 +2983,7 @@ def _fetch_deliverable_records(
                     """,
                     (project_id,),
                 ).fetchall()
-            records = [dict(r) for r in rows]
+            records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
             if include_metadata:
                 for r in records:
                     meta = json.loads(r.pop("metadata_json", None) or "{}")
@@ -3050,8 +3051,10 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     records = _fetch_deliverable_records(
-        state_dir, project_id, args.objective, include_metadata=True,
+        state_dir, project_id, args.objective, include_metadata=True, include_withdrawn=True,
     )
+    hidden = 0 if args.all else sum(r.get("derived_status") == WITHDRAWN_STATE for r in records)
+    records = [r for r in records if args.all or r.get("derived_status") != WITHDRAWN_STATE]
     for r in records:
         meta = r.get("metadata") or {}
         r["task_class"] = meta.get("task_class")
@@ -3090,6 +3093,8 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
         print(f"        {title}")
         print(f"        {_format_deliverable_field(meta, 'task_class')}")
         print(f"        {_format_deliverable_field(meta, 'routing_floor')}")
+    if hidden:
+        print(f"\n  ({hidden} withdrawn hidden — --all to show)")
     print()
     return 0
 
@@ -3209,12 +3214,12 @@ def cmd_objective_queue(args: argparse.Namespace) -> int:
     ``deliverable list``, plus ``dispatches.pr_ref`` for the delivering PR and
     the track's ``track_dependencies`` edges. One row per deliverable, grouped
     by track in ``objective list`` order (horizon band, then the list's
-    priority order). Without ``--all`` a done/closed/cancelled row is hidden.
+    priority order). Without ``--all`` a done/closed/cancelled/withdrawn row is hidden.
     """
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     records = _fetch_deliverable_records(
-        state_dir, project_id, args.objective, include_metadata=True,
+        state_dir, project_id, args.objective, include_metadata=True, include_withdrawn=args.all,
     )
     if not args.all:
         records = [
@@ -3776,8 +3781,6 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 RETARGETED_EVENT = "deliverable_retargeted"
-RETARGET_TRIGGER = "deliverable_retarget"
-RETARGET_ABORTED_TRIGGER = "deliverable_retarget_aborted"
 RETARGET_RECEIPTS_NAME = "t0_receipts.ndjson"
 
 
@@ -3786,7 +3789,7 @@ class _RetargetRefused(Exception):
 
 
 class _RetargetLedgerFailed(Exception):
-    """A retarget receipt did not land in the canonical ledger."""
+    """A retarget (or withdraw) receipt did not land in the canonical ledger."""
 
 
 def _retarget_refused(message: object, rc: int = 2) -> int:
@@ -3794,12 +3797,14 @@ def _retarget_refused(message: object, rc: int = 2) -> int:
     return rc
 
 
-def _retarget_receipt(state_dir: Path, trigger: str, decision: dict[str, Any], **observed: Any) -> None:
-    """Append one ``state_mutation`` receipt for a retarget decision to the store's ledger (ADR-005).
+def _retarget_receipt(
+    state_dir: Path, trigger: str, decision: dict[str, Any], verb: str = "retarget", **observed: Any,
+) -> None:
+    """Append one ``state_mutation`` receipt for a retarget or withdraw decision to the store's ledger (ADR-005).
 
     Raises ``_RetargetLedgerFailed`` unless ``append_receipt_payload`` reports ``appended``: a
     ``duplicate``, no result or any other status means this line is not in the ledger.
-    ``status`` carries the decision's ``retarget_id``. The ledger dedups a receipt with a
+    ``status`` carries the decision's ``<verb>_id``. The ledger dedups a receipt with a
     ``dispatch_id`` on its outcome identity (ADR-038: dispatch_id, event_type, status, commit_sha,
     gate, pr_number) across the whole ledger, so without it a second move of the same deliverable,
     and the aborted line after its intent line, would come back ``duplicate`` and never be written.
@@ -3807,7 +3812,7 @@ def _retarget_receipt(state_dir: Path, trigger: str, decision: dict[str, Any], *
     receipt = {
         "timestamp": _now_utc(), "event_type": "state_mutation", "receipt_kind": "state_mutation",
         "terminal": "T0", "source": "vnx_planning", "trigger": trigger,
-        "status": f"{trigger}:{decision['retarget_id']}", **decision, **observed,
+        "status": f"{trigger}:{decision[verb + '_id']}", **decision, **observed,
     }
     try:
         from append_receipt import append_receipt_payload
@@ -3823,6 +3828,7 @@ def _retarget_receipt(state_dir: Path, trigger: str, decision: dict[str, Any], *
 
 def _retarget_aborted(
     conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], cause: str,
+    verb: str = "retarget",
 ) -> str:
     """Record that the intent line did not become a move; best-effort, a failure goes to stderr.
 
@@ -3838,11 +3844,35 @@ def _retarget_aborted(
     except sqlite3.Error as exc:
         observed, shown = {"state": None, "track": None, "reread_error": str(exc)}, f"unreadable ({exc})"
     try:
-        _retarget_receipt(state_dir, RETARGET_ABORTED_TRIGGER, decision, abort_cause=cause, **observed)
+        _retarget_receipt(state_dir, f"deliverable_{verb}_aborted", decision, verb, abort_cause=cause, **observed)
     except _RetargetLedgerFailed as exc:
-        print(f"deliverable retarget: {exc}; the ledger holds the intent line of "
-              f"{decision['retarget_id']} without its abort.", file=sys.stderr)
+        print(f"deliverable {verb}: {exc}; the ledger holds the intent line of "
+              f"{decision[verb + '_id']} without its abort.", file=sys.stderr)
     return shown
+
+
+def _deliverable_mutation(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], verb: str,
+    write: Callable[[], bool], read: str,
+) -> Optional[str]:
+    """Book the intent receipt, then run *write*; None when the row changed, else the exit-1 message.
+
+    Ledger first (ADR-005). *write* rolls itself back on any error, so after the intent line every
+    failure books the aborted line: a store error or a lost compare-and-swap returns the message,
+    anything else is raised once the aborted line is booked. *read* names the row as it was read.
+    """
+    _retarget_receipt(state_dir, f"deliverable_{verb}", decision, verb)
+    try:
+        if write():
+            return None
+    except sqlite3.Error as exc:
+        _retarget_aborted(conn, state_dir, project_id, decision, f"store_error: {exc}", verb)
+        return f"the store refused the {verb} ({exc})"
+    except BaseException as exc:
+        _retarget_aborted(conn, state_dir, project_id, decision, f"error: {type(exc).__name__}: {exc}", verb)
+        raise
+    now = _retarget_aborted(conn, state_dir, project_id, decision, "row_changed", verb)
+    return f"{decision['dispatch_id']!r} changed while this command ran: read {read}, now {now}"
 
 
 def _retarget_check(
@@ -3913,7 +3943,8 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
     Ledger first (ADR-005): once every check holds, the decision is a ``state_mutation`` receipt in
     the store's ``t0_receipts.ndjson``, and only then does the row move. A refusal is exit 2 with
     nothing written. A ledger that does not take the receipt is exit 1 with the row untouched; a row
-    that changed in between or a store error after the receipt is exit 1 plus an aborted receipt.
+    that changed in between or a store error after the receipt is exit 1 plus an aborted receipt;
+    any other error after the receipt is raised once the aborted receipt is booked.
     No project_id is refused (ADR-007).
     """
     project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
@@ -3930,16 +3961,13 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
             "from_track": row["track"], "to_track": args.objective, "prior_state": row["state"],
             "to_state": "proposed", "actor": "operator", "reason": reason,
         }
-        _retarget_receipt(state_dir, RETARGET_TRIGGER, decision)
-        try:
-            moved = _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason)
-        except sqlite3.Error as exc:  # _retarget_write rolled the move back
-            _retarget_aborted(conn, state_dir, project_id, decision, f"store_error: {exc}")
-            return _retarget_refused(f"the store refused the move ({exc})", rc=1)
-        if not moved:
-            now = _retarget_aborted(conn, state_dir, project_id, decision, "row_changed")
-            return _retarget_refused(f"{args.dispatch_id!r} changed while this command ran: read {row['state']!r} "
-                                     f"on {row['track']!r}, now {now}", rc=1)
+        failed = _deliverable_mutation(
+            conn, state_dir, project_id, decision, "retarget",
+            lambda: _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason),
+            f"{row['state']!r} on {row['track']!r}",
+        )
+        if failed:
+            return _retarget_refused(failed, rc=1)
     except _RetargetRefused as exc:
         return _retarget_refused(exc)
     except _RetargetLedgerFailed as exc:
@@ -3965,6 +3993,126 @@ def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
         print()
     _apply_deliverable_scope_rule(state_dir, project_id, args.objective, verb="retarget", done="moved",
                                   stream=sys.stderr if args.json else None)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Never built: withdraw (track deliverable-retarget-withdraw, ADR-049)
+# ---------------------------------------------------------------------------
+
+WITHDRAWN_EVENT = "deliverable_withdrawn"
+WITHDRAWN_STATE = "withdrawn"
+_WITHDRAW_SCHEMA_VERSION = 36  # migration 0036: the view and the state CHECK know withdrawn
+
+
+class _WithdrawRefused(Exception):
+    """A withdraw precondition that does not hold: exit 2, nothing written."""
+
+
+def _withdraw_refused(message: object, rc: int = 2) -> int:
+    print(f"deliverable withdraw: {message}. No change made.", file=sys.stderr)
+    return rc
+
+
+def _withdraw_check(conn: sqlite3.Connection, project_id: str, dispatch_id: str) -> sqlite3.Row:
+    """The deliverable row to withdraw, or ``_WithdrawRefused`` naming why it may not be withdrawn."""
+    row = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id),
+    ).fetchone()
+    if row is None:
+        raise _WithdrawRefused(f"deliverable not found: {dispatch_id!r} (project {project_id!r})")
+    ref = (row["output_ref"] or "").strip() if "output_ref" in row.keys() else ""
+    if not ref or not _is_deliverable_row(row["metadata_json"]):
+        raise _WithdrawRefused(f"{dispatch_id!r} is not a deliverable (no output_ref, or not marked as one)")
+    if row["state"] not in ("proposed", "ready"):
+        why = "it has delivery evidence" if row["state"] == "completed" else "only proposed or ready can be withdrawn"
+        raise _WithdrawRefused(f"{dispatch_id!r} has state {row['state']!r}: {why}")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < _WITHDRAW_SCHEMA_VERSION:
+        raise _WithdrawRefused(f"the store is at schema v{version}: migration 0036 (the withdrawn state) is not applied")
+    table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'").fetchone()[0]
+    check = re.search(r"CHECK\s*\(\s*state\s+IN\s*\(([^)]*)\)", table_sql, re.IGNORECASE)
+    if check is not None and f"'{WITHDRAWN_STATE}'" not in check.group(1):
+        raise _WithdrawRefused("the store's dispatches.state CHECK (the 0022 shape) does not admit 'withdrawn'")
+    if not _has_table(conn, "coordination_events"):
+        raise _WithdrawRefused("the store has no coordination_events table, so the withdraw cannot be recorded")
+    return row
+
+
+def _withdraw_write(conn: sqlite3.Connection, project_id: str, dispatch_id: str, row: sqlite3.Row, reason: str) -> bool:
+    """Swap the row from its read track+state to withdrawn with its event in one transaction; False if it changed.
+
+    The track is in the swap: a retarget that moved the row in between leaves it untouched, so the
+    event never names a track the deliverable has left. Any error, a failed commit included, rolls
+    the transaction back before it propagates.
+    """
+    track, prior = row["track"], row["state"]
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute(
+            "UPDATE dispatches SET state = ?, updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
+            (WITHDRAWN_STATE, _now_utc(), dispatch_id, project_id, track, prior),
+        ).rowcount == 1:
+            _append_coordination_event(
+                conn, event_type=WITHDRAWN_EVENT, dispatch_id=dispatch_id, from_state=prior,
+                to_state=WITHDRAWN_STATE, actor="operator", reason=reason, project_id=project_id,
+                metadata={"track": track, "prior_state": prior},
+            )
+            conn.commit()
+            return True
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.rollback()
+    return False
+
+
+def cmd_deliverable_withdraw(args: argparse.Namespace) -> int:
+    """End a proposed/ready deliverable that will not be built: ``withdrawn``, with one event (ADR-049).
+
+    Same order and exits as ``retarget``: every check (a refusal is exit 2, nothing written), the
+    ``state_mutation`` receipt, then the compare-and-swap with its ``deliverable_withdrawn`` event.
+    """
+    project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
+    if not project_id:
+        return _withdraw_refused("--project-id is required (ADR-007): none was supplied or resolved")
+    if not reason:
+        return _withdraw_refused("--reason is required and may not be empty")
+    state_dir = _resolve_state_dir(args.state_dir)
+    conn = _db_conn(state_dir)
+    try:
+        row = _withdraw_check(conn, project_id, args.dispatch_id)
+        prior = row["state"]
+        decision = {
+            "withdraw_id": uuid.uuid4().hex, "dispatch_id": args.dispatch_id, "project_id": project_id,
+            "track": row["track"], "prior_state": prior, "to_state": WITHDRAWN_STATE, "actor": "operator",
+            "reason": reason,
+        }
+        failed = _deliverable_mutation(
+            conn, state_dir, project_id, decision, "withdraw",
+            lambda: _withdraw_write(conn, project_id, args.dispatch_id, row, reason),
+            f"{prior!r} on {row['track']!r}",
+        )
+        if failed:
+            return _withdraw_refused(failed, rc=1)
+    except _WithdrawRefused as exc:
+        return _withdraw_refused(exc)
+    except _RetargetLedgerFailed as exc:
+        return _withdraw_refused(exc, rc=1)
+    except sqlite3.Error as exc:  # a read in the checks failed: no receipt, no change
+        return _withdraw_refused(f"the store refused the withdraw ({exc})", rc=1)
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "deliverable": args.dispatch_id, "project_id": project_id, "track": row["track"],
+            "prior_state": prior, "state": WITHDRAWN_STATE, "reason": reason, "action": "withdrawn", "applied": True,
+        }, indent=2))
+    else:
+        print(f"\nvnx deliverable withdraw: {args.dispatch_id} (project '{project_id}')\n")
+        print(f"  {prior} -> withdrawn on {row['track']} (reason: {reason})\n")
     return 0
 
 
@@ -5912,6 +6060,7 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
     common(p_dlist)
     p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
     p_dlist.set_defaults(func=cmd_deliverable_list)
 
     p_dpromote = dlv_sub.add_parser(
@@ -5966,7 +6115,7 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
 
 
 def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:
-    """``deliverable retarget``: move a deliverable that has not started to another track."""
+    """``deliverable retarget`` and ``withdraw``: move, or end, a deliverable that has not started."""
     p = dlv_sub.add_parser("retarget", help="move a proposed/ready deliverable to another track")
     common(p)
     p.add_argument("dispatch_id")
@@ -5974,6 +6123,11 @@ def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:
     p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
     p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
     p.set_defaults(func=cmd_deliverable_retarget)
+    p = dlv_sub.add_parser("withdraw", help="end a proposed/ready deliverable that will not be built")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
+    p.set_defaults(func=cmd_deliverable_withdraw)
 
 
 def _add_objective_queue_parser(obj_sub: Any, common: Any) -> None:
@@ -5989,7 +6143,7 @@ def _add_objective_queue_parser(obj_sub: Any, common: Any) -> None:
     )
     p_queue.add_argument(
         "--all", action="store_true",
-        help="also show closed/done/cancelled deliverables (hidden by default)",
+        help="also show closed/done/cancelled/withdrawn deliverables (hidden by default)",
     )
     p_queue.set_defaults(func=cmd_objective_queue)
 

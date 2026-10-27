@@ -335,6 +335,12 @@ def _cmd_deliverable_retarget(args: Any) -> int:
     return pc.cmd_deliverable_retarget(args)
 
 
+def _cmd_deliverable_withdraw(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_withdraw(args)
+
+
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
@@ -342,6 +348,7 @@ _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "close": _cmd_deliverable_close,
     "set": _cmd_deliverable_set,
     "retarget": _cmd_deliverable_retarget,
+    "withdraw": _cmd_deliverable_withdraw,
 }
 
 

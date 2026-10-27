@@ -59,7 +59,7 @@ class TestStateEnumerations(unittest.TestCase):
             "proposed", "ready",
             "queued", "claimed", "delivering", "accepted", "running",
             "completed", "timed_out", "failed_delivery", "expired", "recovered",
-            "dead_letter",
+            "dead_letter", "withdrawn",
         }
         self.assertEqual(DISPATCH_STATES, expected)
 
@@ -77,9 +77,10 @@ class TestStateEnumerations(unittest.TestCase):
             self.assertIn(state, LEASE_TRANSITIONS, f"No transition entry for {state!r}")
 
     def test_terminal_dispatch_states_have_no_outgoing(self):
-        # completed and expired are terminal states
+        # completed, expired and withdrawn are terminal states
         self.assertEqual(DISPATCH_TRANSITIONS["completed"], frozenset())
         self.assertEqual(DISPATCH_TRANSITIONS["expired"], frozenset())
+        self.assertEqual(DISPATCH_TRANSITIONS["withdrawn"], frozenset())
 
     def test_validate_dispatch_state_valid(self):
         for state in DISPATCH_STATES:

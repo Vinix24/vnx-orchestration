@@ -71,6 +71,16 @@ De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per 
 - **`close` blijft scherp.** De bestaande eis `--evidence <pr>` wordt niet verzwakt. De regel staat in de docstring en in de weigering; PR-2 voegt alleen de twee ontbrekende uitkomsten toe.
 - **Een ingetrokken levering blijft zichtbaar.** Ze verdwijnt niet uit de view en niet uit `vnx deliverable list`; ze leest alleen als `withdrawn`, zodat een operator ziet dat het besluit genomen is en niet dat de rij vergeten is.
 
+### Amendement bij PR-2 (dlv-c61cf36113cc, 2026-10-27)
+
+Drie punten wijken af van de tekst hierboven. De opdracht van PR-2 en een meting gingen voor.
+
+- **De CHECK op `dispatches.state` bestaat wel, alleen niet live.** De zes live stores dragen hem niet (read-only gemeten). Een store die `vnx init` bouwt loopt 0022 en draagt hem wel, zonder `withdrawn`. Migratie 0036 rebuildt die tabel niet: `withdraw` weigert zo'n store met exit 2 en noemt de CHECK. Een migratie die de CHECK verbreedt is een vervolgstap.
+- **`deliverable list` verbergt `withdrawn` zonder `--all`**, net als `horizon queue`, en meldt hoeveel rijen verborgen zijn. Met `--all` blijft de levering zichtbaar.
+- **Een al ingetrokken levering is een weigering (exit 2), geen no-op.** De opdracht noemt alleen `proposed` en `ready` als toegestaan.
+
+Een eerdere manifestversie accepteert voortaan de view van een latere versie, zoals ze extra kolommen al accepteerde. Zonder dat faalt een v36-store op elke manifestversie van 27 tot 35, en zet de reconciler hem na één verloren index terug naar 24 in plaats van naar 33.
+
 ### Wat deterministisch is en wat een model vraagt
 
 Alles in dit besluit is deterministisch: de toegestane staten, de fase-CHECK, de compare-and-swap, de transactie met het event, de view en de negen lezers zijn regels en queries. Er is geen modelcall nodig en er komt er geen bij. De enige vrije tekst is `--reason`, en die wordt opgeslagen en getoond, nooit geïnterpreteerd. Waar de invoer niet klopt (onbekende staat, onbekende track, lege reden, `rowcount` 0) weigert het commando zonder wijziging; dat is de fail-closed kant van dezelfde regel.
