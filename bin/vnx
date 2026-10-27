@@ -312,6 +312,9 @@ Commands:
                      exit 1 unreadable spool, write failure or mismatch, 3 lock busy)
   costs observe [--json] [--coverage] [--ledger PATH]  Measure a provider's balance into an
                      account_observation (exit 1 the write failed)
+  costs backfill [--since YYYY-MM-DD] [--harness-root PATH ...] [--dry-run | --apply]
+                     Book the harness-transcript runs the ledger misses (dry run by default;
+                     exit 1 a failed write, 2 usage)
   package-check      Fail if runtime artifacts exist inside dist
   update [url] [branch]  Pull latest VNX from origin and re-install
   update --pin <tag>     Pin VNX version (respects lock on future updates)
@@ -1124,9 +1127,9 @@ cmd_cost_report() {
 cmd_costs() {
   local verb="${1:-}"
   case "$verb" in
-    report|replay|observe) ;;
+    report|replay|observe|backfill) ;;
     *)
-      err "[costs] usage: vnx costs report [--by model|role|day|provider] [--since YYYY-MM-DD] [--json] [--ledger PATH] | vnx costs replay [--json] | vnx costs observe [--json] [--coverage] [--ledger PATH]"
+      err "[costs] usage: vnx costs report [--by model|role|day|provider] [--since YYYY-MM-DD] [--json] [--ledger PATH] | vnx costs replay [--json] | vnx costs observe [--json] [--coverage] [--ledger PATH] | vnx costs backfill [--since YYYY-MM-DD] [--harness-root PATH ...] [--dry-run | --apply] [--ledger PATH]"
       return 2
       ;;
   esac

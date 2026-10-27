@@ -112,12 +112,13 @@ class Lab:
 
     def live(self, run_id: str, provider: str, model: str, role: str, tokens: dict,
              occurred_from: str = "2026-10-05T00:00:00+00:00",
-             occurred_to: str = "2026-10-05T00:30:00+00:00") -> dict:
+             occurred_to: str = "2026-10-05T00:30:00+00:00",
+             segments: list | None = None) -> dict:
         record = cost_ledger.record_run(cost_ledger.RunCost(
             run_id=run_id, project_id=PROJECT, role=role, provider=provider, model=model,
             occurred_from=occurred_from, occurred_to=occurred_to, tokens=tokens,
             usage_completeness=harness_run_cost.usage_completeness(tokens),
-            billing=harness_run_cost.BILLING_BY_PROVIDER[provider],
+            billing=harness_run_cost.BILLING_BY_PROVIDER[provider], segments=segments,
         ), ledger_path=self.ledger)
         return dict(record)
 
@@ -163,7 +164,7 @@ def test_a_live_run_is_corrected_and_superseded(tmp_path, monkeypatch, capsys):
         "cache_write_1h": 0, "output": 200,
     }
     assert correction["cost_usd"] > 0
-    assert correction["cost_source"].startswith("deepseek-flash@")
+    assert correction["cost_source"].startswith("price_table@")
     totals = cost_ledger.aggregate_runs(lab.ledger)
     assert list(totals.runs) == [live["run_id"]]
     assert totals.runs[live["run_id"]]["record_id"] == correction["record_id"]
@@ -346,3 +347,30 @@ def test_the_pip_cli_wiring_carries_every_flag(tmp_path, monkeypatch):
     assert "--apply" in argv
     assert argv[argv.index("--ledger") + 1] == "/ledger"
     assert "--dry-run" not in argv
+
+
+def test_a_follow_up_session_does_not_take_the_live_line(tmp_path, monkeypatch):
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-a9")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-a9"
+    lab.transcript("deepseek-harness", "sess-big", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", dict(FULL_USAGE), cwd),
+    ])
+    lab.transcript("deepseek-harness", "sess-tiny", cwd, [
+        _deepseek_entry("m1", "2026-10-05T04:00:00Z",
+                        _usage(input_tokens=10, output_tokens=1, cache_read=0, write_5m=0), cwd),
+    ])
+    tokens = _tokens(input_uncached=1000, cache_hit=5000, cache_write_5m=100, output=200)
+    live = lab.live("vnx-dev:envelope_govern:dlv-a9:1", "deepseek-harness", "deepseek-flash",
+                    "builder", tokens,
+                    segments=[{"tokens": tokens, "peak": True, "ts": "2026-10-05T02:00:00Z"}])
+
+    assert lab.apply(lab.lane_root("deepseek-harness")) == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 2
+    assert lines[0]["record_id"] == live["record_id"]
+    assert lines[1]["kind"] == "charge"
+    assert lines[1]["run_id"] == "vnx-dev:backfill:dlv-a9:1"
+    assert lines[1]["tokens"]["input_uncached"] == 10
+    assert cost_ledger.aggregate_runs(lab.ledger).runs[live["run_id"]]["record_id"] == live["record_id"]

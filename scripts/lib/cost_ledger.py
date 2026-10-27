@@ -107,6 +107,9 @@ logger = logging.getLogger(__name__)
 RUN_SCHEMA = "provider_cost_run/1"
 TOKEN_FIELDS = ("input_uncached", "cache_hit", "cache_write_5m", "cache_write_1h", "output")
 ROLES = frozenset({"builder", "review", "plan_gate", "tiebreaker", "panel", "intelligence"})
+# A run without a dispatch row still has to be booked: its role says why the purpose is unknown
+# (K6 backfill, ``unknown:no_dispatch_row``). The prefix keeps the reason machine-readable.
+UNKNOWN_ROLE_PREFIX = "unknown:"
 KINDS = frozenset({"charge", "correction"})
 BILLINGS = frozenset({"metered", "subscription"})
 SPOOL_DIR_NAME = "provider_costs.spool"
@@ -302,6 +305,16 @@ def _require_member(value: object, allowed: frozenset, name: str) -> None:
         raise InvalidRecord(f"{name} {value!r} is not one of {sorted(allowed)}")
 
 
+def _check_role(role: object) -> None:
+    """A purpose role, or ``unknown:<reason>`` for a run whose purpose no row names."""
+    if role in ROLES:
+        return
+    if (isinstance(role, str) and role.startswith(UNKNOWN_ROLE_PREFIX)
+            and role[len(UNKNOWN_ROLE_PREFIX):].strip()):
+        return
+    raise InvalidRecord(f"role {role!r} is not one of {sorted(ROLES)} or {UNKNOWN_ROLE_PREFIX}<reason>")
+
+
 def _check_identity(run: RunCost) -> None:
     project, _producer, _ref, _attempt = split_run_id(run.run_id)
     if not isinstance(run.project_id, str) or not run.project_id:
@@ -310,7 +323,7 @@ def _check_identity(run: RunCost) -> None:
         raise RunIdProjectMismatch(
             f"run_id {run.run_id!r} belongs to project {project!r}, the record to {run.project_id!r}"
         )
-    _require_member(run.role, ROLES, "role")
+    _check_role(run.role)
     _require_member(run.kind, KINDS, "kind")
     _require_member(run.billing, BILLINGS, "billing")
     if not isinstance(run.backfill, bool):
@@ -2616,7 +2629,8 @@ def ledger_files(ledger_path: Optional[Path] = None) -> LedgerFiles:
 
 
 __all__ = [
-    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
+    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "UNKNOWN_ROLE_PREFIX", "KINDS", "BILLINGS",
+    "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
     "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
