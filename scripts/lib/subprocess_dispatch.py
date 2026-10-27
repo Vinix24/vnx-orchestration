@@ -257,6 +257,7 @@ def deliver_with_recovery(
     dispatch_paths: "list[str] | None" = None,
     pr_id: str | None = None,
     mandate_id: str | None = None,
+    skill: str | None = None,
 ) -> bool:
     """Deliver while suppressing shared preparation in benchmark equal-context mode."""
     kwargs = {
@@ -273,6 +274,10 @@ def deliver_with_recovery(
         "dispatch_paths": dispatch_paths,
         "pr_id": pr_id,
         "mandate_id": mandate_id,
+        # OI-2372: the spec-bound skill reaches the prompt seam through this lane
+        # too (a pool worker that claimed a staged spec knows the skill). None =
+        # no skill, the pre-RS-4 prompt unchanged.
+        "skill": skill,
     }
     if not _bench_equal_context_enabled():
         return _deliver_with_recovery(

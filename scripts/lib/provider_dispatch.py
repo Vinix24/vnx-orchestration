@@ -2594,6 +2594,9 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
             dispatch_paths=dispatch_paths,
             pr_id=args.pr_id,
             total_deadline=float(args.deadline_seconds),
+            # OI-2372: --provider claude is a claude handler too; a spec-bound skill
+            # parsed by --skill must reach the prompt seam here, not be dropped.
+            skill=getattr(args, "skill", None),
         )
         end_time = datetime.now(timezone.utc)
 

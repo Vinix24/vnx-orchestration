@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
-"""Tests for F34 skill context inlining — 3-tier resolution in _inject_skill_context
-and cwd propagation through deliver_via_subprocess → SubprocessAdapter.deliver().
+"""Tests for F34 skill context inlining — role CLAUDE.md resolution in
+_inject_skill_context and cwd propagation through deliver_via_subprocess →
+SubprocessAdapter.deliver().
+
+The ``.claude/skills/{role}/CLAUDE.md`` candidate pinned here is gone (RS-4,
+ADR-048): a skill folder holds SKILL.md, so it never matched. Such a file is now
+IGNORED, and a skill reaches a worker through the spec's ``skill`` field.
 """
 
 import sys
@@ -23,16 +28,12 @@ from subprocess_dispatch import _inject_skill_context, deliver_via_subprocess
 class TestInjectSkillContext:
     """Tests for the 3-tier CLAUDE.md resolution."""
 
-    def _make_fs(self, tmp_path: Path, *, agents: bool = False, skills: bool = False, terminal: bool = False):
-        """Create a fake project root under tmp_path with selected tiers present."""
+    def _make_fs(self, tmp_path: Path, *, agents: bool = False, terminal: bool = False):
+        """Create a fake project root under tmp_path with selected sources present."""
         if agents:
             p = tmp_path / "agents" / "backend-developer" / "CLAUDE.md"
             p.parent.mkdir(parents=True)
             p.write_text("# agents tier")
-        if skills:
-            p = tmp_path / ".claude" / "skills" / "backend-developer" / "CLAUDE.md"
-            p.parent.mkdir(parents=True)
-            p.write_text("# skills tier")
         if terminal:
             p = tmp_path / ".claude" / "terminals" / "T1" / "CLAUDE.md"
             p.parent.mkdir(parents=True)
@@ -59,7 +60,7 @@ class TestInjectSkillContext:
     # --- tier-1: agents/{role}/CLAUDE.md wins when present ---
 
     def test_tier1_agents_wins(self, tmp_path):
-        root = self._make_fs(tmp_path, agents=True, skills=True, terminal=True)
+        root = self._make_fs(tmp_path, agents=True, terminal=True)
         with patch("subprocess_dispatch.Path") as mock_path_cls:
             # We need to intercept the resolution, so patch the project root directly
             import subprocess_dispatch as sd
@@ -67,7 +68,6 @@ class TestInjectSkillContext:
 
             # Build the real paths under tmp_path
             agents_md = root / "agents" / "backend-developer" / "CLAUDE.md"
-            skills_md = root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md"
             terminal_md = root / ".claude" / "terminals" / "T1" / "CLAUDE.md"
 
             # Patch parents[2] so resolution uses tmp_path as project root
@@ -84,7 +84,6 @@ class TestInjectSkillContext:
             # Simulate: Path(__file__).resolve().parents[2] / "agents" / role / "CLAUDE.md"
             # We construct real paths under tmp_path so exists()/read_text() work naturally
             agents_md = root / "agents" / "backend-developer" / "CLAUDE.md"
-            skills_md = root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md"
             terminal_md = root / ".claude" / "terminals" / "T1" / "CLAUDE.md"
 
             mock_file = MagicMock()
@@ -108,7 +107,6 @@ class TestInjectSkillContext:
 
             candidates = [
                 project_root / "agents" / "backend-developer" / "CLAUDE.md",
-                project_root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md",
                 project_root / ".claude" / "terminals" / "T1" / "CLAUDE.md",
             ]
 
@@ -116,26 +114,12 @@ class TestInjectSkillContext:
             assert first_hit == project_root / "agents" / "backend-developer" / "CLAUDE.md"
             assert first_hit.read_text() == "# agents tier"
 
-    def test_tier2_skills_wins_when_no_agents(self, tmp_path):
-        root = self._make_fs(tmp_path, agents=False, skills=True, terminal=True)
-        project_root = root
-
-        candidates = [
-            project_root / "agents" / "backend-developer" / "CLAUDE.md",
-            project_root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md",
-            project_root / ".claude" / "terminals" / "T1" / "CLAUDE.md",
-        ]
-        first_hit = next((p for p in candidates if p.exists()), None)
-        assert first_hit == project_root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md"
-        assert first_hit.read_text() == "# skills tier"
-
     def test_tier3_terminal_fallback(self, tmp_path):
-        root = self._make_fs(tmp_path, agents=False, skills=False, terminal=True)
+        root = self._make_fs(tmp_path, agents=False, terminal=True)
         project_root = root
 
         candidates = [
             project_root / "agents" / "backend-developer" / "CLAUDE.md",
-            project_root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md",
             project_root / ".claude" / "terminals" / "T1" / "CLAUDE.md",
         ]
         first_hit = next((p for p in candidates if p.exists()), None)
@@ -144,7 +128,7 @@ class TestInjectSkillContext:
 
     def test_no_role_skips_tiers_1_and_2(self, tmp_path):
         """Without role, only the terminal tier is checked."""
-        root = self._make_fs(tmp_path, agents=True, skills=True, terminal=True)
+        root = self._make_fs(tmp_path, agents=True, terminal=True)
         project_root = root
 
         # Without role, candidates must only include terminal
@@ -161,7 +145,6 @@ class TestInjectSkillContext:
 
         candidates = [
             project_root / "agents" / "backend-developer" / "CLAUDE.md",
-            project_root / ".claude" / "skills" / "backend-developer" / "CLAUDE.md",
             project_root / ".claude" / "terminals" / "T1" / "CLAUDE.md",
         ]
         first_hit = next((p for p in candidates if p.exists()), None)
@@ -221,7 +204,12 @@ class TestInjectSkillContextIntegration:
         assert "DISPATCH INSTRUCTION:" in result
         assert "do work" in result
 
-    def test_inject_prepends_skills_context(self, tmp_path):
+    def test_inject_ignores_a_skills_role_file(self, tmp_path):
+        """RS-4 (ADR-048): `.claude/skills/<role>/CLAUDE.md` is not a role source.
+
+        A skill folder holds SKILL.md, so the candidate never resolved (0 of 38,380
+        receipts); a file planted there must not become the role prompt.
+        """
         skills_md = tmp_path / ".claude" / "skills" / "backend-developer" / "CLAUDE.md"
         skills_md.parent.mkdir(parents=True)
         skills_md.write_text("SKILLS_CONTEXT")
@@ -229,7 +217,7 @@ class TestInjectSkillContextIntegration:
         with self._patch_project_root(tmp_path):
             result = _inject_skill_context("T1", "do work", role="backend-developer")
 
-        assert "SKILLS_CONTEXT" in result
+        assert "SKILLS_CONTEXT" not in result
         assert "do work" in result
 
     def test_inject_prepends_terminal_context(self, tmp_path):
@@ -249,7 +237,7 @@ class TestInjectSkillContextIntegration:
 
         assert result == "do work"
 
-    def test_agents_beats_skills(self, tmp_path):
+    def test_agents_wins_and_the_skills_file_is_ignored(self, tmp_path):
         agents_md = tmp_path / "agents" / "backend-developer" / "CLAUDE.md"
         agents_md.parent.mkdir(parents=True)
         agents_md.write_text("AGENTS_CONTEXT")
