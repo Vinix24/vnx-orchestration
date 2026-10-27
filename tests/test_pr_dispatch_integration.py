@@ -4,17 +4,13 @@ Test PR Queue Integration with Popup Queue
 Tests PR 2.5 implementation
 """
 
-import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
 from conftest import pin_vnx_data_dir
-
-VNX_HOME = Path(os.environ.get("VNX_HOME", Path(__file__).resolve().parents[1]))
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -56,7 +52,7 @@ def _isolate_vnx_data_dir(monkeypatch):
 
 
 def test_recommendation_command_output():
-    """Test that recommendations include dispatch command"""
+    """The pr_ready recommendation names vnx dispatch, not the retired verb"""
     print("\n" + "="*60)
     print("Test 2: Recommendation Command Output")
     print("="*60)
@@ -130,18 +126,20 @@ def test_recommendation_command_output():
     print(f"  Trigger: {rec.get('trigger')}")
     print(f"  Action: {rec.get('action')}")
     print(f"  PR ID: {rec.get('pr_id')}")
-    print(f"  Command: {rec.get('command')}")
+    print(f"  Instruction: {rec.get('suggested_instruction')}")
 
-    if not rec.get('command'):
-        print("❌ Recommendation missing 'command' field")
+    # A6 round 4 (OI-2373): the `pr_queue_manager.py dispatch` verb is retired
+    # (ADR-047), so the pr_ready recommendation must carry no command at all and
+    # must name the surviving `vnx dispatch` route instead.
+    if 'command' in rec:
+        print(f"❌ Recommendation still carries a command: {rec.get('command')}")
         return False
 
-    expected_command = f"python {VNX_HOME / 'scripts/pr_queue_manager.py'} dispatch {rec['pr_id']}"
-    if rec['command'] != expected_command:
-        print(f"❌ Command incorrect. Expected: {expected_command}")
+    if 'vnx dispatch' not in rec.get('suggested_instruction', ''):
+        print(f"❌ Instruction must name vnx dispatch: {rec.get('suggested_instruction')}")
         return False
 
-    print("✅ Recommendation includes correct dispatch command")
+    print("✅ Recommendation names vnx dispatch and carries no retired command")
 
     return True
 
@@ -184,7 +182,7 @@ def main():
     if passed == total:
         print("\n🎉 All tests passed!")
         print("\nPR 2.5 implementation complete:")
-        print("  ✅ Recommendation engine includes commands")
+        print("  ✅ Recommendation engine names the surviving vnx dispatch route")
         return 0
     else:
         print(f"\n❌ {total - passed} test(s) failed")

@@ -318,8 +318,65 @@ class TestRecommendationEngineIntegration:
         pr_ready = [r for r in engine.recommendations if r['trigger'] == 'pr_ready']
         assert len(pr_ready) > 0, "Should generate PR_READY recommendation"
         assert pr_ready[0]['pr_id'] == 'PR-1'
-        assert 'command' in pr_ready[0], "Should include dispatch command"
-        assert 'dispatch PR-1' in pr_ready[0]['command']
+        # A6 round 4 (OI-2373): the `pr_queue_manager.py dispatch` verb is
+        # retired (ADR-047), so the pr_ready recommendation must not hand the
+        # operator a dead command. It names the surviving route instead.
+        assert 'command' not in pr_ready[0], "Retired dispatch verb: no command field"
+        assert 'vnx dispatch' in pr_ready[0]['suggested_instruction']
+
+    def test_no_recommendation_points_at_removed_dispatch_verb(self, clean_state):
+        """A6 round 4 (OI-2373): nothing turns a PR id into a dispatch any more.
+
+        `scripts/pr_queue_manager.py` no longer parses a `dispatch` verb (it
+        exits `Unknown command: dispatch`), so no recommendation may carry that
+        dead command — whether it hides in a bare `command` key or inside a
+        string field such as `suggested_instruction`. The check walks every
+        string reachable from every recommendation, so a nested message cannot
+        reintroduce it either.
+        """
+        pr_state_file = clean_state / "pr_queue_state.yaml"
+        pr_state_content = {
+            'active_feature': {
+                'name': 'Legacy Feature',
+                'plan_file': 'FEATURE_PLAN.md'
+            },
+            'completed_prs': [],
+            'in_progress': None,
+            'blocked': [],
+            'next_available': ['PR-1', 'PR-2'],
+            'execution_order': ['PR-1', 'PR-2'],
+            'updated_at': datetime.now().isoformat()
+        }
+
+        with open(pr_state_file, 'w') as f:
+            yaml.dump(pr_state_content, f)
+
+        engine = RecommendationEngine(lookback_minutes=5)
+        engine.load_pr_queue_state()
+        engine.add_pr_dependency_recommendation()
+
+        assert engine.recommendations, "Should generate the pr_ready recommendation"
+        assert any(r.get('trigger') == 'pr_ready' for r in engine.recommendations)
+
+        dead_command = "pr_queue_manager.py dispatch "
+
+        def _string_fields(value):
+            """Every string reachable from a recommendation, at any depth."""
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    yield from _string_fields(nested)
+            elif isinstance(value, (list, tuple, set)):
+                for nested in value:
+                    yield from _string_fields(nested)
+
+        for rec in engine.recommendations:
+            for text in _string_fields(rec):
+                assert dead_command not in text, (
+                    f"recommendation {rec.get('trigger')!r} still points at the "
+                    f"removed `pr_queue_manager.py dispatch` verb: {text!r}"
+                )
 
     def test_recommendation_inputs_do_not_read_legacy_by_default(self, clean_state, monkeypatch):
         """Canonical cutover: legacy-only sources should be ignored unless rollback is enabled."""
@@ -476,7 +533,11 @@ class TestWorkflowIntegration:
         engine.add_pr_dependency_recommendation()
         pr_ready = [r for r in engine.recommendations if r['trigger'] == 'pr_ready']
         assert len(pr_ready) > 0
-        assert 'command' in pr_ready[0]
+        # A6 round 4 (OI-2373): the retired `pr_queue_manager.py dispatch` verb
+        # must not reappear as a recommendation command; the instruction names
+        # the surviving `vnx dispatch` route instead.
+        assert 'command' not in pr_ready[0]
+        assert 'vnx dispatch' in pr_ready[0]['suggested_instruction']
 
 
 def test_clean_state_does_not_leak_recs_module_globals():

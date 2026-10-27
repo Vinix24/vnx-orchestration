@@ -641,14 +641,20 @@ class RecommendationEngine:
         next_available = self.pr_queue.get('next_available', [])
         if next_available and not in_progress:
             next_pr = next_available[0]
+            # No command field: ADR-047 retired plan-based dispatch creation, so
+            # `pr_queue_manager.py dispatch` no longer exists and no command turns
+            # a PR id into a dispatch any more. The instruction names the one
+            # surviving route instead of pointing the operator at a dead verb.
             self.add_recommendation({
                 "trigger": "pr_ready",
                 "action": "start_next_pr",
                 "pr_id": next_pr,
                 "reason": f"Ready to start: {next_pr}",
                 "priority": "P1",
-                "suggested_instruction": f"Start work on {next_pr}",
-                "command": f"python {VNX_ROOT / 'scripts/pr_queue_manager.py'} dispatch {next_pr}",
+                "suggested_instruction": (
+                    f"Stage a dispatch for {next_pr} via vnx dispatch "
+                    f"(ADR-047: plan-based dispatch creation is retired)"
+                ),
                 "timestamp": datetime.now().isoformat()
             })
 
