@@ -84,6 +84,28 @@ def _provision_track_layer(state_dir: Path) -> None:
     )
 
 
+def _seed_feature_pr(state_dir: Path, track_id: str, pr_ref: str = "PR-0") -> None:
+    """Give a feature a PR identity in the tracks DB (ADR-047).
+
+    ``RoadmapManager._gates_incomplete`` reads the PR ids whose gate evidence
+    it must find from the tracks DB — the track's ``pr_ref`` plus the
+    ``pr_ref`` of every dispatch linked to it. A root FEATURE_PLAN.md is not
+    read at all any more, so this dispatch row (not a plan heading) is what
+    makes ``PR-0`` the id the gate fixtures below are keyed by.
+
+    Also provisions the v30 DB via ``_provision_track_layer`` so the
+    autopilot tick's track-sync leg keeps running cleanly.
+    """
+    _provision_track_layer(state_dir)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute(
+        "INSERT INTO dispatches (dispatch_id, project_id, state, track, pr_ref) VALUES (?, ?, ?, ?, ?)",
+        (f"dlv-{track_id}", "vnx-dev", "completed", track_id, pr_ref),
+    )
+    conn.commit()
+    conn.close()
+
+
 @pytest.fixture
 def roadmap_env(tmp_path, monkeypatch):
     project_root = tmp_path / "project"
@@ -171,20 +193,19 @@ PR-0 (no dependencies)
     return {"project_root": project_root, "roadmap_file": roadmap_file, "state_dir": state_dir}
 
 
-def test_load_feature_materializes_active_plan(roadmap_env):
-    """ADR-047: the plan is copied to the project root as a reference artifact.
+def test_load_feature_writes_no_plan_file(roadmap_env):
+    """ADR-047: loading a feature never writes a root FEATURE_PLAN.md.
 
-    It is not parsed into a PR queue any more (A6 retired
-    ``PRQueueManager.load_feature_plan``), so no PR_QUEUE.md is produced here.
+    The tracks DB is the only plan source, so ``load_feature`` stages the
+    branch (and worktree) and nothing else. Before this change it copied the
+    feature's plan to ``<project_root>/FEATURE_PLAN.md``.
     """
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     state = manager.load_feature("feature-a")
 
     assert state["current_active_feature"] == "feature-a"
-    feature_plan = roadmap_env["project_root"] / "FEATURE_PLAN.md"
-    assert feature_plan.exists()
-    assert "Feature A" in feature_plan.read_text(encoding="utf-8")
+    assert not (roadmap_env["project_root"] / "FEATURE_PLAN.md").exists()
 
 
 def test_advance_loads_next_feature_after_verified_merge(roadmap_env, monkeypatch):
@@ -198,6 +219,7 @@ def test_advance_loads_next_feature_after_verified_merge(roadmap_env, monkeypatc
     )
 
     # RA-3: required gate evidence must be present for advance to proceed.
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
     gate_results_dir.mkdir(parents=True, exist_ok=True)
     _write_gate_result(gate_results_dir, "PR-0", "gemini_review", branch="feature/a")
@@ -285,7 +307,7 @@ def test_advance_inserts_fixup_when_blocking_drift_detected(roadmap_env, monkeyp
 
 def _insert_a_fixup(roadmap_env, monkeypatch):
     """Shared setup: drive advance() through the blocking-drift fix-up path
-    and return the inserted feature dict + its FEATURE_PLAN.md text."""
+    and return the inserted feature dict."""
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
@@ -311,29 +333,28 @@ def _insert_a_fixup(roadmap_env, monkeypatch):
     )
     manager.advance()
     state = manager.load_state()
-    fixup_feature = next(
+    return next(
         item for item in state["features"] if item["feature_id"] == state["current_active_feature"]
     )
-    plan_text = Path(fixup_feature["plan_path"]).read_text(encoding="utf-8")
-    return fixup_feature, plan_text
 
 
 def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monkeypatch):
     """Dispatch 20260914-poorten-punt3-s2 (fix-forward on PR #1852): the
-    FEATURE_PLAN template ``_insert_fixup_feature`` writes for a
-    blocking-drift fix-up, and the ``review_stack`` field it stamps on the
-    inserted feature, must both equal the base ``VNX_DEFAULT_REVIEW_STACK``
-    registry default -- WITHOUT ``ci_gate`` -- not a hardcoded copy.
+    ``review_stack`` stamped on a blocking-drift fix-up must equal the base
+    ``VNX_DEFAULT_REVIEW_STACK`` registry default -- WITHOUT ``ci_gate`` --
+    not a hardcoded copy.
 
     Confirmed red pre-fix: with the old hardcoded literal
     ("gemini_review,codex_gate,claude_github_optional" at three call sites in
     roadmap_manager.py), this assertion failed because the registry default
-    was "codex_gate,glm_gate" (recomposed by this same dispatch in
-    config_registry.py after a 14-day measurement showing gemini_review and
-    claude_github_optional never deliver a verdict; glm_gate became kimi_gate
-    on 2026-09-26, see tests/test_review_stack_subscription_first.py) -- the
-    fix-up template would have re-requested exactly the two poorten that
-    measurement dropped.
+    was "codex_gate,glm_gate" (recomposed in config_registry.py after a 14-day
+    measurement showing gemini_review and claude_github_optional never deliver
+    a verdict; glm_gate became kimi_gate on 2026-09-26, see
+    tests/test_review_stack_subscription_first.py) -- the fix-up would have
+    re-requested exactly the two poorten that measurement dropped.
+
+    ADR-047: the fix-up is a state record now, not a FEATURE_PLAN.md template,
+    so the stack is asserted on the feature only.
 
     VNX_CI_GATE_REQUIRED is pinned OFF (not delenv'd) since its registry
     default is "1" (OI-1385): this test measures the BASE stack, isolated
@@ -350,13 +371,12 @@ def test_fixup_feature_review_stack_matches_config_base_stack(roadmap_env, monke
         f"update the expectation here too: {expected_stack}"
     )
 
-    fixup_feature, plan_text = _insert_a_fixup(roadmap_env, monkeypatch)
+    fixup_feature = _insert_a_fixup(roadmap_env, monkeypatch)
 
     assert fixup_feature["review_stack"] == expected_stack
-    expected_line = f"**Review-Stack**: {','.join(expected_stack)}"
-    assert plan_text.count(expected_line) == 2
-    assert "gemini_review" not in plan_text
-    assert "claude_github_optional" not in plan_text
+    assert "gemini_review" not in fixup_feature["review_stack"]
+    assert "claude_github_optional" not in fixup_feature["review_stack"]
+    assert fixup_feature["plan_path"] is None
 
 
 def test_fixup_feature_review_stack_follows_config_override_without_ci_gate(roadmap_env, monkeypatch):
@@ -364,20 +384,17 @@ def test_fixup_feature_review_stack_follows_config_override_without_ci_gate(road
     own: a test that always compares against the SAME hardcoded literal on
     both sides can pass by coincidence. Point ``VNX_DEFAULT_REVIEW_STACK`` at
     a THIRD value the old hardcoded template never contained, with
-    ``VNX_CI_GATE_REQUIRED`` on, and confirm the fix-up template and
-    ``review_stack`` field track that exact value and never pick up
-    ``ci_gate`` -- proving both are read from config at call time, not from a
-    literal anywhere in roadmap_manager.py.
+    ``VNX_CI_GATE_REQUIRED`` on, and confirm the fix-up feature tracks that
+    exact value and never picks up ``ci_gate`` -- proving it is read from
+    config at call time, not from a literal anywhere in roadmap_manager.py.
     """
     monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "kimi_gate,deepseek_gate")
     monkeypatch.setenv("VNX_CI_GATE_REQUIRED", "1")
 
-    fixup_feature, plan_text = _insert_a_fixup(roadmap_env, monkeypatch)
+    fixup_feature = _insert_a_fixup(roadmap_env, monkeypatch)
 
     assert fixup_feature["review_stack"] == ["kimi_gate", "deepseek_gate"]
-    assert plan_text.count("**Review-Stack**: kimi_gate,deepseek_gate") == 2
     assert "ci_gate" not in fixup_feature["review_stack"]
-    assert "ci_gate" not in plan_text
 
 
 def test_base_review_stack_raises_on_explicitly_empty_config(monkeypatch):
@@ -405,10 +422,10 @@ def test_base_review_stack_raises_on_explicitly_empty_config(monkeypatch):
 def test_fixup_insertion_fails_closed_on_empty_review_stack_config(roadmap_env, monkeypatch):
     """End-to-end version of the unit test above: with an explicitly empty
     ``VNX_DEFAULT_REVIEW_STACK``, driving ``advance()`` through the
-    blocking-drift fix-up path must raise rather than materialize a
-    FEATURE_PLAN.md with an empty ``**Review-Stack**:`` line -- proving the
-    fail-closed behavior is actually wired into the fix-up path, not just
-    true of the helper in isolation.
+    blocking-drift fix-up path must raise rather than insert a feature whose
+    ``review_stack`` requires zero review gates -- proving the fail-closed
+    behavior is actually wired into the fix-up path, not just true of the
+    helper in isolation.
     """
     monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "")
     with pytest.raises(ValueError, match="empty review-gate stack"):
@@ -534,6 +551,7 @@ def test_reconcile_gates_incomplete_when_codex_missing(roadmap_env, monkeypatch)
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -554,6 +572,7 @@ def test_advance_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -573,6 +592,7 @@ def test_reconcile_passes_when_gemini_and_codex_both_pass(roadmap_env, monkeypat
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -585,6 +605,62 @@ def test_reconcile_passes_when_gemini_and_codex_both_pass(roadmap_env, monkeypat
 
     result = manager.reconcile()
     assert result["verdict"] == "pass"
+
+
+def test_gate_pr_ids_come_from_the_tracks_db_not_a_plan_file(roadmap_env, monkeypatch):
+    """ADR-047: the PR ids the gate check verifies are the tracks-DB ones.
+
+    A leftover root FEATURE_PLAN.md naming ``PR-0`` must not feed the check —
+    the dispatch row's ``pr_ref`` (777) does. Gate evidence for 777 passes;
+    nothing was written for PR-0.
+    """
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+    stale_plan = roadmap_env["project_root"] / "FEATURE_PLAN.md"
+    stale_plan.write_text("## PR-0: retired plan heading\n", encoding="utf-8")
+
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a", pr_ref="#777")
+    _write_gate_result(gate_results_dir, "777", "gemini_review", branch="feature/a")
+    _write_gate_result(gate_results_dir, "777", "codex_gate", branch="feature/a")
+
+    result = manager.reconcile()
+
+    assert result["verdict"] == "pass", "the dispatch pr_ref is the PR identity"
+    assert stale_plan.exists(), "the stale plan file is left alone, just never read"
+
+
+def test_gates_incomplete_when_the_tracks_db_is_absent(roadmap_env, monkeypatch):
+    """No tracks DB means no PR evidence: the check blocks, it never passes.
+
+    Gate results for PR-0 exist on disk (the old plan-derived id), but with no
+    dispatch row naming a PR there is no id to verify — fail closed.
+    """
+    manager = rm.RoadmapManager()
+    manager.init_roadmap(roadmap_env["roadmap_file"])
+    manager.load_feature("feature-a")
+    monkeypatch.setattr(
+        rm, "verify_closure",
+        lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
+    )
+
+    gate_results_dir = roadmap_env["state_dir"] / "review_gates" / "results"
+    gate_results_dir.mkdir(parents=True, exist_ok=True)
+    _write_gate_result(gate_results_dir, "PR-0", "gemini_review", branch="feature/a")
+    _write_gate_result(gate_results_dir, "PR-0", "codex_gate", branch="feature/a")
+
+    result = manager.reconcile()
+
+    assert result["verdict"] == "gates_incomplete"
+    assert not (roadmap_env["state_dir"] / "runtime_coordination.db").exists(), (
+        "the read must not create a decoy store"
+    )
 
 
 def test_optional_gate_missing_does_not_block(roadmap_env, monkeypatch):
@@ -610,6 +686,7 @@ def test_optional_gate_missing_does_not_block(roadmap_env, monkeypatch):
     )
     manager.init_roadmap(roadmap_with_optional)
     manager.load_feature("feature-opt")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-opt")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -636,6 +713,7 @@ def test_gates_incomplete_status_only_result(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -661,6 +739,7 @@ def test_gates_incomplete_mismatched_project_id(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -683,6 +762,7 @@ def test_gates_incomplete_stale_branch_result(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -705,6 +785,7 @@ def test_gates_incomplete_branch_less_result(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -790,6 +871,7 @@ def test_gates_incomplete_unknown_gate_without_producer_identity(roadmap_env, mo
     manager = rm.RoadmapManager()
     manager.init_roadmap(_write_roadmap_with_unregistered_gate(roadmap_env["project_root"]))
     manager.load_feature("feature-unregistered")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-unregistered")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -811,6 +893,7 @@ def test_advance_unknown_gate_with_producer_identity_satisfies(roadmap_env, monk
     manager = rm.RoadmapManager()
     manager.init_roadmap(_write_roadmap_with_unregistered_gate(roadmap_env["project_root"]))
     manager.load_feature("feature-unregistered")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-unregistered")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -831,6 +914,7 @@ def test_known_gates_unaffected_by_missing_producer_identity(roadmap_env, monkey
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -852,6 +936,7 @@ def test_advance_fully_valid_gate_result_proceeds(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -941,6 +1026,7 @@ def test_advance_blocked_awaiting_human_approval(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_file)
     manager.load_feature("feature-hi")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-hi")
 
     result = manager.advance()
 
@@ -964,6 +1050,7 @@ def test_advance_proceeds_after_approve_and_token_consumed(roadmap_env, monkeypa
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_file)
     manager.load_feature("feature-hi")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-hi")
 
     # First attempt: blocked
     first = manager.advance()
@@ -997,6 +1084,7 @@ def test_conditional_auto_low_advances_without_token(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_env["roadmap_file"])
     manager.load_feature("feature-a")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
     monkeypatch.setattr(
         rm, "verify_closure",
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
@@ -1046,6 +1134,7 @@ def test_consumed_token_does_not_reauthorize(roadmap_env, monkeypatch):
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_file)
     manager.load_feature("feature-hi")
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-hi")
     manager.approve("feature-hi", actor="vincent", justification="ok")
 
     # First advance consumes the token
@@ -1186,7 +1275,9 @@ def test_autopilot_tick_full_loop_advances_a_to_b(roadmap_env, monkeypatch):
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
     _setup_passing_gates(roadmap_env["state_dir"])
-    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
+    # One seed call covers both legs: the PR id the gate check reads and a
+    # clean track-sync (D-N1 gate) for the tick.
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")
 
     # feature-a is conditional_auto + low risk → no approval token required
     tick = manager.autopilot_tick()
@@ -1210,7 +1301,7 @@ def test_autopilot_tick_blocked_when_gates_incomplete(roadmap_env, monkeypatch):
         lambda **kwargs: {"verdict": "pass", "pr": {"mergeCommit": {"oid": "abc123"}}},
     )
     # No gate results written → gates_incomplete
-    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-a")  # PR id + clean track-sync
 
     tick = manager.autopilot_tick()
     assert tick["status"] == "blocked"
@@ -1235,7 +1326,7 @@ def test_autopilot_tick_blocked_awaiting_human_approval(roadmap_env, monkeypatch
     manager = rm.RoadmapManager()
     manager.init_roadmap(roadmap_file)
     manager.load_feature("feature-hi", no_worktree=True)
-    _provision_track_layer(roadmap_env["state_dir"])  # clean track-sync (D-N1 gate)
+    _seed_feature_pr(roadmap_env["state_dir"], "feature-hi")  # PR id + clean track-sync
 
     tick = manager.autopilot_tick()
     assert tick["status"] == "blocked"
