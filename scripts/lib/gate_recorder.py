@@ -1761,17 +1761,25 @@ def publish_forge_review_summary(
     ``__file__`` would name the ENGINE's checkout (the central install, or a
     dispatch worktree), a different repo from the project's; a store that cannot
     be attributed to a project is refused there and logged below with the repair.
+
+    The record's ``override_b3.reason`` IS passed, as the summary's
+    ``b3_override`` (RG-2): the required check has to say why it is green past
+    the cap, or branch protection keeps blocking the merge the door approved
+    (OI-2143). Only a stamped object is read; anything else is no reason.
     """
     try:
         from forge_gate_publisher import (  # noqa: PLC0415
             REVIEW_RECOVERY_COMMAND_TEMPLATE, publish_review_summary,
         )
 
+        override = payload.get("override_b3")
+        b3_override = str(override.get("reason") or "") if isinstance(override, dict) else ""
         publish_review_summary(
             pr_number,
             head_sha,
             results_dir=result_path.parent,
             branch=(payload.get("branch") or "").strip() or None,
+            b3_override=b3_override,
         )
     # vnx-broad-except: same rule as the per-gate publication one call above —
     # this hook may not be able to fail a gate run, and the publisher's failure
