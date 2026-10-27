@@ -253,3 +253,114 @@ def test_the_installed_pinned_dir_follows_while_current_to_it_does_not(tmp_path:
         "com.vnx.cleanup-reviewed-worktrees.mission-control"
     ]
     assert result["ok"] is False
+
+
+def test_a_command_assignment_overrides_environment_variables(tmp_path: Path) -> None:
+    """OI-2415: the environment names the pinned release, but the job's own
+    ``bash -c`` body assigns ``VNX_HOME=<current>`` before exec'ing the
+    runner -- the assignment wins, and the job is not ``pin_followed``."""
+    store = _store(tmp_path)
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(store / "versions" / "v1.7.5"), "VNX_PROJECT_ID": "mission-control"},
+           argv=["/bin/bash", "-c",
+                 "VNX_HOME=%s; exec python3 runner.py" % (store / "current")])
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    entry = result["entries"][0]
+    assert entry["classification"] == lps.PIN_IGNORED_CURRENT
+    assert entry["vnx_home"] == str(store / "current")
+    assert entry["vnx_home_source"] == "command"
+    assert result["ok"] is False
+    assert [v["kind"] for v in result["violations"]] == [lps.PIN_IGNORED_CURRENT]
+
+
+def test_a_command_assignment_equal_to_the_pin_is_pin_followed(tmp_path: Path) -> None:
+    """The other direction of the same precedence: the command names the pinned
+    release (bare, ``export`` and ``env`` forms), so the job follows -- even
+    when the environment still says ``current``."""
+    store = _store(tmp_path)
+    pinned = str(store / "versions" / "v1.7.5")
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(store / "current"), "VNX_PROJECT_ID": "mission-control"},
+           argv=["/bin/bash", "-c", "VNX_HOME=%s; exec python3 runner.py" % pinned])
+    _plist(plists, "com.vnx.receipt-processor.mission-control",
+           env={"VNX_HOME": str(store / "current"), "VNX_PROJECT_ID": "mission-control"},
+           argv=["/bin/bash", "-c", "export VNX_HOME=%s; exec python3 runner.py" % pinned])
+    _plist(plists, "com.vnx.ledger-health.other",
+           env={"VNX_PROJECT_ID": "mission-control"},
+           argv=["/usr/bin/env", "VNX_HOME=%s" % pinned, "python3", "runner.py"])
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    classifications = {entry["label"]: entry["classification"] for entry in result["entries"]}
+    assert classifications == {
+        "com.vnx.ledger-health.mission-control": lps.PIN_FOLLOWED,
+        "com.vnx.receipt-processor.mission-control": lps.PIN_FOLLOWED,
+        "com.vnx.ledger-health.other": lps.PIN_FOLLOWED,
+    }
+    assert {entry["vnx_home_source"] for entry in result["entries"]} == {"command"}
+    assert result["ok"] is True
+    assert result["violations"] == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'VNX_HOME="$DEPLOY_ROOT/v1.7.5"; exec python3 runner.py',
+        "VNX_HOME=${DEPLOY_ROOT}/v1.7.5; exec python3 runner.py",
+        "VNX_HOME=$(cat /tmp/current-home); exec python3 runner.py",
+        "VNX_HOME=`cat /tmp/current-home`; exec python3 runner.py",
+        'VNX_HOME="unterminated; exec python3 runner.py',
+        "VNX_HOME=/opt/release-a; VNX_HOME=/opt/release-b; exec python3 runner.py",
+        "VNX_HOME=; exec python3 runner.py",
+    ],
+)
+def test_an_unreadable_command_assignment_is_unmeasurable_not_pin_followed(
+    tmp_path: Path, body: str
+) -> None:
+    """A command that sets VNX_HOME through another variable, a command
+    substitution, conflicting literals or an empty value cannot be measured --
+    and the environment's pinned value must NOT be used to fill the gap."""
+    store = _store(tmp_path)
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(store / "versions" / "v1.7.5"), "VNX_PROJECT_ID": "mission-control"},
+           argv=["/bin/bash", "-c", body])
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    entry = result["entries"][0]
+    assert entry["classification"] == lps.PIN_UNMEASURABLE
+    assert entry["classification"] != lps.PIN_FOLLOWED
+    assert result["ok"] is False
+    assert [v["kind"] for v in result["violations"]] == [lps.PIN_UNMEASURABLE]
+    assert "cannot be measured" in entry["detail"]
+    assert str(store / "versions" / "v1.7.5") in entry["detail"]
+
+
+def test_a_command_assignment_elsewhere_is_a_violation_without_an_environment(
+    tmp_path: Path
+) -> None:
+    """With no EnvironmentVariables at all, a differing command assignment is
+    still measured -- it names another existing release, so it is a violation
+    rather than ``pin_dead``/unmeasurable."""
+    store = _store(tmp_path)
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.gate-obligation-runner",
+           env={"VNX_PROJECT_ID": "mission-control"},
+           argv=["/bin/bash", "-c",
+                 "VNX_HOME=%s; exec python3 runner.py" % (store / "versions" / "v1.7.6")])
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    entry = result["entries"][0]
+    assert entry["classification"] == lps.PIN_IGNORED_OTHER_VERSION
+    assert entry["vnx_home"] == str(store / "versions" / "v1.7.6")
+    assert str((store / "versions" / "v1.7.5").resolve()) in entry["detail"]

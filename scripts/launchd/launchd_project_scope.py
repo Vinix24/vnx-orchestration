@@ -33,7 +33,11 @@ static and one live:
      because it only looks at Labels. A job follows the pin only when its
      ``VNX_HOME`` exists and RESOLVES to the installed pinned release
      directory: a matching basename elsewhere, a missing path and a
-     same-named symlink into another release are all reported.
+     same-named symlink into another release are all reported. The
+     ``VNX_HOME`` a job runs with is the one its ``ProgramArguments`` assign
+     (the assignment overrides ``EnvironmentVariables`` for the exec'd
+     process); an assignment that cannot be read statically is reported
+     ``pin_unmeasurable`` instead of trusting the environment.
 
 ``main()`` is the live, read-only operator/CI entry point: it resolves this
 project's id (``vnx_paths.resolve_project_id()``), shells out to the real
@@ -338,10 +342,113 @@ PIN_FOLLOWED = "pin_followed"
 PIN_IGNORED_CURRENT = "pin_ignored_current"
 PIN_IGNORED_OTHER_VERSION = "pin_ignored_other_version"
 PIN_DEAD = "pin_dead"
+# The job assigns VNX_HOME on its own command line in a way that cannot be read
+# without running the shell (another variable, a command substitution, an empty
+# value, two conflicting literals). Its release is unmeasured -- a violation,
+# never ``pin_followed`` (OI-2415).
+PIN_UNMEASURABLE = "pin_unmeasurable"
 
 # ``VNX_HOME=<value>`` inside a ProgramArguments string: the bare
-# gate-obligation-runner renders exactly this instead of an env block.
-_VNX_HOME_ASSIGN_RE = re.compile(r"""(?:^|[\s;])VNX_HOME=(?:"([^"]*)"|'([^']*)'|([^\s;]+))""")
+# gate-obligation-runner renders exactly this instead of an env block. Such an
+# assignment is ALSO the highest-precedence source: in
+# ``bash -c 'VNX_HOME=/store/current; exec python3 runner.py'`` the assignment
+# overrides the plist's EnvironmentVariables for the process that execs the
+# runner, so it is read FIRST and only then the environment, never the other
+# way round (OI-2415). ``export``/``env VNX_HOME=...``/``&&``/``||``/subshell
+# forms all match because the separator class covers whitespace and shell
+# punctuation.
+_VNX_HOME_ASSIGN_RE = re.compile(r"(?:^|[\s;&|()])VNX_HOME=")
+
+# The only expansions a statically-read assignment may carry: the bare
+# obligation-runner template writes ``VNX_HOME="$HOME/.vnx-system/current"``
+# and ``_expand_plist_path`` resolves exactly these two tokens. Anything else
+# (another variable, ``$()``, backticks) leaves the release unknowable without
+# running the shell, so the job is reported unmeasurable rather than judged.
+_HOME_EXPANSION_TOKENS = ("${HOME}", "$HOME")
+
+
+def _unreadable_assignment_reason(raw: str) -> Optional[str]:
+    """Why a command-line ``VNX_HOME=`` value cannot be read with certainty, or
+    None when it is a literal path (``$HOME``/``${HOME}`` excepted)."""
+    remainder = raw
+    for token in _HOME_EXPANSION_TOKENS:
+        remainder = remainder.replace(token, "")
+    if "`" in remainder or "$(" in remainder:
+        return "a command substitution"
+    if "${" in remainder or re.search(r"\$[A-Za-z_0-9@*#?]", remainder):
+        return "an unresolved variable expansion"
+    return None
+
+
+def _assignment_value(text: str, start: int) -> Tuple[str, Optional[str], int]:
+    """Read the value of a ``VNX_HOME=`` assignment whose value begins at
+    ``start`` in ``text``.
+
+    Returns ``(value, unreadable_reason, end)``. ``value`` is the literal text
+    as written (quotes stripped); ``end`` is where the value stops, so the
+    caller keeps scanning the rest of the same argument. A value that is a
+    command substitution, an unterminated quote or an empty token cannot be
+    read statically -- the caller turns that into ``pin_unmeasurable``.
+    """
+    tail = text[start:]
+    if tail.startswith("$("):
+        return "", "a command substitution", start + 2
+    if tail.startswith("`"):
+        return "", "a command substitution", start + 1
+    for quote in ('"', "'"):
+        if tail.startswith(quote):
+            close = text.find(quote, start + 1)
+            if close == -1:
+                return "", f"an unterminated {quote} quote", len(text)
+            return text[start + 1:close], None, close + 1
+    token = re.match(r"[^\s;&|()]*", tail).group(0)
+    if token.endswith("$") and text.startswith("(", start + len(token)):
+        return "", "a command substitution", start + len(token) + 1
+    return token, None, start + len(token)
+
+
+def _command_vnx_home(payload: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """``(value, unreadable_reason)`` for a ``VNX_HOME=`` assignment made by the
+    job's own command line (``ProgramArguments``).
+
+    ``(None, None)`` when the command assigns VNX_HOME nowhere; ``(None, reason)``
+    when it assigns a value that cannot be read statically. Several DIFFERENT
+    literals are unmeasurable too: which one the runner's own command inherits
+    depends on the command sequence, which this reader does not model. Repeats
+    of the same literal are harmless and still measured.
+    """
+    argv = payload.get("ProgramArguments")
+    literals: List[str] = []
+    unreadable: Optional[str] = None
+    for argument in argv if isinstance(argv, list) else ():
+        if not isinstance(argument, str):
+            continue
+        position = 0
+        while True:
+            match = _VNX_HOME_ASSIGN_RE.search(argument, position)
+            if match is None:
+                break
+            raw, reason, end = _assignment_value(argument, match.end())
+            position = max(end, match.end() + 1)  # empty value: still move on
+            if reason is not None:
+                unreadable = unreadable or reason
+                continue
+            raw = raw.strip()
+            if not raw:
+                unreadable = unreadable or "an empty value"
+                continue
+            reason = _unreadable_assignment_reason(raw)
+            if reason is not None:
+                unreadable = unreadable or f"{reason} ({raw!r})"
+            elif raw not in literals:
+                literals.append(raw)
+    if unreadable is not None:
+        return None, unreadable
+    if len(literals) > 1:
+        return None, "conflicting assignments ({})".format(", ".join(repr(v) for v in literals))
+    if literals:
+        return literals[0], None
+    return None, None
 
 
 def _expand_plist_path(value: Optional[str]) -> Optional[Path]:
@@ -358,19 +465,32 @@ def _expand_plist_path(value: Optional[str]) -> Optional[Path]:
         return None
 
 
-def _plist_vnx_home(payload: Dict[str, Any]) -> Optional[str]:
-    """EnvironmentVariables.VNX_HOME, else a ``VNX_HOME=`` assignment in
-    ProgramArguments. None if neither -- such a job is never counted as following."""
+def _plist_vnx_home(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The VNX_HOME the job actually runs with: ``value``, where it came from
+    (``source`` = ``"command"``/``"environment"``/None) and -- when the command
+    line assigns it unreadably -- the ``unreadable`` reason.
+
+    A ``VNX_HOME=`` assignment in ``ProgramArguments`` WINS over
+    ``EnvironmentVariables``: the assignment is what the shell that execs the
+    runner exports, so a job whose environment names the pinned release but
+    whose command says ``VNX_HOME=/store/current`` runs ``current``. Only when
+    the command assigns none at all does the environment's value count. A
+    command assignment that cannot be read statically is never replaced by the
+    environment value either: that would report the pin the job may well not
+    run (OI-2415).
+    """
     env = payload.get("EnvironmentVariables")
-    if isinstance(env, dict) and isinstance(env.get("VNX_HOME"), str) and env["VNX_HOME"].strip():
-        return env["VNX_HOME"].strip()
-    argv = payload.get("ProgramArguments")
-    for argument in argv if isinstance(argv, list) else ():
-        match = _VNX_HOME_ASSIGN_RE.search(argument) if isinstance(argument, str) else None
-        raw = next((group for group in match.groups() if group), "") if match else ""
-        if raw.strip():
-            return raw.strip()
-    return None
+    environment = env.get("VNX_HOME") if isinstance(env, dict) else None
+    environment = environment.strip() if isinstance(environment, str) and environment.strip() else None
+    command_value, unreadable = _command_vnx_home(payload)
+    if unreadable is not None:
+        return {"value": None, "source": "command", "unreadable": unreadable,
+                "environment": environment}
+    if command_value is not None:
+        return {"value": command_value, "source": "command", "unreadable": None,
+                "environment": environment}
+    return {"value": environment, "source": "environment" if environment else None,
+            "unreadable": None, "environment": environment}
 
 
 def _attributed_project(
@@ -467,7 +587,11 @@ def check_pin_alignment(
     installed release dir the pin names), ``pin_ignored_current`` (it follows
     the rolling ``current`` link while the project pins a version),
     ``pin_ignored_other_version`` (another release, a missing directory, or no
-    release at all) or ``pin_dead`` (the pinned release dir does not exist).
+    release at all), ``pin_dead`` (the pinned release dir does not exist) or
+    ``pin_unmeasurable`` (the job's own command line assigns ``VNX_HOME``
+    through a variable, a command substitution or conflicting literals, so no
+    release can be measured -- the command overrides the environment, which is
+    therefore never consulted to fill that gap).
     Everything but ``pin_followed`` is a violation -- an unreadable or
     unmeasured job is never reported as following -- except a plist of a
     project without a pin (a dev checkout), which is listed under
@@ -525,10 +649,25 @@ def check_pin_alignment(
             })
             continue
 
-        vnx_home = _plist_vnx_home(payload)
-        classification, detail = _classify_home(vnx_home, pin, pin_record)
+        home = _plist_vnx_home(payload)
+        if home["unreadable"] is not None:
+            environment_note = (
+                f" while EnvironmentVariables names {home['environment']!r}"
+                if home["environment"] is not None else ""
+            )
+            # Fail closed: the command assignment overrides the environment, so
+            # neither value can be shown to be the release this job runs.
+            classification = PIN_UNMEASURABLE
+            detail = (
+                f"the job's command line assigns VNX_HOME through {home['unreadable']}"
+                f"{environment_note}, so the release it runs cannot be measured against "
+                f"the pinned {pin!r}"
+            )
+        else:
+            classification, detail = _classify_home(home["value"], pin, pin_record)
         entry = {"plist": str(plist_path), "label": label, "project_id": project_id,
-                 "classification": classification, "pin": pin, "vnx_home": vnx_home, "detail": detail}
+                 "classification": classification, "pin": pin, "vnx_home": home["value"],
+                 "vnx_home_source": home["source"], "detail": detail}
         entries.append(entry)
         if classification != PIN_FOLLOWED:
             violations.append(dict(entry, kind=classification))
