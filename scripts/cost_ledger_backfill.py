@@ -9,7 +9,10 @@ books each transcript from ``--since`` on exactly once:
 - a transcript whose dispatch already has a live ledger line becomes a *correction*
   on that line's ``run_id`` (``supersedes`` its ``record_id``, ``backfill: true``),
   so the ledger keeps one effective line per run;
-- a transcript with no live line becomes a *charge* under the ``backfill`` producer;
+- a transcript with no live line becomes a *charge* under the ``backfill`` producer,
+  numbered per reference after the attempts the ledger already holds; the plan reserves
+  every attempt it hands out, so two unbooked sessions of one dispatch book ``:1`` and
+  ``:2`` and never collapse into one run;
 - a line that already says the same thing (tokens, model, role, segments) is
   skipped, so a second ``--apply`` writes nothing.
 
@@ -53,7 +56,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
@@ -114,6 +117,7 @@ class TranscriptRun:
 
     provider: str
     session_id: str
+    path: str
     dispatch_id: Optional[str]
     messages: Sequence[token_harvest.MessageUsage]
     reported_model: Optional[str]
@@ -250,7 +254,8 @@ def scan_lane(root: Path, since: date) -> List[TranscriptRun]:
             continue
         cwd, reported = transcript_meta(path)
         found.append(TranscriptRun(
-            provider=Path(root).name, session_id=path.stem, dispatch_id=dispatch_id_from_cwd(cwd),
+            provider=Path(root).name, session_id=path.stem, path=str(path),
+            dispatch_id=dispatch_id_from_cwd(cwd),
             messages=messages, reported_model=reported,
             occurred_from=_iso(started), occurred_to=_iso(ended),
         ))
@@ -341,7 +346,7 @@ def _already_booked(live: Mapping[str, Any], base: Mapping[str, Any]) -> bool:
 
 
 def _next_attempt(records: Sequence[Mapping[str, Any]]) -> int:
-    """The first attempt number no ``backfill`` run of this reference holds."""
+    """The first attempt number no recorded ``backfill`` run of this reference holds."""
     used = 0
     for record in records:
         try:
@@ -353,6 +358,23 @@ def _next_attempt(records: Sequence[Mapping[str, Any]]) -> int:
     return used + 1
 
 
+def _reserve_attempt(records: Sequence[Mapping[str, Any]], ref: str,
+                     reserved: MutableMapping[str, int]) -> int:
+    """The next free attempt of this reference, held for this plan from now on.
+
+    ``reserved`` is the plan-wide ledger of charges already planned but not yet
+    written: the first charge of a reference starts after the attempts the
+    ledger holds (``_next_attempt``), and every later charge of the same
+    reference takes the number after it. Without this, two unbooked sessions of
+    one dispatch would both be planned as ``:1`` and collapse in the aggregate.
+    """
+    attempt = reserved.get(ref)
+    if attempt is None:
+        attempt = _next_attempt(records)
+    reserved[ref] = attempt + 1
+    return attempt
+
+
 # ---------------------------------------------------------------------------
 # Planning and writing
 # ---------------------------------------------------------------------------
@@ -360,8 +382,13 @@ def _next_attempt(records: Sequence[Mapping[str, Any]]) -> int:
 
 def plan_run(run: TranscriptRun, row: Optional[DispatchRow], live: Optional[Mapping[str, Any]],
              tokens: Mapping[str, Optional[int]], project_id: str,
-             live_index: Mapping[str, Sequence[Mapping[str, Any]]]) -> PlannedRun:
-    """The planned line for one transcript: a correction on its live run, a charge, or a skip."""
+             live_index: Mapping[str, Sequence[Mapping[str, Any]]],
+             reserved: MutableMapping[str, int]) -> PlannedRun:
+    """The planned line for one transcript: a correction on its live run, a charge, or a skip.
+
+    A charge's attempt number comes from ``reserved`` — the plan-wide reservations
+    ``plan_runs`` keeps — so it never reuses a number another charge already holds.
+    """
     model = lane_model(run.provider, row.model if row is not None else None,
                        (live or {}).get("model"), run.reported_model) or _LANE_DEFAULT[run.provider]()
     base = {
@@ -378,7 +405,7 @@ def plan_run(run: TranscriptRun, row: Optional[DispatchRow], live: Optional[Mapp
                                       supersedes=live["record_id"], reason=CORRECTION_REASON,
                                       backfill=True, **base)
         return PlannedRun(run.provider, planned, live, skipped=False)
-    attempt = _next_attempt(live_index.get(run.ref, ()))
+    attempt = _reserve_attempt(live_index.get(run.ref, ()), run.ref, reserved)
     run_id = cost_ledger.run_id_for(project_id, BACKFILL_PRODUCER, run.ref, attempt)
     return PlannedRun(run.provider, cost_ledger.RunCost(run_id=run_id, backfill=True, **base),
                       None, skipped=False)
@@ -393,8 +420,13 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
     small follow-up session in the same worktree can never take the live line of the big
     run it shares a reference with. Only then does a transcript without an exact match
     correct a remaining live line, or — when none is left — book a new charge.
+
+    Order is the run's end timestamp, then its transcript path: the same transcripts in
+    the same store always plan the same run ids. Every charge planned for a reference
+    reserves its attempt in ``reserved`` before the next one is numbered, so the second
+    unbooked session of a dispatch gets the next free attempt instead of a duplicate.
     """
-    ordered = sorted(runs, key=lambda item: (item.occurred_to, item.session_id))
+    ordered = sorted(runs, key=lambda item: (item.occurred_to, item.path))
     tokens = [harness_run_cost.run_tokens(run.messages) for run in ordered]
     claimed: set = set()
     exact: Dict[int, Mapping[str, Any]] = {}
@@ -405,13 +437,14 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
             exact[index] = min(matches, key=lambda record: _distance(record, run))
             claimed.add(exact[index]["record_id"])
     planned: List[PlannedRun] = []
+    reserved: Dict[str, int] = {}
     for index, run in enumerate(ordered):
         live = exact.get(index)
         if live is None:
             candidates = _candidates(live_index.get(run.ref, ()), run.provider, claimed)
             live = min(candidates, key=lambda record: _distance(record, run)) if candidates else None
         row = rows.get(run.dispatch_id) if run.dispatch_id else None
-        planned.append(plan_run(run, row, live, tokens[index], project_id, live_index))
+        planned.append(plan_run(run, row, live, tokens[index], project_id, live_index, reserved))
         if live is not None:
             claimed.add(live["record_id"])
     return planned

@@ -8,7 +8,11 @@ Track ``kosten-per-model-in-het-grootboek``, deliverable K6. Covers
   on that run's ``run_id``, with ``supersedes`` and ``reason``, never a new run;
 - a transcript without a live line becomes one *charge* under the backfill
   producer, marked ``backfill: true``; the aggregate counts each run once;
-- a second ``--apply`` writes nothing (idempotent on ``run_id`` and tokens);
+- two unbooked sessions of one dispatch get ``:1`` and ``:2`` (attempts are
+  reserved across the whole plan, in transcript-end-then-path order), and a
+  live backfill line pushes the new attempts past its own number;
+- a second ``--apply`` writes nothing and changes no run id (idempotent on
+  ``run_id`` and tokens);
 - a run across the DeepSeek peak boundary carries two segments;
 - ``--dry-run`` (the default) writes no line and no spool file, and prints the
   per-provider counts;
@@ -374,3 +378,79 @@ def test_a_follow_up_session_does_not_take_the_live_line(tmp_path, monkeypatch):
     assert lines[1]["run_id"] == "vnx-dev:backfill:dlv-a9:1"
     assert lines[1]["tokens"]["input_uncached"] == 10
     assert cost_ledger.aggregate_runs(lab.ledger).runs[live["run_id"]]["record_id"] == live["record_id"]
+
+
+def test_two_unbooked_sessions_of_one_dispatch_get_two_run_ids(tmp_path, monkeypatch):
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-b1")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-b1"
+    # Written earlier in the store, but it *ends* later: numbering follows the plan's
+    # stable key (occurred_to, then transcript path), never the scan or creation order.
+    lab.transcript("deepseek-harness", "sess-a-late", cwd, [
+        _deepseek_entry("m1", "2026-10-05T04:00:00Z", _usage(input_tokens=200, output_tokens=20), cwd),
+    ])
+    lab.transcript("deepseek-harness", "sess-z-early", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", _usage(input_tokens=100, output_tokens=10), cwd),
+    ])
+
+    assert lab.apply(lab.lane_root("deepseek-harness")) == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 2
+    by_input = {line["tokens"]["input_uncached"]: line for line in lines}
+    assert by_input[100]["run_id"] == "vnx-dev:backfill:dlv-b1:1"
+    assert by_input[200]["run_id"] == "vnx-dev:backfill:dlv-b1:2"
+    aggregate = cost_ledger.aggregate_runs(lab.ledger)
+    assert set(aggregate.runs) == {"vnx-dev:backfill:dlv-b1:1", "vnx-dev:backfill:dlv-b1:2"}
+    assert sum(record["tokens"]["input_uncached"] for record in aggregate.runs.values()) == 300
+
+
+def test_a_second_apply_keeps_the_run_ids_of_two_unbooked_sessions(tmp_path, monkeypatch):
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-b2")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-b2"
+    lab.transcript("deepseek-harness", "sess-b2-early", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", _usage(input_tokens=100, output_tokens=10), cwd),
+    ])
+    lab.transcript("deepseek-harness", "sess-b2-late", cwd, [
+        _deepseek_entry("m1", "2026-10-05T04:00:00Z", _usage(input_tokens=200, output_tokens=20), cwd),
+    ])
+    lane = lab.lane_root("deepseek-harness")
+
+    assert lab.apply(lane) == 0
+    first = lab.ledger.read_bytes()
+    first_ids = sorted(line["run_id"] for line in _lines(lab.ledger))
+    assert first_ids == ["vnx-dev:backfill:dlv-b2:1", "vnx-dev:backfill:dlv-b2:2"]
+
+    assert lab.apply(lane) == 0
+
+    assert lab.ledger.read_bytes() == first
+    assert sorted(line["run_id"] for line in _lines(lab.ledger)) == first_ids
+    assert not (lab.ledger.parent / cost_ledger.SPOOL_DIR_NAME).exists()
+
+
+def test_attempts_continue_after_a_live_backfill_line(tmp_path, monkeypatch):
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-b3")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-b3"
+    live = lab.live("vnx-dev:backfill:dlv-b3:1", "glm-harness", "glm-5.2", "builder",
+                    _tokens(input_uncached=7, output=3))
+    lab.transcript("deepseek-harness", "sess-b3-early", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", _usage(input_tokens=100, output_tokens=10), cwd),
+    ])
+    lab.transcript("deepseek-harness", "sess-b3-late", cwd, [
+        _deepseek_entry("m1", "2026-10-05T04:00:00Z", _usage(input_tokens=200, output_tokens=20), cwd),
+    ])
+
+    assert lab.apply(lab.lane_root("deepseek-harness")) == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 3
+    live_line = [line for line in lines if line["record_id"] == live["record_id"]][0]
+    assert live_line["run_id"] == "vnx-dev:backfill:dlv-b3:1"
+    booked = sorted(line["run_id"] for line in lines if line["record_id"] != live["record_id"])
+    assert booked == ["vnx-dev:backfill:dlv-b3:2", "vnx-dev:backfill:dlv-b3:3"]
+    aggregate = cost_ledger.aggregate_runs(lab.ledger)
+    assert set(aggregate.runs) == {
+        "vnx-dev:backfill:dlv-b3:1", "vnx-dev:backfill:dlv-b3:2", "vnx-dev:backfill:dlv-b3:3",
+    }
