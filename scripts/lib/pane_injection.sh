@@ -1,20 +1,14 @@
 #!/bin/bash
 # pane_injection.sh — provider-aware prompt injection into a tmux pane.
 #
-# Moved out of dispatch_deliver.sh (P05, track terminal-binding-afbouwen) so the
-# injection layer has one home. What travels with it: the three tmux transport
-# helpers and the provider branch that decides whether the skill command goes
-# ahead of the prompt (Claude Code detects a slash command from `send-keys -l`)
-# or whether skill and prompt are pasted as one payload (codex).
-#
-# Names are unchanged from where they came from: dispatch_create.sh calls
-# tmux_send_best_effort directly, the delivery-substep contract names
-# tmux_load_buffer_safe, and _ddt_buffer_name carries the OI-1144 named-buffer
-# contract (one name per delivery, shared by load+paste, deleted on every exit).
-#
-# Behaviour is unchanged. The one contract that crosses the file boundary is
-# PANE_INJECT_FAILED_SUBSTEP: pane_inject_prompt records which substep failed
-# there and dispatch_deliver.sh maps it onto _DDT_FAILED_SUBSTEP.
+# Moved out of dispatch_deliver.sh (P05): the tmux transport helpers plus the
+# provider branch (claude gets the skill command via `send-keys -l` first, codex
+# gets skill+prompt pasted as one payload). Names are unchanged —
+# dispatch_create.sh calls tmux_send_best_effort directly, the delivery-substep
+# contract names tmux_load_buffer_safe, and _ddt_buffer_name carries the OI-1144
+# named-buffer rule (one name per delivery, deleted on every exit). The one
+# contract crossing the file boundary is PANE_INJECT_FAILED_SUBSTEP, which
+# dispatch_deliver.sh maps onto _DDT_FAILED_SUBSTEP.
 #
 # Requires at call time: log() (dispatch_logging.sh) and, for a payload larger
 # than VNX_DISPATCH_MAX_INLINE, VNX_DISPATCH_PAYLOAD_DIR (dispatcher_minimal.sh).

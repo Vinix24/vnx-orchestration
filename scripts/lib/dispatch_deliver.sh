@@ -4,9 +4,7 @@
 # Requires: $STATE_DIR, $VNX_DIR, $VNX_DISPATCH_PAYLOAD_DIR set by orchestrator.
 # Requires: dispatch_logging.sh and dispatch_lifecycle.sh sourced first.
 
-# P05: the provider-aware pane injection (tmux transport helpers + the
-# provider branch) lives in scripts/lib/pane_injection.sh. Sourced here so every
-# caller of this file keeps the same functions; the path is derived from this
+# P05: the pane injection lives in pane_injection.sh; the path comes from this
 # file, so it resolves in a worktree and in an installed tree alike.
 _PANE_INJECTION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/pane_injection.sh
