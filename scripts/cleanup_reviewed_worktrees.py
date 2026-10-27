@@ -17,8 +17,11 @@ Two evidence regimes, and then one gate:
   without ``gh`` = keep) and carry no commit outside origin.
 * Whichever passing verdict it gets, the removal itself goes through
   ``scripts/lib/worktree_removal_guard.guarded_remove``: this sweep decides no
-  liveness, occupancy or HEAD. A lock is dropped only inside that guard, right
-  before its removal, so a tree the guard keeps stays locked.
+  liveness, occupancy or HEAD. The guard is handed the HEAD sha the evidence
+  evaluated and refuses when the tree moved off it, so a commit made between
+  evaluation and removal is never removed unexamined. A lock is dropped only
+  inside that guard, right before its removal, so a tree the guard keeps stays
+  locked.
 * ``orphan_sweep``'s worktree kind keeps its own removal: it is driven by the
   tmux/register liveness model, not by this evidence, and rewiring it is not a
   small change.
@@ -181,6 +184,10 @@ class Verdict:
     # False keeps the local branch after the worktree is released: the proof
     # that fired does not show the commits exist on the remote.
     delete_branch: bool = True
+    # The HEAD sha the evidence actually judged. The removal is bound to it:
+    # a tree that moved off it before the guard runs is refused, so a commit
+    # made after evaluation never rides along on this verdict.
+    evaluated_head: str | None = None
 
 
 @dataclass
@@ -468,10 +475,18 @@ def evaluate_candidate(
     decisions: dict[str, dict[str, Any]] | None = None,
 ) -> Verdict:
     """Locked trees keep the reviewed-worktree rules; unlocked ones need the
-    extra evidence that nothing of theirs is unpublished and no PR is open."""
+    extra evidence that nothing of theirs is unpublished and no PR is open.
+
+    The verdict names the HEAD sha it judged in ``evaluated_head``. That sha
+    is handed to ``guarded_remove``, which refuses the removal when the tree
+    no longer sits on it — a commit made after this evaluation never passes
+    unnoticed into the removal."""
     if wt.lock_reason is None:
-        return evaluate_unlocked(repo_root, wt, repo_slug)
-    return evaluate_worktree(repo_root, wt, repo_slug, decisions)
+        verdict = evaluate_unlocked(repo_root, wt, repo_slug)
+    else:
+        verdict = evaluate_worktree(repo_root, wt, repo_slug, decisions)
+    verdict.evaluated_head = wt.head_sha
+    return verdict
 
 
 def _unlock_for_removal(repo_root: Path, path: Path):
@@ -490,11 +505,20 @@ def _unlock_for_removal(repo_root: Path, path: Path):
     return hook
 
 
-def remove_candidate(repo_root: Path, wt: Candidate, *, delete_branch: bool, dry_run: bool) -> ReleaseResult:
+def remove_candidate(
+    repo_root: Path,
+    wt: Candidate,
+    *,
+    expected_head: str,
+    delete_branch: bool,
+    dry_run: bool,
+) -> ReleaseResult:
     """Remove *wt* through the one guard and report the guard's verdict.
 
-    This sweep hands the guard the tree and the dispatch id and decides
-    nothing itself about liveness, occupancy or HEAD.
+    This sweep hands the guard the tree, the dispatch id and the HEAD sha the
+    evidence evaluated; the guard decides nothing less than liveness,
+    occupancy and HEAD. The branch is deleted only after a removal that
+    passed, so a ``head_moved`` refusal leaves both the tree and its branch.
     """
     from worktree_removal_guard import guarded_remove
 
@@ -502,6 +526,7 @@ def remove_candidate(repo_root: Path, wt: Candidate, *, delete_branch: bool, dry
     try:
         result = guarded_remove(
             wt.path,
+            expected_head=expected_head,
             dispatch_id=wt.dispatch_dir_id or "",
             repo_root=repo_root,
             dry_run=dry_run,
@@ -720,7 +745,13 @@ def _sweep_candidate(
     }
     if not verdict.safe:
         return entry
-    result = remove_candidate(repo_root, wt, delete_branch=verdict.delete_branch, dry_run=not apply)
+    result = remove_candidate(
+        repo_root,
+        wt,
+        expected_head=verdict.evaluated_head or "",
+        delete_branch=verdict.delete_branch,
+        dry_run=not apply,
+    )
     entry["guard_reason"] = result.reason
     entry["guard_detail"] = result.detail
     entry["released"] = result.released

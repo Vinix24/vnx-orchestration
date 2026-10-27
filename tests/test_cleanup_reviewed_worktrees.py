@@ -324,6 +324,54 @@ class TestT0Reject:
         assert wt.path.exists()
 
 
+class TestRemovalBindsTheEvaluatedHead:
+    """PR-4b round 2: the removal is bound to the HEAD ``evaluate_candidate``
+    judged. A clean commit made between evaluation and the guard must not be
+    removed, and its branch must not be deleted."""
+
+    @staticmethod
+    def _merged(fx, monkeypatch):
+        wt = fx.worktree("x")
+        stub_prs(monkeypatch, [{"number": 7, "state": "MERGED", "headRefOid": wt.head_sha}])
+        return wt
+
+    def test_a_commit_after_evaluation_keeps_the_worktree_and_its_branch(self, fx, monkeypatch):
+        wt = self._merged(fx, monkeypatch)
+        verdict = crw.evaluate_candidate(fx.repo, wt, "o/r")
+        assert verdict.safe and verdict.evaluated_head == wt.head_sha
+
+        git(wt.path, "commit", "--allow-empty", "-q", "-m", "commit after evaluation")
+        moved = git(wt.path, "rev-parse", "HEAD")
+        assert moved != verdict.evaluated_head
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=verdict.evaluated_head,
+            delete_branch=verdict.delete_branch, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "head_moved", result.detail
+        assert verdict.evaluated_head[:12] in result.detail, result.detail
+        assert moved[:12] in result.detail, result.detail
+        assert wt.path.exists(), "the worktree must stay"
+        assert fx.branch_exists("dispatch/x"), "the branch must stay"
+
+    def test_an_unchanged_head_still_removes_and_deletes_the_branch(self, fx, monkeypatch):
+        wt = self._merged(fx, monkeypatch)
+        verdict = crw.evaluate_candidate(fx.repo, wt, "o/r")
+        assert verdict.safe and verdict.evaluated_head == wt.head_sha
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=verdict.evaluated_head,
+            delete_branch=verdict.delete_branch, dry_run=False,
+        )
+
+        assert result.released is True, result.detail
+        assert result.reason == "removed"
+        assert not wt.path.exists()
+        assert not fx.branch_exists("dispatch/x")
+
+
 class TestSafety:
     """W6."""
 
