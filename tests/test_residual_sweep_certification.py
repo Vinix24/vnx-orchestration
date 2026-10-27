@@ -177,20 +177,15 @@ class TestClusterBModeControl:
 class TestClusterCCIEvidence:
     """Certify Cluster C residuals — CI path fix and report_path handling."""
 
-    def test_res_c1_pr_queue_uses_project_root(self):
-        """RES-C1 (OI-078): PR_QUEUE.md lookup should use PROJECT_ROOT, not VNX_HOME."""
-        pr_queue_manager = SCRIPT_DIR / "pr_queue_manager.py"
-        content = pr_queue_manager.read_text(encoding="utf-8")
-        # Verify queue_file uses project_root
-        assert "self.project_root" in content and "PR_QUEUE" in content, \
-            "PR_QUEUE.md should be resolved from project_root"
-        # Verify it does NOT use vnx_home for the queue file
-        lines = content.split("\n")
-        for line in lines:
-            if "queue_file" in line and "PR_QUEUE" in line:
-                assert "project_root" in line, \
-                    f"queue_file should use project_root: {line.strip()}"
-                break
+    def test_res_c1_pr_queue_manager_writes_no_queue_file(self):
+        """RES-C1 (OI-078) is moot: ADR-047 B4 retired the PR_QUEUE.md writer.
+
+        RES-C1 made the writer resolve PROJECT_ROOT instead of VNX_HOME. The
+        writer is gone, so no queue file is written under either root.
+        """
+        content = (SCRIPT_DIR / "pr_queue_manager.py").read_text(encoding="utf-8")
+        assert "self.queue_file" not in content
+        assert "_QUEUE.md" not in content
 
     def test_res_c2_report_path_validation_at_record_time(self):
         """RES-C2: report_path is validated at record_result time."""

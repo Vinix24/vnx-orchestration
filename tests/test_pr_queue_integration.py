@@ -52,8 +52,9 @@ def _real_pr_queue_md_untouched():
     """OI-1919: no test in this module may write PR_QUEUE.md in the real checkout.
 
     Compares mtime plus content of the real-root PR_QUEUE.md before and after the
-    module. A leak (PRQueueManager() resolving PROJECT_ROOT to the real repo)
-    fails the module here instead of tripping the harness-lane main-checkout guard.
+    module. ADR-047 B4 retired the file and its writer, so both reads are
+    ``None``; a writer that comes back fails the module here instead of tripping
+    the harness-lane main-checkout guard.
     """
     real_queue = _real_project_root() / "PR_QUEUE.md"
     before = _snapshot(real_queue)
@@ -67,7 +68,7 @@ def _tmp_project_root(tmp_path, monkeypatch):
     """OI-1919: point PROJECT_ROOT (and VNX_HOME) of every test at tmp_path.
 
     VNX_PROJECT_ROOT is the override vnx_paths honours ahead of the git
-    heuristics; PRQueueManager writes PR_QUEUE.md under the resolved root.
+    heuristics, so nothing a test resolves under the project root lands in the repo.
     """
     project_root = tmp_path / "project-root"
     project_root.mkdir(parents=True, exist_ok=True)

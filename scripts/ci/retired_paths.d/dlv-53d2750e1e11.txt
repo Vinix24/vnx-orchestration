@@ -1,0 +1,9 @@
+# Cluster B4 of track `retire-feature-plan-second-planning-layer`
+# (dispatch dlv-53d2750e1e11): PR_QUEUE.md has no generator, no writer and no
+# reader left. The review contract derives its closure stage from the
+# dispatch register (ADR-047 §6). PR_QUEUE.md itself is not listed: the
+# worktree scaffold still writes it until B5. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md
+scripts/build_pr_queue.py
+scripts/lib/review_contract.py::_parse_pr_queue_status
+scripts/pr_queue_manager.py::PRQueueManager.update_markdown

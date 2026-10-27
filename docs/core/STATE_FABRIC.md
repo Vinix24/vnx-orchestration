@@ -99,9 +99,10 @@ it out of `done` until its plan passes the plan gate
 
 `ROADMAP.yaml` is a file format that projects into that database in one direction.
 The file shipped in the repository is an illustrative example of the format.
-`FEATURE_PLAN.md` and `PR_QUEUE.md` are **generated** from it
-(`scripts/build_feature_plan.py`, `scripts/build_pr_queue.py`) and CI fails the
-build if either drifts (`tests/test_roadmap_consistency.py`). A feature entry
+`FEATURE_PLAN.md` is **generated** from it (`scripts/build_feature_plan.py`)
+and CI fails the build if it drifts (`tests/test_roadmap_consistency.py`).
+`PR_QUEUE.md` and its generator are gone (ADR-047): the queue is read from the
+dispatch state. A feature entry
 carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
 
 ## The flow — idea to closure, drift-free
@@ -170,7 +171,7 @@ automatically when wired into a cron or post-merge hook.
   way (receipt, ledger, ROADMAP, or raw `gh pr merge`) still grounds the track.
 - **Blocker + dependency gating.** Open `blocks` items and unmet `depends_on`
   edges hold a track out of `done` regardless of PR state.
-- **Generated views + CI guard.** `FEATURE_PLAN.md` / `PR_QUEUE.md` are generated
+- **Generated view + CI guard.** `FEATURE_PLAN.md` is generated
   and drift-checked; status lives in one place (ROADMAP `launch_state` +
   `features[]`).
 - **Closure authority.** Declared phase advances to `done` via two paths: the
@@ -215,7 +216,7 @@ subset check) require every PR in `pr_ref` to be MERGED before deriving or closi
 - Track lifecycle narrative (plan gate, close, auto-close): `docs/core/HORIZON_LIFECYCLE.md`
 - `t0_state.json` builder, including `live_work` and `pr_queue`: `scripts/build_t0_state.py`, `scripts/lib/pr_queue_state.py`
 - ROADMAP → tracks projection: `scripts/seed_tracks_from_roadmap.py`
-- Generated views: `scripts/build_feature_plan.py`, `scripts/build_pr_queue.py`
+- Generated view: `scripts/build_feature_plan.py`
 - Operational guide + known behaviours: `docs/operations/OBJECTIVE_RECONCILE.md`
 - Receipt / audit ledger contract: ADR-005, `docs/core/11_RECEIPT_FORMAT.md`
 - Tenant scoping on all of the above: ADR-007
