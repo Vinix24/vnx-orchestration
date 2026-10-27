@@ -104,7 +104,39 @@ IGNORABLE_STATUSES = frozenset(
 
 # event_types whose own status field uses the FAILURE_STATUSES/SUCCESS_STATUSES
 # vocab above to signal outcome.
-COMPLETION_EVENT_TYPES = frozenset({"task_complete", "task_completed", "subprocess_completion"})
+#
+# ADR-045 §2 (audit-spoor-kern K-1): ``dispatch_finished`` is a completion type.
+# It carries ``end_state`` (a closed four-value set) and projects to the status
+# the same table names (``END_STATE_TO_STATUS`` below), so the existing
+# completion reading — success literal -> success, failure literal -> failure —
+# is exactly right for it.
+COMPLETION_EVENT_TYPES = frozenset(
+    {"task_complete", "task_completed", "subprocess_completion", "dispatch_finished"})
+
+# ADR-045 §2: the lifecycle types that are NEVER an outcome. ``dispatch_started``
+# happens before the work; ``report_ingested`` says the report arrived, not that
+# the dispatch ended. Listed explicitly (not merely "absent from the sets above")
+# so a future widening of COMPLETION_EVENT_TYPES cannot quietly promote either
+# one into an outcome.
+_LIFECYCLE_NON_OUTCOME_EVENT_TYPES = frozenset({"dispatch_started", "report_ingested"})
+
+# ADR-045 §4, "Eindtoestand naar projectie": the receipt status each closed
+# end_state projects to. ``timed_out`` and ``abandoned`` both project to
+# ``timeout`` — ``abandoned`` is a ledger fact and a timed-out projection, not a
+# new terminal state. This mapping is deterministic: same end_state, same status,
+# everywhere, so a writer never chooses a status and a reader never guesses one.
+END_STATE_TO_STATUS = {
+    "completed": "success", "failed": "failure", "timed_out": "timeout", "abandoned": "timeout"}
+
+
+def end_state_status(end_state: Optional[str]) -> Optional[str]:
+    """Map a ``dispatch_finished`` end_state to the receipt status it projects to.
+
+    Returns None for an absent/unknown value — fail-closed: an end_state outside
+    the closed set has no projection, and the write side refuses the line rather
+    than defaulting it to a status (ADR-045 §2).
+    """
+    return END_STATE_TO_STATUS.get((end_state or "").strip().lower())
 
 # event_types that are unconditionally a governed failure, regardless of
 # whatever the status field carries.
@@ -131,6 +163,9 @@ def classify_event_outcome(event_type: Optional[str], status: Optional[str]) -> 
     """
     et = (event_type or "").strip().lower()
     st = (status or "").strip().lower()
+
+    if et in _LIFECYCLE_NON_OUTCOME_EVENT_TYPES:
+        return None
 
     if et in _ALWAYS_FAILURE_EVENT_TYPES:
         return "failure"
@@ -218,9 +253,11 @@ __all__ = [
     "SUCCESS_STATUSES",
     "IGNORABLE_STATUSES",
     "COMPLETION_EVENT_TYPES",
+    "END_STATE_TO_STATUS",
     "STATUS_ONLY_EVENT_TYPE",
     "UnknownStatusError",
     "classify_event_outcome",
+    "end_state_status",
     "is_governed_failure",
     "is_status_only_outcome",
     "outcome_event_type",

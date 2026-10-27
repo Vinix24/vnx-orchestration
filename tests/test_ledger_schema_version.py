@@ -24,6 +24,8 @@ import ledger_schema_version as lsv
 from ledger_schema_version import (
     ABSENT_SCHEMA_VERSION,
     CURRENT_SCHEMA_VERSION,
+    LATEST_SCHEMA_VERSION,
+    LIFECYCLE_SCHEMA_VERSION,
     ReceiptSchemaMigrationMissingError,
     ReceiptSchemaTooNewError,
     ReceiptSchemaVersionError,
@@ -71,10 +73,26 @@ def test_non_numeric_schema_version_raises_loudly():
 # ---------------------------------------------------------------------------
 
 def test_newer_schema_refuses_loudly():
-    """A receipt stamped newer than the reader's CURRENT refuses, never guesses."""
-    receipt = {"schema_version": CURRENT_SCHEMA_VERSION + 1, "dispatch_id": "d"}
+    """A receipt stamped newer than the reader's LATEST refuses, never guesses."""
+    receipt = {"schema_version": LATEST_SCHEMA_VERSION + 1, "dispatch_id": "d"}
     with pytest.raises(ReceiptSchemaTooNewError, match="newer"):
         read_receipt(receipt)
+
+
+def test_v3_lifecycle_line_is_read_as_is():
+    """ADR-045 §8: a reader accepts 2 and 3 and never down-converts a v3 line."""
+    receipt = {
+        "schema_version": LIFECYCLE_SCHEMA_VERSION,
+        "dispatch_id": "d",
+        "event_type": "dispatch_finished",
+        "project_id": "p",
+        "attempt": 1,
+        "end_state": "completed",
+    }
+    out = read_receipt(receipt)
+    assert out["schema_version"] == LIFECYCLE_SCHEMA_VERSION
+    assert out["event_type"] == "dispatch_finished"
+    assert out["end_state"] == "completed"
 
 
 def test_older_schema_converts_in_memory():

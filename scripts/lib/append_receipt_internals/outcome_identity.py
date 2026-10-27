@@ -34,6 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# The ADR-045 end-line type name, from the one vocabulary module (never a
+# second copy of the literal).
+from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE as _LIFECYCLE_END_EVENT_TYPE
+
 log = logging.getLogger(__name__)
 
 # Fields that identify the OUTCOME. Deliberately NOT source/report_path/
@@ -41,6 +45,15 @@ log = logging.getLogger(__name__)
 # outcome, and are exactly the fields that differ between the two routes for
 # one real-world event (see module docstring).
 OUTCOME_ID_FIELDS = ("dispatch_id", "event_type", "status", "commit_sha", "gate", "pr_number")
+
+# ADR-045 §3 (audit-spoor-kern K-1): the end line's identity is the attempt
+# triple, so its outcome_id also carries project_id and attempt — the same
+# dispatch_id in another project, or attempt 2 of one dispatch, is a different
+# outcome and must never be swallowed as the first one's duplicate. Scoped to
+# the new type on purpose: every existing shape keeps OUTCOME_ID_FIELDS exactly,
+# because its outcome_ids are already recorded in every project's index and
+# shifting them would silently re-key history.
+LIFECYCLE_OUTCOME_ID_FIELDS = OUTCOME_ID_FIELDS + ("project_id", "attempt")
 
 # Same identity, minus status: the "family" of outcomes for one
 # dispatch/event/gate/pr/commit. A new status within the same family is a
@@ -79,13 +92,24 @@ def _canonical_payload(receipt: Dict[str, Any], fields: tuple) -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 
+def _outcome_id_fields(receipt: Dict[str, Any]) -> tuple:
+    """The identity field tuple for this receipt's shape.
+
+    Only the ADR-045 end line widens the tuple (project_id + attempt); every
+    other shape returns the historical ``OUTCOME_ID_FIELDS`` untouched.
+    """
+    if _resolve_event_name(receipt) == _LIFECYCLE_END_EVENT_TYPE:
+        return LIFECYCLE_OUTCOME_ID_FIELDS
+    return OUTCOME_ID_FIELDS
+
+
 def compute_outcome_id(receipt: Dict[str, Any]) -> str:
-    """Deterministic identity hash over ``OUTCOME_ID_FIELDS``.
+    """Deterministic identity hash over the receipt's outcome fields.
 
     Two receipts for the same outcome booked via different routes (different
     source/report_path/terminal/task_id) collapse to the same outcome_id.
     """
-    payload = _canonical_payload(receipt, OUTCOME_ID_FIELDS)
+    payload = _canonical_payload(receipt, _outcome_id_fields(receipt))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -116,7 +140,16 @@ def _outcome_index_path_for(receipts_path: Path) -> Path:
 
 
 def _empty_index() -> Dict[str, Any]:
-    return {"version": OUTCOME_INDEX_VERSION, "outcomes": {}, "correction_index": {}}
+    # ``lifecycle_index`` (ADR-045 §3, audit-spoor-kern K-1) projects the single
+    # end line of an attempt: lifecycle_end_key -> outcome_id. It lives in this
+    # same durable index so a duplicate ``dispatch_finished`` is found without a
+    # ledger scan; ``rebuild_outcome_index`` re-derives it with the rest.
+    return {
+        "version": OUTCOME_INDEX_VERSION,
+        "outcomes": {},
+        "correction_index": {},
+        "lifecycle_index": {},
+    }
 
 
 def load_outcome_index(index_path: Path) -> Dict[str, Any]:
@@ -187,6 +220,13 @@ def record_outcome(receipt: Dict[str, Any], index_data: Dict[str, Any], booking:
     correction_key = compute_correction_key(receipt)
     index_data["outcomes"][booking.outcome_id] = int(time.time())
     index_data["correction_index"][correction_key] = booking.outcome_id
+    # ADR-045 §3: the per-attempt end-line projection, so the one-end-per-attempt
+    # refusal does not need a ledger scan. Lazy import: ``lifecycle`` imports
+    # this package's ``common`` and the top-level vocabulary modules, and this
+    # keeps the import order one-directional at module scope.
+    from .lifecycle import record_lifecycle_end
+
+    record_lifecycle_end(receipt, index_data, booking.outcome_id)
 
 
 @dataclass
