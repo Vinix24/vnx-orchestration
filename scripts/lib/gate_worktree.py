@@ -22,19 +22,24 @@ later turn. The file is written by the gate and never taken from the tree under
 review: a PR that changes AGENTS.md would otherwise write its reviewer's
 instructions. For git the worktree stays the PR's tree (see
 ``_install_review_instructions``).
+
+PR-4a: every gate checkout carries a lifetime flock on a ``<checkout>.live``
+sidecar (outside the tree) from before ``git worktree add`` until its teardown,
+so a remover must take that lock itself before deleting the tree.
 """
 
 from __future__ import annotations
 
 import fcntl
 import logging
+import os
 import re
 import secrets
 import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import IO, List, Optional, Sequence
 
 from atomic_io import atomic_write_text
 
@@ -77,6 +82,51 @@ REVIEW_INSTRUCTIONS_TEXT = (
 # removed from the worktree. A fallback filename only counts when AGENTS.md is
 # absent, so it can never win over the gate's file.
 _OUTRANKING_INSTRUCTION_FILENAMES = ("AGENTS.override.md",)
+
+
+# Sidecar next to the checkout (never inside it) carrying the seat's flock.
+LIFETIME_LOCK_SUFFIX = ".live"
+_lifetime_locks: "dict[str, IO[str]]" = {}
+
+
+def gate_lifetime_lock_path(wt_path: Path) -> Path:
+    """The sidecar carrying gate checkout *wt_path*'s lifetime lock."""
+    wt_path = Path(wt_path)
+    return wt_path.parent / (wt_path.name + LIFETIME_LOCK_SUFFIX)
+
+
+def _acquire_lifetime_lock(wt_path: Path) -> None:
+    """Take the exclusive seat lock and keep its handle open until teardown."""
+    key = str(Path(wt_path).resolve())
+    if key in _lifetime_locks:
+        return
+    sidecar = gate_lifetime_lock_path(wt_path)
+    try:
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(sidecar, "a+")
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError as exc:
+        raise GateWorktreeError(
+            f"create_gate_worktree: cannot take lifetime lock {sidecar}: {exc}"
+        ) from exc
+    _lifetime_locks[key] = handle
+
+
+def _release_lifetime_lock(wt_path: Path) -> None:
+    """Release the seat lock; drop the sidecar once the checkout is gone."""
+    handle = _lifetime_locks.pop(str(Path(wt_path).resolve()), None)
+    if handle is not None:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            handle.close()
+    if not Path(wt_path).exists():
+        try:
+            gate_lifetime_lock_path(wt_path).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # pragma: no cover - best-effort cleanup
+            log.warning("could not remove lifetime lock %s: %s", gate_lifetime_lock_path(wt_path), exc)
 
 
 class GateWorktreeError(RuntimeError):
@@ -326,8 +376,9 @@ def create_gate_worktree(
 
     Steps:
       1. git fetch origin <branch>  (via fetch_branch — validates + fetches)
-      2. git worktree add --detach <path> origin/<branch>
-      3. write the gate-authored AGENTS.md at the worktree root (R9), for
+      2. take the lifetime lock on the sidecar ``<path>.live``
+      3. git worktree add --detach <path> origin/<branch>
+      4. write the gate-authored AGENTS.md at the worktree root (R9), for
          every gate alike: a reviewer that does not load it pays nothing
 
     Raises GateWorktreeError when branch is empty or any step fails —
@@ -338,19 +389,26 @@ def create_gate_worktree(
     root = fetch_branch(branch, gate=gate, identifier=identifier, project_root=project_root)
     wt_path = _worktree_dir(root, gate, identifier)
     wt_path.parent.mkdir(parents=True, exist_ok=True)
+    # Taken BEFORE the checkout exists: no remover ever sees an unlocked gate tree.
+    _acquire_lifetime_lock(wt_path)
 
+    created = False
     try:
         with _worktree_lock(root):
             subprocess.run(
                 ["git", "worktree", "add", "--detach", str(wt_path), f"origin/{branch}"],
                 cwd=str(root), check=True, capture_output=True, text=True, timeout=30,
             )
+        created = True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         detail = getattr(exc, "stderr", "") or str(exc)
         raise GateWorktreeError(
             f"create_gate_worktree: git worktree add failed for gate={gate!r} "
             f"branch={branch!r}: {detail}"
         ) from exc
+    finally:
+        if not created:
+            _release_lifetime_lock(wt_path)
 
     try:
         _install_review_instructions(wt_path)
@@ -376,6 +434,7 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
         return
     wt_path = Path(wt_path)
     if not wt_path.exists():
+        _release_lifetime_lock(wt_path)
         return
 
     root = _resolve_project_root(project_root)
@@ -428,3 +487,5 @@ def remove_gate_worktree(wt_path: Optional[Path], *, project_root: Optional[Path
                 log.warning("git worktree prune failed: %s", detail)
     except Exception as exc:  # pragma: no cover - cleanup must never raise
         log.warning("remove_gate_worktree: unexpected error removing %s: %s", wt_path, exc)
+    finally:
+        _release_lifetime_lock(wt_path)

@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from gate_status import REQUEST_TERMINAL_STATUSES
+
 logger = logging.getLogger(__name__)
 
 # `gh pr checks --json` (gh 2.76.2, measured 2026-08-20) has no `status`/
@@ -121,7 +123,10 @@ class GateExecutorMixin:
             raise ValueError(f"No request record found for gate={gate}")
 
         status = request_payload.get("status", "")
-        if status in ("not_executable", "completed", "failed"):
+        if status in REQUEST_TERMINAL_STATUSES:
+            # One shared list, not a local copy (GE-4c, kimi advisory (c)): a
+            # request ended ``unavailable`` by commit_gate_outcome used to fall
+            # through here and re-run a gate whose attempt was over.
             return request_payload
 
         head_sha = str(request_payload.get("commit_sha") or "")
