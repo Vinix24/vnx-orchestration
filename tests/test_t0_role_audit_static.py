@@ -586,6 +586,116 @@ class TestTriFilePlaybookMechanismGap:
         assert "PLAYBOOK-MECHANISM-GAP" not in r.stdout
 
 
+class TestProviderRoleContentDrift:
+    """Track `orchestrator-provider-agnostic-role`, goal point 4: the audit
+    must FAIL when the `<!-- VNX:BEGIN T0-ROLE -->` block in AGENTS.md or
+    GEMINI.md diverges from the canonical role it mirrors.
+
+    Before this class the audit only checked that the MARKERS were present —
+    a mirrored block edited by hand produced byte-identical output to a
+    current one, so divergence was invisible (measured 2026-10-27 in a temp
+    project: a one-line edit inside AGENTS.md left `--static` output
+    unchanged). Presence is not currency.
+
+    Fail-closed: an unmeasurable mirror (missing END marker, empty payload,
+    no role file to compare against) is a finding, never a pass. A provider
+    file with NO block at all stays unflagged — AGENTS.md/GEMINI.md are
+    gitignored artefacts that `vnx role sync` generates, so absence is a
+    coverage gap reported by `scripts/fleet_role_drift.py`, not local drift.
+    """
+
+    ROLE_MARKER_BEGIN = "<!-- VNX:BEGIN T0-ROLE -->"
+    ROLE_MARKER_END = "<!-- VNX:END T0-ROLE -->"
+    ROLE_BODY = "# T0 - VNX Master Orchestrator\n\nYou are T0. You do not implement code.\n"
+
+    def _project(self, tmp_path: Path, *, role_body: str = None, role_missing: bool = False) -> Path:
+        project = _make_project(tmp_path)
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+        if not role_missing:
+            (t0 / "role-orchestrator.md").write_text(
+                self.ROLE_BODY if role_body is None else role_body
+            )
+        return project
+
+    def _mirror(self, body: str) -> str:
+        return f"{self.ROLE_MARKER_BEGIN}\n{body}{self.ROLE_MARKER_END}\n"
+
+    def _write(self, project: Path, name: str, text: str) -> None:
+        (project / ".claude" / "terminals" / "T0" / name).write_text(text)
+
+    def test_current_block_is_not_flagged_as_drift(self, tmp_path):
+        project = self._project(tmp_path)
+        self._write(project, "AGENTS.md", self._mirror(self.ROLE_BODY))
+        self._write(project, "GEMINI.md", self._mirror(self.ROLE_BODY))
+
+        r = _run_static(project)
+        assert "PROVIDER-ROLE-DRIFT" not in r.stdout, r.stdout
+
+    def test_agents_md_diverging_from_role_is_flagged(self, tmp_path):
+        project = self._project(tmp_path)
+        drifted = self.ROLE_BODY.replace("You do not implement code.", "You DO implement code.")
+        self._write(project, "AGENTS.md", self._mirror(drifted))
+
+        r = _run_static(project)
+        assert r.returncode != 0, r.stdout
+        assert "PROVIDER-ROLE-DRIFT" in r.stdout, r.stdout
+        assert "AGENTS.md" in r.stdout
+        assert "vnx role sync --apply" in r.stdout
+
+    def test_gemini_md_diverging_from_role_is_flagged(self, tmp_path):
+        project = self._project(tmp_path)
+        drifted = self.ROLE_BODY.replace("You are T0.", "You are Gemini.")
+        self._write(project, "GEMINI.md", self._mirror(drifted))
+
+        r = _run_static(project)
+        assert r.returncode != 0, r.stdout
+        assert "PROVIDER-ROLE-DRIFT" in r.stdout, r.stdout
+        assert "GEMINI.md" in r.stdout
+
+    def test_block_without_end_marker_is_flagged(self, tmp_path):
+        """Malformed: BEGIN present, END absent. The payload cannot be
+        measured, so it stays blocking rather than reading as current."""
+        project = self._project(tmp_path)
+        self._write(project, "AGENTS.md", f"{self.ROLE_MARKER_BEGIN}\n{self.ROLE_BODY}")
+
+        r = _run_static(project)
+        assert r.returncode != 0, r.stdout
+        assert "PROVIDER-ROLE-DRIFT" in r.stdout, r.stdout
+        assert "AGENTS.md" in r.stdout
+
+    def test_empty_block_is_flagged(self, tmp_path):
+        """An empty payload is not the role. Missing evidence is not a pass."""
+        project = self._project(tmp_path)
+        self._write(project, "AGENTS.md", f"{self.ROLE_MARKER_BEGIN}\n{self.ROLE_MARKER_END}\n")
+
+        r = _run_static(project)
+        assert r.returncode != 0, r.stdout
+        assert "PROVIDER-ROLE-DRIFT" in r.stdout, r.stdout
+
+    def test_missing_role_file_is_flagged(self, tmp_path):
+        """Nothing to compare the mirror against — the check did not measure,
+        so it reports instead of clearing."""
+        project = self._project(tmp_path, role_missing=True)
+        self._write(project, "AGENTS.md", self._mirror(self.ROLE_BODY))
+
+        r = _run_static(project)
+        assert r.returncode != 0, r.stdout
+        assert "PROVIDER-ROLE-DRIFT" in r.stdout, r.stdout
+        assert "role-orchestrator.md" in r.stdout
+
+    def test_block_matching_a_stale_role_file_is_not_local_drift(self, tmp_path):
+        """Mirror and role file agree: the pair is internally consistent.
+        Catching a role that is behind the CANON is fleet_role_drift.py's
+        content axis, not this per-project check."""
+        stale_body = "# T0 - VNX Master Orchestrator\n\nAn older role body.\n"
+        project = self._project(tmp_path, role_body=stale_body)
+        self._write(project, "AGENTS.md", self._mirror(stale_body))
+
+        r = _run_static(project)
+        assert "PROVIDER-ROLE-DRIFT" not in r.stdout, r.stdout
+
+
 class TestDefaultRootIsGitRoot:
     def test_no_project_root_arg_defaults_to_cwd_git_root(self, tmp_path):
         project = _make_project(tmp_path)
