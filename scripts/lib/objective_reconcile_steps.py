@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
-"""objective_reconcile_steps.py — steps 2, 2b and 3 of ``run_reconcile``.
+"""objective_reconcile_steps.py — steps 2, 2b, 3, 4a and 4b of ``run_reconcile``.
 
-Extracted verbatim from ``objective_reconcile.run_reconcile`` (S4 of the
-slop-refactor track) so the pipeline reads as a pipeline: the derived-status
-refresh, the dispatch-outcome recompute and the nomination sweep each keep
-their own body, their own error handling and their own connection lifetime.
+Extracted verbatim from ``objective_reconcile.run_reconcile`` (S4, then S5 of
+the slop-refactor track) so the pipeline reads as a pipeline: each step keeps
+its own body, its own error handling and its own connection lifetime.
 
 Nothing here decides policy on its own — every branch below is the same
 branch ``run_reconcile`` took before the move, including the fail-closed
-edges (delivery hold, unparseable reopen stamp, unchanged pr_ref).
+edges (delivery hold, unparseable reopen stamp, unchanged pr_ref) and the
+order of every write to the PR-state cache, the summary and the counts.
 
 Import direction: ``objective_reconcile`` imports this module, never the
-other way at module level. The two helpers still owned by
-``objective_reconcile`` (``_now_utc`` and ``_persist_summary`` — its
-remaining steps use them too) are imported lazily inside ``refresh_derived``.
+other way at module level. The helpers still owned by ``objective_reconcile``
+(``_now_utc``/``_persist_summary``, its gh probes and its cache/decision
+primitives — its remaining steps use them too) are imported lazily inside the
+functions below, which also keeps monkeypatching them on the owning module
+effective.
 """
 from __future__ import annotations
 
@@ -188,6 +190,164 @@ def nominate_candidates(
     finally:
         hold_conn.close()
     return candidates, guarded_tracks, held_tracks
+
+
+def gh_unavailable_result(
+    state_dir: Path, project_id: str, repo_root: Path, *,
+    run_id: str, mode: str, started_at: str, provenance: Dict[str, Any],
+    dispatch_outcomes_summary: Dict[str, Any], total_tracks: int, nominated: int,
+    candidates: List[Dict[str, Any]], guarded_tracks: List[Dict[str, Any]],
+    held_tracks: List[Dict[str, Any]],
+) -> Tuple[Optional[Tuple[Dict[str, Any], int]], Optional[str], str]:
+    """Step 4a — gh detection; the degraded summary when gh is unusable.
+
+    Returns ``(degraded, gh_binary, gh_health)``. The binary is resolved once
+    per run and handed back so every later PR lookup reuses it (a stripped PATH
+    must not flip a live gh to "absent" partway through a run). ``degraded`` is
+    the ``(summary, 3)`` the caller returns when gh is absent / auth-failed /
+    timed out — every candidate unverified, summary persisted first, exactly as
+    ``run_reconcile`` did — and ``None`` when gh is usable.
+    """
+    # Lazy: objective_reconcile imports this module at module level, so these
+    # helpers (still owned there) can only be imported here, without a cycle.
+    from objective_reconcile import (
+        _detect_gh, _now_utc, _persist_summary, _resolve_gh_binary,
+    )
+
+    gh_binary = _resolve_gh_binary()
+    gh_health = _detect_gh(repo_root, gh_binary)
+    if gh_health not in ("absent", "auth_failed", "timeout"):
+        return None, gh_binary, gh_health
+
+    per_track = [
+        {"track_id": c["track_id"], "verdict": "unverified",
+         "pr_ref": c["pr_ref"], "reason": gh_health}
+        for c in candidates
+    ] + guarded_tracks + held_tracks
+    counts = {
+        "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
+        "closed": 0, "closed_sibling": 0, "open_pr": 0,
+        "unverified": len(candidates), "deferred": 0, "stale": 0,
+        "reopened_guard": len(guarded_tracks),
+        "delivery_hold": len(held_tracks),
+    }
+    summary = {
+        "run_id": run_id, "project_id": project_id, "mode": mode,
+        "started_at": started_at, "finished_at": _now_utc(),
+        "evidence_source_health": {"gh": gh_health},
+        "provenance": provenance,
+        "dispatch_outcomes": dispatch_outcomes_summary,
+        "counts": counts,
+        "per_track": per_track,
+    }
+    _persist_summary(state_dir, summary)
+    return (summary, 3), gh_binary, gh_health
+
+
+def verify_candidates(
+    state_dir: Path, repo_root: Path, candidates: List[Dict[str, Any]],
+    guarded_tracks: List[Dict[str, Any]], held_tracks: List[Dict[str, Any]], *,
+    gh_binary: Optional[str], total_tracks: int, nominated: int,
+    max_gh_calls: int, allow_closed_siblings: bool,
+) -> Dict[str, Any]:
+    """Step 4b — per-candidate verification with the persistent MERGED cache.
+
+    Returns ``per_track``, ``counts``, ``confirmed_candidates`` and
+    ``gh_calls_used`` for the steps that follow (4c, 5, 6). A candidate whose
+    lookups would cross ``max_gh_calls`` is reported ``deferred``, costs no call.
+    """
+    # Lazy: same circular-import reason as gh_unavailable_result above.
+    from objective_reconcile import _get_repo_key, _load_pr_state_cache
+
+    repo_key = _get_repo_key(repo_root)
+    pr_cache = _load_pr_state_cache(state_dir, repo_key)
+    gh_calls_used = 0
+    counts = {
+        "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
+        "closed": 0, "closed_sibling": 0, "open_pr": 0,
+        "unverified": 0, "deferred": 0, "stale": 0,
+        "reopened_guard": len(guarded_tracks),
+        "delivery_hold": len(held_tracks),
+    }
+    confirmed_candidates: List[Dict[str, Any]] = []
+    per_track: List[Dict[str, Any]] = []
+
+    for cand in candidates:
+        entry, confirmed, gh_calls_used = _verify_one_candidate(
+            cand, state_dir=state_dir, repo_root=repo_root, repo_key=repo_key,
+            pr_cache=pr_cache, gh_binary=gh_binary,
+            allow_closed_siblings=allow_closed_siblings,
+            gh_calls_used=gh_calls_used, max_gh_calls=max_gh_calls,
+        )
+        per_track.append(entry)
+        verdict = entry["verdict"]
+        if confirmed is not None:
+            counts["confirmed"] += 1
+            confirmed_candidates.append(confirmed)
+        else:
+            counts[verdict] = counts.get(verdict, 0) + 1
+
+    return {
+        "per_track": per_track, "counts": counts,
+        "confirmed_candidates": confirmed_candidates, "gh_calls_used": gh_calls_used,
+    }
+
+
+def _verify_one_candidate(
+    cand: Dict[str, Any], *, state_dir: Path, repo_root: Path, repo_key: str,
+    pr_cache: Dict[str, Dict[str, Any]], gh_binary: Optional[str],
+    allow_closed_siblings: bool, gh_calls_used: int, max_gh_calls: int,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], int]:
+    """Verify ONE candidate; returns ``(per_track_entry, confirmed, calls_used)``.
+
+    ``confirmed`` is set only for a CONFIRMED verdict (what 4c and step 5 act
+    on); ``gh_calls_used`` is unchanged on a deferral — the cap is checked first.
+    """
+    # Lazy: same circular-import reason as gh_unavailable_result above.
+    from objective_reconcile import (
+        _decide_candidate, _gh_pr_view, _is_merged, _save_pr_state_cache,
+    )
+
+    track_id = cand["track_id"]
+    pr_numbers: FrozenSet[int] = cand["pr_numbers"]
+    pr_ref = cand["pr_ref"]
+
+    # Split: cached MERGED vs needs a live gh call.
+    pr_results: Dict[int, Optional[Dict[str, Any]]] = {}
+    prs_to_fetch: List[int] = []
+    for pn in pr_numbers:
+        cached = pr_cache.get(str(pn))
+        if cached and _is_merged(cached):
+            pr_results[pn] = cached
+        else:
+            prs_to_fetch.append(pn)
+
+    # Defer if fetching would exceed the cap.
+    if prs_to_fetch and gh_calls_used + len(prs_to_fetch) > max_gh_calls:
+        return {"track_id": track_id, "verdict": "deferred", "pr_ref": pr_ref}, None, gh_calls_used
+
+    # Fetch live states; cache any MERGED results.
+    for pn in prs_to_fetch:
+        gh_calls_used += 1
+        data = _gh_pr_view(pn, repo_root, gh_binary=gh_binary)
+        pr_results[pn] = data
+        if data is not None and _is_merged(data):
+            pr_cache[str(pn)] = data
+
+    # Persist cache after each candidate's batch so timeouts don't lose cached merges.
+    _save_pr_state_cache(state_dir, repo_key, pr_cache)
+
+    verdict, pr_list = _decide_candidate(pr_numbers, pr_results, allow_closed_siblings)
+
+    entry: Dict[str, Any] = {
+        "track_id": track_id,
+        "verdict": verdict,
+        "pr_ref": pr_ref,
+        "pr_results": pr_list,
+    }
+    if verdict != "CONFIRMED":
+        return entry, None, gh_calls_used
+    return entry, {"track_id": track_id, "pr_ref": pr_ref, "pr_results": pr_list}, gh_calls_used
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,10 @@ if str(_ROOT / "scripts" / "lib") not in sys.path:
 import refactor_census  # noqa: E402
 
 RAW_LIMIT = 200
-TARGETS = {"close_track_if_done": "scripts/lib/track_reconciler_closure.py"}
+TARGETS = {
+    "close_track_if_done": "scripts/lib/track_reconciler_closure.py",
+    "run_reconcile": "scripts/lib/objective_reconcile.py",
+}
 
 
 def _raw_length(path: str, qualname: str) -> int:
