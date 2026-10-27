@@ -296,7 +296,7 @@ has its release in a row above and says so here.
 ### Uses of `--force` that are not a release
 
 - `scripts/benchmark/field-tests/runners/run_field_tests.py`: `git worktree remove --force` in benchmark cleanup.
-- `scripts/cleanup_reviewed_worktrees.py` `release_worktree`: `git worktree remove --force` after the caller's own unlock. It discards uncommitted work in that worktree.
+- `scripts/lib/worktree_removal_guard.py` `_assess` (called by `guarded_remove`, the only removal `scripts/cleanup_reviewed_worktrees.py` uses): `git worktree remove --force` while the tree's slot is held and after HEAD plus a clean status were revalidated under the repository lock. A lock is dropped only inside that removal.
 - `scripts/extract_open_items.py` `main`: re-processes all reports and ignores the processed cache.
 - `scripts/lib/gate_worktree.py` `remove_gate_worktree`: `git worktree remove --force` on its own gate worktree.
 - `scripts/lib/mcp_server_config.py` `main`: starts `.mcp.json` from a clean file during terminal bootstrap.

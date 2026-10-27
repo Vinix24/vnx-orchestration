@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 import cleanup_reviewed_worktrees as crw  # noqa: E402
+import dispatch_worktree_isolation as dwi  # noqa: E402
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -36,6 +37,11 @@ def git(cwd: Path, *args: str) -> str:
 class Fixture:
     def __init__(self, tmp_path: Path, project_id: str = "alpha") -> None:
         self.tmp = tmp_path
+        # The project's central store exists before the first claim is written, so
+        # the claim/occupancy registry (resolved through vnx_paths) and the sweep
+        # resolve to ONE place for the whole test instead of following whichever
+        # directory happens to exist at the moment of each call.
+        (Path.home() / ".vnx-data" / project_id / "state").mkdir(parents=True, exist_ok=True)
         self.origin = tmp_path / "origin.git"
         self.repo = tmp_path / "repo"
         git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
@@ -49,7 +55,7 @@ class Fixture:
         git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "fetch", "-q", "origin")
 
-    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.LockedWorktree:
+    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.Candidate:
         path = self.repo / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
         branch = f"dispatch/{dispatch_id}"
         git(self.repo, "worktree", "add", "-q", "-b", branch, str(path), "main")
@@ -59,8 +65,13 @@ class Fixture:
             git(path, "commit", "-q", "-m", "work")
         if push:
             git(path, "push", "-q", "origin", branch)
+        # What create_dispatch_worktree leaves behind: a claim naming this path and an
+        # existing (unheld) occupancy slot. Without them the guard refuses the removal.
+        dwi._write_claim_atomic(dispatch_id, worktree_path=path, project_root=self.repo)
+        dwi._acquire_occupancy(dispatch_id, path, self.repo)
+        dwi._release_occupancy(path)
         git(self.repo, "worktree", "lock", "--reason", "vnx preserve 2026", str(path))
-        found = [w for w in crw.discover_locked_dispatch_worktrees(self.repo) if w.dispatch_dir_id == dispatch_id]
+        found = [w for w in crw.discover_candidates(self.repo) if w.dispatch_dir_id == dispatch_id]
         assert len(found) == 1
         return found[0]
 
@@ -322,7 +333,7 @@ class TestSafety:
         rc = crw.main(["--repo-root", str(fx.repo), "--json"])
         assert rc == 0
         assert wt.path.exists() and fx.branch_exists("dispatch/x")
-        assert any(w.dispatch_dir_id == "x" for w in crw.discover_locked_dispatch_worktrees(fx.repo))
+        assert any(w.dispatch_dir_id == "x" for w in crw.discover_candidates(fx.repo))
 
     def test_current_worktree_stays(self, fx, monkeypatch):
         wt = fx.worktree("x")
@@ -342,7 +353,34 @@ class TestSafety:
         with pytest.raises(SystemExit):
             crw.main([])
 
-    def test_unlocked_worktree_is_never_a_candidate(self, fx, monkeypatch):
+    def test_an_unlocked_worktree_is_a_candidate_too(self, fx, monkeypatch):
+        """PR-4b: the sweep's candidates come from the inventory, so dropping the
+        preserve lock no longer hides a tree from it. The guard, not the sweep,
+        then decides whether it may go."""
         wt = fx.worktree("x")
         git(fx.repo, "worktree", "unlock", str(wt.path))
-        assert crw.discover_locked_dispatch_worktrees(fx.repo) == []
+        candidates = [c for c in crw.discover_candidates(fx.repo) if c.dispatch_dir_id == "x"]
+        assert len(candidates) == 1 and candidates[0].lock_reason is None
+        assert candidates[0].kind == "dispatch"
+
+    def test_a_guarded_refusal_leaves_the_preserve_lock_in_place(self, fx, monkeypatch):
+        """A locked tree the guard keeps must stay LOCKED: the sweep drops the
+        lock only inside the guard's removal, never while it is still judging."""
+        import dispatch_process_registry as registry
+
+        wt = fx.worktree("x")
+        git(fx.repo, "merge", "-q", "--no-ff", "-m", "merge", "dispatch/x")
+        git(fx.repo, "push", "-q", "origin", "main")
+        git(fx.repo, "fetch", "-q", "origin")
+        registry.record_dispatch_pgids("x", [os.getpgid(0)], repo_root=fx.repo)
+
+        def _denied(pid):
+            raise PermissionError(f"not allowed to inspect {pid}")
+
+        monkeypatch.setattr(os, "getpgid", _denied)
+        report = run_main(fx)
+        candidate = report["candidates"][0]
+        assert candidate["released"] is False
+        assert candidate["guard_reason"] == "liveness_unknown", candidate
+        assert wt.path.exists()
+        assert "locked" in git(fx.repo, "worktree", "list", "--porcelain")

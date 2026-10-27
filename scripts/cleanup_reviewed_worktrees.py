@@ -1,5 +1,27 @@
-"""cleanup_reviewed_worktrees.py — release dispatch worktrees preserved for
-identity review, once that review is provably done (OI-1111).
+"""cleanup_reviewed_worktrees.py — release fabric-owned worktrees once nothing
+depends on them any more.
+
+The candidates are the ones ``scripts/lib/worktree_inventory.py`` measures:
+every fabric-OWNED worktree of the repo (dispatch, gate, pool, bench) except
+the checkout this process runs from and worktrees of another repo. A tree
+whose lock, liveness, occupancy or HEAD argues against removal is reported
+with the reason it stays — never dropped from the report.
+
+Two evidence regimes, and then one gate:
+
+* A tree with a lock (``vnx preserve`` or a plain ``git worktree lock``) keeps
+  the reviewed-worktree rules below: its branch is detached, unmeasurable,
+  dirty, or carries a commit that is not provably captured in main, a MERGED
+  or CLOSED pull request, or a T0 ``reject`` decision.
+* A tree WITHOUT a lock must be clean, have no OPEN pull request (unmeasurable
+  without ``gh`` = keep) and carry no commit outside origin.
+* Whichever passing verdict it gets, the removal itself goes through
+  ``scripts/lib/worktree_removal_guard.guarded_remove``: this sweep decides no
+  liveness, occupancy or HEAD. A lock is dropped only inside that guard, right
+  before its removal, so a tree the guard keeps stays locked.
+* ``orphan_sweep``'s worktree kind keeps its own removal: it is driven by the
+  tmux/register liveness model, not by this evidence, and rewiring it is not a
+  small change.
 
 Background: ``vnx-orchestration``'s ``tmux_worktree.reap()`` classifies a
 worktree ``dirty`` — and preserves it forever via ``git worktree lock
@@ -14,11 +36,11 @@ worktrees sit locked this way, three of them freed by hand overnight
 16/17-08 (dispatch-D-e6712386, dispatch-D-0c729d74, dispatch-D-06334377)
 because nothing else does it.
 
-"Reviewed" here means one specific, git-provable fact, never an age guess
-(``.claude/rules/rode-test-eigenschap-of-momentopname.md``): the worktree's
-checked-out branch has NO commit that isn't already captured somewhere safe,
-AND the working tree carries no uncommitted change. Two ways a branch counts
-as captured:
+For a LOCKED tree, "reviewed" means one specific, git-provable fact, never an
+age guess (``.claude/rules/rode-test-eigenschap-of-momentopname.md``): the
+worktree's checked-out branch has NO commit that isn't already captured
+somewhere safe, AND the working tree carries no uncommitted change. Two ways a
+branch counts as captured:
 
 1. Its HEAD is an ancestor of (or equal to) ``origin/main`` — the ordinary
    merge/rebase-merge case.
@@ -65,26 +87,24 @@ Usage::
 
 ``--all`` prints ``scripts/lib/worktree_inventory.py``'s read-only inventory of
 EVERY worktree git knows about in the repo (dispatch, gate, pool, bench and
-external ones), then exits 0 — it evaluates, locks and releases nothing. It is
-the answer to "the sweep sees only locked dispatch trees, what else is there?";
-the default run is untouched by it. A failed ``git worktree list`` exits 2 with
-git's own stderr and prints no inventory at all.
+external ones), then exits 0 — it evaluates, locks and releases nothing. A
+failed ``git worktree list`` exits 2 with git's own stderr and prints no
+inventory at all.
 
 Exit 0 on a normal run (this is a maintenance report, not a CI gate) unless
-argument/repo resolution or ``--all``'s git call fails.
+argument/repo resolution fails or the worktree inventory cannot be read (a
+``git worktree list`` failure exits 2 — "cannot measure" is never "nothing to
+do").
 """
 
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
 import subprocess
 import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict
@@ -93,8 +113,14 @@ _LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
-LOCK_REASON_PREFIX = "vnx preserve"
 _DISPATCH_DIR_RE = re.compile(r"^dispatch-(?P<id>[A-Za-z0-9][A-Za-z0-9_-]*)$")
+
+# Reasons this sweep's own evidence gives for keeping an UNLOCKED tree. The
+# removal layer reports ``worktree_removal_guard.REASON_*`` instead.
+REASON_NO_GH = "no_gh"
+REASON_OPEN_PR = "open_pr"
+REASON_COMMITS_OUTSIDE_ORIGIN = "commits_outside_origin"
+REASON_UNLOCK_FAILED = "unlock_failed"
 
 
 def _run(args: list[str], cwd: Path | str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
@@ -132,12 +158,20 @@ def run_gh_pr_list(repo_slug: str, branch: str) -> str:
 
 
 @dataclass(frozen=True)
-class LockedWorktree:
+class Candidate:
+    """One worktree the sweep may release.
+
+    ``lock_reason`` is None for a tree without a ``git worktree lock``; that
+    is the whole difference between the two evidence regimes. ``kind`` is the
+    inventory's classification (dispatch, gate, pool, bench, other).
+    """
+
     path: Path
     dispatch_dir_id: str | None
     branch: str | None  # short form, e.g. "dispatch/D-030d7e66"; None when detached
     head_sha: str | None
     lock_reason: str | None
+    kind: str = "dispatch"
 
 
 @dataclass
@@ -152,56 +186,43 @@ class Verdict:
 @dataclass
 class ReleaseResult:
     released: bool
+    reason: str = ""
+    detail: str = ""
     errors: list[str] = field(default_factory=list)
 
 
-def discover_locked_dispatch_worktrees(repo_root: Path) -> list[LockedWorktree]:
-    """Every ``.vnx-data/worktrees/dispatch-*`` entry that is currently
-    ``git worktree lock``-ed with a ``vnx preserve`` reason. Anything locked
-    for a DIFFERENT reason (an operator's own manual lock) is left out —
-    this tool only ever acts on locks the engine itself created.
+def discover_candidates(repo_root: Path) -> list[Candidate]:
+    """Every fabric-OWNED worktree of *repo_root*, except the main checkout.
 
-    The porcelain parser lives in ``worktree_inventory`` so this sweep and the
-    ``--all`` inventory can never read the same output two different ways."""
-    from worktree_inventory import parse_worktree_list_porcelain
+    The one measurement is ``worktree_inventory.inventory``: a worktree of
+    another repo is not in it, and a path outside the managed roots is not
+    ``owned``. A tree git still knows about but that is gone on disk stays a
+    candidate — the guard names it ``absent`` rather than the sweep silently
+    dropping it. A failed ``git worktree list`` raises
+    ``WorktreeInventoryError``: "cannot measure" must never read as "nothing
+    to do", so there is no empty-list fallback here.
+    """
+    from worktree_inventory import inventory
 
-    proc = run_git(["worktree", "list", "--porcelain"], cwd=repo_root)
-    if proc.returncode != 0:
-        return []
-    worktrees_dir = (repo_root / ".vnx-data" / "worktrees").resolve()
-    result: list[LockedWorktree] = []
-    for rec in parse_worktree_list_porcelain(proc.stdout):
-        raw_path = rec.get("path")
-        if not raw_path:
+    candidates: list[Candidate] = []
+    for entry in inventory(repo_root):
+        if not entry.owned:
             continue
-        path = Path(raw_path)
-        try:
-            resolved = path.resolve()
-        except OSError:
-            continue
-        if resolved.parent != worktrees_dir:
-            continue
-        m = _DISPATCH_DIR_RE.match(resolved.name)
-        if not m:
-            continue
-        lock_reason = rec.get("locked")
-        if lock_reason is None or not lock_reason.startswith(LOCK_REASON_PREFIX):
-            continue
-        branch_ref = rec.get("branch")
-        branch = branch_ref[len("refs/heads/"):] if branch_ref and branch_ref.startswith("refs/heads/") else branch_ref
-        result.append(
-            LockedWorktree(
-                path=resolved,
-                dispatch_dir_id=m.group("id"),
-                branch=branch,
-                head_sha=rec.get("head"),
-                lock_reason=lock_reason,
+        m = _DISPATCH_DIR_RE.match(entry.path.name)
+        candidates.append(
+            Candidate(
+                path=entry.path,
+                dispatch_dir_id=m.group("id") if m else None,
+                branch=entry.branch,
+                head_sha=entry.head,
+                lock_reason=entry.lock_reason,
+                kind=entry.kind,
             )
         )
-    return result
+    return candidates
 
 
-def is_current_worktree(wt: LockedWorktree) -> bool:
+def is_current_worktree(wt: Candidate) -> bool:
     """Never act on the worktree this process is itself running from —
     checked two ways so either signal alone is enough to protect it."""
     dispatch_env = os.environ.get("VNX_DISPATCH_ID") or os.environ.get("VNX_CURRENT_DISPATCH_ID")
@@ -278,21 +299,34 @@ class PrEntry:
     head_ref_oid: str
 
 
+def _parse_pr_json(raw: str) -> list[dict[str, Any]] | None:
+    """``gh pr list --json`` output as its object entries; None when unusable.
+
+    ``raw == ""`` is ``run_gh_pr_list``'s "gh missing or failed" reply, and
+    anything else that is not a JSON list is unmeasurable too — never "no
+    pull request exists"."""
+    if not raw:
+        return None
+    try:
+        entries = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(entries, list):
+        return None
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
 def find_captured_prs(repo_slug: str, branch: str) -> list[PrEntry]:
     """MERGED and CLOSED pull requests for *branch* that carry a
     ``headRefOid``, MERGED first. Empty when ``gh`` found none or is not
     usable. Multiple PRs can share a branch name over time; any one of them
     that holds the worktree's HEAD is sufficient proof."""
-    raw = run_gh_pr_list(repo_slug, branch)
-    if not raw:
-        return []
-    try:
-        entries = json.loads(raw)
-    except (ValueError, TypeError):
+    entries = _parse_pr_json(run_gh_pr_list(repo_slug, branch))
+    if entries is None:
         return []
     found: list[PrEntry] = []
     for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("headRefOid"):
+        if not entry.get("headRefOid"):
             continue
         state = entry.get("state")
         if state not in ("MERGED", "CLOSED"):
@@ -310,7 +344,7 @@ def _holds_head(repo_root: Path, head_sha: str, oid: str) -> bool:
     return is_ancestor(repo_root, head_sha, oid)
 
 
-def remote_holds_head(repo_root: Path, wt: LockedWorktree, pr_number: int | None) -> tuple[bool, str]:
+def remote_holds_head(repo_root: Path, wt: Candidate, pr_number: int | None) -> tuple[bool, str]:
     """Proof that the commits of *wt* exist on the remote: ``git ls-remote
     origin`` shows ``refs/pull/<n>/head`` or ``refs/heads/<branch>`` at HEAD or
     at a descendant of it. Returns ``(proven, what was found or why not)``."""
@@ -329,7 +363,7 @@ def remote_holds_head(repo_root: Path, wt: LockedWorktree, pr_number: int | None
 
 def evaluate_worktree(
     repo_root: Path,
-    wt: LockedWorktree,
+    wt: Candidate,
     repo_slug: str | None,
     decisions: dict[str, dict[str, Any]] | None = None,
 ) -> Verdict:
@@ -376,42 +410,111 @@ def evaluate_worktree(
     return Verdict(False, pr_note)
 
 
-@contextmanager
-def _flock_context(repo_root: Path) -> Iterator[None]:
-    git_dir_proc = run_git(["rev-parse", "--git-common-dir"], cwd=repo_root)
-    git_dir = Path(git_dir_proc.stdout.strip()) if git_dir_proc.returncode == 0 else (repo_root / ".git")
-    if not git_dir.is_absolute():
-        git_dir = (repo_root / git_dir).resolve()
-    lock_dir = git_dir / "worktrees"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / ".vnx-cleanup-lock"
-    with open(lock_path, "a") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lf, fcntl.LOCK_UN)
+def open_pr_refusal(repo_slug: str | None, branch: str) -> str:
+    """``""`` when *branch* has no OPEN pull request; otherwise the named reason.
+
+    Fail-closed: no recognised origin slug, no usable ``gh`` (its reply is
+    ``""`` when it is missing) or an unreadable reply all mean the open-PR
+    state is unmeasurable — ``no_gh``, never "no open PR"."""
+    if repo_slug is None:
+        return REASON_NO_GH
+    entries = _parse_pr_json(run_gh_pr_list(repo_slug, branch))
+    if entries is None:
+        return REASON_NO_GH
+    for entry in entries:
+        if entry.get("state") == "OPEN":
+            return f"{REASON_OPEN_PR}: PR #{entry.get('number')} voor {branch!r} staat open"
+    return ""
 
 
-def release_worktree(repo_root: Path, wt: LockedWorktree, *, delete_branch: bool) -> ReleaseResult:
+def evaluate_unlocked(repo_root: Path, wt: Candidate, repo_slug: str | None) -> Verdict:
+    """Evidence for a tree that carries no ``git worktree lock``.
+
+    Nothing it holds may exist nowhere else (a clean tree, every commit of
+    HEAD on origin) and no OPEN pull request may still be building on it.
+    Liveness, occupancy and HEAD are not judged here — ``guarded_remove``
+    owns those and refuses in its own words.
+
+    A detached tree has no branch, so it can have no open PR; only its
+    commits need to be on origin (the ordinary leaked gate checkout)."""
+    from worktree_inventory import dirty_count, unpushed_count
+
+    if wt.head_sha is None:
+        return Verdict(False, "kon HEAD-sha niet bepalen")
+    dirty = dirty_count(wt.path, repo_root)
+    if dirty is None:
+        return Verdict(False, "werkmap-status onmeetbaar (git status faalde) — dataverlies-risico")
+    if dirty != 0:
+        return Verdict(False, f"werkmap is niet schoon ({dirty} gewijzigd pad) — dataverlies-risico")
+    if wt.branch is not None:
+        refusal = open_pr_refusal(repo_slug, wt.branch)
+        if refusal:
+            return Verdict(False, refusal)
+    outside = unpushed_count(repo_root, wt.head_sha)
+    if outside is None:
+        return Verdict(False, "kon niet meten of alle commits van HEAD op origin staan")
+    if outside != 0:
+        return Verdict(
+            False,
+            f"{REASON_COMMITS_OUTSIDE_ORIGIN}: {outside} commit(s) van HEAD staan niet op origin — dataverlies-risico",
+        )
+    return Verdict(True, f"schoon, geen open PR, en alle commits van HEAD ({wt.head_sha[:12]}) staan op origin")
+
+
+def evaluate_candidate(
+    repo_root: Path,
+    wt: Candidate,
+    repo_slug: str | None,
+    decisions: dict[str, dict[str, Any]] | None = None,
+) -> Verdict:
+    """Locked trees keep the reviewed-worktree rules; unlocked ones need the
+    extra evidence that nothing of theirs is unpublished and no PR is open."""
+    if wt.lock_reason is None:
+        return evaluate_unlocked(repo_root, wt, repo_slug)
+    return evaluate_worktree(repo_root, wt, repo_slug, decisions)
+
+
+def _unlock_for_removal(repo_root: Path, path: Path):
+    """``before_remove`` hook: drop the lock only once the guard removes.
+
+    The guard calls it inside the repository lock, after every refusal that
+    does not end in a removal — so a tree the guard keeps stays locked. A
+    failed unlock aborts the removal instead of force-removing a locked tree.
+    """
+
+    def hook(_label: str) -> None:
+        proc = run_git(["worktree", "unlock", str(path)], cwd=repo_root)
+        if proc.returncode != 0:
+            raise OSError(f"unlock failed: {(proc.stderr or '').strip()}")
+
+    return hook
+
+
+def remove_candidate(repo_root: Path, wt: Candidate, *, delete_branch: bool, dry_run: bool) -> ReleaseResult:
+    """Remove *wt* through the one guard and report the guard's verdict.
+
+    This sweep hands the guard the tree and the dispatch id and decides
+    nothing itself about liveness, occupancy or HEAD.
+    """
+    from worktree_removal_guard import guarded_remove
+
+    before_remove = _unlock_for_removal(repo_root, wt.path) if wt.lock_reason is not None else None
+    try:
+        result = guarded_remove(
+            wt.path,
+            dispatch_id=wt.dispatch_dir_id or "",
+            repo_root=repo_root,
+            dry_run=dry_run,
+            before_remove=before_remove,
+        )
+    except OSError as exc:  # an unlock the guard could not do never removes
+        return ReleaseResult(False, REASON_UNLOCK_FAILED, str(exc), [str(exc)])
     errors: list[str] = []
-    with _flock_context(repo_root):
-        unlock = run_git(["worktree", "unlock", str(wt.path)], cwd=repo_root)
-        if unlock.returncode != 0:
-            errors.append(f"unlock failed: {(unlock.stderr or '').strip()}")
-            return ReleaseResult(released=False, errors=errors)
-
-        remove = run_git(["worktree", "remove", "--force", str(wt.path)], cwd=repo_root)
-        if remove.returncode != 0:
-            errors.append(f"worktree remove failed: {(remove.stderr or '').strip()}")
-            return ReleaseResult(released=False, errors=errors)
-
-        if wt.branch and delete_branch:
-            branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
-            if branch_delete.returncode != 0:
-                errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
-
-    return ReleaseResult(released=True, errors=errors)
+    if result.removed and delete_branch and wt.branch:
+        branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
+        if branch_delete.returncode != 0:
+            errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
+    return ReleaseResult(result.removed, result.reason, result.detail, errors)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -448,8 +551,11 @@ class WorktreeReportEntry(TypedDict):
     branch: str | None
     head_sha: str | None
     lock_reason: str | None
+    kind: str
     safe_to_release: bool
     reason: str
+    guard_reason: str
+    guard_detail: str
     released: bool
     errors: list[str]
     delete_branch: bool
@@ -519,6 +625,8 @@ def _print_inventory(repo_root: Path, *, as_json: bool) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from worktree_inventory import WorktreeInventoryError
+
     args = build_arg_parser().parse_args(argv)
     repo_root = args.repo_root.resolve()
 
@@ -533,14 +641,18 @@ def main(argv: list[str] | None = None) -> int:
         print("WAARSCHUWING: geen project-id (.vnx-project-id of VNX_PROJECT_ID) — T0-reject-besluiten worden niet gelezen.", file=sys.stderr)
     decisions = read_reject_decisions(repo_root, project_id)
 
-    candidates = discover_locked_dispatch_worktrees(repo_root)
+    try:
+        candidates = discover_candidates(repo_root)
+    except WorktreeInventoryError as exc:
+        print(f"cleanup_reviewed_worktrees: {exc}", file=sys.stderr)
+        return 2
     if args.only:
         wanted = set(args.only)
         candidates = [c for c in candidates if c.dispatch_dir_id in wanted]
 
     repo_slug = get_repo_slug(repo_root)
     if repo_slug is None:
-        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, alleen ancestor-of-main telt.", file=sys.stderr)
+        print("WAARSCHUWING: kon geen github.com owner/repo herkennen uit origin — PR-gebaseerde verificatie (squash-merges) wordt overgeslagen, en een boom zonder lock blijft staan.", file=sys.stderr)
 
     report: list[WorktreeReportEntry] = []
     released = 0
@@ -549,40 +661,23 @@ def main(argv: list[str] | None = None) -> int:
         if is_current_worktree(wt):
             skipped_self += 1
             continue
-        verdict = evaluate_worktree(repo_root, wt, repo_slug, decisions)
-        entry: WorktreeReportEntry = {
-            "dispatch_id": wt.dispatch_dir_id,
-            "path": str(wt.path),
-            "branch": wt.branch,
-            "head_sha": wt.head_sha,
-            "lock_reason": wt.lock_reason,
-            "safe_to_release": verdict.safe,
-            "reason": verdict.reason,
-            "released": False,
-            "errors": [],
-            "delete_branch": verdict.delete_branch,
-        }
-        if verdict.safe and args.apply:
-            result = release_worktree(repo_root, wt, delete_branch=verdict.delete_branch)
-            entry["released"] = result.released
-            entry["errors"] = result.errors
-            if result.released:
-                released += 1
-        report.append(entry)
+        report.append(_sweep_candidate(repo_root, wt, repo_slug, decisions, apply=args.apply))
+        if report[-1]["released"]:
+            released += 1
 
     if args.json:
         print(json.dumps({"repo_root": str(repo_root), "candidates": report}, indent=2))
     else:
-        print(f"cleanup_reviewed_worktrees: {len(candidates)} locked dispatch-worktree(s) gevonden ({skipped_self} eigen worktree overgeslagen)")
+        print(f"cleanup_reviewed_worktrees: {len(candidates)} worktree(s) uit de inventaris gevonden ({skipped_self} eigen worktree overgeslagen)")
         for entry in report:
             verdict_label = "SAFE_TO_RELEASE" if entry["safe_to_release"] else "BLIJFT_STAAN"
             action = ""
             if entry["safe_to_release"]:
                 if args.apply:
-                    action = " -> RELEASED" if entry["released"] else f" -> RELEASE FAILED: {entry['errors']}"
+                    action = " -> RELEASED" if entry["released"] else f" -> GUARD HIELD TEGEN ({entry['guard_reason']}): {entry['guard_detail'] or entry['errors']}"
                 else:
-                    action = " (dry-run, gebruik --apply om echt vrij te geven)"
-            print(f"  [{verdict_label}] {entry['dispatch_id']} ({entry['branch']}): {entry['reason']}{action}")
+                    action = f" (dry-run, guard: {entry['guard_reason'] or 'niet bereikt'})"
+            print(f"  [{verdict_label}] {entry['dispatch_id'] or entry['kind']} ({entry['branch']}): {entry['reason']}{action}")
         if args.apply:
             print(f"cleanup_reviewed_worktrees: {released} worktree(s) vrijgegeven")
         else:
@@ -590,6 +685,47 @@ def main(argv: list[str] | None = None) -> int:
             print(f"cleanup_reviewed_worktrees: {safe_count} van {len(report)} zijn SAFE_TO_RELEASE (dry-run — geen --apply meegegeven)")
 
     return 0
+
+
+def _sweep_candidate(
+    repo_root: Path,
+    wt: Candidate,
+    repo_slug: str | None,
+    decisions: dict[str, dict[str, Any]],
+    *,
+    apply: bool,
+) -> WorktreeReportEntry:
+    """One candidate: evidence first, then (only when it passes) the guard.
+
+    A tree the evidence refuses is never handed to the guard — it could not be
+    removed this run anyway — and its reason is the evidence's own. A tree
+    that passes goes through ``guarded_remove``, and every refusal there is
+    reported in the guard's words (``guard_reason``/``guard_detail``).
+    """
+    verdict = evaluate_candidate(repo_root, wt, repo_slug, decisions)
+    entry: WorktreeReportEntry = {
+        "dispatch_id": wt.dispatch_dir_id,
+        "path": str(wt.path),
+        "branch": wt.branch,
+        "head_sha": wt.head_sha,
+        "lock_reason": wt.lock_reason,
+        "kind": wt.kind,
+        "safe_to_release": verdict.safe,
+        "reason": verdict.reason,
+        "guard_reason": "",
+        "guard_detail": "",
+        "released": False,
+        "errors": [],
+        "delete_branch": verdict.delete_branch,
+    }
+    if not verdict.safe:
+        return entry
+    result = remove_candidate(repo_root, wt, delete_branch=verdict.delete_branch, dry_run=not apply)
+    entry["guard_reason"] = result.reason
+    entry["guard_detail"] = result.detail
+    entry["released"] = result.released
+    entry["errors"] = result.errors
+    return entry
 
 
 if __name__ == "__main__":
