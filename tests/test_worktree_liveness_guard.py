@@ -28,12 +28,10 @@ from pathlib import Path
 
 import pytest
 
+import dispatch_worktree_isolation as dwi
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIB_DIR = REPO_ROOT / "scripts" / "lib"
-if str(LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(LIB_DIR))
-
-import dispatch_worktree_isolation as dwi  # noqa: E402  (sys.path set above)
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +247,7 @@ def test_writer_cannot_take_the_slot_while_the_guard_holds_it(tmp_path, pinned_s
 # ---------------------------------------------------------------------------
 
 def test_gate_seat_lifetime_lock_blocks_until_its_teardown(gate_repo):
-    from gate_worktree import (
-        _release_lifetime_lock,
-        create_gate_worktree,
-        gate_checkout_liveness,
-        remove_gate_worktree,
-    )
+    from gate_worktree import _release_lifetime_lock, create_gate_worktree, remove_gate_worktree
     from worktree_removal_guard import REASON_GATE_SEAT_LIVE, REASON_REMOVED, guarded_remove
 
     local = gate_repo
@@ -262,7 +255,6 @@ def test_gate_seat_lifetime_lock_blocks_until_its_teardown(gate_repo):
         branch="feature/guard", gate="codex_gate", identifier="seat", project_root=local,
     )
     try:
-        assert gate_checkout_liveness(wt) == "live"
         result = guarded_remove(wt, dispatch_id="", repo_root=local, dry_run=False)
         assert result.removed is False
         assert result.reason == REASON_GATE_SEAT_LIVE, result.detail

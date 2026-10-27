@@ -29,10 +29,8 @@ import re
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -176,83 +174,74 @@ def load_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> list[int]:
     return sorted(result)
 
 
-class GroupState(str, Enum):
-    """Tri-state liveness of one recorded process group.
-
-    ``UNKNOWN`` is not ``DEAD``: a probe that could not answer (anything but
-    ``ProcessLookupError``) leaves the group undecided, and a caller guarding a
-    destructive action must keep the worktree on it.  RED-RUN STUB: this
-    version derives the state from ``_group_is_valid``, whose
-    ``PermissionError`` branch reports "not alive" — the round-3 defect.
-    """
-
-    ALIVE = "alive"
-    DEAD = "dead"
-    UNKNOWN = "unknown"
+GROUP_ALIVE, GROUP_DEAD, GROUP_UNKNOWN = "alive", "dead", "unknown"
 
 
-@dataclass(frozen=True)
-class GroupLiveness:
+class GroupLiveness(NamedTuple):
     pgid: int
-    state: GroupState
+    state: str
     detail: str = ""
 
 
-@dataclass(frozen=True)
-class LivenessReport:
-    """What ``live_process_groups`` measured: alive, dead and unknown groups."""
-
-    groups: "tuple[GroupLiveness, ...]" = ()
+class LivenessReport(NamedTuple):
+    """Truthiness is fail-closed: alive, unknown and unreadable all read "keep"."""
+    alive: "tuple[int, ...]" = ()
+    dead: "tuple[int, ...]" = ()
+    unknown: "tuple[int, ...]" = ()
     unmeasurable: str = ""
 
-    @property
-    def alive(self) -> "tuple[int, ...]":
-        return tuple(g.pgid for g in self.groups if g.state is GroupState.ALIVE)
-
-    @property
-    def dead(self) -> "tuple[int, ...]":
-        return tuple(g.pgid for g in self.groups if g.state is GroupState.DEAD)
-
-    @property
-    def unknown(self) -> "tuple[int, ...]":
-        return tuple(g.pgid for g in self.groups if g.state is GroupState.UNKNOWN)
-
-    @property
-    def may_be_alive(self) -> bool:
-        return bool(self.alive or self.unknown or self.unmeasurable)
-
     def __bool__(self) -> bool:
-        return self.may_be_alive
+        return bool(self.alive or self.unknown or self.unmeasurable)
 
 
 def probe_group_liveness(pgid: int, member_pids: "list[int]") -> GroupLiveness:
-    """RED-RUN STUB: delegates to the unchanged ``_group_is_valid``."""
-    state = GroupState.ALIVE if _group_is_valid(pgid, member_pids) else GroupState.DEAD
-    return GroupLiveness(pgid=pgid, state=state)
+    """alive needs a member still carrying the PGID; any other probe error is unknown."""
+    if not member_pids:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, "no recorded member pids")
+    error = ""
+    for pid in member_pids:
+        try:
+            if os.getpgid(pid) == pgid:
+                return GroupLiveness(pgid, GROUP_ALIVE)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            error = error or f"pid {pid}: {exc}"
+    if error:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, error)
+    return GroupLiveness(pgid, GROUP_DEAD)
 
 
 def live_process_groups(dispatch_id: str, *, repo_root: Path) -> LivenessReport:
-    """RED-RUN STUB: recorded groups of *dispatch_id*, classified by the old
-    ``_group_is_valid`` (so a probe error reads as dead)."""
-    if not _entry_path(repo_root, dispatch_id).exists():
+    """Recorded groups of *dispatch_id*, unknown reported separately from dead."""
+    path = _entry_path(repo_root, dispatch_id)
+    if not path.exists():
         return LivenessReport()
     entry = _load_entry(dispatch_id, repo_root=repo_root)
     if entry is None:
-        return LivenessReport(unmeasurable=f"unreadable registry entry {_entry_path(repo_root, dispatch_id)}")
+        return LivenessReport(unmeasurable=f"unreadable registry entry {path}")
     groups = entry.get("groups")
     if groups is None:
         return LivenessReport()
     if not isinstance(groups, dict):
         return LivenessReport(unmeasurable="registry entry 'groups' is not an object")
-    out: "list[GroupLiveness]" = []
+    alive: "list[int]" = []
+    dead: "list[int]" = []
+    unknown: "list[int]" = []
     for pgid_str, member_pids in groups.items():
         try:
             pgid = int(pgid_str)
             members = [int(pid) for pid in member_pids]
         except (TypeError, ValueError):
             return LivenessReport(unmeasurable=f"malformed group record {pgid_str!r}")
-        out.append(probe_group_liveness(pgid, members))
-    return LivenessReport(groups=tuple(sorted(out, key=lambda g: g.pgid)))
+        probe = probe_group_liveness(pgid, members)
+        if probe.state == GROUP_ALIVE:
+            alive.append(pgid)
+        elif probe.state == GROUP_UNKNOWN:
+            unknown.append(pgid)
+        else:
+            dead.append(pgid)
+    return LivenessReport(tuple(sorted(alive)), tuple(sorted(dead)), tuple(sorted(unknown)))
 
 
 def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:
@@ -272,18 +261,8 @@ def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _group_is_valid(pgid: int, member_pids: list[int]) -> bool:
-    """True when a recorded member still exists and still carries *pgid*.
-
-    Guards against PGID reuse: a group whose PGID was handed to an unrelated
-    process will not have any recorded member PID in it.
-    """
-    for pid in member_pids:
-        try:
-            if os.getpgid(pid) == pgid:
-                return True
-        except (ProcessLookupError, PermissionError):
-            continue
-    return False
+    """True only on positive evidence; kept for callers that signal a group."""
+    return probe_group_liveness(pgid, member_pids).state == GROUP_ALIVE
 
 
 def kill_dispatch_pgids(
@@ -330,16 +309,19 @@ def kill_dispatch_pgids(
             if isinstance(member_pids, list)
             else []
         )
-        if _group_is_valid(pgid, members):
+        probe = probe_group_liveness(pgid, members)
+        if probe.state == GROUP_ALIVE:
             targets.append(pgid)
-        else:
-            logger.warning(
-                "dispatch_process_registry: NOT killing pgid %s for %s — "
-                "no recorded member alive with that PGID (group gone or PGID "
-                "reused); leaving it untouched",
-                pgid,
-                dispatch_id,
-            )
+            continue
+        why = ("liveness is unknown (%s)" % (probe.detail or "no answer from the probe")
+               if probe.state == GROUP_UNKNOWN
+               else "no recorded member alive with that PGID (group gone or PGID reused)")
+        logger.warning(
+            "dispatch_process_registry: NOT killing pgid %s for %s — %s; leaving it untouched",
+            pgid,
+            dispatch_id,
+            why,
+        )
 
     if not targets:
         logger.debug(

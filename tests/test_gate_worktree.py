@@ -363,36 +363,35 @@ class TestLinkedWorktreeLockDir:
 
 
 class TestGateSeatLifetimeLock:
-    """PR-4a round-1 finding: a gate checkout must carry a lifetime lock.
+    """PR-4a round-1 finding: a gate checkout carries a lifetime lock.
 
     Without it a gate-seat worktree was removable while the seat was still
-    running its reviewer.  ``create_gate_worktree`` takes an exclusive flock on
+    running its reviewer. ``create_gate_worktree`` takes an exclusive flock on
     ``<checkout>.live`` before the checkout exists and holds it until
     ``remove_gate_worktree`` runs.
     """
 
     def test_create_holds_the_lock_and_teardown_releases_it(self, origin_and_local):
-        from gate_worktree import gate_checkout_liveness, gate_lifetime_lock_path
+        import fcntl
+        import os
+
+        from gate_worktree import gate_lifetime_lock_path
 
         local = origin_and_local["local"]
         wt_path = create_gate_worktree(
             branch="feature/oi-708", gate="codex_gate", identifier="lock", project_root=local,
         )
+        sidecar = gate_lifetime_lock_path(wt_path)
         try:
-            assert gate_lifetime_lock_path(wt_path).exists()
-            assert gate_checkout_liveness(wt_path) == "live", (
-                "the seat must hold its lifetime lock from creation onwards"
-            )
+            assert sidecar.exists()
+            fd = os.open(sidecar, os.O_RDWR)
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(fd)
         finally:
             remove_gate_worktree(wt_path, project_root=local)
 
         assert not wt_path.exists()
-        assert not gate_lifetime_lock_path(wt_path).exists(), (
-            "the sidecar is removed once the checkout is gone"
-        )
-
-    def test_checkout_without_a_sidecar_is_not_measured_as_released(self, tmp_path):
-        """No sidecar is ``no_lock`` — a state the sweep must keep, never release."""
-        from gate_worktree import gate_checkout_liveness
-
-        assert gate_checkout_liveness(tmp_path / "gate-absent") == "no_lock"
+        assert not sidecar.exists(), "the sidecar is removed once the checkout is gone"

@@ -333,28 +333,33 @@ def test_group_liveness_is_three_valued(monkeypatch):
     Red run on the old ``_group_is_valid``: its ``PermissionError`` branch
     returns False, so the unknown case is reported as dead.
     """
-    from dispatch_process_registry import GroupState, probe_group_liveness
+    from dispatch_process_registry import (
+        GROUP_ALIVE,
+        GROUP_DEAD,
+        GROUP_UNKNOWN,
+        probe_group_liveness,
+    )
 
     monkeypatch.setattr(os, "getpgid", lambda pid: 4242)
-    assert probe_group_liveness(4242, [1, 2]).state is GroupState.ALIVE
+    assert probe_group_liveness(4242, [1, 2]).state == GROUP_ALIVE
 
     def _gone(pid):
         raise ProcessLookupError(pid)
 
     monkeypatch.setattr(os, "getpgid", _gone)
-    assert probe_group_liveness(4242, [1, 2]).state is GroupState.DEAD
+    assert probe_group_liveness(4242, [1, 2]).state == GROUP_DEAD
 
     def _denied(pid):
         raise PermissionError(pid)
 
     monkeypatch.setattr(os, "getpgid", _denied)
     probe = probe_group_liveness(4242, [1, 2])
-    assert probe.state is GroupState.UNKNOWN
+    assert probe.state == GROUP_UNKNOWN
     assert probe.detail, "an unknown group must name why it could not be measured"
 
     # No recorded members is not positive evidence either.
     monkeypatch.setattr(os, "getpgid", lambda pid: 4242)
-    assert probe_group_liveness(4242, []).state is GroupState.UNKNOWN
+    assert probe_group_liveness(4242, []).state == GROUP_UNKNOWN
 
 
 def test_live_process_groups_reports_unknown_separately(tmp_path, monkeypatch):
