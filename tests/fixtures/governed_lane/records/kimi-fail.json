@@ -1,0 +1,41 @@
+{
+  "advisory_findings": [],
+  "attempt_seq": 1,
+  "blocking_findings": [
+    {
+      "message": "scripts/lib/gate_depth.py:55 misclassifies supported Codex message aliases `assistant_message` and `output_text` as investigative actions; a zero-tool run using either alias bypasses the degenerate gate and is recorded as completed.",
+      "severity": "error"
+    }
+  ],
+  "branch": "",
+  "commit_sha": "",
+  "contract_hash": "10edc22c251bad9a",
+  "evidence_source": "live",
+  "execution_depth": {
+    "agent_messages": 0,
+    "diff_chars": 203,
+    "diff_limit": 800000,
+    "diff_truncated": false,
+    "files_read": 0,
+    "input_tokens": 0,
+    "investigative_actions": 0,
+    "mode": "single_shot",
+    "output_tokens": 0,
+    "parsed": true,
+    "shell_calls": 0,
+    "truncated_files": [],
+    "unrecognised_item_types": []
+  },
+  "failure_reason": "1 blocking finding(s): scripts/lib/gate_depth.py:55 misclassifies supported Codex message aliases `assistant_message` and `output_text` as investigative actions; a zero-tool run using either alias bypasses the degenerate gate and is recorded as completed.",
+  "gate": "kimi_gate",
+  "model": "kimi-k3",
+  "pr_id": "0",
+  "pr_number": 0,
+  "provider": "kimi",
+  "reason": "verdict",
+  "required_reruns": [],
+  "residual_risk": "Until the message-type vocabulary is aligned with codex_parser, shallow Codex runs can still be accepted as completed gate evidence.",
+  "status": "fail",
+  "summary": "kimi gate: fail (1 blocking finding(s))",
+  "test_run": true
+}
