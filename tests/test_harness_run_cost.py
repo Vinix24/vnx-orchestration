@@ -3,9 +3,10 @@
 Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, second PR
 (ADR-043). Every builder run on ``claude``, ``deepseek-harness`` or
 ``glm-harness`` writes exactly one ``cost_ledger`` line per attempt, and those
-lanes stop writing the old ``emit_provider_cost`` event; codex and kimi keep the
-old event (K2b). Covered here, against the real model registry, real files and
-the real call sites:
+lanes stop writing the old ``emit_provider_cost`` event. Since K2b the codex and
+kimi lanes book their own line the same way (their gate half is covered in
+``test_k2b_codex_kimi_cost_lines.py``). Covered here, against the real model
+registry, real files and the real call sites:
 
 - ``token_harvest`` gives the five ledger fields per assistant message,
   deduplicated on ``message.id``; a field a message lacks is ``None``, never 0;
@@ -614,14 +615,19 @@ class TestTheEnvelopeCallSite:
         assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
 
     @pytest.mark.parametrize("provider,model", [("codex", "gpt-5.5"), ("kimi", "kimi-k3")])
-    def test_codex_and_kimi_keep_the_old_line_and_write_no_ledger_line(self, store, provider, model):
+    def test_codex_and_kimi_write_their_own_line_and_no_old_event(self, store, provider, model):
+        # K2b inverted this: the two CLI lanes book their own line now, so the
+        # old event must be gone — a lane with both would double-count the run.
         _govern(_envelope_spec(store, provider, model), _adapter(model, session_id="sess-not-read"))
 
-        assert _ledger_lines(store.ledger) == []
-        (old,) = _old_lines(store.ledger)
-        assert old["provider"] == provider and old["dispatch_id"] == "20261021-kp-env"
+        (line,) = _ledger_lines(store.ledger)
+        assert _old_lines(store.ledger) == [], "K2b books the codex/kimi lane itself"
+        assert line["run_id"] == f"{PROJECT}:envelope_govern:20261021-kp-env:1"
+        assert line["provider"] == provider and line["role"] == "builder"
+        assert line["billing"] == "subscription" and line["cost_usd"] == 0.0
+        assert line["tokens"]["input_uncached"] == 4000 and line["tokens"]["cache_hit"] == 10000
         (receipt,) = _receipts(store.receipts)
-        assert "cost_ledger_run_ids" not in receipt
+        assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
 
     def test_a_review_seat_on_a_harness_lane_keeps_the_old_line(self, store):
         _govern(_envelope_spec(store, "deepseek-harness", "deepseek-v4-pro", role="review-gate"),
@@ -927,16 +933,19 @@ class TestTheProviderDispatchCallSite:
         assert line["model"] == "deepseek-v4-pro"
         assert _old_lines(store.ledger) == []
 
-    def test_codex_keeps_the_old_line_and_writes_no_ledger_line(self, store):
+    def test_codex_writes_its_own_line_and_no_old_event(self, store):
+        # K2b inverted this: the codex builder's measured end books its line.
         import provider_dispatch as pd
 
         result = SimpleNamespace(token_usage={"input_tokens": 100, "output_tokens": 20}, completion_text="OK",
                                  returncode=0, error=None, timed_out=False)
         pd._emit_governance(_pd_args("codex"), "codex", "gpt-5.5", result, START, END, "success")
 
-        assert _ledger_lines(store.ledger) == []
-        (old,) = _old_lines(store.ledger)
-        assert old["provider"] == "codex"
+        (line,) = _ledger_lines(store.ledger)
+        assert _old_lines(store.ledger) == []
+        assert line["run_id"] == f"{PROJECT}:provider_dispatch:20261021-kp-pd:1"
+        assert line["provider"] == "codex" and line["billing"] == "subscription"
+        assert line["tokens"]["input_uncached"] == 100 and line["tokens"]["output"] == 20
 
     def test_a_plan_gate_seat_keeps_the_old_line(self, store):
         import provider_dispatch as pd
