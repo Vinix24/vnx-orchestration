@@ -15,6 +15,7 @@ import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -275,6 +276,60 @@ def test_a_project_without_a_t0_folder_is_not_guarded(home, tmp_path):
     assert report.accounts[0].coverage == {}
 
 
+# ── decision 3: --require-user, every project on the user level ──────────────
+
+
+def test_require_user_accepts_a_project_covered_at_user_level(home, tmp_path):
+    _account(home)
+    project = _project(tmp_path, "plain")
+    _register(home, project)
+    report = gc.run_check(home=home, require_user=True)
+    assert report.ok, report.problems
+
+
+def test_require_user_fails_a_project_that_registers_the_guard_itself(home, tmp_path):
+    """The closing condition of OI-2056. Without the flag a project that registers the guard in
+    its own settings reads as `project (direct)` and the check exits 0; --require-user wants the
+    user level to be the one that covers, so that project fails, named per event."""
+    _account(home)
+    project = _project(tmp_path, "self-registered")
+    hook = _direct(project)
+    _settings(project, {"UserPromptSubmit": [{"hooks": [hook]}],
+                        "PreToolUse": [{"matcher": "Bash|Skill|SlashCommand", "hooks": [hook]}],
+                        "Stop": [{"hooks": [hook]}]})
+    _register(home, project)
+    assert gc.run_check(home=home).ok, "without the flag the project registration covers it"
+    report = gc.run_check(home=home, require_user=True)
+    assert not report.ok
+    for event in ALL_EVENTS:
+        assert any(str(project.resolve()) in problem and event in problem
+                   and "covered by the project only, not at user level" in problem
+                   for problem in report.problems), report.problems
+
+
+def test_require_user_leaves_a_rule_1_project_to_the_plain_check(home, tmp_path):
+    """--require-user is about projects that pass rule 1; one that does not already fails the
+    plain check and is not named again by this flag."""
+    _account(home)
+    project = _project(tmp_path, "nogit")
+    project.joinpath(".git").rmdir()
+    _register(home, project)
+    report = gc.run_check(home=home, require_user=True)
+    assert not report.ok
+    assert not any("covered by the project only" in problem for problem in report.problems)
+
+
+def test_the_check_cli_accepts_require_user(home, tmp_path):
+    _account(home)
+    project = _project(tmp_path, "plain")
+    _register(home, project)
+    proc = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "vnx_guard.py"), "check", "--require-user"],
+        capture_output=True, text=True, env={**os.environ, "HOME": str(home)}, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "NOT OK" not in proc.stdout
+
+
 # ── an account whose own settings cannot be read ─────────────────────────────
 
 
@@ -403,6 +458,49 @@ def test_with_a_trust_reading_coverage_the_two_accounts_answer_differently(home,
 # ── inventory ────────────────────────────────────────────────────────────────
 
 
+def test_the_report_says_which_scope_it_saw(home, tmp_path):
+    """Without --scan-root the report covers the registry only and has to say so."""
+    _account(home)
+    project = _project(tmp_path / "work", "plain")
+    _register(home, project)
+    only_registry = gc.render_report(gc.run_check(home=home))
+    assert ("scope: registry only (1 projects); "
+            "pass --scan-root DIR to include unregistered projects") in only_registry
+    scanned = gc.render_report(gc.run_check(home=home, scan_roots=[str(tmp_path / "work")]))
+    assert "scope: registry only" not in scanned
+    assert str(tmp_path / "work") in scanned
+
+
+def test_scanning_finds_a_t0_folder_without_a_project_id(home, tmp_path):
+    """A T0 folder without a .vnx-project-id is invisible to a `.vnx-project-id` scan, yet it is
+    exactly the kind of folder the report has to surface (`not guardable`)."""
+    _account(home)
+    root = tmp_path / "work"
+    folder = _project(root, "no-id", project_id="")
+    report = gc.run_check(home=home, scan_roots=[str(root)])
+    assert [project.path for project in report.projects] == [folder.resolve()]
+
+
+def test_an_id_less_t0_folder_is_not_guardable_and_never_fails_the_check(home, tmp_path):
+    """It is listed for the operator, with one closing line; rule 1 itself is unchanged."""
+    _account(home)
+    root = tmp_path / "work"
+    folder = _project(root, "no-id", project_id="")
+    report = gc.run_check(home=home, scan_roots=[str(root)])
+    assert report.ok, report.problems
+    assert report.projects[0].not_guardable == "no .vnx-project-id"
+    assert _rows(report, ".claude", folder) == {"all events": "not guardable: no .vnx-project-id"}
+    assert hc.t0_project_root(str(folder)) is None, "rule 1 is not relaxed"
+    text = gc.render_report(report)
+    assert "not guardable: no .vnx-project-id" in text
+    assert "1 folder with a T0 but no usable .vnx-project-id" in text
+    assert "operator decision" in text
+    out = io.StringIO()
+    code = gc.run_check_command(home=home, config_dirs=[], scan_roots=[str(root)], out=out,
+                                require_user=True)
+    assert code == 0, out.getvalue()
+
+
 def test_a_scan_hit_missing_from_the_registry_is_listed_as_such(home, tmp_path):
     _account(home)
     registered = _project(tmp_path / "work", "known")
@@ -507,17 +605,18 @@ def test_doctor_runs_the_guard_check_in_its_full_run(home, monkeypatch, tmp_path
 # ── the shim's rule 1, a second own entry, the missing-guard notice ──────────
 
 
-def test_a_project_with_a_t0_folder_but_no_project_id_is_not_guarded_with_the_reason(home, tmp_path):
+def test_a_project_with_a_t0_folder_but_no_project_id_is_not_guardable(home, tmp_path):
+    """Decision 3: a T0 folder without a usable .vnx-project-id is listed as not guardable and
+    never fails the plain check. Rule 1 itself still turns the shim away from it."""
     _account(home)
     project = _project(tmp_path, "noid", project_id="")
     _register(home, project)
     report = gc.run_check(home=home)
-    assert not report.ok
+    assert report.ok, report.problems
     rows = _rows(report, ".claude", project)
-    assert list(rows) == ["all events"] and rows["all events"].startswith("not guarded")
-    assert ".vnx-project-id" in rows["all events"]
-    assert any("not guarded" in p and str(project) in p for p in report.problems)
-    assert "not guarded (no .vnx-project-id" in gc.render_report(report)
+    assert rows == {"all events": "not guardable: no .vnx-project-id"}
+    assert hc.t0_project_root(str(project)) is None, "rule 1 is not relaxed"
+    assert "not guardable: no .vnx-project-id" in gc.render_report(report)
 
 
 def test_a_project_without_a_git_entry_is_not_guarded_with_the_reason(home, tmp_path):

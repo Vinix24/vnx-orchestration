@@ -28,6 +28,7 @@ from vnx_cli.commands.update import (
     _collect_protected_versions,
     _load_fleet_pins,
     _resolve_pin_scan_roots,
+    _iter_pin_files,
     _scan_root_for_pins,
     _scan_disk_for_pins,
     _atomic_symlink_flip,
@@ -1447,6 +1448,34 @@ def test_scan_root_for_pins_skips_git_node_modules_and_symlinks(tmp_path):
 
 def test_scan_root_for_pins_absent_root_is_not_a_failure(tmp_path):
     assert _scan_root_for_pins(tmp_path / "does-not-exist", max_depth=4) == {}
+
+
+def test_iter_pin_files_yields_path_and_raw_pin(tmp_path):
+    """The extracted walk yields the pin file and its raw first line, and
+    ``_scan_root_for_pins`` builds the same dict from it."""
+    project = tmp_path / "a" / "project"
+    project.mkdir(parents=True)
+    pin_file = project / ".vnx-version"
+    pin_file.write_text("v1.2.3\nignored second line\n", encoding="utf-8")
+
+    found = list(_iter_pin_files(tmp_path, max_depth=DEFAULT_PIN_SCAN_MAX_DEPTH))
+
+    assert [(path.resolve(), raw) for path, raw in found] == [(pin_file.resolve(), "v1.2.3")]
+    assert _scan_root_for_pins(tmp_path, DEFAULT_PIN_SCAN_MAX_DEPTH) == {
+        "1.2.3": {f"pin scan: {found[0][0]}"}}
+
+
+def test_iter_pin_files_raises_on_unreadable_root(tmp_path):
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root can read chmod-000 dirs — OSError path unreachable")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        with pytest.raises(OSError):
+            list(_iter_pin_files(locked, DEFAULT_PIN_SCAN_MAX_DEPTH))
+    finally:
+        locked.chmod(0o755)
 
 
 def test_scan_disk_for_pins_raises_on_unreadable_root(tmp_path):
