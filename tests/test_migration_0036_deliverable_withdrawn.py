@@ -359,7 +359,7 @@ def test_without_withdrawn_rows_the_v36_view_derives_what_the_v35_view_derives(d
 
 
 def test_the_manifest_moves_to_36_with_the_v35_tables():
-    assert schema_manifest.TERMINAL_VERSION == 36
+    assert schema_manifest.TERMINAL_VERSION >= 36
     assert schema_manifest.SCHEMA_MANIFEST[36].tables == schema_manifest.SCHEMA_MANIFEST[35].tables
     assert schema_manifest.view_at(36, "deliverables") != schema_manifest.view_at(35, "deliverables")
 
@@ -381,5 +381,5 @@ def test_a_v36_view_holds_for_an_earlier_version_but_a_v35_view_does_not_hold_36
 def test_auto_apply_reaches_36_from_35(db):
     from migrations.auto_apply import auto_apply
     _q(db, "PRAGMA user_version = 35")
-    assert auto_apply(db) == [36]
-    assert _q(db, "PRAGMA user_version") == [(36,)]
+    assert auto_apply(db) == list(range(36, schema_manifest.TERMINAL_VERSION + 1))
+    assert _q(db, "PRAGMA user_version") == [(schema_manifest.TERMINAL_VERSION,)]

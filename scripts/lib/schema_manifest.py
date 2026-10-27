@@ -380,6 +380,98 @@ WHERE output_ref IS NOT NULL
 GROUP BY project_id, output_ref
 """)
 
+#: The separator between a base dispatch id and its round number (``<id>-rK``).
+ROUND_SEPARATOR = "-r"
+
+
+def is_round_of(base_id: str, round_id: str) -> bool:
+    """True when *round_id* is ``<base_id>-rK`` for a positive integer ``K``.
+
+    OI-2403: the suffix after ``<base_id>-r`` must be non-empty, ASCII digits only, and
+    must not start with ``0`` — so ``-r0``, ``-r03``, ``-r``, ``-rX`` and any id of another
+    base are not rounds of *base_id*. Fail-closed on missing evidence: a non-string or an
+    empty candidate is never a round.
+
+    ``_DELIVERABLES_VIEW_V37``'s join applies the same three conditions in SQL (prefix,
+    non-empty all-digit suffix, no leading zero); this helper is the one Python copy the
+    close writer uses, and the two must be changed together.
+    """
+    if not isinstance(base_id, str) or not isinstance(round_id, str):
+        return False
+    prefix = base_id + ROUND_SEPARATOR
+    if not round_id.startswith(prefix):
+        return False
+    suffix = round_id[len(prefix):]
+    return bool(suffix) and suffix.isascii() and suffix.isdigit() and not suffix.startswith("0")
+
+
+# v37 (0037, ADR-049 amendment, OI-2262): a base that ended expired because its own round
+# ``<id>-rK`` delivered counts as delivered; the round named in ``metadata_json.superseded_by``
+# must be a completed row of the same project whose id is exactly ``<base-id>-rK`` with a
+# positive integer ``K`` (missing round id, a foreign dispatch, a non-numeric or leading-zero
+# suffix — anything else derives v36's answer). ``is_round_of`` is the Python mirror of the
+# suffix conditions in the join below.
+_DELIVERABLES_VIEW_V37 = ViewInvariant("deliverables", f"""
+CREATE VIEW deliverables AS
+SELECT
+    d.project_id AS project_id,
+    d.output_ref AS deliverable_ref,
+    MIN(d.output_kind) AS output_kind,
+    MIN(d.track) AS track,
+    COUNT(*) AS dispatch_count,
+    SUM(CASE WHEN d.state = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+    SUM(CASE WHEN d.state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+             THEN 1 ELSE 0 END) AS in_flight_count,
+    SUM(CASE WHEN d.state IN ('proposed', 'ready', 'queued') THEN 1 ELSE 0 END) AS planned_count,
+    SUM(CASE WHEN d.state = 'withdrawn' THEN 1 ELSE 0 END) AS withdrawn_count,
+    CASE
+        WHEN SUM(CASE WHEN d.state = 'completed' OR r.dispatch_id IS NOT NULL THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN d.state IN ('completed', 'withdrawn') OR r.dispatch_id IS NOT NULL
+                      THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'done'
+        WHEN SUM(CASE WHEN d.state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+                      THEN 1 ELSE 0 END) > 0
+            THEN 'in_progress'
+        WHEN SUM(CASE WHEN d.state = 'withdrawn' THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'withdrawn'
+        WHEN SUM(CASE WHEN d.state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out')
+                       AND r.dispatch_id IS NULL THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN d.state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out',
+                                       'withdrawn') AND r.dispatch_id IS NULL THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'failed'
+        WHEN SUM(CASE WHEN d.state = 'ready' THEN 1 ELSE 0 END) > 0
+            THEN 'ready'
+        ELSE 'proposed'
+    END AS derived_status,
+    MAX(d.updated_at) AS last_activity
+FROM dispatches AS d
+LEFT JOIN (
+    SELECT claim.project_id AS project_id, claim.base_id AS dispatch_id
+    FROM (
+        SELECT base.project_id AS project_id,
+               base.dispatch_id AS base_id,
+               CASE
+                   WHEN json_valid(base.metadata_json)
+                       THEN json_extract(base.metadata_json, '$.superseded_by')
+               END AS superseded_by
+        FROM dispatches AS base
+        WHERE base.state = 'expired'
+    ) AS claim
+    JOIN dispatches AS round_row
+      ON round_row.project_id = claim.project_id
+     AND round_row.state = 'completed'
+     AND round_row.dispatch_id = claim.superseded_by
+     AND substr(claim.superseded_by, 1, length(claim.base_id) + 2)
+         = claim.base_id || '{ROUND_SEPARATOR}'
+     AND substr(claim.superseded_by, length(claim.base_id) + 3) <> ''
+     AND substr(claim.superseded_by, length(claim.base_id) + 3) NOT GLOB '*[^0-9]*'
+     AND substr(claim.superseded_by, length(claim.base_id) + 3, 1) <> '0'
+) AS r
+  ON r.project_id = d.project_id AND r.dispatch_id = d.dispatch_id
+WHERE d.output_ref IS NOT NULL
+GROUP BY d.project_id, d.output_ref
+""")
+
 _OI_BLOCKER_IDX = (IndexInvariant("idx_track_oi_active_blockers",
                                   ("track_id", "project_id", "link_type"), partial=True,
                                   where="resolved_at IS NULL"),)
@@ -681,6 +773,8 @@ def _build_manifest() -> Dict[int, VersionManifest]:
     }
     # v36 (0036): the v35 tables unchanged, the deliverables view replaced.
     manifest[36] = VersionManifest(36, manifest[35].tables, (_DELIVERABLES_VIEW_V36,))
+    # v37 (0037): same tables, the deliverables view replaced again (done on a completed round).
+    manifest[37] = VersionManifest(37, manifest[36].tables, (_DELIVERABLES_VIEW_V37,))
     return manifest
 
 
