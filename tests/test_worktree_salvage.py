@@ -5,6 +5,7 @@ Every test builds a real bare ``origin``, a real main checkout and a real
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import re
 import subprocess
@@ -96,6 +97,15 @@ class Fixture:
         git(self.repo, "worktree", "add", "-q", "-b", "dispatch/clean", str(wt), "origin/main")
         return wt
 
+    def worktree_with_nested_repo(self) -> Path:
+        """An untracked nested repository: ``git ls-files --others`` collapses
+        it to the single entry ``nested/``, with no file listed under it."""
+        wt = self.clean_worktree()
+        (wt / "nested").mkdir()
+        git(wt / "nested", "init", "-q")
+        (wt / "nested" / "precious.txt").write_text("precious\n", encoding="utf-8")
+        return wt
+
 
 @pytest.fixture()
 def fx(tmp_path: Path) -> Fixture:
@@ -182,6 +192,51 @@ def test_verify_passes_then_names_empty_and_missing_artifacts(fx: Fixture) -> No
     problems = ws.verify(result, fx.dest)
     assert len(problems) == 2
     assert any("worktree-one.patch" in problem for problem in problems)
+
+
+def test_untracked_nested_repository_is_archived_with_its_contents(fx: Fixture) -> None:
+    """``git ls-files --others`` reports a nested repository as one ``nested/``
+    entry. Archiving that entry without recursing would keep the directory line
+    and drop the work under it, which a later removal gated by ``verify`` would
+    then destroy."""
+    wt = fx.worktree_with_nested_repo()
+    assert git(wt, "ls-files", "--others", "--exclude-standard") == "nested/"
+
+    result = ws.salvage(wt, fx.dest, repo_root=fx.repo, dry_run=False)
+
+    assert result.artifacts == ["worktree-clean.untracked.tgz"]
+    with tarfile.open(fx.dest / "worktree-clean.untracked.tgz") as tar:
+        names = tar.getnames()
+    assert "nested/precious.txt" in names
+    assert any(name.startswith("nested/.git/") for name in names), names
+    assert result.untracked_paths == ["nested/"]
+    assert ws.verify(result, fx.dest, repo_root=fx.repo) == []
+    fresh = restore(fx, result)
+    assert (fresh / "nested" / "precious.txt").read_text(encoding="utf-8") == "precious\n"
+
+
+def test_verify_refuses_an_archive_that_holds_only_the_directory_line(fx: Fixture) -> None:
+    """A non-empty tarball whose ``nested/`` member carries none of the files
+    under it is the round-2 artifact. It must never verify clean, whatever the
+    tarball's size."""
+    wt = fx.worktree_with_nested_repo()
+    result = ws.salvage(wt, fx.dest, repo_root=fx.repo, dry_run=False)
+    tarball = fx.dest / "worktree-clean.untracked.tgz"
+    with tarfile.open(tarball, "w:gz") as tar:  # what recursive=False wrote
+        tar.add(str(wt / "nested"), arcname="nested/", recursive=False)
+
+    problems = ws.verify(result, fx.dest, repo_root=fx.repo)
+    assert len(problems) == 1 and "nested holds no files" in problems[0], problems
+
+    # A tarball whose untracked entries were never recorded cannot be
+    # confirmed complete either: that is a problem, not a clean result.
+    unrecorded = dataclasses.replace(result, untracked_paths=[])
+    problems = ws.verify(unrecorded, fx.dest, repo_root=fx.repo)
+    assert len(problems) == 1 and "unconfirmed" in problems[0], problems
+
+    tarball.write_bytes(b"not a tarball")
+    problems = ws.verify(result, fx.dest, repo_root=fx.repo)
+    assert len(problems) == 1 and "cannot list tarball" in problems[0], problems
 
 
 def stage_then_undo_in_tree(wt: Path) -> None:

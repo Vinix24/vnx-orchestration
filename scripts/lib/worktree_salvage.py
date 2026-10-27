@@ -16,7 +16,11 @@ appended ``MANIFEST.txt`` line in the format of the 27-09-2026 hand salvage::
   in that single diff and the index content would be lost. ``git status``, not
   an empty diff, decides whether there is tracked work.
 * ``<name>.untracked.tgz`` — untracked, non-ignored files minus the internal
-  convenience symlinks (the filter is imported from cleanup_reviewed_worktrees).
+  convenience symlinks (the filter is imported from worktree_inventory).
+  ``git ls-files --others`` reports an untracked nested repository as the one
+  entry ``nested/``, so every entry is archived recursively: the archive holds
+  every file under that directory, symlinks as links and never followed.
+  :func:`verify` refuses an archive that holds such an entry without its files.
 
 Dry-run by default and no caller yet: a later PR removes a tree only after
 :func:`verify` returns an empty list.
@@ -64,6 +68,9 @@ class SalvageResult:
     head: str
     unpushed: int
     artifacts: list[str] = field(default_factory=list)
+    # The entries git listed as untracked (a nested repository is one ``dir/``
+    # entry), so verify can prove the tarball carries them.
+    untracked_paths: list[str] = field(default_factory=list)
     manifest_line: str = ""
     written: bool = False
 
@@ -145,14 +152,14 @@ def _tracked_diffs(worktree_path: Path) -> tuple[bytes, bytes]:
 
 def _internal_symlink(entry_path: Path, repo_root: Path) -> bool:
     """True for the ``.venv``-style link that points back into the checkout.
-    One definition lives in ``cleanup_reviewed_worktrees``; import it there
-    rather than carry a second copy that can drift."""
-    scripts_dir = str(Path(__file__).resolve().parents[1])
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    from cleanup_reviewed_worktrees import _is_internal_symlink
+    One definition lives in ``worktree_inventory``; import it there rather
+    than carry a second copy that can drift."""
+    lib_dir = str(Path(__file__).resolve().parent)
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    from worktree_inventory import is_internal_symlink
 
-    return _is_internal_symlink(entry_path, repo_root)
+    return is_internal_symlink(entry_path, repo_root)
 
 
 def _untracked_paths(worktree_path: Path, repo_root: Path) -> list[str]:
@@ -189,9 +196,14 @@ def _write_patch(tmp: Path, patch: bytes) -> None:
 
 
 def _write_tarball(tmp: Path, worktree_path: Path, paths: list[str]) -> None:
+    """Every file of every listed entry. ``recursive=True`` because git lists
+    an untracked nested repository as the single entry ``nested/``: without
+    recursion the archive would hold that directory line and none of the work
+    under it. ``tarfile`` reads each entry with ``lstat``, so a symlink is
+    stored as a link and never followed."""
     with tarfile.open(str(tmp), "w:gz") as tar:
         for rel in paths:
-            tar.add(str(worktree_path / rel), arcname=rel, recursive=False)
+            tar.add(str(worktree_path / rel), arcname=rel, recursive=True)
 
 
 def _stage(
@@ -309,7 +321,7 @@ def salvage(
     )
     result = SalvageResult(
         name=name, branch=branch, head=head, unpushed=unpushed,
-        artifacts=artifacts, manifest_line=manifest_line,
+        artifacts=artifacts, untracked_paths=untracked, manifest_line=manifest_line,
     )
     if dry_run:
         return result
@@ -372,13 +384,31 @@ def _patch_problems(paths: list[Path], head: str, cwd: Path) -> list[str]:
     return []
 
 
-def _tarball_problems(path: Path) -> list[str]:
+def _tarball_problems(path: Path, entries: list[str]) -> list[str]:
+    """Every problem with a tarball that should carry ``entries``: a tarball
+    that cannot be listed, an entry missing from it, and a recorded directory
+    entry that holds none of its files. That last one is the round-2 archive —
+    a non-empty tarball naming ``nested/`` and nothing under it — which a
+    removal gated on this check would take for a complete salvage. No recorded
+    entry means the contents cannot be confirmed, so it is a problem too: a
+    tarball nobody can check is never a pass."""
     try:
         with tarfile.open(str(path), "r:gz") as tar:
-            tar.getnames()
+            members = tar.getmembers()
     except (OSError, tarfile.TarError) as exc:
         return [f"{path.name}: cannot list tarball: {exc}"]
-    return []
+    if not entries:
+        return [f"{path.name}: no untracked entries recorded, contents unconfirmed"]
+    listed = {member.name.rstrip("/"): member for member in members}
+    names = list(listed)
+    problems = []
+    for entry in entries:
+        rel = entry.rstrip("/")
+        if rel not in listed:
+            problems.append(f"{path.name}: untracked entry {rel} is not in the archive")
+        elif listed[rel].isdir() and not any(name.startswith(rel + "/") for name in names):
+            problems.append(f"{path.name}: archived directory {rel} holds no files")
+    return problems
 
 
 def verify(
@@ -388,11 +418,13 @@ def verify(
 
     An artifact named in ``result`` that is missing or empty is a problem, as
     is a bundle ``git bundle verify`` rejects, a tarball ``tarfile`` cannot
-    list, and a staged or worktree patch that does not apply in order to
-    ``result.head``. An empty list is the only result a later removal may act
-    on. ``repo_root`` is where git runs; it defaults to ``dest_dir`` and is
-    needed when the salvage directory is not itself inside the repository (a
-    central ``$VNX_DATA_DIR``).
+    list or that does not carry every untracked entry git listed (an archived
+    directory entry with no files under it is an incomplete salvage, however
+    non-empty the tarball), and a staged or worktree patch that does not apply
+    in order to ``result.head``. An empty list is the only result a later
+    removal may act on. ``repo_root`` is where git runs; it defaults to
+    ``dest_dir`` and is needed when the salvage directory is not itself inside
+    the repository (a central ``$VNX_DATA_DIR``).
     """
     dest = Path(dest_dir)
     cwd = Path(repo_root) if repo_root is not None else dest
@@ -412,7 +444,7 @@ def verify(
         elif artifact.endswith(_BUNDLE_SUFFIX):
             problems.extend(_bundle_problems(path, cwd))
         elif artifact.endswith(_TARBALL_SUFFIX):
-            problems.extend(_tarball_problems(path))
+            problems.extend(_tarball_problems(path, result.untracked_paths))
         else:
             usable.add(artifact)
     # Staged first: the worktree patch starts from the index, not from HEAD.
