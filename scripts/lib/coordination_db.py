@@ -41,8 +41,11 @@ DISPATCH_STATES = frozenset({
     "proposed", "ready",
     "queued", "claimed", "delivering", "accepted", "running",
     "completed", "timed_out", "failed_delivery", "expired", "recovered", "dead_letter",
+    "withdrawn",
 })
-TERMINAL_DISPATCH_STATES = frozenset({"completed", "expired", "dead_letter"})
+# The ONE terminal set (ADR-049): track_reconciler and runtime_supervisor read it.
+# withdrawn ends a deliverable that was never built; it is neither delivered nor failed.
+TERMINAL_DISPATCH_STATES = frozenset({"completed", "expired", "dead_letter", "withdrawn"})
 ACCEPTED_OR_BEYOND_STATES = frozenset({
     "accepted", "running", "completed", "timed_out", "expired", "dead_letter",
 })
@@ -50,9 +53,9 @@ LEASE_STATES = frozenset({"idle", "leased", "expired", "recovering", "released"}
 
 DISPATCH_TRANSITIONS: Dict[str, frozenset] = {
     # Planning gate: proposed (un-approved) -> ready (operator-approved)
-    "proposed":        frozenset({"ready"}),
+    "proposed":        frozenset({"ready", "withdrawn"}),
     # Execution gate: ready -> claimed (dispatchable once promoted)
-    "ready":           frozenset({"claimed", "expired"}),
+    "ready":           frozenset({"claimed", "expired", "withdrawn"}),
     "queued":          frozenset({"claimed", "expired"}),
     "claimed":         frozenset({"delivering", "expired", "recovered"}),
     "delivering":      frozenset({"accepted", "failed_delivery", "timed_out"}),
@@ -64,6 +67,7 @@ DISPATCH_TRANSITIONS: Dict[str, frozenset] = {
     "expired":         frozenset(),
     "recovered":       frozenset({"queued", "claimed", "expired", "dead_letter"}),
     "dead_letter":     frozenset(),
+    "withdrawn":       frozenset(),
 }
 # States that have not started yet: planning gate and the queue.
 PRE_FLIGHT_DISPATCH_STATES = frozenset({"proposed", "ready", "queued"})

@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -861,16 +862,20 @@ def _resolve_pin_scan_roots(scan_roots: "str | list | None" = None) -> list:
     return out
 
 
-def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
-    """Walk ``root`` (bounded depth) for ``.vnx-version`` pin files.
+def _iter_pin_files(root: Path, max_depth: int) -> "Iterator[tuple[Path, str]]":
+    """Yield ``(pin_path, raw_pin)`` for every valid ``.vnx-version`` under root.
 
-    Returns ``{normalized_pin: {reasons}}`` for this root only. Symlinks and
-    ``.git``/``node_modules`` directories are never descended into — they
-    cannot hold a legitimate ancestor pin and would otherwise let a vendored
-    tree or a symlink cycle blow up the walk. ``max_depth`` bounds how many
-    directory levels below ``root`` (root itself is depth 0) are visited, so a
-    broad default root like ``$HOME`` cannot turn every prune into a full
-    filesystem walk.
+    This is the one walk of the disk-scan protection source: ``vnx update``
+    builds its protected-version map from it (``_scan_root_for_pins``) and
+    ``scripts/fleet_pin_audit.py --scan-root`` audits stray pins with it, so
+    both surfaces cannot disagree about what counts as a pin.
+
+    Symlinks and ``.git``/``node_modules``/``.vnx-data`` directories are never
+    descended into — they cannot hold a legitimate ancestor pin and would
+    otherwise let a vendored tree or a symlink cycle blow up the walk.
+    ``max_depth`` bounds how many directory levels below ``root`` (root itself
+    is depth 0) are visited, so a broad default root like ``$HOME`` cannot turn
+    every prune into a full filesystem walk.
 
     An ABSENT root is not a failure (mirrors the registry/file sources: "does
     not exist" means "no pins from this source"). A root that EXISTS but
@@ -879,15 +884,19 @@ def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
     scan root we could not read is exactly the catastrophe this mechanism
     exists to prevent.
     """
-    protected: dict = {}
     if not root.is_dir():
-        return protected
+        return
+    # Compare against the resolved root: ``root`` may be a relative or
+    # symlinked spelling (``/var`` vs ``/private/var`` on macOS) and the walk
+    # descends the resolved path, so the ROOT itself must be recognised as the
+    # root or its unreadability would be swallowed as "just a subdirectory".
+    resolved_root = root.resolve()
 
-    def _walk(dirpath: Path, depth: int) -> None:
+    def _walk(dirpath: Path, depth: int) -> "Iterator[tuple[Path, str]]":
         try:
             entries = list(os.scandir(dirpath))
         except OSError:
-            if dirpath == root:
+            if dirpath == resolved_root:
                 raise
             # A subdirectory that turns unreadable mid-walk (permission
             # oddity, race) is skipped — only the configured ROOT itself is a
@@ -905,7 +914,7 @@ def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
                 if entry.name in _PIN_SCAN_SKIP_DIRS:
                     continue
                 if depth < max_depth:
-                    _walk(Path(entry.path), depth + 1)
+                    yield from _walk(Path(entry.path), depth + 1)
                 continue
             if entry.name != PIN_FILE_NAME:
                 continue
@@ -917,11 +926,18 @@ def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
             pin = lines[0].strip() if lines else ""
             if not pin or pin in (".", "..") or not _PIN_RE.match(pin):
                 continue
-            protected.setdefault(_normalize_version(pin), set()).add(
-                f"pin scan: {pin_path}"
-            )
+            yield pin_path, pin
 
-    _walk(root.resolve(), 0)
+    yield from _walk(resolved_root, 0)
+
+
+def _scan_root_for_pins(root: Path, max_depth: int) -> dict:
+    """``{normalized_pin: {reasons}}`` for the pins ``_iter_pin_files`` finds."""
+    protected: dict = {}
+    for pin_path, pin in _iter_pin_files(root, max_depth):
+        protected.setdefault(_normalize_version(pin), set()).add(
+            f"pin scan: {pin_path}"
+        )
     return protected
 
 

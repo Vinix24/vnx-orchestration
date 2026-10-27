@@ -7,14 +7,7 @@
 **Date**: 2026-03-31
 **Author**: T3 (Track C Architecture)
 
-> **Status 2026-10-24, ADR-047: de planbestanden gaan eruit.**
-> De tracks-DB is de enige planbron (`docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md`). Prioriteit 1 van dit contract, `FEATURE_PLAN.md`, is geen bron meer. Per bestand, met de PR die de laatste lezer weghaalt:
->
-> - `FEATURE_PLAN.md` (prioriteit 1): de planlezer gaat uit `queue_reconciler` en `closure_verifier` in A2, de per-PR-check in A5. Het bestand is sinds #1630 untracked en gitignored, dus het verdwijnt met de schrijver.
-> - `PR_QUEUE.md` (prioriteit 4, projectie): de laatste lezer gaat in B4 (`review_contract`, `pr_queue_state_snapshot`); het bestand zelf gaat daar ook weg.
-> - `ROADMAP.yaml`: de laatste standaardlezer gaat in C2. Het bestand blijft als voorbeeld en is alleen met een expliciete `--file` te importeren.
->
-> De rest van dit contract wordt in B4 herschreven, wanneer de laatste lezer weg is. Tot dan staat de tekst hieronder ongewijzigd.
+> **Revised 2026-10-27 (ADR-047, B4, dispatch dlv-53d2750e1e11).** The tracks DB and the dispatch state are the truth (`docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md`). No plan file is a source: `FEATURE_PLAN.md` left the reconciler and the closure verifier in A2 and A5, and `PR_QUEUE.md`, its generator and its last reader are gone. `ROADMAP.yaml` is an example of the import format, not a source.
 
 This document is the single source of truth for how VNX derives queue state. All downstream PRs (PR-1 through PR-3) implement against this contract. Any component that reads or writes queue state must conform to the hierarchy and rules defined here.
 
@@ -27,7 +20,7 @@ This document is the single source of truth for how VNX derives queue state. All
 The double-feature trial exposed a governance flaw: dispatch runtime truth and queue projection truth drift apart during active execution. Concretely:
 
 - T0 sees `In Progress: None` while a real dispatch is active in `.vnx-data/dispatches/active/`.
-- PR_QUEUE.md shows a PR as "Queued" when dispatches for it have already completed.
+- A queue projection shows a PR as "Queued" when dispatches for it have already completed.
 - Closure and promotion decisions depend on manual archaeology instead of deterministic evidence.
 
 This is not a display bug. It is a **source-of-truth failure** in an autonomous execution chain. When T0 trusts a stale projection over filesystem reality, it can:
@@ -40,7 +33,7 @@ This is not a display bug. It is a **source-of-truth failure** in an autonomous 
 
 Queue state must be **derived** from canonical runtime evidence, not projected from cached snapshots. This contract defines:
 1. Which sources are authoritative, and in what priority order.
-2. What constitutes each queue state (completed, active, pending, blocked).
+2. What constitutes each queue state (completed, active, pending).
 3. How projection drift is detected and surfaced.
 4. When a stale projection must be treated as a mismatch rather than trusted.
 
@@ -54,25 +47,25 @@ Queue state is derived from five sources. They are listed in strict priority ord
 
 | Priority | Source | Role | Authoritative For |
 |----------|--------|------|-------------------|
-| **1** | `FEATURE_PLAN.md` | Structure definition | Valid PR IDs, dependency graph, track assignments, gate names, review-stack requirements |
+| **1** | Tracks DB | Plan definition | Tracks, track dependencies (`track_dependencies`), deliverables, the PR a dispatch delivers (`dispatches.pr_ref`) |
 | **2** | Dispatch filesystem state | Runtime execution truth | Which PRs are active, completed, pending, staging, or rejected right now |
-| **3** | Receipts and review evidence | Completion evidence | Whether a dispatch actually finished, gate pass/fail status, evidence chain integrity |
-| **4** | Queue projection files | Cached view | Pre-computed queue snapshots for T0 consumption (`pr_queue_state.json`, `pr_queue.json`, `PR_QUEUE.md`) |
+| **3** | Receipts, dispatch register and review evidence | Completion evidence | Whether a dispatch actually finished, gate pass/fail status, whether the PR merged (`pr_merged`), evidence chain integrity |
+| **4** | Queue projection files | Cached view | Pre-computed queue snapshots for T0 consumption (`pr_queue_state.json`, `pr_queue.json`, `pr_queue_state.yaml`) |
 | **5** | Progress projections | Advisory | Track-level gate progression, terminal status (`progress_state.yaml`, `t0_brief.json`) |
 
 ### 2.2 Priority Rules
 
-**Rule P-1**: FEATURE_PLAN.md defines what exists.
-If a PR ID does not appear in FEATURE_PLAN.md, it is not a valid queue entry regardless of what dispatch files or projections claim. FEATURE_PLAN.md is the structural authority: it defines the set of PRs, their dependency edges, and their governance metadata. It does not define runtime status.
+**Rule P-1**: The tracks DB defines the plan.
+Tracks, their dependency edges and their deliverables are rows in the tracks DB (ADR-047 §1). No file is a plan source. Dependencies exist only between tracks: a PR carries none of its own and inherits those of its track (ADR-047 §5). The DB does not define runtime status.
 
-**Rule P-2**: Dispatch filesystem defines what is happening.
-The directories under `.vnx-data/dispatches/` (`active/`, `completed/`, `pending/`, `staging/`, `rejected/`) are the runtime authority for execution state. A dispatch file physically present in `active/` means that PR is active, regardless of what `pr_queue_state.json` claims. Filesystem state is checked by scanning directory contents, not by reading cached state files.
+**Rule P-2**: A dispatch defines a PR, and the dispatch filesystem defines what is happening.
+A PR is in the queue when a dispatch names it in its `PR-ID` line (ADR-047 §4). The directories under `.vnx-data/dispatches/` (`active/`, `completed/`, `pending/`, `staging/`, `rejected/`) are the runtime authority for execution state. A dispatch file physically present in `active/` means that PR is active, regardless of what `pr_queue_state.json` claims. Filesystem state is checked by scanning directory contents, not by reading cached state files.
 
 **Rule P-3**: Receipts confirm what happened.
 A dispatch in `completed/` is not fully confirmed until a receipt with a terminal event (`task_complete`, `task_finished`, `done`) exists in the receipt trail for that dispatch ID. Receipts also carry gate evidence linkage. Completion without receipt is treated as **unconfirmed completion** — sufficient to unblock dependents but flagged for operator attention.
 
 **Rule P-4**: Projections are never primary truth.
-`pr_queue_state.json`, `pr_queue.json`, `pr_queue_state.yaml`, and `PR_QUEUE.md` are cached views. They are useful for quick T0 reads but must never be the sole basis for promotion, closure, or dispatch decisions during active execution. They are generated artifacts, not source data.
+`pr_queue_state.json`, `pr_queue.json` and `pr_queue_state.yaml` are cached views. They are useful for quick T0 reads but must never be the sole basis for promotion, closure, or dispatch decisions during active execution. They are generated artifacts, not source data.
 
 **Rule P-5**: Progress projections are advisory only.
 `progress_state.yaml` and `t0_brief.json` reflect track-level progression and terminal health. They inform T0 about which gate a track has reached but do not override dispatch-level truth about individual PR status.
@@ -81,7 +74,7 @@ A dispatch in `completed/` is not fully confirmed until a receipt with a termina
 
 ## 3. State Derivation Rules
 
-Each PR in the queue is in exactly one of four states. The state is derived deterministically from the source hierarchy.
+Each PR in the queue is in exactly one of three states. The state is derived deterministically from the source hierarchy.
 
 ### 3.1 State Definitions
 
@@ -89,33 +82,29 @@ Each PR in the queue is in exactly one of four states. The state is derived dete
 |-------|-----------|--------------|
 | **completed** | All dispatches for this PR are in `completed/` or `rejected/` and at least one dispatch completed successfully | Dispatch filesystem (Priority 2), confirmed by receipts (Priority 3) |
 | **active** | At least one dispatch for this PR exists in `active/` | Dispatch filesystem (Priority 2) |
-| **pending** | All dependencies are satisfied (completed), no dispatch exists in `active/` or `pending/` or `staging/`, and the PR is eligible for dispatch | FEATURE_PLAN.md dependency graph (Priority 1) + dispatch filesystem (Priority 2) |
-| **blocked** | At least one dependency PR is not yet completed | FEATURE_PLAN.md dependency graph (Priority 1) + derived state of dependency PRs |
+| **pending** | No dispatch for this PR is in `active/` or `completed/`; its dispatch waits in `pending/` or `staging/`, or was rejected | Dispatch filesystem (Priority 2) |
+
+There is no per-PR `blocked` state. A dependency holds a track, not a PR: the track reconciler derives `blocked` for a track with an open hard edge in `track_dependencies`.
 
 ### 3.2 Derivation Algorithm
 
-For each PR defined in FEATURE_PLAN.md, derive its state in this order:
+For each PR a dispatch names, derive its state in this order (`QueueReconciler._derive_state`, `scripts/lib/queue_reconciler.py`):
 
 ```
-1. Scan dispatch directories for any dispatch referencing this PR ID.
+1. Collect every dispatch whose PR-ID line names this PR.
 
-2. IF any dispatch for this PR exists in active/:
+2. IF any of them is in active/:
      state = active
      STOP
 
-3. IF any dispatch for this PR exists in completed/ with a successful outcome:
+3. IF any of them is in completed/:
      state = completed
+     receipt_confirmed = a terminal receipt exists for that dispatch
      STOP
 
-4. IF all dependency PRs (from FEATURE_PLAN.md) are in state "completed":
-     IF any dispatch for this PR exists in pending/ or staging/:
-       state = pending (dispatch is queued but not yet claimed)
-     ELSE:
-       state = pending (eligible for dispatch creation)
-     STOP
-
-5. ELSE:
-     state = blocked (one or more dependencies are not completed)
+4. ELSE:
+     state = pending (the evidence is the pending/ or staging/ dispatch;
+                      a PR named only by a rejected dispatch has none)
      STOP
 ```
 
@@ -131,16 +120,20 @@ Multiple dispatches may exist for the same PR (e.g., a rejected dispatch followe
 State remains `active`. Staleness of the active dispatch is a separate concern (lease expiry, runtime reconciliation) handled by the runtime coordination layer. The queue truth contract does not reclassify an active dispatch as failed — that is a runtime decision, not a queue decision.
 
 **EC-2: Dispatch in completed/ but no receipt.**
-State is `completed` (unconfirmed). The PR is treated as completed for dependency resolution, but a drift warning is raised. The receipt gap must be resolved before closure.
+State is `completed` (unconfirmed) and an `info` drift warning is raised. Per-PR closure fails `pr_completed` until the terminal receipt exists (ADR-047 §2).
 
 **EC-3: Multiple dispatches for same PR across different states.**
 Priority: `active` > `completed` > `pending/staging` > `rejected`. If any dispatch is active, the PR is active. If none are active but one completed successfully, the PR is completed.
 
-**EC-4: Dispatch exists for a PR ID not in FEATURE_PLAN.md.**
-The dispatch is ignored for queue derivation purposes. It may be a leftover from a previous feature. A drift warning is raised.
+**EC-4: A dispatch names a PR that nothing else knows.**
+The PR is a queue row, not a drift warning (ADR-047 §4).
 
-**EC-5: FEATURE_PLAN.md lists a PR but no dispatch has ever been created.**
-If dependencies are satisfied, state is `pending`. If dependencies are not satisfied, state is `blocked`. This is the normal initial state for PRs that have not yet been dispatched.
+**EC-5: A dispatch without a `PR-ID` line.**
+It names no PR and is no queue row. A PR that no dispatch names does not exist for the queue.
+
+### 3.5 Closure Stage In The Review Contract
+
+The review contract's `closure_stage` comes from the dispatch register (`derive_closure_stage`, `scripts/lib/review_contract.py`, ADR-047 §6): `merged` when a `pr_merged` event names the PR, `in_review` when a review result (`gate_passed`, `gate_failed`) names it, otherwise `open`. A GitHub number joins the event's `pr_number`; an internal label joins only through the dispatch id. A malformed or unknown event moves nothing.
 
 ---
 
@@ -156,16 +149,16 @@ Drift occurs when a queue projection file disagrees with the state derived from 
 | PR-0 is "In Progress" | Dispatch for PR-0 is in `completed/` | **Stale active** |
 | "In Progress: None" | Dispatch exists in `active/` | **Missing active** |
 | PR-2 is "Completed" | No dispatch for PR-2 in `completed/` | **Phantom completion** |
-| PR-1 is "Blocked" | All dependencies are completed | **Stale blocked** |
+| PR-1 is "Blocked" | A PR has no dependencies of its own | **Stale blocked** |
 
 ### 4.2 Drift Detection Method
 
 Drift is detected by comparing the derived state (Section 3) against the projection state. The comparison is a full diff — every PR in the queue is compared, not just the ones that changed recently.
 
 ```
-For each PR in FEATURE_PLAN.md:
+For each PR a dispatch names:
   derived_state  = derive_state(PR)           # Section 3.2 algorithm
-  projected_state = read_projection(PR)        # From pr_queue_state.json or PR_QUEUE.md
+  projected_state = read_projection(PR)        # From pr_queue_state.json; absent = skip
 
   IF derived_state != projected_state:
     emit drift_warning(pr_id, derived_state, projected_state, evidence)
@@ -175,10 +168,10 @@ For each PR in FEATURE_PLAN.md:
 
 | Severity | Condition | Effect |
 |----------|-----------|--------|
-| **blocking** | Derived state is `active` but projection says `pending` or `blocked` | Promotion or re-dispatch could create a duplicate active dispatch |
-| **blocking** | Derived state is `completed` but projection says `active` | Dependent PRs may be unnecessarily blocked |
-| **warning** | Derived state is `pending` but projection says `blocked` | PR is eligible but T0 may not see it |
-| **warning** | Projection has a PR not in FEATURE_PLAN.md | Stale data from a previous feature |
+| **blocking** | Derived state is `active` but projection says `pending`, `blocked` or `queued` | Promotion or re-dispatch could create a duplicate active dispatch |
+| **blocking** | Derived state is `completed` but projection says `active` | Dependent work may be unnecessarily held |
+| **warning** | Derived state is `pending` but projection says `blocked` or `queued` | PR is eligible but T0 may not see it |
+| **warning** | Any other disagreement | The projection is stale |
 | **info** | Derived and projected states agree but receipt confirmation is missing | Completion is structurally correct but evidence chain is incomplete |
 
 ### 4.4 When Drift Must Be Checked
@@ -211,7 +204,7 @@ When warning drift is detected:
 
 ### 5.1 Reconciliation Is Deterministic
 
-Given the same FEATURE_PLAN.md, the same dispatch directory contents, and the same receipt trail, reconciliation MUST produce the same queue state every time. There is no randomness, no timestamp-dependent ordering, and no dependency on prior reconciliation results.
+Given the same dispatch directory contents and the same receipt trail, reconciliation MUST produce the same queue state every time. There is no randomness, no timestamp-dependent ordering, and no dependency on prior reconciliation results.
 
 ### 5.2 Reconciliation Is Idempotent
 
@@ -224,7 +217,9 @@ When reconciliation runs, it replaces projection files entirely. It does not mer
 Affected files:
 - `pr_queue_state.json` — rebuilt from derived state
 - `pr_queue.json` — rebuilt from derived state
-- `PR_QUEUE.md` — regenerated from derived state
+- `pr_queue_state.yaml` — the same snapshot as `pr_queue.json`
+
+No markdown view is written (`reconcile_queue_state.py --repair`).
 
 ### 5.4 Reconciliation Preserves Provenance
 
@@ -246,7 +241,7 @@ Each reconciled state entry includes provenance: the source that determined the 
 ### 5.5 Reconciliation Does Not Modify Source Data
 
 Reconciliation reads from the source hierarchy and writes to projection files. It never modifies:
-- FEATURE_PLAN.md
+- The tracks DB
 - Dispatch files (does not move, delete, or edit them)
 - Receipt files
 - Review gate results
@@ -257,13 +252,13 @@ Reconciliation reads from the source hierarchy and writes to projection files. I
 
 ### 6.1 pr_queue_manager.py
 
-The queue manager currently maintains `pr_queue_state.json` as a stateful store that is updated incrementally. Under this contract, reconciliation provides a parallel path that can rebuild the same state from scratch. The manager's incremental updates remain valid for normal operation; reconciliation is the corrective path when drift is detected.
+The queue manager maintains `pr_queue_state.json` as a stateful store that is updated incrementally, writes `pr_queue_state.yaml` and `pr_queue.json` from it, and answers dependency readiness from `track_dependencies` (ADR-047, A6). It writes no markdown view. Under this contract, reconciliation provides a parallel path that can rebuild the same state from scratch. The manager's incremental updates remain valid for normal operation; reconciliation is the corrective path when drift is detected.
 
 PR-1 will implement the reconciliation path. This contract does not require rewriting pr_queue_manager.py — it requires adding a reconciliation function that can be called alongside or instead of incremental updates.
 
 ### 6.2 closure_verifier.py
 
-The closure verifier checks gate evidence and review contract integrity. Under this contract, closure verification must also confirm that the queue state for the PR being closed matches derived state, not just projected state. PR-2 will integrate reconciliation into the closure path.
+The closure verifier checks gate evidence and review contract integrity. Per-PR closure needs a dispatch that names the PR (`pr_has_dispatch`) and a completed dispatch with a terminal receipt (`pr_completed`), ADR-047 §2. Whole-feature closure reads the track's derived status from the tracks DB, ADR-047 §3.
 
 ### 6.3 receipt_processor.sh
 
@@ -276,6 +271,10 @@ Runtime coordination manages dispatch leases and state transitions via SQLite. T
 ### 6.5 t0_brief.json and build_t0_state.py
 
 The T0 brief is a consumer of queue state. After reconciliation, the brief should reflect reconciled truth. The state builder uses reconciled state when available.
+
+### 6.6 review_contract.py
+
+The review contract reads no queue file. Its closure stage comes from the dispatch register (Section 3.5).
 
 ---
 
@@ -314,7 +313,7 @@ A PR is out of scope for this feature if it:
 |---|-------|--------|
 | V-1 | Source hierarchy is explicit | Sections 2.1 and 2.2 define all five sources and their priority |
 | V-2 | State derivation is deterministic | Section 3.2 provides a step-by-step algorithm with no ambiguity |
-| V-3 | All four states have derivation rules | Section 3.1 defines completed, active, pending, blocked |
+| V-3 | All three states have derivation rules | Section 3.1 defines completed, active, pending |
 | V-4 | Drift detection is defined | Section 4 defines what drift is, how to detect it, and severity classification |
 | V-5 | Stale projection reliance is blocked | Section 4.4 mandates drift detection before promotion, closure, and feature completion |
 | V-6 | Reconciliation is deterministic and idempotent | Sections 5.1 and 5.2 state this explicitly |
@@ -323,8 +322,8 @@ A PR is out of scope for this feature if it:
 ### 8.2 Quality Gate Checklist
 
 `gate_pr0_queue_truth_contract`:
-- [ ] Contract defines source-of-truth priority among feature plan, dispatch files, receipts, and queue projections (Section 2)
-- [ ] Contract defines deterministic rules for completed, active, pending, and blocked queue state (Section 3)
+- [ ] Contract defines source-of-truth priority among the tracks DB, dispatch files, receipts, and queue projections (Section 2)
+- [ ] Contract defines deterministic rules for completed, active, and pending queue state (Section 3)
 - [ ] Contract explains how projection drift is detected and surfaced (Section 4)
 - [ ] Contract blocks silent reliance on stale queue projections during active execution (Section 4.4, 4.5)
 - [ ] `codex_gate` receipt and normalized report exist with no unresolved blocking findings
@@ -338,19 +337,21 @@ Quick reference showing which source answers which question.
 
 | Question | Primary Source | Confirming Source |
 |----------|---------------|-------------------|
-| What PRs exist in this feature? | FEATURE_PLAN.md | — |
-| What are the dependencies between PRs? | FEATURE_PLAN.md | — |
+| What PRs exist in this feature? | Dispatches that name a PR (`PR-ID`, `dispatches.pr_ref`) | Tracks DB |
+| What are the dependencies? | Tracks DB (`track_dependencies`, between tracks) | — |
 | Is a PR currently being worked on? | Dispatch filesystem (`active/`) | Receipts (working events) |
 | Has a PR been completed? | Dispatch filesystem (`completed/`) | Receipts (terminal events) |
-| Is a PR eligible for dispatch? | Derived: dependencies completed + no active dispatch | — |
-| What gate does a PR require? | FEATURE_PLAN.md (review-stack) | — |
+| Is a PR eligible for dispatch? | Derived: no active dispatch + its track not blocked | Tracks DB |
+| What gate does a PR require? | Risk class of the head (`review_risk_class.py`) | Dispatch Manager Block |
 | Has a gate passed? | Review gate results (`$VNX_STATE_DIR/review_gates/results/`) | Receipts |
-| What does T0 see for queue status? | Queue projections (pr_queue_state.json, PR_QUEUE.md) | Must match derived state |
+| Has a PR merged? | `pr_merged` in the receipt ledger and the dispatch register | The forge |
+| What does T0 see for queue status? | Queue projections (pr_queue_state.json, pr_queue_state.yaml) | Must match derived state |
 
 ## Appendix B: Relationship To Other Contracts
 
 | Contract | Relationship |
 |----------|-------------|
+| ADR-047 (`docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md`) | The tracks DB is the only plan source; this contract follows it |
 | 50_DOUBLE_FEATURE_TRIAL_CONTRACT.md | Trial exposed the queue drift problem this contract addresses |
 | 45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md | Gate evidence is a source in the hierarchy (Priority 3) |
 | 30_FPC_EXECUTION_CONTRACTS.md | Dispatch execution uses task class definitions from this contract |

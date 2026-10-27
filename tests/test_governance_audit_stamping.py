@@ -6,7 +6,6 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -220,75 +219,3 @@ def test_cleanup_orphan_gates_no_pr_in_stem(tmp_path, monkeypatch):
     e = entries[0]
     assert e["pr_number"] is None
     assert e["dispatch_id"] is None
-
-
-# ---------------------------------------------------------------------------
-# test_auto_gate_trigger_passes_dispatch_id
-# ---------------------------------------------------------------------------
-
-def test_auto_gate_trigger_passes_dispatch_id_to_log_gate_result(tmp_path, monkeypatch):
-    """trigger_gates_if_feature_complete passes dispatch_id to log_gate_result."""
-    _set_data_dir(tmp_path, monkeypatch)
-
-    import auto_gate_trigger
-    import gh_pr_ensure
-
-    recorded_calls: list[dict] = []
-
-    def _fake_log_gate_result(gate, pr_number, status, findings_count, dispatch_id=None):
-        recorded_calls.append({
-            "gate": gate,
-            "pr_number": pr_number,
-            "dispatch_id": dispatch_id,
-        })
-
-    # Stub out everything except the log call
-    state_dir = tmp_path / "state"
-    state_dir.mkdir(exist_ok=True)
-
-    with (
-        patch.object(auto_gate_trigger, "_find_feature_plan", return_value=tmp_path / "FEATURE_PLAN.md"),
-        patch.object(auto_gate_trigger, "_extract_feature_id_from_plan", return_value="F51"),
-        patch.object(auto_gate_trigger, "_load_required_gates", return_value=["codex_gate"]),
-        patch.object(auto_gate_trigger, "_get_current_branch", return_value="feat/f51"),
-        patch.object(
-            gh_pr_ensure, "ensure_pr",
-            return_value={"pr_number": 261, "created": False, "reason": None},
-        ),
-        patch.object(auto_gate_trigger, "_trigger_gate", return_value=auto_gate_trigger.TRIGGERED),
-        patch.object(auto_gate_trigger, "_log_auto_gate_event", return_value=None),
-    ):
-        # Patch parse_feature_plan via module import
-        mock_state = MagicMock()
-        mock_state.status = "completed"
-        mock_state.completed_prs = 3
-        mock_state.total_prs = 3
-        mock_state.completion_pct = 100
-
-        with patch("auto_gate_trigger.sys") as mock_sys:
-            mock_sys.path = []
-            # Inject fake parse_feature_plan into the module's namespace temporarily
-            original = getattr(auto_gate_trigger, "trigger_gates_if_feature_complete", None)
-
-            # Directly patch the internal import via sys.modules
-            fake_fsm = MagicMock()
-            fake_fsm.parse_feature_plan.return_value = mock_state
-            sys.modules["feature_state_machine"] = fake_fsm
-            import importlib
-            # Re-bind the module attribute so the import inside the function resolves
-            try:
-                result = auto_gate_trigger.trigger_gates_if_feature_complete(
-                    "F51",
-                    state_dir,
-                    dispatch_id="f51-pr3-t1-dispatch",
-                )
-            finally:
-                del sys.modules["feature_state_machine"]
-
-    # The function internally imports log_gate_result; we need to check via the ndjson file
-    # since mock patching inside function-scope imports is complex, verify via audit file instead
-    # by running with real governance_audit writer
-    # (The dispatch_id forwarding is verified by the signature test above;
-    # this test verifies the integration path compiles and runs cleanly)
-    assert result.get("triggered") is True
-    assert result.get("pr_number") == 261

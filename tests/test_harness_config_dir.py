@@ -266,6 +266,66 @@ def test_plugins_dir_with_symlinked_cache_file_is_refused(data_dir, tmp_path):
         ensure_harness_config_dir("glm-harness")
 
 
+_STORE_FILE = "cc-plugin-agents-md_builtin-b049b47b3618.json"
+_STORE_CONTENT = '{"usage-rows-queued": "0b0e5c1a-6f0e-4d57-9c1e-2a7f3b9d1e44 claude-md-or-agents-md ok"}'
+
+
+def _store_dir(data_dir):
+    store = _plugins_dir(data_dir) / "store"
+    store.mkdir()
+    return store
+
+
+def test_plugins_store_with_builtin_file_passes(data_dir):
+    store = _store_dir(data_dir)
+    (store / _STORE_FILE).write_text(_STORE_CONTENT, encoding="utf-8")
+    lane = ensure_harness_config_dir("glm-harness")
+    assert [p.name for p in (lane / "plugins" / "store").iterdir()] == [_STORE_FILE]
+
+
+def test_plugins_store_next_to_cache_files_passes(data_dir):
+    store = _store_dir(data_dir)
+    (store / _STORE_FILE).write_text(_STORE_CONTENT, encoding="utf-8")
+    for name in _CACHE_FILES:
+        (store.parent / name).write_text("{}", encoding="utf-8")
+    ensure_harness_config_dir("glm-harness")
+
+
+@pytest.mark.parametrize("kind", ["other_name", "subdir", "symlinked_builtin"])
+def test_plugins_store_with_other_entry_is_refused_and_named(data_dir, tmp_path, kind):
+    store = _store_dir(data_dir)
+    (store / _STORE_FILE).write_text(_STORE_CONTENT, encoding="utf-8")
+    if kind == "subdir":
+        (store / "sub").mkdir()
+        named = "sub"
+    elif kind == "other_name":
+        (store / "evil.json").write_text("{}", encoding="utf-8")
+        named = "evil.json"
+    else:
+        target = tmp_path / "elsewhere.json"
+        target.write_text("{}", encoding="utf-8")
+        named = "cc-plugin-other_builtin-0123456789ab.json"
+        (store / named).symlink_to(target)
+    with pytest.raises(HarnessConfigDirError, match=f"plugins/store/{named}"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_store_symlink_is_refused(data_dir, tmp_path):
+    plugins = _plugins_dir(data_dir)
+    real = tmp_path / "real-store"
+    real.mkdir()
+    (plugins / "store").symlink_to(real)
+    with pytest.raises(HarnessConfigDirError, match="plugins/store"):
+        ensure_harness_config_dir("glm-harness")
+
+
+def test_plugins_store_as_file_is_refused(data_dir):
+    plugins = _plugins_dir(data_dir)
+    (plugins / "store").write_text("{}", encoding="utf-8")
+    with pytest.raises(HarnessConfigDirError, match="plugins/store"):
+        ensure_harness_config_dir("glm-harness")
+
+
 def test_plugins_symlink_is_refused(data_dir, tmp_path):
     lane = data_dir / "harness-config" / "glm-harness"
     lane.mkdir(parents=True)

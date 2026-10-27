@@ -81,6 +81,7 @@ REQUIRED_PER_PROJECT_FAMILIES: tuple = (
 MACHINE_WIDE_TEMPLATES: Dict[str, str] = {
     "com.vnx.subsystem-probe": "one probe per machine; it reads the project id only to locate the store it reports on",
     "com.vnx.fleet-role-drift": "one drift check per machine across the registered fleet",
+    "com.vnx.fleet-pin-audit": "one pin audit per machine across the scanned development tree",
 }
 
 _PLACEHOLDER = "${VNX_PROJECT_ID}"

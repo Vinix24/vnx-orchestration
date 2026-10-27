@@ -10,11 +10,16 @@ run repo code (shim step 2), including whether that first ``vnx-dev`` entry exis
 account whose ``settings.json`` cannot be read, is not a JSON object or holds a malformed
 ``hooks`` tree is ``unknown``, with the reason (for the tree: the path to the bad node).
 
-PER PROJECT. The inventory is the registry ``~/.vnx/projects.json`` plus every ``.vnx-project-id``
-under each ``--scan-root`` (depth 3, ``.vnx-data`` skipped); a scan hit the registry does not
-list is marked. A project without ``.claude/terminals/T0/CLAUDE.md`` is ``not guarded (no T0)``.
-A project with one that fails the rest of the shim's rule 1 (``hook_coverage.t0_project_root``:
-a ``.vnx-project-id`` with a first line, a ``.git`` entry at or above, not a dispatch worktree) is
+PER PROJECT. The inventory is the registry ``~/.vnx/projects.json`` plus every folder holding a
+``.vnx-project-id`` OR a ``.claude/terminals/T0/CLAUDE.md`` under each ``--scan-root`` (depth 3,
+``.vnx-data`` skipped); a scan hit the registry does not list is marked. Without ``--scan-root``
+the report says so in a ``scope:`` line, with the number of projects it did see. A project
+without ``.claude/terminals/T0/CLAUDE.md`` is ``not guarded (no T0)``. A T0 folder with no usable
+``.vnx-project-id`` is ``not guardable: no .vnx-project-id``: rule 1 turns the shim away there,
+no user-level entry can run, and it awaits an operator decision. It is listed and counted in one
+closing line, and never changes the exit code (rule 1 itself is unchanged). A project with a T0
+that fails the rest of the shim's rule 1 (``hook_coverage.t0_project_root``: a
+``.vnx-project-id`` with a first line, a ``.git`` entry at or above, not a dispatch worktree) is
 ``not guarded (<reason>)`` and makes ``check`` exit 1: the installed command exits there without
 running the guard. For a project that passes, each event is answered by ``hook_coverage.coverage`` (the function the
 guard itself uses), PreToolUse once per tool of the user matcher. ``coverage`` runs with the
@@ -28,8 +33,13 @@ per project (the trust decision) lives per account:
   ``unknown``                a settings file of the project cannot be loaded (the guard counts it
                              as not covered), or this account's own settings are ``unknown``
 
+``--require-user`` makes the user level the only registration that counts: for every project
+that passes rule 1, an event answered by the project's own settings (``project (...)``) is a
+failure, named per project and per event as ``covered by the project only, not at user level``.
+Without the flag the behaviour and the exit code are those described below.
+
 ``check`` exits 0 when every project with a T0 folder is ``user`` or ``project`` on every event
-in every account, and the shim and guard exist; otherwise 1.
+in every account, and the shim and guard exist; otherwise 1. A usage error is argparse's exit 2.
 """
 from __future__ import annotations
 
@@ -53,6 +63,9 @@ PROJECT_ID_FILE = ".vnx-project-id"
 T0_MARKER = Path(".claude") / "terminals" / "T0" / "CLAUDE.md"
 NO_T0 = "not guarded (no T0)"
 NOT_GUARDED = "not guarded"
+NOT_GUARDABLE = "not guardable"
+NO_PROJECT_ID = f"no {PROJECT_ID_FILE}"
+PROJECT_ONLY = "covered by the project only, not at user level"
 ALL_EVENTS = "all events"
 
 
@@ -64,6 +77,8 @@ class ProjectEntry:
     has_t0: bool
     # why the shim's rule 1 turns this project away (None: the shim runs the guard here)
     rule1_reason: Optional[str] = None
+    # why this T0 folder cannot be guarded at all (no usable .vnx-project-id), or None
+    not_guardable: Optional[str] = None
 
 
 @dataclass
@@ -82,6 +97,7 @@ class CheckReport:
     problems: List[str] = field(default_factory=list)
     accounts: List[AccountReport] = field(default_factory=list)
     projects: List[ProjectEntry] = field(default_factory=list)
+    scan_roots: List[Path] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -108,11 +124,13 @@ def registry_projects(home: Path) -> List[Path]:
 
 
 def scan_projects(root: Path, depth: int = SCAN_DEPTH) -> List[Path]:
-    """Directories holding a ``.vnx-project-id`` at most ``depth`` levels below ``root``."""
+    """Directories holding a ``.vnx-project-id`` or a T0 marker at most ``depth`` levels below
+    ``root``. The T0 marker is what makes an ID-less folder visible: it is exactly the folder
+    that cannot be guarded and that the report has to list."""
     found: List[Path] = []
 
     def walk(directory: Path, level: int) -> None:
-        if (directory / PROJECT_ID_FILE).is_file():
+        if (directory / PROJECT_ID_FILE).is_file() or (directory / T0_MARKER).is_file():
             found.append(directory)
         if level >= depth:
             return
@@ -135,10 +153,18 @@ def rule1_reason(path: Path) -> Optional[str]:
     if hc.t0_project_root(str(path)) is not None:
         return None
     if hc.project_id(path) is None:
-        return f"no {PROJECT_ID_FILE} with a non-empty first line, so the shim exits without running the guard"
+        return (f"{NO_PROJECT_ID} with a non-empty first line, so the shim exits without "
+                "running the guard")
     if hc._repo_root(str(path)) is None:
         return "no .git entry at or above the folder, so the shim finds no repository root"
     return "the folder lies in a repository root or a dispatch worktree that rule 1 refuses"
+
+
+def not_guardable_reason(path: Path) -> Optional[str]:
+    """Why a T0 folder is outside the guard for good: it has no usable ``.vnx-project-id``, the
+    first part of rule 1 (``rule1_reason``). No user-level entry can run there, so no account
+    can repair it: it is listed and awaits an operator decision (it never fails the check)."""
+    return None if hc.project_id(path) is not None else NO_PROJECT_ID
 
 
 def build_inventory(home: Path, scan_roots: Sequence[Path]) -> List[ProjectEntry]:
@@ -153,9 +179,12 @@ def build_inventory(home: Path, scan_roots: Sequence[Path]) -> List[ProjectEntry
         if real in seen:
             continue
         seen.add(real)
-        has_t0 = (Path(real) / T0_MARKER).is_file()
-        inventory.append(ProjectEntry(Path(real), hc.project_id(real), real in registered,
-                                      has_t0, rule1_reason(Path(real)) if has_t0 else None))
+        root = Path(real)
+        has_t0 = (root / T0_MARKER).is_file()
+        not_guardable = not_guardable_reason(root) if has_t0 else None
+        inventory.append(ProjectEntry(
+            root, hc.project_id(real), real in registered, has_t0,
+            rule1_reason(root) if has_t0 and not not_guardable else None, not_guardable))
     return inventory
 
 
@@ -223,6 +252,10 @@ def account_report(config_dir: Path, projects: Sequence[ProjectEntry],
     for project in projects:
         if not project.has_t0:
             continue
+        if project.not_guardable:
+            report.coverage[str(project.path)] = {
+                ALL_EVENTS: f"{NOT_GUARDABLE}: {project.not_guardable}"}
+            continue
         if project.rule1_reason:
             report.coverage[str(project.path)] = {
                 ALL_EVENTS: f"{NOT_GUARDED} ({project.rule1_reason})"}
@@ -236,7 +269,8 @@ def account_report(config_dir: Path, projects: Sequence[ProjectEntry],
 
 
 def run_check(*, home: Path, config_dirs: Sequence[str] = (), scan_roots: Sequence[str] = (),
-              env: Optional[Mapping[str, str]] = None) -> CheckReport:
+              env: Optional[Mapping[str, str]] = None,
+              require_user: bool = False) -> CheckReport:
     mapping = dict(os.environ if env is None else env)
     mapping["HOME"] = str(home)
     report = CheckReport(home)
@@ -248,11 +282,14 @@ def run_check(*, home: Path, config_dirs: Sequence[str] = (), scan_roots: Sequen
         accounts = []
     if not accounts:
         report.problems.append(f"no Claude Code account found under {home}")
-    report.projects = build_inventory(home, [Path(r).expanduser() for r in scan_roots])
+    report.scan_roots = [Path(r).expanduser() for r in scan_roots]
+    report.projects = build_inventory(home, report.scan_roots)
     for account in accounts:
         acc = account_report(account, report.projects, account_env(home, account, mapping))
         report.accounts.append(acc)
         report.problems.extend(_account_problems(acc))
+        if require_user:
+            report.problems.extend(require_user_problems(acc))
     return report
 
 
@@ -272,12 +309,28 @@ def _account_problems(acc: AccountReport) -> List[str]:
                         for event, state in acc.entries.items() if state != gi.STATE_OK)
     for project, rows in acc.coverage.items():
         unguarded = rows.get(ALL_EVENTS, "")
+        if unguarded.startswith(NOT_GUARDABLE):
+            continue
         if unguarded.startswith(NOT_GUARDED):
             problems.append(f"{acc.config_dir}: {project} is {unguarded}")
             continue
         bad = sorted(label for label, text in rows.items() if text in ("missing", "unknown"))
         if bad:
             problems.append(f"{acc.config_dir}: {project} is not covered on {', '.join(bad)}")
+    return problems
+
+
+def require_user_problems(acc: AccountReport) -> List[str]:
+    """Under ``--require-user``: the user level is the only registration that counts, so every
+    event a project answers with its own settings is a failure. A project that is not guardable
+    (no ``.vnx-project-id``) never fails this flag: it awaits an operator decision, and one that
+    fails rule 1 is already reported by the plain check."""
+    problems: List[str] = []
+    for project, rows in acc.coverage.items():
+        project_covered = {label.split(":", 1)[0] for label, text in rows.items()
+                           if text.startswith("project (")}
+        problems.extend(f"{acc.config_dir}: {project}: {event} is {PROJECT_ONLY}"
+                        for event, _ in gi.GUARD_EVENTS if event in project_covered)
     return problems
 
 
@@ -295,13 +348,36 @@ def render_report(report: CheckReport) -> str:
         lines.append(f"  trusted repo root: {acc.trusted_root}")
     lines.extend(_shim_lines(report.home))
     lines.append("Projects")
+    lines.append(_scope_line(report))
     for project in report.projects:
         lines.extend(_project_lines(report, project))
     if not report.projects:
         lines.append("  (none in the registry or under a --scan-root)")
+    closing = _not_guardable_line(report)
+    if closing:
+        lines.append(closing)
     lines.append("OK" if report.ok else "NOT OK")
     lines.extend(f"  - {problem}" for problem in report.problems)
     return "\n".join(lines) + "\n"
+
+
+def _scope_line(report: CheckReport) -> str:
+    """What the inventory read: the registry alone, or the registry plus named scan roots."""
+    if report.scan_roots:
+        roots = ", ".join(str(root) for root in report.scan_roots)
+        return f"scope: registry plus every .vnx-project-id and T0 folder under: {roots}"
+    return (f"scope: registry only ({len(report.projects)} projects); "
+            "pass --scan-root DIR to include unregistered projects")
+
+
+def _not_guardable_line(report: CheckReport) -> Optional[str]:
+    """One closing line for the T0 folders no account can repair (no ``.vnx-project-id``)."""
+    count = sum(1 for project in report.projects if project.not_guardable)
+    if not count:
+        return None
+    noun = "folder" if count == 1 else "folders"
+    return (f"{count} {noun} with a T0 but no usable {PROJECT_ID_FILE}: not guardable; "
+            "they await an operator decision.")
 
 
 def _shim_lines(home: Path) -> List[str]:
@@ -326,7 +402,8 @@ def _project_lines(report: CheckReport, project: ProjectEntry) -> List[str]:
 
 
 def run_check_command(*, home: Path, config_dirs: Sequence[str], scan_roots: Sequence[str],
-                      out) -> int:
-    report = run_check(home=home, config_dirs=config_dirs, scan_roots=scan_roots)
+                      out, require_user: bool = False) -> int:
+    report = run_check(home=home, config_dirs=config_dirs, scan_roots=scan_roots,
+                       require_user=require_user)
     out.write(render_report(report))
     return 0 if report.ok else 1

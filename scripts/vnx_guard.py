@@ -2,7 +2,7 @@
 """vnx guard — install and check the user-level T0 context guard.
 
   vnx guard install [--dry-run] [--config-dir DIR]...
-  vnx guard check   [--config-dir DIR]... [--scan-root DIR]...
+  vnx guard check   [--config-dir DIR]... [--scan-root DIR]... [--require-user]
 
 The logic lives in scripts/lib/guard_install.py and scripts/lib/guard_check.py. This file is the
 one argument parser both entrances share: ``bin/vnx guard`` runs it directly and the pip CLI
@@ -30,9 +30,19 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--dry-run", action="store_true",
                          help="list the accounts and print the diff per file; write nothing")
     check = subs.add_parser(
-        "check", help="report, per account and per VNX project, where the guard runs")
+        "check",
+        help="report, per account and per VNX project, where the guard runs",
+        description=(
+            "Report, per account and per VNX project, where the guard runs. Exit codes: 0 when "
+            "every project that passes rule 1 passes the active rule, 1 when any project fails "
+            "it, 2 for a usage error (argparse). A T0 folder with no usable .vnx-project-id is "
+            "listed as not guardable and never changes the exit code."))
     check.add_argument("--scan-root", action="append", default=[], metavar="DIR",
-                       help="also inventory every .vnx-project-id under DIR (depth 3); repeatable")
+                       help="also inventory every .vnx-project-id and T0 folder under DIR "
+                            "(depth 3); repeatable")
+    check.add_argument("--require-user", action="store_true",
+                       help="every project that passes rule 1 must be covered at user level on "
+                            "every account; a project-level registration alone fails")
     for sub in (install, check):
         sub.add_argument("--config-dir", action="append", default=[], metavar="DIR",
                          help="a Claude config directory instead of discovery; repeatable")
@@ -48,7 +58,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                                          dry_run=args.dry_run, out=sys.stdout)
     if args.guard_command == "check":
         return guard_check.run_check_command(home=home, config_dirs=args.config_dir,
-                                             scan_roots=args.scan_root, out=sys.stdout)
+                                             scan_roots=args.scan_root, out=sys.stdout,
+                                             require_user=args.require_user)
     parser.print_usage(sys.stderr)
     return 1
 

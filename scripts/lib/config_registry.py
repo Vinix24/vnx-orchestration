@@ -286,11 +286,12 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         approval=True,
         subsystem="signed-attestation", status="PARK"),
     "VNX_JUNIT_COUNTS": _e(
-        "VNX_JUNIT_COUNTS", "bool", "0", "gate",
-        "Path 2 (report_parser) takes its receipt test counts from the builder's JUnit XML "
-        "beside the report (track deterministische-testverificatie) instead of the prose in "
-        "the Verification section. Off = today's text counts, byte for byte; PR-5 wires the "
-        "envelope path and turns it on for both write paths at once.",
+        "VNX_JUNIT_COUNTS", "bool", "1", "gate",
+        "Both receipt write paths (report_parser and the envelope sub-path) take their "
+        "receipt test counts from the builder's JUnit XML beside the report (track "
+        "deterministische-testverificatie) instead of the prose in the Verification "
+        "section. Off = today's text counts, byte for byte; this single setting is the "
+        "rollback for both paths at once.",
         subsystem="deterministic-test-verification", status="ACTIVATE"),
     "VNX_MIGRATION_SYSTEM": _e(
         "VNX_MIGRATION_SYSTEM", "enum", "manifest", "dispatch",
@@ -345,6 +346,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "tag measured 36->42 commits behind main within one evening.",
         approval=True,
         subsystem="central-install-cutover", status="ACTIVATE"),
+
+    # Fleet pin audit (track vnx-fleet-pin-audit, PR-7): how far a project's
+    # engine pin may lag the store's `current` before scripts/fleet_pin_audit.py
+    # reports it as a finding instead of a WARN. Read through
+    # config_registry.get() (never os.environ directly), so the standard
+    # precedence chain applies. A non-numeric or negative value is loud on
+    # stderr and falls back to the default. An UNKNOWN distance is never a
+    # finding, and never ok: not measurable is not a pass.
+    "VNX_FLEET_PIN_MAX_LAG_RELEASES": _e(
+        "VNX_FLEET_PIN_MAX_LAG_RELEASES", "string", "3", "gate",
+        "Max releases a project's .vnx-version pin may lag the store's current "
+        "before fleet_pin_audit.py reports it as a finding (exit 1) instead of a "
+        "WARN. Default 3 mirrors fleet_pin_audit.DEFAULT_MAX_LAG_RELEASES. An "
+        "unknown behind-count always stays a WARN.",
+        approval=True,
+        subsystem="fleet-pin-audit", status="ACTIVATE"),
 
     # Operator directive 2026-08-21 (dispatch-20260821-t0-tmux-concurrency-10): the
     # claude-tmux N-slot lock's concurrency cap, raised from 5 to 10 and made

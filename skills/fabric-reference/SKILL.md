@@ -56,6 +56,7 @@ vnx horizon list                    # actionable-by-default: done hidden
 vnx horizon list --all              # include done tracks
 vnx horizon list --horizon now --phase queued   # the real open NOW work
 vnx horizon show <track_id>
+vnx horizon queue [--objective <track_id>] [--all]   # queued deliverables: state, PR, deps
 vnx horizon reconcile               # git-grounded auto-close CHECK (no writes)
 vnx horizon reconcile --apply       # close CONFIRMED tracks (PR merge verified via gh)
 vnx horizon close <track_id> --apply --approval-id <token>   # human-gated single close

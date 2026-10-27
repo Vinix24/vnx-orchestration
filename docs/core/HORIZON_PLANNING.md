@@ -148,6 +148,14 @@ outcome in 35 of 36 runs.
   (`plan_gate_panel.second_seat_from_start`), both seats read the plan in its
   first round and a PASS needs both readable verdicts (quorum 2). The trace says
   `both seats from the start (<class> path <path>)`.
+- **Both seats from the start for irreversible paths (ADR-030, amendment
+  2026-10-25).** After those classes, a path in an irreversible category of
+  `smart_router.irreversible_path_category` brings the second seat in too:
+  `schema-migration`, `receipt-format` (the receipt and ledger format files),
+  `fleet-default` (`agents/`, `skills/`, `.claude/skills/`, `.claude/terminals/`),
+  named in that order. The trace says
+  `both seats from the start (irreversible <category> path <path>)`. A plan
+  that touches only `docs/` keeps one seat.
 - **An operator override** (`--panel-seats <labels>`) runs exactly the seats it
   names, without escalation, under the quorum of two for several seats. The
   trace logs it as `plan-gate override:` and names the default seat it replaced.

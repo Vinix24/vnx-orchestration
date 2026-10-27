@@ -54,8 +54,10 @@ elsewhere in a sentence marks a run: "baseline", "mutation", "on main" or
 
 ``verification_record`` turns that reading into the ADR-035 ``verification{}``
 shape. Both write paths (``report_parser._build_enhanced_receipt`` and
-``envelope_govern_support._verification_from_report``) call it, so one report
-yields one verification on either path. A gate-runner dispatch
+``envelope_govern_support._verification_from_report``) call
+``verification_record_for_report``, which decides the JUnit sidecar question
+and then delegates to ``verification_record``, so one report yields one
+verification on either path and the two paths cannot drift. A gate-runner dispatch
 (``kimi-gate-pr<N>-<ts>``) is review evidence for another dispatch's PR, not a
 work run: its reviewer's own test runs are not that PR's verification, so it
 gets ``method="gate_evidence"``, no counts, and ``receipt_verdict`` treats
@@ -345,6 +347,64 @@ def from_junit(xml_path: Union[str, Path],
         return {"passed": passed, "failed": failed, "skipped": skipped}, None
     except Exception as exc:  # the reader's contract is "never raise", and the reason is returned
         return None, f"JUnit file could not be read: {type(exc).__name__}: {exc}"
+
+
+def junit_counts_enabled() -> bool:
+    """The one reading of ``VNX_JUNIT_COUNTS`` for BOTH receipt write paths.
+
+    Off is today's behaviour (the text counts, no new keys), so an unreadable
+    config reads as off: turning machine-measured counts on takes positive
+    evidence, never the absence of a readable setting. Both paths call this
+    through ``verification_record_for_report`` below, so the two cannot
+    switch independently.
+    """
+    try:
+        import config_runtime
+        return config_runtime.get_bool("VNX_JUNIT_COUNTS")
+    except Exception:  # vnx-silent-except: config module unavailable -> the pre-flag text-count behaviour
+        return False
+
+
+def verification_record_for_report(validation: Dict[str, Any],
+                                   dispatch_id: Any,
+                                   report_path: Union[str, Path]) -> Dict[str, Any]:
+    """The ``verification{}`` both receipt write paths build for one report.
+
+    ADR-035 §12: with ``VNX_JUNIT_COUNTS`` on, the counts come from the
+    builder's JUnit sidecar (``count_source: "junit_worker"``); a missing
+    sidecar keeps the text counts with ``count_source: "report_text"``; a
+    refused one keeps them and names why (``junit_rejected``). A failure
+    recorded in either reading is never erased: ``tests_failed`` is the
+    higher of the two and ``count_mismatch`` says they disagreed. Off is
+    exactly ``verification_record(validation, dispatch_id)``, no new keys.
+
+    Path 1 (``envelope_govern_support._verification_from_report``) and
+    Path 2 (``report_parser._build_verification``) both call this, so no
+    window exists in which one path reads the XML while the other reads the
+    report text.
+    """
+    if not junit_counts_enabled():
+        return verification_record(validation, dispatch_id)
+    xml_path = junit_sidecar_path(report_path)
+    if not xml_path.is_file():
+        return verification_record(validation, dispatch_id, count_source="report_text")
+    counts, rejected = from_junit(xml_path, dispatch_id)
+    if counts is None:
+        return verification_record(validation, dispatch_id, count_source="report_text",
+                                   junit_rejected=rejected)
+    # A text run exists only when extract_validation counted one; without
+    # one there is nothing to disagree with (0/0 is not a claim).
+    text_present = "test_method" in validation
+    text_passed = int(validation.get("tests_passed") or 0)
+    text_failed = int(validation.get("tests_failed") or 0)
+    mismatch = text_present and (
+        text_passed != counts["passed"] or text_failed != counts["failed"])
+    merged = dict(validation)
+    merged["tests_passed"] = counts["passed"]
+    merged["tests_failed"] = max(counts["failed"], text_failed)
+    merged["test_method"] = "pytest"
+    return verification_record(merged, dispatch_id, count_source="junit_worker",
+                               count_mismatch=mismatch)
 
 
 def verification_record(validation: Dict[str, Any],

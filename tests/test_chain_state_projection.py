@@ -140,7 +140,6 @@ class TestChainStateDerivation:
         init_chain_state(
             state_dir,
             chain_id="chain-001",
-            feature_plan="FEATURE_PLAN.md",
             feature_sequence=["PR-0", "PR-1"],
             chain_origin_sha="deadbeef",
         )
@@ -157,7 +156,7 @@ class TestChainStateDerivation:
             {"id": "PR-0", "status": "completed", "dependencies": [], "title": "T0", "track": "C", "gate": "g0"},
             {"id": "PR-1", "status": "queued", "dependencies": ["PR-0"], "title": "T1", "track": "B", "gate": "g1"},
         ])
-        init_chain_state(state_dir, chain_id="chain-002", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="chain-002",
                           feature_sequence=["PR-0", "PR-1"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="ADVANCEMENT_BLOCKED", feature_id="PR-1",
                                   actor="T0", reason="blocker open items")
@@ -172,7 +171,7 @@ class TestChainStateDerivation:
             {"id": "PR-0", "status": "completed", "dependencies": [], "title": "T0", "track": "C", "gate": "g0"},
             {"id": "PR-1", "status": "queued", "dependencies": ["PR-0"], "title": "T1", "track": "B", "gate": "g1"},
         ])
-        init_chain_state(state_dir, chain_id="chain-003", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="chain-003",
                           feature_sequence=["PR-0", "PR-1"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="RECOVERY_PENDING", feature_id="PR-1",
                                   actor="T0", reason="dispatch failed")
@@ -186,7 +185,7 @@ class TestChainStateDerivation:
         _write_pr_queue(state_dir, [
             {"id": "PR-0", "status": "completed", "dependencies": [], "title": "T0", "track": "C", "gate": "g0"},
         ])
-        init_chain_state(state_dir, chain_id="chain-004", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="chain-004",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="CHAIN_HALTED", feature_id="PR-0",
                                   actor="T0", reason="max retries exceeded")
@@ -201,7 +200,7 @@ class TestChainStateDerivation:
             {"id": "PR-0", "status": "completed", "dependencies": [], "title": "T0", "track": "C", "gate": "g0"},
             {"id": "PR-1", "status": "completed", "dependencies": ["PR-0"], "title": "T1", "track": "B", "gate": "g1"},
         ])
-        init_chain_state(state_dir, chain_id="chain-005", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="chain-005",
                           feature_sequence=["PR-0", "PR-1"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="CHAIN_COMPLETE", feature_id="PR-1", actor="T0", reason="all done")
         projection = build_chain_projection(state_dir)
@@ -569,7 +568,7 @@ class TestNextFeature:
             {"id": "PR-1", "status": "queued", "dependencies": ["PR-0"], "title": "T1", "track": "B", "gate": "g1"},
             {"id": "PR-2", "status": "queued", "dependencies": ["PR-1"], "title": "T2", "track": "B", "gate": "g2"},
         ])
-        init_chain_state(state_dir, chain_id="c1", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="c1",
                           feature_sequence=["PR-0", "PR-1", "PR-2"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-1")
         projection = build_chain_projection(state_dir)
@@ -580,7 +579,7 @@ class TestNextFeature:
         _write_pr_queue(state_dir, [
             {"id": "PR-0", "status": "completed", "dependencies": [], "title": "T", "track": "C", "gate": "g"},
         ])
-        init_chain_state(state_dir, chain_id="c2", feature_plan="FEATURE_PLAN.md",
+        init_chain_state(state_dir, chain_id="c2",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="CHAIN_COMPLETE", feature_id="PR-0")
         projection = build_chain_projection(state_dir)
@@ -596,7 +595,6 @@ class TestStateLifecycle:
         record = init_chain_state(
             state_dir,
             chain_id="test-chain",
-            feature_plan="FEATURE_PLAN.md",
             feature_sequence=["PR-0", "PR-1"],
             chain_origin_sha="abcdef12",
         )
@@ -604,8 +602,29 @@ class TestStateLifecycle:
         assert record["chain_id"] == "test-chain"
         assert (state_dir / "chain_state.json").exists()
 
+    def test_init_takes_no_feature_plan_argument(self, state_dir: Path) -> None:
+        """ADR-047: a chain is initialised without a plan reference.
+
+        The signature carries no ``feature_plan`` parameter and the record
+        carries no ``feature_plan`` field, so callers cannot re-introduce a
+        second planning layer here.
+        """
+        with pytest.raises(TypeError, match="feature_plan"):
+            init_chain_state(
+                state_dir,
+                chain_id="no-plan",
+                feature_plan="FEATURE_PLAN.md",
+                feature_sequence=["PR-0"],
+                chain_origin_sha="",
+            )
+
+        record = init_chain_state(
+            state_dir, chain_id="no-plan", feature_sequence=["PR-0"], chain_origin_sha=""
+        )
+        assert "feature_plan" not in record
+
     def test_transition_updates_state_file(self, state_dir: Path) -> None:
-        init_chain_state(state_dir, chain_id="t1", feature_plan="FP.md",
+        init_chain_state(state_dir, chain_id="t1",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         record = record_state_transition(
             state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-0", actor="T0", reason="dispatch sent"
@@ -614,7 +633,7 @@ class TestStateLifecycle:
         assert record["current_feature_id"] == "PR-0"
 
     def test_audit_trail_is_appended(self, state_dir: Path) -> None:
-        init_chain_state(state_dir, chain_id="audit-test", feature_plan="FP.md",
+        init_chain_state(state_dir, chain_id="audit-test",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-0")
         record_state_transition(state_dir, to_state="FEATURE_ADVANCING", feature_id="PR-0")
@@ -633,7 +652,7 @@ class TestStateLifecycle:
         _write_pr_queue(state_dir, [
             {"id": "PR-0", "status": "queued", "dependencies": [], "title": "T", "track": "C", "gate": "g"},
         ])
-        init_chain_state(state_dir, chain_id="requeue-test", feature_plan="FP.md",
+        init_chain_state(state_dir, chain_id="requeue-test",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         record_state_transition(state_dir, to_state="FEATURE_ACTIVE", feature_id="PR-0")
         record_state_transition(state_dir, to_state="FEATURE_FAILED", feature_id="PR-0", reason="ci failed")
@@ -644,7 +663,7 @@ class TestStateLifecycle:
         assert projection["requeue_history"].get("PR-0", {}).get("total_attempts", 0) >= 1
 
     def test_invalid_state_raises_value_error(self, state_dir: Path) -> None:
-        init_chain_state(state_dir, chain_id="err-test", feature_plan="FP.md",
+        init_chain_state(state_dir, chain_id="err-test",
                           feature_sequence=["PR-0"], chain_origin_sha="")
         with pytest.raises(ValueError, match="Invalid chain state"):
             record_state_transition(state_dir, to_state="INVALID_STATE")

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """Queue state reconciler — derives PR queue status from canonical runtime evidence.
 
-Implements the derivation algorithm from docs/core/70_QUEUE_TRUTH_CONTRACT.md.
+Implements the derivation algorithm from docs/core/70_QUEUE_TRUTH_CONTRACT.md,
+with the plan source retired by ADR-047 §4: a PR is in the queue when a
+dispatch names it. No plan file is read, and PRs carry no dependencies of
+their own: dependencies exist only between tracks (ADR-047 §5).
 
 Priority hierarchy (higher = more authoritative):
-  1. FEATURE_PLAN.md          — valid PR IDs and dependency graph
-  2. Dispatch filesystem       — active/completed/pending/staging/rejected
-  3. Receipts                  — terminal event confirmation
-  4. Queue projection files    — cached views only (never primary truth)
-  5. Progress projections      — advisory only
+  1. Dispatch filesystem       — PR identity (PR-ID line) and active/completed/pending/staging/rejected
+  2. Receipts                  — terminal event confirmation
+  3. Queue projection files    — cached views only (never primary truth)
 
 Usage:
   from queue_reconciler import QueueReconciler
-  r = QueueReconciler(dispatch_dir, receipts_file, feature_plan_path)
+  r = QueueReconciler(dispatch_dir, receipts_file)
   result = r.reconcile()
 """
 
@@ -44,19 +45,6 @@ RECEIPT_TERMINAL_EVENTS = frozenset({
 
 
 @dataclass
-class PREntry:
-    pr_id: str
-    title: str
-    dependencies: List[str]
-    track: str = "?"
-    gate: str = ""
-    skill: str = ""
-    risk_class: str = "medium"
-    merge_policy: str = "human"
-    review_stack: List[str] = field(default_factory=list)
-
-
-@dataclass
 class DriftWarning:
     pr_id: str
     severity: str  # "blocking" | "warning" | "info"
@@ -75,7 +63,6 @@ class PRReconciled:
 
 @dataclass
 class ReconcileResult:
-    feature_name: str
     prs: List[PRReconciled]
     drift_warnings: List[DriftWarning]
     reconciled_at: str
@@ -83,7 +70,6 @@ class ReconcileResult:
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "feature_name": self.feature_name,
             "reconciled_at": self.reconciled_at,
             "has_blocking_drift": self.has_blocking_drift,
             "prs": [
@@ -109,94 +95,40 @@ class ReconcileResult:
 
 
 # ---------------------------------------------------------------------------
-# Feature plan parser
-# ---------------------------------------------------------------------------
-
-def parse_feature_plan(plan_path: Path) -> tuple[str, List[PREntry]]:
-    """Parse FEATURE_PLAN.md and return (feature_name, list of PREntry).
-
-    Supports both legacy (## PR-N: Title) and new (### F<N>-PR<M>: Title) formats,
-    including mixed files where both appear.
-    """
-    content = plan_path.read_text(encoding="utf-8")
-
-    # Feature name — legacy '# Feature: X' first, else first document heading
-    feature_name = "Unknown"
-    name_match = re.search(r"^#\s+Feature:\s*(.+)$", content, re.MULTILINE)
-    if name_match:
-        feature_name = name_match.group(1).strip()
-    else:
-        first_heading = re.search(r"^#\s+(.+)$", content, re.MULTILINE)
-        if first_heading:
-            feature_name = first_heading.group(1).strip()
-
-    # Collect PR section headers from both formats, ordered by file position
-    legacy_pat = re.compile(r"^##\s+(PR-\d+):\s*(.+)$", re.MULTILINE)
-    new_pat = re.compile(r"^###\s+(F\d+-PR\d+):\s*(.+)$", re.MULTILINE)
-
-    # (file_position, pr_id, title, section_content_start)
-    all_pr_headers: List[tuple[int, str, str, int]] = []
-    for m in (*legacy_pat.finditer(content), *new_pat.finditer(content)):
-        all_pr_headers.append((m.start(), m.group(1), m.group(2).strip(), m.end()))
-    all_pr_headers.sort(key=lambda x: x[0])
-
-    prs: List[PREntry] = []
-    for i, (_, pr_id, title, section_start) in enumerate(all_pr_headers):
-        section_end = all_pr_headers[i + 1][0] if i + 1 < len(all_pr_headers) else len(content)
-        section = content[section_start:section_end]
-
-        def extract(pattern: str, default: str = "") -> str:
-            m = re.search(pattern, section, re.MULTILINE | re.IGNORECASE)
-            return m.group(1).strip() if m else default
-
-        # Dependencies: [PR-0, PR-1] or []
-        deps_raw = extract(r"\*\*Dependencies\*\*:\s*\[([^\]]*)\]")
-        if not deps_raw:
-            deps_raw = extract(r"^Dependencies:\s*\[([^\]]*)\]")
-        dependencies: List[str] = []
-        if deps_raw.strip():
-            dependencies = [d.strip() for d in deps_raw.split(",") if d.strip()]
-
-        track = extract(r"\*\*Track\*\*:\s*(\S+)", "?")
-        gate = extract(r"\*\*Quality Gate\*\*\s*\n[`]([^`]+)[`]")
-        if not gate:
-            g = re.search(r"`(gate_\w+)`", section)
-            gate = g.group(1) if g else ""
-        skill = extract(r"\*\*Skill\*\*:\s*(\S+)")
-        risk_class = extract(r"\*\*Risk-Class\*\*:\s*(\S+)", "medium").lower()
-        merge_policy = extract(r"\*\*Merge-Policy\*\*:\s*(\S+)", "human").lower()
-        review_raw = extract(r"\*\*Review-Stack\*\*:\s*(.+)")
-        review_stack = [r.strip() for r in review_raw.split(",") if r.strip()] if review_raw else []
-
-        prs.append(
-            PREntry(
-                pr_id=pr_id,
-                title=title,
-                dependencies=dependencies,
-                track=track,
-                gate=gate,
-                skill=skill,
-                risk_class=risk_class,
-                merge_policy=merge_policy,
-                review_stack=review_stack,
-            )
-        )
-
-    return feature_name, prs
-
-
-# ---------------------------------------------------------------------------
 # Dispatch directory scanner
 # ---------------------------------------------------------------------------
 
-def _parse_dispatch_pr_id(dispatch_file: Path) -> Optional[str]:
-    """Extract PR-ID from a dispatch file's metadata block."""
-    try:
-        content = dispatch_file.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    m = re.search(r"^PR-ID:\s*(\S+)", content, re.MULTILINE)
-    return m.group(1).strip() if m else None
+_PR_ID_RE = re.compile(r"^PR-ID:\s*(\S+)", re.MULTILINE)
+_MANAGER_FIELD_RE = re.compile(
+    r"^(Track|Gate|Role|Risk-Class|Merge-Policy|Review-Stack):[ \t]*(\S.*)$", re.MULTILINE
+)
+_TITLE_RE = re.compile(r"^#[ \t]+(.+)$", re.MULTILINE)
+
+
+def _parse_dispatch_metadata(content: str) -> Dict[str, Any]:
+    """The queue metadata a dispatch file declares in its Manager Block.
+
+    ADR-047: where the risk class cannot be derived it is ``high``, never
+    ``medium``; an absent merge policy is the stricter ``human``.
+    """
+    fields: Dict[str, str] = {}
+    for m in _MANAGER_FIELD_RE.finditer(content):
+        fields.setdefault(m.group(1), m.group(2).strip())
+    title = _TITLE_RE.search(content)
+    review_stack = [
+        gate.strip() for gate in fields.get("Review-Stack", "").split(",")
+        if gate.strip() and gate.strip().lower() != "none"
+    ]
+    return {
+        "title": title.group(1).strip() if title else "",
+        "track": fields.get("Track", "?"),
+        "dependencies": [],
+        "gate": fields.get("Gate", ""),
+        "skill": fields.get("Role", ""),
+        "risk_class": fields.get("Risk-Class", "high").lower(),
+        "merge_policy": fields.get("Merge-Policy", "human").lower(),
+        "review_stack": review_stack,
+    }
 
 
 @dataclass
@@ -205,6 +137,7 @@ class DispatchRecord:
     pr_id: Optional[str]
     dir_state: str  # active | completed | pending | staging | rejected
     file_path: Path
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 def scan_dispatch_dirs(dispatch_dir: Path) -> List[DispatchRecord]:
@@ -217,14 +150,18 @@ def scan_dispatch_dirs(dispatch_dir: Path) -> List[DispatchRecord]:
         for f in sorted(sub.iterdir()):
             if not f.is_file() or not f.suffix == ".md":
                 continue
-            dispatch_id = f.stem  # filename without extension
-            pr_id = _parse_dispatch_pr_id(f)
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                content = ""
+            pr_match = _PR_ID_RE.search(content)
             records.append(
                 DispatchRecord(
-                    dispatch_id=dispatch_id,
-                    pr_id=pr_id,
+                    dispatch_id=f.stem,  # filename without extension
+                    pr_id=pr_match.group(1).strip() if pr_match else None,
                     dir_state=dir_name,
                     file_path=f,
+                    metadata=_parse_dispatch_metadata(content),
                 )
             )
     return records
@@ -283,7 +220,6 @@ class QueueReconciler:
     Args:
         dispatch_dir:    Path to $VNX_DISPATCH_DIR
         receipts_file:   Path to $VNX_STATE_DIR/t0_receipts.ndjson
-        feature_plan:    Path to FEATURE_PLAN.md
         projection_file: Path to pr_queue_state.json (for drift detection)
     """
 
@@ -291,12 +227,10 @@ class QueueReconciler:
         self,
         dispatch_dir: Path,
         receipts_file: Path,
-        feature_plan: Path,
         projection_file: Optional[Path] = None,
     ) -> None:
         self.dispatch_dir = dispatch_dir
         self.receipts_file = receipts_file
-        self.feature_plan = feature_plan
         self.projection_file = projection_file
 
     # ------------------------------------------------------------------
@@ -304,78 +238,35 @@ class QueueReconciler:
     # ------------------------------------------------------------------
 
     def reconcile(self) -> ReconcileResult:
-        """Run full reconciliation and return the result."""
-        feature_name, plan_prs = parse_feature_plan(self.feature_plan)
-        dispatch_records = scan_dispatch_dirs(self.dispatch_dir)
+        """Run full reconciliation and return the result.
+
+        Every PR a dispatch names is a queue row (ADR-047 §4). A dispatch
+        without a PR-ID line names no PR and is not a row.
+        """
         confirmed_dispatch_ids = load_receipt_dispatch_ids(self.receipts_file)
         projected = self._load_projection()
 
-        # Build lookup: pr_id -> list of DispatchRecord
-        pr_dispatches: Dict[str, List[DispatchRecord]] = {pr.pr_id: [] for pr in plan_prs}
-        foreign_dispatches: List[DispatchRecord] = []
-        valid_pr_ids = {pr.pr_id for pr in plan_prs}
+        pr_dispatches: Dict[str, List[DispatchRecord]] = {}
+        for rec in scan_dispatch_dirs(self.dispatch_dir):
+            if rec.pr_id:
+                pr_dispatches.setdefault(rec.pr_id, []).append(rec)
 
-        for rec in dispatch_records:
-            if rec.pr_id and rec.pr_id in valid_pr_ids:
-                pr_dispatches[rec.pr_id].append(rec)
-            elif rec.pr_id:
-                foreign_dispatches.append(rec)
-
-        # Derive state for each PR (must process in dependency order for
-        # blocked/pending resolution based on derived state of dependencies)
-        ordered_pr_ids = _topological_sort([p.pr_id for p in plan_prs], {p.pr_id: p.dependencies for p in plan_prs})
-        pr_by_id = {p.pr_id: p for p in plan_prs}
-        derived_states: Dict[str, str] = {}
         reconciled_prs: List[PRReconciled] = []
-
-        for pr_id in ordered_pr_ids:
-            pr_entry = pr_by_id[pr_id]
-            dispatches = pr_dispatches.get(pr_id, [])
-            state, provenance = self._derive_state(
-                pr_id=pr_id,
-                dispatches=dispatches,
-                confirmed_dispatch_ids=confirmed_dispatch_ids,
-                dependency_states={dep: derived_states.get(dep, "blocked") for dep in pr_entry.dependencies},
+        for pr_id in sorted(pr_dispatches):
+            dispatches = pr_dispatches[pr_id]
+            state, provenance = self._derive_state(dispatches, confirmed_dispatch_ids)
+            source = next(
+                (d for d in dispatches if d.dispatch_id == provenance["dispatch_id"]),
+                dispatches[0],
             )
-            derived_states[pr_id] = state
-
             reconciled_prs.append(
-                PRReconciled(
-                    pr_id=pr_id,
-                    state=state,
-                    provenance=provenance,
-                    metadata={
-                        "title": pr_entry.title,
-                        "track": pr_entry.track,
-                        "dependencies": pr_entry.dependencies,
-                        "gate": pr_entry.gate,
-                        "skill": pr_entry.skill,
-                        "risk_class": pr_entry.risk_class,
-                        "merge_policy": pr_entry.merge_policy,
-                        "review_stack": pr_entry.review_stack,
-                    },
-                )
+                PRReconciled(pr_id=pr_id, state=state, provenance=provenance, metadata=dict(source.metadata))
             )
 
-        # Drift detection
         drift_warnings = self._detect_drift(reconciled_prs, projected)
-
-        # Warn about foreign dispatches (EC-4)
-        for fd in foreign_dispatches:
-            drift_warnings.append(
-                DriftWarning(
-                    pr_id=fd.pr_id or "(unknown)",
-                    severity="warning",
-                    derived_state="(not in feature plan)",
-                    projected_state="(unknown)",
-                    message=f"Dispatch {fd.dispatch_id} references PR {fd.pr_id!r} which is not in FEATURE_PLAN.md. Stale or foreign dispatch.",
-                )
-            )
-
         has_blocking = any(w.severity == "blocking" for w in drift_warnings)
 
         return ReconcileResult(
-            feature_name=feature_name,
             prs=reconciled_prs,
             drift_warnings=drift_warnings,
             reconciled_at=datetime.now(tz=timezone.utc).isoformat(),
@@ -388,12 +279,13 @@ class QueueReconciler:
 
     def _derive_state(
         self,
-        pr_id: str,
         dispatches: List[DispatchRecord],
         confirmed_dispatch_ids: Set[str],
-        dependency_states: Dict[str, str],
     ) -> tuple[str, Dict[str, Any]]:
-        """Apply the contract's 5-step derivation algorithm.
+        """Apply the contract's derivation steps to the dispatches naming one PR.
+
+        There is no blocked step: a PR has no dependencies of its own
+        (ADR-047 §5), so a PR that is neither active nor completed is pending.
 
         Returns (state, provenance_dict).
         """
@@ -424,35 +316,18 @@ class QueueReconciler:
                 "unconfirmed_completion": not receipt_confirmed,
             }
 
-        # Step 4: all dependencies completed → pending
-        all_deps_completed = all(
-            dependency_states.get(dep) == "completed"
-            for dep in dependency_states
-        )
-        if all_deps_completed:
-            # Check if there is a dispatch in pending/staging
-            inflight_dispatches = [
-                d for d in dispatches if d.dir_state in ("pending", "staging")
-            ]
-            evidence_dispatch = inflight_dispatches[0] if inflight_dispatches else None
-            return "pending", {
-                "source": "feature_plan_dependency_graph",
-                "dir": inflight_dispatches[0].dir_state if evidence_dispatch else None,
-                "evidence": str(evidence_dispatch.file_path) if evidence_dispatch else None,
-                "dispatch_id": evidence_dispatch.dispatch_id if evidence_dispatch else None,
-                "receipt_confirmed": False,
-                "dependencies_satisfied": list(dependency_states.keys()),
-            }
-
-        # Step 5: blocked
-        unmet = [dep for dep, s in dependency_states.items() if s != "completed"]
-        return "blocked", {
-            "source": "feature_plan_dependency_graph",
-            "dir": None,
-            "evidence": None,
-            "dispatch_id": None,
+        # Step 4: pending. A dispatch in pending/ or staging/ is the evidence;
+        # a PR named only by a rejected dispatch is pending without one.
+        inflight_dispatches = [
+            d for d in dispatches if d.dir_state in ("pending", "staging")
+        ]
+        evidence_dispatch = inflight_dispatches[0] if inflight_dispatches else None
+        return "pending", {
+            "source": "dispatch_filesystem",
+            "dir": evidence_dispatch.dir_state if evidence_dispatch else None,
+            "evidence": str(evidence_dispatch.file_path) if evidence_dispatch else None,
+            "dispatch_id": evidence_dispatch.dispatch_id if evidence_dispatch else None,
             "receipt_confirmed": False,
-            "blocking_dependencies": unmet,
         }
 
     # ------------------------------------------------------------------
@@ -569,32 +444,3 @@ def _drift_message(pr_id: str, derived: str, projected: str) -> str:
     }
     key = (derived, projected)
     return templates.get(key, f"{pr_id}: derived={derived} but projection={projected}")
-
-
-def _topological_sort(pr_ids: List[str], deps: Dict[str, List[str]]) -> List[str]:
-    """Return PR IDs in topological order (dependencies before dependents).
-
-    If there is a cycle or unknown dep, returns the input order unchanged.
-    """
-    in_degree: Dict[str, int] = {pid: 0 for pid in pr_ids}
-    adj: Dict[str, List[str]] = {pid: [] for pid in pr_ids}
-
-    for pid in pr_ids:
-        for dep in deps.get(pid, []):
-            if dep in in_degree:
-                adj[dep].append(pid)
-                in_degree[pid] += 1
-
-    queue = [pid for pid in pr_ids if in_degree[pid] == 0]
-    ordered: List[str] = []
-    while queue:
-        current = queue.pop(0)
-        ordered.append(current)
-        for dep in adj.get(current, []):
-            in_degree[dep] -= 1
-            if in_degree[dep] == 0:
-                queue.append(dep)
-
-    if len(ordered) != len(pr_ids):
-        return pr_ids  # Fallback on cycle
-    return ordered

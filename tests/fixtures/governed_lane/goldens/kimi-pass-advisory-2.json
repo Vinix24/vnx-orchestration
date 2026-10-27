@@ -1,0 +1,10 @@
+{
+  "findings": [
+    {
+      "message": "scripts/lib/providers/routing_policy.yaml:46 and tests/test_routing_policy.py:427 identify the sole production caller as subprocess_dispatch._maybe_route_cheap_lane, but that symbol does not exist. The actual caller is subprocess_dispatch._select_dispatch_path (scripts/lib/subprocess_dispatch.py:284, with decide_lane called at scripts/lib/subprocess_dispatch.py:329). A maintainer following this new guidance will inspect the wrong path and may miss the actual VNX_ROUTING_POLICY_ENABLED-gated call site.",
+      "severity": "warning"
+    }
+  ],
+  "residual_risk": "The no-production-reader guard is a direct-attribute source scan over scripts/, vnx_cli/, and bin/ only; indirect reads via getattr/asdict or future readers outside those roots would not be caught.",
+  "verdict": "pass"
+}

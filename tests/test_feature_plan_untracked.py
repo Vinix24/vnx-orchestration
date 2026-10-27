@@ -1,11 +1,12 @@
 """Regression guard for OI-1376: FEATURE_PLAN.md must stay untracked.
 
-scripts/build_feature_plan.py (and eleven other state-sync scripts) rewrite
+scripts/build_feature_plan.py (and eleven other state-sync scripts) rewrote
 FEATURE_PLAN.md as a side effect of routine dispatch/reconcile runs. While the
 file was git-tracked, every rewrite turned the worktree dirty and complete
 work got scored as a failure by the dirty check — even though nothing about
-the actual change was wrong. The fix is structural: the file stays on disk as
-a generated artifact, but git no longer tracks it.
+the actual change was wrong. The fix is structural: git no longer tracks it.
+ADR-047 retired the file and B3 deleted the generator; a copy left on disk from
+before that is still ignored, so the ignore rule keeps being guarded here.
 """
 from __future__ import annotations
 

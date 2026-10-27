@@ -1,0 +1,5 @@
+# Cluster B3 of track `retire-feature-plan-second-planning-layer`
+# (dispatch dlv-8dfb55f41551): FEATURE_PLAN.md has no generator left. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md (B3 row).
+scripts/build_feature_plan.py
+tests/test_build_feature_plan.py

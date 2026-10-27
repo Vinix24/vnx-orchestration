@@ -35,6 +35,7 @@ import gate_lane_contract
 import gate_report_recovery
 import gate_runner
 import glm_gate
+import governed_lane
 import kimi_gate
 import plan_gate_panel as pgp
 import plan_gate_tiebreaker as pgt
@@ -265,7 +266,9 @@ class TestStandaloneGateRefusesACutOffReport:
 def test_every_verdict_reader_uses_the_one_lane_deadline_reader():
     reader = getattr(gate_lane_contract, "lane_deadline_detail", None)
     assert callable(reader), "gate_lane_contract carries the one reader"
-    for module in (gate_runner, kimi_gate, glm_gate, gate_report_recovery, pgp):
+    # GE-5b: the gates read the deadline signal inside governed_lane.unread_run_outcome now,
+    # so that is the reader to pin (the gates stay covered end to end above).
+    for module in (gate_runner, governed_lane, gate_report_recovery, pgp):
         assert getattr(module, "lane_deadline_detail", None) is reader, module.__name__
 
 

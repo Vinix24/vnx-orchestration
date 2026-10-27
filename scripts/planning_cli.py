@@ -4,6 +4,7 @@
 Delegated from `bin/vnx`:
   vnx objective list [--horizon now|next|later] [--phase ...] [--json]
   vnx objective show <track_id> [--json]
+  vnx objective queue [--objective <track_id>] [--all] [--json]
   vnx objective sync [--apply] [--roadmap PATH] [--json]
   vnx objective drift [--json]
   vnx objective add <track_id> <title> <goal> --plan-scope architecture|light
@@ -46,6 +47,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -53,7 +55,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,15 @@ import provider_switch
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
+
+# `horizon queue` (C1): the readable "what is queued" overview. A row's state is
+# the `deliverables` VIEW's derived_status; measured on migration 0027 that
+# vocabulary is done|in_progress|failed|ready|proposed. `closed` and `cancelled`
+# are the other terminal spellings a store may carry, so the default view hides
+# all three (`--all` shows them).
+_QUEUE_HIDDEN_STATES = frozenset({"done", "closed", "cancelled"})
+_QUEUE_TITLE_WIDTH = 56
+_QUEUE_MISSING_TITLE = "(missing — not set on this deliverable)"
 
 # lane_hint: a descriptive dispatch-routing hint carried on the track record
 # (e.g. "this track is meant to be dispatched governed vs direct") so a
@@ -239,6 +250,8 @@ def _objective_list_json_row(
 def cmd_objective_list(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
+    if getattr(args, "count_blocked", False):
+        return _cmd_list_count_blocked(args, state_dir, project_id)
     tracks = tracks_lib.list_tracks(state_dir, project_id, phase=args.phase)
 
     if args.horizon:
@@ -296,7 +309,19 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
             print("Seed from ROADMAP: python3 scripts/seed_tracks_from_roadmap.py --apply")
         return 0
 
-    # Group by horizon band.
+    _print_objective_list(state_dir, project_id, tracks, review_by_track, scope_by_track, hidden_done)
+    return 0
+
+
+def _print_objective_list(
+    state_dir: str | Path,
+    project_id: str,
+    tracks: list[dict[str, Any]],
+    review_by_track: dict[str, str],
+    scope_by_track: dict[str, "plan_scope.ScopeReading"],
+    hidden_done: int,
+) -> None:
+    """Render the grouped-by-horizon table — the non-JSON ``objective list`` view."""
     grouped: dict[Optional[str], list[dict[str, Any]]] = {h: [] for h in _HORIZON_ORDER}
     grouped[None] = []
     for t in tracks:
@@ -334,6 +359,111 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
         )
     if hidden_done:
         print(f"({hidden_done} done hidden — --all or --phase done to show)\n")
+
+
+# --- `objective list --count-blocked` (cluster point 11): one repeatable number.
+#
+# The cluster measures whether the number of blocked tracks FALLS from the 76
+# measured on 14-08. A later number is only comparable when the same definition
+# produces it: every track whose stored derived_status is 'blocked' (exactly
+# what `objective list --all --json` reports — the 76/106 definition) over ALL
+# tracks, never a live re-derivation and never a phase/horizon slice. Each
+# blocked track is counted ONCE, in the first matching category of a fixed
+# order, so the split always adds up to the total; `--json` still lists every
+# reason per track, so overlap (plan gate AND dependency) stays visible.
+
+_BLOCKED_CATEGORIES = ("plan-gate", "dependency", "other")
+
+
+def _blocked_reasons(detail: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every recorded reason a blocked track is blocked (ordered, overlap kept).
+
+    Fail-closed: a track whose stored derived_status is 'blocked' but whose
+    blocker/dependency rows have gone still yields one 'derived' reason, so it
+    is counted under 'other' instead of silently dropping out of the tally.
+    """
+    reasons: list[dict[str, Any]] = []
+    for oi in detail.get("blocking_ois") or []:
+        oi_id = oi.get("oi_id")
+        is_plan = isinstance(oi_id, str) and oi_id.startswith(_PLAN_OI_PREFIX)
+        reasons.append({"kind": "plan-gate" if is_plan else "other", "oi_id": oi_id})
+    for dep in detail.get("blocking_deps") or []:
+        reasons.append({
+            "kind": "dependency",
+            "track_id": dep.get("track_id"),
+            "phase": dep.get("phase"),
+            "edge_kind": dep.get("kind"),
+        })
+    if not reasons:
+        reasons.append({
+            "kind": "derived",
+            "reason": "derived_status is 'blocked' but no open blocker or unmet hard "
+                      "dependency is recorded now; reconcile before trusting a drop",
+        })
+    return reasons
+
+
+def _blocked_category(reasons: list[dict[str, Any]]) -> str:
+    """First matching category of the fixed order plan-gate > dependency > other."""
+    kinds = {reason["kind"] for reason in reasons}
+    if "plan-gate" in kinds:
+        return "plan-gate"
+    if "dependency" in kinds:
+        return "dependency"
+    return "other"
+
+
+def blocked_track_counts(state_dir: str | Path, project_id: str) -> dict[str, Any]:
+    """READ-ONLY tally of blocked tracks plus every reason per track.
+
+    Total is keyed on the STORED derived_status over ALL tracks — the same
+    definition `objective list --all --json` reports, and therefore the same
+    definition behind the 14-08 baseline of 76. No phase write, no reconcile.
+    """
+    blocked = [
+        track for track in tracks_lib.list_tracks(state_dir, project_id)
+        if track.get("derived_status") == "blocked"
+    ]
+    details = track_reconciler.blocking_details_for(
+        state_dir, project_id, [track["track_id"] for track in blocked]
+    )
+    split = {category: 0 for category in _BLOCKED_CATEGORIES}
+    rows: list[dict[str, Any]] = []
+    for track in blocked:
+        reasons = _blocked_reasons(details.get(track["track_id"]) or {})
+        category = _blocked_category(reasons)
+        split[category] += 1
+        rows.append({
+            "track_id": track["track_id"],
+            "title": track["title"],
+            "phase": track["phase"],
+            "derived_status": track["derived_status"],
+            "category": category,
+            "reasons": reasons,
+        })
+    return {"total": len(rows), "split": split, "tracks": rows}
+
+
+def _cmd_list_count_blocked(
+    args: argparse.Namespace, state_dir: Path, project_id: str,
+) -> int:
+    """`objective list --count-blocked`: print the tally (text, or --json)."""
+    if args.horizon or args.phase:
+        print(
+            "objective list --count-blocked counts ALL tracks (the 14-08 definition) "
+            "— --horizon/--phase do not apply",
+            file=sys.stderr,
+        )
+        return 2
+    counts = blocked_track_counts(state_dir, project_id)
+    if args.json:
+        print(json.dumps(counts, indent=2))
+        return 0
+    split = counts["split"]
+    print(
+        f"{counts['total']} blocked ({split['plan-gate']} plan-gate, "
+        f"{split['dependency']} dependency, {split['other']} other)"
+    )
     return 0
 
 
@@ -2658,7 +2788,7 @@ def _deliverable_metadata(args: argparse.Namespace) -> dict[str, Any]:
     """What a new deliverable carries: its title, the marker, and the optional fields.
 
     ``dispatch_paths`` is what a plan-gate run on the track reads when the run
-    itself names no paths (the schema/security case for the second seat, P1).
+    itself names no paths (the schema/security/irreversible case for the second seat).
     """
     meta: dict[str, Any] = {"title": args.title, "deliverable": True}
     for key in ("task_class", "routing_floor"):
@@ -2686,7 +2816,10 @@ def _print_deliverable_created(
     print(f"  next         : vnx deliverable promote {dispatch_id}")
 
 
-def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: str) -> bool:
+def _apply_deliverable_scope_rule(
+    state_dir: Path, project_id: str, track_id: str, *,
+    verb: str = "add", done: str = "created", stream: Optional[TextIO] = None,
+) -> bool:
     """The fourth deliverable makes a light track architecture (P1); one line says so.
 
     The deliverable row is already committed when this runs, so a rule that
@@ -2694,7 +2827,7 @@ def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: st
     set-plan-scope`` as the way out — it is NOT a failed add. The bool return is
     informational only (True when the rule was applied or none was due);
     ``cmd_deliverable_add`` always returns 0 after this, because the store does
-    hold the deliverable.
+    hold the deliverable. ``retarget`` runs it on its target (``stream``: off a JSON stdout).
     """
     count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
     rule = plan_scope.deliverable_rule(count)
@@ -2702,18 +2835,18 @@ def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: st
         return True
     try:
         change = plan_scope.raise_to_architecture(
-            state_dir, track_id, project_id, rule=f"deliverable add: {rule}",
+            state_dir, track_id, project_id, rule=f"deliverable {verb}: {rule}",
         )
     except Exception as exc:  # the deliverable is already committed: say what is missing
         print(
-            f"deliverable add: the deliverable was created, but the plan-scope rule "
+            f"deliverable {verb}: the deliverable was {done}, but the plan-scope rule "
             f"({rule}) could not be applied to {track_id}: {exc}. Set it by hand with "
             f"`vnx horizon set-plan-scope {track_id} architecture --reason \"...\"`.",
             file=sys.stderr,
         )
         return False
     if change is not None:
-        print(change.line())
+        print(change.line(), file=stream)
     return True
 
 
@@ -2792,9 +2925,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fetch_deliverable_records(
-    state_dir, project_id: str, objective: Optional[str] = None, *, include_metadata: bool = False,
-) -> list[dict]:
+def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
+                               include_metadata: bool = False, include_withdrawn: bool = False) -> list[dict]:
     """The single read path over the deliverable plane — the view rollup when
     migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
@@ -2810,7 +2942,8 @@ def _fetch_deliverable_records(
     parses each deliverable's ``metadata_json`` into ``title`` (always) and
     ``metadata`` (the full parsed dict, so a caller can read fields like
     ``task_class``/``routing_floor`` that are not modeled as their own view
-    columns yet).
+    columns yet). A ``withdrawn`` deliverable is no open or planned work (ADR-049):
+    it is left out unless ``include_withdrawn``.
     """
     conn = _db_conn(state_dir)
     try:
@@ -2850,7 +2983,7 @@ def _fetch_deliverable_records(
                     """,
                     (project_id,),
                 ).fetchall()
-            records = [dict(r) for r in rows]
+            records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
             if include_metadata:
                 for r in records:
                     meta = json.loads(r.pop("metadata_json", None) or "{}")
@@ -2918,8 +3051,10 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
     records = _fetch_deliverable_records(
-        state_dir, project_id, args.objective, include_metadata=True,
+        state_dir, project_id, args.objective, include_metadata=True, include_withdrawn=True,
     )
+    hidden = 0 if args.all else sum(r.get("derived_status") == WITHDRAWN_STATE for r in records)
+    records = [r for r in records if args.all or r.get("derived_status") != WITHDRAWN_STATE]
     for r in records:
         meta = r.get("metadata") or {}
         r["task_class"] = meta.get("task_class")
@@ -2958,7 +3093,174 @@ def cmd_deliverable_list(args: argparse.Namespace) -> int:
         print(f"        {title}")
         print(f"        {_format_deliverable_field(meta, 'task_class')}")
         print(f"        {_format_deliverable_field(meta, 'routing_floor')}")
+    if hidden:
+        print(f"\n  ({hidden} withdrawn hidden — --all to show)")
     print()
+    return 0
+
+
+def _queue_root_dispatch_id(
+    conn: sqlite3.Connection, project_id: str, deliverable_ref: str,
+) -> str:
+    """The dispatch_id a deliverables-view row is keyed by.
+
+    ``deliverable_ref`` is ``output_ref`` as ``cmd_deliverable_add`` writes it
+    (``pr:dlv-<hex>``); the root dispatch row is the one that carries it. A
+    follow-up round (``<dlv>-r2``) has ``output_ref`` NULL, so the round match
+    is built from this root id, never from the view ref.
+    """
+    row = conn.execute(
+        "SELECT dispatch_id FROM dispatches WHERE project_id = ? AND output_ref = ? "
+        "ORDER BY updated_at DESC, id DESC LIMIT 1",
+        (project_id, deliverable_ref),
+    ).fetchone()
+    if row is not None:
+        return row["dispatch_id"]
+    return str(deliverable_ref).split(":", 1)[-1]
+
+
+def _queue_pr_number(
+    conn: sqlite3.Connection, project_id: str, root_id: str,
+) -> Optional[int]:
+    """The delivering PR of a deliverable root or any of its ``-r<n>`` rounds.
+
+    The PR lives on ``dispatches.pr_ref`` (``vnx deliverable close --evidence``
+    writes it there); a round can carry it too but its ``output_ref`` is NULL,
+    so the match is the root id plus its ``<id>-r<n>`` prefix. The most recent
+    non-empty ``pr_ref`` wins. A present-but-unparseable ``pr_ref`` raises
+    ``ValueError`` instead of reading as "no PR" (fail-closed on evidence).
+    """
+    escaped = root_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    row = conn.execute(
+        """
+        SELECT dispatch_id, pr_ref FROM dispatches
+        WHERE project_id = ? AND pr_ref IS NOT NULL AND pr_ref != ''
+          AND (dispatch_id = ? OR dispatch_id LIKE ? ESCAPE '\\')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT 1
+        """,
+        (project_id, root_id, escaped + "-r%"),
+    ).fetchone()
+    if row is None:
+        return None
+    normalized = _normalize_pr_ref(str(row["pr_ref"]).split(",", 1)[0].strip())
+    if normalized is None:
+        raise ValueError(
+            f"unparseable pr_ref {row['pr_ref']!r} on dispatch {row['dispatch_id']!r}"
+        )
+    return int(normalized.lstrip("#"))
+
+
+def _queue_depends_on(state_dir: Path, project_id: str, track_id: str) -> list[dict[str, str]]:
+    """A row's dependencies: its track's edges (no per-deliverable dependency exists)."""
+    return [
+        {"track": edge["to_track_id"], "kind": edge["kind"]}
+        for edge in _dependency_edges_for(state_dir, track_id, project_id)
+    ]
+
+
+def _queue_title(title: str, width: int = _QUEUE_TITLE_WIDTH) -> str:
+    """The fixed-width title column; ``--json`` keeps the untruncated title."""
+    text = (title or "").strip() or _QUEUE_MISSING_TITLE
+    if len(text) <= width:
+        return text
+    return text[: width - 1].rstrip() + "…"
+
+
+def _queue_ordered_tracks(
+    state_dir: Path, project_id: str, objective: Optional[str],
+) -> list[dict[str, Any]]:
+    """Tracks in ``objective list`` order: horizon band, stable within a band."""
+    tracks = tracks_lib.list_tracks(state_dir, project_id)
+    if objective:
+        tracks = [t for t in tracks if t["track_id"] == objective]
+    tracks.sort(
+        key=lambda t: _HORIZON_ORDER.index(t["horizon"])
+        if t.get("horizon") in _HORIZON_ORDER else len(_HORIZON_ORDER)
+    )
+    return tracks
+
+
+def _print_queue_text(
+    rows: list[dict[str, Any]], project_id: str, tracks: list[dict[str, Any]],
+) -> None:
+    """The grouped text form: one section per track, one line per deliverable."""
+    print(f"\nVNX queue — project '{project_id}'\n")
+    by_track: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_track.setdefault(row["track"], []).append(row)
+    ordered = [t["track_id"] for t in tracks]
+    for track_id in ordered + sorted(set(by_track) - set(ordered)):
+        track_rows = by_track.get(track_id) or []
+        if not track_rows:
+            continue
+        print(f"  [{track_id}]")
+        for row in track_rows:
+            deps = ", ".join(
+                f"{d['track']}({d['kind']})" for d in row["depends_on"]
+            ) or "-"
+            pr = f"#{row['pr']}" if row["pr"] is not None else "-"
+            print(
+                f"    {row['deliverable']:<18} {row['state']:<12} {pr:<7} "
+                f"{deps:<28}  {_queue_title(row['title'])}"
+            )
+        print()
+
+
+def cmd_objective_queue(args: argparse.Namespace) -> int:
+    """``vnx horizon queue``: what is queued, per deliverable, from the DB.
+
+    Read-only. Uses the same ``_fetch_deliverable_records`` read path as
+    ``deliverable list``, plus ``dispatches.pr_ref`` for the delivering PR and
+    the track's ``track_dependencies`` edges. One row per deliverable, grouped
+    by track in ``objective list`` order (horizon band, then the list's
+    priority order). Without ``--all`` a done/closed/cancelled/withdrawn row is hidden.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    records = _fetch_deliverable_records(
+        state_dir, project_id, args.objective, include_metadata=True, include_withdrawn=args.all,
+    )
+    if not args.all:
+        records = [
+            r for r in records
+            if r.get("derived_status") not in _QUEUE_HIDDEN_STATES
+        ]
+
+    conn = _db_conn(state_dir)
+    try:
+        rows: list[dict[str, Any]] = []
+        deps_by_track: dict[str, list[dict[str, str]]] = {}
+        for record in records:
+            root_id = _queue_root_dispatch_id(conn, project_id, record["deliverable_ref"])
+            track_id = record.get("track") or "-"
+            if track_id not in deps_by_track:
+                deps_by_track[track_id] = _queue_depends_on(state_dir, project_id, track_id)
+            rows.append({
+                "track": track_id,
+                "deliverable": root_id,
+                "state": record.get("derived_status") or "-",
+                "pr": _queue_pr_number(conn, project_id, root_id),
+                "depends_on": deps_by_track[track_id],
+                "title": record.get("title") or "",
+            })
+    except ValueError as exc:
+        print(f"vnx horizon queue: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+
+    if not rows:
+        print(f"No deliverables queued for project '{project_id}'.")
+        return 0
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    _print_queue_text(
+        rows, project_id, _queue_ordered_tracks(state_dir, project_id, args.objective),
+    )
     return 0
 
 
@@ -3471,6 +3773,346 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
         for key, value in fields.items()
     ]
     print(f"Set {', '.join(parts)} on {dispatch_id} (project {project_id!r})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Another track: retarget (track deliverable-retarget-withdraw)
+# ---------------------------------------------------------------------------
+
+RETARGETED_EVENT = "deliverable_retargeted"
+RETARGET_RECEIPTS_NAME = "t0_receipts.ndjson"
+
+
+class _RetargetRefused(Exception):
+    """A retarget precondition that does not hold: exit 2, nothing written."""
+
+
+class _RetargetLedgerFailed(Exception):
+    """A retarget (or withdraw) receipt did not land in the canonical ledger."""
+
+
+def _retarget_refused(message: object, rc: int = 2) -> int:
+    print(f"deliverable retarget: {message}. No change made.", file=sys.stderr)
+    return rc
+
+
+def _retarget_receipt(
+    state_dir: Path, trigger: str, decision: dict[str, Any], verb: str = "retarget", **observed: Any,
+) -> None:
+    """Append one ``state_mutation`` receipt for a retarget or withdraw decision to the store's ledger (ADR-005).
+
+    Raises ``_RetargetLedgerFailed`` unless ``append_receipt_payload`` reports ``appended``: a
+    ``duplicate``, no result or any other status means this line is not in the ledger.
+    ``status`` carries the decision's ``<verb>_id``. The ledger dedups a receipt with a
+    ``dispatch_id`` on its outcome identity (ADR-038: dispatch_id, event_type, status, commit_sha,
+    gate, pr_number) across the whole ledger, so without it a second move of the same deliverable,
+    and the aborted line after its intent line, would come back ``duplicate`` and never be written.
+    """
+    receipt = {
+        "timestamp": _now_utc(), "event_type": "state_mutation", "receipt_kind": "state_mutation",
+        "terminal": "T0", "source": "vnx_planning", "trigger": trigger,
+        "status": f"{trigger}:{decision[verb + '_id']}", **decision, **observed,
+    }
+    try:
+        from append_receipt import append_receipt_payload
+        result = append_receipt_payload(
+            receipt, receipts_file=str(state_dir / RETARGET_RECEIPTS_NAME), skip_enrichment=True,
+        )
+    except (Exception, SystemExit) as exc:  # SystemExit: append_receipt's import bootstrap failing
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger ({exc})") from exc
+    status = getattr(result, "status", None)
+    if status != "appended":
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger (append result {status!r})")
+
+
+def _retarget_aborted(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], cause: str,
+    verb: str = "retarget",
+) -> str:
+    """Record that the intent line did not become a move; best-effort, a failure goes to stderr.
+
+    The receipt carries the re-read ``state`` and ``track`` (both None when the row is gone, plus
+    ``reread_error`` when the read itself failed). Returns that row as text for the refusal message.
+    """
+    try:
+        now = conn.execute("SELECT state, track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                           (decision["dispatch_id"], project_id)).fetchone()
+        observed: dict[str, Any] = {"state": now["state"], "track": now["track"]} if now else \
+            {"state": None, "track": None}
+        shown = str(dict(now)) if now else "gone"
+    except sqlite3.Error as exc:
+        observed, shown = {"state": None, "track": None, "reread_error": str(exc)}, f"unreadable ({exc})"
+    try:
+        _retarget_receipt(state_dir, f"deliverable_{verb}_aborted", decision, verb, abort_cause=cause, **observed)
+    except _RetargetLedgerFailed as exc:
+        print(f"deliverable {verb}: {exc}; the ledger holds the intent line of "
+              f"{decision[verb + '_id']} without its abort.", file=sys.stderr)
+    return shown
+
+
+def _deliverable_mutation(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], verb: str,
+    write: Callable[[], bool], read: str,
+) -> Optional[str]:
+    """Book the intent receipt, then run *write*; None when the row changed, else the exit-1 message.
+
+    Ledger first (ADR-005). *write* rolls itself back on any error, so after the intent line every
+    failure books the aborted line: a store error or a lost compare-and-swap returns the message,
+    anything else is raised once the aborted line is booked. *read* names the row as it was read.
+    """
+    _retarget_receipt(state_dir, f"deliverable_{verb}", decision, verb)
+    try:
+        if write():
+            return None
+    except sqlite3.Error as exc:
+        _retarget_aborted(conn, state_dir, project_id, decision, f"store_error: {exc}", verb)
+        return f"the store refused the {verb} ({exc})"
+    except BaseException as exc:
+        _retarget_aborted(conn, state_dir, project_id, decision, f"error: {type(exc).__name__}: {exc}", verb)
+        raise
+    now = _retarget_aborted(conn, state_dir, project_id, decision, "row_changed", verb)
+    return f"{decision['dispatch_id']!r} changed while this command ran: read {read}, now {now}"
+
+
+def _retarget_check(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, args: argparse.Namespace,
+) -> sqlite3.Row:
+    """The deliverable row to move, or ``_RetargetRefused`` naming why it may not move."""
+    dispatch_id, target = args.dispatch_id, args.objective
+    row = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id),
+    ).fetchone()
+    if row is None:
+        raise _RetargetRefused(f"deliverable not found: {dispatch_id!r} (project {project_id!r})")
+    ref = (row["output_ref"] or "").strip() if "output_ref" in row.keys() else ""
+    if not ref or not _is_deliverable_row(row["metadata_json"]):
+        raise _RetargetRefused(f"{dispatch_id!r} is not a deliverable (no output_ref, or not marked as one)")
+    if row["state"] not in ("proposed", "ready"):
+        raise _RetargetRefused(f"{dispatch_id!r} has state {row['state']!r}: only proposed or ready can move")
+    if target == row["track"]:
+        raise _RetargetRefused(f"{dispatch_id!r} is already on track {target!r}")
+    track = tracks_lib.get_track(state_dir, target, project_id)
+    if track is None:
+        raise _RetargetRefused(f"target track not found: {target!r} (project {project_id!r})")
+    phase = track.get("phase")
+    if phase not in (("queued", "active", "parked") if args.include_parked else ("queued", "active")):
+        hint = "; pass --include-parked to move onto it" if phase == "parked" else ""
+        raise _RetargetRefused(f"target track {target!r} is in phase {phase!r}{hint}")
+    if not _has_table(conn, "coordination_events"):
+        raise _RetargetRefused("the store has no coordination_events table, so the move cannot be recorded")
+    return row
+
+
+def _retarget_write(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str, row: sqlite3.Row,
+    to_track: str, reason: str,
+) -> bool:
+    """Swap the row on its read track+state and write the event in one transaction; False if it moved.
+
+    A ready row's approval was for the old track, so it is cleared (as ``_return_to_plan`` does).
+    Any error, a failed commit included, rolls the transaction back before it propagates.
+    """
+    from_track, prior = row["track"], row["state"]
+    approval = ", operator_approved_at = NULL" if "operator_approved_at" in row.keys() else ""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        changed = conn.execute(
+            f"UPDATE dispatches SET track = ?, state = 'proposed', updated_at = ?{approval} "
+            "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
+            (to_track, _now_utc(), dispatch_id, project_id, from_track, prior),
+        ).rowcount
+        if changed == 1:
+            _append_coordination_event(
+                conn, event_type=RETARGETED_EVENT, dispatch_id=dispatch_id, from_state=prior,
+                to_state="proposed", actor="operator", reason=reason, project_id=project_id,
+                metadata={"from_track": from_track, "to_track": to_track, "prior_state": prior},
+            )
+            conn.commit()
+            return True
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.rollback()
+    return False
+
+
+def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
+    """Move a proposed/ready deliverable to another track with one event (``close`` would attest a PR).
+
+    Ledger first (ADR-005): once every check holds, the decision is a ``state_mutation`` receipt in
+    the store's ``t0_receipts.ndjson``, and only then does the row move. A refusal is exit 2 with
+    nothing written. A ledger that does not take the receipt is exit 1 with the row untouched; a row
+    that changed in between or a store error after the receipt is exit 1 plus an aborted receipt;
+    any other error after the receipt is raised once the aborted receipt is booked.
+    No project_id is refused (ADR-007).
+    """
+    project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
+    if not project_id:
+        return _retarget_refused("--project-id is required (ADR-007): none was supplied or resolved")
+    if not reason:
+        return _retarget_refused("--reason is required and may not be empty")
+    state_dir = _resolve_state_dir(args.state_dir)
+    conn = _db_conn(state_dir)
+    try:
+        row = _retarget_check(conn, state_dir, project_id, args)
+        decision = {
+            "retarget_id": uuid.uuid4().hex, "dispatch_id": args.dispatch_id, "project_id": project_id,
+            "from_track": row["track"], "to_track": args.objective, "prior_state": row["state"],
+            "to_state": "proposed", "actor": "operator", "reason": reason,
+        }
+        failed = _deliverable_mutation(
+            conn, state_dir, project_id, decision, "retarget",
+            lambda: _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason),
+            f"{row['state']!r} on {row['track']!r}",
+        )
+        if failed:
+            return _retarget_refused(failed, rc=1)
+    except _RetargetRefused as exc:
+        return _retarget_refused(exc)
+    except _RetargetLedgerFailed as exc:
+        return _retarget_refused(exc, rc=1)
+    except sqlite3.Error as exc:  # a read in the checks failed: no receipt, no move
+        return _retarget_refused(f"the store refused the move ({exc})", rc=1)
+    finally:
+        conn.close()
+
+    from_track, prior = row["track"], row["state"]
+    if args.json:
+        print(json.dumps({
+            "deliverable": args.dispatch_id, "project_id": project_id, "from_track": from_track,
+            "to_track": args.objective, "prior_state": prior, "state": "proposed", "reason": reason,
+            "action": "retargeted", "applied": True,
+        }, indent=2))
+    else:
+        print(f"\nvnx deliverable retarget: {args.dispatch_id} (project '{project_id}')\n")
+        print(f"  track {from_track} -> {args.objective} (reason: {reason})")
+        if prior == "ready":
+            print(f"  ready -> proposed: the promote approval was for {from_track}; promote again "
+                  f"with `vnx deliverable promote {args.dispatch_id}`.")
+        print()
+    _apply_deliverable_scope_rule(state_dir, project_id, args.objective, verb="retarget", done="moved",
+                                  stream=sys.stderr if args.json else None)
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Never built: withdraw (track deliverable-retarget-withdraw, ADR-049)
+# ---------------------------------------------------------------------------
+
+WITHDRAWN_EVENT = "deliverable_withdrawn"
+WITHDRAWN_STATE = "withdrawn"
+_WITHDRAW_SCHEMA_VERSION = 36  # migration 0036: the view and the state CHECK know withdrawn
+
+
+class _WithdrawRefused(Exception):
+    """A withdraw precondition that does not hold: exit 2, nothing written."""
+
+
+def _withdraw_refused(message: object, rc: int = 2) -> int:
+    print(f"deliverable withdraw: {message}. No change made.", file=sys.stderr)
+    return rc
+
+
+def _withdraw_check(conn: sqlite3.Connection, project_id: str, dispatch_id: str) -> sqlite3.Row:
+    """The deliverable row to withdraw, or ``_WithdrawRefused`` naming why it may not be withdrawn."""
+    row = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id),
+    ).fetchone()
+    if row is None:
+        raise _WithdrawRefused(f"deliverable not found: {dispatch_id!r} (project {project_id!r})")
+    ref = (row["output_ref"] or "").strip() if "output_ref" in row.keys() else ""
+    if not ref or not _is_deliverable_row(row["metadata_json"]):
+        raise _WithdrawRefused(f"{dispatch_id!r} is not a deliverable (no output_ref, or not marked as one)")
+    if row["state"] not in ("proposed", "ready"):
+        why = "it has delivery evidence" if row["state"] == "completed" else "only proposed or ready can be withdrawn"
+        raise _WithdrawRefused(f"{dispatch_id!r} has state {row['state']!r}: {why}")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < _WITHDRAW_SCHEMA_VERSION:
+        raise _WithdrawRefused(f"the store is at schema v{version}: migration 0036 (the withdrawn state) is not applied")
+    table_sql = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'dispatches'").fetchone()[0]
+    check = re.search(r"CHECK\s*\(\s*state\s+IN\s*\(([^)]*)\)", table_sql, re.IGNORECASE)
+    if check is not None and f"'{WITHDRAWN_STATE}'" not in check.group(1):
+        raise _WithdrawRefused("the store's dispatches.state CHECK (the 0022 shape) does not admit 'withdrawn'")
+    if not _has_table(conn, "coordination_events"):
+        raise _WithdrawRefused("the store has no coordination_events table, so the withdraw cannot be recorded")
+    return row
+
+
+def _withdraw_write(conn: sqlite3.Connection, project_id: str, dispatch_id: str, row: sqlite3.Row, reason: str) -> bool:
+    """Swap the row from its read track+state to withdrawn with its event in one transaction; False if it changed.
+
+    The track is in the swap: a retarget that moved the row in between leaves it untouched, so the
+    event never names a track the deliverable has left. Any error, a failed commit included, rolls
+    the transaction back before it propagates.
+    """
+    track, prior = row["track"], row["state"]
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if conn.execute(
+            "UPDATE dispatches SET state = ?, updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
+            (WITHDRAWN_STATE, _now_utc(), dispatch_id, project_id, track, prior),
+        ).rowcount == 1:
+            _append_coordination_event(
+                conn, event_type=WITHDRAWN_EVENT, dispatch_id=dispatch_id, from_state=prior,
+                to_state=WITHDRAWN_STATE, actor="operator", reason=reason, project_id=project_id,
+                metadata={"track": track, "prior_state": prior},
+            )
+            conn.commit()
+            return True
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.rollback()
+    return False
+
+
+def cmd_deliverable_withdraw(args: argparse.Namespace) -> int:
+    """End a proposed/ready deliverable that will not be built: ``withdrawn``, with one event (ADR-049).
+
+    Same order and exits as ``retarget``: every check (a refusal is exit 2, nothing written), the
+    ``state_mutation`` receipt, then the compare-and-swap with its ``deliverable_withdrawn`` event.
+    """
+    project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
+    if not project_id:
+        return _withdraw_refused("--project-id is required (ADR-007): none was supplied or resolved")
+    if not reason:
+        return _withdraw_refused("--reason is required and may not be empty")
+    state_dir = _resolve_state_dir(args.state_dir)
+    conn = _db_conn(state_dir)
+    try:
+        row = _withdraw_check(conn, project_id, args.dispatch_id)
+        prior = row["state"]
+        decision = {
+            "withdraw_id": uuid.uuid4().hex, "dispatch_id": args.dispatch_id, "project_id": project_id,
+            "track": row["track"], "prior_state": prior, "to_state": WITHDRAWN_STATE, "actor": "operator",
+            "reason": reason,
+        }
+        failed = _deliverable_mutation(
+            conn, state_dir, project_id, decision, "withdraw",
+            lambda: _withdraw_write(conn, project_id, args.dispatch_id, row, reason),
+            f"{prior!r} on {row['track']!r}",
+        )
+        if failed:
+            return _withdraw_refused(failed, rc=1)
+    except _WithdrawRefused as exc:
+        return _withdraw_refused(exc)
+    except _RetargetLedgerFailed as exc:
+        return _withdraw_refused(exc, rc=1)
+    except sqlite3.Error as exc:  # a read in the checks failed: no receipt, no change
+        return _withdraw_refused(f"the store refused the withdraw ({exc})", rc=1)
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps({
+            "deliverable": args.dispatch_id, "project_id": project_id, "track": row["track"],
+            "prior_state": prior, "state": WITHDRAWN_STATE, "reason": reason, "action": "withdrawn", "applied": True,
+        }, indent=2))
+    else:
+        print(f"\nvnx deliverable withdraw: {args.dispatch_id} (project '{project_id}')\n")
+        print(f"  {prior} -> withdrawn on {row['track']} (reason: {reason})\n")
     return 0
 
 
@@ -4065,7 +4707,8 @@ def _derive_panel_weight(
     run uses the configured default seat, plus the escalation seat on a BLOCK,
     or exactly the seats an operator names with ``--panel-seats``
     (``plan_gate_panel.compose_panel``). Since P1 the escalation seat also sits
-    from the start when the paths fall in the schema or security class: the
+    from the start when the paths fall in the schema, security or an
+    irreversible class (``plan_gate_panel.second_seat_from_start``): the
     run's ``--dispatch-paths``, or, when the run names none, what the
     ``deliverable_paths`` callable returns (read only then). The variant stays in the trace and the round record so the
     history stays readable. The operator's provider switch then removes every
@@ -5417,6 +6060,7 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dlist = dlv_sub.add_parser("list", help="list deliverables grouped by objective")
     common(p_dlist)
     p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
     p_dlist.set_defaults(func=cmd_deliverable_list)
 
     p_dpromote = dlv_sub.add_parser(
@@ -5467,6 +6111,74 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
              "the stored list). Read by a plan-gate run that names no paths.",
     )
     p_dset.set_defaults(func=cmd_deliverable_set)
+    _add_deliverable_retarget_parser(dlv_sub, common)
+
+
+def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:
+    """``deliverable retarget`` and ``withdraw``: move, or end, a deliverable that has not started."""
+    p = dlv_sub.add_parser("retarget", help="move a proposed/ready deliverable to another track")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--objective", required=True, metavar="TRACK_ID", help="the track to move it to")
+    p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
+    p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
+    p.set_defaults(func=cmd_deliverable_retarget)
+    p = dlv_sub.add_parser("withdraw", help="end a proposed/ready deliverable that will not be built")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
+    p.set_defaults(func=cmd_deliverable_withdraw)
+
+
+def _add_objective_queue_parser(obj_sub: Any, common: Any) -> None:
+    """``objective queue`` (alias ``horizon queue``): the queued-work overview."""
+    p_queue = obj_sub.add_parser(
+        "queue",
+        help="queued deliverables per track: state, delivering PR, dependencies",
+    )
+    common(p_queue)
+    p_queue.add_argument(
+        "--objective", default=None, metavar="TRACK_ID",
+        help="only show the deliverables of this track",
+    )
+    p_queue.add_argument(
+        "--all", action="store_true",
+        help="also show closed/done/cancelled/withdrawn deliverables (hidden by default)",
+    )
+    p_queue.set_defaults(func=cmd_objective_queue)
+
+
+def _add_planning_parsers(sub: Any, obj_sub: Any, common: Any) -> None:
+    """The planning subcommands registered beside ``objective`` at the top level.
+
+    A single call from ``_build_parser`` keeps that already-over-limit function
+    from growing (the function-size ratchet refuses any growth there).
+    """
+    _add_objective_queue_parser(obj_sub, common)
+    _add_deliverable_parsers(sub, common)
+
+
+def _add_objective_list_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective list`: the horizon table plus the repeatable blocked-track count.
+
+    Extracted from ``_build_parser``, which is already over the 70-executable-line
+    ratchet limit: a flag added inline there would grow it.
+    """
+    p_list = obj_sub.add_parser("list", help="list objectives grouped by horizon")
+    common(p_list)
+    p_list.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_list.add_argument("--phase", choices=sorted(tracks_lib.VALID_PHASES), default=None)
+    p_list.add_argument("--all", action="store_true",
+                        help="include done tracks (hidden by default)")
+    p_list.add_argument(
+        "--count-blocked", action="store_true", dest="count_blocked",
+        help="print one repeatable count of blocked tracks: every track whose stored "
+             "derived_status is 'blocked', over ALL tracks — the same definition as "
+             "the 14-08 baseline of 76 — split plan-gate (open OI-PLAN-* blocker) > "
+             "dependency (unmet hard dependency) > other, each track counted once; "
+             "--json lists every reason per track",
+    )
+    p_list.set_defaults(func=cmd_objective_list)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -5481,13 +6193,7 @@ def _build_parser() -> argparse.ArgumentParser:
         p.add_argument("--state-dir", default="")
         p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
-    p_list = obj_sub.add_parser("list", help="list objectives grouped by horizon")
-    _common(p_list)
-    p_list.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
-    p_list.add_argument("--phase", choices=sorted(tracks_lib.VALID_PHASES), default=None)
-    p_list.add_argument("--all", action="store_true",
-                        help="include done tracks (hidden by default)")
-    p_list.set_defaults(func=cmd_objective_list)
+    _add_objective_list_parser(obj_sub, _common)
 
     p_show = obj_sub.add_parser("show", help="show one objective")
     _common(p_show)
@@ -5744,7 +6450,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _common(p_rec_streak)
     p_rec_streak.set_defaults(func=cmd_objective_reconcile_streak)
 
-    _add_deliverable_parsers(sub, _common)
+    _add_planning_parsers(sub, obj_sub, _common)
 
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)

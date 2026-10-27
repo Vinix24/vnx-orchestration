@@ -141,12 +141,57 @@ class TestOI1307RequestReviewsContractBased:
             )
 
         # The contract-based path writes to {pr_id}-claude_github_optional-contract.json
-        # pr_id = str(pr_number) = "11", slug = "11"
+        # pr_id = str(pr_number) = "11", slug = "11".
+        # The writer is guarded by atomic_io.slot_lock, which leaves an empty
+        # `.{name}.lock` sidecar in this directory. pathlib globs match dot-files
+        # and directory order is not stable across filesystems (ext4 lists the
+        # sidecar first in CI), so the record glob pins the `.json` suffix and
+        # the record count must be exactly one.
         results_dir = manager_env["results_dir"]
-        result_files = list(results_dir.glob("*claude_github_optional*"))
-        assert result_files, f"Expected a result record in {results_dir}, found none"
+        expected = results_dir / "11-claude_github_optional-contract.json"
+        result_files = list(results_dir.glob("*claude_github_optional*.json"))
+        assert result_files == [expected], (
+            f"Expected exactly one result record {expected.name} in {results_dir}, got "
+            f"{[p.name for p in result_files]} (dir holds "
+            f"{sorted(p.name for p in results_dir.iterdir())})"
+        )
         payload = json.loads(result_files[0].read_text())
         assert payload.get("gate") == "claude_github_optional"
+
+    def test_record_glob_cannot_pick_the_slot_lock_sidecar(self, manager_env, monkeypatch):
+        """The guarded writer's `.lock` sidecar must never be read as the result record.
+
+        `write_result_guarded` takes `atomic_io.slot_lock`, which leaves an empty
+        `.{name}.lock` next to every record. pathlib globs match dot-files, and
+        ext4 enumerates directory entries in a different order than APFS, so an
+        unanchored `*claude_github_optional*` glob picks the empty sidecar on
+        Linux and json.loads fails with JSONDecodeError.
+        """
+        monkeypatch.chdir(manager_env["project_root"])
+        manager = _make_manager()
+
+        with patch("governance_receipts.emit_governance_receipt"):
+            manager.request_reviews(
+                pr_number=11,
+                branch="fix/oi1307",
+                review_stack=["claude_github_optional"],
+                risk_class="low",
+                changed_files=["scripts/foo.py"],
+                mode="per_pr",
+                dispatch_id="test-oi1307-slot-lock",
+            )
+
+        results_dir = manager_env["results_dir"]
+        lock = results_dir / ".11-claude_github_optional-contract.json.lock"
+        assert lock.exists(), "the guarded writer is expected to leave its slot-lock sidecar"
+        # The trap: the pre-fix unanchored pattern matches the empty sidecar too.
+        assert lock in list(results_dir.glob("*claude_github_optional*"))
+        # The fix: pinning the record suffix excludes it, and exactly one record matches.
+        records = list(results_dir.glob("*claude_github_optional*.json"))
+        assert records == [results_dir / "11-claude_github_optional-contract.json"], (
+            f"expected exactly one record, got {[p.name for p in records]}"
+        )
+        assert json.loads(records[0].read_text())["gate"] == "claude_github_optional"
 
     def test_request_reviews_returns_status_key(self, manager_env, monkeypatch):
         """Returned payload must have 'status' for backwards compat with emit_governance_receipt."""

@@ -72,6 +72,26 @@ def test_full_suite_prohibition_in_critical_rules():
     )
 
 
+def test_junit_sidecar_rule_in_critical_rules():
+    """The critical rules must ask the builder to leave its JUnit XML beside the report.
+
+    Track deterministische-testverificatie: with ``VNX_JUNIT_COUNTS`` on, both
+    receipt write paths count the builder's ``<report>.junit.xml`` instead of
+    the Verification prose. The file is only there if the footer asks for it,
+    with the suite name tied to this dispatch id. Pins the two flags the rule
+    is made of, not its exact prose.
+    """
+    section = _worker_dispatch_standards_section()
+    assert "--junitxml=" in section, (
+        "Critical rules lost the JUnit sidecar rule (--junitxml=): the receipt "
+        "would fall back to the report text with no file to read."
+    )
+    assert "junit_suite_name=<dispatch_id>" in section, (
+        "Critical rules lost the suite-name requirement: an XML whose suite "
+        "name is not the dispatch id is refused as evidence."
+    )
+
+
 def test_commit_order_rule_in_critical_rules():
     """The critical rules must mandate the commit-before-push sequence.
 

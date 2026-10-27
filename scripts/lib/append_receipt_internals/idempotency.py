@@ -46,9 +46,10 @@ IDEMPOTENCY_FIELDS = (
     # "hetzelfde" for a receipt is: same identity fields above AND the same
     # outcome at the same commit — not merely the same identity fields.
     # Without these two, a review_gate_result receipt (gate_result_parser.py
-    # GateResultParserMixin._emit_result_receipt: no dispatch_id, report_path
-    # reused from the original request record across reruns) collapses two
-    # genuinely different verdicts on the same gate+PR into one digest: an
+    # record_result, since GE-4c-1 booked by gate_outcome.commit_gate_outcome:
+    # no dispatch_id, report_path reused from the original request record
+    # across reruns) collapses two genuinely different verdicts on the same
+    # gate+PR into one digest: an
     # UNAVAILABLE booking (e.g. a provider outage) occupies the cache slot
     # and a later real PASS/FAIL for the exact same gate+PR is then dropped
     # as a "duplicate" — the valid verdict never lands, the unusable one does
@@ -57,10 +58,11 @@ IDEMPOTENCY_FIELDS = (
     # receipt shape and is cheap to include unconditionally: two calls that
     # really are the same repeated event always carry the same status too,
     # so this never breaks a genuine duplicate. "commit_sha" is the reviewed
-    # head (ADR-045 point 4), stamped by every review_gate_result emit site
-    # (gate_recorder._emit_terminal_result_receipt and both gate_result_parser
-    # emitters, GE-1): the same PR at two different commits is never the same
-    # result, and without it the two collapse into one receipt.
+    # head (ADR-045 point 4), stamped by the one review_gate_result emit site
+    # (gate_recorder._emit_terminal_result_receipt, GE-1; the two
+    # gate_result_parser emitters folded into it in GE-4c-1): the same PR at
+    # two different commits is never the same result, and without it the two
+    # collapse into one receipt.
     "status",
     "commit_sha",
 )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,7 +95,7 @@ def test_get_provider_is_case_insensitive():
 
 
 def test_haiku_provider_parses_output():
-    prov = HaikuProvider(flat_cost_usd=0.005)
+    prov = HaikuProvider()
     payload = '{"domain":"governance","outcome_class":"success","impact_class":"trivial","suggested_edit":null}'
     with patch("classifier_providers.haiku_provider.subprocess.run", return_value=_make_completed(payload)):
         result = prov.classify("test prompt")
@@ -102,7 +103,10 @@ def test_haiku_provider_parses_output():
     assert result.error is None
     assert result.parsed_json is not None
     assert result.parsed_json["domain"] == "governance"
-    assert result.cost_usd == 0.005
+    # A subscription lane costs 0 at the margin; no transcript means the tokens
+    # (and so the list price) are unknown, booked as such and never priced.
+    assert result.cost_usd == 0.0
+    assert result.extra["cost_source"] == "unavailable:no_transcript"
     assert result.provider == "haiku"
 
 
@@ -143,16 +147,23 @@ def test_haiku_provider_handles_timeout():
 
 def test_haiku_provider_uses_correct_command():
     prov = HaikuProvider(model="claude-haiku-4-5")
-    captured = {}
+    captured = {"cmds": []}
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["kwargs"] = kwargs
+        captured["cmds"].append(cmd)
+        if cmd[0] == "claude":
+            captured["kwargs"] = kwargs
         return _make_completed('{"ok": true}')
 
     with patch("classifier_providers.haiku_provider.subprocess.run", side_effect=fake_run):
         prov.classify("test prompt")
-    assert captured["cmd"] == ["claude", "--print", "--model", "claude-haiku-4-5"]
+    claude_cmds = [cmd for cmd in captured["cmds"] if cmd[0] == "claude"]
+    assert len(claude_cmds) == 1
+    cmd = claude_cmds[0]
+    assert cmd[:2] == ["claude", "--print"]
+    assert cmd[cmd.index("--model") + 1] == "claude-haiku-4-5"
+    # K4b-1: a fresh session id per call, so the transcript of this call is findable.
+    assert uuid.UUID(cmd[cmd.index("--session-id") + 1])
     assert captured["kwargs"]["input"] == "test prompt"
 
 

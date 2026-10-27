@@ -15,12 +15,6 @@
     {
       "file": "pr_queue_manager.py",
       "language": "python",
-      "function": "init_feature_batch",
-      "max_lines": 200
-    },
-    {
-      "file": "pr_queue_manager.py",
-      "language": "python",
       "function": "patch_dispatch",
       "max_lines": 160
     },

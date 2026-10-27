@@ -1,0 +1,10 @@
+# B1 (dlv-e1e3d82d5bba)
+# Track retire-feature-plan-second-planning-layer, B1: the tracks DB is the
+# only plan source (ADR-047), so the FEATURE_PLAN.md auto-gate trigger and the
+# parser behind it go. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md
+scripts/lib/auto_gate_trigger.py
+scripts/lib/feature_state_machine.py
+tests/test_auto_gate_trigger_default_stack.py
+tests/test_auto_gate_trigger_provider_switch.py
+tests/test_feature_state_machine.py

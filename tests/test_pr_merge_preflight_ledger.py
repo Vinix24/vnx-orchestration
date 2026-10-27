@@ -256,7 +256,7 @@ class TestRefusalRecord:
         """Design choice under test: a refusal is ``pr_merge_refused``, NEVER a
         ``pr_merged`` carrying conclusion=refused. Every merged-PR reader in
         the tree filters on the literal string ``pr_merged``
-        (track_reconciler.py:320, build_feature_plan.py:212,
+        (track_reconciler.py:320,
         build_t0_state.py:999, pr_queue_state.py:128, traceability_audit.py:610,
         digest/collectors/progress.py:63) and none of them reads
         ``conclusion`` — so reusing the event type would make every one of them
