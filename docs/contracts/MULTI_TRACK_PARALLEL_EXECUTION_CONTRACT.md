@@ -46,7 +46,7 @@ Every track is identified by a composite key `(track_id, project_id)` per ADR-00
 
 ### 1.4 Dependencies and Planning
 
-A track declares a `depends_on` set (references to other `track_id`s) and a declared `file_scope` (§2.1). The roadmap file (`ROADMAP.yaml`) seeds tracks; `roadmap_manager` and the autopilot-tick (`RA-6`, ships dark) advance them. Planning = `vnx track new` with explicit dependency and file-scope declarations.
+A track declares a `depends_on` set (references to other `track_id`s) and a declared `file_scope` (§2.1). The tracks DB is the plan source (ADR-047): a `ROADMAP.yaml` is an example of the import format, imported only when the operator names it (`vnx objective sync --roadmap <file>`); `roadmap_manager` and the autopilot-tick (`RA-6`, ships dark) advance tracks. Planning = `vnx track new` with explicit dependency and file-scope declarations.
 
 ---
 

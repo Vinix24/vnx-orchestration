@@ -406,3 +406,11 @@ def test_main_dry_run_via_cli(env, capsys):
     # Default (no --apply) is dry-run -> DB untouched.
     snap = _snapshot(env["db_path"])
     assert snap["disp"]["d1-readme"] is None
+
+
+def test_main_requires_roadmap(tmp_path, capsys):
+    """The file is an explicit import argument (ADR-047 / C2): no autodetect."""
+    with pytest.raises(SystemExit) as excinfo:
+        bf.main(["--db", str(tmp_path / "runtime_coordination.db")])
+    assert excinfo.value.code == 2
+    assert "--roadmap" in capsys.readouterr().err

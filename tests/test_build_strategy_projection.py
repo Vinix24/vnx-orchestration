@@ -40,6 +40,7 @@ from build_strategy_projection import (
     _map_status,
     _resolve_phase_id,
     build_projection,
+    main,
     seed_decisions,
     write_strategy_roadmap,
 )
@@ -214,7 +215,9 @@ class TestBuildProjection:
         root = _write_sample_roadmap(tmp_path)
         roadmap = build_projection(root_roadmap_path=root, now_iso=_NOW_ISO)
         assert "source" in roadmap.notes
-        assert roadmap.notes["source"] == "ROADMAP.yaml"
+        # The source is the file the caller named, not a fixed root path
+        # (ADR-047 / C2: this is an import tool).
+        assert roadmap.notes["source"] == str(root)
 
 
 # ---------------------------------------------------------------------------
@@ -535,3 +538,30 @@ class TestValidation:
         for p in roadmap.phases:
             for w_ref in p.waves:
                 assert w_ref in wave_ids, f"Phase {p.phase_id} refs unknown wave {w_ref}"
+
+
+# ---------------------------------------------------------------------------
+# 17-18: the file is required (import tool, not a plan source)
+# ---------------------------------------------------------------------------
+
+class TestRoadmapArgumentRequired:
+    def test_main_exits_2_without_roadmap(self, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["build_strategy_projection.py"])
+        with pytest.raises(SystemExit) as excinfo:
+            main()
+        assert excinfo.value.code == 2
+        assert "--roadmap" in capsys.readouterr().err
+
+    def test_main_imports_the_named_file(self, tmp_path, monkeypatch, capsys):
+        root = _write_sample_roadmap(tmp_path)
+        out = tmp_path / "out"
+        monkeypatch.setattr(sys, "argv", [
+            "build_strategy_projection.py", "--roadmap", str(root),
+            "--output-dir", str(out), "--skip-decisions",
+        ])
+        assert main() == 0
+        assert (out / "roadmap.yaml").exists()
+
+    def test_build_projection_has_no_default_path(self):
+        with pytest.raises(TypeError):
+            build_projection()  # type: ignore[call-arg]
