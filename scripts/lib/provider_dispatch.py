@@ -1444,6 +1444,60 @@ def _emit_old_cost_event(
     return cost_usd, cost_source
 
 
+def _cli_spawn_refused(provider: str, result: Any) -> Optional[str]:
+    """The condition under which a codex/kimi builder spawn never reached a model, else ``None``.
+
+    The codex spawn reports its launch refusals — an unresolvable model, a
+    process that never started — as ``error`` with no usage at all: nothing ran,
+    so that attempt books a refused spawn, not a run nobody measured. kimi gets
+    no such mapping: a kimi run reporting nothing is exactly the
+    ``unknown:kimi_cli_no_usage`` shape the ledger documents.
+    """
+    refused = getattr(result, "spawn_refused", None)
+    if isinstance(refused, str) and refused.strip():
+        return refused.strip()
+    if provider == "codex" and getattr(result, "token_usage", None) is None:
+        error = getattr(result, "error", None)
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+    return None
+
+
+def _book_cli_builder_run(
+    args: argparse.Namespace,
+    provider: str,
+    model_used: str,
+    result: Any,
+    window: tuple,
+    token_usage: Dict[str, Any],
+    state_dir: Path,
+) -> tuple:
+    """Book a codex/kimi builder run's own ledger line (K2b); ``(cost_usd, cost_source, run_ids)``.
+
+    The measured end of both lanes: the CLI has exited and ``result.token_usage``
+    carries what it reported. Booking is fail-open, and a refused booking falls
+    back to the old event, so this dispatch still gets a receipt with a cost.
+    """
+    import harness_run_cost  # noqa: PLC0415
+    from provider_costs import costs_path_in  # noqa: PLC0415
+
+    record, _reason = harness_run_cost.book_cli_builder(
+        provider=provider, model_requested=model_used, started=window[0], ended=window[1],
+        token_usage=getattr(result, "token_usage", None),
+        spawn_refused=_cli_spawn_refused(provider, result),
+        project_id=harness_run_cost.ledger_project_id(state_dir),
+        producer=COST_LEDGER_PRODUCER, ref=args.dispatch_id,
+        # The store this lane resolved (state_dir is its <data>/state), so a
+        # pinned state dir books where the receipt and report of this run land.
+        ledger_path=costs_path_in(state_dir.parent),
+    )
+    if record is None:
+        model = harness_run_cost.lane_model(provider, model_used)
+        cost_usd, cost_source = _emit_old_cost_event(args, provider, model, token_usage, state_dir)
+        return cost_usd, cost_source, None
+    return harness_run_cost.receipt_cost([record])
+
+
 def _book_dispatch_cost(
     args: argparse.Namespace,
     provider: str,
@@ -1459,12 +1513,16 @@ def _book_dispatch_cost(
     (ADR-043, ``harness_run_cost``) and the receipt takes its cost from it.
     When the run's attempts were already booked by the subprocess lane
     (``_dispatch_claude`` hands them over as ``result.cost_ledger_records``),
-    those records are the receipt's and nothing is written twice. Every other
-    lane and role writes the old event. Ledger errors propagate: the caller
+    those records are the receipt's and nothing is written twice. A codex or
+    kimi builder run books its own line through the CLI booker (K2b), fail-open:
+    a refusal leaves the old event to price the receipt. Every other lane and
+    role writes the old event. Harness-lane ledger errors propagate: the caller
     writes no receipt (fail-loud).
     """
     import harness_run_cost  # noqa: PLC0415
 
+    if harness_run_cost.books_cli_run(provider, vars(args).get("role")):
+        return _book_cli_builder_run(args, provider, model_used, result, window, token_usage, state_dir)
     if not harness_run_cost.writes_builder_run(provider, vars(args).get("role")):
         cost_usd, cost_source = _emit_old_cost_event(args, provider, model_used, token_usage, state_dir)
         return cost_usd, cost_source, None

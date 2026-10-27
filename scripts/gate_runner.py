@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -33,6 +34,7 @@ import gate_recorder as _rec
 from failure_classification import find_codex_model_refusal
 from providers import provider_registry
 import gate_artifacts as _art
+import provider_costs
 import provider_switch
 import vertex_ai_runner as _vtx
 from claude_gate_lane import CLAUDE_LANE_PROVIDER
@@ -47,6 +49,7 @@ from gate_prompt import (  # OI-1442: the diff is data, not instruction
     default_review_instruction,
 )
 import gate_depth  # OI-1851: record what part of the diff each prompt carries
+import harness_run_cost  # K2b: the codex gate's own cost-ledger line
 from prompt_assembler import PromptAssembler, format_for_provider
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     DISPATCH_ERROR_DETAIL_MAX_CHARS as _DISPATCH_ERROR_DETAIL_MAX_CHARS,
@@ -611,13 +614,73 @@ def _unlaunched_codex_result(reason: str, exc: Exception) -> Dict[str, Any]:
 
     ``reason`` is in ``gate_recorder.EXECUTION_FAILURE_REASONS``, so the run
     books ``unavailable``: the PR was not reviewed, it was not rejected.
+    ``spawn_refused`` marks it for the cost ledger (K2b): nothing started, so
+    the attempt books zero tokens and ``unavailable:spawn_refused``.
     """
     return {
         "status": "failed", "reason": reason,
         "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
         "duration_seconds": 0.0, "partial_output_lines": 0,
-        "runner_pid": os.getpid(),
+        "runner_pid": os.getpid(), "spawn_refused": reason,
     }
+
+
+# K2b: the one gate whose runs book a cost-ledger line here. Only ``codex_gate``
+# runs its model from this module (``codex exec --json``); a harness-lane gate
+# ends in its own lane.
+_COST_PRODUCERS_BY_GATE: Dict[str, str] = {"codex_gate": "codex_gate"}
+
+
+def _codex_gate_model(request_payload: Dict[str, Any]) -> str:
+    """The model this run launched codex with: the launch record's, else the registry's default."""
+    launch = request_payload.get("codex_launch")
+    model = launch.get("model") if isinstance(launch, dict) else None
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return provider_registry.resolve_codex_model()
+
+
+def _book_gate_run_cost(
+    *,
+    gate: str,
+    request_payload: Dict[str, Any],
+    result: Dict[str, Any],
+    pr_number: Optional[int],
+    pr_id: str,
+    state_dir: Path,
+) -> None:
+    """Book this gate run's own ledger line (K2b), and never let the booking change its verdict.
+
+    The codex gate runs ``codex exec --json`` from this module, so the run ends
+    here, holding the only usage report the lane gives: the event stream
+    ``_classify_finished_run`` parsed into ``execution_depth``. Booking is
+    fail-open (``record_codex_run`` logs the refusal and returns it) and this
+    function never raises. A run with no resolvable model identity has no line;
+    that refusal is logged here rather than dropped.
+    """
+    producer = _COST_PRODUCERS_BY_GATE.get(gate)
+    if producer is None:
+        return
+    run_ref = pr_id or (f"pr-{pr_number}" if pr_number is not None else "pr-unknown")
+    try:
+        model = _codex_gate_model(request_payload)
+    except provider_registry.CodexModelResolutionError as exc:
+        log.warning("gate_runner: %s %s cost line not booked, no model identity: %s", gate, run_ref, exc)
+        return
+    ended = datetime.now(timezone.utc)
+    started = ended - timedelta(seconds=float(result.get("duration_seconds") or 0.0))
+    refused = result.get("spawn_refused") or None
+    depth = None if refused else gate_depth.measure_execution_depth(result.get("stdout") or "")
+    run = harness_run_cost.cli_run(
+        provider=harness_run_cost.CODEX_PROVIDER, model=model, started=started, ended=ended,
+        depth=depth, spawn_refused=refused,
+    )
+    harness_run_cost.record_codex_run(
+        run, project_id=harness_run_cost.ledger_project_id(state_dir), producer=producer, ref=run_ref,
+        # The store this runner holds, not whatever the ambient env names: a
+        # gate run books into the store its own result record lands in.
+        ledger_path=provider_costs.costs_path_in(state_dir.parent),
+    )
 
 
 def _build_reason_detail(base_detail: str, stdout: str, stderr: str) -> str:
@@ -937,6 +1000,13 @@ class GateRunner:
             result = _unlaunched_codex_result("codex_review_effort_invalid", exc)
         finally:
             remove_gate_worktree(worktree_path, project_root=self._project_root)
+
+        # K2b: the run ended above, so its cost line is booked here — before the
+        # verdict is recorded, and never able to change it.
+        _book_gate_run_cost(
+            gate=gate, request_payload=request_payload, result=result,
+            pr_number=pr_number, pr_id=pr_id, state_dir=self._state_dir,
+        )
 
         if result["status"] == "failed":
             return _rec.record_failure(
@@ -1551,11 +1621,13 @@ class GateRunner:
                 cwd=str(cwd) if cwd else None,
             )
         except OSError as exc:
+            # The binary never started: the cost line books this as a refused
+            # spawn (K2b), zero tokens and no amount, not an unknown run.
             return {
                 "status": "failed", "reason": "subprocess_error",
                 "reason_detail": str(exc), "stdout": "", "stderr": str(exc),
                 "duration_seconds": 0.0, "partial_output_lines": 0,
-                "runner_pid": os.getpid(),
+                "runner_pid": os.getpid(), "spawn_refused": "subprocess_error",
             }
         if proc.stdin:
             if prompt:
