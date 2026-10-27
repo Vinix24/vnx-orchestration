@@ -26,13 +26,21 @@ Partial-failure contract (ADR-046 §3), fixed here before the code:
    no record and no receipt, and sets no flag. The debt of the record that
    stays is still paid by step 3: it belongs to that record.
 6. **Repeat.** An admitted write of the decided outcome already on the slot
-   (same ``commit_sha``, status and pass/fail decision) is a no-op: no
-   rewrite, no ``attempt_seq`` increment, no receipt; it returns the stored
-   record. The key carries no ``attempt_seq``, so a rewrite advanced the
-   attempt while the key returned its receipt as a duplicate. Only decided
-   records: an ``unavailable`` or ``not_executable`` owes no receipt, and its
-   newer ``reason_detail`` (a quota refusal on a retry) still lands and feeds
-   the provider-reachability ledger.
+   (same ``commit_sha``, status, pass/fail decision and evidence,
+   :data:`REPEAT_EVIDENCE_FIELDS`) is a no-op: no rewrite, no
+   ``attempt_seq`` increment, no receipt; it returns the stored record. The
+   key carries no ``attempt_seq``, so a rewrite advanced the attempt while the
+   key returned its receipt as a duplicate. Only decided records: an
+   ``unavailable`` or ``not_executable`` owes no receipt, and its newer
+   ``reason_detail`` (a quota refusal on a retry) still lands and feeds the
+   provider-reachability ledger. A write that changes the status or the
+   evidence is no repeat and lands as the next attempt with its own receipt,
+   unless that receipt has the identity of the one booked for the record on
+   the slot (``gate_recorder.outcome_receipt_identity``: the idempotency key,
+   or the outcome id of a receipt that names a dispatch). The append would
+   return it as a duplicate and the record would change while the ledger
+   keeps the old line, so it is refused (:class:`DuplicateReceiptRefused`)
+   before the round ledger, like every refusal of step 5.
 7. **Request** (GE-4b). An admitted outcome, a repeat included, then gives
    its :class:`GateRequest` the terminal status of the record on the slot
    (:data:`REQUEST_STATUS_OF`, or the request's own :attr:`GateRequest.status`),
@@ -47,6 +55,9 @@ receipt that landed, whose clearing write then failed, and that is recovered
 after that window, can book a second line. The writers still on
 ``write_result_guarded`` (``gate_request_handler``, a ci_gate ``running``
 snapshot) stamp no ``attempt_seq``, and no obligation is booked here (GE-4c-2).
+A ``claude_github_optional`` record carries no head of its own (its receipt
+reads the head off the request), so it is never a repeat: an identical retry
+lands as the next attempt, and the key returns its receipt as a duplicate.
 """
 
 from __future__ import annotations
@@ -54,7 +65,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import gate_recorder
 from atomic_io import slot_lock
@@ -83,6 +94,10 @@ REQUEST_STATUS_OF: Dict[str, str] = {
 # still taken then raises before anything is written: step 2 of the contract.
 RECEIPT_LOCK_TIMEOUT_SECONDS = 30.0
 
+# Step 6: the evidence a repeat carries unchanged, next to head, status and
+# decision. Nothing else joins: not report_path, recorded_at or attempt_seq.
+REPEAT_EVIDENCE_FIELDS: Tuple[str, ...] = ("blocking_findings", "advisory_findings", "required_reruns", "residual_risk")
+
 
 class ReceiptPendingRefused(gate_recorder.ResultOverwriteRefused):
     """The record on the slot still owes its receipt and booking it failed again (step 3).
@@ -90,6 +105,17 @@ class ReceiptPendingRefused(gate_recorder.ResultOverwriteRefused):
     A :class:`gate_recorder.ResultOverwriteRefused`, so every writer's existing
     refusal path handles it: nothing is written, nothing is published.
     """
+
+
+class DuplicateReceiptRefused(gate_recorder.ResultOverwriteRefused):
+    """A write changes the outcome on the slot, and its receipt would be the duplicate of that record's (step 6).
+
+    Handled by every writer's existing refusal path, like :class:`ReceiptPendingRefused`.
+    """
+
+
+# Refusals whose own text replaces the guard's in the audit line.
+_REFUSALS_WITH_OWN_CAUSE = (ReceiptPendingRefused, DuplicateReceiptRefused)
 
 
 @dataclass(frozen=True)
@@ -191,11 +217,12 @@ def commit_gate_outcome(
         try:
             _pay_outstanding_receipt(path, existing, gate=gate, pr_ref=pr_ref)
             gate_recorder._check_overwrite_guard(path, record, gate=gate, pr_ref=pr_ref)
+            _refuse_a_duplicate_receipt(path, existing, outcome)
             gate_recorder._book_round(path, record, gate=gate)
         except gate_recorder.ResultOverwriteRefused as exc:
             refusal = exc
             if audit_refusal:
-                detail = str(exc) if isinstance(exc, ReceiptPendingRefused) else None
+                detail = str(exc) if isinstance(exc, _REFUSALS_WITH_OWN_CAUSE) else None
                 gate_recorder._audit_write_refusal(path, gate, pr_ref, record, reason_detail=detail)
             on_disk = existing if isinstance(existing, dict) else {}
         else:
@@ -238,9 +265,10 @@ def _repeats_the_slot(existing: Any, record: Dict[str, Any]) -> bool:
     """Step 6: does this write repeat the decided outcome on the slot?
 
     Positive evidence only: both records owe a receipt, both name the same
-    non-empty head, and status and pass/fail decision are equal (the receipt
-    books ``is_pass``, so a ``completed`` with blocking findings is a fail).
-    Anything missing or malformed is no repeat, and the write goes ahead.
+    non-empty head, status and pass/fail decision are equal (the receipt
+    books ``is_pass``, so a ``completed`` with blocking findings is a fail),
+    and so is the evidence (:func:`_changed_evidence`). Anything missing or
+    malformed is no repeat, and the write goes ahead.
     """
     if not isinstance(existing, dict):
         return False
@@ -251,7 +279,55 @@ def _repeats_the_slot(existing: Any, record: Dict[str, Any]) -> bool:
         return False
     return (old_head.strip() == new_head.strip()
             and canonical_status(existing) == canonical_status(record)
-            and is_pass(existing)[0] == is_pass(record)[0])
+            and is_pass(existing)[0] == is_pass(record)[0]
+            and not _changed_evidence(existing, record))
+
+
+def _changed_evidence(existing: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
+    """The :data:`REPEAT_EVIDENCE_FIELDS` that differ: absent on both sides is equal, on one side a change."""
+    return [name for name in REPEAT_EVIDENCE_FIELDS if existing.get(name) != record.get(name)]
+
+
+def _refuse_a_duplicate_receipt(path: Path, existing: Any, outcome: GateOutcome) -> None:
+    """Step 6: refuse a decided write that changes the outcome on the slot when the key would drop its receipt.
+
+    Only a write that is no repeat and changes the status or the evidence of
+    a decided record. That record's receipt is taken as booked (step 3 paid
+    any debt first) under the identity this writer gives it now. Its own
+    ``receipt_fields`` left the record with that booking, so a key they filled
+    (claude_github's head, which lives on its request and not on its record)
+    is read as this write's: the booked receipt cannot be read back, and
+    reading it as different would let the key swallow this write.
+    """
+    record = outcome.record
+    if not isinstance(existing, dict) or _repeats_the_slot(existing, record):
+        return
+    if not (gate_recorder.owes_outcome_receipt(existing) and gate_recorder.owes_outcome_receipt(record)):
+        return
+    changed = ["status"] if canonical_status(existing) != canonical_status(record) else []
+    changed += _changed_evidence(existing, record)
+    if not changed:
+        return
+    old_key, old_outcome_id = gate_recorder.outcome_receipt_identity(
+        existing, gate=outcome.gate, pr_ref=outcome.pr_ref, extra_fields=outcome.receipt_fields,
+    )
+    new_key, new_outcome_id = gate_recorder.outcome_receipt_identity(
+        record, gate=outcome.gate, pr_ref=outcome.pr_ref, extra_fields=outcome.receipt_fields,
+    )
+    if new_key == old_key:
+        same = "idempotency key"
+    elif new_outcome_id and new_outcome_id == old_outcome_id:
+        same = "outcome id (dispatch_id, head, status, gate and PR)"
+    else:
+        return
+    raise DuplicateReceiptRefused(
+        f"{outcome.gate} result for pr={outcome.pr_ref!r} at {path}: this write changes "
+        f"{', '.join(changed)} of the decided outcome on the slot (commit_sha={existing.get('commit_sha')!r}, "
+        f"status={canonical_status(existing)!r}, attempt_seq={existing.get('attempt_seq')!r}), but its "
+        f"review_gate_result receipt has the {same} of the receipt booked for that record: the append "
+        f"would return it as a duplicate and the record would change while the ledger keeps the old "
+        f"line; refusing it (ADR-046 §6)"
+    )
 
 
 def _write_record_then_receipt(

@@ -1790,13 +1790,49 @@ def _emit_terminal_result_receipt(
     this function left unset and never replace one, so ``status``,
     ``gate_status``, the record's head and ``attempt_seq`` stay its own.
     """
-    from gate_status import canonical_status, is_pass
-
-    status = canonical_status(payload)
     if not owes_outcome_receipt(payload):
         # not_executable / unavailable / in-flight: not a decided verdict, so
         # there is no outcome receipt to book.
         return
+    receipt_status, fields = _outcome_receipt_fields(payload, gate=gate, pr_ref=pr_ref, extra_fields=extra_fields)
+    try:
+        emit_governance_receipt(
+            _OUTCOME_RECEIPT_EVENT,
+            status=receipt_status,
+            lock_timeout=lock_timeout,
+            **_OUTCOME_RECEIPT_ENVELOPE,
+            **fields,
+        )
+    # vnx-broad-except: the verdict is already on disk and this hook may not
+    # be able to fail the gate run that produced it. The receipt-append
+    # failure surface is open-ended (store resolution, lock contention, a lazy
+    # import); narrowing it would let anything outside that surface take down
+    # a write that has already succeeded. Nothing is silent: the branch below
+    # logs with the gate and pr_ref so the missing outcome stays visible.
+    except Exception as exc:
+        if raise_on_failure:
+            raise
+        logger.warning(
+            "gate_recorder: review_gate_result receipt NOT emitted for "
+            "gate=%s pr_ref=%s — %s: %s. The result on disk is unchanged; "
+            "the ledger is missing this outcome until a repair path emits it.",
+            gate, pr_ref, type(exc).__name__, exc,
+        )
+
+
+# The envelope _emit_terminal_result_receipt hands emit_governance_receipt;
+# outcome_receipt_identity reads the same values, so the two cannot drift.
+_OUTCOME_RECEIPT_EVENT = "review_gate_result"
+_OUTCOME_RECEIPT_ENVELOPE: Dict[str, str] = {"receipt_kind": "review_gate", "terminal": "T0", "source": "vnx_governance"}
+
+
+def _outcome_receipt_fields(
+    payload: Dict[str, Any], *, gate: str, pr_ref: str, extra_fields: Optional[Mapping[str, Any]],
+) -> Tuple[str, Dict[str, Any]]:
+    """The receipt ``status`` and fields a decided ``payload`` books; the caller checked it owes one."""
+    from gate_status import canonical_status, is_pass
+
+    status = canonical_status(payload)
     passed, _reason = is_pass(payload)
     receipt_status = "completed" if passed else "failed"
     blocking = payload.get("blocking_findings") or []
@@ -1836,31 +1872,31 @@ def _emit_terminal_result_receipt(
     for key, value in (extra_fields or {}).items():
         if key not in _RECEIPT_ENVELOPE_KEYS:
             fields.setdefault(key, value)
+    return receipt_status, fields
 
-    try:
-        emit_governance_receipt(
-            "review_gate_result",
-            receipt_kind="review_gate",
-            status=receipt_status,
-            terminal="T0",
-            lock_timeout=lock_timeout,
-            **fields,
-        )
-    # vnx-broad-except: the verdict is already on disk and this hook may not
-    # be able to fail the gate run that produced it. The receipt-append
-    # failure surface is open-ended (store resolution, lock contention, a lazy
-    # import); narrowing it would let anything outside that surface take down
-    # a write that has already succeeded. Nothing is silent: the branch below
-    # logs with the gate and pr_ref so the missing outcome stays visible.
-    except Exception as exc:  # noqa: BLE001
-        if raise_on_failure:
-            raise
-        logger.warning(
-            "gate_recorder: review_gate_result receipt NOT emitted for "
-            "gate=%s pr_ref=%s — %s: %s. The result on disk is unchanged; "
-            "the ledger is missing this outcome until a repair path emits it.",
-            gate, pr_ref, type(exc).__name__, exc,
-        )
+
+def outcome_receipt_identity(
+    payload: Dict[str, Any], *, gate: str, pr_ref: str, extra_fields: Optional[Mapping[str, Any]] = None,
+) -> Tuple[str, str]:
+    """The identities the receipt append dedupes this decided record's receipt on: ``(key, outcome_id)``.
+
+    Computed by the append's own functions on the receipt
+    :func:`_emit_terminal_result_receipt` hands it: the short-window
+    idempotency key over ``IDEMPOTENCY_FIELDS`` (``status`` and ``commit_sha``
+    included), and the durable outcome id of ADR-038, which the append only
+    enforces for a receipt that names a dispatch (``""`` for one that does
+    not). The receipt is built without its append time. The key reads that
+    time only for a receipt with no dispatch_id, task_id or report_path, and
+    without it reads the receipt's whole content: two such receipts are then
+    one identity only when every field is equal.
+    """
+    from append_receipt_internals.idempotency import _compute_idempotency_key
+    from append_receipt_internals.outcome_identity import compute_outcome_id, has_outcome_identity
+
+    receipt_status, fields = _outcome_receipt_fields(payload, gate=gate, pr_ref=pr_ref, extra_fields=extra_fields)
+    receipt = {"event_type": _OUTCOME_RECEIPT_EVENT, "status": receipt_status, **_OUTCOME_RECEIPT_ENVELOPE, **fields}
+    outcome_id = compute_outcome_id(receipt) if has_outcome_identity(receipt) else ""
+    return _compute_idempotency_key(receipt, _OUTCOME_RECEIPT_EVENT), outcome_id
 
 
 # Failure reasons whose ``reason_detail`` is the provider's own text about why

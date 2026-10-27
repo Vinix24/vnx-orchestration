@@ -9,3 +9,7 @@
   receipt: a `record-result` for `unavailable`, `not_executable` or an in-flight status no longer adds one, and a
   status that is neither an outcome nor in flight is refused before anything is written. The unused
   `write_result_guarded(emit_outcome_receipt=...)` opt-out is gone.
+  A write on the same head, status and decision that changes `blocking_findings`, `advisory_findings`,
+  `required_reruns` or `residual_risk` is no repeat: it lands as the next attempt with its own receipt, and is
+  refused (`DuplicateReceiptRefused`, naming the changed fields) when the receipt key would return that receipt as
+  a duplicate of the one already booked for the record on the slot.

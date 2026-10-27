@@ -78,7 +78,8 @@ class GateResultParserMixin:
         contract request's end are one ``commit_gate_outcome``. The receipt
         carries what ``_emit_claude_github_receipt`` booked before, the head
         read off the contract request (it is not on this record) included. A
-        refusal raises :class:`ResultOverwriteRefused` and changes nothing.
+        refusal raises the commit's :class:`ResultOverwriteRefused`, with its
+        cause, and changes nothing.
         """
         from review_gate_manager import _utc_now
 
@@ -125,16 +126,10 @@ class GateResultParserMixin:
             "contributed_evidence": receipt.contributed_evidence(),
             **({"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}),
         })
-        _payload_on_disk, written = commit_gate_outcome(
-            outcome, results_dir=self.results_dir, result_path=result_file,
+        commit_gate_outcome(
+            outcome, results_dir=self.results_dir, result_path=result_file, raise_on_refusal=True,
             request=self._answered_request(request_payload, full_payload["completed_at"]),
         )
-        if not written:
-            raise ResultOverwriteRefused(
-                f"claude_github_optional result for pr_id={pr_id!r} at {result_file} "
-                f"was refused by the overwrite guard: a decided, evidenced verdict "
-                f"already holds this slot; the record on disk is unchanged"
-            )
         return receipt
 
     def _answered_request(self, request_payload: Dict[str, Any], completed_at: str) -> Optional[GateRequest]:
@@ -248,7 +243,8 @@ class GateResultParserMixin:
         the receipt is the commit's, with the residual risk, findings and
         required reruns ``_emit_result_receipt`` booked before, and the
         ``pr-<N>-<gate>`` request ends with it. A refusal raises
-        :class:`ResultOverwriteRefused` (a ``ValueError``) and changes nothing.
+        :class:`ResultOverwriteRefused` (a ``ValueError``), the commit's own
+        with its cause, and changes nothing.
         """
         if status in {"pass", "fail"}:
             error = evidence_error(payload)
@@ -269,7 +265,7 @@ class GateResultParserMixin:
                 gate, payload, pr_id="", receipt_fields={key: payload[key] for key in _RECORD_RESULT_RECEIPT_FIELDS},
             )
             _payload_on_disk, written = commit_gate_outcome(
-                outcome, results_dir=self.results_dir, result_path=result_path,
+                outcome, results_dir=self.results_dir, result_path=result_path, raise_on_refusal=True,
                 request=self._answered_request(request_payload, payload["recorded_at"]),
             )
         if not written:
