@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from atomic_io import atomic_write_json
+from atomic_io import atomic_write_json, slot_lock
 from auto_merge_policy import codex_final_gate_required
 from dispatch_spec import REGISTERED_GATE_NAMES, RETIRED_GATE_NAMES, retired_gate_hint
 from review_contract import ReviewContract
@@ -22,6 +22,7 @@ from gemini_prompt_renderer import render_gemini_prompt
 from gate_recorder import (
     PROVIDER_SWITCHED_OFF_REASON,
     QUOTA_REFUSAL_REASON,
+    annotate_result_guarded,
     gate_is_available,
     gate_provider_reachability,
     gate_switch_refusal,
@@ -359,8 +360,35 @@ _RECORD_DOES_NOT_HOLD_THE_SEAT = frozenset({
 })
 
 
+# The one event type every request receipt books under (GE-4c-2, E4): four
+# emitters wrote four slightly different lines under this name until then, and
+# ``_emit_review_request_receipt`` is now the only place it is spelled.
+_REVIEW_REQUEST_EVENT = "review_gate_request"
+
+# The one field set a ``review_gate_request`` receipt carries (GE-4c-2, E4).
+# The emitter fills every key its calling path has a value for and omits the
+# rest: ``pr_number``/``contract_hash`` are part of the append's idempotency
+# key, so stamping one on a path that never carried it would change which
+# lines dedupe against which. Nothing new without a line here.
+REVIEW_REQUEST_RECEIPT_FIELDS = (
+    "pr_id",
+    "pr_number",
+    "branch",
+    "gate",
+    "review_mode",
+    "risk_class",
+    "changed_files",
+    "contract_hash",
+    "request",
+    "contributed_evidence",
+    "was_intentionally_absent",
+    "failure_reason",
+    "takeover_from",
+    "dispatch_id",
+)
+
 # The consumer name every review-seat switch decision carries in its detail line.
-_SEAT_SWITCH_CONSUMER = "review_gate_request"
+_SEAT_SWITCH_CONSUMER = _REVIEW_REQUEST_EVENT
 
 
 class _PrHead:
@@ -1010,6 +1038,21 @@ class GateRequestHandlerMixin:
             return ""
         return text if text.strip() else ""
 
+    def _write_request_record(self, path: Path, payload: Dict[str, Any]) -> None:
+        """The ONE writer for every request record this module produces (GE-4c-2, Q5-Q7).
+
+        ``atomic_write_json`` inside ``slot_lock`` on the request path: the
+        same pair GE-4b gave ``gate_recorder.persist_request`` (Q1), so a
+        reader never sees half a request and two writers of one request never
+        interleave. That is not theoretical: ``commit_gate_outcome`` ends a
+        request through ``persist_request`` on this same lock while this
+        module writes it, and an executor reads the request it just wrote to
+        decide whether to run. ``path`` is the caller's, because this module
+        names a request two ways (``_request_path``, ``_contract_request_path``).
+        """
+        with slot_lock(path):
+            atomic_write_json(path, payload)
+
     def _stamp_takeover_annotations(
         self,
         payload: Dict[str, Any],
@@ -1042,26 +1085,25 @@ class GateRequestHandlerMixin:
         no multi-hop path to report, so the field is NEVER absent on a
         takeover record.
 
-        The request write goes through ``atomic_write_json`` (temp file in
-        the same directory + ``os.replace``), never a bare ``write_text``.
-        That file is an EVIDENCE file: a torn write here passes the
-        existence check a reader does first and only fails on the content it
-        trusts -- worse than no record at all, because it surfaces exactly
-        when the record is needed. Not suppressed with a
-        `# vnx-atomic-write` marker: that marker is for writes where a torn
-        write is harmless, which a gate evidence record is not.
+        The request write goes through :meth:`_write_request_record`
+        (``atomic_write_json`` inside ``slot_lock`` on the request path,
+        GE-4c-2 Q5), never a bare ``write_text`` or an unlocked write. That
+        file is an EVIDENCE file: a torn write here passes the existence
+        check a reader does first and only fails on the content it trusts --
+        worse than no record at all, because it surfaces exactly when the
+        record is needed, and two writers of one request (this annotation and
+        the executor reading it) must not interleave.
 
-        The result write (OI-1630) routes through
-        ``gate_recorder.write_result_guarded`` instead of a bare
-        ``atomic_write_json``. This method reads the on-disk result, merges
-        the takeover fields onto it, and writes the merge back -- a
-        read-modify-write with no lock across the gap. A concurrent GUARDED
-        writer (the real gate run this same takeover request just kicked
-        off) can land a decided, evidenced verdict in that gap; without the
-        guard, this method's stale copy of the pre-verdict record would
-        stomp it on the way back to disk. The guard refuses that stomp the
-        same way it already refuses every other writer of a
-        ``review_gates/results/`` record.
+        The result write (OI-1630, GE-4c-2 R11) goes through
+        ``gate_recorder.annotate_result_guarded``, which does the
+        read-merge-write inside ONE ``slot_lock`` behind the overwrite guard.
+        It is not ``commit_gate_outcome`` and must not be: an annotation is
+        provenance about a record someone else decided, so it chooses no
+        status and stamps no ``attempt_seq``. A concurrent GUARDED writer (the
+        real gate run this same takeover request just kicked off) can land a
+        decided, evidenced verdict; the guard refuses a stomp of it, and
+        because the merge now happens under the lock it also cannot merge a
+        stale copy of the record the verdict replaced.
         """
         gate = payload.get("gate", "")
         if takeover_path is None:
@@ -1084,32 +1126,24 @@ class GateRequestHandlerMixin:
         if pr_number is not None:
             request_file = self._request_path(gate, pr_number)
             if request_file.exists():
-                atomic_write_json(request_file, payload)
+                self._write_request_record(request_file, payload)
 
             result_file = self._result_path(gate, pr_number)
             if result_file.exists():
-                try:
-                    result_payload = json.loads(result_file.read_text(encoding="utf-8"))
-                except (OSError, ValueError):
-                    result_payload = None
-                if result_payload is not None:
-                    result_payload.update(annotations)
-                    _on_disk, written = write_result_guarded(
-                        result_file, result_payload, gate=gate, pr_ref=str(pr_number),
+                _on_disk, written = annotate_result_guarded(
+                    result_file, annotations, gate=gate, pr_ref=str(pr_number),
+                )
+                if not written:
+                    # The guard logged its own refusal; this names the caller's
+                    # (OI-1630): a decided verdict stands unannotated rather
+                    # than stomped, and an unreadable record is never annotated.
+                    logger.warning(
+                        "gate_request_handler: takeover-annotation write "
+                        "REFUSED for gate=%s pr=%s -- an existing terminal, "
+                        "evidenced result stands; this stamp never reached "
+                        "results/",
+                        gate, pr_number,
                     )
-                    if not written:
-                        # gate_recorder.write_result_guarded already logged the
-                        # refusal; this makes the takeover-stamping caller's own
-                        # awareness explicit (OI-1630) -- a decided, evidenced
-                        # verdict that landed concurrently stands unannotated
-                        # rather than being stomped by this stale copy.
-                        logger.warning(
-                            "gate_request_handler: takeover-annotation write "
-                            "REFUSED for gate=%s pr=%s -- an existing terminal, "
-                            "evidenced result stands; this stamp never reached "
-                            "results/",
-                            gate, pr_number,
-                        )
         return payload
 
     def _chain_exhausted_path(self, gate: str, pr_number: int) -> Path:
@@ -1572,7 +1606,7 @@ class GateRequestHandlerMixin:
         if not path:
             request_file = self._request_path(reader, pr_number)
             if seat_fields and request_file.exists():
-                atomic_write_json(request_file, payload)
+                self._write_request_record(request_file, payload)
             return payload
 
         last_hop = path[-1]
@@ -1693,7 +1727,7 @@ class GateRequestHandlerMixin:
             classification=(PROVIDER_SWITCHED_OFF_REASON, decision.detail()),
         )
         payload.update(seat_fields or {})
-        atomic_write_json(self._request_path(gate, pr_number), payload)
+        self._write_request_record(self._request_path(gate, pr_number), payload)
         return payload
 
     def request_reviews(
@@ -1783,8 +1817,9 @@ class GateRequestHandlerMixin:
             )
             requested.append(payload)
             self._emit_review_request_receipt(
-                payload, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk.risk_class,
-                changed_files=changed_files, dispatch_id=dispatch_id,
+                payload, gate=payload["gate"], pr_id=str(pr_number), pr_number=pr_number,
+                branch=branch, mode=mode, risk_class=risk.risk_class, changed_files=changed_files,
+                request=payload, dispatch_id=dispatch_id,
             )
 
         return {
@@ -1940,34 +1975,54 @@ class GateRequestHandlerMixin:
         )
 
     def _emit_review_request_receipt(
-        self, payload: Dict[str, Any], *, pr_number: int, branch: str, mode: str,
+        self, payload: Dict[str, Any], *, gate: str, pr_id: str, branch: str, mode: str,
         risk_class: str, changed_files: List[str], dispatch_id: str,
+        status: Optional[str] = None,
+        pr_number: Optional[int] = None, contract_hash: Optional[str] = None,
+        request: Optional[Dict[str, Any]] = None,
+        optional_gate: Optional[Tuple[bool, bool]] = None,
     ) -> None:
-        """The ``review_gate_request`` governance receipt for one requested seat or gate."""
+        """The ONE ``review_gate_request`` emitter: one event, one field set (GE-4c-2, E4).
+
+        ``payload`` is the request record the caller just wrote and supplies
+        the receipt's status; ``status`` overrides it for the one path whose
+        record names its state in a field of its own (the optional gate's
+        ``state``). The optional arguments are the per-path fields, each
+        omitted when the calling path has none -- ``pr_number`` and
+        ``contract_hash`` are keys of the append's idempotency, so stamping
+        one on a path that never carried it changes what dedupes against
+        what. ``request`` is the whole record when the caller has a
+        slot-shaped one, and a takeover request's ``failure_reason`` and
+        ``takeover_from`` travel top-level next to it (OI-1415).
+        """
         from review_gate_manager import emit_governance_receipt
 
-        receipt_fields: Dict[str, Any] = {}
-        if payload.get("takeover"):
-            # Top-level, in addition to the nested `request` payload, so
-            # a generic ledger reader finds the canonical reason field
-            # without knowing to look inside `request` (OI-1415).
-            receipt_fields["failure_reason"] = payload["failure_reason"]
-            receipt_fields["takeover_from"] = payload["takeover_from"]
+        fields: Dict[str, Any] = {
+            "pr_id": str(pr_id),
+            "branch": branch,
+            "gate": gate,
+            "review_mode": mode,
+            "risk_class": risk_class,
+            "changed_files": changed_files,
+            "dispatch_id": dispatch_id,
+        }
+        if pr_number is not None:
+            fields["pr_number"] = pr_number
+        if contract_hash is not None:
+            fields["contract_hash"] = contract_hash
+        if request is not None:
+            fields["request"] = request
+            if request.get("takeover"):
+                fields["failure_reason"] = request["failure_reason"]
+                fields["takeover_from"] = request["takeover_from"]
+        if optional_gate is not None:
+            fields["contributed_evidence"], fields["was_intentionally_absent"] = optional_gate
         emit_governance_receipt(
-            "review_gate_request",
+            _REVIEW_REQUEST_EVENT,
             receipt_kind="review_gate",
-            status=payload["status"],
+            status=status if status is not None else payload["status"],
             terminal="T0",
-            pr_id=str(pr_number),
-            pr_number=pr_number,
-            branch=branch,
-            gate=payload["gate"],
-            review_mode=mode,
-            risk_class=risk_class,
-            changed_files=changed_files,
-            request=payload,
-            dispatch_id=dispatch_id,
-            **receipt_fields,
+            **fields,
         )
 
     def _advance_seat(
@@ -2053,8 +2108,9 @@ class GateRequestHandlerMixin:
             seat_fields=seat_fields,
         )
         self._emit_review_request_receipt(
-            advanced, pr_number=pr_number, branch=branch, mode=mode, risk_class=risk_class,
-            changed_files=changed_files, dispatch_id=dispatch_id,
+            advanced, gate=advanced["gate"], pr_id=str(pr_number), pr_number=pr_number,
+            branch=branch, mode=mode, risk_class=risk_class, changed_files=changed_files,
+            request=advanced, dispatch_id=dispatch_id,
         )
         return advanced
 
@@ -2192,7 +2248,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        atomic_write_json(self._request_path("gemini_review", pr_number), payload)
+        self._write_request_record(self._request_path("gemini_review", pr_number), payload)
         return payload
 
     def _build_gemini_contract_payload(
@@ -2251,7 +2307,7 @@ class GateRequestHandlerMixin:
         Raises:
             gemini_prompt_renderer.MissingContractFieldError: when the contract is missing required fields.
         """
-        from review_gate_manager import _utc_now, emit_governance_receipt
+        from review_gate_manager import _utc_now
 
         prompt = render_gemini_prompt(contract)
         available = self._gemini_available()
@@ -2260,22 +2316,13 @@ class GateRequestHandlerMixin:
             contract, mode, dispatch_id, available, requested_at, prompt, pr_number=pr_number,
         )
 
-        request_file = self._contract_request_path("gemini_review", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        emit_governance_receipt(
-            "review_gate_request",
-            receipt_kind="review_gate",
-            status=payload["status"],
-            terminal="T0",
-            pr_id=contract.pr_id,
-            branch=contract.branch,
-            gate="gemini_review",
-            review_mode=mode,
-            risk_class=contract.risk_class,
-            contract_hash=contract.content_hash,
-            changed_files=contract.changed_files,
-            dispatch_id=dispatch_id,
+        self._write_request_record(
+            self._contract_request_path("gemini_review", contract.pr_id), payload,
+        )
+        self._emit_review_request_receipt(
+            payload, gate="gemini_review", pr_id=contract.pr_id, branch=contract.branch, mode=mode,
+            risk_class=contract.risk_class, changed_files=contract.changed_files,
+            contract_hash=contract.content_hash, dispatch_id=dispatch_id,
         )
         return payload
 
@@ -2373,8 +2420,20 @@ class GateRequestHandlerMixin:
         contract: ReviewContract,
         requested_at: str,
     ) -> None:
+        """Write the optional gate's request record and its result-slot mirror (GE-4c-2, R10).
+
+        The request goes through :meth:`_write_request_record` (Q7). The
+        mirror stays on ``gate_recorder.write_result_guarded`` and not
+        ``commit_gate_outcome``: every state it records — ``not_configured``,
+        ``configured_dry_run``, ``requested``, ``blocked`` — is in flight or
+        refused, not one of ADR-046 §1's four outcomes, so ``GateOutcome``
+        refuses it by construction (as with the ci_gate ``running`` snapshot,
+        R7b). Nothing is lost: the same slot lock, overwrite guard, atomic
+        write and receipt emitter are already there, and a status owing no
+        receipt books no ``review_gate_result`` line and no ``attempt_seq``.
+        """
         request_file = self._contract_request_path("claude_github_optional", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        self._write_request_record(request_file, payload)
 
         # Persist the explicit state as a result record so closure_verifier can
         # observe optional-gate state via review_gates/results/ — without this
@@ -2423,29 +2482,24 @@ class GateRequestHandlerMixin:
 
     def _emit_claude_github_request_receipt(
         self,
+        payload: Dict[str, Any],
         contract: ReviewContract,
         mode: str,
         dispatch_id: str,
-        state: str,
         receipt: ClaudeGitHubReviewReceipt,
     ) -> None:
-        from review_gate_manager import emit_governance_receipt
+        """The optional gate's request receipt through the one emitter (GE-4c-2, E4).
 
-        emit_governance_receipt(
-            "review_gate_request",
-            receipt_kind="review_gate",
-            status=state,
-            terminal="T0",
-            pr_id=contract.pr_id,
-            branch=contract.branch,
-            gate="claude_github_optional",
-            review_mode=mode,
-            risk_class=contract.risk_class,
-            contract_hash=contract.content_hash,
-            changed_files=contract.changed_files,
-            contributed_evidence=receipt.contributed_evidence(),
-            was_intentionally_absent=receipt.was_intentionally_absent(),
-            dispatch_id=dispatch_id,
+        ``status`` is the receipt's ``state``: this path has always booked the
+        optional gate's state as the line's status, and its record has no
+        ``status`` field to read it from.
+        """
+        optional_gate = (receipt.contributed_evidence(), receipt.was_intentionally_absent())
+        self._emit_review_request_receipt(
+            payload, gate="claude_github_optional", pr_id=contract.pr_id, branch=contract.branch,
+            mode=mode, risk_class=contract.risk_class, changed_files=contract.changed_files,
+            contract_hash=contract.content_hash, optional_gate=optional_gate, dispatch_id=dispatch_id,
+            status=receipt.state,
         )
 
     def request_claude_github_with_contract(
@@ -2481,7 +2535,7 @@ class GateRequestHandlerMixin:
         receipt = self._build_claude_github_receipt(contract, state, reason, requested_at, pr_number, comment_body)
         payload = self._build_claude_github_payload(receipt, contract, mode, dispatch_id, requested_at, stderr_detail)
         self._persist_claude_github_files(payload, contract, requested_at)
-        self._emit_claude_github_request_receipt(contract, mode, dispatch_id, state, receipt)
+        self._emit_claude_github_request_receipt(payload, contract, mode, dispatch_id, receipt)
         return receipt
 
     def _request_codex(
@@ -2524,7 +2578,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        atomic_write_json(self._request_path("codex_gate", pr_number), payload)
+        self._write_request_record(self._request_path("codex_gate", pr_number), payload)
         return payload
 
     def _request_kimi(
@@ -2560,7 +2614,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        atomic_write_json(self._request_path("kimi_gate", pr_number), payload)
+        self._write_request_record(self._request_path("kimi_gate", pr_number), payload)
         return payload
 
     def _request_glm(
@@ -2637,7 +2691,7 @@ class GateRequestHandlerMixin:
                 reason=reason, reason_detail=reason_detail,
                 commit_sha=payload.get("commit_sha") or "",
             )
-        atomic_write_json(self._request_path("glm_gate", pr_number), payload)
+        self._write_request_record(self._request_path("glm_gate", pr_number), payload)
         return payload
 
     def _request_deepseek(
@@ -2731,7 +2785,7 @@ class GateRequestHandlerMixin:
                 reason=reason, reason_detail=reason_detail,
                 commit_sha=payload.get("commit_sha") or "",
             )
-        atomic_write_json(self._request_path(gate, pr_number), payload)
+        self._write_request_record(self._request_path(gate, pr_number), payload)
         return payload
 
     def _apply_claude_github_configured_state(
@@ -2786,7 +2840,7 @@ class GateRequestHandlerMixin:
             payload["dispatch_id"] = dispatch_id
         if configured:
             self._apply_claude_github_configured_state(payload, pr_number)
-        atomic_write_json(self._request_path("claude_github_optional", pr_number), payload)
+        self._write_request_record(self._request_path("claude_github_optional", pr_number), payload)
         return payload
 
     def _request_ci_gate(
@@ -2823,7 +2877,7 @@ class GateRequestHandlerMixin:
                 pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
             )
-        atomic_write_json(self._request_path("ci_gate", pr_number), payload)
+        self._write_request_record(self._request_path("ci_gate", pr_number), payload)
         return payload
 
     def _build_ci_gate_contract_payload(
@@ -2866,26 +2920,16 @@ class GateRequestHandlerMixin:
 
     def _emit_ci_gate_contract_receipt(
         self,
+        payload: Dict[str, Any],
         contract: "ReviewContract",
         mode: str,
         dispatch_id: str,
-        status: str,
     ) -> None:
-        from review_gate_manager import emit_governance_receipt
-
-        emit_governance_receipt(
-            "review_gate_request",
-            receipt_kind="review_gate",
-            status=status,
-            terminal="T0",
-            pr_id=contract.pr_id,
-            branch=contract.branch,
-            gate="ci_gate",
-            review_mode=mode,
-            risk_class=contract.risk_class,
-            contract_hash=contract.content_hash,
-            changed_files=contract.changed_files,
-            dispatch_id=dispatch_id,
+        """The ci_gate contract request receipt through the one emitter (GE-4c-2, E4)."""
+        self._emit_review_request_receipt(
+            payload, gate="ci_gate", pr_id=contract.pr_id, branch=contract.branch, mode=mode,
+            risk_class=contract.risk_class, changed_files=contract.changed_files,
+            contract_hash=contract.content_hash, dispatch_id=dispatch_id,
         )
 
     def request_ci_gate_with_contract(
@@ -2914,10 +2958,8 @@ class GateRequestHandlerMixin:
         requested_at = _utc_now()
         payload = self._build_ci_gate_contract_payload(contract, pr_number, mode, dispatch_id, available, requested_at)
 
-        request_file = self._contract_request_path("ci_gate", contract.pr_id)
-        request_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-
-        self._emit_ci_gate_contract_receipt(contract, mode, dispatch_id, payload["status"])
+        self._write_request_record(self._contract_request_path("ci_gate", contract.pr_id), payload)
+        self._emit_ci_gate_contract_receipt(payload, contract, mode, dispatch_id)
         return payload
 
     def _wiring_gate_available(self) -> bool:
@@ -2953,8 +2995,7 @@ class GateRequestHandlerMixin:
             }
             if dispatch_id:
                 payload["dispatch_id"] = dispatch_id
-            _path = self._request_path("wiring_gate", pr_number)
-            atomic_write_json(_path, payload)
+            self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
             return payload
 
         try:
@@ -2982,8 +3023,7 @@ class GateRequestHandlerMixin:
             }
             if dispatch_id:
                 payload["dispatch_id"] = dispatch_id
-            _path = self._request_path("wiring_gate", pr_number)
-            atomic_write_json(_path, payload)
+            self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
             return payload
 
         payload = {
@@ -3011,6 +3051,5 @@ class GateRequestHandlerMixin:
         }
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
-        _path = self._request_path("wiring_gate", pr_number)
-        atomic_write_json(_path, payload)
+        self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
         return payload
