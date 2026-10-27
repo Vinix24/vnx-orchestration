@@ -208,10 +208,11 @@ for acceptance and queue advancement.
 
 ## Dispatch Promotion Rule
 
-A staged spec bundle (`pending/<id>/dispatch-spec.json`) is the only queue: the door fires it.
-The old staging-`.md` promote (`vnx promote`) is retired, so there is no promote step left to
-run by hand. No staged dispatch may be promoted merely because a receipt exists. Promote a
-staged bundle only after checking:
+A staged spec bundle (`pending/<id>/dispatch-spec.json`) is the only queue: the door fires it,
+and `vnx dispatch <id>` is the only command that starts one. The old staging-`.md` promote flow
+is retired (T-A10, track `terminal-binding-afbouwen`), so no promote command is left to run by
+hand. No staged dispatch may be promoted merely because a receipt exists. Promote a staged
+bundle only after checking:
 - dependency eligibility
 - queue state
 - open-item state

@@ -94,7 +94,7 @@ Dispatches execute sequentially in one terminal:
 
 ```bash
 ./bin/vnx staging-list
-./bin/vnx promote <dispatch-id>    # One at a time
+./bin/vnx dispatch <dispatch-id>    # One at a time
 ```
 
 Same receipts, same report structure — just sequential instead of parallel.

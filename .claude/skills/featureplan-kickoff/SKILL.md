@@ -160,9 +160,9 @@ Validate:
 
 ### 3.4 Promote exactly one dispatch
 
-Only if validation passes. The staging-`.md` promote (`python3 scripts/pr_queue_manager.py
-promote`, `vnx promote`) is retired (T-A10, track `terminal-binding-afbouwen`): a staged spec
-bundle fired through the single-entry door is the only queue. Fire the first bundle:
+Only if validation passes. The staging-`.md` promote flow is retired (T-A10, track
+`terminal-binding-afbouwen`): a staged spec bundle fired through the single-entry door is the
+only queue, and `bin/vnx dispatch <dispatch-id>` is what fires it. Fire the first bundle:
 
 ```bash
 bin/vnx dispatch <dispatch-id>
