@@ -193,7 +193,6 @@ tests/test_serve_dashboard_api.py  # OI-1227: red solo — serve_dashboard._read
 tests/test_session_ids_staleness.py  # OI-1227: red solo — read_events_with_timeout does not refresh session_id (1 failed, 5 passed)
 tests/test_strategy_roadmap.py  # OI-1227: red solo — roadmap file not found (RoadmapValidationError) (1 failed, 33 passed)
 tests/test_strategy_roadmap_real_file.py  # OI-1227: red solo — committed roadmap not found (RoadmapValidationError) (1 failed)
-tests/test_subprocess_adapter_pr3.py  # OI-1227: red solo — session-id extraction 'ses_other' != 'ses_abc123' (1 failed, 25 passed)
 tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes to kimi, expected None (5 failed, 30 passed)
 tests/test_subprocess_dispatch_identity.py  # OI-1227: red solo — delivered env leaks ANTHROPIC_AUTH_TOKEN (1 failed, 5 passed)
 tests/test_subprocess_health.py  # OI-1227: red solo — deliver-with-recovery file not found (3 failed, 13 passed)
@@ -209,7 +208,6 @@ tests/test_tmux_worktree.py  # OI-952: order/load-dependent flake, passes solo o
 tests/test_track_cli.py  # OI-1227: red solo — track db file not found (15 failed, 3 passed)
 tests/test_track_v23_cli.py  # OI-1227: red solo — track v23 subprocess ret != 0 (4 failed, 6 passed)
 tests/test_vnx_cli.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) op hetzelfde ADR-007 init-backfill project_id-conflict (env:VNX_PROJECT_ID='vnx-dev'); .vnx-data/state wordt nooit aangemaakt omdat `vnx init` fail-closed weigert
-tests/test_vnx_start_runtime.py  # OI-1227: red solo — VNX var set mismatch (1 failed, 46 passed)
 tests/test_w_init_project_id_threading.py  # OI-1227: red solo — migration linter flags new DEFAULT 'vnx-dev' (1 failed, 26 passed)
 tests/test_wave4_central_install_e2e.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (3 failed) — ANDERE oorzaak dan ADR-007: in de CI-omgeving staat VNX_DATA_DIR al gepind op /home/runner/.vnx-data/vnx-dev (central-install pad) i.p.v. het project-lokale pad dat de test verwacht
 tests/test_wave4_path_resolver.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) — zelfde VNX_DATA_DIR-pin naar /home/runner/.vnx-data/vnx-dev als test_wave4_central_install_e2e.py; test_resolve_paths_end_to_end_central roept resolve_paths() in-process aan zonder de ambient env te wissen
