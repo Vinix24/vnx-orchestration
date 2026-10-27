@@ -36,10 +36,10 @@ def _isolate_vnx_data_dir(monkeypatch):
     and PRQueueManager()'s own real-store-under-pytest guard then refuses
     the write with RuntimeError instead of landing in the tmp dir.
 
-    PROJECT_ROOT is isolated too: PRQueueManager.update_markdown() writes
-    PR_QUEUE.md to project_root, and project_root resolves via vnx_paths'
-    git-toplevel walk regardless of VNX_DATA_DIR — left unpinned, every run
-    overwrites this repo's own git-tracked PR_QUEUE.md.
+    PROJECT_ROOT is isolated too: project_root resolves via vnx_paths'
+    git-toplevel walk regardless of VNX_DATA_DIR, so a write under it would
+    land in this repo (it once overwrote the PR_QUEUE.md that ADR-047 B4
+    retired, together with its writer).
 
     Module-level autouse (not a test-function parameter) so the file still
     runs standalone via ``python3 tests/test_pr_dispatch_integration.py``

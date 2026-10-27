@@ -6,8 +6,7 @@ This file is a short pointer. The architecture principles and full wave history 
 [docs/manifesto/ROADMAP.md](docs/manifesto/ROADMAP.md). The live, per-feature plan is not a
 markdown file at all — it is the maintainer's tracks database (`vnx horizon`, alias
 `vnx objective`). The repo-root [`ROADMAP.yaml`](./ROADMAP.yaml) is a generic example of the
-machine-readable roadmap format, not the live plan; [`PR_QUEUE.md`](./PR_QUEUE.md) is a view
-generated from it by `scripts/build_pr_queue.py`.
+machine-readable roadmap format, not the live plan.
 
 ## What ships today
 

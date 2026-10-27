@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the review contract schema and its deterministic materializer."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -18,12 +19,12 @@ from review_contract import (
     QualityGate,
     ReviewContract,
     TestEvidence,
+    derive_closure_stage,
     materialize_review_contract,
     materialize_from_files,
     _normalize_line,
     _parse_pr_section,
     _parse_feature_title,
-    _parse_pr_queue_status,
 )
 import claude_github_receipt
 import gemini_prompt_renderer
@@ -108,40 +109,14 @@ Render deliverable-aware Gemini review prompts from the review contract.
 - [ ] Advisory vs blocking findings are emitted distinctly
 """
 
-SAMPLE_PR_QUEUE = """\
-# PR Queue - Feature: Review Contracts And Gates
+DISPATCH_ID = "dlv-0123456789ab"
 
-## Progress Overview
-Total: 2 PRs | Complete: 0 | Active: 0 | Queued: 2 | Blocked: 0
-Progress: ░░░░░░░░░░ 0%
+# The register line scripts/pr_merge.py appends at the merge (``_emit_register_event``).
+MERGED_EVENT = {"event": "pr_merged", "pr_number": 2176, "dispatch_id": DISPATCH_ID,
+                "terminal": "T0", "extra": {"merge_method": "squash", "conclusion": "merged"}}
 
-## Status
-
-### ⏳ Queued PRs
-- PR-1: Review Contract Schema And Materializer (dependencies: none) [risk=medium]
-- PR-2: Gemini Review Prompt Renderer (dependencies: PR-1) [risk=medium]
-
-## Dependency Flow
-```
-PR-1 (no dependencies)
-PR-1 -> PR-2
-```
-"""
-
-SAMPLE_PR_QUEUE_COMPLETED = """\
-# PR Queue - Feature: Review Contracts And Gates
-
-## Progress Overview
-Total: 2 PRs | Complete: 1 | Active: 0 | Queued: 1 | Blocked: 0
-
-## Status
-
-### ✅ Completed PRs
-- PR-1: Review Contract Schema And Materializer
-
-### ⏳ Queued PRs
-- PR-2: Gemini Review Prompt Renderer (dependencies: PR-1)
-"""
+# What the retired PR_QUEUE.md said for PR-1 when it was "merged".
+STALE_PR_QUEUE_COMPLETED = "### ✅ Completed PRs\n- PR-1: Review Contract Schema And Materializer\n"
 
 
 class TestParseFeaturePlan:
@@ -167,11 +142,58 @@ class TestParseFeaturePlan:
         section = _parse_pr_section(SAMPLE_FEATURE_PLAN, "PR-2")
         assert section["dependencies"] == ["PR-1"]
 
-    def test_parse_pr_queue_status_open(self):
-        assert _parse_pr_queue_status(SAMPLE_PR_QUEUE, "PR-1") == "open"
 
-    def test_parse_pr_queue_status_completed(self):
-        assert _parse_pr_queue_status(SAMPLE_PR_QUEUE_COMPLETED, "PR-1") == "merged"
+class TestClosureStageFromDispatchRegister:
+    """ADR-047 §6: the closure stage comes from the dispatch register, not PR_QUEUE.md."""
+
+    def test_merged_pr_by_github_number(self):
+        assert derive_closure_stage("2176", "", [MERGED_EVENT]) == "merged"
+
+    @pytest.mark.parametrize("pr_id, pr_number", [("#2176", 2176), (" 2176 ", "2176"), ("2176", "#2176")])
+    def test_github_number_forms_are_one_pr(self, pr_id, pr_number):
+        assert derive_closure_stage(pr_id, "", [dict(MERGED_EVENT, pr_number=pr_number)]) == "merged"
+
+    def test_open_pr_when_only_another_pr_merged(self):
+        events = [dict(MERGED_EVENT, pr_number=2175), {"event": "gate_passed", "pr_number": 2175}]
+        assert derive_closure_stage("2176", DISPATCH_ID, events) == "open"
+
+    @pytest.mark.parametrize("event", ["gate_passed", "gate_failed"])
+    def test_review_result_is_in_review(self, event):
+        assert derive_closure_stage("2176", "", [{"event": event, "pr_number": 2176}]) == "in_review"
+
+    def test_merge_wins_over_a_later_review_result(self):
+        events = [MERGED_EVENT, {"event": "gate_failed", "pr_number": 2176}]
+        assert derive_closure_stage("2176", "", events) == "merged"
+
+    def test_label_joins_through_the_dispatch_id(self):
+        assert derive_closure_stage("PR-1", DISPATCH_ID, [MERGED_EVENT]) == "merged"
+        assert derive_closure_stage("PR-1", "dlv-other", [MERGED_EVENT]) == "open"
+
+    def test_label_is_not_the_github_number(self):
+        event = dict(MERGED_EVENT, pr_number=3, dispatch_id="dlv-other")
+        assert derive_closure_stage("PR-3", DISPATCH_ID, [event]) == "open"
+
+    def test_label_without_dispatch_id_never_matches(self):
+        assert derive_closure_stage("PR-1", "", [dict(MERGED_EVENT, dispatch_id="")]) == "open"
+
+    @pytest.mark.parametrize("event", [
+        None,
+        "pr_merged",
+        {"pr_number": 2176},
+        {"event": None, "pr_number": 2176},
+        {"event": "pr_merge_refused", "pr_number": 2176},
+        {"event": "gate_requested", "pr_number": 2176},
+        {"event": "pr_merged"},
+        {"event": "pr_merged", "pr_number": None},
+        {"event": "pr_merged", "pr_number": True},
+        {"event": "pr_merged", "pr_number": "21x76"},
+        {"event": "pr_merged", "pr_number": 0},
+    ])
+    def test_missing_malformed_or_unknown_evidence_stays_open(self, event):
+        assert derive_closure_stage("2176", "", [event]) == "open"
+
+    def test_empty_register_is_open(self):
+        assert derive_closure_stage("2176", DISPATCH_ID, []) == "open"
 
 
 class TestReviewContractSchema:
@@ -270,7 +292,7 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
             branch="feature/review-contract",
             changed_files=["scripts/lib/review_contract.py"],
         )
@@ -292,7 +314,7 @@ class TestMaterializeReviewContract:
         kwargs = dict(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
             branch="feature/review-contract",
             changed_files=["a.py", "b.py"],
         )
@@ -306,7 +328,7 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
         )
         assert any("PR-2" in ng for ng in contract.non_goals)
 
@@ -314,7 +336,8 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE_COMPLETED,
+            register_events=[MERGED_EVENT],
+            dispatch_id=DISPATCH_ID,
         )
         assert contract.closure_stage == "merged"
 
@@ -323,14 +346,14 @@ class TestMaterializeReviewContract:
             materialize_review_contract(
                 pr_id="PR-99",
                 feature_plan_content=SAMPLE_FEATURE_PLAN,
-                pr_queue_content=SAMPLE_PR_QUEUE,
+                register_events=[],
             )
 
     def test_changed_files_sorted(self):
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
             changed_files=["z.py", "a.py", "m.py"],
         )
         assert contract.changed_files == ["a.py", "m.py", "z.py"]
@@ -340,7 +363,7 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
             test_evidence=evidence,
         )
         assert contract.test_evidence is not None
@@ -351,7 +374,7 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
             deterministic_findings=findings,
         )
         assert len(contract.deterministic_findings) == 1
@@ -361,24 +384,78 @@ class TestMaterializeReviewContract:
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=SAMPLE_FEATURE_PLAN,
-            pr_queue_content=SAMPLE_PR_QUEUE,
+            register_events=[],
         )
         assert "scripts/lib/review_contract.py" in contract.scope_files
 
     def test_materialize_from_files(self, tmp_path):
         fp = tmp_path / "FEATURE_PLAN.md"
-        pq = tmp_path / "PR_QUEUE.md"
         fp.write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
-        pq.write_text(SAMPLE_PR_QUEUE, encoding="utf-8")
 
         contract = materialize_from_files(
             pr_id="PR-1",
             feature_plan_path=fp,
-            pr_queue_path=pq,
+            state_dir=tmp_path / "state",
             branch="feature/test",
         )
         assert contract.pr_id == "PR-1"
         assert contract.branch == "feature/test"
+        assert contract.closure_stage == "open"
+
+
+def _project(tmp_path, events, *, pr_queue: str = ""):
+    """A project root with a plan and a dispatch register; PR_QUEUE.md only when given."""
+    (tmp_path / "FEATURE_PLAN.md").write_text(SAMPLE_FEATURE_PLAN, encoding="utf-8")
+    if pr_queue:
+        (tmp_path / "PR_QUEUE.md").write_text(pr_queue, encoding="utf-8")
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    lines = "".join(json.dumps(event) + "\n" for event in events)
+    (state_dir / "dispatch_register.ndjson").write_text(lines, encoding="utf-8")
+    return tmp_path / "FEATURE_PLAN.md", state_dir
+
+
+class TestClosureStageWithoutPrQueue:
+    """The closure stage is read from the register on disk; PR_QUEUE.md is never read."""
+
+    def test_merged_pr_from_the_register(self, tmp_path):
+        fp, state_dir = _project(tmp_path, [{"event": "dispatch_completed", "dispatch_id": DISPATCH_ID},
+                                            MERGED_EVENT])
+        contract = materialize_from_files(
+            pr_id="PR-1", feature_plan_path=fp, state_dir=state_dir, dispatch_id=DISPATCH_ID,
+        )
+        assert not (tmp_path / "PR_QUEUE.md").exists()
+        assert contract.closure_stage == "merged"
+
+    def test_open_pr_from_the_register(self, tmp_path):
+        fp, state_dir = _project(tmp_path, [{"event": "dispatch_started", "dispatch_id": DISPATCH_ID}])
+        contract = materialize_from_files(
+            pr_id="PR-1", feature_plan_path=fp, state_dir=state_dir, dispatch_id=DISPATCH_ID,
+        )
+        assert contract.closure_stage == "open"
+
+    def test_a_stale_pr_queue_md_changes_nothing(self, tmp_path):
+        with_file, without_file = tmp_path / "with", tmp_path / "without"
+        with_file.mkdir()
+        without_file.mkdir()
+        events = [{"event": "dispatch_started", "dispatch_id": DISPATCH_ID}]
+        contracts = [
+            materialize_from_files(pr_id="PR-1", feature_plan_path=fp, state_dir=sd, dispatch_id=DISPATCH_ID)
+            for fp, sd in (_project(with_file, events, pr_queue=STALE_PR_QUEUE_COMPLETED),
+                           _project(without_file, events))
+        ]
+        assert contracts[0].closure_stage == contracts[1].closure_stage == "open"
+        assert contracts[0].content_hash == contracts[1].content_hash
+
+    def test_malformed_register_lines_are_no_evidence(self, tmp_path):
+        fp, state_dir = _project(tmp_path, [])
+        (state_dir / "dispatch_register.ndjson").write_text(
+            '{"event": "pr_merged", "dispatch_id": "' + DISPATCH_ID + '"\nnot json\n', encoding="utf-8",
+        )
+        contract = materialize_from_files(
+            pr_id="PR-1", feature_plan_path=fp, state_dir=state_dir, dispatch_id=DISPATCH_ID,
+        )
+        assert contract.closure_stage == "open"
 
 
 class TestNormalizeLine:

@@ -114,7 +114,6 @@ class PRQueueManager:
         self.vnx_state_file = self.vnx_state_dir / "pr_queue_state.yaml"
         self.vnx_queue_json = self.vnx_state_dir / "pr_queue.json"
         self.project_root = project_root
-        self.queue_file = self.project_root / "PR_QUEUE.md"
         self.state = {}
         self.load_queue()
 
@@ -257,7 +256,6 @@ class PRQueueManager:
         if pr_data['id'] not in existing_ids:
             self.state['prs'].append(pr_data)
             self.save_state()
-            self.update_markdown()
 
     def get_next_pr(self) -> Optional[Dict]:
         """
@@ -312,107 +310,16 @@ class PRQueueManager:
                     self.log_queue_event("block", pr_id, from_status=old_status, to_status=status)
 
         self.save_state()
-        self.update_markdown()
-
-    def update_markdown(self):
-        """Generate PR_QUEUE.md visualization (inspired by GSD's PLAN.md)"""
-        total = len(self.state['prs'])
-        complete = len(self.state['completed'])
-        blocked = len(self.state['blocked'])
-        active = len(self.state.get('active', []))
-        queued = total - complete - active - blocked
-
-        percent = int(complete / total * 100) if total > 0 else 0
-        progress_bar = '█' * int(percent / 10) + '░' * (10 - int(percent / 10))
-
-        feature_metadata = self.state.get('feature_metadata') or {}
-        content = f"""# PR Queue - Feature: {self.state.get('feature', 'Unknown')}
-
-## Progress Overview
-Total: {total} PRs | Complete: {complete} | Active: {active} | Queued: {queued} | Blocked: {blocked}
-Progress: {progress_bar} {percent}%
-
-"""
-        if feature_metadata:
-            review_stack = feature_metadata.get("review_stack") or []
-            if isinstance(review_stack, list):
-                review_stack = ",".join(review_stack)
-            content += f"""## Governance Metadata
-Risk-Class: {feature_metadata.get('risk_class', 'unknown')}
-Merge-Policy: {feature_metadata.get('merge_policy', 'human')}
-Review-Stack: {review_stack or 'none'}
-
-## Status
-"""
-        else:
-            content += "## Status\n"
-
-        # Completed PRs
-        if self.state['completed']:
-            content += "\n### ✅ Completed PRs\n"
-            for pr_id in self.state['completed']:
-                pr = next((p for p in self.state['prs'] if p['id'] == pr_id), None)
-                if pr:
-                    content += f"- {pr['id']}: {pr['title']}\n"
-
-        # Active PRs (parallel tracks)
-        if self.state.get('active'):
-            content += f"\n### 🔄 Currently Active\n"
-            for active_id in self.state['active']:
-                pr = next((p for p in self.state['prs'] if p['id'] == active_id), None)
-                if pr:
-                    track = pr.get('track', '?')
-                    content += (
-                        f"- {pr['id']}: {pr['title']} "
-                        f"(Track {track}, skill: {pr['skill']}, risk: {pr.get('risk_class', 'unknown')}, "
-                        f"merge: {pr.get('merge_policy', 'human')})\n"
-                    )
-
-        # Queued PRs
-        queued_prs = [pr for pr in self.state['prs'] if pr['status'] == 'queued']
-        if queued_prs:
-            content += "\n### ⏳ Queued PRs\n"
-            for pr in queued_prs:
-                deps = f" (dependencies: {', '.join(pr['dependencies'])})" if pr.get('dependencies') else " (dependencies: none)"
-                content += (
-                    f"- {pr['id']}: {pr['title']}{deps} "
-                    f"[risk={pr.get('risk_class', 'unknown')}, merge={pr.get('merge_policy', 'human')}, "
-                    f"review={','.join(pr.get('review_stack', [])) or 'none'}]\n"
-                )
-
-        # Blocked PRs
-        if self.state.get('blocked'):
-            content += "\n### 🚧 Blocked PRs\n"
-            for pr_id in self.state['blocked']:
-                pr = next((p for p in self.state['prs'] if p['id'] == pr_id), None)
-                if pr:
-                    content += f"- {pr['id']}: {pr['title']}\n"
-
-        # Dependency flow
-        if total > 0:
-            content += "\n## Dependency Flow\n```\n"
-            for pr in self.state['prs']:
-                if not pr.get('dependencies'):
-                    content += f"{pr['id']} (no dependencies)\n"
-                else:
-                    deps_str = ", ".join(pr['dependencies'])
-                    content += f"{deps_str} → {pr['id']}\n"
-            content += "```\n"
-
-        with open(self.queue_file, 'w') as f:
-            f.write(content)
 
     def set_feature(self, feature_name: str):
         """Set the feature name for this queue"""
         self.state['feature'] = feature_name
         self.save_state()
-        self.update_markdown()
 
     def clear_queue(self):
         """Clear the queue and start fresh"""
         self.state = self._fresh_state()
         self.save_state()
-        self.update_markdown()
 
     def get_status_summary(self) -> Dict:
         """Get a summary of the current queue status"""
