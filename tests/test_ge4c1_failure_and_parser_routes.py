@@ -109,18 +109,29 @@ def test_one_call_commits_one_record_its_receipt_and_its_request(env, row):
     assert {"failed_at", "completed_at", "resolved_at"} & set(on_disk), "the end lands with its time"
 
 
+# How a refused write ends its request (GE-4c step 9): ``(status, writer_named_it)``.
+# The writer's own end when it named one, else ``failed`` + ``failure_reason:
+# write_refused``. Every one is terminal, so the next execute_gate short-circuits
+# instead of re-running the refusal.
+REFUSED_END = {"R2": ("not_executable", True), "R3-failed": ("failed", True),
+               "R3-unavailable": ("unavailable", True), "R8": ("failed", False), "R9": ("failed", False)}
+
+
 @pytest.mark.parametrize("row", sorted(ROWS))
-def test_a_refused_write_books_nothing_and_changes_no_request(env, row):
+def test_a_refused_write_books_nothing_and_ends_its_request(env, row):
     write, slot, _status, _receipts_owed = ROWS[row]
     (env["results_dir"] / slot.format(PR)).write_text('{"status": "pa', encoding="utf-8")
     request_path, request = _request(env, slot.format(PR))
-    before = request_path.read_bytes()
     if row in ("R8", "R9"):
         with pytest.raises(gate_recorder.ResultOverwriteRefused):
             write(env, request)
     else:
         assert write(env, request)["write_refused"] is True
-    assert request_path.read_bytes() == before and request["status"] == "executing"
+    status, named_its_end = REFUSED_END[row]
+    ended = _json(request_path)
+    assert ended["status"] == status and "completed_at" not in ended
+    if not named_its_end:
+        assert ended["failure_reason"] == "write_refused"
     assert (env["results_dir"] / slot.format(PR)).read_text(encoding="utf-8") == '{"status": "pa'
     assert _receipts(env) == []
 
