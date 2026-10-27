@@ -118,7 +118,7 @@ Triaging 50 tracks with a per-track verdict and evidence is a delivery of its ow
 **Alternative reading, recorded so the T0 can decide.** If "getrieerd" means "attributed by the
 count itself" — every blocked track lands in exactly one category with at least one recorded
 reason, and `other` is the fail-closed bucket for a track with no reason left
-(`scripts/planning_cli.py:377-403`) — then the half is met: 104 = 93 + 11 + 0, no track dropped
+(`scripts/planning_cli.py:378-405`) — then the half is met: 104 = 93 + 11 + 0, no track dropped
 out. This document does not adopt that reading: the T0's "getrieerd" matches the per-track
 disposition in the blocked-track triage tables (`GESHIPT`/`DEELS`/`OPEN`/`ONTOETSBAAR`), not the
 category split.
