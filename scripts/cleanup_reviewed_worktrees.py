@@ -64,9 +64,19 @@ lock (``live``) or a missing sidecar (``no_lock``, a pre-lock checkout) keeps
 the tree, and the lock is re-taken for the removal itself so a seat that
 starts in between also keeps it.
 
+A dispatch tree is released only while this process holds that dispatch's
+occupancy slot — the same lock the isolation layer takes before handing the
+worktree out — from the liveness check up to and including the removal, so a
+dispatch that starts in between cannot take the worktree and have it deleted
+under its feet; a slot that cannot be taken skips the tree with that reason.
+Right before the removal, under that slot, the clean check and HEAD are
+revalidated: a worktree that gained an uncommitted change or moved its HEAD
+is skipped with a named reason instead of being force-removed.
+
 Dry-run by default — this script only ever WRITES when called with
 ``--apply``. Even then it only touches ``git worktree``/``git branch``
-plumbing in the target repo; it never touches ``~/Library/LaunchAgents`` or
+plumbing and the occupancy slot in the target repo; it never touches
+``~/Library/LaunchAgents`` or
 any other machine state, and it always refuses to act on the worktree it is
 currently running from (via ``VNX_DISPATCH_ID``/``VNX_CURRENT_DISPATCH_ID``
 and via cwd).
@@ -238,21 +248,31 @@ def claims_dir_for_repo(repo_root: Path) -> Path:
     return claims_dir_for_state_dir(vnx_paths.resolve_data_root(repo_root) / "state")
 
 
-def check_liveness(repo_root: Path, dispatch_id: str | None) -> str | None:
+def check_liveness(
+    repo_root: Path, dispatch_id: str | None, *, slot_held: bool = False,
+) -> str | None:
     """Keep reason when the candidate has an active process or slot, else None.
 
     Signals: the dispatch's occupancy lock is held (a live process owns the
     slot; the claim JSON itself is NOT a signal — a preserved dirty tree keeps
     its claim file and is released all the time), or the dispatch process
     registry records a group whose members are alive. A candidate with no
-    dispatch id cannot have either. Any failure to measure is a KEEP."""
+    dispatch id cannot have either. Any failure to measure is a KEEP.
+
+    ``slot_held`` means the caller ALREADY holds the dispatch's occupancy slot
+    (``_held_occupancy_slot``). Taking that lock is the occupancy measurement
+    itself; probing it again would see the caller's own open description and
+    report a live dispatch that is really this sweep."""
     if not dispatch_id:
         return None
     import dispatch_worktree_isolation as dwi
     from dispatch_process_registry import live_process_groups
 
     try:
-        held = dwi.probe_occupancy(claims_dir_for_repo(repo_root), dispatch_id) == "held"
+        held = (
+            False if slot_held
+            else dwi.probe_occupancy(claims_dir_for_repo(repo_root), dispatch_id) == "held"
+        )
         groups = live_process_groups(dispatch_id, repo_root=repo_root)
     except OSError as exc:
         return f"liveness: niet meetbaar ({exc}) — worktree blijft staan"
@@ -263,6 +283,71 @@ def check_liveness(repo_root: Path, dispatch_id: str | None) -> str | None:
     if groups:
         return f"liveness: procesgroep {groups[0]} van dispatch {dispatch_id!r} leeft nog — worktree blijft staan"
     return None
+
+
+class _OccupancySlotUnavailable(RuntimeError):
+    """The sweep could not take a dispatch's occupancy slot for itself."""
+
+
+@contextmanager
+def _held_occupancy_slot(repo_root: Path, dispatch_id: str | None) -> Iterator[None]:
+    """Hold *dispatch_id*'s occupancy slot for the whole judge-and-remove window.
+
+    The same lock ``dispatch_worktree_isolation._acquire_occupancy`` takes
+    before a worktree is handed to a dispatch. Taking it here — and keeping it
+    until the removal is done — closes the window ``check_liveness`` alone
+    leaves open: a dispatch that claims the worktree after that probe would
+    write into a tree this sweep then removes with ``--force``.
+
+    A candidate without a dispatch id (a detached gate tree) has no slot and
+    yields at once. A slot a live dispatch holds, or one that cannot be
+    measured, opened or locked, raises :class:`_OccupancySlotUnavailable` so
+    the caller skips the worktree with that reason: nothing here waits.
+
+    The lock file is opened exactly as the writer opens it (``open(path,
+    "a")``) and is not unlinked afterwards — released lock files stay, as they
+    do for every other holder; a dispatch id that never had one therefore goes
+    from ``absent`` to ``released`` in the registry, and neither of the two
+    ever reads as a live dispatch. While the lock is held, a real dispatch's
+    ``_acquire_occupancy`` fails closed (``WorktreeOccupied``) instead of
+    writing into the tree under removal.
+    """
+    if not dispatch_id:
+        yield
+        return
+    import dispatch_worktree_isolation as dwi
+
+    claims_dir = claims_dir_for_repo(repo_root)
+    try:
+        state = dwi.probe_occupancy(claims_dir, dispatch_id)
+    except OSError as exc:
+        raise _OccupancySlotUnavailable(f"occupancy-slot van {dispatch_id!r} niet meetbaar ({exc})") from exc
+    if state == "held":
+        raise _OccupancySlotUnavailable(
+            f"de occupancy-lock van dispatch {dispatch_id!r} wordt door een levend proces vastgehouden"
+        )
+    if state not in ("absent", "released"):
+        raise _OccupancySlotUnavailable(f"occupancy-slot van {dispatch_id!r}: onbekende toestand {state!r}")
+    lock_path = dwi.occupancy_lock_path(claims_dir, dispatch_id)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(lock_path, "a")
+    except OSError as exc:
+        raise _OccupancySlotUnavailable(f"occupancy-slot van {dispatch_id!r} niet te openen ({exc})") from exc
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise _OccupancySlotUnavailable(
+                f"dispatch {dispatch_id!r} nam de occupancy-lock net over tussen de liveness-probe en de beoordeling"
+            ) from exc
+        except OSError as exc:
+            raise _OccupancySlotUnavailable(f"occupancy-slot van {dispatch_id!r} niet te locken ({exc})") from exc
+        yield
+    finally:
+        # Closing the description drops its flock — on success, skip and
+        # exception alike; the kernel does this even if this process dies.
+        handle.close()
 
 
 def gate_seat_keep_reason(wt_path: Path) -> str | None:
@@ -597,12 +682,18 @@ def evaluate_candidate(
     wt: WorktreeCandidate,
     repo_slug: str | None,
     decisions: dict[str, dict[str, Any]] | None = None,
+    *,
+    slot_held: bool = False,
 ) -> Verdict:
     """The whole decision for one candidate: owner-owned kinds first, then the
-    liveness guard, then the locked or the unlocked rule set."""
+    liveness guard, then the locked or the unlocked rule set.
+
+    ``slot_held`` says the caller already holds the dispatch's occupancy slot
+    (``_held_occupancy_slot``); the slot's lock is then the occupancy
+    measurement and is not probed a second time."""
     if wt.kind in _NEVER_RELEASE_KINDS:
         return Verdict(False, f"{wt.kind}-worktree wordt door zijn eigen beheerder opgeruimd — deze ronde blijft hij staan")
-    live_reason = check_liveness(repo_root, wt.dispatch_dir_id)
+    live_reason = check_liveness(repo_root, wt.dispatch_dir_id, slot_held=slot_held)
     if live_reason:
         return Verdict(False, live_reason)
     if wt.kind == KIND_GATE:
@@ -665,8 +756,12 @@ def _remove_worktree_and_branch(
 ) -> ReleaseResult:
     """Unlock/remove the checkout and, when asked, delete its local branch.
 
-    The caller holds ``_flock_context`` — and, for a gate tree, the checkout's
-    lifetime lock across the removal."""
+    The caller holds ``_flock_context``, the candidate's occupancy slot (a
+    dispatch tree) and — for a gate tree — the checkout's lifetime lock across
+    the removal, and has just revalidated cleanliness and HEAD
+    (``recheck_before_removal``). ``--force`` is what removes the untracked
+    files the clean rule tolerates (internal symlinks); it never stands in for
+    a revalidation the caller skipped."""
     errors: list[str] = []
     if wt.locked:
         unlock = run_git(["worktree", "unlock", str(wt.path)], cwd=repo_root)
@@ -818,6 +913,82 @@ def _print_inventory(repo_root: Path, *, as_json: bool) -> int:
     return 0
 
 
+def recheck_before_removal(repo_root: Path, wt: WorktreeCandidate) -> str | None:
+    """Keep reason when *wt* changed since the assessment judged it, else None.
+
+    Runs under the candidate's occupancy slot, immediately before the removal:
+    the clean check and HEAD the assessment based its verdict on must still
+    hold. A worktree that is no longer clean, whose HEAD moved, or whose HEAD
+    cannot be read is skipped with the reason named — never force-removed on
+    evidence the assessment did not see."""
+    if wt.head_sha is None:
+        return "werkmap veranderde na de beoordeling: HEAD onbekend — worktree blijft staan"
+    proc = run_git(["rev-parse", "HEAD"], cwd=wt.path)
+    current = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not current:
+        detail = (proc.stderr or "").strip() or "geen uitvoer"
+        return f"werkmap veranderde na de beoordeling: HEAD niet meetbaar ({detail}) — worktree blijft staan"
+    if current != wt.head_sha:
+        return (
+            f"werkmap veranderde na de beoordeling: HEAD is nu {current[:12]} "
+            f"in plaats van {wt.head_sha[:12]} — worktree blijft staan"
+        )
+    if not is_worktree_clean(wt.path, repo_root):
+        return (
+            "werkmap veranderde na de beoordeling: niet meer schoon "
+            "(ongecommitte wijzigingen of untracked bestanden) — worktree blijft staan"
+        )
+    return None
+
+
+def _report_entry(wt: WorktreeCandidate, verdict: Verdict) -> WorktreeReportEntry:
+    return {
+        "dispatch_id": wt.dispatch_dir_id, "kind": wt.kind, "locked": wt.locked,
+        "path": str(wt.path), "branch": wt.branch, "head_sha": wt.head_sha,
+        "lock_reason": wt.lock_reason, "safe_to_release": verdict.safe,
+        "reason": verdict.reason, "released": False, "errors": [],
+        "delete_branch": verdict.delete_branch,
+    }
+
+
+def _sweep_one(
+    repo_root: Path,
+    wt: WorktreeCandidate,
+    repo_slug: str | None,
+    decisions: dict[str, dict[str, Any]],
+    *,
+    apply: bool,
+) -> tuple[WorktreeReportEntry, bool]:
+    """Judge one candidate and, with *apply*, release it — under its slot.
+
+    With *apply* the whole window from the liveness check to the removal runs
+    while this process holds the dispatch's occupancy slot. If the slot cannot
+    be taken (a live dispatch owns it, or it is unmeasurable) the worktree is
+    skipped with that reason. The verdict is revalidated under the same slot
+    right before the removal, so a worktree that gained an uncommitted change
+    or moved its HEAD in between is skipped instead of force-removed.
+
+    A dry run only reads: it takes no slot and writes nothing."""
+    if not apply:
+        return _report_entry(wt, evaluate_candidate(repo_root, wt, repo_slug, decisions)), False
+    try:
+        with _held_occupancy_slot(repo_root, wt.dispatch_dir_id):
+            verdict = evaluate_candidate(repo_root, wt, repo_slug, decisions, slot_held=True)
+            if verdict.safe:
+                changed = recheck_before_removal(repo_root, wt)
+                if changed:
+                    verdict = Verdict(False, changed, delete_branch=verdict.delete_branch)
+            if not verdict.safe:
+                return _report_entry(wt, verdict), False
+            result = release_worktree(repo_root, wt, delete_branch=verdict.delete_branch)
+            entry = _report_entry(wt, verdict)
+            entry["released"] = result.released
+            entry["errors"] = result.errors
+            return entry, result.released
+    except _OccupancySlotUnavailable as exc:
+        return _report_entry(wt, Verdict(False, f"liveness: {exc} — worktree blijft staan")), False
+
+
 def run_sweep(
     repo_root: Path,
     candidates: list[WorktreeCandidate],
@@ -828,8 +999,9 @@ def run_sweep(
 ) -> tuple[list[WorktreeReportEntry], int, int]:
     """Judge every candidate and, with *apply*, release the safe ones.
 
-    Returns ``(report, released_count, skipped_self)``. ``evaluate_candidate``
-    runs the liveness guard before any release decision."""
+    Returns ``(report, released_count, skipped_self)``. Each candidate is
+    judged and removed by ``_sweep_one``, which holds the dispatch's occupancy
+    slot for that whole window."""
     report: list[WorktreeReportEntry] = []
     released = 0
     skipped_self = 0
@@ -837,21 +1009,10 @@ def run_sweep(
         if is_current_worktree(wt):
             skipped_self += 1
             continue
-        verdict = evaluate_candidate(repo_root, wt, repo_slug, decisions)
-        entry: WorktreeReportEntry = {
-            "dispatch_id": wt.dispatch_dir_id, "kind": wt.kind, "locked": wt.locked,
-            "path": str(wt.path), "branch": wt.branch, "head_sha": wt.head_sha,
-            "lock_reason": wt.lock_reason, "safe_to_release": verdict.safe,
-            "reason": verdict.reason, "released": False, "errors": [],
-            "delete_branch": verdict.delete_branch,
-        }
-        if verdict.safe and apply:
-            result = release_worktree(repo_root, wt, delete_branch=verdict.delete_branch)
-            entry["released"] = result.released
-            entry["errors"] = result.errors
-            if result.released:
-                released += 1
+        entry, did_release = _sweep_one(repo_root, wt, repo_slug, decisions, apply=apply)
         report.append(entry)
+        if did_release:
+            released += 1
     return report, released, skipped_self
 
 

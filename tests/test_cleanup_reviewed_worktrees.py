@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 import cleanup_reviewed_worktrees as crw  # noqa: E402
+import dispatch_worktree_isolation as dwi  # noqa: E402
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -310,6 +311,111 @@ class TestT0Reject:
         assert rc == 2
         err = capsys.readouterr().err
         assert "beta" in err and "alpha" in err
+        assert wt.path.exists()
+
+
+class TestOccupancySlotHeldThroughRemoval:
+    """PR-4 round 3: the sweep holds the dispatch's occupancy slot — the lock a
+    dispatch takes before it starts working in a worktree — from the liveness
+    check up to and including the removal. The REAL flock is taken here; the
+    fake dispatch below contends for it through the production helper
+    (``dispatch_worktree_isolation._acquire_occupancy``).
+
+    ``run_gh_pr_list`` is the seam BETWEEN the assessment (which already saw
+    the tree clean, at ``wt.head_sha``) and the removal."""
+
+    def _stub_pr_list(self, monkeypatch, wt, during_assessment):
+        """A MERGED PR for *wt*'s branch whose ``headRefOid`` is *wt*'s HEAD;
+        *during_assessment* runs while the sweep is doing that lookup."""
+        monkeypatch.setattr(crw, "get_repo_slug", lambda repo_root: "o/r")
+
+        def fake(slug, branch):
+            during_assessment()
+            return json.dumps([{"number": 7, "state": "MERGED", "headRefOid": wt.head_sha}])
+        monkeypatch.setattr(crw, "run_gh_pr_list", fake)
+
+    def _assert_slot_free(self, fx, wt):
+        """Nothing holds the slot any more: a real dispatch can take it."""
+        assert dwi.probe_occupancy(crw.claims_dir_for_repo(fx.repo), "x") != "held"
+        dwi._acquire_occupancy("x", wt.path, fx.repo)
+        dwi._release_occupancy(wt.path)
+
+    def test_a_dispatch_that_starts_between_assessment_and_removal_keeps_the_tree(self, fx, monkeypatch):
+        """The codex reproduction: a dispatch takes the slot and writes an
+        uncommitted file after the assessment. The sweep holds the slot, so
+        the dispatch is refused it; the file it wrote anyway survives and the
+        worktree is skipped with the reason instead of force-removed."""
+        wt = fx.worktree("x")
+        refusals: list[str] = []
+
+        def fake_dispatch():
+            try:
+                dwi._acquire_occupancy("x", wt.path, fx.repo)
+            except dwi.WorktreeOccupied as exc:
+                refusals.append(str(exc))
+            (wt.path / "late.txt").write_text("werk van de dispatch\n", encoding="utf-8")
+
+        self._stub_pr_list(monkeypatch, wt, fake_dispatch)
+        entries = run_main(fx)["candidates"]
+
+        assert refusals, "the sweep did not hold the occupancy slot during the assessment"
+        entry, = entries
+        assert entry["safe_to_release"] is False, entry["reason"]
+        assert "veranderde na de beoordeling" in entry["reason"] and "niet meer schoon" in entry["reason"]
+        assert entry["released"] is False
+        assert wt.path.exists() and (wt.path / "late.txt").exists()
+        assert fx.branch_exists("dispatch/x")
+        self._assert_slot_free(fx, wt)
+
+    def test_a_head_that_moves_between_assessment_and_removal_keeps_the_tree(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+
+        def late_commit():
+            (wt.path / "extra.txt").write_text("meer werk\n", encoding="utf-8")
+            git(wt.path, "add", "-A")
+            git(wt.path, "commit", "-q", "-m", "late commit")
+
+        self._stub_pr_list(monkeypatch, wt, late_commit)
+        entries = run_main(fx)["candidates"]
+
+        entry, = entries
+        assert entry["safe_to_release"] is False, entry["reason"]
+        assert "HEAD is nu" in entry["reason"]
+        assert entry["released"] is False and wt.path.exists()
+        assert git(wt.path, "rev-parse", "HEAD") != wt.head_sha
+        self._assert_slot_free(fx, wt)
+
+    def test_the_slot_is_released_after_a_skip(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+        monkeypatch.setattr(crw, "get_repo_slug", lambda repo_root: "o/r")
+        stub_prs(monkeypatch, [])  # no captured PR: judged, but not safe
+        entries = run_main(fx)["candidates"]
+
+        entry, = entries
+        assert entry["safe_to_release"] is False and wt.path.exists()
+        self._assert_slot_free(fx, wt)
+
+    def test_the_slot_is_released_after_an_exception(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+        monkeypatch.setattr(crw, "get_repo_slug", lambda repo_root: "o/r")
+        stub_prs(monkeypatch, [{"number": 7, "state": "MERGED", "headRefOid": wt.head_sha}])
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("remove kapot")
+
+        monkeypatch.setattr(crw, "release_worktree", boom)
+        with pytest.raises(RuntimeError):
+            crw.main(["--repo-root", str(fx.repo), "--json", "--apply"])
+
+        assert wt.path.exists()
+        self._assert_slot_free(fx, wt)
+
+    def test_a_dry_run_takes_no_slot_and_writes_nothing(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+        stub_prs(monkeypatch, [{"number": 7, "state": "MERGED", "headRefOid": wt.head_sha}])
+        rc = crw.main(["--repo-root", str(fx.repo), "--json"])
+        assert rc == 0
+        assert not (crw.claims_dir_for_repo(fx.repo) / "x.occupancy").exists()
         assert wt.path.exists()
 
 

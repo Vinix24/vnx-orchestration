@@ -638,6 +638,16 @@ def _unlock_and_close(fh, wt_path: Optional[Path]) -> None:
         fh.close()
 
 
+def occupancy_lock_path(claims_dir: Path, dispatch_id: str) -> Path:
+    """The occupancy lock file of *dispatch_id* inside *claims_dir*.
+
+    Public because a second holder must lock exactly the file the dispatch
+    side takes (``_acquire_occupancy``) and ``probe_occupancy`` probes —
+    deriving that path twice is how the two drift apart.
+    """
+    return Path(claims_dir) / f"{_sanitize_dispatch_id(dispatch_id)}.occupancy"
+
+
 def probe_occupancy(claims_dir: Path, dispatch_id: str) -> str:
     """Whether a live process holds the occupancy lock for *dispatch_id*.
 
@@ -652,7 +662,7 @@ def probe_occupancy(claims_dir: Path, dispatch_id: str) -> str:
     "released". An OSError other than a blocked lock propagates; the caller
     decides what an unmeasurable lock means.
     """
-    lock_path = Path(claims_dir) / f"{_sanitize_dispatch_id(dispatch_id)}.occupancy"
+    lock_path = occupancy_lock_path(claims_dir, dispatch_id)
     if not lock_path.exists():
         return "absent"
     with open(lock_path, "a") as fh:
