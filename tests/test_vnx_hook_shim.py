@@ -340,6 +340,47 @@ def test_outside_a_guarded_project_the_shim_is_silent(world, shell):
         assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", ""), label
 
 
+# ── a drifted cwd follows the session's project ─────────────────────────────
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_drifted_cwd_follows_claude_project_dir(world, shell):
+    """OI-2119 (d): step 1 used to exit 0 on a pwd that named no project, before step 2 could
+    start anything. Claude Code sets CLAUDE_PROJECT_DIR to the folder the session started in, and
+    step 1 is the same two steps as ``hook_coverage.session_project_root``."""
+    home = world["tmp"] / "drifted-home"
+    home.mkdir()
+    proc = _shim(world, shell, PROBE, cwd=home, CLAUDE_PROJECT_DIR=world["project"])
+    assert _ran(proc)["ran"] == os.path.realpath(world["hooks"] / PROBE)
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_dispatch_worktree_cwd_stays_silent_with_the_main_project(world, shell):
+    worktree = world["project"] / ".vnx-data" / "worktrees" / "dispatch-x"
+    worktree.mkdir(parents=True)
+    proc = _shim(world, shell, PROBE, cwd=worktree, CLAUDE_PROJECT_DIR=world["project"])
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_a_worktree_claude_project_dir_stays_silent(world, shell):
+    home = world["tmp"] / "drifted-home"
+    home.mkdir()
+    proc = _shim(world, shell, PROBE, cwd=home,
+                 CLAUDE_PROJECT_DIR=world["project"] / ".vnx-data" / "worktrees" / "dispatch-x")
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
+@pytest.mark.parametrize("shell", SHELLS)
+def test_no_project_on_either_step_stays_silent(world, shell):
+    home = world["tmp"] / "drifted-home"
+    home.mkdir()
+    no_project = world["tmp"] / "no-project-here"
+    no_project.mkdir()
+    proc = _shim(world, shell, PROBE, cwd=home, CLAUDE_PROJECT_DIR=no_project)
+    assert (proc.returncode, proc.stdout, proc.stderr) == (0, "", "")
+
+
 def _code_choice_cases(world, tmp: Path):
     """(label, cwd, registry projects, extra env) for shim step 2."""
     fabric = _vnx_project(tmp / "fabric", "vnx-dev")
@@ -379,6 +420,13 @@ def test_the_shim_and_hook_coverage_agree_on_rule_1_and_the_code_choice(world, s
              _not_guarded_cases(world["tmp"] / f"parity-{shell}")]
     cases.append(("project root", world["project"], (), {}))
     cases.append(("T0 folder", world["project"] / ".claude" / "terminals" / "T0", (), {}))
+    drifted = world["tmp"] / f"drifted-{shell}"
+    drifted.mkdir()
+    worktree = world["project"] / ".vnx-data" / "worktrees" / "dispatch-x"
+    worktree.mkdir(parents=True, exist_ok=True)
+    cases.append(("drifted cwd", drifted, (), {"CLAUDE_PROJECT_DIR": str(world["project"])}))
+    cases.append(("worktree cwd with the main project", worktree, (),
+                  {"CLAUDE_PROJECT_DIR": str(world["project"])}))
     cases.extend(_code_choice_cases(world, world["tmp"] / f"choice-{shell}"))
     released = _released_shim(world)
     for label, cwd, projects, extra in cases:
@@ -386,7 +434,7 @@ def test_the_shim_and_hook_coverage_agree_on_rule_1_and_the_code_choice(world, s
         env = _env(world, shell, **extra)
         project_call = _shim(world, shell, PROBE, cwd=cwd, **extra)
         user_call = _shim(world, shell, "--scope", "user", PROBE, cwd=cwd, shim=released, **extra)
-        root = hook_coverage.t0_project_root(str(cwd))
+        root = hook_coverage.session_project_root(str(cwd), env)
         assert (project_call.stdout != "") == (root is not None), label
         assert (user_call.stdout != "") == (root is not None), label
         if root is not None:

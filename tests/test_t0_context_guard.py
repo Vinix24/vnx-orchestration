@@ -368,6 +368,59 @@ def test_a_side_session_opts_out_with_vnx_terminal(tmp_path, env_base):
     assert _all_events_silent(tmp_path, env, _vnx_project(tmp_path / "project"))
 
 
+# ── a drifted cwd follows the session's project ─────────────────────────────
+
+
+def _drifted_home(tmp_path: Path) -> Path:
+    """The $HOME a T0's shell had drifted to (OI-2119 (d)): no repository above it."""
+    home = tmp_path / "drifted-home"
+    home.mkdir()
+    return home
+
+
+def test_a_drifted_cwd_follows_claude_project_dir(tmp_path, env_base):
+    """OI-2119 (d): 3 of 143 sessions drifted to $HOME, so rule 1 failed on the payload cwd and
+    the guard was silently off at 520K tokens. Claude Code sets CLAUDE_PROJECT_DIR to the folder
+    the session started in; rule 1 uses it when the cwd names no project."""
+    project = _vnx_project(tmp_path / "project")
+    env = {**env_base, "CLAUDE_PROJECT_DIR": str(project)}
+    home = _drifted_home(tmp_path)
+    decisions = {
+        event: _run(tmp_path, env, event, 520_000, cwd=home, prompt="status?",
+                    tool_name="Bash", tool_input={"command": "vnx dispatch x"})
+        for event in ("UserPromptSubmit", "PreToolUse", "Stop")
+    }
+    assert decisions["Stop"]["decision"] == "block"
+    assert _denied(decisions["PreToolUse"])
+    assert decisions["UserPromptSubmit"]["hookSpecificOutput"]["hookEventName"] == \
+        "UserPromptSubmit"
+
+
+def test_a_dispatch_worktree_cwd_stays_silent_with_the_main_project(tmp_path, env_base):
+    """A dispatch worktree stays silent even when CLAUDE_PROJECT_DIR names the main checkout."""
+    project = _vnx_project(tmp_path / "project")
+    env = {**env_base, "CLAUDE_PROJECT_DIR": str(project)}
+    assert _all_events_silent(tmp_path, env,
+                              project / ".vnx-data" / "worktrees" / "dispatch-x")
+    assert _receipts(env_base) == []
+
+
+def test_a_worktree_claude_project_dir_stays_silent(tmp_path, env_base):
+    project = _vnx_project(tmp_path / "project")
+    env = {**env_base,
+           "CLAUDE_PROJECT_DIR": str(project / ".vnx-data" / "worktrees" / "dispatch-x")}
+    assert _all_events_silent(tmp_path, env, _drifted_home(tmp_path))
+    assert _receipts(env_base) == []
+
+
+def test_no_project_on_either_step_stays_silent(tmp_path, env_base):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    env = {**env_base, "CLAUDE_PROJECT_DIR": str(plain)}
+    assert _all_events_silent(tmp_path, env, _drifted_home(tmp_path))
+    assert _receipts(env_base) == []
+
+
 # ── user scope: the project's own registration wins ─────────────────────────
 
 
