@@ -347,6 +347,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         approval=True,
         subsystem="central-install-cutover", status="ACTIVATE"),
 
+    # Fleet pin audit (track vnx-fleet-pin-audit, PR-7): how far a project's
+    # engine pin may lag the store's `current` before scripts/fleet_pin_audit.py
+    # reports it as a finding instead of a WARN. Read through
+    # config_registry.get() (never os.environ directly), so the standard
+    # precedence chain applies. A non-numeric or negative value is loud on
+    # stderr and falls back to the default. An UNKNOWN distance is never a
+    # finding, and never ok: not measurable is not a pass.
+    "VNX_FLEET_PIN_MAX_LAG_RELEASES": _e(
+        "VNX_FLEET_PIN_MAX_LAG_RELEASES", "string", "3", "gate",
+        "Max releases a project's .vnx-version pin may lag the store's current "
+        "before fleet_pin_audit.py reports it as a finding (exit 1) instead of a "
+        "WARN. Default 3 mirrors fleet_pin_audit.DEFAULT_MAX_LAG_RELEASES. An "
+        "unknown behind-count always stays a WARN.",
+        approval=True,
+        subsystem="fleet-pin-audit", status="ACTIVATE"),
+
     # Operator directive 2026-08-21 (dispatch-20260821-t0-tmux-concurrency-10): the
     # claude-tmux N-slot lock's concurrency cap, raised from 5 to 10 and made
     # registry-backed so an operator can flip it from the dashboard, not just env.
