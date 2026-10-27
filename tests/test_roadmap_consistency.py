@@ -1,17 +1,15 @@
-"""CI guard: FEATURE_PLAN.md and PR_QUEUE.md must stay in sync with ROADMAP.yaml.
+"""CI guard: FEATURE_PLAN.md must stay in sync with ROADMAP.yaml.
 
-FEATURE_PLAN.md check: FEATURE_PLAN.md is a generated, untracked artifact
-(scripts/build_feature_plan.py — OI-1376) with no committed copy to read in a
-fresh checkout, so this regenerates it in memory from ROADMAP.yaml alone and
-verifies every roadmap feature appears with the correct status line.
+FEATURE_PLAN.md is a generated, untracked artifact (scripts/build_feature_plan.py
+— OI-1376) with no committed copy to read in a fresh checkout, so this
+regenerates it in memory from ROADMAP.yaml alone and verifies every roadmap
+feature appears with the correct status line.
 
-PR_QUEUE.md check: regenerates from ROADMAP.yaml and asserts byte-exact match
-against the committed file (since PR_QUEUE.md is purely derived from ROADMAP.yaml
-with no live sources).
+PR_QUEUE.md and its generator are gone (ADR-047, B4): there is no second view
+left to compare.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 from pathlib import Path
 
@@ -20,7 +18,6 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _ROADMAP = _REPO_ROOT / "ROADMAP.yaml"
-_PR_QUEUE = _REPO_ROOT / "PR_QUEUE.md"
 
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
@@ -67,26 +64,12 @@ def test_feature_plan_contains_all_roadmap_features() -> None:
     )
 
 
-def test_pr_queue_matches_roadmap() -> None:
-    result = subprocess.run(
-        [sys.executable, str(_REPO_ROOT / "scripts" / "build_pr_queue.py"), "--check"],
-        capture_output=True,
-        text=True,
-        cwd=str(_REPO_ROOT),
-    )
-    assert result.returncode == 0, (
-        f"PR_QUEUE.md is stale. Re-run: python3 scripts/build_pr_queue.py\n"
-        f"Details: {result.stderr.strip()}"
-    )
-
-
 def test_no_conflict_markers_in_roadmap_files() -> None:
     # FEATURE_PLAN.md is excluded here: it is a generated, untracked artifact
     # (OI-1376) with no committed copy to inspect in a fresh checkout, and its
     # content is built programmatically each time (not merged), so it cannot
     # carry leftover conflict markers.
-    for path in (_ROADMAP, _PR_QUEUE):
-        content = path.read_text(encoding="utf-8")
-        for i, line in enumerate(content.splitlines(), 1):
-            if line.startswith(("<<<<<<", ">>>>>>>", "=======")):
-                pytest.fail(f"Conflict marker in {path.name} at line {i}: {line!r}")
+    content = _ROADMAP.read_text(encoding="utf-8")
+    for i, line in enumerate(content.splitlines(), 1):
+        if line.startswith(("<<<<<<", ">>>>>>>", "=======")):
+            pytest.fail(f"Conflict marker in {_ROADMAP.name} at line {i}: {line!r}")
