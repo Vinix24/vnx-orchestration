@@ -25,6 +25,10 @@ outcome of this one (ADR-007: the decision carries ``project_id`` and the
 reader filters on it). Other records in the log (``dispatch_created``,
 ``pr_merge``, ...) are no outcome decision.
 
+A ``reject`` also ends the attempt (OI-2262): the decision line is written, then a
+``failed_delivery``/``timed_out`` row moves to ``dead_letter`` through the one state machine;
+any other state is untouched, and a refused transition exits non-zero with the line on disk.
+
 Scope
 -----
 Only dispatches with a receipt at or after ``OPEN_OUTCOMES_EPOCH`` are
@@ -246,6 +250,59 @@ def record_outcome_decision(
     record["outcome_pending"] = False
     write_decision(record, Path(log_path))
     return record
+
+
+#: A T0 reject ends the attempt it rejected: the states in which its own delivery failed.
+REJECT_END_STATES = frozenset({"failed_delivery", "timed_out"})
+REJECT_END_TARGET = "dead_letter"
+
+
+def end_attempt_on_reject(
+    state_dir: Path,
+    *,
+    dispatch_id: str,
+    project_id: str,
+    reason: str,
+    decided_at: str,
+) -> Dict[str, Any]:
+    """Move the dispatch row a T0 rejected to ``dead_letter`` (OI-2262).
+
+    Such a row is non-terminal and keeps its track out of ``done`` for good, so the
+    judgement that ended the attempt ends the row with it — the one state machine, actor
+    ``t0``, the decide reason, one event with the decision log's timestamp. Any other
+    state is left alone (``completed`` delivered, terminal states ended, a live row is
+    not a failed attempt). Returns ``{"action"}``: ``ended`` (with ``from_state`` and
+    ``to_state``), ``not_an_attempt`` (with ``state``), ``no_row`` or ``no_store``.
+    A refused transition raises: the caller reports it and exits non-zero.
+    """
+    from coordination_db import DB_FILENAME, get_connection  # local: leaf imported by many
+
+    if not (Path(state_dir) / DB_FILENAME).is_file():
+        return {"action": "no_store"}
+    with get_connection(state_dir) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master "
+                            "WHERE type = 'table' AND name = 'dispatches'").fetchone():
+            return {"action": "no_row"}
+        row = conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+        ).fetchone()
+        if row is None:
+            return {"action": "no_row"}
+        if "project_id" in row.keys() and row["project_id"] != project_id:
+            return {"action": "no_row"}
+        from_state = row["state"]
+        if from_state not in REJECT_END_STATES:
+            return {"action": "not_an_attempt", "state": from_state}
+        from runtime_state_machine import transition_dispatch  # local: same leaf, same reason
+
+        transition_dispatch(
+            conn, dispatch_id=dispatch_id, to_state=REJECT_END_TARGET, actor="t0", reason=reason,
+            metadata={"decision": "reject", "decided_at": decided_at,
+                      "decision_log": DECISION_LOG_NAME, "project_id": project_id},
+            project_id=project_id,
+        )
+        conn.commit()
+    return {"action": "ended", "from_state": from_state, "to_state": REJECT_END_TARGET}
 
 
 # ---------------------------------------------------------------------------

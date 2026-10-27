@@ -1,0 +1,18 @@
+-- 0037_deliverable_superseded.sql — a deliverable closed on its own round is delivered
+-- (ADR-049 amendment for OI-2262, track deliverable-retarget-withdraw). DROP VIEW plus
+-- CREATE VIEW for deliverables, no data: a base whose own row ended `expired` carries its
+-- delivery round `<id>-rK` in metadata_json.superseded_by, and the view reads that round's
+-- `completed` state as the evidence. Order unchanged (done, in_progress, withdrawn, failed,
+-- ready, proposed). Not executed as-is: the runner builds the view from the v37 manifest
+-- (schema_manifest._DELIVERABLES_VIEW_V37), the only copy of its SQL.
+--
+-- Positive evidence only: no round, a foreign round, a malformed/NULL blob or a round that
+-- is not `completed` keeps deriving what v36 derived (`failed`); with no superseded row
+-- this view derives exactly what v36 derives.
+--
+-- Down: apply_0037.revert_migration(db_path) restores the v36 view and stamps 36 in one
+-- transaction. No row changes, so ADR-005 asks for no ledger line here (0036's down path
+-- books a state_mutation receipt because it moves withdrawn rows to expired).
+--
+-- Target DB: runtime_coordination.db · Applied by: scripts/lib/migrations/apply_0037.py
+-- Tested by: tests/test_oi2262_failed_delivery_end_states.py

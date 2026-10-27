@@ -380,6 +380,60 @@ WHERE output_ref IS NOT NULL
 GROUP BY project_id, output_ref
 """)
 
+# v37 (0037, ADR-049 amendment, OI-2262): a base that ended expired because its own round
+# ``<id>-rK`` delivered counts as delivered; the round named in ``metadata_json.superseded_by``
+# must be a completed row of the same project (anything else derives v36's answer).
+_DELIVERABLES_VIEW_V37 = ViewInvariant("deliverables", """
+CREATE VIEW deliverables AS
+SELECT
+    d.project_id AS project_id,
+    d.output_ref AS deliverable_ref,
+    MIN(d.output_kind) AS output_kind,
+    MIN(d.track) AS track,
+    COUNT(*) AS dispatch_count,
+    SUM(CASE WHEN d.state = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+    SUM(CASE WHEN d.state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+             THEN 1 ELSE 0 END) AS in_flight_count,
+    SUM(CASE WHEN d.state IN ('proposed', 'ready', 'queued') THEN 1 ELSE 0 END) AS planned_count,
+    SUM(CASE WHEN d.state = 'withdrawn' THEN 1 ELSE 0 END) AS withdrawn_count,
+    CASE
+        WHEN SUM(CASE WHEN d.state = 'completed' OR r.dispatch_id IS NOT NULL THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN d.state IN ('completed', 'withdrawn') OR r.dispatch_id IS NOT NULL
+                      THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'done'
+        WHEN SUM(CASE WHEN d.state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+                      THEN 1 ELSE 0 END) > 0
+            THEN 'in_progress'
+        WHEN SUM(CASE WHEN d.state = 'withdrawn' THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'withdrawn'
+        WHEN SUM(CASE WHEN d.state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out')
+                       AND r.dispatch_id IS NULL THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN d.state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out',
+                                       'withdrawn') AND r.dispatch_id IS NULL THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'failed'
+        WHEN SUM(CASE WHEN d.state = 'ready' THEN 1 ELSE 0 END) > 0
+            THEN 'ready'
+        ELSE 'proposed'
+    END AS derived_status,
+    MAX(d.updated_at) AS last_activity
+FROM dispatches AS d
+LEFT JOIN (
+    SELECT base.project_id AS project_id, base.dispatch_id AS dispatch_id
+    FROM dispatches AS base
+    JOIN dispatches AS round_row
+      ON round_row.project_id = base.project_id
+     AND round_row.state = 'completed'
+     AND round_row.dispatch_id = CASE
+             WHEN json_valid(base.metadata_json)
+                 THEN json_extract(base.metadata_json, '$.superseded_by')
+         END
+    WHERE base.state = 'expired'
+) AS r
+  ON r.project_id = d.project_id AND r.dispatch_id = d.dispatch_id
+WHERE d.output_ref IS NOT NULL
+GROUP BY d.project_id, d.output_ref
+""")
+
 _OI_BLOCKER_IDX = (IndexInvariant("idx_track_oi_active_blockers",
                                   ("track_id", "project_id", "link_type"), partial=True,
                                   where="resolved_at IS NULL"),)
@@ -681,6 +735,8 @@ def _build_manifest() -> Dict[int, VersionManifest]:
     }
     # v36 (0036): the v35 tables unchanged, the deliverables view replaced.
     manifest[36] = VersionManifest(36, manifest[35].tables, (_DELIVERABLES_VIEW_V36,))
+    # v37 (0037): same tables, the deliverables view replaced again (done on a completed round).
+    manifest[37] = VersionManifest(37, manifest[36].tables, (_DELIVERABLES_VIEW_V37,))
     return manifest
 
 

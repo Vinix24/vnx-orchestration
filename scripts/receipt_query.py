@@ -10,6 +10,10 @@
   decide             — record a T0 decision (accept/reject) about one dispatch
                         in ``t0_decision_log.jsonl`` through
                         ``t0_decision_log.write_decision`` (append under flock).
+                        A reject also ends the attempt it rejected: a
+                        ``failed_delivery``/``timed_out`` row moves to ``dead_letter``
+                        (``end_attempt_on_reject``); any other state is untouched and a
+                        refused transition exits non-zero, decision line written.
   by-dispatch        — thin, project-scoped wrapper over
                         receipt_provenance.find_receipts_by_dispatch. No
                         reimplementation.
@@ -92,6 +96,7 @@ from open_outcomes import (
     DECISION_LOG_NAME,
     OUTCOME_DECISIONS,
     build_open_outcomes,
+    end_attempt_on_reject,
     iter_complete_lines,
     record_outcome_decision,
 )
@@ -653,12 +658,40 @@ def _cmd_decide(args: argparse.Namespace) -> int:
         decision=args.decision,
         reason=args.reason.strip(),
     )
+    ended = None
+    if args.decision == "reject":
+        try:
+            ended = end_attempt_on_reject(
+                state_dir,
+                dispatch_id=args.dispatch_id,
+                project_id=project_id,
+                reason=args.reason.strip(),
+                decided_at=record["timestamp"],
+            )
+        except Exception as exc:  # the decision line is the record: it stays, the row is named
+            print(f"error: {args.dispatch_id}: the reject is in {DECISION_LOG_NAME} at "
+                  f"{record['timestamp']}, but its row was not moved to dead_letter: {exc}",
+                  file=sys.stderr)
+            return 1
     if args.json:
-        print(json.dumps(record, indent=2))
+        print(json.dumps({**record, "attempt_end": ended} if ended else record, indent=2))
     else:
         print(f"recorded {record['decision']} for {record['dispatch_id']} "
               f"(project {project_id}) at {record['timestamp']}")
+        if ended is not None:
+            print(f"  dispatch row {record['dispatch_id']}: {_attempt_end_text(ended)}")
     return 0
+
+
+def _attempt_end_text(ended: Dict[str, Any]) -> str:
+    """One line naming what the reject did to the dispatch row, or why it left it alone."""
+    if ended["action"] == "ended":
+        return f"{ended['from_state']} -> {ended['to_state']}"
+    if ended["action"] == "not_an_attempt":
+        return f"untouched (state {ended['state']!r} is not a failed attempt)"
+    if ended["action"] == "no_row":
+        return "untouched (no dispatch of this project by that id)"
+    return "untouched (no runtime_coordination.db beside the state dir)"
 
 
 def _cmd_by_dispatch(args: argparse.Namespace) -> int:

@@ -86,6 +86,9 @@ _MANUAL_TABLE_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     # 0036's SQL file is comments only; apply_0036.py replaces the deliverables view
     # over dispatches, and its down turns withdrawn rows expired with an event each.
     "0036_deliverable_withdrawn.sql": ("dispatches", "coordination_events"),
+    # 0037's SQL file is comments only; apply_0037.py replaces the deliverables view over
+    # dispatches again (a superseded base joined to its completed round), touching no row.
+    "0037_deliverable_superseded.sql": ("dispatches",),
 }
 
 _COMMENT_RE = re.compile(r"--.*?$", re.MULTILINE)

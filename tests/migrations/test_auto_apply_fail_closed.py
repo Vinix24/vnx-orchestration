@@ -29,6 +29,7 @@ for _p in (_REPO_ROOT, _REPO_ROOT / "scripts", _REPO_ROOT / "scripts" / "lib"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import schema_manifest
 import schema_migration
 from coordination_db import db_path_from_state_dir, init_schema
 from migrations import auto_apply as auto_apply_mod
@@ -36,7 +37,7 @@ from migrations.auto_apply import auto_apply
 
 _MIGRATIONS_DIR = _REPO_ROOT / "schemas" / "migrations"
 _RUNNERS_DIR = _REPO_ROOT / "scripts" / "lib" / "migrations"
-_TERMINAL = 36
+_TERMINAL = schema_manifest.TERMINAL_VERSION
 
 #: The seven runtime tables 0015 gives project_id (its runtime partition).
 _P4_RUNTIME_TABLES = (
@@ -200,8 +201,6 @@ def test_fresh_store_0015_columns_default_to_the_path_tenant(tmp_path):
 
 
 def test_fresh_store_holds_the_terminal_manifest_and_fk_check(tmp_path):
-    import schema_manifest
-
     state_dir = _central_state_dir(tmp_path, "proj-a")
     assert _fresh_t0_bootstrap(state_dir) == (_TERMINAL, None)
     conn = sqlite3.connect(str(db_path_from_state_dir(state_dir)))
@@ -453,7 +452,7 @@ def test_store_at_terminal_is_not_touched(tmp_path, monkeypatch, fleet_shape):
     db_path = _vnx_migrate_route_store(tmp_path, "proj-a")
     if fleet_shape == "without-0015-columns":
         _strip_0015_runtime_columns(db_path)
-        assert auto_apply(db_path) == [34, 35, 36]
+        assert auto_apply(db_path) == list(range(34, _TERMINAL + 1))
     conn = sqlite3.connect(str(db_path))
     for pid in ("proj-a", "proj-b"):
         conn.execute(
