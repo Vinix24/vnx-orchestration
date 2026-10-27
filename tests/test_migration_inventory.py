@@ -38,15 +38,15 @@ def test_sql_surface_has_at_least_42_files():
     assert all(p.endswith(".sql") for p in sql_surface.paths)
 
 
-def test_applier_surface_has_fourteen_runners():
+def test_applier_surface_has_fifteen_runners():
     surfaces = mi.build_inventory(REPO)
     applier_surface = surfaces[1]
-    assert applier_surface.file_count == 14
+    assert applier_surface.file_count == 15
     names = {Path(p).stem for p in applier_surface.paths}
     assert names == {
         "apply_0015", "apply_0017", "apply_0019", "apply_0020", "apply_0022",
         "apply_0024", "apply_0026", "apply_0027", "apply_0031", "apply_0032",
-        "apply_0033", "apply_0034", "apply_0035", "apply_0036",
+        "apply_0033", "apply_0034", "apply_0035", "apply_0036", "apply_0037",
     }
 
 

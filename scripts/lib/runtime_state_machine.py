@@ -157,8 +157,14 @@ def transition_dispatch(
     actor: str = "runtime",
     reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Transition a dispatch to a new state, validating and emitting an event."""
+    """Transition a dispatch to a new state, validating and emitting an event.
+
+    ``project_id`` stamps the event (ADR-007). None keeps the ambient default every caller
+    before OI-2262 relied on; a caller that knows the project passes it, so the event never
+    lands under whatever project the shell happens to name.
+    """
     row = conn.execute(
         "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
     ).fetchone()
@@ -176,7 +182,7 @@ def transition_dispatch(
     _append_event(
         conn, event_type=f"dispatch_{to_state}", entity_type="dispatch",
         entity_id=dispatch_id, from_state=from_state, to_state=to_state,
-        actor=actor, reason=reason, metadata=metadata,
+        actor=actor, reason=reason, metadata=metadata, project_id=project_id,
     )
     return dict(
         conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
