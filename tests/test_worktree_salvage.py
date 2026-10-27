@@ -69,7 +69,6 @@ class Fixture:
         """No signing, whatever the operator's global config says."""
         git(self.repo, "config", "commit.gpgsign", "false")
         git(self.repo, "config", "tag.gpgsign", "false")
-        git(self.repo, "config", "protocol.file.allow", "always")
 
     def worktree(self, name: str = "worktree-one", parent: str = "one") -> Path:
         """A dispatch-style worktree on its own branch, cut from origin/main."""
@@ -137,7 +136,8 @@ def test_a_local_commit_is_bundled_cloned_and_verified(fx: Fixture) -> None:
     manifest = (fx.dest / ws.MANIFEST_NAME).read_text(encoding="utf-8")
     pattern = (
         rf"worktree-one \| dispatch/one-worktree-one \| head={head} "
-        rf"\| niet-op-remote=1 \| (worktree-one-\d{{8}}T\d{{6}}Z-{head[:8]})/worktree-one\.bundle \n"
+        rf"\| niet-op-remote=1 "
+        rf"\| (worktree-one-\d{{8}}T\d{{6}}Z-{head[:8]})/worktree-one\.bundle \n"
     )
     assert re.fullmatch(pattern, manifest), manifest
     assert result.manifest_line == manifest.rstrip("\n")
@@ -195,7 +195,7 @@ def test_a_staged_change_is_not_covered(fx: Fixture) -> None:
     wt = fx.worktree()
     (wt / "a.txt").write_text("a\nstaged\n", encoding="utf-8")
     git(wt, "add", "a.txt")
-    assert git(wt, "status", "--porcelain=v2").stdout.startswith("1 A. ")
+    assert git(wt, "status", "--porcelain=v2").stdout.startswith("1 M. ")
 
     result = salvage(fx, wt)
 
@@ -232,7 +232,7 @@ def test_a_dirty_submodule_checkout_is_not_covered(fx: Fixture) -> None:
     git(src, "add", "f.txt")
     git(src, "commit", "-q", "-m", "sub base")
     wt = fx.worktree()
-    git(wt, "submodule", "add", "-q", str(src), "sub")
+    git(wt, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(src), "sub")
     git(wt, "commit", "-q", "-m", "add the submodule")
     assert git_status(wt) == ""
 
@@ -313,17 +313,19 @@ def test_a_bundle_header_over_an_empty_pack_is_a_problem(fx: Fixture) -> None:
 def test_two_trees_with_the_same_basename_keep_their_own_directories(fx: Fixture) -> None:
     first = fx.worktree(name="worktree-one", parent="alpha")
     second = fx.worktree(name="worktree-one", parent="beta")
-    first_head = fx.commit(first, "one.txt", "one\n", "alpha work")
-    second_head = fx.commit(second, "two.txt", "two\n", "beta work")
+    head = fx.commit(first, "one.txt", "one\n", "alpha work")
+    # Both trees at one head: the two salvages collide on the directory name.
+    git(second, "reset", "-q", "--hard", head)
 
     one = salvage(fx, first)
     two = salvage(fx, second)
 
     assert one.salvage_dir != two.salvage_dir
     assert two.salvage_dir.name == f"{one.salvage_dir.name}-2"
-    for result, head, name in (
-        (one, first_head, "clone-one"), (two, second_head, "clone-two"),
-    ):
+    for result, name in ((one, "clone-one"), (two, "clone-two")):
+        assert (result.branch, result.head, result.unpushed) == (
+            result.branch, head, 1,
+        )
         clone = clone_bundle(fx, bundle_of(result), name)
         assert git(clone, "rev-parse", head).returncode == 0
     assert verify(fx, one) == []
@@ -388,6 +390,29 @@ def test_a_missing_bundle_is_named(fx: Fixture) -> None:
     problems = verify(fx, result)
     assert len(problems) == 1, problems
     assert problems[0].endswith("worktree-one.bundle: missing"), problems
+
+
+def test_an_artifact_kind_verify_cannot_check_is_a_problem(fx: Fixture) -> None:
+    result, _bundle = _salvaged_bundle(fx)
+    (result.salvage_dir / "worktree-one.patch").write_text("not a diff\n", encoding="utf-8")
+    result.artifacts = [*result.artifacts, f"{result.salvage_dir.name}/worktree-one.patch"]
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert "not an artifact kind this verify can check" in problems[0], problems
+
+
+def test_a_result_without_its_bundle_is_a_problem(fx: Fixture) -> None:
+    result, _bundle = _salvaged_bundle(fx)
+    assert result.unpushed == 1
+
+    result.artifacts = []
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert "no bundle is listed" in problems[0], problems
 
 
 def test_verify_names_a_head_that_moved_after_the_salvage(fx: Fixture) -> None:
