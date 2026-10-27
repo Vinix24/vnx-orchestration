@@ -79,8 +79,8 @@ _MILESTONE_RANK = {
 }
 
 # Feature-block keys the ROADMAP format supports (union of every consumer in the
-# roadmap toolchain: this seeder, build_feature_plan and pr_queue_manager). A
-# key outside this set is a typo (e.g. ``goal_stat`` for
+# roadmap toolchain: this seeder and pr_queue_manager — build_feature_plan is
+# gone, ADR-047). A key outside this set is a typo (e.g. ``goal_stat`` for
 # ``goal_state``) that used to vanish without a trace — the feature would be
 # seeded WITHOUT that field. OI-1168: validate strictly so a typo fails LOUD.
 #
