@@ -2559,9 +2559,6 @@ main() {
     staging-list)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" staging-list "$@"
       ;;
-    promote)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" promote "$@"
-      ;;
     queue-status)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
       ;;
