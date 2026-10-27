@@ -389,7 +389,7 @@ The block is additive, never a replacement: the role source (`agents/<role>/CLAU
 |---|---|---|
 | headless envelope (`claude_headless`) | the shared injector (`scripts/lib/envelope_prepare.py:83`) | the skill's bytes in the prompt; subscription tokens, no extra call |
 | provider (`provider_dispatch`) | the same injector (`scripts/lib/provider_dispatch.py:369`) | the same bytes at that provider's token price, no extra call |
-| pool | spawns `subprocess_dispatch` (`scripts/lib/pool_manager.py:121`), which passes the same injector (`scripts/lib/subprocess_dispatch.py:167`) | nothing extra; no separate plumbing |
+| pool | spawns `pool_worker_runner` (`scripts/lib/pool_manager.py:100`), i.e. the door, whose lane passes the same injector; the rollback route (`VNX_SINGLE_ENTRY_DISPATCH=0`) spawns `subprocess_dispatch`, which passes it too (`scripts/lib/subprocess_dispatch.py:167`) | nothing extra; no separate plumbing |
 | any reviewer seat | nowhere | nothing; `enrichment_allowed` (`scripts/lib/reviewer_roles.py:32`) refuses it and the receipt reads `reviewer_bound` |
 
 **Rollback (ADR-048 §6).** RS-3 (the receipt fields), then RS-2 (the injection), then RS-1 (the staging refusal); RS-5 and the ADR revert independently of those three.

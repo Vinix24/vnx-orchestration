@@ -24,6 +24,7 @@ _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from dispatch_flags import single_entry_enabled  # noqa: E402
 from pool_decision_engine import (  # noqa: E402
     Membership,
     PoolConfig,
@@ -75,6 +76,45 @@ def _default_db_path(project_id: str) -> Path:
         return Path.cwd() / ".vnx-data" / "state" / "runtime_coordination.db"
 
 
+def _pool_worker_command(
+    project_id: str,
+    pool_id: str,
+    terminal_id: str,
+    role: str,
+) -> List[str]:
+    """The command the pool starts for one worker (ADR-042 besluit 6, amended 2026-10-27).
+
+    Default: the single-claim runner ``scripts.lib.pool_worker_runner``, which delivers
+    through the single-entry door (``dispatch_bridge.deliver_via_door``) — the pool route
+    is the door. The legacy ``scripts.lib.subprocess_dispatch`` worker stays reachable and
+    working as the hard-parked rollback net: it is picked when the door predicate
+    ``dispatch_flags.single_entry_enabled()`` is False (``VNX_SINGLE_ENTRY_DISPATCH=0`` or
+    ``VNX_DISPATCH_LEGACY=1``).
+
+    ``VNX_POOL_TASK_CONSUMER=1`` keeps its old meaning — "run the single-claim task-consumer
+    runner" — and keeps that runner even under the rollback. Its ``=0``/unset value no longer
+    names a route by itself: the door predicate decides. The rollback is the single-entry
+    flag, not the consumer flag.
+    """
+    if os.environ.get("VNX_POOL_TASK_CONSUMER") == "1" or single_entry_enabled():
+        # Each worker claims one queued dispatch and exits; pool re-spawns on next tick
+        # (ADR-018 Rule 2 + FM-4).
+        return [
+            sys.executable, "-m", "scripts.lib.pool_worker_runner",
+            "--terminal-id", terminal_id,
+            "--project-id", project_id,
+            "--pool-id", pool_id,
+        ]
+    dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
+    return [
+        sys.executable, "-m", "scripts.lib.subprocess_dispatch",
+        "--terminal-id", terminal_id,
+        "--dispatch-id", dispatch_id,
+        "--instruction", f"Pool worker {terminal_id} for pool {pool_id}",
+        "--role", role,
+    ]
+
+
 def _spawn_via_provider_dispatch(
     project_id: str,
     pool_id: str,
@@ -84,8 +124,8 @@ def _spawn_via_provider_dispatch(
 ) -> SpawnResult:
     """Spawn a worker CC session via subprocess.Popen.
 
-    Launches ``scripts.lib.subprocess_dispatch`` as a detached child process
-    in an isolated git worktree, and captures its PID for lifecycle management.
+    Launches the pool worker from :func:`_pool_worker_command` as a detached child
+    process in an isolated git worktree, and captures its PID for lifecycle management.
     """
     log.info(
         "spawn: project=%s pool=%s terminal=%s provider=%s role=%s",
@@ -106,24 +146,7 @@ def _spawn_via_provider_dispatch(
             error=f"worktree creation failed: {exc}",
         )
 
-    if os.environ.get("VNX_POOL_TASK_CONSUMER") == "1":
-        # Task-consumer mode (ADR-018 Rule 2 + FM-4): spawn the single-claim runner.
-        # Each worker claims one queued dispatch and exits; pool re-spawns on next tick.
-        cmd = [
-            sys.executable, "-m", "scripts.lib.pool_worker_runner",
-            "--terminal-id", terminal_id,
-            "--project-id", project_id,
-            "--pool-id", pool_id,
-        ]
-    else:
-        dispatch_id = f"pool-spawn-{terminal_id}-{int(time.time() * 1000) % 100000}"
-        cmd = [
-            sys.executable, "-m", "scripts.lib.subprocess_dispatch",
-            "--terminal-id", terminal_id,
-            "--dispatch-id", dispatch_id,
-            "--instruction", f"Pool worker {terminal_id} for pool {pool_id}",
-            "--role", role,
-        ]
+    cmd = _pool_worker_command(project_id, pool_id, terminal_id, role)
 
     try:
         # OI-017: the pool never reads the child's stdout/stderr, so holding PIPE

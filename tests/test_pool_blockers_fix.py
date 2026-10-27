@@ -59,7 +59,9 @@ class TestSpawnIsReal:
         assert call_kwargs.kwargs["cwd"] == str(fake_worktree)
         cmd = call_kwargs.args[0]
         assert sys.executable in cmd[0]
-        assert "scripts.lib.subprocess_dispatch" in cmd
+        # T-D0: the default worker is the single-claim pool runner (the door route).
+        assert "scripts.lib.pool_worker_runner" in " ".join(cmd)
+        assert "scripts.lib.subprocess_dispatch" not in " ".join(cmd)
 
     def test_spawn_captures_worktree_failure(self):
         from pool_manager import _spawn_via_provider_dispatch
