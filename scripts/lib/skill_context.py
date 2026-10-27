@@ -157,6 +157,11 @@ def _inject_skill_context(
       2. .claude/skills/{role}/CLAUDE.md — skill definition
       3. .claude/terminals/{terminal}/CLAUDE.md — terminal fallback
 
+    RS-2 (ADR-048): when ``dispatch_metadata["skill"]`` names a skill the spec
+    bound, its body is prepended to the assembled prompt (before the role block)
+    by ``_build_skill_prefix_for``. A reviewer role returns before that, so a
+    reviewer never receives the skill.
+
     Args:
         terminal_id:       Terminal identifier (e.g. "T1").
         instruction:       Raw dispatch instruction text.
@@ -202,7 +207,42 @@ def _inject_skill_context(
         assembled = _legacy_claude_md_resolution(
             terminal_id, instruction, role, intelligence_section,
         )
+    # RS-2 (ADR-048): a skill the spec bound is prepended BEFORE the assembled
+    # role/instruction body — one seam for every lane. No skill key = unchanged.
+    skill_prefix = _build_skill_prefix_for(dispatch_metadata)
+    if skill_prefix:
+        assembled = f"{skill_prefix}{assembled}"
     return _with_report_directive(assembled, dispatch_metadata)
+
+
+def _build_skill_prefix_for(dispatch_metadata: "dict | None") -> str:
+    """Return the skill-content prefix for ``dispatch_metadata["skill"]``, or ''.
+
+    Resolved against the checkout this install runs from — the same
+    ``subprocess_dispatch.__file__`` walk the legacy role resolution uses — via
+    ``skill_prefix.resolve_skill_dir``, the ONE existence resolver staging and the
+    door's compile_plan rule also use. That resolver validates the slug, so a
+    skill reaches here either as an unknown folder or as an invalid slug (an
+    absolute path, ``..``, ``a/b``) — neither is a delivery failure: log one
+    WARNING naming the slug and continue. A reviewer role never reaches this
+    helper.
+    """
+    slug = ((dispatch_metadata or {}).get("skill") or "").strip()
+    if not slug:
+        return ""
+    import subprocess_dispatch as _sd
+    from skill_prefix import build_skill_prefix, resolve_skill_dir  # noqa: PLC0415
+
+    project_root = _sd.Path(_sd.__file__).resolve().parents[2]
+    folder = resolve_skill_dir(project_root, slug)
+    if folder is None:
+        logger.warning(
+            "_inject_skill_context: skill %r is not a valid slug or no longer resolves "
+            "under %s — continuing without it (the refusal belongs to staging and the "
+            "door)", slug, project_root,
+        )
+        return ""
+    return build_skill_prefix([slug], folder.parent)
 
 
 def _with_report_directive(body: str, dispatch_metadata: "dict | None") -> str:
