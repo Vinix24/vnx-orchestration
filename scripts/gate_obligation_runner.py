@@ -2481,7 +2481,7 @@ def _rejected_evidence_note(gate: str, decision: Dict[str, Any]) -> str:
     )
 
 
-def _book_obligation_outcome(path: Path, *, record_path: Path, **fields: Any) -> Dict[str, Any]:
+def _book_obligation_outcome(path: Path, **fields: Any) -> Dict[str, Any]:
     """Book an obligation OUTCOME through ``gate_outcome``, under the result slot's lock (GE-4c).
 
     The booking lands inside the slot lock the gate's record and its
@@ -2489,10 +2489,15 @@ def _book_obligation_outcome(path: Path, *, record_path: Path, **fields: Any) ->
     stamped as ``booked_for``; it returns the obligation record, like
     ``update_obligation``. Only OUTCOMES go through here (fulfilled/failed/
     not_executable because a run ended): scheduling state — claims, counters,
-    ``dispatch_still_running`` — keeps ``update_obligation``.
+    ``dispatch_still_running`` — keeps ``update_obligation``. ``fields`` must
+    name that record in ``result_path`` (every outcome booking does): it is the
+    slot whose lock this booking joins, never inferred from the obligation file.
     """
     from gate_outcome import GateObligation, commit_obligation_outcome  # deferred: it imports gate_recorder
 
+    record_path = fields.get("result_path")
+    if not record_path:
+        raise ValueError("an obligation outcome names the result record it books (result_path)")
     return commit_obligation_outcome(GateObligation(path=path, fields=fields), result_path=Path(record_path))
 
 
@@ -2543,7 +2548,8 @@ def _book_existing_evidence(
             evidence_path, gate, evidence_pr_number, dispatch_id,
         )
         updated = _book_obligation_outcome(
-            path, record_path=evidence_path, status=STATUS_FULFILLED,
+            path,
+            status=STATUS_FULFILLED,
             reason="fulfilled_by_existing_evidence",
             reason_detail=(
                 f"{gate} already produced a complete-evidence PASS for "
@@ -2577,7 +2583,8 @@ def _book_existing_evidence(
     # not_executable / failed" doc comment).
     _passed, verdict_reason = _gate_is_pass(evidence_record)
     updated = _book_obligation_outcome(
-        path, record_path=evidence_path, status=STATUS_FAILED,
+        path,
+        status=STATUS_FAILED,
         reason="failed_by_existing_evidence",
         reason_detail=(
             f"{gate} already produced a complete-evidence FAIL for "
@@ -3332,7 +3339,8 @@ def fulfill_obligation(
                 f"resolved_by_gate={successor_gate!r} (D2e)."
             )
             updated = _book_obligation_outcome(
-                path, record_path=successor_path, status=terminal,
+                path,
+                status=terminal,
                 pr_number=pr_number,
                 branch=branch,
                 attempts=attempts,
@@ -3415,7 +3423,8 @@ def fulfill_obligation(
                     else f"{temp_reason}_timeout"
                 )
                 _book_obligation_outcome(
-                    path, record_path=result_file, status=STATUS_NOT_EXECUTABLE,
+                    path,
+                    status=STATUS_NOT_EXECUTABLE,
                     pr_number=pr_number,
                     branch=branch,
                     attempts=attempts,
@@ -3560,7 +3569,8 @@ def fulfill_obligation(
                 result_file, gate, pr_number, dispatch_id,
             )
         updated = _book_obligation_outcome(
-            path, record_path=result_file, status=terminal,
+            path,
+            status=terminal,
             pr_number=pr_number,
             branch=branch,
             attempts=attempts,
@@ -3598,7 +3608,6 @@ def fulfill_obligation(
         )
         _book_obligation_outcome(
             path,
-            record_path=Path(state_dir) / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json",
             status=STATUS_NOT_EXECUTABLE,
             pr_number=pr_number,
             branch=branch,
