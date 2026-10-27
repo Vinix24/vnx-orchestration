@@ -119,6 +119,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Receipt test counts from the builder's JUnit XML beside the report "
         "(VNX_JUNIT_COUNTS); off = the Verification section's prose counts."
     ),
+    "fleet-pin-audit": (
+        "Fleet pin audit: a project's .vnx-version pin more than N releases "
+        "behind the store's current is a finding (exit 1) instead of a WARN."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -169,6 +173,10 @@ _ROW_ORDER: List[str] = [
     # defaults off until PR-5 wires the envelope path and turns it on for both
     # write paths at once -- dormant-and-measured, not claimed LIVE.
     "deterministic-test-verification",
+    # vnx-fleet-pin-audit PR-7: the audit's own lag threshold, wired at the
+    # read site but with no effectiveness probe registered yet -- same shape
+    # as deterministic-test-verification just above.
+    "fleet-pin-audit",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

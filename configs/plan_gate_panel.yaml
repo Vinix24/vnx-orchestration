@@ -16,9 +16,12 @@
 #   model_arg  — the model string handed to the lane (opus, kimi-k3, glm-5.2,
 #                ...). Not validated here; the lane rejects an unrunnable model.
 #
-# One seat per provider family (Anthropic / Moonshot / Zhipu / DeepSeek /
-# OpenAI). A run does not use them all: see default_seat below. A seat that
-# flakes (a down proxy, an uninstalled CLI, an unparseable verdict) is RETRIED
+# One seat per provider family, enforced at load time: two seats whose provider
+# strings resolve to one family (claude -> anthropic, glm-harness and litellm:zai
+# -> zai, deepseek-harness and litellm:deepseek -> deepseek) are refused with both
+# seats named, because two votes from one vendor are one vote. A run does not use
+# them all: see default_seat below. A seat that flakes (a down proxy, an
+# uninstalled CLI, an unparseable verdict) is RETRIED
 # once and then ABSTAINS as a non-scoring lane instead of vetoing — see
 # apply_panel_rule's liveness quorum. Keep every provider here runnable anyway;
 # the retry only rescues transient flakes. glm-harness requires the local

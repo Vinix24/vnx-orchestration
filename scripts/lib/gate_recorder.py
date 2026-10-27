@@ -1477,6 +1477,8 @@ def _audit_write_refusal(
     gate: str,
     pr_ref: str,
     attempted: Dict[str, Any],
+    *,
+    reason_detail: Optional[str] = None,
 ) -> None:
     """Land a durable trace of a write the overwrite guard refused (OI-1750).
 
@@ -1495,7 +1497,8 @@ def _audit_write_refusal(
 
     Reuses :func:`write_skip_rationale` (GATE-9) — the ledger's one
     skip-rationale writer — rather than adding a second writer or a second
-    file for the same event type.
+    file for the same event type. ``reason_detail`` replaces the guard's text
+    for a refusal with another cause (``gate_outcome.ReceiptPendingRefused``).
     """
     state_dir = _state_dir_from_result_path(result_path)
     if state_dir is None:
@@ -1504,7 +1507,7 @@ def _audit_write_refusal(
         state_dir, gate,
         pr_id=pr_ref,
         reason="gate_result_write_refused",
-        reason_detail=(
+        reason_detail=reason_detail or (
             f"overwrite guard refused a status={attempted.get('status', '')!r} "
             "write: an existing decided, evidenced verdict for this head would "
             "have been downgraded"
@@ -1710,11 +1713,20 @@ def publish_forge_review_summary(
         )
 
 
+def owes_outcome_receipt(payload: Dict[str, Any]) -> bool:
+    """Only a decided verdict books a ``review_gate_result`` receipt (ADR-046 §2)."""
+    from gate_status import FAIL_STATES, PASS_STATES, canonical_status
+
+    return canonical_status(payload) in (PASS_STATES | FAIL_STATES)
+
+
 def _emit_terminal_result_receipt(
     payload: Dict[str, Any],
     *,
     gate: str,
     pr_ref: str,
+    lock_timeout: Optional[float] = None,
+    raise_on_failure: bool = False,
 ) -> None:
     """Emit the RESULT receipt for a decided gate verdict (OI-1702/OI-1703).
 
@@ -1730,7 +1742,10 @@ def _emit_terminal_result_receipt(
     outside the slot lock. A receipt append is a consequence of the record,
     never a condition for it: a failure here must not undo or fail a verdict
     that is already on disk, so it is logged and swallowed — the same
-    discipline as :func:`publish_forge_check_run`.
+    discipline as :func:`publish_forge_check_run`. The exception is
+    :func:`gate_outcome.commit_gate_outcome` (GE-4a): it calls this under the
+    slot lock with ``raise_on_failure`` and a bounded ``lock_timeout``, and
+    turns a raised failure into ``receipt_pending`` on the record (ADR-046 §3).
 
     The receipt ``status`` is mapped onto the receipt's own verdict
     vocabulary: ``gate_status`` speaks PASS/FAIL literals while
@@ -1745,12 +1760,10 @@ def _emit_terminal_result_receipt(
     ``provider``/``model`` come from the payload the writer already holds and
     are omitted when absent — never derived from the gate name.
     """
-    from gate_status import (  # noqa: PLC0415
-        FAIL_STATES, PASS_STATES, canonical_status, is_pass,
-    )
+    from gate_status import canonical_status, is_pass
 
     status = canonical_status(payload)
-    if status not in (PASS_STATES | FAIL_STATES):
+    if not owes_outcome_receipt(payload):
         # not_executable / unavailable / in-flight: not a decided verdict, so
         # there is no outcome receipt to book.
         return
@@ -1798,9 +1811,12 @@ def _emit_terminal_result_receipt(
         fields["head_sha"] = head_sha
     if isinstance(payload.get("override_b3"), dict):
         fields["override_b3"] = payload["override_b3"]
-    pr_number = payload.get("pr_number")
-    if isinstance(pr_number, int) and not isinstance(pr_number, bool):
-        fields["pr_number"] = pr_number
+    # ``attempt_seq`` names the attempt this receipt books (ADR-046 §3), also
+    # when a later commit books it for a record that still owed it.
+    for key in ("pr_number", "attempt_seq"):
+        value = payload.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            fields[key] = value
 
     try:
         emit_governance_receipt(
@@ -1808,6 +1824,7 @@ def _emit_terminal_result_receipt(
             receipt_kind="review_gate",
             status=receipt_status,
             terminal="T0",
+            lock_timeout=lock_timeout,
             **fields,
         )
     # vnx-broad-except: the verdict is already on disk and this hook may not
@@ -1817,6 +1834,8 @@ def _emit_terminal_result_receipt(
     # a write that has already succeeded. Nothing is silent: the branch below
     # logs with the gate and pr_ref so the missing outcome stays visible.
     except Exception as exc:  # noqa: BLE001
+        if raise_on_failure:
+            raise
         logger.warning(
             "gate_recorder: review_gate_result receipt NOT emitted for "
             "gate=%s pr_ref=%s — %s: %s. The result on disk is unchanged; "
@@ -1958,8 +1977,8 @@ def write_result_guarded(
     ==========================================  ==========================
     writer                                      variant
     ==========================================  ==========================
-    ``record_terminal_result``                  raises on refusal
-    ``record_not_executable``                   via this function
+    ``record_terminal_result``                  commit_gate_outcome, raises
+    ``record_not_executable``                   commit_gate_outcome
     ``record_failure`` (and its thin wrapper
     ``record_failure_simple``)                  via this function
     ``gate_report_generator``
@@ -2077,8 +2096,12 @@ def record_terminal_result(
     Refusing to write a terminal result without producer identity closes
     that gap for every future writer that routes through this function.
 
-    Non-terminal payloads (pending/running/queued) are not gate evidence
-    yet, so they are not held to this requirement. The caller
+    The status is one of the four outcomes of ADR-046 (``GateOutcome``): an
+    in-flight status (pending/running/queued) is refused with ``ValueError``
+    before anything is written, and ``unavailable`` is not terminal, so it is
+    not held to this requirement. The write, its receipt and the
+    partial-failure contract are :func:`gate_outcome.commit_gate_outcome`'s
+    (GE-4a). The caller
     resolves ``result_path`` itself — gate writers use different filename
     conventions (legacy ``pr-N-gate.json`` vs. ``{slug}-gate-contract.json``)
     and this function does not need to know which.
@@ -2115,7 +2138,10 @@ def record_terminal_result(
         FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, canonical_status,
         has_producer_identity, is_terminal,
     )
+    from gate_outcome import GateOutcome, commit_gate_outcome  # deferred: it imports this module
 
+    # The caller's choice of outcome, before the downgrades below rewrite the record.
+    outcome = GateOutcome.from_record(gate, payload, pr_id=pr_id)
     if canonical_status(payload) in (PASS_STATES | FAIL_STATES) and gate_depth.is_degenerate(execution_depth):
         detail = gate_depth.degenerate_detail(execution_depth)
         logger.warning(
@@ -2159,26 +2185,11 @@ def record_terminal_result(
         identity_error = gate_dispatch_identity_error(gate, payload.get("dispatch_id"))
         if identity_error:
             raise ValueError(identity_error)
-    with slot_lock(result_path):
-        try:
-            _check_overwrite_guard(result_path, payload, gate=gate, pr_ref=pr_id)
-            _book_round(result_path, payload, gate=gate)
-        except ResultOverwriteRefused:
-            _audit_write_refusal(result_path, gate, pr_id, payload)
-            _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)
-            raise
-        _write_result_atomic(result_path, payload)
-    _archive_finished_gate_bundle(payload, gate=gate, result_path=result_path)
-    # After the write, outside the lock, non-fatal — see
-    # :func:`publish_forge_check_run`. A refusal from the overwrite guard
-    # raises above and never reaches this line, so the same "only publish a
-    # write that landed" rule holds here as in write_result_guarded.
-    publish_forge_check_run(payload, gate=gate, result_path=result_path)
-    # The receipt reads the POST-reclassification payload: a degenerate
-    # pass/fail was rewritten to ``unavailable`` above, so
-    # _emit_terminal_result_receipt sees no decided verdict and emits nothing.
-    _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_id)
-    _feed_provider_reachability(payload, gate=gate, result_path=result_path)
+    # The receipt reads the POST-reclassification record: a degenerate
+    # pass/fail was rewritten to ``unavailable`` above, so it owes no receipt.
+    commit_gate_outcome(
+        outcome, results_dir=result_path.parent, result_path=result_path, raise_on_refusal=True,
+    )
     return result_path
 
 
@@ -2222,13 +2233,17 @@ def record_not_executable(
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
+        from gate_outcome import GateOutcome, commit_gate_outcome  # deferred: it imports this module
+
         # audit_refusal=False: the unconditional write_skip_rationale call
         # below already lands one line for this call whether or not the
         # guard refuses it (OI-1707) — the default audit-on-refusal in
-        # write_result_guarded would double-log the same refused write.
-        payload_on_disk, written = write_result_guarded(
-            rf, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
-            audit_refusal=False,
+        # commit_gate_outcome would double-log the same refused write.
+        outcome = GateOutcome(
+            gate=gate, status="not_executable", pr_id=pr_id, pr_number=pr_number, record=result_payload,
+        )
+        payload_on_disk, written = commit_gate_outcome(
+            outcome, results_dir=results_dir, result_path=rf, audit_refusal=False,
         )
         result_payload = (
             payload_on_disk if written

@@ -340,6 +340,11 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     ``cost_ledger.report_spool_health`` after each spool replay. It is
     event-driven (``expected_interval_seconds=None``): with an empty spool and
     nothing to correct the replay writes nothing, so its silence is no absence.
+
+    vnx-fleet-pin-audit PR-7 adds the 12th: ``fleet_pin_audit``, written by
+    ``scripts/fleet_pin_audit.py --write-state`` on the daily launchd cadence.
+    Periodic (86400), so its absence is a real finding until the driver has
+    run once.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -358,4 +363,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "report_to_receipt_converter",
         "receipt_conversion_rejections",
         "cost-ledger",
+        "fleet_pin_audit",
     }

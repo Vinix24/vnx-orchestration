@@ -340,7 +340,12 @@ def _register_guard_subparser(subparsers: argparse.Action) -> None:
     )
     check_parser.add_argument(
         "--scan-root", action="append", default=[], metavar="DIR",
-        help="also inventory every .vnx-project-id under DIR (depth 3); repeatable",
+        help="also inventory every .vnx-project-id and T0 folder under DIR (depth 3); repeatable",
+    )
+    check_parser.add_argument(
+        "--require-user", action="store_true",
+        help="every project that passes rule 1 must be covered at user level on every account; "
+             "a project-level registration alone fails",
     )
     for sub in (install_parser, check_parser):
         sub.add_argument(

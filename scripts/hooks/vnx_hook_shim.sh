@@ -12,8 +12,12 @@
 #      folder `git rev-parse --show-toplevel` names, found without starting git, so nothing here
 #      can outlast the hook's 10 s timeout. Unless that root has a `.vnx-project-id` with a
 #      non-empty first line and a `.claude/terminals/T0/CLAUDE.md`, and the cwd is outside
-#      `.vnx-data/worktrees/`, it exits 0 without output: only a VNX project with a T0 is
-#      guarded (rule 1 of the T0 guard; the guard checks it again on the payload).
+#      `.vnx-data/worktrees/`, step 1 uses `CLAUDE_PROJECT_DIR` (Claude Code sets it to the
+#      folder the session started in) and applies the same rule there. A candidate under
+#      `.vnx-data/worktrees/` yields nothing and stops the search, and an empty or unset
+#      `CLAUDE_PROJECT_DIR` yields nothing. With no project on either step it exits 0 without
+#      output: only a VNX project with a T0 is guarded (rule 1 of the T0 guard; the guard
+#      checks it again on the payload, through the same two steps).
 #   2. The fabric repo runs its own `<root>/scripts/hooks/<entry>` when present. Everyone else
 #      runs the released code: a user-scope call the entry beside this script, in the release
 #      its registered command names; a project-scope call
@@ -63,24 +67,37 @@ case "$entry" in
     exit 1 ;;
 esac
 
-# 1. Rule 1: a VNX project with a T0, outside a dispatch worktree.
-#    hook_coverage.t0_project_root is the Python twin of this walk.
+# 1. Rule 1: a VNX project with a T0, outside a dispatch worktree. One order for both sides:
+#    hook_coverage.session_project_root is the Python twin of this walk. The physical cwd comes
+#    first; when it yields no rule-1 root, CLAUDE_PROJECT_DIR does. A candidate under
+#    .vnx-data/worktrees/ yields nothing and stops the resolution; an empty or unset
+#    CLAUDE_PROJECT_DIR yields nothing.
+#    rule1_root <candidate>: sets root and id, returns 0 when <candidate> lies in a rule-1 project.
+rule1_root() {
+  case "$1/" in */.vnx-data/worktrees/*) return 1 ;; esac
+  root=$1
+  while [ ! -e "$root/.git" ]; do
+    [ -n "$root" ] && [ "$root" != / ] || return 1
+    root=${root%/*}
+    [ -n "$root" ] || root=/
+  done
+  case "$root/" in */.vnx-data/worktrees/*) return 1 ;; esac
+  [ -f "$root/.claude/terminals/T0/CLAUDE.md" ] || return 1
+  [ -f "$root/.vnx-project-id" ] && [ -r "$root/.vnx-project-id" ] || return 1
+  id=
+  IFS= read -r id < "$root/.vnx-project-id" || [ -n "$id" ] || return 1
+  id=${id%"${id##*[![:space:]]}"}
+  id=${id#"${id%%[![:space:]]*}"}
+  [ -n "$id" ] || return 1
+  return 0
+}
 cwd=$(pwd -P 2>/dev/null) || exit 0
-case "$cwd/" in */.vnx-data/worktrees/*) exit 0 ;; esac
-root=$cwd
-while [ ! -e "$root/.git" ]; do
-  [ -n "$root" ] && [ "$root" != / ] || exit 0
-  root=${root%/*}
-  [ -n "$root" ] || root=/
-done
-case "$root/" in */.vnx-data/worktrees/*) exit 0 ;; esac
-[ -f "$root/.claude/terminals/T0/CLAUDE.md" ] || exit 0
-[ -f "$root/.vnx-project-id" ] && [ -r "$root/.vnx-project-id" ] || exit 0
-id=
-IFS= read -r id < "$root/.vnx-project-id" || [ -n "$id" ] || exit 0
-id=${id%"${id##*[![:space:]]}"}
-id=${id#"${id%%[![:space:]]*}"}
-[ -n "$id" ] || exit 0
+if ! rule1_root "$cwd"; then
+  case "$cwd/" in */.vnx-data/worktrees/*) exit 0 ;; esac
+  project_dir=${CLAUDE_PROJECT_DIR:-}
+  [ -n "$project_dir" ] || exit 0
+  rule1_root "$project_dir" || exit 0
+fi
 
 # 2. Which code: the registered fabric repo runs its own, everyone else the released one.
 #    hook_coverage.shim_entry_file and registered_fabric_root are the Python twins.
