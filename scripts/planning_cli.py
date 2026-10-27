@@ -4040,21 +4040,24 @@ def _withdraw_check(conn: sqlite3.Connection, project_id: str, dispatch_id: str)
 
 
 def _withdraw_write(conn: sqlite3.Connection, project_id: str, dispatch_id: str, row: sqlite3.Row, reason: str) -> bool:
-    """Swap the row from its read state to withdrawn with its event in one transaction; False if it changed.
+    """Swap the row from its read track+state to withdrawn with its event in one transaction; False if it changed.
 
-    Any error, a failed commit included, rolls the transaction back before it propagates.
+    The track is in the swap: a retarget that moved the row in between leaves it untouched, so the
+    event never names a track the deliverable has left. Any error, a failed commit included, rolls
+    the transaction back before it propagates.
     """
-    prior = row["state"]
+    track, prior = row["track"], row["state"]
     conn.execute("BEGIN IMMEDIATE")
     try:
         if conn.execute(
-            "UPDATE dispatches SET state = ?, updated_at = ? WHERE dispatch_id = ? AND project_id = ? AND state = ?",
-            (WITHDRAWN_STATE, _now_utc(), dispatch_id, project_id, prior),
+            "UPDATE dispatches SET state = ?, updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
+            (WITHDRAWN_STATE, _now_utc(), dispatch_id, project_id, track, prior),
         ).rowcount == 1:
             _append_coordination_event(
                 conn, event_type=WITHDRAWN_EVENT, dispatch_id=dispatch_id, from_state=prior,
                 to_state=WITHDRAWN_STATE, actor="operator", reason=reason, project_id=project_id,
-                metadata={"track": row["track"], "prior_state": prior},
+                metadata={"track": track, "prior_state": prior},
             )
             conn.commit()
             return True
@@ -4088,7 +4091,8 @@ def cmd_deliverable_withdraw(args: argparse.Namespace) -> int:
         }
         failed = _deliverable_mutation(
             conn, state_dir, project_id, decision, "withdraw",
-            lambda: _withdraw_write(conn, project_id, args.dispatch_id, row, reason), repr(prior),
+            lambda: _withdraw_write(conn, project_id, args.dispatch_id, row, reason),
+            f"{prior!r} on {row['track']!r}",
         )
         if failed:
             return _withdraw_refused(failed, rc=1)

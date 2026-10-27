@@ -232,6 +232,29 @@ def test_a_row_that_changes_after_the_ledger_line_is_exit_1_with_the_aborted_lin
     assert (aborted["state"], aborted["abort_cause"]) == ("ready", "row_changed")
 
 
+def test_a_retarget_between_the_read_and_the_swap_leaves_the_moved_row_alone(store, monkeypatch):
+    dst = "feat-destination"
+    _track(store, dst)
+    dlv = _add(store)
+    real = planning_cli._withdraw_check
+
+    def _then_retarget(conn, project_id, dispatch_id):
+        row = real(conn, project_id, dispatch_id)  # withdraw read the row on SRC
+        rc, _, err = _cli(store, "deliverable", "retarget", dispatch_id, "--objective", dst, "--reason", "moves first")
+        assert rc == 0, err
+        return row
+
+    monkeypatch.setattr(planning_cli, "_withdraw_check", _then_retarget)
+    rc, _, err = _withdraw(store, dlv)
+    assert rc == 1 and "changed while this command ran" in err and f"'proposed' on {SRC!r}" in err
+    assert (_row(store, dlv)["state"], _row(store, dlv)["track"]) == ("proposed", dst)
+    assert _events(store, dlv) == []
+    intent, aborted = _ledger(store)
+    assert (intent["trigger"], intent["track"], aborted["trigger"]) == (INTENT, SRC, ABORTED)
+    assert (aborted["withdraw_id"], aborted["state"], aborted["track"], aborted["abort_cause"]) == \
+        (intent["withdraw_id"], "proposed", dst, "row_changed")
+
+
 @pytest.mark.parametrize("error, rc", [(sqlite3.OperationalError("injected: event insert fails"), 1),
                                        (RuntimeError("injected: not a store error"), None)])
 def test_an_event_insert_that_raises_rolls_back_and_books_the_aborted_line(store, monkeypatch, error, rc):
