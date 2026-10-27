@@ -465,6 +465,20 @@ def _expand_plist_path(value: Optional[str]) -> Optional[Path]:
         return None
 
 
+def _unmeasurable_detail(home: Dict[str, Any], pin: str) -> str:
+    """Violation detail for a command-line assignment that cannot be read. The
+    environment's value is named only as context -- the command overrides it, so
+    it is never used to fill the gap."""
+    environment_note = (
+        f" while EnvironmentVariables names {home['environment']!r}"
+        if home["environment"] is not None else ""
+    )
+    return (
+        f"the job's command line assigns VNX_HOME through {home['unreadable']}"
+        f"{environment_note}, so the release it runs cannot be measured against the pinned {pin!r}"
+    )
+
+
 def _plist_vnx_home(payload: Dict[str, Any]) -> Dict[str, Any]:
     """The VNX_HOME the job actually runs with: ``value``, where it came from
     (``source`` = ``"command"``/``"environment"``/None) and -- when the command
@@ -651,18 +665,10 @@ def check_pin_alignment(
 
         home = _plist_vnx_home(payload)
         if home["unreadable"] is not None:
-            environment_note = (
-                f" while EnvironmentVariables names {home['environment']!r}"
-                if home["environment"] is not None else ""
-            )
             # Fail closed: the command assignment overrides the environment, so
             # neither value can be shown to be the release this job runs.
             classification = PIN_UNMEASURABLE
-            detail = (
-                f"the job's command line assigns VNX_HOME through {home['unreadable']}"
-                f"{environment_note}, so the release it runs cannot be measured against "
-                f"the pinned {pin!r}"
-            )
+            detail = _unmeasurable_detail(home, pin)
         else:
             classification, detail = _classify_home(home["value"], pin, pin_record)
         entry = {"plist": str(plist_path), "label": label, "project_id": project_id,
