@@ -22,8 +22,8 @@ from pathlib import Path
 
 import pytest
 
-_F39_DIR = Path(__file__).resolve().parents[2] / "scripts" / "f39"
-_SCRIPTS_LIB = Path(__file__).resolve().parents[2] / "scripts" / "lib"
+_F39_DIR = Path(__file__).resolve().parents[1] / "scripts" / "f39"
+_SCRIPTS_LIB = Path(__file__).resolve().parents[1] / "scripts" / "lib"
 for _path in (_F39_DIR, _SCRIPTS_LIB):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
