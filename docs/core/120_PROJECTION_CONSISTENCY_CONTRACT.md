@@ -66,7 +66,7 @@ A **projected surface** is a derived view. It is computed from one or more canon
 | **P-1** | `terminal_state.json` | `.vnx-data/state/` | C-1 (`terminal_leases`) | `terminal_state_shadow.py`, `lease_manager.py` | Must update within 2s of lease transition |
 | **P-2** | `pr_queue_state.json` | `.vnx-data/state/` | C-3 (dispatch filesystem), C-4 (receipts), C-5 (FEATURE_PLAN.md) | `pr_queue_manager.py`, `queue_reconciler.py` | Must update within 5s of dispatch directory change |
 | **P-3** | `progress_state.yaml` | `.vnx-data/state/` | C-4 (receipts), C-3 (dispatch filesystem) | `update_progress_state.py`, `receipt_processor` | Must update within 5s of receipt arrival |
-| **P-4** | `PR_QUEUE.md` | Project root | P-2 (`pr_queue_state.json`) | Queue regeneration scripts | Same as P-2 |
+| **P-4** | *retired* (ADR-047) | — | `PR_QUEUE.md` is gone. The queue is read from the tracks DB and the dispatch register: `vnx horizon queue` (alias `vnx objective queue`) | none | Not a stored projection — a live read-only query |
 | **P-5** | `dashboard_status.json` | `.vnx-data/state/` | P-1, P-2, P-3 (all projections) | Dashboard generators | Advisory — no staleness contract |
 | **P-6** | `t0_brief.json` | `.vnx-data/state/` | P-2, P-3, C-3, C-4 | `build_t0_state.py` | Advisory — refreshed on demand |
 
@@ -79,19 +79,22 @@ FEATURE_PLAN.md (C-5)
   [Queue Reconciler] <-- dispatch filesystem (C-3) + receipts (C-4)
         |
         v
-  pr_queue_state.json (P-2) --> PR_QUEUE.md (P-4)
-                                    |
-                                    v
-terminal_leases (C-1)          dashboard_status.json (P-5)
-        |                           ^
-        v                           |
-  terminal_state.json (P-1) --------+
-                                    |
-dispatches (C-2) + receipts (C-4)   |
-        |                           |
-        v                           |
-  progress_state.yaml (P-3) --------+
+  pr_queue_state.json (P-2) ----------------+
+                                            v
+terminal_leases (C-1)               dashboard_status.json (P-5)
+        |                                   ^
+        v                                   |
+  terminal_state.json (P-1) ----------------+
+                                            |
+dispatches (C-2) + receipts (C-4)           |
+        |                                   |
+        v                                   |
+  progress_state.yaml (P-3) ----------------+
 ```
+
+P-4 (`PR_QUEUE.md`) is no longer in this graph (ADR-047): no file is rendered. The
+queue is read from the tracks DB and the dispatch register by `vnx horizon queue`
+(alias `vnx objective queue`), a read-only query that writes nothing.
 
 ---
 
@@ -214,7 +217,7 @@ Each projection must update within a bounded time after its canonical source cha
 | P-1 (`terminal_state.json`) | Lease acquired, released, or expired in C-1 | **2 seconds** | Shadow writer must fire after every lease operation |
 | P-2 (`pr_queue_state.json`) | Dispatch file moved between directories in C-3 | **5 seconds** | Queue manager update or reconciler must fire after dispatch state change |
 | P-3 (`progress_state.yaml`) | Receipt arrives in C-4, or dispatch becomes active in C-3 | **5 seconds** | Receipt processor or dispatcher must update progress after state change |
-| P-4 (`PR_QUEUE.md`) | P-2 updates | **Same as P-2** | Regenerated alongside P-2 |
+| P-4 | *retired* (ADR-047) | — | No file: `vnx horizon queue` reads the tracks DB and the dispatch register on demand |
 | P-5 (`dashboard_status.json`) | Any projection updates | **No contract** | Advisory only, refreshed on demand |
 
 ### 6.2 Staleness Detection
@@ -278,7 +281,7 @@ Mismatch reports are written to:
 
 ### 8.1 What Reconciliation Does
 
-Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates all projections (P-1 through P-4). It is:
+Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates the stored projections (P-1, P-2, P-3, P-5); P-4 is retired and no file is rendered. It is:
 - **Deterministic**: Same canonical state produces same projections.
 - **Idempotent**: Running twice with no intervening changes produces identical results.
 - **Non-destructive**: Reconciliation never modifies canonical surfaces. It only overwrites projections.
@@ -294,13 +297,12 @@ Reconciliation reads all canonical surfaces (C-1 through C-5) and regenerates al
 5. Read C-2 (dispatches table) → cross-reference with filesystem state
 
 6. Regenerate P-2 (pr_queue_state.json) from steps 1-3
-7. Regenerate P-4 (PR_QUEUE.md) from step 6
-8. Regenerate P-1 (terminal_state.json) from step 4
-9. Regenerate P-3 (progress_state.yaml) from steps 2-4
+7. Regenerate P-1 (terminal_state.json) from step 4
+8. Regenerate P-3 (progress_state.yaml) from steps 2-4
 
-10. Run consistency check (Section 5.1) across all surfaces
-11. Emit mismatch report for any remaining contradictions
-12. Log reconciliation_completed event to C-6
+9. Run consistency check (Section 5.1) across all surfaces
+10. Emit mismatch report for any remaining contradictions
+11. Log reconciliation_completed event to C-6
 ```
 
 ### 8.3 When Reconciliation Must Run

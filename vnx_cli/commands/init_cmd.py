@@ -10,7 +10,9 @@ the committed footprint tiny (< 10 KB) and stops a pip-installed VNX from
 writing runtime state into the package or the repo.
 
 A-11 extension: adds .claude/ skeleton, local .vnx-data/ layout, .vnx-version
-pin, root CLAUDE.md and FEATURE_PLAN.md via Jinja2 templates (default/minimal).
+pin and root CLAUDE.md via Jinja2 templates (default/minimal). It writes no
+plan file: the tracks DB is the plan source (ADR-047), so
+``vnx track new ...`` is the first planning step, not a scaffolded document.
 """
 
 import os
@@ -428,21 +430,6 @@ def _write_root_claude_md(project_dir: Path, tmpl_root: Path, ctx: dict, force: 
         return
     _atomic_write(path, _render_template(tmpl_root / "claude_md.j2", ctx), project_dir)
     print("  created CLAUDE.md")
-
-
-def _write_feature_plan(project_dir: Path, force: bool) -> None:
-    path = project_dir / "FEATURE_PLAN.md"
-    if path.exists() and not force:
-        print("  exists  FEATURE_PLAN.md")
-        return
-    _atomic_write(
-        path,
-        "# Feature Plan\n\n"
-        "<!-- Start a new track: vnx track new <id>"
-        " --project-id <proj-id> --title '...' --goal '...' -->\n",
-        project_dir,
-    )
-    print("  created FEATURE_PLAN.md")
 
 
 def _update_gitignore(project_dir: Path) -> None:
@@ -1131,7 +1118,6 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
         print(f"  created   .vnx-version ({set_version or __version__})")
 
     _write_root_claude_md(project_dir, tmpl_root, ctx, force)
-    _write_feature_plan(project_dir, force)
     _update_gitignore(project_dir)
 
     # --- D5a: attestation trust-root (.vnx-attest/ + CODEOWNERS entries) ----

@@ -20,7 +20,7 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 - Monitoring: `operations/README.md`
 - Scripts: `SCRIPTS_INDEX.md`
 - Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
-- Roadmap: `../ROADMAP.md` (current state); architecture principles and wave history: `manifesto/ROADMAP.md`
+- Roadmap: the tracks database — `vnx horizon queue` for live state (ADR-047); architecture principles and wave history: `manifesto/ROADMAP.md`
 
 ## Directory Overview
 

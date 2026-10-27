@@ -359,8 +359,8 @@ T0 does not invoke it per dispatch but should know the opt-in flags:
 # Refresh state mid-session
 python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/build_t0_state.py"
 
-# On-demand queue drift repair
-python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/reconcile_queue_state.py" --repair
+# Queue state (read-only; the tracks DB is the plan source — ADR-047)
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/planning_cli.py" horizon queue
 
 # Open items (if digest needs refresh)
 python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/open_items_manager.py" digest
