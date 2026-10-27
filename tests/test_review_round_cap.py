@@ -224,3 +224,108 @@ def test_the_blocker_thresholds_report_threshold_blockers(blockers, rule):
     assert (cap.capped, cap.rule, cap.threshold) == (True, rule, "blockers")
     assert "threshold: blockers" in cap.summary()
     assert cap.to_record()["threshold"] == "blockers"
+
+
+# ---------------------------------------------------------------------------
+# Round 2 (codex finding): the cap is the LEDGER's project's, not the process's
+# ---------------------------------------------------------------------------
+
+PROJECT_A = "proj-rg1-a"
+PROJECT_B = "proj-rg1-b"
+
+
+def _project_store(tmp_path: Path, name: str, project_id: str, cap: str) -> Path:
+    """A project's state dir: its identity marker and its own ``project_config`` round cap."""
+    import config_store_db
+
+    root = tmp_path / name
+    root.mkdir()
+    (root / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
+    state_dir = root / "state"
+    state_dir.mkdir()
+    conn = sqlite3.connect(state_dir / "runtime_coordination.db")
+    try:
+        config_store_db.set_config(conn, project_id, "VNX_REVIEW_ROUND_CAP", cap, actor="test")
+    finally:
+        conn.close()
+    return state_dir
+
+
+def _b_ledger(state_dir: Path, *blockers: int) -> Any:
+    """B's round ledger: its ``opened`` line and one codex FAIL round per blocker count."""
+    import review_rounds
+
+    review_gates = state_dir / "review_gates"
+    _write_ledger(
+        review_rounds.ledger_path(review_gates),
+        [_opened(project_id=PROJECT_B), *_fail_rounds(*blockers, project_id=PROJECT_B)],
+    )
+    return review_rounds.read_ledger(review_rounds.ledger_path(review_gates))
+
+
+def _process_is_a(tmp_path: Path, monkeypatch) -> Path:
+    """Wire this process to project A (cap 3) and return its state dir; B's store is separate."""
+    import review_rounds
+
+    store_a = _project_store(tmp_path, "a", PROJECT_A, "3")
+    monkeypatch.setenv("VNX_STATE_DIR", str(store_a))
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT_A)
+    _rewire_config()
+    assert review_rounds.round_cap() == 3, "the launching process is project A, whose cap is 3"
+    return store_a
+
+
+def test_the_merge_door_judges_b_ledger_against_b_cap_not_the_process_project(tmp_path, monkeypatch):
+    """``cap-verdict --data-dir`` / a door on another store: B's cap of 5, never A's 3."""
+    import review_seat_evaluation
+
+    _process_is_a(tmp_path, monkeypatch)
+    store_b = _project_store(tmp_path, "b", PROJECT_B, "5")
+    results_dir = store_b / "review_gates" / "results"
+    results_dir.mkdir(parents=True)
+    scope = review_seat_evaluation.SeatScope(
+        pr_id=str(PR), results_dir=results_dir, head_sha=HEADS[2], branch=BRANCH,
+    )
+
+    _b_ledger(store_b, 1, 1, 1)
+    three = review_seat_evaluation.door_rounds(scope)
+    assert three is not None and three.cap is not None
+    assert three.cap.capped is False, "B's three FAIL rounds are judged against B's cap of 5, not A's 3"
+    assert three.cap.round_limit == 5
+
+    _b_ledger(store_b, 1, 1, 1, 1)
+    four = review_seat_evaluation.door_rounds(scope)
+    assert four is not None and four.cap is not None
+    assert (four.cap.capped, four.cap.round_limit) == (False, 5)
+
+    _b_ledger(store_b, 1, 1, 1, 1, 1)
+    five = review_seat_evaluation.door_rounds(scope)
+    assert five is not None and five.cap is not None
+    assert (five.cap.capped, five.cap.threshold, five.cap.cap_round, five.cap.round_limit) == (
+        True, "rounds", 5, 5,
+    )
+
+
+def test_the_round_cap_takes_the_ledgers_project_and_state_dir(tmp_path, monkeypatch):
+    """The API acceptance 1 names: ``round_cap`` resolves for the ledger's store, not the process's."""
+    import review_rounds
+
+    _process_is_a(tmp_path, monkeypatch)
+    store_b = _project_store(tmp_path, "b", PROJECT_B, "5")
+
+    ledger = _b_ledger(store_b, 1, 1, 1)
+    assert review_rounds.round_cap(project_id=PROJECT_B, state_dir=store_b) == 5
+    assert review_rounds.cap_state(
+        ledger.for_pr(PROJECT_B, PR), PR, project_id=PROJECT_B, state_dir=store_b,
+    ).capped is False
+
+
+def test_a_malformed_cap_in_the_ledgers_store_raises_even_when_the_process_project_is_fine(tmp_path, monkeypatch):
+    import review_rounds
+
+    _process_is_a(tmp_path, monkeypatch)
+    store_b = _project_store(tmp_path, "b", PROJECT_B, "not-a-number")
+
+    with pytest.raises(review_rounds.RoundCapError):
+        review_rounds.round_cap(project_id=PROJECT_B, state_dir=store_b)
+

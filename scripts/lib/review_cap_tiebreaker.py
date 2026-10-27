@@ -302,7 +302,8 @@ def _asked(pr_number: int, step: rcv.CapStep, answer: CapAnswer, model: str, for
     )
 
 
-def _ledger_view(state_dir: Path, pr_number: int) -> Tuple[Tuple[review_rounds.RoundLine, ...], str]:
+def _ledger_view(state_dir: Path, pr_number: int) -> Tuple[Tuple[review_rounds.RoundLine, ...], str, str]:
+    """This PR's counted lines, its count boundary, and the project the store names itself as."""
     review_gates = Path(state_dir) / "review_gates"
     try:
         ledger = review_rounds.read_ledger(review_rounds.ledger_path(review_gates))
@@ -312,7 +313,7 @@ def _ledger_view(state_dir: Path, pr_number: int) -> Tuple[Tuple[review_rounds.R
     project_id = review_rounds.store_project_id(review_gates)
     if unreadable or not ledger.is_opened(project_id, pr_number):
         raise CapTiebreakerError(unreadable or f"PR #{pr_number} is not opened in the round ledger: nothing is counted")
-    return ledger.for_pr(project_id, pr_number), ledger.since(project_id, pr_number)
+    return ledger.for_pr(project_id, pr_number), ledger.since(project_id, pr_number), project_id
 
 
 def decide(
@@ -328,8 +329,8 @@ def decide(
     bind, no diff stat, the ledger), the two tiebreaker errors (no verdict
     recorded), and what ``record_verdict`` raises.
     """
-    lines, since = _ledger_view(state_dir, pr_number)
-    cap = review_rounds.cap_state(lines, pr_number)
+    lines, since, project_id = _ledger_view(state_dir, pr_number)
+    cap = review_rounds.cap_state(lines, pr_number, project_id=project_id, state_dir=state_dir)
     step = rcv.next_step(cap, lines, rcv.read_verdicts(state_dir, pr_number), since=since)
     if step.kind == rcv.BELOW_CAP:
         raise CapTiebreakerError(f"{cap.summary()}: there is nothing for the tiebreaker to decide")

@@ -204,6 +204,19 @@ def ledger_path_for_results(results_dir: Path) -> Optional[Path]:
     return ledger_path(results_dir.parent)
 
 
+def ledger_state_dir(path: Path) -> Optional[Path]:
+    """The state dir a ledger path lives in (``<state>/review_gates/rounds.ndjson``), else ``None``.
+
+    The writer's cap decision resolves the project's round cap from this store
+    (RG-1 round 2), so it is the same state dir the result store's layout names,
+    never the environment's. A path outside that layout names no store.
+    """
+    path = Path(path)
+    if path.name != LEDGER_NAME or path.parent.name != "review_gates":
+        return None
+    return path.parent.parent
+
+
 def store_state_dir(data_dir: Optional[Path] = None) -> Path:
     """The state dir the round ledger lives in, resolved the way the gate does.
 
@@ -713,15 +726,29 @@ def parse_round_cap(value: Optional[str]) -> int:
     return cap
 
 
-def round_cap(project_id: Optional[str] = None) -> int:
-    """The configured round cap, per project: ``config_runtime.get`` unless a project is named.
+def round_cap(project_id: Optional[str] = None, state_dir: Optional[Path] = None) -> int:
+    """The configured round cap for the project store the caller names.
+
+    ``state_dir`` and ``project_id`` are the round ledger's own store and
+    project (:func:`store_project_id`): a ledger read from another project's
+    state dir (``cap-verdict --data-dir``, a merge door on another store) is
+    judged against THAT project's threshold, never the launching process's.
+    With a state dir named, the DB source is read from its
+    ``runtime_coordination.db`` (``config_registry.get_for_project``), so the
+    process's own wiring does not leak in. Without either, the process's
+    configuration resolves, the behaviour for a caller with no ledger in hand.
 
     The chain: ``VNX_OVERRIDE_REVIEW_ROUND_CAP`` (the rollback brake) > the
     project's ``project_config`` row > ``VNX_REVIEW_ROUND_CAP`` > default ``3``.
     A malformed value raises; it never falls back to the default. The imports
     are local so this module needs no config layer to be imported.
     """
-    if project_id is not None:
+    if state_dir is not None:
+        import config_registry
+
+        pid = project_id or _state_dir_project_id(state_dir)
+        raw = config_registry.get_for_project(ROUND_CAP_KEY, pid, state_dir)
+    elif project_id is not None:
         import config_registry
 
         raw = config_registry.get(ROUND_CAP_KEY, project_id)
@@ -730,6 +757,13 @@ def round_cap(project_id: Optional[str] = None) -> int:
 
         raw = config_runtime.get(ROUND_CAP_KEY)
     return parse_round_cap(raw)
+
+
+def _state_dir_project_id(state_dir: Path) -> str:
+    """The project a state dir names itself as (ADR-007), ``""`` when it names none."""
+    import vnx_paths
+
+    return vnx_paths.project_id_from_state_dir(Path(state_dir)) or ""
 
 
 @dataclass(frozen=True)
@@ -826,7 +860,10 @@ def codex_rounds(lines: Iterable[RoundLine]) -> Tuple[RoundLine, ...]:
     return tuple(rounds)
 
 
-def cap_state(lines: Iterable[RoundLine], pr_number: int) -> CapState:
+def cap_state(
+    lines: Iterable[RoundLine], pr_number: int, *, project_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> CapState:
     """Walk the rounds in order; the first round where B3.1, else B3.2, holds is the cap.
 
     ``lines`` are one PR's lines in verdict order (:meth:`Ledger.for_pr`), so the
@@ -835,9 +872,13 @@ def cap_state(lines: Iterable[RoundLine], pr_number: int) -> CapState:
     distinct heads reaching :func:`round_cap`. The blocker thresholds are checked
     first, so a round satisfying both is named ``blockers``. A malformed cap
     raises :class:`RoundCapError`; it never quietly counts against 3.
+
+    ``project_id`` and ``state_dir`` are the ledger's project and store: every
+    caller that read a ledger passes them, so the round cap is that project's
+    threshold, not the launching process's (RG-1 round 2).
     """
     rounds = codex_rounds(lines)
-    limit = round_cap()
+    limit = round_cap(project_id=project_id, state_dir=state_dir)
     total = 0
     failed = 0
     for index, line in enumerate(rounds, start=1):
@@ -1015,7 +1056,9 @@ def _check_append(ledger: Ledger, line: RoundLine, grant_for: Optional[GrantReso
     if line.seat != CODEX_SEAT or line.override:
         return line
     lines = ledger.for_pr(line.project_id, line.pr_number)
-    cap = cap_state(lines, line.pr_number)
+    cap = cap_state(
+        lines, line.pr_number, project_id=line.project_id, state_dir=ledger_state_dir(ledger.path),
+    )
     if not cap.capped:
         return line
     # A re-anchor carries a verdict given on another head; it never uses the granted round.

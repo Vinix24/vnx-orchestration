@@ -434,7 +434,7 @@ class _PrRounds:
 
     def __init__(
         self, pr_number: int, lines: Iterable[Any] = (), unreadable: str = "", history_missing: str = "",
-        *, state_dir: Optional[Path] = None, since: str = "",
+        *, state_dir: Optional[Path] = None, project_id: str = "", since: str = "",
     ) -> None:
         import review_rounds
 
@@ -442,8 +442,11 @@ class _PrRounds:
         self.lines = tuple(lines)
         self.unreadable = unreadable
         self.history_missing = history_missing
-        self.cap = review_rounds.cap_state(self.lines, pr_number)
         self.state_dir = state_dir
+        self.project_id = project_id
+        self.cap = review_rounds.cap_state(
+            self.lines, pr_number, project_id=project_id, state_dir=state_dir,
+        )
         self.since = since
 
     @classmethod
@@ -462,23 +465,27 @@ class _PrRounds:
 
         path = review_rounds.ledger_path(review_gates_dir)
         project_id = review_rounds.store_project_id(review_gates_dir)
+        state_dir = Path(review_gates_dir).parent
         try:
             ledger = review_rounds.read_ledger(path)
             text = review_rounds.unreadable_text(ledger, pr_number)
             if text:
-                return cls(pr_number, unreadable=text)
+                return cls(pr_number, unreadable=text, state_dir=state_dir, project_id=project_id)
             if not ledger.is_opened(project_id, pr_number):
                 evidence = review_rounds.prior_evidence(
-                    review_rounds.store_data_dir(), pr_number, state_dir=Path(review_gates_dir).parent,
+                    review_rounds.store_data_dir(), pr_number, state_dir=state_dir,
                 )
                 if evidence:
-                    return cls(pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence))
+                    return cls(
+                        pr_number, history_missing=review_rounds.history_missing_text(pr_number, evidence),
+                        state_dir=state_dir, project_id=project_id,
+                    )
                 review_rounds.open_pr(path, project_id, pr_number, basis=review_rounds.BASIS_NEW, evidence=0)
         except review_rounds.RoundLedgerError as exc:
-            return cls(pr_number, unreadable=str(exc))
+            return cls(pr_number, unreadable=str(exc), state_dir=state_dir, project_id=project_id)
         return cls(
             pr_number, ledger.for_pr(project_id, pr_number),
-            state_dir=Path(review_gates_dir).parent, since=ledger.since(project_id, pr_number),
+            state_dir=state_dir, project_id=project_id, since=ledger.since(project_id, pr_number),
         )
 
     def grant_on(self, head_sha: str) -> Optional[Any]:

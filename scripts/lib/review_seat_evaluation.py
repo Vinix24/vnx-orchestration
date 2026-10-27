@@ -913,7 +913,9 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
             f"de deur. Is er vóór R1 gereviewd, of is een uitspraak geboekt zonder gate-aanvraag, dan opent de "
             f"operator de PR met `{review_rounds.open_command(pr_number)}`; de cap begint bij die regel op nul"
         ))
-    cap = review_rounds.cap_state(lines, pr_number)
+    cap = review_rounds.cap_state(
+        lines, pr_number, project_id=project_id, state_dir=review_rounds.ledger_state_dir(path),
+    )
     since = ledger.since(project_id, pr_number)
     grant = _door_grant(path.parent.parent, cap, since) if cap.capped else None
     returned = _returned_to_plan(path.parent.parent, cap, since) if cap.capped else ""
