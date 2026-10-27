@@ -38,6 +38,12 @@ import config_registry  # noqa: E402
 import event_outcome_semantics  # noqa: E402
 import receipt_outcome  # noqa: E402
 import receipt_schema  # noqa: E402
+from append_receipt_internals import outcome_identity  # noqa: E402
+from append_receipt_internals.idempotency import _compute_idempotency_key  # noqa: E402
+from append_receipt_internals.outcome_identity import (  # noqa: E402
+    compute_correction_key,
+    compute_outcome_id,
+)
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
 
 START = "dispatch_started"
@@ -358,3 +364,159 @@ def test_task_complete_keeps_its_v2_stamp(tmp_path, lifecycle_on):
     line = _lines(ledger)[0]
     assert line["schema_version"] == 2
     assert "writer_sha" not in line
+
+
+# ---------------------------------------------------------------------------
+# 6. the attempt triple is in EVERY lifecycle line's identity — all three
+#    types, both identity calculations (audit-spoor-kern K-1 round 2)
+# ---------------------------------------------------------------------------
+
+LIFECYCLE_INPUTS = {START: START_FIELDS, FINISH: FINISH_FIELDS, REPORT: REPORT_FIELDS}
+
+
+@pytest.mark.parametrize("event_type", [START, REPORT, FINISH])
+def test_attempt_two_of_one_dispatch_is_its_own_line(tmp_path, lifecycle_on, event_type):
+    """attempt 2 of one dispatch is a different line for ALL three types.
+
+    Before this round only the end line was scoped by the attempt triple; a
+    second ``dispatch_started`` / ``report_ingested`` kept attempt 1's keys and
+    was discarded as its duplicate.
+    """
+    ledger = _ledger(tmp_path)
+    fields = LIFECYCLE_INPUTS[event_type]
+
+    assert _append(ledger, _receipt(event_type, fields)).status == "appended"
+    result = _append(ledger, _receipt(event_type, fields, attempt=2))
+
+    assert result.status == "appended", (
+        f"attempt 2's {event_type} was discarded as attempt 1's duplicate")
+    lines = _lines(ledger)
+    assert [line["attempt"] for line in lines] == [1, 2]
+    assert len({line["outcome_id"] for line in lines}) == 2, (
+        f"attempt 1 and attempt 2 must not share one {event_type} outcome_id")
+
+
+@pytest.mark.parametrize("event_type", [START, REPORT, FINISH])
+def test_same_dispatch_id_in_another_project_is_its_own_line(tmp_path, lifecycle_on, event_type):
+    """The same dispatch_id in another project is a different line, per type."""
+    ledger = _ledger(tmp_path)
+    fields = LIFECYCLE_INPUTS[event_type]
+
+    assert _append(ledger, _receipt(event_type, fields)).status == "appended"
+    result = _append(ledger, _receipt(event_type, fields, project_id="another-project"))
+
+    assert result.status == "appended", (
+        f"another project's {event_type} was discarded as this project's duplicate")
+    lines = _lines(ledger)
+    assert [line["project_id"] for line in lines] == ["vnx-dev", "another-project"]
+    assert len({line["outcome_id"] for line in lines}) == 2
+
+
+@pytest.mark.parametrize("event_type", [START, REPORT, FINISH])
+def test_the_short_window_key_is_scoped_by_project_and_attempt(event_type):
+    """Both identity calculations are scoped, not just the durable one.
+
+    A differing attempt or project must also give a different in-process cache
+    key: the short-window check runs first, so a collision there drops the
+    second line before the outcome index is ever consulted.
+    """
+    fields = LIFECYCLE_INPUTS[event_type]
+    base = _compute_idempotency_key(_receipt(event_type, fields), event_type)
+
+    assert _compute_idempotency_key(
+        _receipt(event_type, fields, attempt=2), event_type) != base, (
+        f"attempt 2's {event_type} kept attempt 1's short-window key")
+    assert _compute_idempotency_key(
+        _receipt(event_type, fields, project_id="another-project"), event_type) != base, (
+        f"another project's {event_type} kept this project's short-window key")
+
+
+def test_one_helper_decides_the_lifecycle_identity_fields():
+    """One decision for the three lifecycle types, none for every other shape."""
+    decide = outcome_identity.lifecycle_identity_fields
+    for event_type in (START, FINISH, REPORT):
+        assert set(decide(_receipt(event_type, LIFECYCLE_INPUTS[event_type]))) == {
+            "project_id", "attempt"}
+    assert decide({"event_type": "task_complete", "dispatch_id": "d-legacy"}) == ()
+
+
+def test_another_attempt_and_another_project_do_not_supersede_the_first_end_line(
+    tmp_path, lifecycle_on,
+):
+    """The correction key is scoped like the identity: only attempt 1 itself
+    can be superseded by a later attempt-1 line."""
+    ledger = _ledger(tmp_path)
+    assert _append(ledger, _receipt(FINISH, FINISH_FIELDS)).status == "appended"
+    assert _append(ledger, _receipt(FINISH, FINISH_FIELDS, attempt=2)).status == "appended"
+    assert _append(ledger, _receipt(FINISH, FINISH_FIELDS, project_id="another-project")).status == "appended"
+
+    lines = _lines(ledger)
+    assert len(lines) == 3
+    assert len({line["outcome_id"] for line in lines}) == 3
+    first_outcome_id = lines[0]["outcome_id"]
+    assert "supersedes" not in lines[1], (
+        "attempt 2's end line must not be booked as a correction of attempt 1")
+    assert "supersedes" not in lines[2], (
+        "another project's end line must not be booked as a correction of this project's")
+    assert lines[1].get("supersedes") != first_outcome_id
+    assert lines[2].get("supersedes") != first_outcome_id
+
+
+@pytest.mark.parametrize("event_type", [START, REPORT, FINISH])
+def test_a_real_duplicate_is_still_discarded(tmp_path, lifecycle_on, event_type):
+    """Widening the identity must not turn a true duplicate into a second line."""
+    ledger = _ledger(tmp_path)
+    fields = LIFECYCLE_INPUTS[event_type]
+
+    assert _append(ledger, _receipt(event_type, fields)).status == "appended"
+    assert _append(ledger, _receipt(event_type, fields)).status == "duplicate"
+    assert len(_lines(ledger)) == 1
+
+
+def test_a_real_correction_within_one_attempt_still_supersedes(tmp_path, lifecycle_on):
+    """Same project, dispatch, attempt and type — only the status differs.
+
+    ``status`` is the one identity input outside the correction key (that is
+    exactly what ADR-038 makes a correction: a changed outcome in an unchanged
+    family), and on a report line it is inert for outcome classification (pinned
+    in section 4 above). Scoping the family by the attempt triple must never
+    block a genuine correction inside it.
+    """
+    ledger = _ledger(tmp_path)
+    assert _append(ledger, _receipt(REPORT, REPORT_FIELDS, status="unavailable")).status == "appended"
+    assert _append(ledger, _receipt(REPORT, REPORT_FIELDS, status="success")).status == "appended"
+
+    lines = _lines(ledger)
+    assert len(lines) == 2
+    assert "supersedes" not in lines[0]
+    assert lines[1].get("supersedes") == lines[0]["outcome_id"]
+
+
+def test_legacy_identity_and_correction_keys_are_unchanged():
+    """Golden values taken on main before this round.
+
+    A non-lifecycle shape's outcome and correction keys are already recorded in
+    every project's durable index; the lifecycle widening must leave them
+    byte-identical (its own identity extras stay behind the vocabulary check).
+    """
+    task_complete = {
+        "event_type": "task_complete",
+        "dispatch_id": "d-legacy", "status": "success",
+        "terminal": "T1", "commit_sha": "a" * 40,
+    }
+    assert compute_outcome_id(task_complete) == (
+        "8fb15f4e0fd44aea28c56738da36e4467e4366ad8a1ffa0d4515cef30a010508")
+    assert compute_correction_key(task_complete) == (
+        "e350640c5ff3cfa94c609b9b7c3ffac98bab72af4e75e1d7a58d7636b5f68b89")
+    assert _compute_idempotency_key(task_complete, "task_complete") == (
+        "54d42a8d2c7cfae0943e8148ce3d22149bcd528abe9629b1b94f48c2e849d767")
+
+    review_gate = {
+        "event_type": "review_gate_result",
+        "dispatch_id": "d-legacy", "status": "pass",
+        "gate": "codex_gate", "pr_number": 2307,
+    }
+    assert compute_outcome_id(review_gate) == (
+        "28c2a006575dae6ee77c15dd44ed929709d72ac4d548a74939a1465af33d0c4a")
+    assert compute_correction_key(review_gate) == (
+        "e898a5b1e5d0e23c99f03220e891e033ef7bc2b74fdab0b00a8c348220619064")

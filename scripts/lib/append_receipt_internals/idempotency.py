@@ -21,6 +21,7 @@ from .common import (
 from .outcome_identity import (
     compute_outcome_id,
     has_outcome_identity,
+    lifecycle_identity_fields,
     load_outcome_index,
     record_outcome,
     resolve_outcome_booking,
@@ -28,7 +29,6 @@ from .outcome_identity import (
     _outcome_index_path_for,
 )
 from .lifecycle import check_end_line
-from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE
 
 _log = logging.getLogger(__name__)
 
@@ -213,19 +213,22 @@ def _compute_idempotency_key(receipt: Dict[str, Any], event_name: str) -> str:
     if "event_type" not in digest_fields and "event" not in digest_fields:
         digest_fields["event_type"] = event_name
 
-    # ADR-045 §3 (audit-spoor-kern K-1): the identity of an end line is
-    # (project_id, dispatch_id, attempt). Those last two are deliberately NOT in
-    # IDEMPOTENCY_FIELDS for every receipt shape — adding them globally would
-    # change the dedup key of shapes that already carry project_id. Scoped here,
-    # they keep this short window from collapsing attempt 1 and attempt 2 of one
-    # dispatch, or the same dispatch_id in two projects, into one cache entry.
-    # The one-end-per-attempt refusal itself is lifecycle.check_end_line's, not
-    # this cache's: a conflicting second end is refused, not silently skipped.
-    if event_name == DISPATCH_FINISHED_EVENT_TYPE:
-        for lifecycle_field in ("project_id", "attempt"):
-            value = receipt.get(lifecycle_field)
-            if value is not None and str(value).strip():
-                digest_fields[lifecycle_field] = value
+    # ADR-045 §3 (audit-spoor-kern K-1): the identity of a lifecycle line is
+    # (project_id, dispatch_id, attempt). Those two extras are deliberately NOT
+    # in IDEMPOTENCY_FIELDS for every receipt shape — adding them globally would
+    # change the dedup key of shapes that already carry project_id. The ONE
+    # helper that also scopes the durable outcome and correction keys decides
+    # which shapes get them, so all three lifecycle types (start, end, report)
+    # are scoped together and cannot drift apart. Without that, attempt 1 and
+    # attempt 2 of one dispatch — or the same dispatch_id in two projects —
+    # collapse onto one cache entry and the second line is silently skipped
+    # before the durable index is ever consulted. The one-end-per-attempt
+    # refusal itself is lifecycle.check_end_line's, not this cache's: a
+    # conflicting second end is refused, not silently skipped.
+    for lifecycle_field in lifecycle_identity_fields(receipt, event_name):
+        value = receipt.get(lifecycle_field)
+        if value is not None and str(value).strip():
+            digest_fields[lifecycle_field] = value
 
     if (
         "dispatch_id" not in digest_fields

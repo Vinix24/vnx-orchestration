@@ -21,6 +21,12 @@ every route-identifying field, and a durable on-disk index
 (``receipt_outcome_index.json``, sibling to the ledger file) so the dedup
 check spans the whole ledger rather than a short cache window. See
 ``docs/governance/decisions/ADR-038-receipt-outcome-identity.md``.
+
+ADR-045 adds the attempt triple: for the three lifecycle line types the
+identity (and the correction key derived from it) also carries ``project_id``
+and ``attempt``, so attempt 2 and another project's line of the same
+``dispatch_id`` are their own lines. Every other receipt shape keeps the
+historical fields exactly.
 """
 
 from __future__ import annotations
@@ -34,9 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# The ADR-045 end-line type name, from the one vocabulary module (never a
-# second copy of the literal).
-from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE as _LIFECYCLE_END_EVENT_TYPE
+# The ADR-045 lifecycle vocabulary, from the one vocabulary module (never a
+# second copy of the type names).
+from receipt_schema import is_lifecycle_event_type
 
 log = logging.getLogger(__name__)
 
@@ -46,14 +52,15 @@ log = logging.getLogger(__name__)
 # one real-world event (see module docstring).
 OUTCOME_ID_FIELDS = ("dispatch_id", "event_type", "status", "commit_sha", "gate", "pr_number")
 
-# ADR-045 §3 (audit-spoor-kern K-1): the end line's identity is the attempt
-# triple, so its outcome_id also carries project_id and attempt — the same
-# dispatch_id in another project, or attempt 2 of one dispatch, is a different
-# outcome and must never be swallowed as the first one's duplicate. Scoped to
-# the new type on purpose: every existing shape keeps OUTCOME_ID_FIELDS exactly,
-# because its outcome_ids are already recorded in every project's index and
-# shifting them would silently re-key history.
-LIFECYCLE_OUTCOME_ID_FIELDS = OUTCOME_ID_FIELDS + ("project_id", "attempt")
+# ADR-045 §3 (audit-spoor-kern K-1): the identity of a lifecycle line is the
+# attempt triple (project_id, dispatch_id, attempt), not the dispatch alone. The
+# same dispatch_id in another project, or attempt 2 of one dispatch, is a
+# different line and must never be swallowed as the first one's duplicate.
+# These are the two fields that triple adds to the base identity; every existing
+# shape keeps OUTCOME_ID_FIELDS exactly, because its outcome_ids are already
+# recorded in every project's index and shifting them would silently re-key
+# history.
+LIFECYCLE_IDENTITY_EXTRA_FIELDS = ("project_id", "attempt")
 
 # Same identity, minus status: the "family" of outcomes for one
 # dispatch/event/gate/pr/commit. A new status within the same family is a
@@ -92,15 +99,44 @@ def _canonical_payload(receipt: Dict[str, Any], fields: tuple) -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 
-def _outcome_id_fields(receipt: Dict[str, Any]) -> tuple:
-    """The identity field tuple for this receipt's shape.
+def lifecycle_identity_fields(
+    receipt: Dict[str, Any], event_name: Optional[str] = None,
+) -> tuple:
+    """The extra identity fields a lifecycle line carries; ``()`` for every other shape.
 
-    Only the ADR-045 end line widens the tuple (project_id + attempt); every
-    other shape returns the historical ``OUTCOME_ID_FIELDS`` untouched.
+    The ONE decision behind both identity calculations: ``compute_outcome_id``
+    and ``compute_correction_key`` here, and the short-window idempotency key in
+    ``idempotency._compute_idempotency_key``. It keys on the ADR-045 lifecycle
+    vocabulary as a whole, not on one type — the per-type copy this replaces let
+    ``dispatch_started`` and ``report_ingested`` of attempt 2 (or of the same
+    dispatch_id in another project) keep attempt 1's keys and be discarded as
+    its duplicate.
+
+    ``event_name`` lets a caller that resolved the name separately (the
+    idempotency key does, because a receipt may carry the legacy ``event``
+    alias) pass it in instead of resolving it twice.
     """
-    if _resolve_event_name(receipt) == _LIFECYCLE_END_EVENT_TYPE:
-        return LIFECYCLE_OUTCOME_ID_FIELDS
-    return OUTCOME_ID_FIELDS
+    resolved = _normalize_field(event_name) or _resolve_event_name(receipt)
+    if is_lifecycle_event_type(resolved):
+        return LIFECYCLE_IDENTITY_EXTRA_FIELDS
+    return ()
+
+
+def _outcome_id_fields(receipt: Dict[str, Any]) -> tuple:
+    """The identity field tuple for this receipt's shape."""
+    return OUTCOME_ID_FIELDS + lifecycle_identity_fields(receipt)
+
+
+def _correction_key_fields(receipt: Dict[str, Any]) -> tuple:
+    """The correction-key field tuple for this receipt's shape.
+
+    Scoped exactly like the outcome identity: a lifecycle line only supersedes
+    an earlier line of the same project, dispatch, event, commit, gate, PR AND
+    attempt. Without the attempt triple here, attempt 2's end line and another
+    project's end line would carry a ``supersedes`` pointing at attempt 1's
+    outcome — inventing a correction relation neither of them has.
+    """
+    return CORRECTION_KEY_FIELDS + lifecycle_identity_fields(receipt)
 
 
 def compute_outcome_id(receipt: Dict[str, Any]) -> str:
@@ -114,9 +150,9 @@ def compute_outcome_id(receipt: Dict[str, Any]) -> str:
 
 
 def compute_correction_key(receipt: Dict[str, Any]) -> str:
-    """Deterministic hash over ``CORRECTION_KEY_FIELDS`` (outcome identity
+    """Deterministic hash over the correction-key fields (outcome identity
     minus status) — the family a correction is scoped to."""
-    payload = _canonical_payload(receipt, CORRECTION_KEY_FIELDS)
+    payload = _canonical_payload(receipt, _correction_key_fields(receipt))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
