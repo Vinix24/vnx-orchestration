@@ -441,6 +441,64 @@ def _write_evidence(repo: Path, content_key: str, evidence_type: str, key_dir: d
     )
 
 
+def _commit_allowed_signers(repo: Path, key_dir: dict) -> None:
+    """Commit the ephemeral public key to .vnx-attest/allowed_signers."""
+    pub = key_dir["key_path"].with_suffix(".pub").read_text().strip()
+    attest_dir = repo / ATTEST_DIR
+    attest_dir.mkdir(parents=True, exist_ok=True)
+    (attest_dir / "allowed_signers").write_text(f"{key_dir['identity']} {pub}\n")
+    subprocess.run(["git", "add", ATTEST_DIR], cwd=str(repo), check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add: allowed_signers"],
+        cwd=str(repo), check=True, capture_output=True,
+    )
+
+
+def _temp_signer_files() -> set[str]:
+    """Snapshot the *.allowed_signers temp files verify_pr materialises."""
+    return {str(p) for p in Path(tempfile.gettempdir()).glob("*.allowed_signers")}
+
+
+def _setup_base_signers_branch(
+    tmpdir: str,
+    ephemeral_key_dir: dict,
+    *,
+    task_class: "str | None" = "implementation",
+    with_evidence: bool = True,
+) -> tuple[Path, str]:
+    """Repo whose BASE branch carries allowed_signers, plus signed attestation.
+
+    The base-branch signer file is what production resolves (no override), so
+    this is the shape CI actually runs — the temporary copy verify_pr makes
+    from it must survive into the evidence-bound phase.
+
+    Returns (repo, base_sha).
+    """
+    repo = _init_repo(Path(tmpdir))
+    _commit_allowed_signers(repo, ephemeral_key_dir)
+    base_sha = _head_sha(repo)
+
+    _add_file_commit(repo, "scripts/lib/feature.py", "x = 1\n", "feat: feature")
+    content_key = compute_diff_hash(repo_root=repo, base_ref=base_sha, head_ref="HEAD")
+
+    write_attest_record(
+        dispatch_id="D-base-signers",
+        deliverable_id="D3",
+        track_id="evidence-bound-gate",
+        plan_gate_ref="gate-ref",
+        signer_identity=ephemeral_key_dir["identity"],
+        timestamp="2026-07-09T12:00:00Z",
+        key_path=ephemeral_key_dir["key_path"],
+        repo_root=repo,
+        base_ref=base_sha,
+        task_class=task_class,
+    )
+    if with_evidence:
+        _write_evidence(repo, content_key, EVIDENCE_TEST_PASS, ephemeral_key_dir)
+        _write_evidence(repo, content_key, EVIDENCE_TIER1_GATE_PASS, ephemeral_key_dir)
+    return repo, base_sha
+
+
 def _setup_feature_branch_with_attest(
     tmpdir: str,
     ephemeral_key_dir: dict,
@@ -684,3 +742,81 @@ class TestEvidenceBoundGate:
             assert exit_code == 1, f"Expected FAIL (invalid evidence signature) but got {exit_code}: {message}"
             assert "evidence-bound gate required" in message.lower()
             assert "invalid signature" in message.lower()
+
+
+class TestBaseBranchSignersEvidenceBound:
+    """The base-branch signer copy must outlive BOTH gate phases.
+
+    Regression: verify_pr materialised the base-branch allowed_signers into a
+    temp file and unlinked it in the ``finally`` of the provenance phase —
+    before the evidence-bound phase handed that same path to
+    ``ssh-keygen -Y verify -f``.  Required mode then refused a VALID evidence
+    record with "invalid signature"; advisory mode logged false diagnostics.
+
+    These tests exercise the base-branch path (no allowed_signers_override),
+    which is the normal path in CI.
+    """
+
+    def test_required_mode_valid_evidence_with_base_signers_passes(
+        self, ephemeral_key_dir, monkeypatch,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        before = _temp_signer_files()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha = _setup_base_signers_branch(tmpdir, ephemeral_key_dir)
+
+            exit_code, message = verify_pr(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD",
+            )
+            assert exit_code == 0, (
+                f"Valid evidence must pass with base-branch signers, "
+                f"got {exit_code}: {message}"
+            )
+            assert "PASS" in message
+        assert _temp_signer_files() - before == set(), (
+            "verify_pr leaked its temporary allowed_signers file"
+        )
+
+    def test_advisory_mode_valid_evidence_reports_no_signature_failure(
+        self, ephemeral_key_dir, monkeypatch, capsys,
+    ):
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "advisory")
+        before = _temp_signer_files()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha = _setup_base_signers_branch(tmpdir, ephemeral_key_dir)
+
+            exit_code, message = verify_pr(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD",
+            )
+            captured = capsys.readouterr()
+            assert exit_code == 0, f"Advisory must not block, got {exit_code}: {message}"
+            assert "PASS" in message
+            assert "invalid signature" not in captured.err.lower(), (
+                f"Valid evidence reported a signature failure: {captured.err!r}"
+            )
+            assert "[evidence-bound advisory]" not in captured.err, (
+                f"No advisory diagnostic expected, got: {captured.err!r}"
+            )
+        assert _temp_signer_files() - before == set(), (
+            "verify_pr leaked its temporary allowed_signers file"
+        )
+
+    def test_temp_signer_file_removed_on_blocking_early_return(
+        self, ephemeral_key_dir, monkeypatch,
+    ):
+        """The early FAIL return must still delete the temp signer file."""
+        monkeypatch.setenv("VNX_EVIDENCE_BOUND_GATE", "required")
+        before = _temp_signer_files()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo, base_sha = _setup_base_signers_branch(
+                tmpdir, ephemeral_key_dir, with_evidence=False,
+            )
+
+            exit_code, message = verify_pr(
+                repo_root=repo, base_ref=base_sha, head_ref="HEAD",
+            )
+            assert exit_code == 1, f"Expected FAIL (missing evidence), got {exit_code}: {message}"
+            assert "evidence-bound gate required" in message.lower()
+        assert _temp_signer_files() - before == set(), (
+            "verify_pr leaked its temporary allowed_signers file on the FAIL path"
+        )
