@@ -96,8 +96,13 @@ class TestDoctorReportsLegacyStore:
         assert payload["summary"]["warn"] >= 1
         assert str(legacy) in check["detail"]
         assert "NOT used" in check["detail"]
-        assert "vnx migrate --relocate-legacy" in check["detail"]
-        assert "will be available" in check["detail"]
+        assert (
+            f"vnx migrate --relocate-legacy --legacy-path {legacy} --project-id {PROJECT_ID}"
+            in check["detail"]
+        )
+        assert "docs/operations/LEGACY-XDG-STORE-MIGRATION.md" in check["detail"]
+        assert "not wired yet" not in check["detail"]
+        assert "will be available in a later release" not in check["detail"]
 
     def test_legacy_and_central_store_pass(self, env):
         legacy = _legacy(env.xdg)
