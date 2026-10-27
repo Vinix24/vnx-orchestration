@@ -32,15 +32,20 @@ PromptAssembler prompt file, which both "plan-reviewer" and "review-gate" are.
 """
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
+from unittest import mock
+
+import pytest
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-import skill_context
+import governed_lane  # noqa: E402  (after the sys.path pins above)
+import skill_context  # noqa: E402
 
 _CONTRADICTORY_INSTRUCTION = "Do NOT write to any path other than the mandated report file."
 
@@ -122,13 +127,27 @@ def test_plan_reviewer_role_is_unaffected_by_this_fix():
     assert _CONTRADICTORY_INSTRUCTION in resolved
 
 
-def test_glm_gate_and_kimi_gate_dispatch_under_review_gate_role():
-    """Direct proof the two gate scripts actually pass the new role — not just
-    that the role file behaves correctly in isolation."""
-    glm_gate_src = (SCRIPTS_DIR / "glm_gate.py").read_text(encoding="utf-8")
-    kimi_gate_src = (SCRIPTS_DIR / "kimi_gate.py").read_text(encoding="utf-8")
-    assert 'role="review-gate"' in glm_gate_src
-    assert 'role="review-gate"' in kimi_gate_src
+@pytest.mark.parametrize("gate_name", ["glm_gate", "kimi_gate"])
+def test_glm_gate_and_kimi_gate_dispatch_under_review_gate_role(gate_name):
+    """Direct proof the two gates actually pass the new role — not just that the role
+    file behaves correctly in isolation. Since GE-5b the role is passed by the shared
+    adapter, so the proof runs through each script's OWN factory binding: patch it on
+    the script module, ask the adapter for a dispatcher, and read the role back."""
+    module = importlib.import_module(gate_name)
+    seen: dict = {}
+
+    def _factory(_data_dir, **kwargs):
+        seen.update(kwargs)
+        return lambda *_a, **_k: ""
+
+    coverage = {"diff_chars": 10, "diff_limit": 10, "diff_truncated": False}
+    with mock.patch.object(module, "_make_default_dispatcher", _factory):
+        governed_lane.review_dispatcher(
+            module._PROVIDER, Path("/tmp/nowhere"), "feature/review-gate", coverage, None,
+            dispatcher_factory=module._gate_seams().make_default_dispatcher,
+        )
+
+    assert seen["role"] == "review-gate"
 
 
 def test_review_roles_ssot_includes_review_gate():
