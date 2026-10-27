@@ -82,9 +82,11 @@ class TestSpawnIntegrationFullFlow:
 
         cmd = mock_popen.call_args[0][0]
         assert "--terminal-id" in cmd
-        assert "--dispatch-id" in cmd
-        assert "--role" in cmd
-        assert "backend-developer" in cmd
+        # T-D0: the default route is the pool worker, i.e. the door — it claims its own
+        # dispatch, so the pool no longer hands it a dispatch-id or a role.
+        assert "scripts.lib.pool_worker_runner" in " ".join(cmd)
+        assert "--project-id" in cmd
+        assert "--pool-id" in cmd
 
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")

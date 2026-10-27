@@ -2,13 +2,14 @@
 
 ``vnx costs report [--by ...] [--since ...] [--json] [--ledger PATH]`` reports
 the cost ledger grouped by model, role, day or provider; ``vnx costs replay
-[--json]`` brings its spool back into the ledger. The machinery lives in two
-scripts, ``scripts/cost_ledger_report.py`` and ``scripts/cost_ledger_replay.py``,
-which the fabric's ``bin/vnx costs`` runs too. Like ``providers.py``, this
-entrance runs those scripts as a subprocess, so their exit codes (report: 0 a
-report, 1 an unreadable ledger, 2 usage; replay: 0 done, 1 an unreadable spool,
-a write failure or a read-back mismatch, 3 a lock busy) reach the shell
-unchanged.
+[--json]`` brings its spool back into the ledger; ``vnx costs observe [--json]
+[--ledger PATH]`` measures each provider's balance into an ``account_observation``
+(K5b: a calibration is never a spend). The machinery lives in three scripts under
+``scripts/`` — ``cost_ledger_{report,replay,observe}.py`` — which the fabric's
+``bin/vnx costs`` runs too. Like ``providers.py``, this entrance runs them as a
+subprocess, so their exit codes (report: 0 a report, 1 an unreadable ledger,
+2 usage; replay: 0 done, 1 unreadable spool, write failure or read-back mismatch,
+3 lock busy; observe: 0 written, 1 a write failure) reach the shell unchanged.
 """
 
 from __future__ import annotations
@@ -38,6 +39,10 @@ def register_costs_subparser(subparsers) -> None:
     report.add_argument("--ledger", metavar="PATH", help="the cost ledger to read (default: this project's store)")
     replay = verbs.add_parser("replay", help="bring the cost ledger's spool back into the ledger, bounded")
     replay.add_argument("--json", action="store_true", help="print the result as one JSON object")
+    observe = verbs.add_parser("observe", help="measure each provider's balance into an account_observation")
+    observe.add_argument("--json", action="store_true", help="print the records as one JSON list")
+    observe.add_argument("--coverage", action="store_true", help="also report the OpenRouter missed-catch coverage")
+    observe.add_argument("--ledger", metavar="PATH", help="the cost ledger whose store receives the records")
     parser.set_defaults(func=vnx_costs)
 
 
@@ -51,6 +56,12 @@ def resolve_report_script(root: Path | None = None) -> Path:
     """Return the packaged cost_ledger_report.py path for the resolved engine."""
     root = root or _engine.engine_root()
     return root / "scripts" / "cost_ledger_report.py"
+
+
+def resolve_observe_script(root: Path | None = None) -> Path:
+    """Return the packaged cost_ledger_observe.py path for the resolved engine."""
+    root = root or _engine.engine_root()
+    return root / "scripts" / "cost_ledger_observe.py"
 
 
 def _report_argv(script: Path, args) -> list[str]:
@@ -68,17 +79,26 @@ def _replay_argv(script: Path, args) -> list[str]:
     return [sys.executable, str(script)] + (["--json"] if getattr(args, "json", False) else [])
 
 
+def _observe_argv(script: Path, args) -> list[str]:
+    """``scripts/cost_ledger_observe.py``'s argv for this ``vnx costs observe``."""
+    argv = [sys.executable, str(script)] + (["--ledger", args.ledger] if getattr(args, "ledger", None) else [])
+    return argv + [flag for flag in ("--json", "--coverage") if getattr(args, flag.lstrip("-"), False)]
+
+
 def vnx_costs(args) -> int:
-    """Run the report or the replay script for ``vnx costs <verb>``."""
+    """Run the report, replay or observe script for ``vnx costs <verb>``."""
     verb = getattr(args, "costs_command", None)
     usage = "usage: vnx costs report [--by model|role|day|provider] [--since YYYY-MM-DD] [--json] " \
-            "[--ledger PATH] | vnx costs replay [--json]"
+            "[--ledger PATH] | vnx costs replay [--json] | vnx costs observe [--json] [--coverage] [--ledger PATH]"
     if verb == "report":
         script = resolve_report_script()
         argv = _report_argv(script, args)
     elif verb == "replay":
         script = resolve_replay_script()
         argv = _replay_argv(script, args)
+    elif verb == "observe":
+        script = resolve_observe_script()
+        argv = _observe_argv(script, args)
     else:
         print(usage, file=sys.stderr)
         return _EXIT_USAGE

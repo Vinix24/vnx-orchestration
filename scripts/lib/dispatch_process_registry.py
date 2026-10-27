@@ -13,11 +13,16 @@ moment the lane still knows the group — and re-finds them at teardown by PGID.
 A process that has run away from the group (reparented to launchd, PPID 1)
 keeps its PGID, so it is still found.
 
-Conservatism: the registry only ever contains what a dispatch lane explicitly
-recorded, and teardown only signals a group when at least one recorded member
-PID still exists AND still carries the recorded PGID.  If there is any doubt
-(no entry, entry cleared, every member gone, or the PGID reused by an
-unrelated group), the kill does nothing and logs instead of guessing.
+Conservatism, two different questions:
+  * teardown (kill) signals a group only when at least one recorded member PID
+    still exists AND still carries the recorded PGID.  If there is any doubt
+    (no entry, entry cleared, every member gone, or the PGID reused by an
+    unrelated group), the kill does nothing and logs instead of guessing.
+  * liveness for a removal guard also probes the group itself with
+    ``killpg(pgid, 0)`` once no recorded member carries the PGID, because a
+    worker can spawn children after the snapshot and exit while they keep its
+    PGID.  Only ``ProcessLookupError`` there proves the group is gone; a
+    reused PGID reads alive and keeps the worktree (the safe side).
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +179,126 @@ def load_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> list[int]:
     return sorted(result)
 
 
+GROUP_ALIVE, GROUP_DEAD, GROUP_UNKNOWN = "alive", "dead", "unknown"
+
+
+class GroupLiveness(NamedTuple):
+    pgid: int
+    state: str
+    detail: str = ""
+
+
+class LivenessReport(NamedTuple):
+    """Truthiness is fail-closed: alive, unknown and unreadable all read "keep"."""
+    alive: "tuple[int, ...]" = ()
+    dead: "tuple[int, ...]" = ()
+    unknown: "tuple[int, ...]" = ()
+    unmeasurable: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.alive or self.unknown or self.unmeasurable)
+
+
+def _recorded_member_carries_pgid(pgid: int, member_pids: "list[int]") -> bool:
+    """True only when a recorded member PID still exists and carries *pgid*.
+
+    This is the positive evidence the kill path requires before it signals a
+    group: a group probe alone cannot tell this dispatch's group from an
+    unrelated group that reused the PGID.
+    """
+    for pid in member_pids:
+        try:
+            if os.getpgid(pid) == pgid:
+                return True
+        except ProcessLookupError:
+            continue
+        except OSError:
+            continue
+    return False
+
+
+def _probe_group_exists(pgid: int) -> GroupLiveness:
+    """Ask the kernel whether the process group itself still exists.
+
+    ``killpg(pgid, 0)`` is authoritative: it succeeds while any process in the
+    group exists, raises ``ProcessLookupError`` only when the group is gone,
+    and raises ``PermissionError`` when the group exists but may not be
+    signalled by us.
+    """
+    if pgid <= 0:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, f"pgid {pgid} is not a process group id")
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return GroupLiveness(pgid, GROUP_DEAD, "no process in the group")
+    except PermissionError as exc:
+        return GroupLiveness(pgid, GROUP_ALIVE, f"group exists but cannot be signalled: {exc}")
+    except OSError as exc:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, f"group probe failed: {exc}")
+    return GroupLiveness(pgid, GROUP_ALIVE, "group exists")
+
+
+def probe_group_liveness(pgid: int, member_pids: "list[int]") -> GroupLiveness:
+    """Classify the group as alive, dead or unknown — never dead without proof.
+
+    A recorded member still carrying *pgid* is alive.  When no recorded member
+    carries it any more, the member list proves nothing: the worker can spawn
+    children after the spawn-time snapshot and exit while those children keep
+    its PGID.  The group itself is then probed with ``killpg(pgid, 0)``:
+    success or ``PermissionError`` is ``GROUP_ALIVE``, and only
+    ``ProcessLookupError`` from that probe is ``GROUP_DEAD``; any other
+    ``OSError`` is ``GROUP_UNKNOWN``.  A PGID reused by an unrelated group
+    therefore also reads alive and refuses a removal — the safe side.  No
+    recorded member PIDs at all stays ``GROUP_UNKNOWN``.
+    """
+    if not member_pids:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, "no recorded member pids")
+    error = ""
+    for pid in member_pids:
+        try:
+            if os.getpgid(pid) == pgid:
+                return GroupLiveness(pgid, GROUP_ALIVE)
+        except ProcessLookupError:
+            continue
+        except OSError as exc:
+            error = error or f"pid {pid}: {exc}"
+    if error:
+        return GroupLiveness(pgid, GROUP_UNKNOWN, error)
+    return _probe_group_exists(pgid)
+
+
+def live_process_groups(dispatch_id: str, *, repo_root: Path) -> LivenessReport:
+    """Recorded groups of *dispatch_id*, unknown reported separately from dead."""
+    path = _entry_path(repo_root, dispatch_id)
+    if not path.exists():
+        return LivenessReport()
+    entry = _load_entry(dispatch_id, repo_root=repo_root)
+    if entry is None:
+        return LivenessReport(unmeasurable=f"unreadable registry entry {path}")
+    groups = entry.get("groups")
+    if groups is None:
+        return LivenessReport()
+    if not isinstance(groups, dict):
+        return LivenessReport(unmeasurable="registry entry 'groups' is not an object")
+    alive: "list[int]" = []
+    dead: "list[int]" = []
+    unknown: "list[int]" = []
+    for pgid_str, member_pids in groups.items():
+        try:
+            pgid = int(pgid_str)
+            members = [int(pid) for pid in member_pids]
+        except (TypeError, ValueError):
+            return LivenessReport(unmeasurable=f"malformed group record {pgid_str!r}")
+        probe = probe_group_liveness(pgid, members)
+        if probe.state == GROUP_ALIVE:
+            alive.append(pgid)
+        elif probe.state == GROUP_UNKNOWN:
+            unknown.append(pgid)
+        else:
+            dead.append(pgid)
+    return LivenessReport(tuple(sorted(alive)), tuple(sorted(dead)), tuple(sorted(unknown)))
+
+
 def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:
     """Remove the registry entry for *dispatch_id*.  Idempotent, never raises."""
     try:
@@ -191,18 +316,26 @@ def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _group_is_valid(pgid: int, member_pids: list[int]) -> bool:
-    """True when a recorded member still exists and still carries *pgid*.
+    """True only when a recorded member still carries *pgid*.
 
-    Guards against PGID reuse: a group whose PGID was handed to an unrelated
-    process will not have any recorded member PID in it.
+    Signalling needs that positive evidence: ``probe_group_liveness`` also
+    answers alive for a reused PGID, which is the right answer for a removal
+    guard but never a reason to signal a stranger's group.
     """
-    for pid in member_pids:
-        try:
-            if os.getpgid(pid) == pgid:
-                return True
-        except (ProcessLookupError, PermissionError):
-            continue
-    return False
+    return _recorded_member_carries_pgid(pgid, member_pids)
+
+
+def _no_target_reason(pgid: int, members: "list[int]") -> str:
+    """Why a recorded group is not a kill target: no recorded member carries it."""
+    probe = probe_group_liveness(pgid, members)
+    if probe.state == GROUP_UNKNOWN:
+        return "liveness is unknown (%s)" % (probe.detail or "no answer from the probe")
+    if probe.state == GROUP_ALIVE:
+        return (
+            "no recorded member carries that PGID (the group probe answers alive, "
+            "so the PGID was reused by an unrelated group)"
+        )
+    return "no recorded member alive with that PGID (group gone)"
 
 
 def kill_dispatch_pgids(
@@ -249,16 +382,15 @@ def kill_dispatch_pgids(
             if isinstance(member_pids, list)
             else []
         )
-        if _group_is_valid(pgid, members):
+        if _recorded_member_carries_pgid(pgid, members):
             targets.append(pgid)
-        else:
-            logger.warning(
-                "dispatch_process_registry: NOT killing pgid %s for %s — "
-                "no recorded member alive with that PGID (group gone or PGID "
-                "reused); leaving it untouched",
-                pgid,
-                dispatch_id,
-            )
+            continue
+        logger.warning(
+            "dispatch_process_registry: NOT killing pgid %s for %s — %s; leaving it untouched",
+            pgid,
+            dispatch_id,
+            _no_target_reason(pgid, members),
+        )
 
     if not targets:
         logger.debug(
