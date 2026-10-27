@@ -1,14 +1,17 @@
 # ============================================================================
-# ROADMAP.yaml is the SINGLE SOURCE OF TRUTH for the feature roadmap.
+# This file is an EXAMPLE of the roadmap import format. It is not a plan source.
 #
-# It is the only hand-edited planning surface. No view is generated from it any
-# more: FEATURE_PLAN.md and its generator scripts/build_feature_plan.py are gone
-# (ADR-047), the tracks DB is the only plan source.
+# The tracks DB is the only plan source (ADR-047). No code reads this file from
+# a fixed or derived path: it is imported only when the operator names it
+# explicitly, e.g.
+#   python3 scripts/seed_tracks_from_roadmap.py --roadmap ROADMAP.yaml --apply
+#   vnx objective sync --roadmap ROADMAP.yaml --apply
+# FEATURE_PLAN.md and PR_QUEUE.md and their generators are gone (ADR-047).
 #
-# CI keeps the file honest: tests/test_roadmap_consistency.py checks the format.
+# CI keeps the format honest: tests/test_roadmap_consistency.py checks it.
 #
-# This shipped file is an ILLUSTRATIVE EXAMPLE of the roadmap format. Replace the
-# example features below with your own.
+# Replace the example features below with your own, or import this file as-is to
+# see the shape a tracks import expects.
 #
 # ADR-007: every new central-DB table needs a composite UNIQUE/PK over
 # project_id. Cite it explicitly in review-gate prompts for schema work.

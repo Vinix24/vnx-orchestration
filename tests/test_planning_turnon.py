@@ -3,11 +3,12 @@
 Covers the three turn-on pieces, all against temp DBs + ROADMAP fixtures
 (NEVER the live .vnx-data DB):
 
-- `vnx objective sync` CHECK mode reports the would-change set and mutates
-  nothing; `--apply` mutates idempotently (2nd --apply = no-op).
-- the flag-gated prelude hook `maybe_auto_seed`: unset -> no-op;
-  VNX_AUTO_SEED_TRACKS=1 -> runs sync --apply (asserted via temp DB + a
-  monkeypatched seeder recording apply=True).
+- `vnx objective sync --roadmap <file>` CHECK mode reports the would-change set
+  and mutates nothing; `--apply` mutates idempotently (2nd --apply = no-op).
+- `vnx objective sync` WITHOUT `--roadmap` exits 2 and writes nothing: the
+  tracks DB is the plan source (ADR-047), a file is imported only when named.
+  The flag-gated auto-seed hook (`maybe_auto_seed`) is gone with it — its tests
+  were removed here (C2, dlv-8c87936d5e6a).
 - `vnx objective drift` reports the divergent set, writes planning_drift.json,
   exits 0 even when divergence > 0, and never touches any ROADMAP-write path.
 """
@@ -175,194 +176,33 @@ def test_sync_missing_roadmap_returns_nonzero(empty_state, capsys):
     assert rc == 1
 
 
-# ---------------------------------------------------------------------------
-# Part 2 — flag-gated auto-seed prelude hook
-# ---------------------------------------------------------------------------
-
-def test_auto_seed_unset_is_noop(empty_state):
-    state_dir, roadmap = empty_state
-    result = planning_cli.maybe_auto_seed(
-        state_dir=state_dir, roadmap_path=roadmap, project_id="vnx-dev",
-        env={},  # VNX_AUTO_SEED_TRACKS unset
-    )
-    assert result["skipped"] is True
-    # No mutation when disabled.
+def test_sync_without_roadmap_exits_2_and_writes_nothing(empty_state, capsys):
+    """No derived default any more (ADR-047): the tracks DB is the source, a
+    file is imported only when the operator names it."""
+    state_dir, _ = empty_state
+    rc = planning_cli.main([
+        "objective", "sync", "--apply", "--project-id", "vnx-dev",
+        "--state-dir", str(state_dir), "--json",
+    ])
+    assert rc == 2
     assert tracks_lib.list_tracks(state_dir, "vnx-dev") == []
+    captured = capsys.readouterr()
+    assert "--roadmap" in captured.err
+    assert "ADR-047" in captured.err
+    assert captured.out == ""
 
 
-def test_auto_seed_enabled_runs_sync_apply(empty_state):
-    state_dir, roadmap = empty_state
-    result = planning_cli.maybe_auto_seed(
-        state_dir=state_dir, roadmap_path=roadmap, project_id="vnx-dev",
-        env={"VNX_AUTO_SEED_TRACKS": "1"},
-    )
-    assert result["skipped"] is False
-    assert result["summary"]["created"] == 3
-    seeded = {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")}
-    assert seeded == {"feat-a", "feat-b", "feat-c"}
-
-
-def test_auto_seed_enabled_calls_seeder_with_apply_true(empty_state, monkeypatch):
-    state_dir, roadmap = empty_state
-    calls: list[dict] = []
-
-    def _spy(s_dir, r_path, project_id, *, apply=False):
-        calls.append({"apply": apply, "project_id": project_id})
-        return {"summary": {"created": 0, "updated": 0, "unchanged": 0,
-                            "phase_drift": 0, "orphan": 0}}
-
-    monkeypatch.setattr(planning_cli.seeder, "seed", _spy)
-    planning_cli.maybe_auto_seed(
-        state_dir=state_dir, roadmap_path=roadmap, project_id="vnx-dev",
-        env={"VNX_AUTO_SEED_TRACKS": "1"},
-    )
-    assert calls == [{"apply": True, "project_id": "vnx-dev"}]
-
-
-# ---------------------------------------------------------------------------
-# Part 2b — auto-seed roadmap anchoring (the apply=True landmine)
-# ---------------------------------------------------------------------------
-
-def _seed_spy(monkeypatch, calls):
-    def _spy(s_dir, r_path, project_id, *, apply=False):
-        calls.append({"apply": apply, "project_id": project_id, "r_path": str(r_path)})
-        return {"summary": {"created": 0, "updated": 0, "unchanged": 0,
-                            "phase_drift": 0, "orphan": 0}}
-    monkeypatch.setattr(planning_cli.seeder, "seed", _spy)
-
-
-def test_auto_seed_reaches_apply_when_anchored_on_explicit_project_root(tmp_path):
-    """Correctly-anchored: an explicit project_root pointing at a real,
-    project-authored ROADMAP.yaml still reaches the seed/apply path."""
-    project_root = tmp_path / "my-project"
-    project_root.mkdir()
-    (project_root / "ROADMAP.yaml").write_text(SAMPLE_ROADMAP, encoding="utf-8")
-    state_dir = tmp_path / "state"
-    _init_schema(state_dir)
-
-    result = planning_cli.maybe_auto_seed(
-        state_dir=state_dir, project_id="vnx-dev",
-        env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
-    )
-    assert result["skipped"] is False
-    assert result["summary"]["created"] == 3
-    seeded = {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")}
-    assert seeded == {"feat-a", "feat-b", "feat-c"}
-
-
-def test_auto_seed_refuses_when_project_root_unresolvable(tmp_path, monkeypatch, caplog):
-    """Unanchored: no explicit roadmap/project_root, CWD is not a git repo, and
-    no VNX_CANONICAL_ROOT fallback -- the hook must refuse rather than guess,
-    and must never call seed(apply=True)."""
-    state_dir = tmp_path / "state"
-    _init_schema(state_dir)
-    cwd = tmp_path / "not-a-repo"
-    cwd.mkdir()
-    monkeypatch.chdir(cwd)
-    monkeypatch.delenv("VNX_CANONICAL_ROOT", raising=False)
-
-    calls: list[dict] = []
-    _seed_spy(monkeypatch, calls)
-
-    with caplog.at_level("WARNING"):
-        result = planning_cli.maybe_auto_seed(
-            state_dir=state_dir, project_id="vnx-dev",
-            env={"VNX_AUTO_SEED_TRACKS": "1"},
-        )
-
-    assert result["skipped"] is True
-    assert "cannot resolve project root" in result["reason"]
-    assert calls == []  # seed(apply=True) never invoked
-    assert any("refusing to seed" in rec.message for rec in caplog.records)
-
-
-def test_auto_seed_refuses_on_shipped_example_template(tmp_path, monkeypatch, caplog):
-    """Unanchored: the resolved ROADMAP.yaml is the shipped illustrative
-    example template (launch_state.status: example) -- refuse instead of
-    projecting example-feature onto the tracks DB."""
-    project_root = tmp_path / "central-keystone"
-    project_root.mkdir()
-    (project_root / "ROADMAP.yaml").write_text(
-        "roadmap_id: vnx-roadmap\n"
-        "title: VNX Roadmap (example)\n"
-        "launch_state:\n"
-        "  status: example\n"
-        "features:\n"
-        "  - feature_id: example-feature\n"
-        "    title: Example feature\n"
-        "    status: planned\n",
-        encoding="utf-8",
-    )
-    state_dir = tmp_path / "state"
-    _init_schema(state_dir)
-
-    calls: list[dict] = []
-    _seed_spy(monkeypatch, calls)
-
-    with caplog.at_level("WARNING"):
-        result = planning_cli.maybe_auto_seed(
-            state_dir=state_dir, project_id="vnx-dev",
-            env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
-        )
-
-    assert result["skipped"] is True
-    assert "shipped illustrative example template" in result["reason"]
-    assert calls == []
-    assert any("refusing to seed" in rec.message for rec in caplog.records)
-
-
-def test_auto_seed_refuses_when_roadmap_symlink_escapes_project_root(tmp_path, monkeypatch, caplog):
-    """Unanchored: ROADMAP.yaml inside the resolved project root is a symlink
-    that escapes to a file outside the project -- refuse rather than seed off
-    a roadmap that isn't really the project's own."""
-    outside = tmp_path / "outside" / "ROADMAP.yaml"
-    outside.parent.mkdir()
-    outside.write_text(SAMPLE_ROADMAP, encoding="utf-8")
-
-    project_root = tmp_path / "my-project"
-    project_root.mkdir()
-    (project_root / "ROADMAP.yaml").symlink_to(outside)
-    state_dir = tmp_path / "state"
-    _init_schema(state_dir)
-
-    calls: list[dict] = []
-    _seed_spy(monkeypatch, calls)
-
-    with caplog.at_level("WARNING"):
-        result = planning_cli.maybe_auto_seed(
-            state_dir=state_dir, project_id="vnx-dev",
-            env={"VNX_AUTO_SEED_TRACKS": "1"}, project_root=project_root,
-        )
-
-    assert result["skipped"] is True
-    assert "escapes project root" in result["reason"]
-    assert calls == []
-    assert any("refusing to seed" in rec.message for rec in caplog.records)
-
-
-def test_auto_seed_anchors_via_cwd_git_root_when_no_explicit_project_root(tmp_path, monkeypatch):
-    """Correctly-anchored default path: no explicit roadmap_path/project_root
-    is given, so the hook resolves the project root from CWD's git top-level
-    (the standard project_root.resolve_project_root() resolver) and reaches
-    the seed/apply path against that project's own ROADMAP.yaml."""
-    import subprocess
-
-    project_root = tmp_path / "git-project"
-    project_root.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=project_root, check=True)
-    (project_root / "ROADMAP.yaml").write_text(SAMPLE_ROADMAP, encoding="utf-8")
-    state_dir = tmp_path / "state"
-    _init_schema(state_dir)
-    monkeypatch.chdir(project_root)
-
-    result = planning_cli.maybe_auto_seed(
-        state_dir=state_dir, project_id="vnx-dev",
-        env={"VNX_AUTO_SEED_TRACKS": "1"},
-    )
-    assert result["skipped"] is False
-    assert result["summary"]["created"] == 3
-    seeded = {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")}
-    assert seeded == {"feat-a", "feat-b", "feat-c"}
+def test_sync_without_roadmap_ignores_a_planted_root_file(empty_state, capsys, monkeypatch):
+    """Even a ROADMAP.yaml in the CWD/git root is not picked up implicitly."""
+    state_dir, _ = empty_state
+    monkeypatch.chdir(state_dir.parent)
+    (state_dir.parent / "ROADMAP.yaml").write_text(SAMPLE_ROADMAP, encoding="utf-8")
+    rc = planning_cli.main([
+        "objective", "sync", "--apply", "--project-id", "vnx-dev",
+        "--state-dir", str(state_dir),
+    ])
+    assert rc == 2
+    assert tracks_lib.list_tracks(state_dir, "vnx-dev") == []
 
 
 # ---------------------------------------------------------------------------

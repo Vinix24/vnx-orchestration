@@ -13,8 +13,11 @@ Two simulations per site where applicable:
      stub it to a sentinel and assert the site delegates to it, proving the
      ``__file__`` walk is gone.
 
-The roadmap-path fix (track_reconciler) is covered separately: repo-root first,
-CWD git-root next, legacy co-located layout last, never crashing on a miss.
+The ROADMAP-path sites are gone (ADR-047 / C2): nothing resolves a ROADMAP.yaml
+from a derived path any more, so the repo-root / CWD-git-root / legacy fallback
+tests went with the resolvers. What stays proven here: a missing store never
+crashes the merge-source loader, and a ROADMAP file at the repo root is NOT
+merge evidence.
 """
 from __future__ import annotations
 
@@ -51,7 +54,6 @@ _ENV_VARS = (
     "VNX_STATE_DIR",
     "VNX_DATA_DIR_EXPLICIT",
     "VNX_PROJECT_ID",
-    "VNX_ROADMAP_PATH",
     "VNX_DISPATCH_DIR",
 )
 
@@ -229,7 +231,8 @@ def test_state_paths_no_project_root_helper_remains():
 
 def test_planning_cli_repo_root_none_when_not_explicit():
     # Must return None (not a __file__-derived keystone path) so the reconciler's
-    # own CWD/legacy fallback runs. Passing a non-None value is treated as explicit.
+    # own CWD-git-root fallback runs for its gh lookup. A non-None value is
+    # treated as explicit.
     assert planning_cli._resolve_repo_root("") is None
 
 
@@ -243,121 +246,25 @@ def test_planning_cli_state_dir_routes_through_resolver(central):
     assert planning_cli._resolve_state_dir("") == state
 
 
-def test_planning_cli_roadmap_routes_through_project_root(central, tmp_path):
-    resolved = planning_cli._resolve_roadmap_path(None)
-    assert resolved == tmp_path / "project-repo" / "ROADMAP.yaml"
-    assert ".vnx-system" not in str(resolved)
+def test_load_merged_pr_numbers_never_crashes_on_missing_store(tmp_path, monkeypatch):
+    # Every merge source is best-effort: a non-existent state dir must not raise.
+    # OI-1155: opt out of the gh source (default-ON) so the assertion stays
+    # deterministic and does not reach a live ``gh pr list``.
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    result = track_reconciler._load_merged_pr_numbers(tmp_path / "nowhere" / "state")
+    assert result == frozenset()
 
 
-# ---------------------------------------------------------------------------
-# Close-evidence threads repo_root (Gap 3)
-# ---------------------------------------------------------------------------
-
-
-def _minimal_reconciler_db(state_dir: Path, track_id: str, project_id: str, pr_ref: str):
-    """Create the minimal tables _close_evidence queries, with one track."""
-    import sqlite3
-
-    db = state_dir / track_reconciler.DB_FILENAME
-    conn = sqlite3.connect(str(db))
-    conn.executescript(
-        "CREATE TABLE dispatches (dispatch_id TEXT, track TEXT, project_id TEXT, state TEXT);"
-        "CREATE TABLE tracks (track_id TEXT, project_id TEXT, pr_ref TEXT);"
-        "CREATE TABLE coordination_events (event_type TEXT, project_id TEXT, entity_id TEXT);"
-    )
-    conn.execute(
-        "INSERT INTO tracks (track_id, project_id, pr_ref) VALUES (?, ?, ?)",
-        (track_id, project_id, pr_ref),
-    )
-    conn.commit()
-    conn.close()
-
-
-def test_close_evidence_uses_repo_root_roadmap(tmp_path, monkeypatch):
+def test_roadmap_file_at_repo_root_is_not_merge_evidence(tmp_path, monkeypatch):
+    """ADR-047 / C2: the root ROADMAP.yaml is an import example, not evidence."""
     monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state = tmp_path / ".vnx-data" / "proj-x" / "state"
     state.mkdir(parents=True)
-    _minimal_reconciler_db(state, "T-close", "proj-x", "#4242")
-
     repo = tmp_path / "project-repo"
     repo.mkdir()
     (repo / "ROADMAP.yaml").write_text(
         "features:\n  - pr_queue:\n      - pr_id: '#4242'\n        status: merged\n",
         encoding="utf-8",
     )
-
-    # With repo_root -> reads the repo roadmap -> #4242 merged -> pr_merged True.
-    ev = track_reconciler._close_evidence("%s" % state, "T-close", "proj-x", repo_root=repo)
-    assert ev["pr_merged"] is True
-    assert ev["has_success_signal"] is True
-
-    # Without repo_root, and with the CWD git-root roadmap forced empty, the same
-    # evidence renders pr_merged False — proving repo_root is what carried it.
-    monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: None)
-    ev_none = track_reconciler._close_evidence("%s" % state, "T-close", "proj-x")
-    assert ev_none["pr_merged"] is False
-
-
-# ---------------------------------------------------------------------------
-# Roadmap-path fix (track_reconciler._resolve_roadmap_path)
-# ---------------------------------------------------------------------------
-
-
-def test_roadmap_explicit_repo_root_wins(tmp_path):
-    state = tmp_path / ".vnx-data" / "proj-x" / "state"
-    repo = tmp_path / "repo"
-    resolved = track_reconciler._resolve_roadmap_path(state, repo)
-    assert resolved == repo / "ROADMAP.yaml"
-
-
-def test_roadmap_central_mode_not_two_up_from_state(tmp_path, monkeypatch):
-    # Central layout: state = ~/.vnx-data/<proj>/state; the legacy two-up
-    # (~/.vnx-data/ROADMAP.yaml) must NOT be used when a repo_root is given.
-    state = tmp_path / ".vnx-data" / "proj-x" / "state"
-    state.mkdir(parents=True)
-    repo = tmp_path / "project-repo"
-    resolved = track_reconciler._resolve_roadmap_path(state, repo)
-    assert resolved == repo / "ROADMAP.yaml"
-    assert resolved != state.parent.parent / "ROADMAP.yaml"
-
-
-def test_roadmap_cwd_git_root_fallback(tmp_path, monkeypatch):
-    state = tmp_path / ".vnx-data" / "proj-x" / "state"
-    fake_repo = tmp_path / "cwd-repo"
-    monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: fake_repo)
-    resolved = track_reconciler._resolve_roadmap_path(state, None)
-    assert resolved == fake_repo / "ROADMAP.yaml"
-
-
-def test_roadmap_legacy_fallback_when_no_git(tmp_path, monkeypatch):
-    state = tmp_path / "repo" / ".vnx-data" / "state"
-    monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: None)
-    resolved = track_reconciler._resolve_roadmap_path(state, None)
-    assert resolved == state.parent.parent / "ROADMAP.yaml"
-
-
-def test_load_merged_pr_numbers_never_crashes_on_missing_roadmap(tmp_path, monkeypatch):
-    # Source-3 is best-effort: a non-existent state dir / roadmap must not raise.
-    # OI-1155: opt out of source-4 (default-ON gh) so the assertion stays
-    # deterministic and does not reach a live ``gh pr list``.
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
-    monkeypatch.setattr(track_reconciler, "_git_toplevel", lambda p: None)
-    result = track_reconciler._load_merged_pr_numbers(tmp_path / "nowhere" / "state")
-    assert result == frozenset()
-
-
-def test_load_merged_pr_numbers_reads_roadmap_from_repo_root(tmp_path, monkeypatch):
-    state = tmp_path / ".vnx-data" / "proj-x" / "state"
-    state.mkdir(parents=True)
-    repo = tmp_path / "project-repo"
-    repo.mkdir()
-    (repo / "ROADMAP.yaml").write_text(
-        "features:\n"
-        "  - pr_queue:\n"
-        "      - pr_id: '#4242'\n"
-        "        status: merged\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     merged = track_reconciler._load_merged_pr_numbers(state, repo_root=repo)
-    assert 4242 in merged
+    assert 4242 not in merged

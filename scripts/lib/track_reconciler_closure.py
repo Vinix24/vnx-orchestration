@@ -95,8 +95,8 @@ def close_track_if_done(
     phase (bounded TOCTOU-narrowing, not atomicity).
 
     repo_root: optional project repo root, forwarded to the internal
-    reconcile_track call for its ROADMAP.yaml (Source-3) evidence path; falls
-    back to the CWD git-root then the legacy layout (see reconcile_track).
+    reconcile_track call as the working directory for its ``gh`` merge-state
+    lookup; falls back to the CWD git-root when None (see reconcile_track).
 
     merged_pr_numbers: optional pre-established merged-PR set (OI-1064). When
     provided, forwarded to the internal reconcile_track call so a caller that

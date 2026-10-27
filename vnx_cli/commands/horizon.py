@@ -27,7 +27,6 @@ command refuses with exit code 2 instead of silently defaulting.
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -99,59 +98,35 @@ def _default_repo_root(args: Any) -> None:
     """Default ``--repo-root`` to the resolved project_dir when not set.
 
     The pip CLI runs against ``--project-dir`` and the caller's CWD is not
-    necessarily the project repo (central-mode), so ``gh`` PR lookups and the
-    ROADMAP.yaml (Source-3) evidence must anchor on the project_dir — not the
-    packaged engine's own location or a stray CWD. Also guarantees the attribute
-    exists so ``planning_cli`` never hits ``AttributeError: 'Namespace' object
-    has no attribute 'repo_root'``.
+    necessarily the project repo (central-mode), so the ``gh`` PR lookups must
+    anchor on the project_dir — not the packaged engine's own location or a
+    stray CWD. Also guarantees the attribute exists so ``planning_cli`` never
+    hits ``AttributeError: 'Namespace' object has no attribute 'repo_root'``.
     """
     if not getattr(args, "repo_root", ""):
         args.repo_root = str(Path(args.project_dir).resolve())
 
 
-def _default_roadmap(args: Any) -> None:
-    """Default ``--roadmap`` to the project_dir-anchored ROADMAP.yaml when unset.
-
-    The sibling of ``_default_repo_root`` for the one verb that reads the ROADMAP
-    directly (``sync``). Without it, ``planning_cli._resolve_roadmap_path`` falls
-    through to ``resolve_paths()["PROJECT_ROOT"]``, which collapses onto the
-    central install's OWN code tree (``~/.vnx-system/versions/<v>``) when the
-    ``.vnx-install-mode`` marker is absent — so a consumer project's sync reads
-    the shipped illustrative ``ROADMAP.yaml`` template (one ``example-feature``),
-    tries to create it, and flags every real track as an orphan.
-
-    The pip CLI always knows the project via ``--project-dir``; anchor on it, the
-    same way ``resolve_state_dir`` anchors the store. An explicit ``--roadmap`` or
-    a ``VNX_ROADMAP_PATH`` override still wins (precedence: flag > env > project).
-    """
-    if getattr(args, "roadmap", None):
-        return
-    if os.environ.get("VNX_ROADMAP_PATH"):
-        return
-    args.roadmap = str(Path(args.project_dir).resolve() / "ROADMAP.yaml")
-
-
 def _prep_repo(args: Any, default: str | None = "repo_root") -> None:
     """``_prep`` plus the repository defaults, for a verb that reads the repository.
 
-    Repository-dependent verbs: ``sync`` (ROADMAP.yaml), ``drift``, ``reconcile``,
-    ``close`` (git/gh evidence under ``--repo-root``) and ``plan-gate run`` /
-    ``attest`` / ``batch`` (``--repo-root``, checked but not defaulted). With an explicit ``--project-id`` the
-    SOURCE must be that project too: the project dir (also the default ``.``), the
-    ``--repo-root`` and the roadmap location must not belong to another project.
+    Repository-dependent verbs: ``sync`` (the file comes from ``--roadmap``),
+    ``drift``, ``reconcile``, ``close`` (git/gh evidence under ``--repo-root``)
+    and ``plan-gate run`` / ``attest`` / ``batch`` (``--repo-root``, checked but
+    not defaulted). With an explicit ``--project-id`` the SOURCE must be that
+    project too: the project dir (also the default ``.``), the ``--repo-root``
+    and the imported file's location must not belong to another project.
     A source whose identity cannot be established passes, because the operator's
     explicit ``--project-id`` is then the only signal there is.
     """
     explicit = bool(getattr(args, "project_id", None))
     _prep(args)
-    if default == "roadmap":
-        _default_roadmap(args)
-    elif default == "repo_root":
+    if default == "repo_root":
         _default_repo_root(args)
     if not explicit:
         return
     sources = [Path(args.project_dir), Path(getattr(args, "repo_root", None) or args.project_dir)]
-    roadmap = getattr(args, "roadmap", None) or os.environ.get("VNX_ROADMAP_PATH")
+    roadmap = getattr(args, "roadmap", None)
     if roadmap:
         sources.append(Path(roadmap).expanduser().resolve().parent)
     try:
@@ -190,8 +165,10 @@ def _cmd_queue(args: Any) -> int:
 
 
 def _cmd_sync(args: Any) -> int:
+    # No roadmap default any more: `objective sync` imports only a file the
+    # caller names with --roadmap (ADR-047) and exits 2 without one.
     pc = _require_planning_cli()
-    _prep_repo(args, default="roadmap")
+    _prep_repo(args)
     return pc.cmd_objective_sync(args)
 
 

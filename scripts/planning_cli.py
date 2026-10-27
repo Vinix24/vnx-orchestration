@@ -30,15 +30,16 @@ canonical vocabulary exists for it — see `plan_gate_panel.py`'s "quality
 FLOOR" framing).
 `vnx promote` (top-level) is the PR-queue command — NOT the same.
 
-Planning turn-on (auto-seed + advisory drift):
-  `objective sync` re-projects ROADMAP.yaml -> tracks via the shipped seeder.
+File import + advisory drift (ADR-047: the tracks DB is the only plan source):
+  `objective sync --roadmap <file>` imports one ROADMAP-shaped file into tracks.
+    The path is REQUIRED: without it the command exits 2 and imports nothing.
     Default = CHECK (dry-run): report would-change set, write nothing.
-    --apply  = idempotent projection of ROADMAP onto tracks. NEVER writes
-               ROADMAP.yaml and NEVER promotes deliverables (human gate kept).
+    --apply  = idempotent projection of the named file onto tracks. NEVER
+               writes the file and NEVER promotes deliverables (human gate
+               kept). Nothing reads a ROADMAP from a derived path any more.
   `objective drift` runs the advisory reconciler and reports tracks whose
     declared phase != derived_status. ADVISORY: always exits 0, writes
-    planning_drift.json for the dashboard / T0. Never writes ROADMAP.
-  `maybe_auto_seed()` is the flag-gated prelude hook (VNX_AUTO_SEED_TRACKS=1).
+    planning_drift.json for the dashboard / T0. Never writes a plan file.
 """
 
 from __future__ import annotations
@@ -112,6 +113,14 @@ _LINK_PR_DELIVERY_HELP = (
     "'error' field say so; apply 0032 and re-run to record it)"
 )
 
+# Help text for `objective sync --roadmap` (ADR-047 / retire-feature-plan C2).
+# Hoisted for the same reason as _LINK_PR_DELIVERY_HELP: the size ratchet
+# refuses any growth of an over-70-line function.
+_SYNC_ROADMAP_HELP = (
+    "REQUIRED: the ROADMAP-shaped file to import. Nothing is derived for you "
+    "(ADR-047: the tracks DB is the plan source)"
+)
+
 
 def _resolve_state_dir(explicit: str) -> Path:
     if explicit:
@@ -126,26 +135,14 @@ def _resolve_state_dir(explicit: str) -> Path:
     return _canonical_state_dir()
 
 
-def _resolve_roadmap_path(explicit: str | None) -> Path:
-    if explicit:
-        return Path(explicit)
-    env = os.environ.get("VNX_ROADMAP_PATH", "")
-    if env:
-        return Path(env)
-    # The project's ROADMAP.yaml lives at the resolved PROJECT_ROOT, not the
-    # keystone that resolve_project_root(__file__) yields in a central install.
-    from vnx_paths import resolve_paths
-    return Path(resolve_paths()["PROJECT_ROOT"]) / "ROADMAP.yaml"
-
-
 def _resolve_repo_root(explicit: str) -> Path | None:
     """Resolve the project repo root ONLY when explicitly provided.
 
-    Returns None when no --repo-root is given, so track_reconciler's Source-3
-    resolver runs its own CWD-git-root -> legacy fallback. Deriving a default via
-    resolve_project_root(__file__) would yield the KEYSTONE in a central install
-    and -- because the reconciler treats any non-None repo_root as explicit
-    (track_reconciler._resolve_roadmap_path) -- poison the ROADMAP.yaml lookup.
+    Returns None when no --repo-root is given, so track_reconciler's own
+    CWD-git-root fallback runs for its ``gh`` merge-state lookup. Deriving a
+    default via resolve_project_root(__file__) would yield the KEYSTONE in a
+    central install, and -- because the reconciler treats any non-None
+    repo_root as explicit -- run ``gh`` against the wrong repository.
     Pass --repo-root to override when the CWD is not the project repo.
     """
     if explicit:
@@ -306,7 +303,10 @@ def cmd_objective_list(args: argparse.Namespace) -> int:
                   f"({hidden_done} done hidden — --all to show).")
         else:
             print(f"No objectives found for project '{project_id}'.")
-            print("Seed from ROADMAP: python3 scripts/seed_tracks_from_roadmap.py --apply")
+            print(
+                "Import a ROADMAP file: python3 scripts/seed_tracks_from_roadmap.py "
+                "--roadmap <file> --apply"
+            )
         return 0
 
     _print_objective_list(state_dir, project_id, tracks, review_by_track, scope_by_track, hidden_done)
@@ -538,14 +538,26 @@ def cmd_objective_show(args: argparse.Namespace) -> int:
 
 
 def cmd_objective_sync(args: argparse.Namespace) -> int:
-    """Re-project ROADMAP.yaml -> tracks via the shipped idempotent seeder.
+    """Import ONE explicitly named ROADMAP-shaped file into the tracks DB.
+
+    The tracks DB is the only plan source (ADR-047); a file is imported only
+    when the operator names it. No path is derived for the caller: without
+    ``--roadmap`` this exits 2 and writes nothing.
 
     CHECK mode (default): dry-run — report the would-change set, write nothing.
-    --apply: idempotent projection. NEVER writes ROADMAP.yaml, NEVER promotes
-    deliverables (the human gate is preserved).
+    --apply: idempotent projection. NEVER writes the imported file, NEVER
+    promotes deliverables (the human gate is preserved).
     """
     state_dir = _resolve_state_dir(args.state_dir)
-    roadmap_path = _resolve_roadmap_path(args.roadmap)
+    raw_roadmap = getattr(args, "roadmap", None)
+    if not raw_roadmap:
+        print(
+            "objective sync: --roadmap <file> is required — the tracks DB is the "
+            "plan source (ADR-047); a ROADMAP file is imported only when named.",
+            file=sys.stderr,
+        )
+        return 2
+    roadmap_path = Path(raw_roadmap)
     project_id = args.project_id
 
     if not roadmap_path.exists():
@@ -2139,128 +2151,6 @@ def cmd_objective_reopen(args: argparse.Namespace) -> int:
         f"(pr_ref={current_pr_ref}, approval={approval_id})"
     )
     return 0
-
-
-class _RoadmapAnchorRefused(Exception):
-    """Raised when the auto-seed roadmap cannot be unambiguously anchored to
-    the current project. Caught by maybe_auto_seed(), which refuses to seed
-    rather than run seed(apply=True) against an unanchored ROADMAP.yaml."""
-
-
-def _looks_like_shipped_example_roadmap(data: Any) -> bool:
-    """True when parsed ROADMAP YAML content is the shipped illustrative
-    template (`launch_state.status: example`) rather than a project's own
-    authored roadmap. See ROADMAP.yaml's own header: "This shipped file is an
-    ILLUSTRATIVE EXAMPLE of the roadmap format."
-    """
-    if not isinstance(data, dict):
-        return False
-    launch_state = data.get("launch_state")
-    return isinstance(launch_state, dict) and launch_state.get("status") == "example"
-
-
-def _resolve_anchored_roadmap_path(
-    explicit: str | None,
-    env: dict,
-    project_root: str | Path | None = None,
-) -> Path:
-    """Resolve ROADMAP.yaml for the auto-seed hook, anchored on PROJECT ROOT.
-
-    Precedence: explicit path > VNX_ROADMAP_PATH env override > a default
-    anchored on the resolved project root. Callers of an explicit path/env
-    override are trusted (same contract as `_resolve_roadmap_path`) and are
-    not passed through the anchor checks below.
-
-    The default branch resolves the project root via the standard resolver
-    (`project_root.resolve_project_root`, CWD-git-root based -- deliberately
-    NOT passed `planning_cli.py`'s own `__file__`, since in a central install
-    that file lives inside the shared VNX_HOME git clone and git-resolving
-    from there would collapse the root onto the keystone code tree instead of
-    the project actually being seeded). Raises _RoadmapAnchorRefused when:
-      - the project root cannot be resolved unambiguously (not a git repo,
-        no VNX_CANONICAL_ROOT fallback);
-      - the resulting roadmap path would fall outside the resolved project
-        root; or
-      - the roadmap content matches the shipped illustrative template.
-    """
-    if explicit:
-        return Path(explicit)
-
-    env_override = env.get("VNX_ROADMAP_PATH", "")
-    if env_override:
-        return Path(env_override)
-
-    if project_root is not None:
-        root = Path(project_root).resolve()
-    else:
-        from project_root import resolve_project_root
-        try:
-            root = resolve_project_root()
-        except RuntimeError as exc:
-            raise _RoadmapAnchorRefused(f"cannot resolve project root: {exc}") from exc
-
-    candidate = (root / "ROADMAP.yaml").resolve()
-    if not candidate.is_relative_to(root):
-        raise _RoadmapAnchorRefused(
-            f"resolved roadmap path escapes project root {root}: {candidate}"
-        )
-
-    if candidate.exists():
-        import yaml
-        try:
-            data = yaml.safe_load(candidate.read_text(encoding="utf-8")) or {}
-        except (OSError, yaml.YAMLError):
-            data = {}
-        if _looks_like_shipped_example_roadmap(data):
-            raise _RoadmapAnchorRefused(
-                f"resolved roadmap is the shipped illustrative example template: {candidate}"
-            )
-
-    return candidate
-
-
-def maybe_auto_seed(
-    state_dir: str | Path | None = None,
-    roadmap_path: str | Path | None = None,
-    project_id: Optional[str] = None,
-    env: Optional[dict] = None,
-    project_root: str | Path | None = None,
-) -> dict[str, Any]:
-    """Flag-gated prelude hook: idempotent `objective sync --apply` when opted in.
-
-    Wired into the dispatcher prelude (where lease_sweep is ticked). Default
-    (VNX_AUTO_SEED_TRACKS unset/!=1) is a no-op. When set, projects ROADMAP onto
-    tracks idempotently. NEVER writes ROADMAP.yaml; NEVER promotes deliverables.
-
-    The roadmap is resolved anchored on the project root (see
-    `_resolve_anchored_roadmap_path`); when that anchor is ambiguous or would
-    resolve to the shipped example template, the hook REFUSES to seed instead
-    of running `seed(apply=True)` against the wrong roadmap.
-
-    Returns a result dict: {"skipped": True, ...} when disabled or refused,
-    else {"skipped": False, "summary": {...}}.
-    """
-    env = env if env is not None else os.environ
-    if env.get("VNX_AUTO_SEED_TRACKS", "") != "1":
-        return {"skipped": True, "reason": "VNX_AUTO_SEED_TRACKS not set"}
-
-    s_dir = _resolve_state_dir(str(state_dir) if state_dir else env.get("VNX_STATE_DIR", ""))
-    try:
-        r_path = _resolve_anchored_roadmap_path(
-            str(roadmap_path) if roadmap_path else None, env, project_root=project_root,
-        )
-    except _RoadmapAnchorRefused as exc:
-        reason = f"refusing to seed: {exc}"
-        logger.warning("maybe_auto_seed: %s", reason)
-        return {"skipped": True, "reason": reason}
-
-    pid = project_id or env.get("VNX_PROJECT_ID", "vnx-dev")
-
-    if not Path(r_path).exists():
-        return {"skipped": True, "reason": f"ROADMAP not found: {r_path}"}
-
-    report = seeder.seed(s_dir, r_path, pid, apply=True)
-    return {"skipped": False, "summary": report.get("summary", {})}
 
 
 _VALID_OUTPUT_KINDS = ("pr", "post", "deal", "doc")
@@ -6202,12 +6092,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_sync = obj_sub.add_parser(
         "sync",
-        help="re-project ROADMAP.yaml -> tracks (CHECK by default; --apply to write)",
+        help="import one named ROADMAP file -> tracks (CHECK by default; --apply to write)",
     )
     _common(p_sync)
     p_sync.add_argument("--apply", action="store_true",
                         help="apply the idempotent projection (default: dry-run check)")
-    p_sync.add_argument("--roadmap", default=None, help="path to ROADMAP.yaml (default: project root)")
+    p_sync.add_argument("--roadmap", default=None, metavar="FILE", help=_SYNC_ROADMAP_HELP)
     p_sync.set_defaults(func=cmd_objective_sync)
 
     p_drift = obj_sub.add_parser(

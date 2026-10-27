@@ -15,8 +15,10 @@ WHY THIS EXISTS
   Historically merged PRs/dispatches were never attributed to their feature track:
   dispatches carry a lane (A/B/C) in `track`, not the feature_id, so step 3 sees no
   rows and every track derives 'queued' even though its PR shipped. This backfill
-  populates EXACTLY the three things the reconciler reads, sourced from ROADMAP.yaml
-  (the authoritative track<->PR mapping via pr_queue[].pr_id status='merged'):
+  populates EXACTLY the three things the reconciler reads, sourced from ONE
+  ROADMAP-shaped file the operator names with --roadmap (import, not a plan
+  source: ADR-047 makes the tracks DB the plan source; the merged mapping comes
+  from that file's pr_queue[].pr_id status='merged'):
 
   1. dispatches.track  : for a dispatch whose pr_ref matches a feature's merged PR
      and whose track IS NULL, set track = feature_id. ADDITIVE — never overwrites a
@@ -35,7 +37,7 @@ WHY THIS EXISTS
 
 WHAT IT NEVER DOES
   - Never writes tracks.phase (declared phase stays the human-gated SSOT).
-  - Never writes ROADMAP.yaml.
+  - Never writes the imported file.
   - Never promotes / advances anything.
   - Never deletes or overwrites real data (additive only).
 
@@ -79,7 +81,6 @@ _LIB = _HERE / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
-from project_root import resolve_project_root  # noqa: E402
 import track_reconciler  # noqa: E402
 
 DB_FILENAME = "runtime_coordination.db"
@@ -128,7 +129,7 @@ def _integrity_check(conn: sqlite3.Connection) -> list[str]:
 
 
 def load_roadmap_pr_map(roadmap_path: str | Path) -> dict[str, dict[str, Any]]:
-    """Build feature_id -> {merged_pr_ids: [...], representative: pr_id} from ROADMAP.yaml.
+    """Build feature_id -> {merged_pr_ids: [...], representative: pr_id} from the named file.
 
     A PR is authoritative-merged when its pr_queue entry carries status == 'merged'.
     feature_id maps 1:1 to track_id (per seed_tracks_from_roadmap.py). Returns only
@@ -745,8 +746,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--roadmap",
         type=Path,
-        default=None,
-        help="Path to ROADMAP.yaml (default: autodetect from project root).",
+        required=True,
+        metavar="FILE",
+        help="The ROADMAP-shaped file to import (required: nothing is autodetected; "
+             "the tracks DB is the plan source, ADR-047).",
     )
     parser.add_argument(
         "--project-id",
@@ -773,11 +776,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             data_dir = resolve_central_data_dir(args.project_id)
         db_path = data_dir / "state" / DB_FILENAME
 
-    if args.roadmap:
-        roadmap_path = args.roadmap.resolve()
-    else:
-        project_root = resolve_project_root(__file__)
-        roadmap_path = project_root / "ROADMAP.yaml"
+    roadmap_path = args.roadmap.resolve()
 
     if not db_path.exists():
         print(f"  [ERROR] Database not found: {db_path}", file=sys.stderr)

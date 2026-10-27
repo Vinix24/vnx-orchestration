@@ -46,19 +46,6 @@ _maybe_runtime_supervise() {
     printf '%s' "$now" > "$state_file.tmp.$$" && mv -f "$state_file.tmp.$$" "$state_file"
 }
 
-# _maybe_auto_seed_tracks — flag-gated planning auto-seed tick.
-# When VNX_AUTO_SEED_TRACKS=1, run the idempotent `vnx objective sync --apply`
-# once per prelude tick to keep tracks current with ROADMAP.yaml. Best-effort,
-# non-blocking, logged. Default (unset) = no behaviour change. This NEVER writes
-# ROADMAP.yaml and NEVER promotes deliverables (the human gate is preserved).
-_maybe_auto_seed_tracks() {
-    [[ "${VNX_AUTO_SEED_TRACKS:-0}" == "1" ]] || return 0
-    local log_file="$VNX_LOGS_DIR/auto_seed_tracks.log"
-    mkdir -p "$(dirname "$log_file")"
-    python3 "$SCRIPT_DIR/planning_cli.py" objective sync --apply \
-        >> "$log_file" 2>&1 || true
-}
-
 # _maybe_oi_bridge_tick — throttled OI→track bridge tick (D1, oi-bridge-continuous).
 # Invokes scripts/import_open_items_to_tracks.py at most once per
 # VNX_OI_BRIDGE_INTERVAL seconds when VNX_SUPERVISOR_MODE=unified — the SAME

@@ -5,7 +5,8 @@ Reads dispatch/event state and computes a per-track derived_status.
 
 ADVISORY ONLY — hard contract:
   - Writes ONLY tracks.derived_status (never tracks.phase).
-  - Never touches ROADMAP.yaml.
+  - Reads no plan file: merged-PR evidence is the NDJSON/receipt ledger plus
+    git via ``gh``. ROADMAP.yaml is an import example (ADR-047), never a source.
   - Never auto-advances any track.
 
 Idempotent and replay-safe:
@@ -231,7 +232,7 @@ def _tally_delivery_rows(
 def _load_merged_prs_from_gh(
     state_path: Path, ttl_seconds: int = 600, cwd: "str | None" = None
 ) -> FrozenSet[int]:
-    """Git-grounded merged-PR source (source 4, default-ON since OI-1155).
+    """Git-grounded merged-PR source (source 3, default-ON since OI-1155).
 
     Cache-first (``pr_merged_cache.json``, TTL ~10 min) so the SessionStart hot
     path rarely shells out; network call is silent-on-failure so the caller's
@@ -277,27 +278,6 @@ def _git_toplevel(path: Path) -> Optional[Path]:
     return Path(out).resolve() if out else None
 
 
-def _resolve_roadmap_path(state_dir: Path, repo_root: "Path | None") -> Path:
-    """Resolve the project's ROADMAP.yaml (Source-3 evidence), central-mode aware.
-
-    Priority: explicit ``repo_root`` > CWD git-root > legacy ``state.parent.parent``.
-
-    The ROADMAP lives at the project *repo* root, not next to the state dir. In a
-    central install ``state_dir`` is ``~/.vnx-data/<project>/state`` so the legacy
-    two-up (``state.parent.parent``) resolves ``~/.vnx-data/`` — which holds no
-    ROADMAP.yaml, silently voiding the Source-3 evidence path. So prefer an
-    explicit repo_root the caller threads, then the CWD git-root (``vnx horizon
-    reconcile`` runs from the project dir), and only then the co-located legacy
-    layout that a dev checkout still relies on. Best-effort — never raises.
-    """
-    if repo_root is not None:
-        return Path(repo_root) / "ROADMAP.yaml"
-    cwd_root = _git_toplevel(Path.cwd())
-    if cwd_root is not None:
-        return cwd_root / "ROADMAP.yaml"
-    return state_dir.parent.parent / "ROADMAP.yaml"
-
-
 def _load_merged_pr_numbers(
     state_dir: str | Path,
     repo_root: "str | Path | None" = None,
@@ -307,19 +287,23 @@ def _load_merged_pr_numbers(
     Sources (all optional; errors silently ignored):
       1. {state_dir}/../events/pr_merged.ndjson  — ADR-005 event ledger
       2. {state_dir}/t0_receipts.ndjson           — receipt log
-      3. {repo_root|cwd-git-root|state.parent.parent}/ROADMAP.yaml — feature list
-         pr_queue[*].status=merged entries cover recent PRs not yet in NDJSON files
-      4. git/GitHub via ``gh`` (DEFAULT-ON since OI-1155; opt out with
+      3. git/GitHub via ``gh`` (DEFAULT-ON since OI-1155; opt out with
          ``VNX_RECONCILE_GIT=0``) — cache-first (10-min TTL), silent-on-failure.
          Closes the gap where a PR merged via raw ``gh pr merge`` emits no local
          ``pr_merged`` receipt, so a merged track would otherwise stay ``queued``
-         forever (the git-reality drift). Measured 2026-08-15: sources 1-3 all
+         forever (the git-reality drift). Measured 2026-08-15: sources 1-2 both
          yield zero ``pr_merged`` signals on the vnx-dev store while ``gh``
-         reports 500 merged PRs — sources 1-3 are dead in practice, so source 4
-         must run by default to be the single live authority.
+         reports 500 merged PRs — the local sources are dead in practice, so
+         source 3 must run by default to be the single live authority.
 
-    Returns frozenset[int]. Offline-safe and never raises: sources 1-3 are local
-    and deterministic; source 4 degrades to today's local-only behaviour when
+    ROADMAP.yaml is NOT a source (ADR-047 / C2): the tracks DB is the only plan
+    source and the file is an import example. Nothing here opens it — a PR only
+    counts as evidence when the ledger or git says so.
+
+    ``repo_root`` is the working directory for the ``gh`` lookup only.
+
+    Returns frozenset[int]. Offline-safe and never raises: sources 1-2 are local
+    and deterministic; source 3 degrades to today's local-only behaviour when
     ``gh`` is absent/offline (silent-on-failure).
     """
     merged: set = set()
@@ -351,29 +335,7 @@ def _load_merged_pr_numbers(
         except OSError:
             pass
 
-    # Source 3: ROADMAP.yaml — authoritative for recent PRs not yet backfilled to NDJSON.
-    # Resolved from the project REPO-root (explicit repo_root > CWD git-root >
-    # legacy co-located layout), so central-mode projects (state at
-    # ~/.vnx-data/<project>/state) find the roadmap at their repo root instead of
-    # the roadmap-less ~/.vnx-data/. See _resolve_roadmap_path.
-    roadmap_path = _resolve_roadmap_path(
-        state_path, Path(repo_root) if repo_root is not None else None
-    )
-    try:
-        import yaml  # available in all VNX environments
-        data = yaml.safe_load(roadmap_path.read_text(encoding="utf-8")) or {}
-        for feat in (data.get("features") or []):
-            for pr in (feat.get("pr_queue") or []):
-                if (pr.get("status") or "") == "merged":
-                    pn = _parse_pr_number(pr.get("pr_id"))
-                    if pn is not None:
-                        merged.add(pn)
-    except OSError:
-        pass
-    except Exception:
-        log.debug("_load_merged_pr_numbers: ROADMAP.yaml parse error (non-fatal)", exc_info=True)
-
-    # Source 4 (network, DEFAULT-ON since OI-1155): git/GitHub merge state via gh,
+    # Source 3 (network, DEFAULT-ON since OI-1155): git/GitHub merge state via gh,
     # cache-first + silent-on-failure. This is the ONLY source that sees a PR
     # merged via a bare ``gh pr merge`` (no local pr_merged receipt is written),
     # so it must run by default or such merged tracks never derive 'done'.
@@ -700,15 +662,15 @@ def reconcile_track(
           established merge state by other means (e.g. run_reconcile's live
           ``gh pr view`` sweep) MUST pass the UNION of its gh-confirmed numbers
           and the locally-loaded set here. Otherwise reconcile_track falls back
-          to _load_merged_pr_numbers, whose gh source (source 4) is default-ON
+          to _load_merged_pr_numbers, whose gh source (source 3) is default-ON
           since OI-1155 (opt out with VNX_RECONCILE_GIT=0) — so a track the
           caller just confirmed merged via gh would re-derive as 'queued' from
           the weaker local sources, and no close path could close it. The caller
           performs the union (gh evidence is additive: it never replaces local
-          NDJSON/ROADMAP evidence, only adds what a bare ``gh pr merge`` never
-          wrote locally).
-    repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
-    evidence path; falls back to the CWD git-root then the legacy layout.
+          NDJSON evidence, only adds what a bare ``gh pr merge`` never wrote
+          locally).
+    repo_root: optional project repo root, used ONLY as the working directory
+    for the ``gh`` merge-state lookup; falls back to the CWD git-root when None.
     """
     conn = _get_conn(state_dir)
     try:
@@ -843,8 +805,8 @@ def reconcile_all_tracks(
     Raises RuntimeError if derived_status column is absent (migration 0028
     must be applied first).
 
-    repo_root: optional project repo root for the ROADMAP.yaml (Source-3)
-    evidence path; falls back to the CWD git-root then the legacy layout.
+    repo_root: optional project repo root, used ONLY as the working directory
+    for the ``gh`` merge-state lookup; falls back to the CWD git-root when None.
     """
     conn = _get_conn(state_dir)
     try:

@@ -252,14 +252,19 @@ def test_sync_from_a_checkout_of_another_project_writes_nothing(home, monkeypatc
     _seed(alpha_state, "alpha", "trk-alpha")
 
     monkeypatch.chdir(proj_b)
-    rc, out, err = _run(monkeypatch, capsys, ["horizon", "sync", "--project-id", "alpha", "--apply", "--json"])
+    # sync imports only a named file (ADR-047), so name beta's own roadmap: the
+    # identity gate is what must refuse, not a missing-argument exit.
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "sync", "--project-id", "alpha", "--apply", "--json",
+        "--roadmap", str(proj_b / "ROADMAP.yaml")])
     assert rc == 2
     assert "alpha" in err and "beta" in err
     assert _store_track_ids(alpha_state) == {"trk-alpha"}
 
     monkeypatch.chdir(home)
     rc, out, err = _run(monkeypatch, capsys, [
-        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(proj_b), "--apply", "--json"])
+        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(proj_b),
+        "--apply", "--json", "--roadmap", str(proj_b / "ROADMAP.yaml")])
     assert rc == 2
     assert _store_track_ids(alpha_state) == {"trk-alpha"}
 
@@ -310,7 +315,8 @@ def test_repository_dependent_verb_with_unknown_identity_proceeds(home, monkeypa
     alpha_state = home / ".vnx-data" / "alpha" / "state"
     _seed(alpha_state, "alpha", "trk-alpha")
     rc, out, err = _run(monkeypatch, capsys, [
-        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(bare), "--json"])
+        "horizon", "sync", "--project-id", "alpha", "--project-dir", str(bare), "--json",
+        "--roadmap", str(bare / "ROADMAP.yaml")])
     assert rc == 0, err
 
 
@@ -320,7 +326,9 @@ def test_repository_dependent_verb_of_the_same_project_is_accepted(home, monkeyp
     alpha_state = home / ".vnx-data" / "alpha" / "state"
     _seed(alpha_state, "alpha", "trk-alpha")
     monkeypatch.chdir(proj_a)
-    rc, out, err = _run(monkeypatch, capsys, ["horizon", "sync", "--project-id", "alpha", "--json"])
+    rc, out, err = _run(monkeypatch, capsys, [
+        "horizon", "sync", "--project-id", "alpha", "--json",
+        "--roadmap", str(proj_a / "ROADMAP.yaml")])
     assert rc == 0, err
     assert "beta-only" in json.loads(out)["created"]
 

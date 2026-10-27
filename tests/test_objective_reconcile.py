@@ -1377,12 +1377,16 @@ def test_run_reconcile_explicit_repo_root_not_resolved(tmp_path, monkeypatch):
 
 
 def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monkeypatch):
-    # Gap 2: the dry-run close path must read the project ROADMAP (Source-3) via
-    # repo_root, so pr_merged is True when the repo roadmap lists the PR merged.
+    # Gap 2 (as revised by ADR-047 / C2): the dry-run close path still forwards
+    # repo_root, but repo_root now only selects the gh working directory — a
+    # ROADMAP.yaml at the repo root is NOT merge evidence any more, so the same
+    # PR listed there leaves pr_merged False with gh opted out.
     monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     sd = _build_db(tmp_path)
     _seed_track(sd, "T-dry", phase="active", pr_ref="#4242")
     _seed_dispatch(sd, "D-dry", "T-dry", state="completed")  # derives 'done'
+    # The merge that grounds the close comes from the NDJSON ledger (source 1).
+    _seed_pr_merged_ndjson(sd, 4242)
 
     repo = tmp_path / "project-repo"
     repo.mkdir()
@@ -1417,10 +1421,19 @@ def test_objective_close_dry_run_threads_repo_root_into_evidence(tmp_path, monke
     assert rc == 0
     # The dry-run path forwarded repo_root...
     assert captured.get("repo_root") == Path(str(repo)).resolve()
-    # ...and the evidence read the repo roadmap -> pr_merged True (would be False
-    # if repo_root were dropped and the CWD-git-root roadmap read instead).
+    # ...and the evidence confirms the merge from the ledger (not from the repo
+    # ROADMAP, which is no longer a source: ADR-047 / C2).
     ev = real_close_evidence(str(sd), "T-dry", PROJECT_ID, repo_root=Path(str(repo)).resolve())
     assert ev["pr_merged"] is True
+    assert ev["completed"] == 1
+
+    # Control: with the ledger entry gone, the same repo-root ROADMAP claim is
+    # NOT evidence — pr_merged falls back to False.
+    (sd.parent / "events" / "pr_merged.ndjson").unlink()
+    ev_no_ledger = real_close_evidence(
+        str(sd), "T-dry", PROJECT_ID, repo_root=Path(str(repo)).resolve(),
+    )
+    assert ev_no_ledger["pr_merged"] is False
 
 
 # ---------------------------------------------------------------------------
