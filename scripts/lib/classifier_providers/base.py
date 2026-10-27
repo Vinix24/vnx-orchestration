@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 import provider_reachability
@@ -19,11 +21,16 @@ from provider_reachability import Reachability
 
 @dataclass
 class ClassifierResult:
-    """Uniform result returned by every classifier provider."""
+    """Uniform result returned by every classifier provider.
+
+    ``cost_usd`` is the ledger's amount since K4b-1, and ``None`` when the ledger
+    refused it or could not write it (``extra["cost_error"]`` names the reason):
+    an unknown cost is never a made-up number and never a silent 0 in a sum.
+    """
 
     raw_response: str
     parsed_json: Optional[Dict[str, Any]]
-    cost_usd: float
+    cost_usd: Optional[float]
     latency_ms: int
     provider: str
     error: Optional[str] = None
@@ -49,10 +56,49 @@ class ClassifierProvider(ABC):
     # account or quota as another lane share its key (the codex classifier and
     # codex_gate are one quota), so one refusal is seen by every consumer.
     reachability_key: str = ""
+    # The cost-ledger lane this provider's calls are booked on (K4b-1). Empty:
+    # this provider books no ledger line yet, and keeps its own estimate.
+    ledger_provider: str = ""
     # The project get_provider decided the provider switch for (None: the process project).
     # A switchable provider's classify() decides again for the same project before its launch
     # (layer 1), so an item of a project that may call the provider is never refused there.
     switch_project_id: Optional[str] = None
+
+    def finish_run(
+        self, *, session_id: str, model: str, started: datetime, monotonic_start: float,
+        spawn_refused: Optional[str] = None, raw_response: str = "",
+        parsed_json: Optional[Dict[str, Any]] = None, error: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> ClassifierResult:
+        """Build this call's result and book its one ledger line on ``ledger_provider``.
+
+        The amount is the written record's (a subscription lane books 0 at the
+        margin; its list price stays in ``api_equivalent_usd``), with the record's
+        ``cost_source``/``cost_run_id``. When the ledger refuses or cannot write the
+        line it is ``None`` and ``extra["cost_error"]`` names the reason. A provider
+        without a ``ledger_provider`` books nothing; ``spawn_refused`` names a child
+        that never started, and a run without a transcript is booked ``unknown``.
+        """
+        fields = dict(extra or {})
+        cost_usd: Optional[float] = None
+        if self.ledger_provider:
+            import harness_run_cost  # noqa: PLC0415 — keep the classifier import light
+
+            record, reason = harness_run_cost.record_classifier_run(
+                provider=self.ledger_provider, model=model, session_id=session_id, started=started,
+                ended=datetime.now(timezone.utc), project_id=self.switch_project_id,
+                spawn_refused=spawn_refused,
+            )
+            if record is None:
+                fields["cost_error"] = reason
+            else:
+                cost_usd = record["cost_usd"]
+                fields.update(cost_source=record["cost_source"], cost_run_id=record["run_id"])
+        return ClassifierResult(
+            raw_response=raw_response, parsed_json=parsed_json, cost_usd=cost_usd,
+            latency_ms=int((time.monotonic() - monotonic_start) * 1000),
+            provider=self.name, error=error, extra=fields,
+        )
 
     @abstractmethod
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
