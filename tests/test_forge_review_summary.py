@@ -517,6 +517,30 @@ class TestTheCapAndTheOverride:
         assert reason in payload["summary"] and "B3 override" in payload["summary"]
         assert "B3.1" in payload["summary"]
 
+    def test_a_record_with_an_override_reason_is_published_green_from_the_recorder(
+        self, tmp_path, monkeypatch
+    ):
+        """Acceptance 1, end to end: the record's own ``override_b3`` reaches the check."""
+        import gate_recorder
+
+        results = _capped_store(tmp_path, monkeypatch)
+        recorder = _stub_publication(monkeypatch)
+        reason = "operator approved two remaining blockers"
+        payload = {
+            "gate": "codex_gate", "pr_id": PR_ID, "pr_number": PR_NUMBER, "status": "pass",
+            "commit_sha": HEAD, "branch": BRANCH, "report_path": str(tmp_path / "codex_gate.md"),
+            "override_b3": {"reason": reason, "rule": "B3.1"},
+        }
+
+        gate_recorder.publish_forge_review_summary(
+            payload, pr_number=PR_NUMBER, head_sha=HEAD,
+            result_path=results / f"pr-{PR_NUMBER}-codex_gate.json",
+        )
+
+        assert [call["conclusion"] for call in recorder.calls] == [fgp.CONCLUSION_SUCCESS]
+        assert "B3 override" in recorder.calls[0]["summary"]
+        assert reason in recorder.calls[0]["summary"]
+
     def test_the_threshold_is_named_when_the_cap_record_carries_one(self, tmp_path, monkeypatch):
         """RG-1's ``threshold`` in the cap record reaches the summary when present."""
         import review_rounds
