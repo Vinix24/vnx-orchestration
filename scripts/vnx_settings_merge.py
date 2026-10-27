@@ -298,9 +298,10 @@ def merge_permissions(existing_perms: dict, vnx_perms: dict) -> dict:
 # renders for the same event, or names a path in a VNX install's hook tree.
 # MEASURED 2026-10-27 on a pinned consumer (10 handlers): its 3 VNX handlers
 # name ``~/.vnx-system/current/scripts/hooks/t0_context_guard.py``; its 7
-# project handlers name the project's own ``.claude/hooks/`` or
-# ``.claude/vnx-system/hooks/`` — no ``scripts/`` prefix, so a legacy embedded
-# install's project-local hook directory stays project-owned.
+# project handlers name the project's own ``.claude/hooks/`` directory or the
+# hook directory of a legacy embedded install under ``.claude/`` — neither
+# carries a ``scripts/`` prefix, so a legacy embedded install's project-local
+# hook directory stays project-owned.
 # ``scripts/hooks/`` is the segment VNX ships its entries under in every install
 # layout (central version dir, ``current``, dev checkout, embedded ``.vnx/``);
 # ``/.vnx-system/`` catches a handler that names the central install without
