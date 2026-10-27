@@ -35,6 +35,14 @@ ALL_KNOWN_STATES = (
     | PARTIAL_REVIEW_STATES | frozenset({"not_executable"})
 )
 
+# The statuses a REQUEST record ends in — the attempt it describes is over.
+# ONE definition for the two sides that used to disagree (GE-4c, kimi advisory
+# (c)): ``gate_outcome.REQUEST_STATUS_OF`` maps a record's outcome into this set
+# and ``gate_executor.execute_gate`` short-circuits on it. ``unavailable`` was
+# in the mapping and not in the executor's list, so a request ended there was
+# re-run. A retry after any of these is a NEW request, never a re-run.
+REQUEST_TERMINAL_STATUSES = frozenset({"completed", "failed", "not_executable", "unavailable"})
+
 
 def review_coverage_gap(result: Dict[str, Any]) -> str:
     """:func:`gate_depth.coverage_gap` on the record's own ``execution_depth``
