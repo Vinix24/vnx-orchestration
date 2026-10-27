@@ -10,6 +10,14 @@
 -- is not `completed` keeps deriving what v36 derived (`failed`); with no superseded row
 -- this view derives exactly what v36 derives.
 --
+-- The named row must be that base's OWN round (OI-2403): superseded_by starts with
+-- `base.dispatch_id || '-r'`, and the suffix after it is non-empty, ASCII digits only
+-- (`NOT GLOB '*[^0-9]*'`) and does not start with `0` — so `<id>-r0`, `<id>-r03`,
+-- `<id>-r`, `<id>-rX` and any completed dispatch that is not a round of that id are no
+-- evidence. scripts/lib/schema_manifest.py::is_round_of is the Python mirror of the same
+-- three suffix conditions; the close writer uses it, so the round it records is exactly
+-- the round this view reads back.
+--
 -- Down: apply_0037.revert_migration(db_path) restores the v36 view and stamps 36 in one
 -- transaction. No row changes, so ADR-005 asks for no ledger line here (0036's down path
 -- books a state_mutation receipt because it moves withdrawn rows to expired).

@@ -140,7 +140,7 @@ def _set_state(store: Path, dispatch_id: str, state: str) -> str:
     return dispatch_id
 
 
-def _add_round(store: Path, base: str, number: int = 3, state: str = "completed",
+def _add_round(store: Path, base: str, number: Any = 3, state: str = "completed",
                project: str = PID, pr_ref: Optional[str] = "#2262") -> str:
     round_id = f"{base}-r{number}"
     _sql(store, "INSERT INTO dispatches (dispatch_id, project_id, state, track, pr_ref, metadata_json) "
@@ -343,6 +343,35 @@ def test_close_of_a_failed_base_is_refused_when_the_completed_round_is_another_p
     assert _events(store, dlv, "deliverable_superseded") == []
 
 
+def test_close_of_a_failed_base_is_refused_when_the_completed_row_is_not_a_round(store):
+    """OI-2403: a completed dispatch that is not ``<base>-rK`` is not this base's delivery."""
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    _set_state(store, _add(store), "completed")  # an unrelated completed dispatch
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+    assert _view(store, f"pr:{dlv}") == "failed"
+
+
+@pytest.mark.parametrize("round_label", ["0", "03", "X", ""])
+def test_close_of_a_failed_base_is_refused_when_its_round_is_not_a_positive_integer(store, round_label):
+    """OI-2403: ``-r0``, ``-r03``, ``-rX`` and a bare ``-r`` are not rounds of the base."""
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    _add_round(store, dlv, round_label)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+    assert _view(store, f"pr:{dlv}") == "failed"
+
+
 def test_close_of_a_failed_base_is_refused_when_its_metadata_does_not_parse(store):
     dlv = _set_state(store, _add(store), "failed_delivery")
     _add_round(store, dlv, 3)
@@ -473,6 +502,59 @@ def test_the_view_ignores_a_superseded_round_that_is_not_a_round_of_that_id(stor
     _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
          (json.dumps({"superseded_by": f"{dlv}-other"}), dlv))
     assert _view(store, f"pr:{dlv}") == "failed"
+
+
+@pytest.mark.parametrize("round_label", ["0", "03", "X", ""])
+def test_the_view_ignores_a_completed_target_whose_suffix_is_not_a_positive_integer(store, round_label):
+    """OI-2403: the target row exists and is ``completed``, but it is not a ``<base>-rK`` round."""
+    dlv = _set_state(store, _add(store), "expired")
+    round_id = _add_round(store, dlv, round_label)
+    _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
+         (json.dumps({"superseded_by": round_id}), dlv))
+
+    assert _view(store, f"pr:{dlv}") == "failed"
+
+
+def test_the_view_ignores_a_superseded_target_that_is_an_unrelated_completed_dispatch(store):
+    """Codex round 3 reproduction: any completed dispatch of the project used to derive ``done``."""
+    dlv = _set_state(store, _add(store), "expired")
+    unrelated = _set_state(store, _add(store), "completed")
+    _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
+         (json.dumps({"superseded_by": unrelated}), dlv))
+
+    assert unrelated != dlv
+    assert _view(store, f"pr:{dlv}") == "failed"
+
+
+# ---------------------------------------------------------------------------
+# 3b. The round id is validated by one helper the view's SQL mirrors (OI-2403)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("round_id,expected", [
+    ("dlv-abc-r1", True), ("dlv-abc-r3", True), ("dlv-abc-r27", True),
+    ("dlv-abc-r0", False), ("dlv-abc-r03", False), ("dlv-abc-r", False),
+    ("dlv-abc-rX", False), ("dlv-abc-r3x", False), ("dlv-abc-rx3", False),
+    ("dlv-abc-r-1", False), ("dlv-abc-r3-r4", False), ("dlv-abc-r 3", False),
+    ("dlv-abc-r٣", False), ("dlv-abc", False), ("dlv-abc-r3-", False),
+    ("dlv-abd-r3", False), ("", False), (None, False), (42, False),
+])
+def test_is_round_of_accepts_only_a_positive_integer_round(round_id, expected):
+    assert schema_manifest.is_round_of("dlv-abc", round_id) is expected
+
+
+def test_the_view_and_the_helper_agree_on_every_round_shape(store):
+    """The view's SQL is a mirror of ``is_round_of``; this pins the two together."""
+    shapes = [("dlv-abc-r1", True), ("dlv-abc-r0", False), ("dlv-abc-r03", False),
+              ("dlv-abc-r", False), ("dlv-abc-rX", False)]
+    for round_id, expected in shapes:
+        assert schema_manifest.is_round_of("dlv-abc", round_id) is expected
+    base = _set_state(store, _add(store), "expired")
+    for label, expected in [("1", "done"), ("0", "failed"), ("03", "failed"),
+                            ("", "failed"), ("X", "failed")]:
+        _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
+             (json.dumps({"superseded_by": f"{base}-r{label}"}), base))
+        _add_round(store, base, label)
+        assert _view(store, f"pr:{base}") == expected, label
 
 
 # ---------------------------------------------------------------------------

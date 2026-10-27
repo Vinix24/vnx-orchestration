@@ -73,6 +73,7 @@ import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import plan_scope
 import provider_switch
+import schema_manifest
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -3016,21 +3017,25 @@ def _queue_pr_number(
 
     The PR lives on ``dispatches.pr_ref`` (``vnx deliverable close --evidence``
     writes it there); a round can carry it too but its ``output_ref`` is NULL,
-    so the match is the root id plus its ``<id>-r<n>`` prefix. The most recent
+    so the match is the root id plus its ``<id>-rK`` prefix for a positive
+    integer ``K`` — ``schema_manifest.is_round_of`` decides that shape, so a row
+    like ``<id>-r0`` or ``<id>-rX`` is not read as a round. The most recent
     non-empty ``pr_ref`` wins. A present-but-unparseable ``pr_ref`` raises
     ``ValueError`` instead of reading as "no PR" (fail-closed on evidence).
     """
     escaped = root_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT dispatch_id, pr_ref FROM dispatches
         WHERE project_id = ? AND pr_ref IS NOT NULL AND pr_ref != ''
           AND (dispatch_id = ? OR dispatch_id LIKE ? ESCAPE '\\')
         ORDER BY updated_at DESC, id DESC
-        LIMIT 1
         """,
-        (project_id, root_id, escaped + "-r%"),
-    ).fetchone()
+        (project_id, root_id, escaped + schema_manifest.ROUND_SEPARATOR + "%"),
+    ).fetchall()
+    row = next((r for r in rows
+                if r["dispatch_id"] == root_id
+                or schema_manifest.is_round_of(root_id, r["dispatch_id"])), None)
     if row is None:
         return None
     normalized = _normalize_pr_ref(str(row["pr_ref"]).split(",", 1)[0].strip())
@@ -3408,20 +3413,21 @@ SUPERSEDED_EVENT = "deliverable_superseded"
 def _completed_round(conn: sqlite3.Connection, project_id: str, dispatch_id: str) -> Optional[str]:
     """The newest ``<dispatch_id>-rK`` row of *project_id* in ``completed``, or None.
 
-    Fail-closed: no round, another project's row, an id that is not ``-rK`` and any state
-    but ``completed`` are not evidence, so the caller keeps refusing.
+    Fail-closed: no round, another project's row, an id that is not ``-rK`` for a positive
+    integer ``K`` and any state but ``completed`` are not evidence, so the caller keeps
+    refusing. The id shape is decided by ``schema_manifest.is_round_of`` — the same rule
+    the v37 view applies in SQL — so the round this close records is exactly the round the
+    view reads back as delivered (``-r0``, ``-r03``, ``-rX`` and a bare ``-r`` are not).
     """
-    prefix = f"{dispatch_id}-r"
-    escaped = dispatch_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    esc = dispatch_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     rows = conn.execute(
         "SELECT dispatch_id, state FROM dispatches "
         "WHERE project_id = ? AND dispatch_id LIKE ? ESCAPE '\\' "
         "ORDER BY updated_at DESC, id DESC",
-        (project_id, escaped + "-r%"),
+        (project_id, esc + schema_manifest.ROUND_SEPARATOR + "%"),
     ).fetchall()
     for row in rows:
-        suffix = row["dispatch_id"][len(prefix):]
-        if (row["dispatch_id"].startswith(prefix) and suffix.isascii() and suffix.isdigit()
+        if (schema_manifest.is_round_of(dispatch_id, row["dispatch_id"])
                 and row["state"] == "completed"):
             return row["dispatch_id"]
     return None
