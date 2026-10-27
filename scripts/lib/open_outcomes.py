@@ -274,6 +274,11 @@ def end_attempt_on_reject(
     not a failed attempt). Returns ``{"action"}``: ``ended`` (with ``from_state`` and
     ``to_state``), ``not_an_attempt`` (with ``state``), ``no_row`` or ``no_store``.
     A refused transition raises: the caller reports it and exits non-zero.
+
+    ``BEGIN IMMEDIATE`` goes on before the row is read: ``transition_dispatch`` compares the
+    state it validates against nothing, so a row that moved between this read and its UPDATE
+    would otherwise be overwritten with ``dead_letter``. The metadata is never read or
+    written here — this function cannot lose another writer's ``metadata_json``.
     """
     from coordination_db import DB_FILENAME, get_connection  # local: leaf imported by many
 
@@ -283,24 +288,32 @@ def end_attempt_on_reject(
         if not conn.execute("SELECT 1 FROM sqlite_master "
                             "WHERE type = 'table' AND name = 'dispatches'").fetchone():
             return {"action": "no_row"}
-        row = conn.execute(
-            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-        ).fetchone()
-        if row is None:
-            return {"action": "no_row"}
-        if "project_id" in row.keys() and row["project_id"] != project_id:
-            return {"action": "no_row"}
-        from_state = row["state"]
-        if from_state not in REJECT_END_STATES:
-            return {"action": "not_an_attempt", "state": from_state}
-        from runtime_state_machine import transition_dispatch  # local: same leaf, same reason
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+            ).fetchone()
+            if row is None:
+                conn.rollback()
+                return {"action": "no_row"}
+            if "project_id" in row.keys() and row["project_id"] != project_id:
+                conn.rollback()
+                return {"action": "no_row"}
+            from_state = row["state"]
+            if from_state not in REJECT_END_STATES:
+                conn.rollback()
+                return {"action": "not_an_attempt", "state": from_state}
+            from runtime_state_machine import transition_dispatch  # local: same leaf, same reason
 
-        transition_dispatch(
-            conn, dispatch_id=dispatch_id, to_state=REJECT_END_TARGET, actor="t0", reason=reason,
-            metadata={"decision": "reject", "decided_at": decided_at,
-                      "decision_log": DECISION_LOG_NAME, "project_id": project_id},
-            project_id=project_id,
-        )
+            transition_dispatch(
+                conn, dispatch_id=dispatch_id, to_state=REJECT_END_TARGET, actor="t0", reason=reason,
+                metadata={"decision": "reject", "decided_at": decided_at,
+                          "decision_log": DECISION_LOG_NAME, "project_id": project_id},
+                project_id=project_id,
+            )
+        except BaseException:
+            conn.rollback()
+            raise
         conn.commit()
     return {"action": "ended", "from_state": from_state, "to_state": REJECT_END_TARGET}
 

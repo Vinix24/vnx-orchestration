@@ -3427,26 +3427,40 @@ def _completed_round(conn: sqlite3.Connection, project_id: str, dispatch_id: str
     return None
 
 
-def _close_superseded_attempt(
+def _read_superseded_row(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str,
+) -> Optional[sqlite3.Row]:
+    """The row the supersede close binds: its state and its ``metadata_json`` text, read under the lock.
+
+    Both values are bound into the UPDATE's predicate, so a writer that changed either one
+    after A started its close — even one that bypasses ``BEGIN IMMEDIATE`` — makes the write
+    miss instead of overwriting the change it never saw.
+    """
+    return conn.execute(
+        "SELECT state, metadata_json FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+        (dispatch_id, project_id),
+    ).fetchone()
+
+
+def _book_superseded_attempt(
     conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
     pr_ref: str, evidence_number: int,
 ) -> dict:
-    """Book a base on its own completed round: ``expired`` plus ``metadata_json.superseded_by``.
+    """The work under the lock: find the round, merge the metadata, write the row and the event.
 
-    ``expired`` is terminal and no delivery claim; the v37 view reads the pair as the
-    evidence. One transaction with one ``deliverable_superseded`` event, compare-and-swap
-    on the state just read. Returns ``superseded``, ``no_round``, ``bad_metadata``
-    (metadata_json does not parse: never overwritten) or ``row_changed`` (nothing written).
+    Leaves the transaction open — ``_close_superseded_attempt`` commits or rolls it back.
+    Returns ``superseded``, ``no_round``, ``bad_metadata`` (metadata_json does not parse:
+    never overwritten) or ``row_changed`` (nothing written).
     """
     round_id = _completed_round(conn, project_id, dispatch_id)
     if round_id is None:
         return {"action": "no_round"}
-    row = conn.execute(
-        "SELECT metadata_json FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
-        (dispatch_id, project_id),
-    ).fetchone()
+    row = _read_superseded_row(conn, project_id, dispatch_id)
+    if row is None or row["state"] != from_state:
+        return {"action": "row_changed"}
+    metadata_text = row["metadata_json"]
     try:
-        metadata = json.loads((row["metadata_json"] if row else None) or "{}")
+        metadata = json.loads(metadata_text or "{}")
     except (TypeError, ValueError):
         return {"action": "bad_metadata"}
     if not isinstance(metadata, dict):
@@ -3459,12 +3473,12 @@ def _close_superseded_attempt(
         """
         UPDATE dispatches
         SET state = 'expired', pr_ref = ?, metadata_json = ?, updated_at = ?
-        WHERE dispatch_id = ? AND project_id = ? AND state = ?
+        WHERE dispatch_id = ? AND project_id = ? AND state = ? AND metadata_json IS ?
         """,
-        (pr_ref, json.dumps(metadata, default=str), now, dispatch_id, project_id, from_state),
+        (pr_ref, json.dumps(metadata, default=str), now, dispatch_id, project_id, from_state,
+         metadata_text),
     ).rowcount
     if changed != 1:
-        conn.rollback()
         return {"action": "row_changed"}
     _append_coordination_event(
         conn,
@@ -3478,8 +3492,38 @@ def _close_superseded_attempt(
         metadata={"evidence_pr": evidence_number, "pr_ref": pr_ref,
                   "superseded_by": round_id, "attestation": "operator"},
     )
-    conn.commit()
     return {"action": "superseded", "round": round_id}
+
+
+def _close_superseded_attempt(
+    conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
+    pr_ref: str, evidence_number: int,
+) -> dict:
+    """Book a base on its own completed round: ``expired`` plus ``metadata_json.superseded_by``.
+
+    ``expired`` is terminal and no delivery claim; the v37 view reads the pair as the
+    evidence. ``BEGIN IMMEDIATE`` goes on BEFORE the row is read, so the read, the merge,
+    the UPDATE and the one ``deliverable_superseded`` event are one serialized transaction:
+    no writer can change the state or the metadata between the read and the write. The
+    UPDATE still compares against both values it read (the compare-and-swap), so a writer
+    that bypasses the lock is caught instead of overwritten. Returns ``superseded``,
+    ``no_round``, ``bad_metadata`` (metadata_json does not parse: never overwritten) or
+    ``row_changed`` (nothing written).
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        outcome = _book_superseded_attempt(
+            conn, project_id=project_id, dispatch_id=dispatch_id, from_state=from_state,
+            pr_ref=pr_ref, evidence_number=evidence_number,
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+    if outcome["action"] == "superseded":
+        conn.commit()
+    else:
+        conn.rollback()
+    return outcome
 
 
 def _close_off_ready(
@@ -3511,7 +3555,8 @@ def _close_off_ready(
             "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
                         "delivered this work (ADR-049: never closed on foreign evidence)",
             "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
-            "row_changed": f"it was no longer {current_state!r} when the write ran",
+            "row_changed": f"its state or its metadata_json changed under the read (it must still "
+                           f"be {current_state!r} with the metadata the write compared against)",
         }
         print(
             f"deliverable close: cannot close {dispatch_id!r}: state {current_state!r}, and "

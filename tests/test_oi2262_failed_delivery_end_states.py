@@ -473,3 +473,130 @@ def test_the_view_ignores_a_superseded_round_that_is_not_a_round_of_that_id(stor
     _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
          (json.dumps({"superseded_by": f"{dlv}-other"}), dlv))
     assert _view(store, f"pr:{dlv}") == "failed"
+
+
+# ---------------------------------------------------------------------------
+# 4. The supersede compare-and-swap protects metadata_json, not only the state
+# ---------------------------------------------------------------------------
+
+class _LoadsHook:
+    """``planning_cli``'s ``json`` namespace with a one-shot pause on its first ``loads``.
+
+    The close parses the metadata it read with ``json.loads`` immediately before it writes
+    the row, so that call is the seam a test can pause on — no sleep, no thread. Everything
+    else on the namespace (``dumps``, ``load``, ``dump``) is the real ``json`` module.
+    """
+
+    def __init__(self, pause) -> None:
+        self._pause = pause
+        self.fired = False
+
+    def loads(self, value, *args, **kwargs):
+        parsed = json.loads(value, *args, **kwargs)
+        if not self.fired:
+            self.fired = True
+            self._pause()
+        return parsed
+
+    def __getattr__(self, name):
+        return getattr(json, name)
+
+
+def _competing_metadata_write(store: Path, dispatch_id: str, key: str, value: Any) -> bool:
+    """Connection B: merge one key into the base row's metadata; True if it committed.
+
+    ``timeout=0`` so the attempt is refused at once when A holds the write lock instead of
+    blocking the close that is waiting for this very call (one thread, two connections).
+    """
+    conn = sqlite3.connect(str(store / tracks_lib.DB_FILENAME), timeout=0)
+    try:
+        row = conn.execute(
+            "SELECT metadata_json FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, PID),
+        ).fetchone()
+        metadata = json.loads((row[0] if row else None) or "{}")
+        metadata[key] = value
+        conn.execute(
+            "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ? AND project_id = ?",
+            (json.dumps(metadata), dispatch_id, PID),
+        )
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def test_a_metadata_write_between_the_read_and_the_write_is_not_lost(store, monkeypatch):
+    """Codex's two-connection reproduction: B's key survives the close, in either interleaving."""
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    round_id = _add_round(store, dlv, 3)
+    committed: List[bool] = []
+    hook = _LoadsHook(lambda: committed.append(_competing_metadata_write(store, dlv, "operator_note", "kept")))
+    monkeypatch.setattr(planning_cli, "json", hook)
+
+    rc, out, err = _close(store, dlv)
+
+    assert hook.fired, "the pause did not land between the read and the write"
+    assert rc == 0, err
+    if committed[0] is False:
+        # A held the write lock, so B's write was refused rather than lost: a client that
+        # retries lands its key on the metadata A committed.
+        assert _competing_metadata_write(store, dlv, "operator_note", "kept") is True
+    metadata = json.loads(_row(store, dlv)["metadata_json"])
+    assert metadata.get("operator_note") == "kept"
+    assert metadata["superseded_by"] == round_id
+
+
+def test_a_metadata_write_committed_before_the_close_is_merged_not_replaced(store):
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    round_id = _add_round(store, dlv, 3)
+    assert _competing_metadata_write(store, dlv, "operator_note", "kept") is True
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 0, err
+    metadata = json.loads(_row(store, dlv)["metadata_json"])
+    assert (metadata.get("operator_note"), metadata["superseded_by"]) == ("kept", round_id)
+
+
+def test_a_stale_metadata_read_misses_the_compare_and_swap_and_writes_nothing(store, monkeypatch):
+    """A read taken before the write transaction is caught instead of overwriting B's key."""
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    _add_round(store, dlv, 3)
+    stale = _row(store, dlv)["metadata_json"]
+    assert _competing_metadata_write(store, dlv, "operator_note", "kept") is True
+    real_read = planning_cli._read_superseded_row
+
+    def stale_read(conn, project_id, dispatch_id):
+        row = real_read(conn, project_id, dispatch_id)
+        return {"state": row["state"], "metadata_json": stale}
+
+    monkeypatch.setattr(planning_cli, "_read_superseded_row", stale_read)
+    before, events_before = _row(store, dlv), _events(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "changed under the read" in err and "No change made." in err
+    assert _row(store, dlv) == before and _events(store, dlv) == events_before
+    assert json.loads(_row(store, dlv)["metadata_json"])["operator_note"] == "kept"
+
+
+def test_the_supersede_write_still_binds_the_state_it_was_read_in(store):
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    _add_round(store, dlv, 3)
+    before = _row(store, dlv)
+    conn = _conn(store)
+    try:
+        outcome = planning_cli._close_superseded_attempt(
+            conn, project_id=PID, dispatch_id=dlv, from_state="timed_out",
+            pr_ref="#2262", evidence_number=2262,
+        )
+    finally:
+        conn.close()
+
+    assert outcome == {"action": "row_changed"}
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
