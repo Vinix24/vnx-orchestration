@@ -71,6 +71,14 @@ import event_store
 import final_answer_verdict
 import provider_switch
 
+# GE-5a / ADR-046 §4: the dispatcher wiring and the report reader are the one
+# GovernedLane adapter (governed_lane.py) the review gates share. Imported back
+# under their historical names so every caller — glm_gate, kimi_gate,
+# gate_runner, both tiebreakers, panel.py and run_panel itself — keeps working
+# without a change. The INTERIM side-door marker travels with the function
+# (its docstring in governed_lane.py).
+from governed_lane import _make_default_dispatcher, read_report as _read_report
+
 HERE =Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
 _SCRIPTS_DIR = HERE.parent
@@ -1459,26 +1467,6 @@ def apply_panel_rule(
     )
 
 
-def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional[str]:
-    """Locate a panelist's unified report. Authoritative source: the ``Report: <path>``
-    line provider_dispatch prints to stderr; falls back to the deterministic path.
-
-    Only a path whose filename is exactly ``{dispatch_id}.md`` is accepted — a foreign
-    or stale ``Report:`` line must never feed this panelist a different dispatch's
-    verdict (the gate's verdict-source integrity)."""
-    expected = f"{dispatch_id}.md"
-    for line in (stderr or "").splitlines():
-        if line.startswith("Report: "):
-            p = Path(line[len("Report: "):].strip())
-            if p.name == expected and p.is_file():
-                return p.read_text(encoding="utf-8")
-    if base is not None:
-        p = base / "unified_reports" / expected
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    return None
-
-
 def _resolve_data_dir(data_dir: Optional[str]) -> Path:
     """Resolve the data_dir the panel reports are written under and read back from.
 
@@ -1797,169 +1785,6 @@ def _run_provider_lane_child(
             cmd, capture_output=True, text=True, timeout=timeout_seconds,
             check=False, env=env,
         )
-
-
-def _make_default_dispatcher(
-    data_dir: Optional[str], timeout_seconds: int,
-    *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
-    total_deadline_seconds: Optional[int] = None,
-) -> DispatcherFn:
-    """Real dispatcher: run a panelist through its governed lane, return the report text.
-
-    INTERIM — PR-12 consolidation target. This dispatches WITHOUT going through the
-    single-entry door (`vnx dispatch` / dispatch_bridge), which is a side door. Once the
-    door is wired and flipped, this MUST route through that one door instead. The split
-    below is exactly what the door decides internally:
-      claude            -> headless lane, `claude -p` via ClaudeSubprocessAdapter, on
-                           the SUBSCRIPTION (measured 2026-08-11; the door's default for
-                           claude since A2, 2026-08-26). NOT provider_dispatch — it
-                           refuses claude.
-      kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
-
-    ``role``: OI-811 — this factory is reused by callers whose instruction is NOT a plan
-    review (e.g. the deliberation panel's diverge/contrarian/verify/synthesis stages).
-    Defaults to "plan-reviewer" for backward compatibility with ``run_panel``. A caller
-    with a different role gets the generic (non-plan-framed) file-ref instruction on the
-    claude seat, and that role is stamped on both lanes so govern() and the phantom-guard
-    evaluate it correctly instead of being told it is a plan review.
-
-    ``base_ref``: OI-1887 — threaded straight into ``provider_dispatch.py --base-ref``
-    (which already threads it into ``create_dispatch_worktree``, see that module) so a
-    review-gate caller reviewing a PR can isolate the provider's worktree on
-    ``origin/<pr-branch>`` instead of the default ``origin/main``. None (the default)
-    leaves the plan-gate and deliberation-panel callers unchanged: neither reviews a PR
-    branch, so both keep isolating on main. Never applies to the claude branch below —
-    that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
-    no PR branch to isolate on either.
-
-    ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
-    ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
-    the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
-    subprocess timeout; a review gate passes it with a margin on top so the lane's own
-    deadline fires first and the lane writes its own report. Only the child env carries
-    it — this process's ``os.environ`` is never touched. None (the default) leaves the
-    plan-gate and deliberation-panel callers exactly as they were. The claude branch
-    keeps running its seat with ``timeout_seconds`` as its deadline; no review gate
-    routes through it.
-    """
-    base = _resolve_data_dir(data_dir)
-
-    def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
-        # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
-        # resolved (`base`), or the lane re-resolves its own. provider_dispatch
-        # honors the two-key VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 contract (see
-        # its _resolve_data_dir); without it the seat's report write path can land
-        # outside the dir _read_report reads back from (e.g. the legacy
-        # ~/.vnx-data/unified_reports root), and the seat report is silently
-        # never found. The claude branch pins the same two keys — see
-        # _run_claude_headless_seat, which sets them on os.environ because on that
-        # lane they must bind in this process as well as in the child.
-        env = _seat_child_env(base, total_deadline_seconds)
-        _tmp_doc_path: Optional[str] = None
-        try:
-            if provider in _CLAUDE_PROVIDERS:
-                # BUG-2 FIX (file-ref): the instruction already has the full plan doc inlined
-                # by run_panel's build_plan_review_instruction call. For the claude seat we
-                # replace it with a compact file-ref instruction so the ~50k-char body never
-                # has to travel as one prompt argument.
-                #
-                # We write the original inline instruction to a temp file so the worker can
-                # read the plan + rubric + verdict contract from a stable on-disk path.
-                # The expected report path is derived from data_dir (resolved above, never
-                # None) so the file-ref instruction's write path and _read_report's read path
-                # agree.
-                report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
-
-                # Write the full inline instruction (plan + rubric + contract) to a temp file.
-                # The worker reads this file; the short file-ref instruction points to it.
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    suffix=".vnx_plan_review.md",
-                    delete=False,
-                    encoding="utf-8",
-                    prefix=f"plan_gate_{dispatch_id}_",
-                ) as fh:
-                    fh.write(instruction)
-                    _tmp_doc_path = fh.name
-
-                # Short instruction: rubric + verdict contract + explicit report-path directive.
-                # No 50k doc body — the worker reads it from _tmp_doc_path. A non-plan-review
-                # caller (OI-811) gets the generic file-ref framing instead — never told it is
-                # reviewing an IMPLEMENTATION PLAN.
-                if role == "plan-reviewer":
-                    claude_instruction = build_plan_review_instruction_fileref(
-                        doc_path=_tmp_doc_path,
-                        track_id="<see file>",
-                        report_path=report_path_str,
-                    )
-                else:
-                    claude_instruction = build_generic_fileref_instruction(
-                        doc_path=_tmp_doc_path,
-                        report_path=report_path_str,
-                    )
-
-                return _run_claude_headless_seat(
-                    dispatch_id=dispatch_id,
-                    model=model_arg,
-                    instruction=claude_instruction,
-                    role=role,
-                    base=base,
-                    timeout_seconds=timeout_seconds,
-                )
-
-            cmd = [
-                sys.executable, str(PROVIDER_DISPATCH),
-                "--provider", provider,
-                "--terminal-id", _PANEL_TERMINAL_ID,
-                "--dispatch-id", dispatch_id,
-                "--model", model_arg,
-                "--role", role,
-                # OI-1422: every seat this dispatcher builds (plan-reviewer,
-                # deliberation-panelist) is a read-only verdict/analysis worker —
-                # it reads a doc and writes a report, it never touches repo files.
-                # Without an explicit --task-class, provider_dispatch.py's
-                # argparse default ("") falls through to VNX_TASK_CLASS, which is
-                # unset here, so _build_frontmatter's own fallback stamps
-                # task_class="implementation" on the receipt (provider_dispatch.py
-                # _build_frontmatter). kimi_spawn.py's completion-vs-execution
-                # fabrication guard (_finalize_kimi_result) keys off task_class
-                # ALONE — it has no role parameter — so "implementation" leaves a
-                # clean-worktree kimi seat classified as a delivery worker that
-                # produced nothing, and the guard fires a false "completion
-                # without execution" failure on real panel/review output.
-                # "research_structured" is the fabric's own canonical task_class
-                # for reviewer/architect/planner/security-engineer/data-analyst
-                # work (dispatch_router.py SKILL_TO_TASK_CLASS) and is already a
-                # member of phantom_guard.REVIEW_TASK_CLASSES, so this exempts the
-                # seat through both guards without widening either SSOT.
-                "--task-class", "research_structured",
-                "--instruction", instruction,
-                "--no-auto-commit",
-            ]
-            if base_ref:
-                cmd += ["--base-ref", base_ref]
-            proc = _run_provider_lane_child(
-                cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id,
-                data_dir=base)
-            report = _read_report(base, dispatch_id, proc.stderr)
-            if report is None:
-                # provider_dispatch prints its actionable detail across both streams —
-                # surfacing only stderr once masked the real cause behind an unrelated
-                # last-stderr-line red herring for a full day.
-                raise RuntimeError(
-                    f"no report for {dispatch_id} (rc={proc.returncode}): "
-                    f"stdout: {(proc.stdout or '')[-800:]} | stderr: {(proc.stderr or '')[-400:]}"
-                )
-            return report
-        finally:
-            # Always clean up the temp doc file regardless of success or failure.
-            if _tmp_doc_path is not None:
-                try:
-                    os.unlink(_tmp_doc_path)
-                except OSError:
-                    pass
-
-    return _dispatch
 
 
 def _panel_retry_count() -> int:

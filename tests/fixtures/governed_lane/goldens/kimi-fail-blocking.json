@@ -1,0 +1,10 @@
+{
+  "findings": [
+    {
+      "message": "scripts/lib/gate_depth.py:55 misclassifies supported Codex message aliases `assistant_message` and `output_text` as investigative actions; a zero-tool run using either alias bypasses the degenerate gate and is recorded as completed.",
+      "severity": "error"
+    }
+  ],
+  "residual_risk": "Until the message-type vocabulary is aligned with codex_parser, shallow Codex runs can still be accepted as completed gate evidence.",
+  "verdict": "fail"
+}

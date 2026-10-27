@@ -514,6 +514,8 @@ def test_timeout_still_propagates_when_teardown_raises(repo, monkeypatch):
 
 
 def test_normally_exiting_seat_costs_no_second_teardown(repo, monkeypatch):
+    # The dispatcher resolves the report reader through the panel at call time, so
+    # patching ``plan_gate_panel._read_report`` (the pre-GE-5a seam) still reaches it.
     monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a, **k: "panel seat analysis")
     real_remove = dwi.remove_dispatch_worktree
 

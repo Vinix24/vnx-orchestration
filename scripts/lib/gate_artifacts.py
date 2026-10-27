@@ -18,6 +18,7 @@ import final_answer_verdict
 import gate_depth
 import gate_recorder
 from gate_lane_contract import canonical_review_verdict
+from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
 from final_prompt_integrity import final_prompt_sha_for_dispatch
 from codex_parser import (
     VERDICT_READABLE_BINARIES,
@@ -486,8 +487,9 @@ def _write_result_record(
     pr_id: str,
     result_payload: Dict[str, Any],
     report_file: Path,
+    request: Optional[GateRequest] = None,
 ) -> Optional[str]:
-    """Write result JSON through the overwrite guard; error detail or None.
+    """Write result JSON, its receipt and ``request``'s end in one commit (GE-4b); error detail or None.
 
     OI-1472: this was the last PRODUCTION writer of a
     ``review_gates/results/`` record still calling ``write_text`` directly,
@@ -499,7 +501,7 @@ def _write_result_record(
        leaves a torn file, which is exactly the unreadable-but-present shape
        ``gate_recorder._check_overwrite_guard`` refuses on. This writer could
        manufacture the corruption the guard exists to detect.
-       :func:`gate_recorder.write_result_guarded` writes tmp + ``os.replace``.
+       :func:`gate_outcome.commit_gate_outcome` writes tmp + ``os.replace``.
     2. It also bypassed the read side, so it would overwrite a torn record
        left by something else instead of refusing to guess what it had been.
 
@@ -514,8 +516,9 @@ def _write_result_record(
         if result_file is None:
             raise ValueError("pr_number or pr_id required")
         json.loads(json.dumps(result_payload, indent=2))  # verify valid JSON (GATE-12 step 5)
-        _payload_on_disk, written = gate_recorder.write_result_guarded(
-            result_file, result_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        _payload_on_disk, written = commit_gate_outcome(
+            GateOutcome.from_record(gate, result_payload, pr_id=pr_id, downgraded=True),
+            results_dir=results_dir, result_path=result_file, request=request,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         _cleanup_orphan_report(report_file)
@@ -843,14 +846,11 @@ def materialize_artifacts(
     _stamp_run_settings(result_payload, request_payload, gate)
     _stamp_verdict_source(result_payload, raw_verdict, recovery)
 
-    if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file)):
+    request = GateRequest(requests_dir, request_payload, {"completed_at": now})
+    if (write_err := _write_result_record(results_dir, gate, pr_number, pr_id, result_payload, report_file, request)):
         return gate_recorder.record_failure_simple(
             **_fail, reason="artifact_materialization_failed", reason_detail=write_err,
         )
-
-    request_payload["status"] = "completed"
-    request_payload["completed_at"] = now
-    gate_recorder.persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
 
     _write_pipeline_sidecar(reports_dir, result_payload, real_dispatch_id, gate, pr_number, pr_id)
     _emit_register_event(gate, canonical_verdict, blocking, real_dispatch_id, pr_number, pr_id)
