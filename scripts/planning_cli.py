@@ -54,7 +54,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -2815,7 +2815,10 @@ def _print_deliverable_created(
     print(f"  next         : vnx deliverable promote {dispatch_id}")
 
 
-def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: str) -> bool:
+def _apply_deliverable_scope_rule(
+    state_dir: Path, project_id: str, track_id: str, *,
+    verb: str = "add", done: str = "created", stream: Optional[TextIO] = None,
+) -> bool:
     """The fourth deliverable makes a light track architecture (P1); one line says so.
 
     The deliverable row is already committed when this runs, so a rule that
@@ -2823,7 +2826,7 @@ def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: st
     set-plan-scope`` as the way out — it is NOT a failed add. The bool return is
     informational only (True when the rule was applied or none was due);
     ``cmd_deliverable_add`` always returns 0 after this, because the store does
-    hold the deliverable.
+    hold the deliverable. ``retarget`` runs it on its target (``stream``: off a JSON stdout).
     """
     count = len(_fetch_deliverable_records(state_dir, project_id, track_id))
     rule = plan_scope.deliverable_rule(count)
@@ -2831,18 +2834,18 @@ def _apply_deliverable_scope_rule(state_dir: Path, project_id: str, track_id: st
         return True
     try:
         change = plan_scope.raise_to_architecture(
-            state_dir, track_id, project_id, rule=f"deliverable add: {rule}",
+            state_dir, track_id, project_id, rule=f"deliverable {verb}: {rule}",
         )
     except Exception as exc:  # the deliverable is already committed: say what is missing
         print(
-            f"deliverable add: the deliverable was created, but the plan-scope rule "
+            f"deliverable {verb}: the deliverable was {done}, but the plan-scope rule "
             f"({rule}) could not be applied to {track_id}: {exc}. Set it by hand with "
             f"`vnx horizon set-plan-scope {track_id} architecture --reason \"...\"`.",
             file=sys.stderr,
         )
         return False
     if change is not None:
-        print(change.line())
+        print(change.line(), file=stream)
     return True
 
 
@@ -3765,6 +3768,203 @@ def cmd_deliverable_set(args: argparse.Namespace) -> int:
         for key, value in fields.items()
     ]
     print(f"Set {', '.join(parts)} on {dispatch_id} (project {project_id!r})")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Another track: retarget (track deliverable-retarget-withdraw)
+# ---------------------------------------------------------------------------
+
+RETARGETED_EVENT = "deliverable_retargeted"
+RETARGET_TRIGGER = "deliverable_retarget"
+RETARGET_ABORTED_TRIGGER = "deliverable_retarget_aborted"
+RETARGET_RECEIPTS_NAME = "t0_receipts.ndjson"
+
+
+class _RetargetRefused(Exception):
+    """A retarget precondition that does not hold: exit 2, nothing written."""
+
+
+class _RetargetLedgerFailed(Exception):
+    """A retarget receipt did not land in the canonical ledger."""
+
+
+def _retarget_refused(message: object, rc: int = 2) -> int:
+    print(f"deliverable retarget: {message}. No change made.", file=sys.stderr)
+    return rc
+
+
+def _retarget_receipt(state_dir: Path, trigger: str, decision: dict[str, Any], **observed: Any) -> None:
+    """Append one ``state_mutation`` receipt for a retarget decision to the store's ledger (ADR-005).
+
+    Raises ``_RetargetLedgerFailed`` unless ``append_receipt_payload`` reports ``appended``: a
+    ``duplicate``, no result or any other status means this line is not in the ledger.
+    ``status`` carries the decision's ``retarget_id``. The ledger dedups a receipt with a
+    ``dispatch_id`` on its outcome identity (ADR-038: dispatch_id, event_type, status, commit_sha,
+    gate, pr_number) across the whole ledger, so without it a second move of the same deliverable,
+    and the aborted line after its intent line, would come back ``duplicate`` and never be written.
+    """
+    receipt = {
+        "timestamp": _now_utc(), "event_type": "state_mutation", "receipt_kind": "state_mutation",
+        "terminal": "T0", "source": "vnx_planning", "trigger": trigger,
+        "status": f"{trigger}:{decision['retarget_id']}", **decision, **observed,
+    }
+    try:
+        from append_receipt import append_receipt_payload
+        result = append_receipt_payload(
+            receipt, receipts_file=str(state_dir / RETARGET_RECEIPTS_NAME), skip_enrichment=True,
+        )
+    except (Exception, SystemExit) as exc:  # SystemExit: append_receipt's import bootstrap failing
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger ({exc})") from exc
+    status = getattr(result, "status", None)
+    if status != "appended":
+        raise _RetargetLedgerFailed(f"the {trigger} receipt was not written to the ledger (append result {status!r})")
+
+
+def _retarget_aborted(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, decision: dict[str, Any], cause: str,
+) -> str:
+    """Record that the intent line did not become a move; best-effort, a failure goes to stderr.
+
+    The receipt carries the re-read ``state`` and ``track`` (both None when the row is gone, plus
+    ``reread_error`` when the read itself failed). Returns that row as text for the refusal message.
+    """
+    try:
+        now = conn.execute("SELECT state, track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+                           (decision["dispatch_id"], project_id)).fetchone()
+        observed: dict[str, Any] = {"state": now["state"], "track": now["track"]} if now else \
+            {"state": None, "track": None}
+        shown = str(dict(now)) if now else "gone"
+    except sqlite3.Error as exc:
+        observed, shown = {"state": None, "track": None, "reread_error": str(exc)}, f"unreadable ({exc})"
+    try:
+        _retarget_receipt(state_dir, RETARGET_ABORTED_TRIGGER, decision, abort_cause=cause, **observed)
+    except _RetargetLedgerFailed as exc:
+        print(f"deliverable retarget: {exc}; the ledger holds the intent line of "
+              f"{decision['retarget_id']} without its abort.", file=sys.stderr)
+    return shown
+
+
+def _retarget_check(
+    conn: sqlite3.Connection, state_dir: Path, project_id: str, args: argparse.Namespace,
+) -> sqlite3.Row:
+    """The deliverable row to move, or ``_RetargetRefused`` naming why it may not move."""
+    dispatch_id, target = args.dispatch_id, args.objective
+    row = conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id),
+    ).fetchone()
+    if row is None:
+        raise _RetargetRefused(f"deliverable not found: {dispatch_id!r} (project {project_id!r})")
+    ref = (row["output_ref"] or "").strip() if "output_ref" in row.keys() else ""
+    if not ref or not _is_deliverable_row(row["metadata_json"]):
+        raise _RetargetRefused(f"{dispatch_id!r} is not a deliverable (no output_ref, or not marked as one)")
+    if row["state"] not in ("proposed", "ready"):
+        raise _RetargetRefused(f"{dispatch_id!r} has state {row['state']!r}: only proposed or ready can move")
+    if target == row["track"]:
+        raise _RetargetRefused(f"{dispatch_id!r} is already on track {target!r}")
+    track = tracks_lib.get_track(state_dir, target, project_id)
+    if track is None:
+        raise _RetargetRefused(f"target track not found: {target!r} (project {project_id!r})")
+    phase = track.get("phase")
+    if phase not in (("queued", "active", "parked") if args.include_parked else ("queued", "active")):
+        hint = "; pass --include-parked to move onto it" if phase == "parked" else ""
+        raise _RetargetRefused(f"target track {target!r} is in phase {phase!r}{hint}")
+    if not _has_table(conn, "coordination_events"):
+        raise _RetargetRefused("the store has no coordination_events table, so the move cannot be recorded")
+    return row
+
+
+def _retarget_write(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str, row: sqlite3.Row,
+    to_track: str, reason: str,
+) -> bool:
+    """Swap the row on its read track+state and write the event in one transaction; False if it moved.
+
+    A ready row's approval was for the old track, so it is cleared (as ``_return_to_plan`` does).
+    Any error, a failed commit included, rolls the transaction back before it propagates.
+    """
+    from_track, prior = row["track"], row["state"]
+    approval = ", operator_approved_at = NULL" if "operator_approved_at" in row.keys() else ""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        changed = conn.execute(
+            f"UPDATE dispatches SET track = ?, state = 'proposed', updated_at = ?{approval} "
+            "WHERE dispatch_id = ? AND project_id = ? AND track IS ? AND state = ?",
+            (to_track, _now_utc(), dispatch_id, project_id, from_track, prior),
+        ).rowcount
+        if changed == 1:
+            _append_coordination_event(
+                conn, event_type=RETARGETED_EVENT, dispatch_id=dispatch_id, from_state=prior,
+                to_state="proposed", actor="operator", reason=reason, project_id=project_id,
+                metadata={"from_track": from_track, "to_track": to_track, "prior_state": prior},
+            )
+            conn.commit()
+            return True
+    except BaseException:
+        conn.rollback()
+        raise
+    conn.rollback()
+    return False
+
+
+def cmd_deliverable_retarget(args: argparse.Namespace) -> int:
+    """Move a proposed/ready deliverable to another track with one event (``close`` would attest a PR).
+
+    Ledger first (ADR-005): once every check holds, the decision is a ``state_mutation`` receipt in
+    the store's ``t0_receipts.ndjson``, and only then does the row move. A refusal is exit 2 with
+    nothing written. A ledger that does not take the receipt is exit 1 with the row untouched; a row
+    that changed in between or a store error after the receipt is exit 1 plus an aborted receipt.
+    No project_id is refused (ADR-007).
+    """
+    project_id, reason = (args.project_id or "").strip(), (args.reason or "").strip()
+    if not project_id:
+        return _retarget_refused("--project-id is required (ADR-007): none was supplied or resolved")
+    if not reason:
+        return _retarget_refused("--reason is required and may not be empty")
+    state_dir = _resolve_state_dir(args.state_dir)
+    conn = _db_conn(state_dir)
+    try:
+        row = _retarget_check(conn, state_dir, project_id, args)
+        decision = {
+            "retarget_id": uuid.uuid4().hex, "dispatch_id": args.dispatch_id, "project_id": project_id,
+            "from_track": row["track"], "to_track": args.objective, "prior_state": row["state"],
+            "to_state": "proposed", "actor": "operator", "reason": reason,
+        }
+        _retarget_receipt(state_dir, RETARGET_TRIGGER, decision)
+        try:
+            moved = _retarget_write(conn, project_id, args.dispatch_id, row, args.objective, reason)
+        except sqlite3.Error as exc:  # _retarget_write rolled the move back
+            _retarget_aborted(conn, state_dir, project_id, decision, f"store_error: {exc}")
+            return _retarget_refused(f"the store refused the move ({exc})", rc=1)
+        if not moved:
+            now = _retarget_aborted(conn, state_dir, project_id, decision, "row_changed")
+            return _retarget_refused(f"{args.dispatch_id!r} changed while this command ran: read {row['state']!r} "
+                                     f"on {row['track']!r}, now {now}", rc=1)
+    except _RetargetRefused as exc:
+        return _retarget_refused(exc)
+    except _RetargetLedgerFailed as exc:
+        return _retarget_refused(exc, rc=1)
+    except sqlite3.Error as exc:  # a read in the checks failed: no receipt, no move
+        return _retarget_refused(f"the store refused the move ({exc})", rc=1)
+    finally:
+        conn.close()
+
+    from_track, prior = row["track"], row["state"]
+    if args.json:
+        print(json.dumps({
+            "deliverable": args.dispatch_id, "project_id": project_id, "from_track": from_track,
+            "to_track": args.objective, "prior_state": prior, "state": "proposed", "reason": reason,
+            "action": "retargeted", "applied": True,
+        }, indent=2))
+    else:
+        print(f"\nvnx deliverable retarget: {args.dispatch_id} (project '{project_id}')\n")
+        print(f"  track {from_track} -> {args.objective} (reason: {reason})")
+        if prior == "ready":
+            print(f"  ready -> proposed: the promote approval was for {from_track}; promote again "
+                  f"with `vnx deliverable promote {args.dispatch_id}`.")
+        print()
+    _apply_deliverable_scope_rule(state_dir, project_id, args.objective, verb="retarget", done="moved",
+                                  stream=sys.stderr if args.json else None)
     return 0
 
 
@@ -5762,6 +5962,18 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
              "the stored list). Read by a plan-gate run that names no paths.",
     )
     p_dset.set_defaults(func=cmd_deliverable_set)
+    _add_deliverable_retarget_parser(dlv_sub, common)
+
+
+def _add_deliverable_retarget_parser(dlv_sub: Any, common: Any) -> None:
+    """``deliverable retarget``: move a deliverable that has not started to another track."""
+    p = dlv_sub.add_parser("retarget", help="move a proposed/ready deliverable to another track")
+    common(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--objective", required=True, metavar="TRACK_ID", help="the track to move it to")
+    p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
+    p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
+    p.set_defaults(func=cmd_deliverable_retarget)
 
 
 def _add_objective_queue_parser(obj_sub: Any, common: Any) -> None:
