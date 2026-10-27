@@ -93,7 +93,7 @@ import re
 import sys
 import time
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
@@ -1539,37 +1539,16 @@ UNKNOWN_GROUP = "(unknown)"
 
 @dataclass(frozen=True)
 class GroupedTotals:
-    """The ledger split into groups by one key, from one read (:func:`aggregate_groups`).
+    """The ledger per group from one read: ``totals`` is the whole selection and carries the read-level counts.
 
-    ``totals`` is the whole selection exactly as :func:`aggregate_runs` returns
-    it, and the only place the read-level counts live: ``legacy_lines``,
-    ``unreadable_lines``, ``torn_tail``, ``unlocked_read`` and the spool counts
-    (``spool_pending``, ``spool_unreadable``, ``spool_conflicts``,
-    ``spool_quarantined``) belong to the read, not to a group. Each entry of
-    ``groups`` is a :class:`LedgerTotals` with that group's effective runs and
-    its sums; its read-level fields are zero and ``False`` because the read is
-    counted once, on ``totals``. Groups and totals come from the same read, so
-    the groups' runs add up to ``totals.runs``.
+    Every entry of ``groups`` is a :class:`LedgerTotals` over that group's
+    effective runs; its read-level fields are zero because the spool and the
+    line counts belong to the read and are counted once, on ``totals``.
     """
 
     key: str
     groups: Mapping[str, LedgerTotals]
     totals: LedgerTotals
-
-
-@dataclass(frozen=True)
-class _ParsedRead:
-    """One read of the ledger and the spool, parsed once (:func:`_parse_read`)."""
-
-    records: List[Dict[str, Any]]
-    legacy_lines: int
-    unreadable_lines: int
-    torn_tail: bool
-    waiting: List[List[Dict[str, Any]]]
-    spool_unreadable: bool
-    spool_conflicts: int
-    spool_quarantined: int
-    unlocked_read: bool
 
 
 def aggregate_groups(
@@ -1578,19 +1557,17 @@ def aggregate_groups(
     *,
     select: Optional[Callable[[Mapping[str, Any]], bool]] = None,
 ) -> GroupedTotals:
-    """Sum the ledger per ``key`` group (``model``, ``role``, ``day`` or ``provider``), in one read.
+    """Sum the ledger per group (``model``, ``role``, ``day`` or ``provider``), in one read.
 
-    The ledger is read and the spool counted once, in one
-    :func:`_ledger_and_spool` scope; ``totals`` is the whole selection as
-    :func:`aggregate_runs` returns it, and every group is a
-    :class:`LedgerTotals` over that group's effective runs, summed by the same
-    :func:`_sum_runs`. ``key`` is the record's field of that name, except
-    ``day``, the UTC date of ``occurred_from`` (never ``recorded_at``); a
-    record whose key field is missing or not a non-empty string is grouped in
-    ``(unknown)``, never dropped. ``select`` filters on the effective record,
-    as in :func:`aggregate_runs`, so a correction that moves a run out of the
-    selection takes the whole run out. An unknown ``key`` is a ``ValueError``,
-    raised before anything is read.
+    The ledger is read and the spool counted once (:func:`_ledger_and_spool`);
+    ``totals`` is what :func:`aggregate_runs` returns for that read, and every
+    group is a :class:`LedgerTotals` over its effective runs, summed by the same
+    :func:`_sum_runs`. ``day`` is the UTC date of ``occurred_from``, never
+    ``recorded_at``; a record whose key field is missing or not a non-empty
+    string is grouped in ``(unknown)``, never dropped. ``select`` filters on the
+    effective record, so a correction that moves a run out of the selection takes
+    the whole run out. An unknown ``key`` raises ``ValueError`` before anything
+    is read.
     """
     if key not in GROUP_KEYS:
         raise ValueError(f"group key {key!r} is not one of {list(GROUP_KEYS)}")
@@ -1618,9 +1595,8 @@ def _group_of(record: Mapping[str, Any], key: str) -> str:
 def utc_day(value: object) -> Optional[str]:
     """The UTC date (``YYYY-MM-DD``) of an ISO-8601 timestamp, or ``None`` when it is not one.
 
-    ``None`` for a missing value, a value that is not a string, one that does
-    not parse and one without a timezone: a day is never guessed from local
-    time. The group key ``day`` and a ``--since`` window both select on this.
+    A missing value, a non-string, one that does not parse and one without a
+    timezone give ``None``: a day is never guessed from local time.
     """
     if not isinstance(value, str):
         return None
@@ -1628,9 +1604,7 @@ def utc_day(value: object) -> Optional[str]:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc).date().isoformat()
+    return parsed.astimezone(timezone.utc).date().isoformat() if parsed.tzinfo else None
 
 
 def _is_count(value: object) -> bool:
@@ -1639,32 +1613,9 @@ def _is_count(value: object) -> bool:
 
 
 def _has_unknown_token(record: Mapping[str, Any]) -> bool:
-    """True when the run has at least one token count that is not an int (``null``, missing)."""
+    """True when the run has at least one token count that is not an int (``null`` or missing)."""
     counts = record.get("tokens") if isinstance(record.get("tokens"), dict) else {}
     return any(not _is_count(counts.get(name)) for name in TOKEN_FIELDS)
-
-
-def _parse_read(read: _LedgerRead) -> _ParsedRead:
-    """Parse one read (:func:`_ledger_and_spool`): the records, the line counts and the waiting spooled runs."""
-    text, spooled, spool_unreadable, quarantined, unlocked = read
-    whole, torn = _split_torn_tail(text)
-    records, legacy, unreadable = _parse_lines(whole)
-    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
-    waiting = [run for run in spooled if not all(_has_landed(record, by_id, origins) for record in run)]
-    return _ParsedRead(
-        records=records, legacy_lines=legacy, unreadable_lines=unreadable + int(torn), torn_tail=torn,
-        waiting=waiting, spool_unreadable=spool_unreadable, spool_conflicts=len(_second_executions(records, waiting)),
-        spool_quarantined=quarantined, unlocked_read=unlocked,
-    )
-
-
-def _effective_runs(
-    records: Sequence[Mapping[str, Any]],
-    select: Optional[Callable[[Mapping[str, Any]], bool]],
-) -> Dict[str, Mapping[str, Any]]:
-    """The effective record per ``run_id`` (its last line), filtered on that record."""
-    last = {record["run_id"]: record for record in records}
-    return {run_id: record for run_id, record in last.items() if select is None or select(record)}
 
 
 def _sum_runs(
@@ -1672,9 +1623,8 @@ def _sum_runs(
 ) -> Tuple[float, float, Dict[str, int], Dict[str, int], Tuple[str, ...]]:
     """``(cost_usd, api_equivalent_usd, tokens, tokens_unknown, unavailable)`` of these effective runs.
 
-    The one summing loop. A run without a price is in no sum and is listed in
-    ``unavailable``; an unknown token count is counted in ``tokens_unknown``,
-    never summed as ``0``.
+    The one summing loop: a run without a price is in no sum (it is listed in
+    ``unavailable``) and an unknown token count is counted, never summed as 0.
     """
     cost = api = 0.0
     tokens = dict.fromkeys(TOKEN_FIELDS, 0)
@@ -1697,41 +1647,33 @@ def _sum_runs(
     return round(cost, 8), round(api, 8), tokens, unknown, tuple(unavailable)
 
 
-def _totals_with(
-    runs: Mapping[str, Mapping[str, Any]],
-    *,
-    legacy_lines: int = 0,
-    unreadable_lines: int = 0,
-    spool_pending: int = 0,
-    spool_unreadable: bool = False,
-    spool_conflicts: int = 0,
-    spool_quarantined: int = 0,
-    torn_tail: bool = False,
-    unlocked_read: bool = False,
-) -> LedgerTotals:
-    """A :class:`LedgerTotals` over these runs: the sums from :func:`_sum_runs`, the read-level counts given."""
+def _totals_with(runs: Mapping[str, Mapping[str, Any]]) -> LedgerTotals:
+    """A :class:`LedgerTotals` over these runs, the read-level counts zero (:func:`_totals` sets them)."""
     cost, api, tokens, unknown, unavailable = _sum_runs(runs)
     return LedgerTotals(
         runs=runs, cost_usd=cost, api_equivalent_usd=api, tokens=tokens, tokens_unknown=unknown,
-        unavailable=unavailable, legacy_lines=legacy_lines, unreadable_lines=unreadable_lines,
-        spool_pending=spool_pending, spool_unreadable=spool_unreadable, spool_conflicts=spool_conflicts,
-        spool_quarantined=spool_quarantined, torn_tail=torn_tail, unlocked_read=unlocked_read,
-    )
-
-
-def _totals_from(parsed: _ParsedRead, select: Optional[Callable[[Mapping[str, Any]], bool]]) -> LedgerTotals:
-    """The totals of a parsed read: its effective runs under ``select``, with the read-level counts for the whole."""
-    return _totals_with(
-        _effective_runs(parsed.records, select), legacy_lines=parsed.legacy_lines,
-        unreadable_lines=parsed.unreadable_lines, spool_pending=len(parsed.waiting),
-        spool_unreadable=parsed.spool_unreadable, spool_conflicts=parsed.spool_conflicts,
-        spool_quarantined=parsed.spool_quarantined, torn_tail=parsed.torn_tail, unlocked_read=parsed.unlocked_read,
+        unavailable=unavailable, legacy_lines=0, unreadable_lines=0, spool_pending=0, spool_unreadable=False,
+        spool_conflicts=0, spool_quarantined=0, torn_tail=False, unlocked_read=False,
     )
 
 
 def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bool]]) -> LedgerTotals:
     """The :class:`LedgerTotals` of one read of the ledger and the spool (:func:`_ledger_and_spool`)."""
-    return _totals_from(_parse_read(read), select)
+    text, spooled, spool_unreadable, quarantined, unlocked = read
+    whole, torn = _split_torn_tail(text)
+    records, legacy, unreadable = _parse_lines(whole)
+    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
+    waiting = [run for run in spooled if not all(_has_landed(record, by_id, origins) for record in run)]
+    last = {record["run_id"]: record for record in records}
+    runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
+    return replace(
+        _totals_with(runs), legacy_lines=legacy, unreadable_lines=unreadable + int(torn), torn_tail=torn,
+        spool_pending=len(waiting), spool_unreadable=spool_unreadable,
+        spool_conflicts=len(_second_executions(records, waiting)), spool_quarantined=quarantined,
+        unlocked_read=unlocked,
+    )
+
+
 
 
 # ---------------------------------------------------------------------------

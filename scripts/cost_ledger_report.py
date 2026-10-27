@@ -1,33 +1,19 @@
 #!/usr/bin/env python3
-"""cost_ledger_report.py — ``vnx costs report``: the cost ledger grouped by model, role, day or provider.
+"""cost_ledger_report.py — ``vnx costs report``: the ledger per model, role, day or provider (K5a, ADR-043).
 
-Track ``kosten-per-model-in-het-grootboek``, K5a. One read of the ledger
-(``cost_ledger.aggregate_groups``, which reads the ledger and counts the spool
-in one scope) gives one row per group and the totals row for the same
-selection; nothing is written and no writer is changed. ``--by`` defaults to
-``provider``; ``day`` is the UTC date of ``occurred_from``, never
-``recorded_at``, and a record whose key field is missing or not a string is
-grouped in ``(unknown)``, never dropped. ``--since YYYY-MM-DD`` selects on the
-effective record's ``occurred_from`` (UTC), so a correction that moves a run
-before the date takes the whole run out. The ledger comes from ``--ledger``,
-else as ``aggregate_runs`` resolves it.
+One read (``cost_ledger.aggregate_groups``) gives a row per group and the totals
+row for the same selection. ``day`` is the UTC date of ``occurred_from``; a
+record whose key field is missing is grouped in ``(unknown)``. ``--since``
+selects on the effective ``occurred_from`` (UTC). The read-level counts (spool
+backlog, legacy and unreadable lines, torn tail, unlocked read) print once below
+the totals, never in a group's sums. Money: two decimals here, unrounded in
+``--json``.
 
-Every group shows its runs, the metered ``cost_usd``, the
-``api_equivalent_usd`` of subscription runs, the five token sums, the runs with
-an unknown token count, the ``unavailable`` runs and completeness (the share
-of the group's runs with ``usage_completeness == "complete"``). The read-level
-counts -- the spool backlog, the legacy and unreadable lines, a torn tail, a
-read without the lock file -- are printed once below the totals row, whenever
-one is non-zero, and never folded into a group's sums.
+Exit codes: 0 a report (incomplete too: it says so), 1 an unreadable ledger,
+2 usage (an unknown ``--by`` or a bad ``--since``).
 
-Exit codes:
-  0  the report (a report that is incomplete still exits 0: the incompleteness is printed below it)
-  1  the ledger cannot be read
-  2  usage: an unknown ``--by`` or a ``--since`` that is not ``YYYY-MM-DD``
-
-Usage:
-  python3 scripts/cost_ledger_report.py [--by model|role|day|provider] [--since YYYY-MM-DD]
-                                        [--json] [--ledger PATH]
+Usage: python3 scripts/cost_ledger_report.py [--by model|role|day|provider]
+       [--since YYYY-MM-DD] [--json] [--ledger PATH]
 """
 from __future__ import annotations
 
@@ -37,7 +23,7 @@ import logging
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Callable, Dict, List, Mapping, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
@@ -49,15 +35,13 @@ import cost_ledger  # noqa: E402
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 DEFAULT_BY = "provider"
-_HEADER = ["group", "runs", "cost_usd", "api_equiv", *cost_ledger.TOKEN_FIELDS,
-           "unknown_tokens", "unavailable", "complete"]
+HEADER = ["group", "runs", "cost_usd", "api_equiv", *cost_ledger.TOKEN_FIELDS, "unknown_tokens", "unavailable",
+          "complete"]
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="vnx costs report",
-        description="Report the cost ledger grouped by model, role, day or provider (ADR-043).",
-    )
+    parser = argparse.ArgumentParser(prog="vnx costs report",
+                                     description="Report the cost ledger grouped by model, role, day or provider.")
     parser.add_argument("--by", default=DEFAULT_BY, metavar="model|role|day|provider",
                         help=f"the group key (default {DEFAULT_BY})")
     parser.add_argument("--since", metavar="YYYY-MM-DD",
@@ -67,18 +51,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _resolved_ledger(ledger: Optional[str]) -> Path:
-    """``--ledger``, else the path ``aggregate_runs`` resolves: one resolver, never a path of our own."""
-    if ledger:
-        return Path(ledger)
+def _ledger(argument: Optional[str]) -> Path:
+    """``--ledger``, else the path ``aggregate_runs`` resolves (one resolver, no path of our own)."""
+    if argument:
+        return Path(argument)
     import provider_costs
 
     return provider_costs._resolve_costs_path()
-
-
-def _since_date(since: Optional[str]) -> Optional[str]:
-    """``since`` as ``YYYY-MM-DD``, or ``None``; a value that is not a date raises ``ValueError``."""
-    return None if since is None else date.fromisoformat(since).isoformat()
 
 
 def _window(since: Optional[str]) -> Optional[Callable[[Mapping[str, object]], bool]]:
@@ -93,14 +72,8 @@ def _window(since: Optional[str]) -> Optional[Callable[[Mapping[str, object]], b
     return selected
 
 
-def _ordered_groups(report) -> List[Tuple[str, "cost_ledger.LedgerTotals"]]:
-    """The groups by spend (cost plus api-equivalent) high to low, then by name: the biggest first."""
-    return sorted(report.groups.items(),
-                  key=lambda item: (-(item[1].cost_usd + item[1].api_equivalent_usd), item[0]))
-
-
 def _cells(name: str, totals) -> List[str]:
-    """One table row: the group's numbers, its completeness as ``complete/total`` runs."""
+    """One table row: the group's numbers and its completeness as ``complete/total`` runs."""
     return [name, str(len(totals.runs)), f"{totals.cost_usd:.2f}", f"{totals.api_equivalent_usd:.2f}",
             *(str(int(totals.tokens[field])) for field in cost_ledger.TOKEN_FIELDS),
             str(totals.unknown_token_runs), str(len(totals.unavailable)),
@@ -137,38 +110,36 @@ def _read_lines(totals) -> List[str]:
     return lines
 
 
+def _ordered(report) -> List:
+    """``[(group, LedgerTotals)]`` by spend (cost plus api-equivalent) high to low, then by name."""
+    return sorted(report.groups.items(),
+                  key=lambda item: (-(item[1].cost_usd + item[1].api_equivalent_usd), item[0]))
+
+
 def _as_text(key: str, ledger: Path, since: Optional[str], report) -> str:
     title = f"cost ledger report by {key} (ledger: {ledger}" + (f", since: {since})" if since else ")")
-    rows = [_cells(name, totals) for name, totals in _ordered_groups(report)]
-    rows.append(_cells("total", report.totals))
-    lines = [title, "", *_table([_HEADER, *rows])]
+    rows = [_cells(name, totals) for name, totals in _ordered(report)] + [_cells("total", report.totals)]
+    lines = [title, "", *_table([HEADER, *rows])]
     read_lines = _read_lines(report.totals)
-    if read_lines:
-        lines.extend(["", *read_lines])
-    return "\n".join(lines)
+    return "\n".join(lines + (["", *read_lines] if read_lines else []))
 
 
 def _row(name: str, totals) -> Dict[str, object]:
     """One group (or the total) as JSON: the sums unrounded, the counts as they are."""
-    return {
-        "group": name, "runs": len(totals.runs), "cost_usd": totals.cost_usd,
-        "api_equivalent_usd": totals.api_equivalent_usd, "tokens": dict(totals.tokens),
-        "tokens_unknown": dict(totals.tokens_unknown), "unknown_token_runs": totals.unknown_token_runs,
-        "unavailable_runs": len(totals.unavailable), "complete_runs": totals.complete_runs,
-    }
+    return {"group": name, "runs": len(totals.runs), "cost_usd": totals.cost_usd,
+            "api_equivalent_usd": totals.api_equivalent_usd, "tokens": dict(totals.tokens),
+            "tokens_unknown": dict(totals.tokens_unknown), "unknown_token_runs": totals.unknown_token_runs,
+            "unavailable_runs": len(totals.unavailable), "complete_runs": totals.complete_runs}
 
 
 def _as_json(key: str, ledger: Path, since: Optional[str], report) -> Dict[str, object]:
     totals = report.totals
-    return {
-        "by": key, "since": since, "ledger": str(ledger),
-        "groups": [_row(name, group) for name, group in _ordered_groups(report)],
-        "totals": _row("total", totals),
-        "spool_pending": totals.spool_pending, "spool_unreadable": totals.spool_unreadable,
-        "spool_conflicts": totals.spool_conflicts, "spool_quarantined": totals.spool_quarantined,
-        "legacy_lines": totals.legacy_lines, "unreadable_lines": totals.unreadable_lines,
-        "torn_tail": totals.torn_tail, "unlocked_read": totals.unlocked_read, "incomplete": totals.incomplete,
-    }
+    return {"by": key, "since": since, "ledger": str(ledger),
+            "groups": [_row(name, group) for name, group in _ordered(report)], "totals": _row("total", totals),
+            "spool_pending": totals.spool_pending, "spool_unreadable": totals.spool_unreadable,
+            "spool_conflicts": totals.spool_conflicts, "spool_quarantined": totals.spool_quarantined,
+            "legacy_lines": totals.legacy_lines, "unreadable_lines": totals.unreadable_lines,
+            "torn_tail": totals.torn_tail, "unlocked_read": totals.unlocked_read, "incomplete": totals.incomplete}
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -178,11 +149,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"vnx costs report: --by {args.by!r} is not one of {', '.join(cost_ledger.GROUP_KEYS)}", file=sys.stderr)
         return EXIT_USAGE
     try:
-        since = _since_date(args.since)
+        since = None if args.since is None else date.fromisoformat(args.since).isoformat()
     except ValueError as exc:
         print(f"vnx costs report: --since {args.since!r} is not a date YYYY-MM-DD: {exc}", file=sys.stderr)
         return EXIT_USAGE
-    ledger = _resolved_ledger(args.ledger)
+    ledger = _ledger(args.ledger)
     try:
         report = cost_ledger.aggregate_groups(args.by, ledger, select=_window(since))
     except OSError as exc:
