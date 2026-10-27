@@ -61,6 +61,17 @@ De Claude Code-specifieke bindingen van vandaag:
    - de terugvalluiken van de deur, `VNX_DISPATCH_LEGACY=1` en `VNX_SINGLE_ENTRY_DISPATCH=0`, blijven tot golf 2. Ze openen het legacy-pad (ADR-024 punt 3) en zijn het rollback-net van ADR-028 fase 0 ("P6, not before"). Weghalen herziet beide ADR's en gebeurt in `terminal-binding-afbouwen`, met een eigen akkoord.
    De operator aanvaardde dit punt op 22-10; het herziet ADR-024 gedeeltelijk.
 
+### Amendement 2026-10-27 — de pool start zijn worker via de deur (T-D0)
+
+Bouwt besluit 6 uit op het punt dat daar nog open stond ("de pool krijgt in golf 2 een besluit"). Track `terminal-binding-afbouwen`, taak T-D0, op het operator-akkoord van 27-10 (V1 en V2 van het plan).
+
+- **De poolroute is de deur.** `scripts/lib/pool_manager.py::_pool_worker_command` start standaard `scripts.lib.pool_worker_runner`. Die levert via `dispatch_bridge.deliver_via_door` zolang `dispatch_flags.single_entry_enabled()` waar is — en dat is de standaard. De pool zet daarmee geen tweede leveringspad meer naast de deur.
+- **Het terugdraaien is `VNX_SINGLE_ENTRY_DISPATCH=0`.** Dan (of met `VNX_DISPATCH_LEGACY=1`, dat altijd wint) start de pool weer `-m scripts.lib.subprocess_dispatch`, ongewijzigd en bereikbaar. Dat is het hard geparkeerde rollback-net van besluit 6 en ADR-028 fase 0 ("P6, not before"); het blijft staan tot een eigen akkoord het weghaalt.
+- **`VNX_POOL_TASK_CONSUMER` houdt zijn betekenis.** `=1` betekent nog steeds "start de single-claim runner" en doet dat ook onder het rollback-net. `=0` of ongezet kiest geen route meer: de deurvlag beslist. Wie de oude route terugwil, gebruikt de deurvlag, niet deze vlag.
+- **`terminal_leases` blijft een pooltabel.** Geen migratie en geen kolom weg. De tabel draagt `project_id` al in zijn sleutel — `schemas/migrations/0031_runtime_tenant_fk_repair.sql:146` (`UNIQUE(terminal_id, project_id)`) — zoals ADR-007 eist voor elke centrale tabel.
+- **De eigenaar van de lease-vernieuwing is de pool-worker.** De poolmanager schrijft de rij direct na de spawn (`PoolStateRepository.add_or_refresh_pool_lease`); daarna houdt de worker hem levend: `pool_worker_runner._PoolLease` ververst `last_heartbeat_at` zolang hij loopt en geeft de rij vrij aan zijn einde. `subprocess_dispatch._pool_heartbeat_loop` blijft voorlopig staan als vernieuwer van de rollback-route; T-G1 haalt hem weg zodra de test op deze route op main groen is.
+- **De lezers van `dispatches/active/` blijven ongewijzigd.** Dit amendement verandert geen lezer; die afstemming is T-G5, na K-7 van `audit-spoor-kern`.
+
 ## Gevolgen
 
 ### Golf 1
