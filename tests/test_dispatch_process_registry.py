@@ -321,3 +321,70 @@ def test_no_entry_kills_nothing(tmp_path: Path):
 
     killed = cleanup_dispatch_processes("dispatch-absent", worktree, repo_root=tmp_path)
     assert killed == 0
+
+
+# ---------------------------------------------------------------------------
+# Tri-state liveness (PR-4a, round-3 finding)
+# ---------------------------------------------------------------------------
+
+def test_group_liveness_is_three_valued(monkeypatch):
+    """A probe error other than "no such process" is ``unknown``, never dead.
+
+    Red run on the old ``_group_is_valid``: its ``PermissionError`` branch
+    returns False, so the unknown case is reported as dead.
+    """
+    from dispatch_process_registry import GroupState, probe_group_liveness
+
+    monkeypatch.setattr(os, "getpgid", lambda pid: 4242)
+    assert probe_group_liveness(4242, [1, 2]).state is GroupState.ALIVE
+
+    def _gone(pid):
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(os, "getpgid", _gone)
+    assert probe_group_liveness(4242, [1, 2]).state is GroupState.DEAD
+
+    def _denied(pid):
+        raise PermissionError(pid)
+
+    monkeypatch.setattr(os, "getpgid", _denied)
+    probe = probe_group_liveness(4242, [1, 2])
+    assert probe.state is GroupState.UNKNOWN
+    assert probe.detail, "an unknown group must name why it could not be measured"
+
+    # No recorded members is not positive evidence either.
+    monkeypatch.setattr(os, "getpgid", lambda pid: 4242)
+    assert probe_group_liveness(4242, []).state is GroupState.UNKNOWN
+
+
+def test_live_process_groups_reports_unknown_separately(tmp_path, monkeypatch):
+    """``live_process_groups`` keeps an unmeasurable group out of ``dead`` and
+    makes the report truthy: unknown answers "yes, keep"."""
+    from dispatch_process_registry import live_process_groups, record_dispatch_pgids
+
+    assert not live_process_groups("dispatch-no-entry", repo_root=tmp_path)
+
+    own_pgid = os.getpgid(0)
+    record_dispatch_pgids("dispatch-unknown", [own_pgid], repo_root=tmp_path)
+
+    def _denied(pid):
+        raise PermissionError(pid)
+
+    monkeypatch.setattr(os, "getpgid", _denied)
+    report = live_process_groups("dispatch-unknown", repo_root=tmp_path)
+    assert report.alive == ()
+    assert report.dead == ()
+    assert own_pgid in report.unknown
+    assert bool(report) is True, "an unknown group must read as 'keep', never as nothing alive"
+
+
+def test_live_process_groups_unreadable_entry_is_unmeasurable(tmp_path):
+    from dispatch_process_registry import live_process_groups
+
+    corrupt = tmp_path / ".vnx-data" / "state" / "dispatch_pgids" / "dispatch-corrupt.json"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_text("{not json", encoding="utf-8")
+
+    report = live_process_groups("dispatch-corrupt", repo_root=tmp_path)
+    assert report.unmeasurable, "an unreadable entry is not evidence that nothing is alive"
+    assert bool(report) is True

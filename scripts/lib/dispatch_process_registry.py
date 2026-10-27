@@ -29,6 +29,8 @@ import re
 import signal
 import subprocess
 import time
+from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Iterable
 
@@ -172,6 +174,85 @@ def load_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> list[int]:
         except (TypeError, ValueError):
             continue
     return sorted(result)
+
+
+class GroupState(str, Enum):
+    """Tri-state liveness of one recorded process group.
+
+    ``UNKNOWN`` is not ``DEAD``: a probe that could not answer (anything but
+    ``ProcessLookupError``) leaves the group undecided, and a caller guarding a
+    destructive action must keep the worktree on it.  RED-RUN STUB: this
+    version derives the state from ``_group_is_valid``, whose
+    ``PermissionError`` branch reports "not alive" — the round-3 defect.
+    """
+
+    ALIVE = "alive"
+    DEAD = "dead"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class GroupLiveness:
+    pgid: int
+    state: GroupState
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class LivenessReport:
+    """What ``live_process_groups`` measured: alive, dead and unknown groups."""
+
+    groups: "tuple[GroupLiveness, ...]" = ()
+    unmeasurable: str = ""
+
+    @property
+    def alive(self) -> "tuple[int, ...]":
+        return tuple(g.pgid for g in self.groups if g.state is GroupState.ALIVE)
+
+    @property
+    def dead(self) -> "tuple[int, ...]":
+        return tuple(g.pgid for g in self.groups if g.state is GroupState.DEAD)
+
+    @property
+    def unknown(self) -> "tuple[int, ...]":
+        return tuple(g.pgid for g in self.groups if g.state is GroupState.UNKNOWN)
+
+    @property
+    def may_be_alive(self) -> bool:
+        return bool(self.alive or self.unknown or self.unmeasurable)
+
+    def __bool__(self) -> bool:
+        return self.may_be_alive
+
+
+def probe_group_liveness(pgid: int, member_pids: "list[int]") -> GroupLiveness:
+    """RED-RUN STUB: delegates to the unchanged ``_group_is_valid``."""
+    state = GroupState.ALIVE if _group_is_valid(pgid, member_pids) else GroupState.DEAD
+    return GroupLiveness(pgid=pgid, state=state)
+
+
+def live_process_groups(dispatch_id: str, *, repo_root: Path) -> LivenessReport:
+    """RED-RUN STUB: recorded groups of *dispatch_id*, classified by the old
+    ``_group_is_valid`` (so a probe error reads as dead)."""
+    if not _entry_path(repo_root, dispatch_id).exists():
+        return LivenessReport()
+    entry = _load_entry(dispatch_id, repo_root=repo_root)
+    if entry is None:
+        return LivenessReport(unmeasurable=f"unreadable registry entry {_entry_path(repo_root, dispatch_id)}")
+    groups = entry.get("groups")
+    if groups is None:
+        return LivenessReport()
+    if not isinstance(groups, dict):
+        return LivenessReport(unmeasurable="registry entry 'groups' is not an object")
+    out: "list[GroupLiveness]" = []
+    for pgid_str, member_pids in groups.items():
+        try:
+            pgid = int(pgid_str)
+            members = [int(pid) for pid in member_pids]
+        except (TypeError, ValueError):
+            return LivenessReport(unmeasurable=f"malformed group record {pgid_str!r}")
+        out.append(probe_group_liveness(pgid, members))
+    return LivenessReport(groups=tuple(sorted(out, key=lambda g: g.pgid)))
 
 
 def clear_dispatch_pgids(dispatch_id: str, *, repo_root: Path) -> None:

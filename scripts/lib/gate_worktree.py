@@ -79,6 +79,33 @@ REVIEW_INSTRUCTIONS_TEXT = (
 _OUTRANKING_INSTRUCTION_FILENAMES = ("AGENTS.override.md",)
 
 
+# Sidecar suffix for the gate lifetime lock (PR-4a, round-1 finding): the gate
+# seat holds ``fcntl.flock(LOCK_EX)`` on this file next to the checkout for its
+# whole lifetime, so a remover may only proceed after taking it itself.
+LIFETIME_LOCK_SUFFIX = ".live"
+
+
+def gate_lifetime_lock_path(wt_path: Path) -> Path:
+    """The sidecar carrying gate checkout *wt_path*'s lifetime lock."""
+    wt_path = Path(wt_path)
+    return wt_path.parent / (wt_path.name + LIFETIME_LOCK_SUFFIX)
+
+
+def gate_checkout_liveness(wt_path: Path, *, detail: "list[str] | None" = None) -> str:
+    """RED-RUN STUB: the lifetime lock probe is implemented in the next commit."""
+    raise NotImplementedError("gate-checkout lifetime liveness lands in the next commit (PR-4a)")
+
+
+def _acquire_lifetime_lock(wt_path: Path) -> None:
+    """RED-RUN STUB: taken by create_gate_worktree in the next commit."""
+    raise NotImplementedError("gate-seat lifetime lock lands in the next commit (PR-4a)")
+
+
+def _release_lifetime_lock(wt_path: Path) -> None:
+    """RED-RUN STUB: released by the seat's teardown in the next commit."""
+    raise NotImplementedError("gate-seat lifetime lock lands in the next commit (PR-4a)")
+
+
 class GateWorktreeError(RuntimeError):
     """Raised when a gate's isolated worktree cannot be created.
 
