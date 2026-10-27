@@ -70,8 +70,9 @@ Schema 2.2 change (D5 fabric-state-herstel, live work):
     plus counts. The full section is ``open_outcomes`` in t0_state.json.
   - t0_index.json (schema ``t0_index/1.1``) drops ``terminals``,
     ``queue.active`` and ``active_dispatches`` for a compact ``live_work``.
-    ``terminals`` stays in t0_state.json while headless_dispatch_daemon reads
-    its ``lease_state``.
+    ``terminals`` stays in t0_state.json until T-B2 removes it with its
+    reader; it is filled from the ``terminal_leases`` rows only, so building
+    the state never probes tmux.
 
 Schema 2.1 changes (W4E / OI-1199):
   - feature_state union-merges register-canonical aggregation with the
@@ -618,47 +619,88 @@ def _init_and_check_db(state_dir: Path, migration_skip: Any = _SKIP_UNDECIDED) -
 # Terminal state
 # ---------------------------------------------------------------------------
 
-def _build_terminals(state_dir: Path) -> Dict[str, Any]:
-    """Terminal state via canonical_state_views + lease DB augmentation."""
-    try:
-        from canonical_state_views import build_terminal_snapshot, _brief_terminals
-        snapshot = build_terminal_snapshot(state_dir)
-        terminals: Dict[str, Any] = _brief_terminals(snapshot)
-    except Exception as exc:
-        log.warning("terminal snapshot failed: %s", exc)
-        terminals = {
-            t: {
-                "status": "unknown",
-                "track": tr,
-                "ready": False,
-                "current_task": None,
-                "last_update": "never",
-                "source": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "status_age_seconds": None,
-            }
-            for t, tr in [("T1", "A"), ("T2", "B"), ("T3", "C")]
+_TERMINAL_TRACKS: Tuple[Tuple[str, str], ...] = (("T1", "A"), ("T2", "B"), ("T3", "C"))
+
+
+def _terminal_record_from_lease(lease: Optional[Dict[str, Any]], track: str) -> Dict[str, Any]:
+    """Project one ``terminal_leases`` row onto the terminals-block shape.
+
+    The vocabulary mirrors ``coordination_db.project_terminal_state`` so
+    readers of the block see the same statuses: ``leased`` is working,
+    ``expired``/``recovering`` is recovering, ``idle``/``released`` is idle.
+    An unknown enum value stays ``unknown`` and not ready — a state we cannot
+    name is never evidence that the terminal is free. No row means idle,
+    because the lease table is the measurement.
+    """
+    if not lease:
+        return {
+            "status": "idle",
+            "track": track,
+            "ready": True,
+            "last_update": "never",
+            "status_age_seconds": None,
+            "current_dispatch": None,
+            "source": "lease",
+            "lease_state": "idle",
         }
 
-    # Augment with lease state from DB
+    lease_state = str(lease.get("state") or "").strip()
+    if lease_state == "leased":
+        status = "working"
+    elif lease_state in {"expired", "recovering"}:
+        status = "recovering"
+    elif lease_state in {"idle", "released"}:
+        status = "idle"
+    else:
+        status = "unknown"
+
+    last_update = str(lease.get("last_heartbeat_at") or lease.get("leased_at") or "never")
+    last_seen = _parse_iso(last_update) if last_update != "never" else None
+    status_age_seconds = (
+        int((_now_utc() - last_seen).total_seconds()) if last_seen is not None else None
+    )
+    return {
+        "status": status,
+        "track": track,
+        "ready": status == "idle",
+        "last_update": last_update,
+        "status_age_seconds": status_age_seconds,
+        "current_dispatch": lease.get("dispatch_id") or None,
+        "source": "lease",
+        "lease_state": lease_state or "unknown",
+    }
+
+
+def _build_terminals(state_dir: Path) -> Dict[str, Any]:
+    """Terminal block from the lease rows only — no tmux probe.
+
+    T-B1 (terminal-binding-afbouwen): this block used to be filled through
+    ``canonical_state_views.build_terminal_snapshot``, which reconciles from
+    ``terminal_state.json`` and falls back to ``tmux list-panes -a``. The
+    block itself stays until T-B2 removes it together with its reader, but it
+    is now measured from one source: the ``terminal_leases`` row per terminal.
+    Building t0_state therefore never shells out to tmux and never depends on
+    a live tmux server.
+
+    A lease read that failed is ``unknown`` plus ``lease_error``, never idle.
+    """
+    terminals: Dict[str, Any] = {
+        tid: _terminal_record_from_lease(None, track) for tid, track in _TERMINAL_TRACKS
+    }
     try:
         from coordination_db import get_connection, get_lease
         with get_connection(state_dir) as conn:
-            for tid in ("T1", "T2", "T3"):
-                lease = get_lease(conn, tid)
-                terminals.setdefault(tid, {})["lease_state"] = (
-                    lease.get("state", "idle") if lease else "idle"
-                )
-                # Rename current_task -> current_dispatch for schema 2.0
-                terminals[tid]["current_dispatch"] = terminals[tid].pop("current_task", None)
+            for tid, track in _TERMINAL_TRACKS:
+                terminals[tid] = _terminal_record_from_lease(get_lease(conn, tid), track)
     except Exception as exc:
-        # Not "idle": a lease read that failed is unmeasured, and says why.
         log.warning("terminal lease read failed: %s", exc)
-        for tid in ("T1", "T2", "T3"):
-            terminals.setdefault(tid, {})["lease_state"] = "unknown"
-            terminals[tid]["lease_error"] = f"{type(exc).__name__}: {exc}"
-            if "current_task" in terminals.get(tid, {}):
-                terminals[tid]["current_dispatch"] = terminals[tid].pop("current_task")
+        for tid, track in _TERMINAL_TRACKS:
+            record = _terminal_record_from_lease(None, track)
+            record["status"] = "unknown"
+            record["ready"] = False
+            record["lease_state"] = "unknown"
+            record["lease_error"] = f"{type(exc).__name__}: {exc}"
+            terminals[tid] = record
 
     return terminals
 
