@@ -11,7 +11,7 @@ modules (linked below); this is the map.
 |---|---|---|---|
 | **Past** | What actually happened? | `t0_receipts.ndjson` + the NDJSON event ledgers | Append-only, immutable (ADR-005) |
 | **Current** | What is true right now? | `runtime_coordination.db` (tracks, dispatches, events) | Mutable, single-writer DAL |
-| **Future** | What do we intend to do? | the tracks database, reached through `vnx horizon` (`docs/core/HORIZON_PLANNING.md`) | Operator-edited through the verbs; `ROADMAP.yaml` is an optional file input, views are generated from it |
+| **Future** | What do we intend to do? | the tracks database, reached through `vnx horizon` (`docs/core/HORIZON_PLANNING.md`) | Operator-edited through the verbs; `ROADMAP.yaml` is only an example of the import format, imported when an operator names it |
 
 ### Past — the audit trail
 Every dispatch leaves an immutable receipt in `t0_receipts.ndjson`; every track
@@ -97,8 +97,10 @@ command reference. A track is born plan-gated: an `OI-PLAN-<track>` blocker keep
 it out of `done` until its plan passes the plan gate
 (`docs/core/HORIZON_LIFECYCLE.md`, ADR-030).
 
-`ROADMAP.yaml` is a file format that projects into that database in one direction.
-The file shipped in the repository is an illustrative example of the format.
+`ROADMAP.yaml` is a file format that imports into that database in one direction.
+The file shipped in the repository is an example of the format — not a plan
+source. No code reads it from a fixed or derived path: it is imported only when
+the operator names the file (ADR-047).
 `FEATURE_PLAN.md` and its generator (`scripts/build_feature_plan.py`) are gone
 (ADR-047). `PR_QUEUE.md` and its generator are gone too (ADR-047): the queue is
 read from the dispatch state. A feature entry
@@ -109,8 +111,10 @@ carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
 1. **Author.** You add a track with `vnx horizon add`, or add (or edit) a feature in
    a `ROADMAP.yaml`: `feature_id`, `status: planned`, `milestone`, `pr_queue: []`,
    `depends_on: []`.
-2. **Seed (roadmap file only).** `scripts/seed_tracks_from_roadmap.py --apply` projects each
-   feature into a track (one direction: ROADMAP → tracks). It maps
+2. **Import (a named file only).** `scripts/seed_tracks_from_roadmap.py --roadmap <file>
+   --apply` (or `vnx objective sync --roadmap <file> --apply`) imports each
+   feature of THAT file into a track (one direction: file → tracks). Without the
+   path both refuse and write nothing. It maps
    `status → phase`, `milestone → horizon`, `depends_on → track_dependencies`.
    It never writes ROADMAP and never advances a phase. Status≠phase drift is
    reported (`phase_drift`), never auto-resolved.
@@ -118,11 +122,11 @@ carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
    `proposed → ready` (your gate) `→ active → completed` and leaves a receipt.
 4. **Capture issues.** Issues found mid-flight become `track_open_items`. A
    `blocks` item gates the track out of `done` until resolved.
-5. **Merge.** A PR merges. The reconciler detects it from four evidence sources,
-   in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` → ROADMAP
-   `pr_queue` status → (default-ON since OI-1155, opt out `VNX_RECONCILE_GIT=0`)
-   live `gh pr list --state merged` (10-min cache). No local receipt is
-   required — git reality suffices.
+5. **Merge.** A PR merges. The reconciler detects it from three evidence
+   sources, in order: `pr_merged.ndjson` events → `t0_receipts.ndjson` →
+   (default-ON since OI-1155, opt out `VNX_RECONCILE_GIT=0`) live
+   `gh pr list --state merged` (10-min cache). A ROADMAP file is never read as
+   merge evidence. No local receipt is required — git reality suffices.
 6. **Reconcile (derived refresh).** `track_reconciler` computes `derived_status`
    independently of `phase`: blocker OI unresolved → `blocked`; unmet dependency
    → `blocked`; all dispatches terminal → `done` when any of: no `pr_ref` set,
@@ -145,8 +149,8 @@ carries `feature_id`, `status`, `milestone`, `pr_queue[]`, and `depends_on[]`.
      the phase to `done` along the shortest legal path, stamping `approval_id` +
      reason in `track_phase_history`. Requires `derived_status='done'`.
 
-   Either path writes to `track_phase_history`. ROADMAP stays untouched; views
-   regenerate.
+   Either path writes to `track_phase_history`. No plan file is written:
+   `ROADMAP.yaml` stays untouched.
 
 The only place structural drift can open is between step 6 (derived done) and
 step 8 (close). That window is deliberate — it is the boundary between advisory
@@ -166,13 +170,14 @@ automatically when wired into a cron or post-merge hook.
   The re-close guard reads that stamp on every subsequent reconcile run and skips
   the track (verdict `reopened_guard`) as long as `pr_ref` is unchanged — re-close
   is re-armed only when the operator sets a new `pr_ref`.
-- **Multi-source merge detection.** Four evidence sources mean a PR merged any
-  way (receipt, ledger, ROADMAP, or raw `gh pr merge`) still grounds the track.
+- **Multi-source merge detection.** Three evidence sources mean a PR merged any
+  way (receipt, ledger, or raw `gh pr merge`) still grounds the track. A ROADMAP
+  file is never read for it (ADR-047).
 - **Blocker + dependency gating.** Open `blocks` items and unmet `depends_on`
   edges hold a track out of `done` regardless of PR state.
-- **Generated view + CI guard.** `FEATURE_PLAN.md` is generated
-  and drift-checked; status lives in one place (ROADMAP `launch_state` +
-  `features[]`).
+- **Format guard.** `tests/test_roadmap_consistency.py` keeps the shipped
+  example `ROADMAP.yaml` format honest; track status lives in one place (the
+  tracks DB).
 - **Closure authority.** Declared phase advances to `done` via two paths: the
   automated reconcile loop (system actor, gh-verified evidence, `approval_id`
   stamped `auto-reconcile-<run-id>`) or a human `objective close` (explicit
@@ -185,7 +190,7 @@ automatically when wired into a cron or post-merge hook.
 |---|---|---|
 | Feature authored in ROADMAP | Manual | — |
 | Views regenerated | Auto (CI-checked) | — |
-| Tracks seeded | Auto/Manual | `VNX_AUTO_SEED_TRACKS` |
+| Tracks imported from a file | Manual | `--roadmap <file>` (ADR-047) |
 | Dispatch created/run | Auto | ready-promotion (you) |
 | PR merged | Auto (git) | — |
 | Merge detected / derived_status | Auto (reconciler) | advisory only |
@@ -208,13 +213,13 @@ subset check) require every PR in `pr_ref` to be MERGED before deriving or closi
 ## Where the mechanisms live
 
 - Track DAL + phase state machine: `scripts/lib/tracks.py`
-- Derived-status reconciler + 4-source merge detection: `scripts/lib/track_reconciler.py`
+- Derived-status reconciler + 3-source merge detection: `scripts/lib/track_reconciler.py`
 - Closing a track against merge evidence (`close_track_if_done`): `scripts/lib/track_reconciler_closure.py`
 - Batch auto-close reconcile loop: `scripts/lib/objective_reconcile.py`
 - `vnx horizon` / `vnx objective` verbs (`list`, `show`, `sync`, `drift`, `reconcile`, `close`, `reopen`, `link-pr` and the rest): `scripts/planning_cli.py`, reference in `docs/core/HORIZON_PLANNING.md`
 - Track lifecycle narrative (plan gate, close, auto-close): `docs/core/HORIZON_LIFECYCLE.md`
 - `t0_state.json` builder, including `live_work` and `pr_queue`: `scripts/build_t0_state.py`, `scripts/lib/pr_queue_state.py`
-- ROADMAP → tracks projection: `scripts/seed_tracks_from_roadmap.py`
+- ROADMAP-shaped file → tracks import (explicit `--roadmap` only): `scripts/seed_tracks_from_roadmap.py`
 - The generated `FEATURE_PLAN.md` view and its generator are gone (ADR-047)
 - Operational guide + known behaviours: `docs/operations/OBJECTIVE_RECONCILE.md`
 - Receipt / audit ledger contract: ADR-005, `docs/core/11_RECEIPT_FORMAT.md`

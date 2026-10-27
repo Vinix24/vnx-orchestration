@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""seed_tracks_from_roadmap.py — project authored ROADMAP.yaml into the tracks DB.
+"""seed_tracks_from_roadmap.py — import ONE ROADMAP-shaped file into the tracks DB.
 
-One-directional projection: ROADMAP.yaml `features[]` (the SINGLE authored
-planning surface) -> `tracks` rows via the tracks.py DAL. Phase 1 of the
-planning layer (NO-NODE model): TRACK = ROADMAP feature, one row per feature.
+This is an IMPORT TOOL, not a plan source: the tracks DB is the only plan
+source (ADR-047) and ROADMAP.yaml is an example of the format this reads. The
+file is therefore REQUIRED — the operator names it; nothing is autodetected
+from the project root, the CWD or an env var.
+
+One-directional projection of the named file: `features[]` -> `tracks` rows via
+the tracks.py DAL. Phase 1 of the planning layer (NO-NODE model): TRACK =
+feature, one row per feature.
 
 Idempotent + dry-run default:
-  python3 scripts/seed_tracks_from_roadmap.py            # DRY-RUN — prints plan, no writes
-  python3 scripts/seed_tracks_from_roadmap.py --apply    # writes rows + emits track events
-  python3 scripts/seed_tracks_from_roadmap.py --apply --project-id vnx-dev
-  python3 scripts/seed_tracks_from_roadmap.py --roadmap path/to/ROADMAP.yaml --state-dir /tmp/s
+  python3 scripts/seed_tracks_from_roadmap.py --roadmap <file>           # DRY-RUN, no writes
+  python3 scripts/seed_tracks_from_roadmap.py --roadmap <file> --apply   # writes + track events
+  python3 scripts/seed_tracks_from_roadmap.py --roadmap <file> --apply --project-id vnx-dev
+  python3 scripts/seed_tracks_from_roadmap.py --roadmap <file> --state-dir /tmp/s
 
 Drift handling (load-bearing):
   - row absent           -> created (in --apply)
@@ -29,8 +34,8 @@ Mapping (ROADMAP feature -> tracks row):
   depends_on      -> track_dependencies (kind=hard, derivation_source=manual)
   milestone       -> horizon            (1.0->now/next, 1.x->later)
 
-The seeder NEVER writes ROADMAP.yaml and NEVER runs --apply against the live DB
-on your behalf. Tests drive it against a temp DB + sample ROADMAP.
+The seeder NEVER writes the imported file and NEVER runs --apply against the
+live DB on your behalf. Tests drive it against a temp DB + a sample file.
 """
 
 from __future__ import annotations
@@ -414,10 +419,16 @@ def _print_report(report: dict[str, Any]) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Seed tracks from authored ROADMAP.yaml (dry-run default).")
+    parser = argparse.ArgumentParser(
+        description="Import one named ROADMAP-shaped file into the tracks DB "
+                    "(dry-run default; --roadmap is required).",
+    )
     parser.add_argument("--apply", action="store_true", help="write rows (default: dry-run, no writes)")
     parser.add_argument("--project-id", default=os.environ.get("VNX_PROJECT_ID", "vnx-dev"))
-    parser.add_argument("--roadmap", default=None, help="path to ROADMAP.yaml (default: project root)")
+    parser.add_argument(
+        "--roadmap", required=True, metavar="FILE",
+        help="the ROADMAP-shaped file to import (required: nothing is autodetected)",
+    )
     parser.add_argument("--state-dir", default=os.environ.get("VNX_STATE_DIR", ""),
                         help="state dir containing runtime_coordination.db")
     parser.add_argument("--report", default=None, help="write the JSON drift report to this path")
@@ -429,11 +440,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         from project_root import resolve_project_root
         state_dir = resolve_project_root(__file__) / ".vnx-data" / "state"
 
-    if args.roadmap:
-        roadmap_path = Path(args.roadmap)
-    else:
-        from project_root import resolve_project_root
-        roadmap_path = resolve_project_root(__file__) / "ROADMAP.yaml"
+    roadmap_path = Path(args.roadmap)
 
     try:
         report = seed(state_dir, roadmap_path, args.project_id, apply=args.apply)

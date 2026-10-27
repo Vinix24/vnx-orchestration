@@ -9,7 +9,7 @@ Verifies the additive pr_ref evidence path added in feat/reconciler-prref-eviden
 - Determinism: two runs over identical state produce identical derived_status
 - Dispatch-based path not regressed (tracks WITH matching dispatches still use it)
 - _load_merged_pr_numbers reads from pr_merged.ndjson (NDJSON source)
-- _load_merged_pr_numbers reads from ROADMAP.yaml (YAML source)
+- a ROADMAP.yaml at the repo root is NOT evidence (ADR-047: source 3 is gone)
 - _load_merged_pr_numbers returns empty frozenset when no files exist (graceful)
 - _parse_pr_number handles '#N', 'N', None, and malformed inputs
 """
@@ -50,8 +50,9 @@ PROJECT_ID = "test-ev-proj"
 def _build_db(tmp_path: Path, *, deep: bool = False) -> Path:
     """Return a state_dir with migrations 0022 + 0024 + 0027 + 0028 + 0032 applied.
 
-    deep=True uses tmp_path/.vnx-data/state so that state_dir.parent.parent == tmp_path,
-    matching the real project structure and allowing ROADMAP.yaml at tmp_path/ROADMAP.yaml.
+    deep=True uses tmp_path/.vnx-data/state, matching the real (central) project
+    structure — used where the test plants a ROADMAP.yaml at the repo root to
+    prove it is NOT read as merge evidence.
 
     0032 (track_pr_delivery) is included so this file's pr_ref+merged-evidence
     path is exercised on a store that CAN record delivery markings, same as
@@ -203,7 +204,7 @@ def test_parse_pr_number_whitespace():
 # ---------------------------------------------------------------------------
 
 def test_load_merged_empty_when_no_files(tmp_path):
-    """Returns empty frozenset when no NDJSON or ROADMAP.yaml exist."""
+    """Returns empty frozenset when no NDJSON ledger or receipt log exists."""
     state_dir = tmp_path / "state"
     state_dir.mkdir(parents=True)
     result = _load_merged_pr_numbers(state_dir)
@@ -229,36 +230,34 @@ def test_load_merged_from_pr_merged_ndjson(tmp_path):
     assert 999 not in result
 
 
-def test_load_merged_from_roadmap_yaml(tmp_path):
-    """Reads pr_queue[*].status=merged entries from ROADMAP.yaml."""
-    # state_dir must be two levels deep so state_dir.parent.parent == tmp_path
+def test_load_merged_ignores_roadmap_yaml_at_repo_root(tmp_path, monkeypatch):
+    """C2: a ROADMAP.yaml at the repo root names a PR no other source has, and
+    that PR is no longer evidence. Source 3 is gone (ADR-047) — the file is an
+    import example, not merge evidence."""
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = tmp_path / ".vnx-data" / "state"
     state_dir.mkdir(parents=True)
-    roadmap = tmp_path / "ROADMAP.yaml"
-    roadmap.write_text(
+    (tmp_path / "ROADMAP.yaml").write_text(
         "features:\n"
         "  - feature_id: feat-a\n"
         "    pr_queue:\n"
         "      - pr_id: '#800'\n"
         "        status: merged\n"
-        "      - pr_id: '#801'\n"
-        "        status: open\n"
         "  - feature_id: feat-b\n"
         "    pr_queue:\n"
         "      - pr_id: '#802'\n"
         "        status: merged\n",
         encoding="utf-8",
     )
-    # repo_root points Source-3 at the test-controlled ROADMAP.yaml deterministically
-    # (independent of the CWD git-root), which is the project repo root.
+    # An explicit repo_root used to point Source 3 at that file; it now only
+    # selects the gh cwd, and gh is opted out above.
     result = _load_merged_pr_numbers(state_dir, repo_root=tmp_path)
-    assert 800 in result
-    assert 802 in result
-    assert 801 not in result  # status=open, not merged
+    assert result == frozenset()
 
 
-def test_load_merged_combines_sources(tmp_path):
-    """Merges PR numbers from both NDJSON and ROADMAP.yaml."""
+def test_load_merged_combines_ledger_and_receipt_log(tmp_path, monkeypatch):
+    """Sources 1 and 2 both contribute; a root ROADMAP.yaml adds nothing."""
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = tmp_path / ".vnx-data" / "state"
     state_dir.mkdir(parents=True)
     events_dir = tmp_path / ".vnx-data" / "events"
@@ -267,13 +266,56 @@ def test_load_merged_combines_sources(tmp_path):
         json.dumps({"event_type": "pr_merged", "pr_number": 676}) + "\n",
         encoding="utf-8",
     )
+    (state_dir / "t0_receipts.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 677}) + "\n",
+        encoding="utf-8",
+    )
     (tmp_path / "ROADMAP.yaml").write_text(
         "features:\n  - feature_id: f\n    pr_queue:\n      - pr_id: '#757'\n        status: merged\n",
         encoding="utf-8",
     )
     result = _load_merged_pr_numbers(state_dir, repo_root=tmp_path)
     assert 676 in result
-    assert 757 in result
+    assert 677 in result
+    assert 757 not in result
+
+
+def test_done_derives_from_sources_1_and_2_identically(tmp_path, monkeypatch):
+    """The reconciler reaches the same 'done' with Source 3 gone: the #900 merge
+    sits in the receipt log (source 2) and #676 in the NDJSON ledger (source 1)."""
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    state_dir = _build_db(tmp_path)
+    _seed_track(state_dir, "T-ledger", pr_ref="#676")
+    _seed_track(state_dir, "T-receipt", pr_ref="#900")
+    (state_dir.parent / "events" / "pr_merged.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 676}) + "\n",
+        encoding="utf-8",
+    )
+    (state_dir / "t0_receipts.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 900}) + "\n",
+        encoding="utf-8",
+    )
+    for track_id in ("T-ledger", "T-receipt"):
+        result = track_reconciler.reconcile_track(state_dir, track_id, PROJECT_ID)
+        assert result["derived_status"] == "done", result
+
+
+def test_roadmap_claim_alone_never_derives_done(tmp_path, monkeypatch):
+    """A ROADMAP.yaml at the repo root naming the merge no other source has
+    leaves the track non-done — the file is not evidence (ADR-047 / C2)."""
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
+    state_dir = _build_db(tmp_path, deep=True)
+    _seed_track(state_dir, "T-roadmap-only", pr_ref="#901")
+    (tmp_path / "ROADMAP.yaml").write_text(
+        "features:\n  - feature_id: T-roadmap-only\n    pr_queue:\n"
+        "      - pr_id: '#901'\n        status: merged\n",
+        encoding="utf-8",
+    )
+    result = track_reconciler.reconcile_track(
+        state_dir, "T-roadmap-only", PROJECT_ID, repo_root=tmp_path,
+    )
+    assert result["derived_status"] != "done", result
+    assert _get_derived(state_dir, "T-roadmap-only") != "done"
 
 
 def test_load_merged_graceful_on_bad_ndjson(tmp_path):
@@ -481,8 +523,13 @@ def test_dispatch_path_not_regressed_in_progress_pr(tmp_path):
 # reconcile_all_tracks with evidence
 # ---------------------------------------------------------------------------
 
-def test_reconcile_all_tracks_prref_evidence(tmp_path):
-    """reconcile_all_tracks correctly applies pr_ref evidence to all tracks."""
+def test_reconcile_all_tracks_prref_evidence(tmp_path, monkeypatch):
+    """reconcile_all_tracks correctly applies pr_ref evidence to all tracks.
+
+    C2: the merged-PR set comes from sources 1/2 only. The repo-root
+    ROADMAP.yaml claims #999 merged too — it must change nothing.
+    """
+    monkeypatch.setenv("VNX_RECONCILE_GIT", "0")
     state_dir = _build_db(tmp_path, deep=True)
     # Track with pr_ref + merged: should derive 'done'
     _seed_track(state_dir, "T-all-a", pr_ref="#756")
@@ -494,10 +541,13 @@ def test_reconcile_all_tracks_prref_evidence(tmp_path):
     _seed_track(state_dir, "T-all-d", pr_ref=None)
     _seed_dispatch(state_dir, "D-all-d", "T-all-d", state="running")
 
-    # ROADMAP.yaml at the project repo root; repo_root threads it into Source-3
-    # deterministically (independent of the CWD git-root).
+    (state_dir.parent / "events" / "pr_merged.ndjson").write_text(
+        json.dumps({"event_type": "pr_merged", "pr_number": 756}) + "\n",
+        encoding="utf-8",
+    )
+    # A repo-root ROADMAP.yaml claiming #999 merged is NOT evidence any more.
     (tmp_path / "ROADMAP.yaml").write_text(
-        "features:\n  - feature_id: f\n    pr_queue:\n      - pr_id: '#756'\n        status: merged\n",
+        "features:\n  - feature_id: f\n    pr_queue:\n      - pr_id: '#999'\n        status: merged\n",
         encoding="utf-8",
     )
 

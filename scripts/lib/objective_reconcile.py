@@ -450,7 +450,7 @@ def _is_merged(pr_data: Optional[Dict[str, Any]]) -> bool:
 #
 #   merge_evidence_pr_numbers — the UNION primitive. Takes a set of
 #     gh-confirmed MERGED PR numbers and returns the union with the
-#     locally-loaded set (NDJSON + ROADMAP). run_reconcile calls this after its
+#     locally-loaded set (NDJSON receipts). run_reconcile calls this after its
 #     own gh sweep; gather_close_evidence calls this after the per-track sweep.
 #
 #   gather_close_evidence — the per-track gather the close verb uses. Resolves
@@ -465,7 +465,7 @@ def merge_evidence_pr_numbers(
 ) -> FrozenSet[int]:
     """Return the UNION of gh-confirmed MERGED PR numbers and the local set.
 
-    gh evidence is additive: it never replaces local NDJSON/ROADMAP evidence,
+    gh evidence is additive: it never replaces local NDJSON evidence,
     only adds what a bare ``gh pr merge`` never wrote locally. This is the
     exact union run_reconcile builds (step 4c) — extracted so the standalone
     close verb and the bulk sweep reach it through the SAME function and
@@ -716,12 +716,12 @@ def _persist_summary(state_dir: Path, summary: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 def _resolve_effective_repo_root() -> Path:
-    """Resolve a concrete project repo root for gh + ROADMAP evidence.
+    """Resolve a concrete project repo root for the gh merge-state lookups.
 
     Used when the caller passes ``repo_root=None``. Prefers the canonical
     PROJECT_ROOT (VNX_HOME + project-marker aware — never the keystone), then the
     CWD git-root, then the CWD. Always returns a real directory so ``gh``
-    subprocess ``cwd=`` and Source-3 resolution never receive ``None``.
+    subprocess ``cwd=`` never receives ``None``.
     """
     try:
         from vnx_paths import resolve_paths
@@ -810,10 +810,10 @@ def run_reconcile(
     Returns (summary_dict, exit_code) where exit_code is 0, 2, or 3.
     Never raises — all errors are captured in the summary and returned as exit 3.
 
-    ``repo_root`` may be None: gh PR lookups and the ROADMAP.yaml (Source-3)
-    evidence need a concrete project repo, so a None is resolved here to the
-    canonical PROJECT_ROOT / CWD git-root / CWD (mirroring track_reconciler's
-    None-handling) rather than degrading gh to ``cwd="None"`` (= absent).
+    ``repo_root`` may be None: the gh PR lookups need a concrete project repo,
+    so a None is resolved here to the canonical PROJECT_ROOT / CWD git-root /
+    CWD (track_reconciler's ``None``-handling) rather than degrading gh to
+    ``cwd="None"`` (= absent).
     """
     # None-tolerance: never pass None into gh (cwd="None") or downstream.
     if repo_root is None:
@@ -887,11 +887,11 @@ def run_reconcile(
     # merge`` (no local pr_merged receipt) derived 'queued' there — even though
     # reconcile itself just confirmed those PRs merged via gh. Threading the
     # evidence here lets the close path re-derive 'done' from evidence it
-    # ALREADY gathered (source 4, default-ON since OI-1155, makes its own
+    # ALREADY gathered (source 3, default-ON since OI-1155, makes its own
     # ``gh pr list`` call; this threading adds no per-PR ``gh pr view`` calls).
     #
     # The injected set is a UNION of the gh-confirmed MERGED PR numbers and the
-    # locally-loaded set (NDJSON + ROADMAP). Local evidence stays valid; gh
+    # locally-loaded set (NDJSON receipts). Local evidence stays valid; gh
     # only ADDS what a bare ``gh pr merge`` never wrote locally. No new per-PR
     # ``gh pr view`` calls: only MERGED results already fetched in step 4b are
     # extracted, so the --max-gh-calls cap still holds for the whole run.

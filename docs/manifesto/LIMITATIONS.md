@@ -1,6 +1,6 @@
 # Known Limitations & Scope
 
-> **Note on the model below (2026-07):** the fixed T0 + Track A/B/C + T-MANAGER terminal layout described in this "Tested" section is the **opt-in subprocess lane** (`VNX_ADAPTER_T{n}=subprocess`). The **default** since the door-flip is the single-entry dispatch door with **ephemeral per-dispatch workers** (spawned per task, leaving receipts + worktree state behind), not fixed terminals. See the README and `docs/core/DISPATCH_RULES.md` for the current lanes; live per-feature status lives in `ROADMAP.yaml`.
+> **Note on the model below (2026-07):** the fixed T0 + Track A/B/C + T-MANAGER terminal layout described in this "Tested" section is the **opt-in subprocess lane** (`VNX_ADAPTER_T{n}=subprocess`). The **default** since the door-flip is the single-entry dispatch door with **ephemeral per-dispatch workers** (spawned per task, leaving receipts + worktree state behind), not fixed terminals. See the README and `docs/core/DISPATCH_RULES.md` for the current lanes; live per-feature status lives in the tracks DB (`vnx objective list`), not in `ROADMAP.yaml` (ADR-047).
 
 ## Tested
 
