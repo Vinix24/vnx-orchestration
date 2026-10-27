@@ -151,6 +151,97 @@ def test_an_unmergeable_hooks_shape_is_refused(tmp_path, capsys, hooks):
     assert "refusing to touch its hooks" in capsys.readouterr().err
 
 
+# ── An unreadable handler refuses the merge before anything is written ─────
+
+
+def _settings_with_a_broken_handler(handler: object) -> dict:
+    """The measured consumer's file plus one handler the merge cannot read."""
+    existing = _settings_with_one_vnx_and_one_project_hook()
+    existing["hooks"]["PreToolUse"].append({"matcher": "Read", "hooks": [handler]})
+    return existing
+
+
+@pytest.mark.parametrize(("handler", "reason"), [
+    ("not-a-handler", "is not an object"),
+    ({"type": "command"}, "has no 'command' string"),
+    ({"type": "command", "command": None}, "has no 'command' string"),
+    ({"type": "command", "command": 12}, "has no 'command' string"),
+    ({"type": "command", "command": "   "}, "has no 'command' string"),
+    ({"type": 12, "command": "bash x.sh"}, ".type is not a string"),
+])
+def test_a_handlers_hooks_list_entry_that_cannot_be_read_is_refused(
+        tmp_path, capsys, handler, reason):
+    """A handler is classified by its command; an unreadable one refuses the merge.
+
+    Refreshing on a guess deletes a project hook (OI-2057), so the merge stops
+    before it changes anything and says which entry it could not read.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    existing = _settings_with_a_broken_handler(handler)
+
+    problem = engine._hooks_shape_error(existing["hooks"])
+    assert problem is not None, handler
+    assert problem.startswith("hooks.PreToolUse[2].hooks[0]"), problem
+    assert reason in problem
+
+    with pytest.raises(SystemExit) as raised:
+        engine.merge_settings(existing, _template(project))
+
+    assert raised.value.code == 1
+    assert "refusing to touch its hooks" in capsys.readouterr().err
+
+
+def test_a_group_whose_hooks_value_is_not_an_array_is_refused(tmp_path, capsys):
+    project = tmp_path / "project"
+    project.mkdir()
+    existing = _settings_with_one_vnx_and_one_project_hook()
+    existing["hooks"]["PreToolUse"].append({"matcher": "Read", "hooks": "not-a-list"})
+
+    problem = engine._hooks_shape_error(existing["hooks"])
+    assert problem == "hooks.PreToolUse[2].hooks is not an array"
+
+    with pytest.raises(SystemExit) as raised:
+        engine.merge_settings(existing, _template(project))
+    assert raised.value.code == 1
+    assert "refusing to touch its hooks" in capsys.readouterr().err
+
+
+def test_a_command_handler_without_a_type_is_still_a_command_handler():
+    """Real consumer files omit `type`; the command rule applies to those too."""
+    existing = _settings_with_a_broken_handler({"command": None})
+    assert engine._hooks_shape_error(existing["hooks"]) is not None
+
+
+def test_a_non_command_handler_is_left_to_validate_settings(tmp_path):
+    """A handler of another type carries no command to read — it is kept, not refused."""
+    project = tmp_path / "project"
+    project.mkdir()
+    existing = _settings_with_one_vnx_and_one_project_hook()
+    existing["hooks"]["PreToolUse"].append(
+        {"matcher": "Read", "hooks": [{"type": "prompt", "prompt": "be careful"}]})
+
+    assert engine._hooks_shape_error(existing["hooks"]) is None
+    merged = engine.merge_settings(existing, _template(project))
+    prompt_handlers = [handler for group in merged["hooks"]["PreToolUse"]
+                       if isinstance(group, dict) and group.get("matcher") == "Read"
+                       for handler in group.get("hooks") or []]
+    assert prompt_handlers == [{"type": "prompt", "prompt": "be careful"}]
+
+
+def test_the_cli_refuses_an_unreadable_handler_and_writes_nothing(tmp_path):
+    project, settings_path = _write_settings(
+        tmp_path, _settings_with_a_broken_handler({"type": "command"}))
+    before = settings_path.read_text(encoding="utf-8")
+
+    proc = _run_cli(project, tmp_path, "--merge", "--no-backup")
+
+    assert proc.returncode != 0
+    assert "refusing to touch its hooks" in proc.stderr
+    assert "hooks.PreToolUse[2].hooks[0] has no 'command' string" in proc.stderr
+    assert settings_path.read_text(encoding="utf-8") == before
+
+
 # ── The ownership rule, measured ──────────────────────────────────────────
 
 

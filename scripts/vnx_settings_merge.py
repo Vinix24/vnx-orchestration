@@ -25,6 +25,12 @@ VNX install's hook tree (a ``scripts/hooks/`` segment, or anything under the
 central install's ``/.vnx-system/``). Everything else is a project hook and is
 kept: the merge refreshes what VNX installed and never deletes what it did not.
 
+A handler that cannot be read at all — a non-object entry in a matcher group's
+``hooks`` list, or a ``type: command`` handler whose ``command`` is missing or
+not a string — refuses the merge before anything is written (``_hooks_shape_error``,
+exit 1). Refreshing on a guess is what deletes a project hook, so an unreadable
+handler is not treated as "no handler".
+
 Usage:
   python3 vnx_settings_merge.py --merge --project-root /path/to/project
   python3 vnx_settings_merge.py --full  --project-root /path/to/project
@@ -422,13 +428,58 @@ def merge_hooks(existing_hooks: dict, template_hooks: dict, *,
     return merged, report
 
 
+def _handler_shape_error(handler: object, where: str) -> str | None:
+    """Why this hook handler cannot be merged, or None when it can be read.
+
+    A handler is classified by its command, so a handler that is not an object,
+    or a ``type: command`` handler whose ``command`` is missing/not a string,
+    gives the merge nothing to read. Guessing there would either drop a project
+    hook or refresh one on a guess, so the merge refuses instead. A handler of
+    another type (``type`` absent, or a non-``command`` type) carries no command
+    to read and is left to ``validate_settings``: it is kept as a project hook,
+    which loses nothing.
+    """
+    if not isinstance(handler, dict):
+        return f"{where} is not an object"
+    handler_type = handler.get("type")
+    if handler_type is not None and not isinstance(handler_type, str):
+        return f"{where}.type is not a string"
+    if handler_type not in (None, "command"):
+        return None
+    command = handler.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return f"{where} has no 'command' string"
+    return None
+
+
 def _hooks_shape_error(hooks: object) -> str | None:
-    """Why this hooks tree cannot be merged, or None when it can be classified."""
+    """Why this hooks tree cannot be merged, or None when it can be classified.
+
+    The tree, every event's group list, and every group's handler list must be
+    readable before a merge touches anything: a handler the merge cannot read is
+    not evidence that it is VNX-owned, and refreshing on a guess deletes a
+    project hook. A group that is not an object is deliberately NOT refused here
+    — ``merge_hooks`` keeps it verbatim and ``validate_settings`` reports it, so
+    the merge still fails loudly without this function having to drop anything.
+    """
     if not isinstance(hooks, dict):
         return "'hooks' is not an object"
     for event, groups in hooks.items():
         if not isinstance(groups, list):
             return f"hooks.{event} is not an array"
+        for group_index, group in enumerate(groups):
+            if not isinstance(group, dict):
+                continue
+            handlers = group.get("hooks")
+            if handlers is None:
+                continue
+            if not isinstance(handlers, list):
+                return f"hooks.{event}[{group_index}].hooks is not an array"
+            for handler_index, handler in enumerate(handlers):
+                problem = _handler_shape_error(
+                    handler, f"hooks.{event}[{group_index}].hooks[{handler_index}]")
+                if problem:
+                    return problem
     return None
 
 
