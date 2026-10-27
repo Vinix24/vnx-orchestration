@@ -3,9 +3,10 @@
 :func:`salvage` preserves exactly one kind of tree state — the commits no
 ``origin`` ref reaches — and :func:`verify` answers ``[]`` only when every piece
 of the tree's state is that kind, positively checked. Any other status entry
-(tracked or staged change, submodule, unmerged path, untracked file), a tree
-without a readable HEAD, and every artifact whose evidence is unproven is a
-named problem: a dirty tree never verifies clean.
+(tracked or staged change, submodule, unmerged path, untracked file), a populated
+submodule (its commits ride in no bundle), a tree without a readable HEAD, and
+every artifact whose evidence is unproven is a named problem: a dirty tree never
+verifies clean.
 
 Each real run writes a directory of its own,
 ``dest_dir/<name>-<UTC %Y%m%dT%H%M%SZ>-<head[:8]>/``, created with ``os.mkdir``,
@@ -62,7 +63,7 @@ class SalvageResult:
     artifacts: list[str] = field(default_factory=list)  # paths relative to dest_dir
     manifest_line: str = ""
     written: bool = False
-    uncovered: list[str] = field(default_factory=list)  # status paths not preserved
+    uncovered: list[str] = field(default_factory=list)  # paths no artifact preserves
     worktree: Path | None = None  # where the tree was measured; verify re-reads it
 
 
@@ -130,6 +131,32 @@ def _status_paths(worktree_path: Path) -> list[str]:
         if entry[0] == "2":
             next(fields, None)  # a rename or copy names its source path too
     return paths
+
+
+def _populated_submodules(worktree_path: Path) -> list[str]:
+    """Every gitlink of the tree's index whose directory holds a checkout (a
+    ``.git`` inside it). A populated submodule keeps its commits in its own
+    object store, which no superproject bundle can carry, so those commits cannot
+    be proved present: dirty or clean, it is named. A gitlink whose checkout was
+    never made is not named — nothing local to lose. Read-only: index plus stat."""
+    raw = _run_git(["ls-files", "--stage", "-z"], worktree_path, "read gitlinks")
+    populated: list[str] = []
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        entry = os.fsdecode(chunk)
+        try:
+            meta, path = entry.split("\t", 1)
+            mode = meta.split(" ", 1)[0]
+        except ValueError:
+            raise SalvageError(f"read gitlinks: unparseable index entry {entry[:60]!r}")
+        if mode != "160000":
+            continue
+        if not path or os.path.isabs(path):
+            raise SalvageError(f"read gitlinks: gitlink names no path {entry[:60]!r}")
+        if os.path.lexists(os.path.join(worktree_path, path, ".git")):
+            populated.append(path)
+    return populated
 
 
 def _claim_dir(dest_dir: Path, base: str, *, create: bool) -> Path:
@@ -205,6 +232,11 @@ def salvage(
     # Read the tree's state before creating anything, so a dest_dir inside the
     # worktree cannot become a status entry of the tree it describes.
     uncovered = _status_paths(worktree_path)
+    # A populated submodule's commits are in no bundle this salvage writes; record
+    # it uncovered while the tree is still readable, before anything is written.
+    for path in _populated_submodules(worktree_path):
+        if path not in uncovered:
+            uncovered.append(path)
     artifacts = [f"{name}{BUNDLE_SUFFIX}"] if unpushed > 0 else []
     if not dry_run:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -341,6 +373,14 @@ def _tree_problems(result: SalvageResult) -> list[str]:
     if entries:
         rest = f" (+{len(entries) - 1} more)" if len(entries) > 1 else ""
         problems.append(f"tree has state this salvage does not cover: {entries[0]}{rest}")
+    try:
+        gitlinks = _populated_submodules(tree)
+    except SalvageError as exc:
+        return problems + [f"tree {result.name}: gitlinks unreadable: {exc}"]
+    # Dirty or clean, a populated submodule holds commits no bundle carried. One
+    # already refused above as a status entry needs no second line.
+    problems.extend(
+        f"submodule_not_preserved {path}" for path in gitlinks if path not in entries)
     return problems
 
 
