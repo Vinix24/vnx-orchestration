@@ -138,6 +138,35 @@ def test_queue_all_has_three_rows_with_prs(queue_state: Path, capsys):
     assert all(r["depends_on"] == [{"track": TRACK_B, "kind": "hard"}] for r in rows)
 
 
+def test_queue_does_not_read_a_non_round_row_as_the_deliverable_pr(tmp_path: Path, capsys):
+    """OI-2403: ``<id>-r0``/``<id>-rX``/``<id>-r`` are not rounds, so their PR is not the row's."""
+    state_dir = _build_db(tmp_path)
+    _seed_tracks(state_dir)
+    _insert_dispatch(
+        state_dir, "dlv-000000000004", state="ready",
+        output_ref="pr:dlv-000000000004", title="Only non-round rows",
+    )
+    for suffix in ("r0", "rX", "r"):
+        _insert_dispatch(
+            state_dir, f"dlv-000000000004-{suffix}", state="completed",
+            pr_ref="#77", updated_at="2026-01-05T00:00:00.000Z",
+        )
+    _insert_dispatch(
+        state_dir, "dlv-000000000005", state="ready",
+        output_ref="pr:dlv-000000000005", title="PR on a real round",
+    )
+    _insert_dispatch(
+        state_dir, "dlv-000000000005-r3", state="completed",
+        pr_ref="#88", updated_at="2026-01-06T00:00:00.000Z",
+    )
+
+    rc = _queue(state_dir, "--all", "--json")
+
+    assert rc == 0
+    ps = {r["deliverable"]: r["pr"] for r in json.loads(capsys.readouterr().out)}
+    assert ps == {"dlv-000000000004": None, "dlv-000000000005": 88}
+
+
 def test_queue_default_hides_done(queue_state: Path, capsys):
     rc = _queue(queue_state, "--json")
     assert rc == 0

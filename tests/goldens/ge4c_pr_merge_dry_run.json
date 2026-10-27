@@ -1,0 +1,16 @@
+{
+  "branch": "dispatch/ge-4c-golden",
+  "dispatch_id": "",
+  "dry_run": true,
+  "error": "dry_run: no merge executed",
+  "exit_code": 0,
+  "merge_method": "squash",
+  "overlaps": [],
+  "pr_number": 4409,
+  "pr_title": "GE-4c golden",
+  "receipt_ok": false,
+  "receipt_status": null,
+  "register_ok": false,
+  "success": true,
+  "target_repo": "vnx-test/target"
+}

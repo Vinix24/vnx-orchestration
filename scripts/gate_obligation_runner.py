@@ -2481,6 +2481,26 @@ def _rejected_evidence_note(gate: str, decision: Dict[str, Any]) -> str:
     )
 
 
+def _book_obligation_outcome(path: Path, **fields: Any) -> Dict[str, Any]:
+    """Book an obligation OUTCOME through ``gate_outcome``, under the result slot's lock (GE-4c).
+
+    The booking lands inside the slot lock the gate's record and its
+    ``review_gate_result`` receipt were written under, with the attempt identity
+    stamped as ``booked_for``; it returns the obligation record, like
+    ``update_obligation``. Only OUTCOMES go through here (fulfilled/failed/
+    not_executable because a run ended): scheduling state — claims, counters,
+    ``dispatch_still_running`` — keeps ``update_obligation``. ``fields`` must
+    name that record in ``result_path`` (every outcome booking does): it is the
+    slot whose lock this booking joins, never inferred from the obligation file.
+    """
+    from gate_outcome import GateObligation, commit_obligation_outcome  # deferred: it imports gate_recorder
+
+    record_path = fields.get("result_path")
+    if not record_path:
+        raise ValueError("an obligation outcome names the result record it books (result_path)")
+    return commit_obligation_outcome(GateObligation(path=path, fields=fields), result_path=Path(record_path))
+
+
 def _book_existing_evidence(
     path: Path,
     record: Dict[str, Any],
@@ -2527,7 +2547,7 @@ def _book_existing_evidence(
         fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
             evidence_path, gate, evidence_pr_number, dispatch_id,
         )
-        updated = update_obligation(
+        updated = _book_obligation_outcome(
             path,
             status=STATUS_FULFILLED,
             reason="fulfilled_by_existing_evidence",
@@ -2562,7 +2582,7 @@ def _book_existing_evidence(
     # producer_freshness.scan_gate_obligations's own "fulfilled /
     # not_executable / failed" doc comment).
     _passed, verdict_reason = _gate_is_pass(evidence_record)
-    updated = update_obligation(
+    updated = _book_obligation_outcome(
         path,
         status=STATUS_FAILED,
         reason="failed_by_existing_evidence",
@@ -3318,7 +3338,7 @@ def fulfill_obligation(
                 f"({verdict_reason}). Booked against {gate}'s obligation with "
                 f"resolved_by_gate={successor_gate!r} (D2e)."
             )
-            updated = update_obligation(
+            updated = _book_obligation_outcome(
                 path,
                 status=terminal,
                 pr_number=pr_number,
@@ -3402,7 +3422,7 @@ def fulfill_obligation(
                     if temp_reason == REASON_GATE_PARKED
                     else f"{temp_reason}_timeout"
                 )
-                update_obligation(
+                _book_obligation_outcome(
                     path,
                     status=STATUS_NOT_EXECUTABLE,
                     pr_number=pr_number,
@@ -3548,7 +3568,7 @@ def fulfill_obligation(
             fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
                 result_file, gate, pr_number, dispatch_id,
             )
-        updated = update_obligation(
+        updated = _book_obligation_outcome(
             path,
             status=terminal,
             pr_number=pr_number,
@@ -3586,7 +3606,7 @@ def fulfill_obligation(
             reason="runner_error",
             reason_detail=f"{type(exc).__name__}: {exc}",
         )
-        update_obligation(
+        _book_obligation_outcome(
             path,
             status=STATUS_NOT_EXECUTABLE,
             pr_number=pr_number,
