@@ -10,8 +10,10 @@ the totals, never in a group's sums. Money: two decimals here, unrounded in
 ``--json``.
 
 ``--by provider`` also carries the calibration of the same window (K5b) in ``--json``:
-the measured spend next to the ledger's metered sum, with the deviation in percent,
-or ``unavailable:<reason>`` — never a zero, and in no sum.
+the measured spend next to the ledger's metered sum over exactly the interval the
+observations measured (a run before the first or after the last observation is in
+neither), with the deviation in percent, or ``unavailable:<reason>`` — never a zero,
+and in no sum.
 
 Exit codes: 0 a report (incomplete too: it says so), 1 an unreadable ledger,
 2 usage (an unknown ``--by`` or a bad ``--since``).
@@ -25,9 +27,9 @@ import argparse
 import json
 import logging
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Mapping, Optional
+from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
@@ -121,16 +123,49 @@ def _ordered(report) -> List:
                   key=lambda item: (-(item[1].cost_usd + item[1].api_equivalent_usd), item[0]))
 
 
+LEDGER_WINDOW_UNREADABLE = account_observations.UNAVAILABLE + "ledger_window_unreadable"
+
+
+def _instant(value: object) -> Optional[datetime]:
+    """An ISO-8601 moment with a timezone, or ``None``: a moment without one is never guessed."""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _measured_cost(totals, delta: Mapping[str, object]) -> Tuple[Optional[float], Optional[str]]:
+    """The group's metered sum over exactly the interval the calibration measured, or why it has none.
+
+    A run is in the window by its effective ``occurred_from``, the field ``--since``
+    selects on too: the deviation is only a deviation when both sides cover the
+    same time, so a run before the first or after the last observation is in neither.
+    """
+    start, end = _instant(delta.get("measured_from")), _instant(delta.get("measured_to"))
+    if start is None or end is None:
+        return None, None
+    inside: Dict[str, Mapping[str, object]] = {}
+    for run_id, record in totals.runs.items():
+        moment = _instant(record.get("occurred_from"))
+        if moment is None:
+            return None, LEDGER_WINDOW_UNREADABLE
+        if start <= moment <= end:
+            inside[run_id] = record
+    return cost_ledger.totals_for_runs(inside).cost_usd, None
+
+
 def _calibration(name: str, totals, ledger: Path, since: Optional[str]) -> Dict[str, object]:
-    """The measured spend of the window next to the ledger's metered sum, or why it has no number."""
+    """The measured spend of the window next to the ledger's metered sum over that same window."""
     account = account_observations.account_for(name)
     if account is None:
         return {"account": None, "spend_usd": None, "observations": 0, "deviation_pct": None,
                 "unavailable": account_observations.NO_ACCOUNT, "ledger_cost_usd": totals.cost_usd}
     delta = account_observations.calibration_delta(account, since, ledger_path=ledger)
+    ledger_cost, window_reason = _measured_cost(totals, delta)
     return {"account": account, "spend_usd": delta["spend_usd"], "observations": delta["observations"],
-            "unavailable": delta["unavailable"], "ledger_cost_usd": totals.cost_usd,
-            "deviation_pct": account_observations.deviation_pct(totals.cost_usd, delta["spend_usd"])}
+            "unavailable": delta["unavailable"] or window_reason, "ledger_cost_usd": ledger_cost,
+            "deviation_pct": account_observations.deviation_pct(ledger_cost, delta["spend_usd"])}
 
 
 def _as_text(key: str, ledger: Path, since: Optional[str], report) -> str:

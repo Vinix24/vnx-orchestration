@@ -52,6 +52,8 @@ def _http(deepseek=None, openrouter=None):
 
 
 def _observation(provider: str, at: str, **values) -> dict:
+    if provider == "deepseek":
+        values.setdefault("currency", "USD")  # a balance is only spend in dollars (K5b round 2)
     record = {"schema": ao.SCHEMA, "kind": ao.KIND, "provider": provider, "observed_at": at,
               "values": values, "record_id": f"{provider}-{at}"}
     return record
@@ -145,6 +147,21 @@ def test_the_drop_of_the_total_balance_is_the_spend(store: Path):
     assert ao.deviation_pct(2.0, None) is None and ao.deviation_pct(2.0, 0.0) is None
 
 
+def test_a_balance_in_another_currency_has_no_dollar_spend(store: Path):
+    """Codex finding 2: two CNY observations never become ``spend_usd``, and USD is the only currency."""
+    path = _write_observations(ao.observations_path_for(store), [
+        _observation("deepseek", "2026-10-20T00:00:00Z", currency="CNY", total=100.0, topped_up=50.0),
+        _observation("deepseek", "2026-10-21T00:00:00Z", currency="CNY", total=90.0, topped_up=50.0)])
+    delta = ao.calibration_delta("deepseek", "2026-10-20", "2026-10-21", observations_path=path)
+    assert delta["spend_usd"] is None
+    assert delta["unavailable"] == "unavailable:currency_CNY"
+    mixed = _write_observations(path.parent / "mixed.ndjson", [
+        _observation("deepseek", "2026-10-20T00:00:00Z", currency="USD", total=100.0, topped_up=50.0),
+        _observation("deepseek", "2026-10-21T00:00:00Z", currency="CNY", total=90.0, topped_up=50.0)])
+    assert ao.calibration_delta("deepseek", "2026-10-20", "2026-10-21",
+                                observations_path=mixed)["unavailable"] == "unavailable:currency_mismatch"
+
+
 def test_a_window_without_two_observations_or_with_a_broken_line_has_no_number(store: Path):
     path = _write_observations(ao.observations_path_for(store), [
         _observation("deepseek", "2026-10-20T00:00:00Z", total=100.0, topped_up=50.0)])
@@ -154,6 +171,18 @@ def test_a_window_without_two_observations_or_with_a_broken_line_has_no_number(s
     broken.write_text(json.dumps({"schema": ao.SCHEMA, "kind": ao.KIND}) + "\n", encoding="utf-8")
     delta = ao.calibration_delta("deepseek", observations_path=broken)
     assert delta["spend_usd"] is None and "observations_unreadable" in delta["unavailable"]
+
+
+def test_a_valid_json_line_that_is_not_an_object_is_unreadable_and_the_rest_is_read(store: Path):
+    """Codex finding 3: a ``[1]`` line is no observation and must not crash the reader."""
+    path = ao.observations_path_for(store)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([1]) + "\n"
+                    + json.dumps(_observation("deepseek", "2026-10-20T00:00:00Z", total=100.0, topped_up=50.0))
+                    + "\n", encoding="utf-8")
+    records, unreadable = ao.read_observations(path)
+    assert unreadable == 1
+    assert [record["provider"] for record in records] == ["deepseek"]
 
 
 def test_an_openrouter_topup_does_not_move_the_usage_delta(store: Path):
@@ -206,6 +235,20 @@ def test_without_a_generation_source_the_usage_delta_is_used_and_labelled(store:
     assert coverage["usage_delta_usd"] == 4.0 and coverage["ledger_usd"] == 2.0
 
 
+@pytest.mark.parametrize("generation", [{"id": "gen-no-moment"},
+                                        {"id": "gen-garbage", "created_at": "not-a-moment"}])
+def test_a_generation_without_a_readable_timestamp_has_no_coverage_number(store: Path, generation: dict):
+    """Codex finding 4: a missing or invalid ``created_at`` is ``unavailable``, never a crash."""
+    cost_ledger.record_run(_run(f"{PROJECT}:dispatch:k5b-d6:1", provider="litellm:zai", model="glm-5.2"),
+                           ledger_path=store)
+    coverage = ao.openrouter_coverage(
+        "2026-10-20", "2026-10-20", env=ENV,
+        http_get=_http(None, ({"data": [generation]}, "")), ledger_path=store)
+    assert coverage["source"] == "usage_delta"
+    assert coverage["unavailable"] == "unavailable:no_generation_source: generation_without_created_at"
+    assert coverage["missed_catches"] == ()
+
+
 # ---------------------------------------------------------------------------
 # the report
 # ---------------------------------------------------------------------------
@@ -223,6 +266,25 @@ def test_the_report_carries_the_calibration_next_to_the_metered_sum(store: Path,
                                   "unavailable": None, "ledger_cost_usd": 2.0, "deviation_pct": -80.0}
     assert cost_ledger_report.main(["--ledger", str(store), "--by", "day"]) == 0
     assert "calibration" not in capsys.readouterr().out  # only --by provider carries it
+
+
+def test_ledger_runs_outside_the_measured_interval_do_not_move_the_deviation(store: Path, capsys):
+    """Codex finding 1: both sums cover the same interval, the one between the two observations."""
+    cost_ledger.record_run(_run(f"{PROJECT}:dispatch:k5b-d7:1", occurred_from="2026-10-19T09:00:00Z",
+                                occurred_to="2026-10-19T09:30:00Z", cost_usd=100.0), ledger_path=store)
+    cost_ledger.record_run(_run(f"{PROJECT}:dispatch:k5b-d7:2", cost_usd=2.0), ledger_path=store)
+    cost_ledger.record_run(_run(f"{PROJECT}:dispatch:k5b-d7:3", occurred_from="2026-10-22T09:00:00Z",
+                                occurred_to="2026-10-22T09:30:00Z", cost_usd=100.0), ledger_path=store)
+    _write_observations(ao.observations_path_for(store), [
+        _observation("deepseek", "2026-10-20T00:00:00Z", total=100.0, topped_up=50.0),
+        _observation("deepseek", "2026-10-21T00:00:00Z", total=90.0, topped_up=50.0)])
+    assert cost_ledger_report.main(["--ledger", str(store), "--by", "provider",
+                                    "--since", "2026-10-19", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(group for group in payload["groups"] if group["group"] == "deepseek-harness")
+    assert row["calibration"]["ledger_cost_usd"] == 2.0
+    assert row["calibration"]["spend_usd"] == 10.0
+    assert row["calibration"]["deviation_pct"] == -80.0
 
 
 def test_a_provider_without_an_account_says_so_instead_of_zero(store: Path, capsys):

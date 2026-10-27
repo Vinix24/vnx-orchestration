@@ -9,7 +9,10 @@ one record per provider under the ledger's own lock, held exclusively; a failing
 :func:`calibration_delta` reads a window's spend as the drop in the total balance and refuses to
 subtract a top-up from it: a rise of the *topped-up* balance makes that window say
 ``unavailable:topup_in_window`` while the windows around it stay unaffected (each step uses only its
-own two observations). :func:`openrouter_coverage` asks whether OpenRouter lists a key's generations:
+own two observations). Only a USD balance drop is dollars (``unavailable:currency_<code>``,
+``currency_mismatch`` across currencies, ``currency_unknown`` without one), and a measured result
+names the interval it measured so the ledger can be summed over that same interval.
+:func:`openrouter_coverage` asks whether OpenRouter lists a key's generations:
 when it can, a generation no ledger run covers is a missed catch; when it cannot, the ``total_usage``
 delta is set against the ledger's OpenRouter sum and the result says that detection has no source.
 """
@@ -172,12 +175,22 @@ def read_observations(
             record = json.loads(line)
         except ValueError:
             record = None
-        keyed = all(isinstance((record or {}).get(key), str) for key in ("provider", "observed_at"))
+        # Valid JSON that is not an object (``[1]``, ``null``) is no observation and no crash either.
+        if not isinstance(record, dict):
+            unreadable += 1
+            continue
+        keyed = all(isinstance(record.get(key), str) for key in ("provider", "observed_at"))
         if keyed and record.get("schema") == SCHEMA and record.get("kind") == KIND:
             records.append(record)
         else:
             unreadable += 1
     return records, unreadable
+
+
+def _currency(values: Mapping[str, Any]) -> Optional[str]:
+    """The upper-cased currency code of an observation's values, or ``None`` when it names none."""
+    code = values.get("currency")
+    return code.strip().upper() if isinstance(code, str) and code.strip() else None
 
 
 def _step(provider: str, earlier: Mapping[str, Any], later: Mapping[str, Any]):
@@ -189,6 +202,15 @@ def _step(provider: str, earlier: Mapping[str, Any], later: Mapping[str, Any]):
     if not isinstance(first, Mapping) or not isinstance(second, Mapping):
         return None, UNAVAILABLE + "observation_without_values"
     keys = ("total_usage",) if provider == "openrouter" else ("total", "topped_up")
+    if provider != "openrouter":
+        # A balance drop is dollars only when both sides say USD: never compare another currency to the ledger.
+        earlier_currency, later_currency = _currency(first), _currency(second)
+        if earlier_currency is None or later_currency is None:
+            return None, UNAVAILABLE + "currency_unknown"
+        if earlier_currency != later_currency:
+            return None, UNAVAILABLE + "currency_mismatch"
+        if earlier_currency != "USD":
+            return None, UNAVAILABLE + "currency_" + earlier_currency
     numbers = [_amount(values.get(key)) for values in (first, second) for key in keys]
     if any(number is None for number in numbers):
         return None, UNAVAILABLE + "observation_without_values"
@@ -208,10 +230,13 @@ def calibration_delta(
     """The spend of ``[since, until]`` for ``provider``: the drop in the balance, never a top-up.
 
     Bounds are ISO-8601 or ``YYYY-MM-DD`` (``until`` of a bare date covers that day, ``None`` is open).
+    A measured result names the interval it actually measured (``measured_from`` to
+    ``measured_to``, the first and the last observation used), so a reader can sum
+    the ledger over exactly that interval: a run before or after it is no deviation.
     """
     def no(reason: str, count: int = 0) -> Dict[str, Any]:
         return {"provider": provider, "since": since, "until": until, "observations": count,
-                "spend_usd": None, "unavailable": reason}
+                "spend_usd": None, "unavailable": reason, "measured_from": None, "measured_to": None}
 
     records, unreadable = read_observations(observations_path, ledger_path=ledger_path)
     if unreadable:
@@ -236,7 +261,8 @@ def calibration_delta(
             return no(reason, len(window))
         spend += amount
     return {"provider": provider, "since": since, "until": until, "observations": len(window),
-            "spend_usd": round(spend, 8), "unavailable": None}
+            "spend_usd": round(spend, 8), "unavailable": None,
+            "measured_from": window[0][0].isoformat(), "measured_to": window[-1][0].isoformat()}
 
 
 def deviation_pct(ledger_cost: Optional[float], spend: Optional[float]) -> Optional[float]:
@@ -246,7 +272,12 @@ def deviation_pct(ledger_cost: Optional[float], spend: Optional[float]) -> Optio
 
 
 def _generations(env: Mapping[str, str], http_get, since: Optional[str], until: Optional[str]):
-    """``(generation ids, None)`` when the API lists them, else ``(None, unavailable)``."""
+    """``([(id, created_at)], None)`` when the API lists them, else ``(None, unavailable)``.
+
+    A listed entry without a string id or a readable ``created_at`` makes the whole
+    listing unusable: coverage cannot say which run covers it, so it says that
+    instead of comparing a moment with ``None``.
+    """
     key = provider_usage.resolve_openrouter_api_key(dict(env))
     if not key:
         return None, UNAVAILABLE + "no_generation_source: no OPENROUTER_API_KEY"
@@ -255,7 +286,16 @@ def _generations(env: Mapping[str, str], http_get, since: Optional[str], until: 
     data = body.get("data") if isinstance(body, Mapping) else None
     if not isinstance(data, list):
         return None, UNAVAILABLE + "no_generation_source: " + (reason or "onverwacht antwoord")
-    return [item for item in data if isinstance(item, Mapping) and isinstance(item.get("id"), str)], None
+    listed: List[Tuple[str, datetime]] = []
+    for item in data:
+        identifier = item.get("id") if isinstance(item, Mapping) else None
+        created_at = _moment(item.get("created_at")) if isinstance(item, Mapping) else None
+        if not isinstance(identifier, str) or not identifier:
+            return None, UNAVAILABLE + "no_generation_source: generation_without_id"
+        if created_at is None:
+            return None, UNAVAILABLE + "no_generation_source: generation_without_created_at"
+        listed.append((identifier, created_at))
+    return listed, None
 
 
 def openrouter_coverage(
@@ -276,9 +316,10 @@ def openrouter_coverage(
     delta = calibration_delta("openrouter", since, until, observations_path=observations_path,
                               ledger_path=ledger)
     generations, why = _generations(dict(os.environ) if env is None else env, http_get, since, until)
-    missed = () if generations is None else tuple(item["id"] for item in generations if not any(
-        start is not None and end is not None and start <= _moment(item.get("created_at")) <= end
-        for start, end in windows))
+    missed = () if generations is None else tuple(
+        identifier for identifier, created_at in generations
+        if not any(start is not None and end is not None and start <= created_at <= end
+                   for start, end in windows))
     return {"since": since, "until": until, "source": "usage_delta" if generations is None else "generations",
             "missed_catches": missed, "ledger_runs": len(runs), "usage_delta_usd": delta["spend_usd"],
             "ledger_usd": None if None in amounts else round(sum(amounts), 8), "unavailable": why}
