@@ -1578,6 +1578,16 @@ def aggregate_groups(
     return GroupedTotals(key=key, groups=_groups_of(key, totals.runs), totals=totals)
 
 
+def totals_for_runs(runs: Mapping[str, Mapping[str, Any]]) -> LedgerTotals:
+    """A :class:`LedgerTotals` over these effective records, summed as :func:`aggregate_runs` does.
+
+    For a caller that already holds one read's records and needs the same sums
+    over a subset of them (the report's calibration window); the read-level
+    counts are zero, they belong to the read, never to a subset of it.
+    """
+    return _totals_with(runs)
+
+
 def _groups_of(key: str, runs: Mapping[str, Mapping[str, Any]]) -> Dict[str, LedgerTotals]:
     """``{group: LedgerTotals}`` for these effective runs; the read-level counts stay on the result's totals."""
     grouped: Dict[str, Dict[str, Mapping[str, Any]]] = {}
