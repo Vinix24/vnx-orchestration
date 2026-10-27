@@ -147,8 +147,9 @@ Cause: #2266 (`d0139cd3`) added `from gate_artifacts import _compute_contract_ha
 `sys.path`. Entry points that put only `scripts/lib` on the path — `scripts/analysis/*` and a
 standalone test — failed at import time.
 
-Fix (`scripts/lib/governance_receipts.py`, 12 added lines): make the facade's own directory
-importable before the import, the same guard `scripts/lib/context_rotation.py:45-46` uses. The
+Fix (`scripts/lib/governance_receipts.py`, +22/−11): import the facade through a small
+`_load_append_receipt()` that puts the facade's own directory on `sys.path` first — the same
+self-bootstrap `scripts/lib/context_rotation.py:45-46` does, without an `E402` `# noqa`. The
 facade itself must stay the import — importing `append_receipt_internals` alone is not
 equivalent, because `append_receipt_payload` reads the `common.facade` proxy, which is only
 populated when the facade module registers (`scripts/lib/append_receipt_internals/common.py:63-97`).

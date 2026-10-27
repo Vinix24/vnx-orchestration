@@ -4,22 +4,33 @@
 from __future__ import annotations
 
 import datetime as dt
+import importlib
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-# ``append_receipt`` is the facade at ``scripts/append_receipt.py``, one level
-# above this package; the internals need its registration (the ``facade``
-# proxy), so importing ``append_receipt_internals`` alone is not equivalent.
-# An entry point that puts only ``scripts/lib`` on sys.path (scripts/analysis/*,
-# a standalone test) would fail the bare import, so make the facade's own
-# directory importable first — the same guard ``context_rotation`` uses.
-_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
-
-from append_receipt import AppendReceiptError, append_receipt_payload
 from dispatch_identity import validate_receipt_kind
+
+
+def _load_append_receipt():
+    """Import the ``scripts/append_receipt.py`` facade, making its dir importable.
+
+    ``append_receipt_payload`` reads the ``common.facade`` proxy, which is only
+    populated when the facade module registers, so importing
+    ``append_receipt_internals`` alone is not equivalent. A lib-only entry point
+    (``scripts/analysis/*``, a standalone test) has ``scripts/lib`` on sys.path
+    but not ``scripts/``, where the facade lives, so put it there first — the
+    same self-bootstrap ``context_rotation`` does.
+    """
+    scripts_dir = str(Path(__file__).resolve().parent.parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    return importlib.import_module("append_receipt")
+
+
+_append_receipt = _load_append_receipt()
+AppendReceiptError = _append_receipt.AppendReceiptError
+append_receipt_payload = _append_receipt.append_receipt_payload
 
 
 def utc_now_iso() -> str:
