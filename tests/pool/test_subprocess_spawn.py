@@ -128,8 +128,12 @@ class TestSpawnViaProviderDispatch:
         cmd = call_args[0][0]
         assert "--terminal-id" in cmd
         assert "T1" in cmd
-        assert "--role" in cmd
-        assert "backend-developer" in cmd
+        # T-D0: the default worker is the single-claim pool runner (the door route); it
+        # claims its own dispatch, so --role/--dispatch-id/--instruction are its legacy
+        # rollback args, not its default ones.
+        assert "scripts.lib.pool_worker_runner" in " ".join(cmd)
+        assert "--project-id" in cmd
+        assert "--pool-id" in cmd
         assert call_args[1]["cwd"] == "/tmp/fake-worktree"
 
     @patch("pool_worktree_manager.create_worker_worktree")
@@ -183,15 +187,18 @@ class TestSpawnViaProviderDispatch:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_command_includes_dispatch_id(self, mock_kill, mock_popen, mock_wt):
+    def test_rollback_command_includes_dispatch_id(self, mock_kill, mock_popen, mock_wt):
+        """VNX_SINGLE_ENTRY_DISPATCH=0 keeps the legacy worker and its dispatch-id."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 200
         mock_popen.return_value = mock_proc
 
-        _spawn_via_provider_dispatch(
-            "vnx-dev", "default", "T1", "claude", "backend-developer"
-        )
+        with patch.dict(os.environ, {"VNX_SINGLE_ENTRY_DISPATCH": "0",
+                                     "VNX_DISPATCH_LEGACY": ""}):
+            _spawn_via_provider_dispatch(
+                "vnx-dev", "default", "T1", "claude", "backend-developer"
+            )
 
         cmd = mock_popen.call_args[0][0]
         assert "--dispatch-id" in cmd
@@ -201,15 +208,18 @@ class TestSpawnViaProviderDispatch:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_spawn_command_includes_instruction(self, mock_kill, mock_popen, mock_wt):
+    def test_rollback_command_includes_instruction(self, mock_kill, mock_popen, mock_wt):
+        """The rollback worker still carries the generic pool instruction."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 300
         mock_popen.return_value = mock_proc
 
-        _spawn_via_provider_dispatch(
-            "vnx-dev", "my-pool", "T2", "claude", "code-reviewer"
-        )
+        with patch.dict(os.environ, {"VNX_SINGLE_ENTRY_DISPATCH": "0",
+                                     "VNX_DISPATCH_LEGACY": ""}):
+            _spawn_via_provider_dispatch(
+                "vnx-dev", "my-pool", "T2", "claude", "code-reviewer"
+            )
 
         cmd = mock_popen.call_args[0][0]
         assert "--instruction" in cmd
@@ -434,9 +444,11 @@ class TestSpawnNegativePaths:
         mock_proc.pid = 400
         mock_popen.return_value = mock_proc
 
-        result = _spawn_via_provider_dispatch(
-            "vnx-dev", "default", "T1", "claude", ""
-        )
+        with patch.dict(os.environ, {"VNX_SINGLE_ENTRY_DISPATCH": "0",
+                                     "VNX_DISPATCH_LEGACY": ""}):
+            result = _spawn_via_provider_dispatch(
+                "vnx-dev", "default", "T1", "claude", ""
+            )
 
         assert result.success is True
         assert result.pid == 400

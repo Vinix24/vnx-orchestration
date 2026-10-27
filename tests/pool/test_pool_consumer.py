@@ -2,10 +2,12 @@
 
 Verifies:
 - Flag on  → _spawn_via_provider_dispatch uses pool_worker_runner (not subprocess_dispatch)
-- Flag off → unchanged generic "Pool worker" instruction (no regression)
+- Door default (T-D0, 2026-10-27) → pool_worker_runner too; the consumer flag no longer
+  selects between the two workers on its own
+- VNX_SINGLE_ENTRY_DISPATCH=0 → the legacy subprocess_dispatch worker (rollback net)
 - PoolManager.tick() with 6 queued dispatches + flag on spawns runner for each worker
 - pool_id passed through to runner args
-- Exact-match on '1': other values keep legacy path
+- Exact-match on '1': other values do not force the runner
 
 ADR-007: project_id-scoped pool lease + dispatch match (FM-4).
 ADR-018: pool sizing via tick (Rule 2); single-claim, no loop.
@@ -113,14 +115,16 @@ class TestConsumerFlagOnSpawn:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_off_keeps_generic_instruction(self, mock_kill, mock_popen, mock_wt):
-        """Flag unset → subprocess_dispatch with generic 'Pool worker' instruction — no regression."""
+    def test_flag_unset_uses_door_route(self, mock_kill, mock_popen, mock_wt):
+        """Flag unset → the door route (pool_worker_runner), not the legacy worker (T-D0)."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 33333
         mock_popen.return_value = mock_proc
 
-        env = {k: v for k, v in os.environ.items() if k != "VNX_POOL_TASK_CONSUMER"}
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("VNX_POOL_TASK_CONSUMER", "VNX_SINGLE_ENTRY_DISPATCH",
+                            "VNX_DISPATCH_LEGACY")}
         with patch.dict(os.environ, env, clear=True):
             result = _spawn_via_provider_dispatch(
                 "vnx-dev", "default", "T3", "claude", "code-reviewer"
@@ -129,29 +133,30 @@ class TestConsumerFlagOnSpawn:
         assert result.success is True
         cmd = mock_popen.call_args[0][0]
         cmd_str = " ".join(cmd)
-        assert "subprocess_dispatch" in cmd_str
-        assert "--instruction" in cmd
-        instr_idx = cmd.index("--instruction") + 1
-        assert "Pool worker T3" in cmd[instr_idx]
-        assert "default" in cmd[instr_idx]
+        assert "pool_worker_runner" in cmd_str
+        assert "subprocess_dispatch" not in cmd_str
+        assert "--instruction" not in cmd
 
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_flag_value_0_uses_generic_instruction(self, mock_kill, mock_popen, mock_wt):
-        """VNX_POOL_TASK_CONSUMER=0 (not '1') keeps legacy path — exact string match."""
+    def test_flag_value_0_keeps_legacy_path_only_when_door_is_rolled_back(self, mock_kill, mock_popen, mock_wt):
+        """VNX_POOL_TASK_CONSUMER=0 (not '1') does not name a route; the door rollback does."""
         mock_wt.return_value = Path("/tmp/fake-worktree")
         mock_proc = MagicMock()
         mock_proc.pid = 44444
         mock_popen.return_value = mock_proc
 
-        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "0"}):
+        with patch.dict(os.environ, {"VNX_POOL_TASK_CONSUMER": "0",
+                                     "VNX_SINGLE_ENTRY_DISPATCH": "0",
+                                     "VNX_DISPATCH_LEGACY": ""}):
             result = _spawn_via_provider_dispatch(
                 "vnx-dev", "default", "T4", "claude", "backend-developer"
             )
 
         assert result.success is True
         cmd = mock_popen.call_args[0][0]
+        assert "subprocess_dispatch" in " ".join(cmd)
         assert "--instruction" in cmd
         assert "Pool worker T4" in cmd[cmd.index("--instruction") + 1]
 
@@ -279,8 +284,8 @@ class TestPoolManagerConsumerIntegration:
     @patch("pool_worktree_manager.create_worker_worktree")
     @patch("pool_manager.subprocess.Popen")
     @patch("pool_manager.os.kill")
-    def test_tick_flag_off_unchanged_with_dispatches(self, mock_kill, mock_popen, mock_wt, tmp_path):
-        """Flag off + 6 queued dispatches → existing generic instruction still used (no regression)."""
+    def test_tick_rollback_restores_legacy_worker(self, mock_kill, mock_popen, mock_wt, tmp_path):
+        """VNX_SINGLE_ENTRY_DISPATCH=0 + 6 queued dispatches → the legacy worker again."""
         wt = tmp_path / "worktrees" / "worker"
         wt.mkdir(parents=True)
         mock_wt.return_value = wt
@@ -293,7 +298,9 @@ class TestPoolManagerConsumerIntegration:
 
         mgr = PoolManager("vnx-dev", "default", db_path)
 
-        env = {k: v for k, v in os.environ.items() if k != "VNX_POOL_TASK_CONSUMER"}
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("VNX_POOL_TASK_CONSUMER", "VNX_DISPATCH_LEGACY")}
+        env["VNX_SINGLE_ENTRY_DISPATCH"] = "0"
         with patch.dict(os.environ, env, clear=True):
             result = mgr.tick()
 

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
@@ -542,6 +542,51 @@ def result_file_path(
     return None
 
 
+class RequestOnDisk(NamedTuple):
+    """The request record on a slot, read under that slot's own lock (GE-4c round 2).
+
+    ``present`` and ``record`` are two fields and not one, because "no request
+    was ever written here" and "a request is here that nobody can read" are
+    different facts: the first says there is nothing to overwrite, the second
+    says there may be, and neither is evidence that the caller's request is the
+    one the slot holds.
+    """
+
+    path: Path
+    present: bool
+    record: Optional[Dict[str, Any]]
+
+
+class RequestRefusal(NamedTuple):
+    """A request write a guard refused: the refusal's name and detail, and the record it decided on.
+
+    ``on_disk`` is the record the guard actually read, under the same lock it
+    refused under, so a caller never has to re-read a slot to explain itself.
+    """
+
+    reason: str
+    detail: str
+    on_disk: RequestOnDisk
+
+
+def read_request_record(path: Path) -> RequestOnDisk:
+    """The request record at ``path``; a missing file and an unreadable one stay distinguishable."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return RequestOnDisk(path=path, present=False, record=None)
+    # An unreadable request is a REFUSAL for the caller (``present=True,
+    # record=None``), never "nothing here": the two states lead to opposite
+    # decisions, so this one is returned rather than folded into the absent case.
+    except OSError:
+        return RequestOnDisk(path=path, present=True, record=None)
+    try:
+        record = json.loads(raw)
+    except json.JSONDecodeError:
+        return RequestOnDisk(path=path, present=True, record=None)
+    return RequestOnDisk(path=path, present=True, record=record if isinstance(record, dict) else None)
+
+
 def persist_request(
     requests_dir: Path,
     gate: str,
@@ -549,17 +594,32 @@ def persist_request(
     *,
     pr_number: Optional[int],
     pr_id: str,
-) -> None:
+    refuse_if: Optional[Callable[[RequestOnDisk], Optional[Tuple[str, str]]]] = None,
+) -> Optional[RequestRefusal]:
     """Write a request atomically under its own slot lock (GE-4b); a reader never sees half of one.
 
     The file name is the result slot's (:func:`result_file_path`). ``commit_gate_outcome`` takes
     this lock inside the result slot's lock, never the other way round.
+
+    ``refuse_if`` (GE-4c round 2): a guard evaluated under the SAME lock,
+    against the request record that is on the slot right now, before the
+    write. A ``(reason, detail)`` pair it returns is a named refusal: nothing
+    is written and the refusal comes back as a :class:`RequestRefusal` with the
+    record it was decided on. The guard runs inside the lock on purpose --
+    reading the slot first and writing after is the race (a concurrent retry
+    landing in between) the guard exists to close.
     """
     path = result_file_path(requests_dir, gate, pr_number, pr_id)
     if path is None:
-        return
+        return None
     with slot_lock(path):
+        if refuse_if is not None:
+            on_disk = read_request_record(path)
+            refusal = refuse_if(on_disk)
+            if refusal:
+                return RequestRefusal(reason=refusal[0], detail=refusal[1], on_disk=on_disk)
         atomic_write_json(path, payload)
+    return None
 
 
 def _repo_root() -> Path:
@@ -2332,6 +2392,11 @@ def record_not_executable(
         )
         request = GateRequest(
             requests_dir, request_payload, {"reason": reason, "reason_detail": reason_detail, "resolved_at": now},
+            # Its own end, named: this request reports the runner's refusal, and a
+            # refused write must not turn that diagnosis into ``failed``/``write_refused``
+            # (GE-4c step 9, OI-1707). ``not_executable`` is terminal, so the retry
+            # still short-circuits instead of re-running the refusal.
+            status="not_executable",
         )
         payload_on_disk, written = commit_gate_outcome(
             outcome, results_dir=results_dir, result_path=rf, audit_refusal=False, request=request,
