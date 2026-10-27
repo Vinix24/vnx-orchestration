@@ -26,6 +26,7 @@ running the real merge-door invariant chain over real report files.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,6 +51,8 @@ pytestmark = pytest.mark.usefixtures("attributed_forge_target")
 
 HEAD = "c" * 40
 OTHER_HEAD = "d" * 40
+#: The head the cap fell on: a different head than the one a PASS is booked on.
+CAP_HEAD = "a" * 40
 PR_NUMBER = 4242
 PR_ID = str(PR_NUMBER)
 BRANCH = "dispatch/20260908-golfb-b3-samenvattende-check"
@@ -135,6 +138,55 @@ def _write(results_dir: Path, gate: str, record: Dict[str, Any]) -> Path:
     path = results_dir / f"pr-{PR_NUMBER}-{gate}.json"
     path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# A capped PR in a canonical store (RG-2)
+# ---------------------------------------------------------------------------
+
+
+def _round_line(head: str, verdict: str, blockers: int, *, at: int, report: str = "") -> Dict[str, Any]:
+    return {
+        "project_id": "", "pr_number": PR_NUMBER, "head_sha": head, "seat": "codex_gate",
+        "reviewer": "codex_gate", "takeover_from": "", "verdict": verdict,
+        "blocking_count": blockers,
+        "report_path": report or f"/r/20261027-{at:02d}-codex.md",
+        "dispatch_id": f"20261027-rg2-{at}", "recorded_at": f"2026-10-27T09:0{at}:00Z",
+        "branch": BRANCH, "source": "gate",
+    }
+
+
+def _capped_store(tmp_path: Path, monkeypatch) -> Path:
+    """A B3.1-capped PR with a codex PASS on HEAD, in ``.../review_gates/results``.
+
+    The cap fell on CAP_HEAD (three blockers in one round). Only the cap keeps
+    the PASS on HEAD from filling the codex seat; an override reason is what the
+    door hands over to let it count.
+    """
+    pin_review_stack(monkeypatch, "codex_gate")
+    results = tmp_path / "state" / "review_gates" / "results"
+    results.mkdir(parents=True)
+    record = _record(tmp_path, "codex_gate")
+    _write(results, "codex_gate", record)
+    opened = {"kind": "opened", "project_id": "", "pr_number": PR_NUMBER, "basis": "new",
+              "evidence": 0, "recorded_at": "2026-10-27T09:00:00Z", "source": "gate"}
+    lines = [opened, _round_line(CAP_HEAD, "fail", 3, at=1),
+             _round_line(HEAD, "pass", 0, at=2, report=record["report_path"])]
+    (results.parent / "rounds.ndjson").write_text(
+        "".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8"
+    )
+    return results
+
+
+def _stub_publication(monkeypatch, *, current_head: str = HEAD) -> "_Recorder":
+    """Replace the client, the App config, auto-merge and the PR's current head."""
+    recorder = _Recorder()
+    monkeypatch.setattr(fgp, "publish_check_run", recorder)
+    monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
+    monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda pr, repo=None: False)
+    monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
+    monkeypatch.setattr(fgp, "_resolve_head_sha", lambda pr, repo: current_head)
+    return recorder
 
 
 @pytest.fixture(autouse=True)
@@ -429,6 +481,125 @@ class TestReviewPublication:
         fgp.publish_review_summary(PR_NUMBER, HEAD, results_dir=results_dir, branch=BRANCH)
 
         assert recorder.calls[0]["conclusion"] == fgp.CONCLUSION_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# The cap and the override on the required check (RG-2, OI-2143)
+# ---------------------------------------------------------------------------
+
+
+class TestTheCapAndTheOverride:
+    def test_a_capped_head_without_an_override_keeps_the_check_red(self, tmp_path, monkeypatch):
+        """Acceptance 2: today's rule, pinned — the cap alone keeps the check red."""
+        results = _capped_store(tmp_path, monkeypatch)
+        recorder = _stub_publication(monkeypatch)
+
+        payload = fgp.publish_review_summary(PR_NUMBER, HEAD, results_dir=results, branch=BRANCH)
+
+        assert payload["conclusion"] == fgp.CONCLUSION_FAILURE
+        assert recorder.calls[0]["conclusion"] == fgp.CONCLUSION_FAILURE
+        assert "B3.1" in payload["summary"] and "B3 override" not in payload["summary"]
+
+    def test_an_override_reason_turns_the_same_head_green_and_is_on_the_summary(
+        self, tmp_path, monkeypatch
+    ):
+        """Acceptance 1: ``override_b3`` on a capped head publishes ``success``."""
+        results = _capped_store(tmp_path, monkeypatch)
+        recorder = _stub_publication(monkeypatch)
+        reason = "operator approved the remaining blockers as open items"
+
+        payload = fgp.publish_review_summary(
+            PR_NUMBER, HEAD, results_dir=results, branch=BRANCH, b3_override=reason
+        )
+
+        assert payload["conclusion"] == fgp.CONCLUSION_SUCCESS
+        assert recorder.calls[0]["conclusion"] == fgp.CONCLUSION_SUCCESS
+        assert reason in payload["summary"] and "B3 override" in payload["summary"]
+        assert "B3.1" in payload["summary"]
+
+    def test_the_threshold_is_named_when_the_cap_record_carries_one(self, tmp_path, monkeypatch):
+        """RG-1's ``threshold`` in the cap record reaches the summary when present."""
+        import review_rounds
+
+        monkeypatch.setattr(review_rounds.CapState, "to_record", lambda self: {
+            "rule": self.rule, "cap_round": self.cap_round, "rounds": len(self.rounds),
+            "blockers": list(self.blockers), "total": self.total, "threshold": "rounds",
+        })
+        results = _capped_store(tmp_path, monkeypatch)
+        _stub_publication(monkeypatch)
+
+        payload = fgp.publish_review_summary(
+            PR_NUMBER, HEAD, results_dir=results, branch=BRANCH, b3_override="approved"
+        )
+
+        assert "drempel: rounds" in payload["summary"]
+
+    def test_an_override_outside_a_cap_says_so_and_changes_nothing(self, tmp_path, results_dir):
+        """An override on a PR the cap never touched fills no seat by itself."""
+        _write(results_dir, "glm_gate", _record(tmp_path, "glm_gate", status="fail"))
+
+        verdict = fgp.review_verdict(
+            PR_NUMBER, HEAD, results_dir=results_dir, branch=BRANCH, b3_override="noted"
+        )
+
+        assert verdict.conclusion == fgp.CONCLUSION_FAILURE
+        assert "B3 override: noted" in verdict.reason and "niet op de B3-cap" in verdict.reason
+
+
+class TestTheRefreshEntryPoint:
+    """RG-4 wires this into the door; it republishes without writing a gate record."""
+
+    def test_it_republishes_green_and_writes_no_gate_record(self, tmp_path, monkeypatch):
+        """Acceptance 4: green for the capped head, and the results dir is untouched."""
+        results = _capped_store(tmp_path, monkeypatch)
+        recorder = _stub_publication(monkeypatch)
+        before = sorted(path.name for path in results.iterdir())
+
+        published = fgp.refresh_review_summary(
+            PR_NUMBER, HEAD, b3_override="door override: two open items booked",
+            results_dir=results, branch=BRANCH,
+        )
+
+        assert published is True
+        assert [call["head_sha"] for call in recorder.calls] == [HEAD]
+        assert recorder.calls[0]["conclusion"] == fgp.CONCLUSION_SUCCESS
+        assert "B3 override" in recorder.calls[0]["summary"]
+        assert "two open items booked" in recorder.calls[0]["summary"]
+        assert sorted(path.name for path in results.iterdir()) == before
+
+    def test_a_moved_head_publishes_nothing_and_says_why(self, tmp_path, monkeypatch, caplog):
+        """Acceptance 3: the PR points at another commit, so nothing goes out."""
+        results = _capped_store(tmp_path, monkeypatch)
+        recorder = _stub_publication(monkeypatch, current_head=OTHER_HEAD)
+
+        with caplog.at_level(logging.WARNING, logger="forge_gate_publisher"):
+            published = fgp.refresh_review_summary(
+                PR_NUMBER, HEAD, b3_override="door override", results_dir=results, branch=BRANCH
+            )
+
+        assert published is False and recorder.calls == []
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert HEAD[:12] in logged and OTHER_HEAD[:12] in logged and "verschoven" in logged
+
+    def test_a_failing_forge_call_returns_false(self, tmp_path, monkeypatch):
+        """Acceptance 4: the door gets a refusal, not a traceback."""
+        results = _capped_store(tmp_path, monkeypatch)
+        _stub_publication(monkeypatch)
+
+        def exploding(*_a, **_k):
+            raise fgp.ForgeAPIError("GitHub gaf 500", status=500, body="boom")
+
+        monkeypatch.setattr(fgp, "publish_check_run", exploding)
+
+        assert fgp.refresh_review_summary(
+            PR_NUMBER, HEAD, b3_override="door override", results_dir=results, branch=BRANCH
+        ) is False
+
+    def test_an_override_without_a_reason_is_refused(self, tmp_path, monkeypatch):
+        results = _capped_store(tmp_path, monkeypatch)
+
+        with pytest.raises(fgp.ForgeCheckRunError):
+            fgp.refresh_review_summary(PR_NUMBER, HEAD, b3_override="   ", results_dir=results)
 
 
 # ---------------------------------------------------------------------------

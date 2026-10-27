@@ -109,6 +109,7 @@ __all__ = [
     "publish_review_summary",
     "read_result_record",
     "read_result_record_at",
+    "refresh_review_summary",
     "refuse_if_auto_merge_is_armed",
     "result_record_path",
     "review_verdict",
@@ -461,6 +462,7 @@ def review_verdict(
     project_id: Optional[str] = None,
     checkout: Optional[Path] = None,
     base_branch: Optional[str] = None,
+    b3_override: str = "",
 ) -> ForgeVerdict:
     """Is every required review seat filled on THIS head? One verdict for the whole review.
 
@@ -507,6 +509,11 @@ def review_verdict(
     reads it (R3b), in ``checkout`` (``None``: the store's own checkout) against
     ``base_branch``, the PR's ``baseRefName`` (``None``: not known, so the class
     is high, as at the door).
+
+    ``b3_override`` is the ``--override-b3`` reason the merge door would use, or
+    ``""``. It reaches :func:`evaluate_review_seats`, so a capped PR the door may
+    merge publishes the verdict the door gives (OI-2143), with the reason, the
+    cap rule and the threshold named in the verdict a reviewer reads (RG-2).
     """
     resolved_head = _require_head(head_sha)
     directory = results_dir if results_dir is not None else _default_results_dir()
@@ -525,13 +532,18 @@ def review_verdict(
 
     evaluation = evaluate_review_seats(
         str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
-        checkout=checkout, base_branch=base_branch,
+        checkout=checkout, base_branch=base_branch, b3_override=b3_override,
     )
+    note = _b3_override_note(b3_override, evaluation)
+
+    def verdict(conclusion: str, reason: str) -> ForgeVerdict:
+        return ForgeVerdict(conclusion, f"{reason}\n\n{note}" if note else reason)
+
     seats = ", ".join(evaluation.seats) or "geen"
     if evaluation.required.error:
-        return ForgeVerdict(CONCLUSION_ACTION_REQUIRED, f"geen review-akkoord op deze kop: {evaluation.message()}")
+        return verdict(CONCLUSION_ACTION_REQUIRED, f"geen review-akkoord op deze kop: {evaluation.message()}")
     if evaluation.blocking:
-        return ForgeVerdict(
+        return verdict(
             CONCLUSION_FAILURE,
             f"geen review-akkoord op deze kop (seats: {seats}): {evaluation.message()}",
         )
@@ -539,17 +551,40 @@ def review_verdict(
     judged = [fill for fill in evaluation.unfilled if fill.spoke]
     if judged or unproven:
         reasons = [f"seat {fill.seat}: {fill.message}" for fill in judged] + unproven
-        return ForgeVerdict(
+        return verdict(
             CONCLUSION_FAILURE,
             f"geen geldig review-akkoord op deze kop (seats: {seats}): " + "; ".join(reasons),
         )
     if evaluation.unfilled:
-        return ForgeVerdict(
+        return verdict(
             CONCLUSION_ACTION_REQUIRED,
             f"geen review-akkoord op deze kop: een vereiste seat heeft hier nog niet gesproken "
             f"(seats: {seats}). Draai de review-poorten op {resolved_head[:12]}. {evaluation.message()}",
         )
-    return ForgeVerdict(CONCLUSION_SUCCESS, f"geldig review-akkoord op deze kop: {evaluation.message()}")
+    return verdict(CONCLUSION_SUCCESS, f"geldig review-akkoord op deze kop: {evaluation.message()}")
+
+
+def _b3_override_note(b3_override: str, evaluation: Any) -> str:
+    """The override line a reviewer reads: reason, cap rule, and the cap record's threshold.
+
+    ``""`` without an override. The threshold (RG-1's ``blockers`` or
+    ``rounds``) is named only when the cap record carries one.
+    """
+    reason = (b3_override or "").strip()
+    if not reason:
+        return ""
+    rounds = getattr(evaluation, "rounds", None)
+    cap = getattr(rounds, "cap", None)
+    if cap is None or not cap.capped:
+        return (
+            f"B3 override: {reason}. Deze kop staat niet op de B3-cap, dus de override "
+            "verandert hier niets aan de telling"
+        )
+    threshold = str(cap.to_record().get("threshold") or "").strip()
+    line = f"B3 override: {reason}. De kop staat op de {cap.rule}-cap"
+    if threshold:
+        line += f" (drempel: {threshold})"
+    return f"{line}. {cap.summary()}"
 
 
 def _unproven_fills(evaluation, head_sha: str) -> List[str]:
@@ -1120,6 +1155,7 @@ def publish_review_summary(
     project_id: Optional[str] = None,
     dry_run: bool = False,
     base_branch: Optional[str] = None,
+    b3_override: str = "",
 ) -> Dict[str, Any]:
     """Publish ``vnx-gate/review`` for one head. Returns the payload sent.
 
@@ -1140,6 +1176,11 @@ def publish_review_summary(
     ``base_branch`` is the PR's base; ``None`` reads it from the PR in the
     store's repo (:func:`pr_base_branch`), so the risk class is read against the
     base the door reads it against (R3b).
+
+    ``b3_override`` is the ``--override-b3`` reason the merge door used, or
+    ``""`` (RG-2): a capped head the door merges under an override gets a green
+    required check with the reason on it, not the red one branch protection
+    keeps blocking (OI-2143).
     """
     resolved_head = _require_head(head_sha)
 
@@ -1155,7 +1196,7 @@ def publish_review_summary(
         base = base_branch if base_branch is not None else pr_base_branch(pr_number, target.owner_repo)
         verdict = review_verdict(
             pr_number, resolved_head, results_dir=results_dir, branch=branch,
-            project_id=project_id, base_branch=base,
+            project_id=project_id, base_branch=base, b3_override=b3_override,
         )
         if verdict.conclusion == CONCLUSION_SUCCESS:
             refuse_if_auto_merge_is_armed(pr_number, target.owner_repo)
@@ -1208,6 +1249,73 @@ def publish_review_summary(
         check_name=REVIEW_SUMMARY_CHECK_NAME,
     )
     return payload
+
+
+def refresh_review_summary(
+    pr_number: int,
+    head_sha: str,
+    *,
+    b3_override: str,
+    results_dir: Optional[Path] = None,
+    branch: Optional[str] = None,
+    project_id: Optional[str] = None,
+    base_branch: Optional[str] = None,
+) -> bool:
+    """Republish ``vnx-gate/review`` for one head with an explicit override reason (RG-2).
+
+    The entry point the merge door uses (RG-4) when it merges under
+    ``--override-b3``: that override writes no gate record, so the required check
+    would stay red on a head the door is about to merge. This republishes from
+    the records already on disk, and returns whether the check-run went out.
+
+    **A head that moved publishes nothing.** The check is bound to one commit;
+    the PR's current head is read first (:func:`_resolve_head_sha`) and when it
+    cannot be read, or differs from ``head_sha``, nothing is published and the
+    reason is logged. The reason is required: an override without one is not an
+    override. Every way the publication can fail is a logged ``False``, never an
+    exception — the caller is mid-merge and needs an answer.
+    """
+    reason = (b3_override or "").strip()
+    if not reason:
+        raise ForgeCheckRunError(
+            "een B3-override zonder reden is geen override: geef de reden mee waarmee "
+            "de kop langs de cap mag"
+        )
+    resolved_head = _require_head(head_sha)
+
+    try:
+        target = _publication_target(None, results_dir)
+        current_head = _resolve_head_sha(pr_number, target.owner_repo)
+        if not current_head:
+            logger.warning(
+                "forge_gate_publisher: de kop van PR #%s is niet op te vragen; er wordt "
+                "niets gepubliceerd voor %s en de check blijft zoals hij staat",
+                pr_number, resolved_head[:12],
+            )
+            return False
+        if current_head != resolved_head:
+            logger.warning(
+                "forge_gate_publisher: de kop van PR #%s is verschoven (%s -> %s); er wordt "
+                "niets gepubliceerd voor de gevraagde kop — ververs de check voor de nieuwe kop",
+                pr_number, resolved_head[:12], current_head[:12],
+            )
+            return False
+        publish_review_summary(
+            pr_number, resolved_head, results_dir=results_dir, branch=branch,
+            project_id=project_id, base_branch=base_branch, b3_override=reason,
+        )
+    # vnx-silent-except: the caller is mid-merge and needs true/false, not a
+    # traceback; the failure is logged loudly and every one of them leaves the
+    # check unpublished, which the caller must treat as a refusal.
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "forge_gate_publisher: verversen van %s voor PR #%s op %s MISLUKT — %s: %s. "
+            "De check staat er niet; de deur moet de merge weigeren tot dit lukt. Herstel: %s",
+            REVIEW_SUMMARY_CHECK_NAME, pr_number, resolved_head[:12], type(exc).__name__, exc,
+            REVIEW_RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number),
+        )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
