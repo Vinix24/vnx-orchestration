@@ -431,37 +431,33 @@ def test_horizon_reconcile_no_repo_root_crash(project, monkeypatch, capsys):
 
 
 # ---------------------------------------------------------------------------
-# roadmap anchoring on --project-dir (sync must not read the central template)
+# objective sync imports ONLY the file named with --roadmap (ADR-047 / C2)
 # ---------------------------------------------------------------------------
 
-def test_default_roadmap_sets_from_project_dir(tmp_path):
-    args = SimpleNamespace(project_dir=str(tmp_path), roadmap=None)
-    _horizon._default_roadmap(args)
-    assert args.roadmap == str((tmp_path / "ROADMAP.yaml").resolve())
+def test_horizon_sync_requires_roadmap_and_exits_2(project, monkeypatch, capsys):
+    """No derived default any more: without --roadmap the verb exits 2, writes
+    nothing, and never falls through to a project/central ROADMAP template."""
+    project_dir, _ = project
+    pid = "horizon-test"
+    (project_dir / "ROADMAP.yaml").write_text(
+        "features:\n  - feature_id: real-track\n    title: Real Track\n    status: shipped\n",
+        encoding="utf-8",
+    )
+    rc, out, err = _run(monkeypatch, capsys, [
+        "objective", "sync",
+        "--project-id", pid, "--project-dir", str(project_dir), "--json",
+    ])
+    assert rc == 2, err
+    assert "--roadmap" in err
+    assert out == ""
 
 
-def test_default_roadmap_preserves_explicit_flag(tmp_path):
-    args = SimpleNamespace(project_dir=str(tmp_path), roadmap="/explicit/ROADMAP.yaml")
-    _horizon._default_roadmap(args)
-    assert args.roadmap == "/explicit/ROADMAP.yaml"
+def test_horizon_sync_imports_the_named_file(project, monkeypatch, capsys):
+    """The operator-named file is what gets projected — and only that file.
 
-
-def test_default_roadmap_honors_env_override(tmp_path, monkeypatch):
-    monkeypatch.setenv("VNX_ROADMAP_PATH", "/env/ROADMAP.yaml")
-    args = SimpleNamespace(project_dir=str(tmp_path), roadmap=None)
-    _horizon._default_roadmap(args)
-    # env override wins; the wrapper leaves roadmap unset so planning_cli's
-    # _resolve_roadmap_path picks up VNX_ROADMAP_PATH itself.
-    assert args.roadmap is None
-
-
-def test_horizon_sync_reads_project_roadmap_not_central_template(project, monkeypatch, capsys):
-    """`vnx objective sync` must project the PROJECT's ROADMAP.yaml, not the
-    central install's illustrative template. The bug: without anchoring on
-    --project-dir, _resolve_roadmap_path fell through to resolve_paths()
-    ["PROJECT_ROOT"], which collapses onto ~/.vnx-system/versions/<v> in a
-    marker-less central install — creating a phantom `example-feature` and
-    orphaning every real track."""
+    The project does NOT author a ROADMAP.yaml at its root any more; the file is
+    passed explicitly, so no phantom `example-feature` from a template can be
+    created and no real track can be orphaned."""
     project_dir, state_dir = project
     pid = "horizon-test"
 
@@ -472,8 +468,11 @@ def test_horizon_sync_reads_project_roadmap_not_central_template(project, monkey
     ])
     assert rc == 0, err
 
-    # Author a project-local ROADMAP.yaml containing exactly that track.
-    (project_dir / "ROADMAP.yaml").write_text(
+    # The file to import lives outside the project root: nothing derives it.
+    import_dir = project_dir / "imports"
+    import_dir.mkdir()
+    roadmap = import_dir / "my-roadmap.yaml"
+    roadmap.write_text(
         "features:\n"
         "  - feature_id: real-track\n"
         "    title: Real Track\n"
@@ -482,14 +481,14 @@ def test_horizon_sync_reads_project_roadmap_not_central_template(project, monkey
     )
 
     rc, out, err = _run(monkeypatch, capsys, [
-        "objective", "sync",
+        "objective", "sync", "--roadmap", str(roadmap),
         "--project-id", pid, "--project-dir", str(project_dir), "--json",
     ])
     assert rc == 0, err
     report = json.loads(out)
     s = report["summary"]
     # The real track is recognised (not orphaned) and no phantom example-feature
-    # is created — proof the project roadmap was read, not the central template.
+    # is created — proof the named file was read, not a derived template.
     assert "example-feature" not in report.get("created", [])
     assert s["orphan"] == 0, report
     assert "real-track" not in report.get("orphan", [])

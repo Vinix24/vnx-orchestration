@@ -60,8 +60,8 @@ Automatische aanroepers van de seeder (niemand typt het commando):
 | Plek | Wat het doet | Wat C2 doet |
 |---|---|---|
 | `scripts/planning_cli.py:2092` (`maybe_auto_seed`), `:2132` | `seeder.seed(..., apply=True)` in de prelude-hook | de hook vervalt; er is geen seed meer zonder pad |
-| `scripts/lib/dispatcher_supervisor_ticks.sh:54` (`_maybe_auto_seed_tracks`) | draait `planning_cli.py objective sync --apply` per tick bij `VNX_AUTO_SEED_TRACKS=1` | de tick vervalt |
-| `scripts/dispatcher_minimal.sh:604` | roept `_maybe_auto_seed_tracks` aan in de prelude | de aanroep vervalt met de tick |
+| `scripts/lib/dispatcher_supervisor_ticks.sh:54` (`_maybe_auto_seed_tracks`) | draait `planning_cli.py objective sync --apply` per tick achter een env-flag | de tick vervalt (uitgevoerd in C2, dlv-8c87936d5e6a) |
+| `scripts/dispatcher_minimal.sh:604` | roept `_maybe_auto_seed_tracks` aan in de prelude | de aanroep vervalt met de tick (uitgevoerd in C2) |
 | `scripts/planning_cli.py:430` (`cmd_objective_sync`) | `seeder.seed(...)` voor het handmatige `vnx objective sync` | blijft, maar met een verplicht pad |
 
 Twee plekken blijven staan: `vnx_cli/commands/doctor.py:1110` en `scripts/check_no_file_derived_data_paths.py:89` controleren de pad-literaal, ze lezen het bestand niet.

@@ -252,11 +252,39 @@ def _mutation_forbidden(handler: "DashboardHandler") -> "str | None":
     return None
 
 
+_STATE_MISS_BASENAME = ".vnx-state-miss"
+
+
+def _state_miss_path() -> str:
+    """A path inside the canonical state dir that the handler answers 404 for.
+
+    translate_path() hands its result to SimpleHTTPRequestHandler, which opens it. After every
+    candidate was rejected, the returned path therefore must NOT be one of those rejected
+    candidates: returning the canonical candidate anyway is what let a symlink pointing outside
+    the state dir be served. This reserved name is not derived from the request and is probed
+    until it is neither an existing path nor a symlink (a dangling symlink is refused too, since
+    its target can reappear). A directory holds finitely many names, so the probe terminates.
+    """
+    suffix = 0
+    while True:
+        name = _STATE_MISS_BASENAME if suffix == 0 else f"{_STATE_MISS_BASENAME}-{suffix}"
+        candidate = CANONICAL_STATE_DIR / name
+        try:
+            occupied = candidate.is_symlink() or candidate.exists()
+        except OSError:
+            occupied = True  # cannot prove it is absent -> keep probing (fail closed)
+        if not occupied:
+            return str(candidate)
+        suffix += 1
+
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path: str) -> str:
         """
         Serve `/state/*` from canonical state first, with legacy fallback.
         Keeps dashboard UI stable while state ownership moved to `.vnx-data/state`.
+        Anything that resolves outside a state dir is refused; when nothing is left the
+        request maps to a 404 path that is not derived from the request.
         """
         parsed_path = unquote(urlsplit(path).path)
         if parsed_path.startswith("/state/"):
@@ -270,6 +298,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             if rel_path.anchor and parts and parts[0] == rel_path.anchor:
                 parts = parts[1:]
             rel_parts = [part for part in parts if part not in ("", ".", "..")]
+            not_found = None
             for base in (CANONICAL_STATE_DIR, LEGACY_STATE_DIR):
                 candidate = base.joinpath(*rel_parts)
                 # Defense in depth: refuse anything that resolves outside the state dir
@@ -283,9 +312,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     continue
                 if candidate.exists():
                     return str(candidate)
-            # Nothing valid inside the state dirs -> a canonical path that does not exist,
-            # so the handler returns 404 (same outcome as a genuine miss).
-            return str(CANONICAL_STATE_DIR.joinpath(*rel_parts))
+                # Inside a state dir but absent: a genuine miss. Remember it (canonical first)
+                # so the 404 keeps the requested name, and keep looking in the legacy dir.
+                if not_found is None:
+                    not_found = candidate
+            if not_found is not None:
+                return str(not_found)
+            # Every candidate was rejected (each one resolved outside the state dirs). None of
+            # them may be handed back: the handler would open it. A reserved non-existent path
+            # inside the canonical dir makes it answer 404, the same outcome as a genuine miss.
+            return _state_miss_path()
         return super().translate_path(path)
 
     def do_GET(self) -> None:

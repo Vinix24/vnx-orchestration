@@ -9,6 +9,7 @@ Verifies:
 - horizon derivation (1.0 -> now/next, 1.x -> later)
 - phase drift reported, not auto-synced
 - track_created / track_authored_synced events emitted to track_events.ndjson
+- the CLI refuses to run without --roadmap (no default, no autodetect; ADR-047)
 """
 
 from __future__ import annotations
@@ -357,3 +358,24 @@ class TestKeyValidation:
         state_dir = _make_db(tmp_path)
         with pytest.raises(ValueError, match="mapping"):
             seeder.seed(state_dir, p, "vnx-dev", apply=False)
+
+
+# ---------------------------------------------------------------------------
+# CLI contract: the file is required (import tool, not a plan source)
+# ---------------------------------------------------------------------------
+
+def test_cli_requires_roadmap_and_writes_nothing(tmp_path):
+    state_dir = _make_db(tmp_path)
+    with pytest.raises(SystemExit) as excinfo:
+        seeder.main(["--state-dir", str(state_dir), "--apply"])
+    assert excinfo.value.code == 2
+    assert tracks_lib.list_tracks(state_dir, "vnx-dev") == []
+
+
+def test_cli_imports_the_named_file(tmp_path):
+    state_dir = _make_db(tmp_path)
+    p = _write_roadmap(tmp_path, [
+        {"feature_id": "feat-x", "title": "X", "status": "planned"},
+    ])
+    assert seeder.main(["--roadmap", str(p), "--state-dir", str(state_dir), "--apply"]) == 0
+    assert {t["track_id"] for t in tracks_lib.list_tracks(state_dir, "vnx-dev")} == {"feat-x"}

@@ -645,6 +645,10 @@ _PHASE_CHOICES = ("queued", "active", "parked", "done")
 _OUTPUT_KIND_CHOICES = ("pr", "post", "deal", "doc")
 _LANE_HINT_CHOICES = ("direct", "governed", "unset")
 _PLAN_SCOPE_CHOICES = ("architecture", "light")
+_SYNC_ROADMAP_HELP = (
+    "REQUIRED: the ROADMAP-shaped file to import. Nothing is derived for you "
+    "(ADR-047: the tracks DB is the plan source)"
+)
 
 
 def _common_horizon_args(p: argparse.ArgumentParser) -> None:
@@ -693,12 +697,12 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     p_show.add_argument("track_id", metavar="TRACK_ID")
 
     p_sync = subs.add_parser(
-        "sync", help="re-project ROADMAP.yaml -> tracks (CHECK by default; --apply to write)"
+        "sync", help="import one named ROADMAP file -> tracks (CHECK by default; --apply to write)"
     )
     _common_horizon_args(p_sync)
     p_sync.add_argument("--apply", action="store_true",
                         help="apply the idempotent projection (default: dry-run check)")
-    p_sync.add_argument("--roadmap", default=None, help="path to ROADMAP.yaml (default: project root)")
+    p_sync.add_argument("--roadmap", default=None, metavar="FILE", help=_SYNC_ROADMAP_HELP)
 
     p_drift = subs.add_parser(
         "drift",
@@ -707,7 +711,7 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
     _common_horizon_args(p_drift)
     p_drift.add_argument(
         "--repo-root", default="", dest="repo_root", metavar="PATH",
-        help="project repo root for the ROADMAP.yaml (Source-3) evidence "
+        help="project repo root for the gh merge-state lookups "
              "(default: resolved --project-dir)",
     )
 
@@ -768,7 +772,7 @@ def _register_objective_verbs(subs: argparse.Action) -> None:
                          help="allow closing a PARKED track (un-parks it; off by default)")
     p_close.add_argument(
         "--repo-root", default="", dest="repo_root", metavar="PATH",
-        help="project repo root for the ROADMAP.yaml (Source-3) evidence "
+        help="project repo root for the gh merge-state lookups "
              "(default: resolved --project-dir)",
     )
     p_close.add_argument(
@@ -1328,6 +1332,29 @@ def _register_migrate_subparser(subparsers: argparse.Action) -> None:
         default=".",
         metavar="DIR",
         help="project directory to resolve data root from (default: current directory)",
+    )
+    migrate_parser.add_argument(
+        "--relocate-legacy",
+        action="store_true",
+        help="copy a pre-#1437 XDG store into the central store (deletes nothing)",
+    )
+    migrate_parser.add_argument(
+        "--legacy-path",
+        default=None,
+        metavar="DIR",
+        help="legacy store to relocate (required with --relocate-legacy; no auto-discovery)",
+    )
+    migrate_parser.add_argument(
+        "--project-id",
+        default=None,
+        metavar="PROJECT_ID",
+        help="tenant of the relocated store (required with --relocate-legacy)",
+    )
+    migrate_parser.add_argument(
+        "--assume-owner",
+        default=None,
+        metavar="REASON",
+        help="record why an unstamped (schema-v14) store belongs to --project-id",
     )
 
 
