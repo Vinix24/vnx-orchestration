@@ -1,0 +1,2 @@
+- Red-run claims (track deterministische-testverificatie, PR-3a): `scripts/ci/red_run_claims.py` turns a PR body's red-run claims into `red_on_base.py --claims` input, labels imported from `report_body_contract.RED_RUN_LABELS`.
+- A claim the parser cannot read exits 3 and writes no claims file instead of silently becoming "no claim"; whitespace inside a parametrize part such as `test_always[hello world]` is now read exactly.
