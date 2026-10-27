@@ -10,7 +10,7 @@ Required coverage:
   - state-dir resolution: VNX_STATE_DIR='' + VNX_DATA_DIR set → canonical dir, not empty path
 """
 from __future__ import annotations
-import importlib.util as _ilu, json, os, sys, tempfile, unittest
+import contextlib, importlib.util as _ilu, json, os, sys, tempfile, unittest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -33,6 +33,13 @@ _MIGS_SQL = Path(__file__).resolve().parent.parent / "schemas" / "migrations" / 
 def _apply_0026(state_dir):
     return _m26.apply_migration(db_path_from_state_dir(state_dir), _MIGS_SQL)
 
+import dispatch_bridge  # noqa: E402
+import pool_worker_runner  # noqa: E402
+import skill_prefix  # noqa: E402
+import subprocess_dispatch  # noqa: E402
+import subprocess_dispatch_internals.delivery as _delivery  # noqa: E402
+import subprocess_dispatch_internals.recovery as _recovery  # noqa: E402
+from provider_spawns.claude_spawn import ClaudeSpawnResult  # noqa: E402
 from pool_worker_runner import (  # noqa: E402
     EXIT_NO_WORK, EXIT_OK, EXIT_PROJECT_MISMATCH, EXIT_BUNDLE_MISSING,
     EXIT_INVALID_DISPATCH_ID, run, _validate_dispatch_id, _resolve_state_dir,
@@ -268,6 +275,155 @@ class TestDeadlineFallback(_Base):
             any("Failed to read deadline_seconds" in msg for msg in log_ctx.output),
             f"Expected warning about spec read failure in: {log_ctx.output}",
         )
+
+
+# ---------------------------------------------------------------------------
+# RS-4 / OI-2372: the skill named by the claimed dispatch's spec reaches the
+# worker's prompt. Before this change run() read only deadline_seconds from
+# dispatch-spec.json, so the skill never left the file.
+# ---------------------------------------------------------------------------
+
+SKILL = "rspoolskill"
+MARKER = "RS4-POOL-SKILL-MARKER-7c31"
+SKILL_DID = "20261027-pool-skill"
+
+
+class TestSpecSkillDelivery(_Base):
+    """Real prompt assembly; only the spawn (an external process) is patched."""
+
+    ROLE = "backend-developer"
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self._t.name)
+        self.root = _fake_project_root(self.tmp)
+
+    def _spec(self, skill, role=None, provider="claude", did=SKILL_DID):
+        role = role or self.ROLE
+        self._bundle(did, provider=provider, instr="do the task")
+        d = self.dd / did
+        (d / "bundle.json").write_text(json.dumps({
+            "dispatch_id": did, "gate": "",
+            "target_profile": {"provider": provider, "role": role},
+        }), encoding="utf-8")
+        spec = {"schema_version": 1, "deadline_seconds": 900}
+        if skill is not None:
+            spec["skill"] = skill
+        (d / "dispatch-spec.json").write_text(json.dumps(spec), encoding="utf-8")
+        self._queue(did)
+
+    def _deliver(self, skill, role=None):
+        self._spec(skill, role, did=f"{SKILL_DID}-{role or self.ROLE}")
+        return _run_capturing(self.sd, self.dd, self.root)["prompt"]
+
+    def test_a_spec_skill_reaches_the_prompt(self):
+        prompt = self._deliver(SKILL)
+        self.assertIn(MARKER, prompt,
+                      "the pool worker's prompt lacks the skill its spec bound")
+        self.assertIn("do the task", prompt)
+
+    def test_a_spec_without_a_skill_leaves_the_prompt_unchanged(self):
+        prompt = self._deliver(None)
+        self.assertNotIn(MARKER, prompt)
+        self.assertNotIn("# SKILL:", prompt)
+        # Same bytes the pre-RS-4 lane assembled: the new kwarg's default is inert.
+        self.assertEqual(prompt, _baseline_prompt(self.sd, self.root, self.ROLE,
+                                                  f"{SKILL_DID}-{self.ROLE}"))
+
+    def test_a_reviewer_role_never_gets_the_skill(self):
+        for role in ("review-gate", "plan-reviewer"):
+            with self.subTest(role=role):
+                prompt = self._deliver(SKILL, role=role)
+                self.assertNotIn(MARKER, prompt)
+                self.assertIn("do the task", prompt)
+
+    def test_the_door_route_is_told_the_skill(self):
+        """The default (door) route restages the spec, so it must carry the skill."""
+        self._spec(SKILL)
+        seen = {}
+
+        def _bridge(**kwargs):
+            seen.update(kwargs)
+            return 0
+
+        with patch.dict(os.environ, {"VNX_SINGLE_ENTRY_DISPATCH": "1"}, clear=False), \
+             patch.object(dispatch_bridge, "bridge_dispatch", side_effect=_bridge):
+            result = self._run()
+        self.assertEqual(result, EXIT_OK)
+        self.assertEqual(seen.get("skill"), SKILL,
+                         f"the door was staged without the spec's skill: {sorted(seen)}")
+
+    def test_the_provider_lane_is_told_the_skill(self):
+        self._spec(SKILL, provider="kimi")
+        seen = {}
+        with patch.object(pool_worker_runner, "_deliver_provider",
+                          side_effect=lambda *a, **kw: (seen.update(kw), EXIT_OK)[1]):
+            self.assertEqual(self._run(), EXIT_OK)
+        self.assertEqual(seen.get("skill"), SKILL)
+
+
+def _fake_project_root(tmp_path):
+    root = tmp_path / "project"
+    (root / "skills" / SKILL).mkdir(parents=True)
+    (root / "skills" / SKILL / "SKILL.md").write_text(
+        f"---\nname: {SKILL}\n---\n\n{MARKER}: apply the method.\n", encoding="utf-8")
+    fake_file = root / "scripts" / "lib" / "subprocess_dispatch.py"
+    fake_file.parent.mkdir(parents=True)
+    fake_file.touch()
+    return root
+
+
+@contextlib.contextmanager
+def _pool_env(root, captured):
+    """Side effects AROUND the assembly patched; assembly and skill resolution real."""
+    result = ClaudeSpawnResult(
+        returncode=0, completion={}, events_written=0, session_id="sess-rs4",
+        timed_out=False, completion_text="ok", token_usage=None)
+
+    def _spawn(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return result
+
+    patches = [
+        patch.dict(os.environ, {"VNX_DISPATCH_LEGACY": "1"}, clear=False),
+        patch.object(subprocess_dispatch, "__file__",
+                     str(root / "scripts" / "lib" / "subprocess_dispatch.py")),
+        patch.object(subprocess_dispatch, "_build_intelligence_section", lambda *a, **k: ""),
+        patch.object(subprocess_dispatch, "_resolve_agent_cwd", lambda role: None),
+        patch.object(subprocess_dispatch, "_write_manifest", lambda **kw: root / "manifest.json"),
+        patch.object(subprocess_dispatch, "_promote_manifest", lambda *a, **kw: None),
+        patch.object(_delivery, "_start_heartbeat", lambda *a, **kw: (None, None, None)),
+        patch.object(_recovery, "_init_recovery_state", lambda *a, **kw: ("ts", "", [], None)),
+        patch.object(_recovery, "_book_attempt", lambda *a, **kw: None),
+        patch.object(_recovery, "_handle_success", lambda *a, **kw: None),
+        patch("provider_spawns.claude_spawn.spawn_claude", side_effect=_spawn),
+    ]
+    with contextlib.ExitStack() as stack:
+        for p in patches:
+            stack.enter_context(p)
+        yield captured
+
+
+def _run_capturing(sd, dd, root):
+    captured = {}
+    with _pool_env(root, captured):
+        rc = run(terminal_id="T1", project_id="proj", state_dir=Path(sd), dispatch_dir=dd)
+    assert rc == EXIT_OK, f"pool delivery returned {rc}"
+    return captured
+
+
+def _baseline_prompt(sd, root, role, did):
+    """The prompt the pre-RS-4 lane assembled: deliver_with_recovery with no skill."""
+    captured = {}
+    with _pool_env(root, captured), patch.object(
+            skill_prefix, "build_skill_prefix",
+            side_effect=AssertionError("build_skill_prefix ran with no skill")):
+        ok = subprocess_dispatch.deliver_with_recovery(
+            # Same model the pool run resolves (VNX_DISPATCH_MODEL default).
+            terminal_id="T1", instruction="do the task", model="kimi-k3",
+            dispatch_id=did, role=role, max_retries=0, auto_commit=False)
+    assert ok is True, "the no-skill baseline delivery failed"
+    return captured["prompt"]
 
 
 if __name__ == "__main__":

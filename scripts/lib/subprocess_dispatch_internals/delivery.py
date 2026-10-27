@@ -99,12 +99,16 @@ def _assemble_instruction(
     repo_map: str | None,
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
+    skill: "str | None" = None,
 ) -> str:
     """Append repo map, layered skill context, then permission preamble.
 
     When VNX_SHARED_PREPARE=1, delegates to dispatch_prepare.prepare() so both
     Claude lanes share identical enrichment. Default ("0") is byte-identical to
     pre-T1 behavior (subprocess golden guard).
+
+    ``skill`` (OI-2372) is the spec-bound skill; it rides dispatch_metadata to the
+    SAME prompt seam RS-2 built (``dispatch_metadata["skill"]``). None = unchanged.
     """
     if os.environ.get("VNX_SHARED_PREPARE", "0").strip().lower() in (
         "1", "true", "yes", "on"
@@ -119,6 +123,7 @@ def _assemble_instruction(
             pr_id=pr_id,
             model=model,
             repo_map=repo_map,
+            skill=skill,
         )
         return body + f"\n\n{END_OF_INSTRUCTION_SENTINEL}\n"
     import subprocess_dispatch as _sd
@@ -134,6 +139,9 @@ def _assemble_instruction(
             "dispatch_paths": dispatch_paths,
             "pr_id": pr_id,
             "pr": pr_id,  # PromptAssembler renders metadata["pr"]; set both keys (CFX-W5-2)
+            # RS-2's seam: None reads as "no skill asked for", so the prompt is
+            # unchanged; a reviewer role is suppressed before the prefix is built.
+            "skill": skill,
         },
     )
     return _sd._inject_permission_profile(terminal_id, role, instruction)
@@ -263,6 +271,7 @@ def _prepare_dispatch(
     commit_hash_before: str,
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
+    skill: "str | None" = None,
 ) -> tuple[str, "Path | None", "Path | None", str]:
     """Run pre-deliver phases: handover continuation, assembly, cwd, manifest write.
 
@@ -272,7 +281,7 @@ def _prepare_dispatch(
     instruction, pending_handover = _apply_handover_continuation(terminal_id, instruction)
     instruction = _assemble_instruction(
         terminal_id, instruction, role, dispatch_id, model, repo_map,
-        dispatch_paths=dispatch_paths, pr_id=pr_id,
+        dispatch_paths=dispatch_paths, pr_id=pr_id, skill=skill,
     )
     agent_cwd = _resolve_agent_cwd_and_log_profile(role)
     manifest_path = _sd._write_manifest(
@@ -304,6 +313,7 @@ def deliver_via_subprocess(
     commit_hash_before: str = "",
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
+    skill: "str | None" = None,
 ) -> _SubprocessResult:
     """Deliver a dispatch via spawn_claude() and consume the event stream.
 
@@ -320,6 +330,9 @@ def deliver_via_subprocess(
     dispatch_paths and pr_id are forwarded to dispatch_metadata so W5 item
     classes (adr_relevant, code_anchor, operator_memory, schema_section,
     prior_round_finding) fire in IntelligenceSelector.select() during assembly.
+
+    ``skill`` (OI-2372) is forwarded to the same dispatch_metadata key for the
+    prompt seam; None leaves the assembled prompt unchanged.
     """
     import subprocess_dispatch as _sd
     from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS
@@ -329,7 +342,7 @@ def deliver_via_subprocess(
 
     instruction, pending_handover, agent_cwd, manifest_path = _prepare_dispatch(
         terminal_id, instruction, model, dispatch_id, role, repo_map, commit_hash_before,
-        dispatch_paths=dispatch_paths, pr_id=pr_id,
+        dispatch_paths=dispatch_paths, pr_id=pr_id, skill=skill,
     )
 
     resume_session = _load_resume_session(terminal_id)
@@ -362,8 +375,7 @@ def deliver_via_subprocess(
     process_cell: list = [None]
     heartbeat_stop, heartbeat_thread, silence_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
-        process_cell=process_cell,
-        model=model,
+        process_cell=process_cell, model=model,
     )
 
     # Governance state accumulated by the per-event callback below.

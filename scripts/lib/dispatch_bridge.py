@@ -648,6 +648,7 @@ def deliver_via_door(
     base_ref: Optional[str] = None,
     project_id: Optional[str] = None,
     deadline_seconds: Optional[int] = None,
+    skill: Optional[str] = None,
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
 ) -> bool:
@@ -685,6 +686,13 @@ def deliver_via_door(
     omitted kwarg (``base_ref`` -> "origin/main", ``pr_id``/``work_ref`` ->
     None) — byte-identical prior behavior for a caller that never passes them.
 
+    ``skill`` (OI-2372): the spec-bound skill the caller already knows (the pool
+    worker reads it back from the claimed dispatch's ``dispatch-spec.json``). It is
+    threaded to ``bridge_dispatch`` -> ``stage_spec_bundle`` unchanged, so the
+    restaged spec carries the same skill the original staging carried and the
+    lane's prompt seam injects it. Default None keeps every other caller's staged
+    spec byte-identical (no skill key value), and staging re-validates the slug.
+
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
     """
@@ -705,6 +713,7 @@ def deliver_via_door(
             base_ref=base_ref if base_ref is not None else "origin/main",
             project_id=project_id,
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
+            skill=skill,
             allow_headless=allow_headless,
             headless_reason=headless_reason,
         ) == 0

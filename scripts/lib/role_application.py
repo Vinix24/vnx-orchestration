@@ -32,8 +32,12 @@ Comparison shape (motivated):
 Candidate sources mirror what ``_inject_skill_context`` actually resolves:
   - ``prompt_assembler`` — ``scripts/lib/prompts/roles/<role>.md`` (PromptAssembler L2)
   - ``agents``          — ``agents/<role>/CLAUDE.md`` (project-level agent override)
-  - ``skills``          — ``.claude/skills/<role>/CLAUDE.md`` (skill definition)
   - ``terminal``        — ``.claude/terminals/<terminal>/CLAUDE.md`` (terminal fallback)
+
+The old fourth tier, ``.claude/skills/<role>/CLAUDE.md``, is gone (RS-4, ADR-048):
+a skill folder holds ``SKILL.md``, never ``CLAUDE.md``, so it resolved 0 of 38,380
+receipts. A skill reaches a worker through the spec's ``skill`` field (RS-2), not
+through a role candidate.
 
 The first EXISTING source in that order is the one the injector resolves; only
 that resolved source's content may evidence role application. When its content
@@ -71,7 +75,6 @@ _WS_RE = re.compile(r"\s+")
 # Tier labels stamped on the receipt. "none" = no role source resolved.
 TIER_PROMPT_ASSEMBLER = "prompt_assembler"
 TIER_AGENTS = "agents"
-TIER_SKILLS = "skills"
 TIER_TERMINAL = "terminal"
 TIER_NONE = "none"
 # D1 (OI-1444): stamped when role is review-gate/plan-reviewer — those roles are
@@ -92,7 +95,7 @@ class RoleApplicationVerdict:
     """Deterministic outcome of the role-applied check, stamped on the receipt."""
 
     role_applied: bool
-    tier: str                     # prompt_assembler | agents | skills | terminal | none
+    tier: str                     # prompt_assembler | agents | terminal | none
     reason: Optional[str] = None  # why not applied, when role_applied is False
     source_path: Optional[str] = None
 
@@ -122,8 +125,8 @@ def _validate_slug(name: str, context: str) -> None:
     """Raise ValueError if *name* contains '..' or path separators.
 
     Path traversal via ``role`` or ``terminal_id`` slugs would let a dispatch
-    escape the intended directory trees (agents/, .claude/skills/,
-    prompt_assembler prompts, .claude/terminals/) and read arbitrary files.
+    escape the intended directory trees (agents/, prompt_assembler prompts,
+    .claude/terminals/) and read arbitrary files.
     This guard rejects such slugs before any path is constructed (OI-932).
     """
     if not name or not name.strip():
@@ -150,8 +153,9 @@ def _candidate_sources(terminal_id: str, role: str, project_root: Path):
         yield TIER_PROMPT_ASSEMBLER, _prompts_dir / f"{role}.md"
     if role:
         yield TIER_AGENTS, project_root / "agents" / role / "CLAUDE.md"
-    if role:
-        yield TIER_SKILLS, project_root / ".claude" / "skills" / role / "CLAUDE.md"
+    # RS-4 (ADR-048): the ``.claude/skills/<role>/CLAUDE.md`` candidate used to be
+    # yielded here. A skill folder holds SKILL.md, so it resolved 0 of 38,380
+    # receipts; the spec's ``skill`` field (RS-2) is the route for a skill now.
     _validate_slug(terminal_id, "terminal_id")
     yield TIER_TERMINAL, project_root / ".claude" / "terminals" / terminal_id / "CLAUDE.md"
 
@@ -218,7 +222,7 @@ def verify_role_applied(
     """Deterministically verify the resolved role source reached *final_prompt*.
 
     Resolves the role source via the same candidate order ``_inject_skill_context``
-    uses (PromptAssembler role prompt first, then the legacy 3-tier) and checks
+    uses (PromptAssembler role prompt first, then the legacy agents/ source) and checks
     whitespace-normalized containment of the resolved source's content.
 
     Returns a ``RoleApplicationVerdict``; never raises (best-effort verification
@@ -254,7 +258,7 @@ def verify_role_applied(
             return RoleApplicationVerdict(
                 role_applied=False,
                 tier=TIER_NONE,
-                reason="no role source resolved (prompt_assembler/agents/skills/terminal)",
+                reason="no role source resolved (prompt_assembler/agents/terminal)",
                 source_path=None,
             )
 

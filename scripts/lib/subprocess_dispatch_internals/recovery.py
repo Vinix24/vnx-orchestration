@@ -553,6 +553,7 @@ def _attempt_delivery(
     commit_hash_before: str,
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
+    skill: "str | None" = None,
 ):
     """Single delivery attempt — proxies to ``deliver_via_subprocess``, then books its cost (ADR-043)."""
     import subprocess_dispatch as _sd
@@ -569,6 +570,7 @@ def _attempt_delivery(
         commit_hash_before=commit_hash_before,
         dispatch_paths=dispatch_paths,
         pr_id=pr_id,
+        skill=skill,
     )
     _book_attempt(dispatch_id, model, role, sub_result, started)
     return sub_result
@@ -640,6 +642,7 @@ def deliver_with_recovery(
     dispatch_paths: "list[str] | None" = None,
     pr_id: "str | None" = None,
     mandate_id: "str | None" = None,
+    skill: "str | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
@@ -651,6 +654,9 @@ def deliver_with_recovery(
 
     pr_id: when provided, forwarded to IntelligenceSelector.select() so
     prior_round_finding items (codex/gemini gate results) fire in production.
+
+    skill (OI-2372): the spec-bound skill, forwarded to the prompt assembly seam
+    on every attempt. None = no skill, the prompt unchanged.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
@@ -673,8 +679,7 @@ def deliver_with_recovery(
             heartbeat_interval=heartbeat_interval,
             chunk_timeout=chunk_timeout, total_deadline=total_deadline,
             commit_hash_before=commit_hash_before,
-            dispatch_paths=dispatch_paths,
-            pr_id=pr_id,
+            dispatch_paths=dispatch_paths, pr_id=pr_id, skill=skill,
         )
         if sub_result.success:
             _handle_success(
