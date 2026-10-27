@@ -411,7 +411,7 @@ def is_round_of(base_id: str, round_id: str) -> bool:
 # positive integer ``K`` (missing round id, a foreign dispatch, a non-numeric or leading-zero
 # suffix — anything else derives v36's answer). ``is_round_of`` is the Python mirror of the
 # suffix conditions in the join below.
-_DELIVERABLES_VIEW_V37 = ViewInvariant("deliverables", """
+_DELIVERABLES_VIEW_V37 = ViewInvariant("deliverables", f"""
 CREATE VIEW deliverables AS
 SELECT
     d.project_id AS project_id,
@@ -461,7 +461,8 @@ LEFT JOIN (
       ON round_row.project_id = claim.project_id
      AND round_row.state = 'completed'
      AND round_row.dispatch_id = claim.superseded_by
-     AND substr(claim.superseded_by, 1, length(claim.base_id) + 2) = claim.base_id || '-r'
+     AND substr(claim.superseded_by, 1, length(claim.base_id) + 2)
+         = claim.base_id || '{ROUND_SEPARATOR}'
      AND substr(claim.superseded_by, length(claim.base_id) + 3) <> ''
      AND substr(claim.superseded_by, length(claim.base_id) + 3) NOT GLOB '*[^0-9]*'
      AND substr(claim.superseded_by, length(claim.base_id) + 3, 1) <> '0'
