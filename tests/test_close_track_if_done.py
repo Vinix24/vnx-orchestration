@@ -988,3 +988,117 @@ def test_injected_gh_only_set_without_union_leaves_local_pr_uncounted(tmp_path):
     # derived_status reflects the MISSING local PR #6002 → 'in_progress'.
     assert result["derived_status"] == "in_progress"
 
+
+
+# ---------------------------------------------------------------------------
+# Seam tests for the S3 close/gate split (dlv-9aacc366daf4)
+#
+# These pin the shared helper's contract from the OUTSIDE — the exact payload
+# returned by each gate and the exact path/walk result — so extracting the
+# gates and the walk into private helpers cannot change a single returned key
+# or value. They pass on the pre-split code and must pass after the split.
+# ---------------------------------------------------------------------------
+
+def test_seam_payload_gate_dicts_are_exact(tmp_path, monkeypatch):
+    """Each gate outcome returns exactly the pre-split payload, key by key."""
+    sd = _build_db(tmp_path)
+
+    tracks_lib.create_track(
+        sd, "T-seam-queued", PROJECT_ID, title="seam", goal_state="y", phase="queued"
+    )
+    assert track_reconciler.close_track_if_done(
+        sd, "T-seam-queued", PROJECT_ID, actor="operator"
+    ) == {
+        "track_id": "T-seam-queued",
+        "project_id": PROJECT_ID,
+        "declared_phase": "queued",
+        "derived_status": "queued",
+        "action": "noop_not_terminal",
+        "applied": False,
+    }
+
+    _seed_done_track(sd, "T-seam-done", phase="done")
+    assert track_reconciler.close_track_if_done(
+        sd, "T-seam-done", PROJECT_ID, actor="operator"
+    ) == {
+        "track_id": "T-seam-done",
+        "project_id": PROJECT_ID,
+        "declared_phase": "done",
+        "derived_status": "done",
+        "action": "noop_already_closed",
+        "applied": False,
+    }
+
+    _seed_done_track(sd, "T-seam-parked", phase="parked")
+    assert track_reconciler.close_track_if_done(
+        sd, "T-seam-parked", PROJECT_ID, actor="operator"
+    ) == {
+        "track_id": "T-seam-parked",
+        "project_id": PROJECT_ID,
+        "declared_phase": "parked",
+        "derived_status": "done",
+        "action": "rejected_parked",
+        "applied": False,
+    }
+
+    # No legal-path case exists in the 4-phase graph, so the path lookup is
+    # made to report "unreachable" — the gate under test is rejected_no_path.
+    _seed_done_track(sd, "T-seam-nopath", phase="active")
+    import track_reconciler_closure
+
+    monkeypatch.setattr(track_reconciler_closure, "_phase_path_to", lambda *a, **k: None)
+    assert track_reconciler.close_track_if_done(
+        sd, "T-seam-nopath", PROJECT_ID, actor="operator"
+    ) == {
+        "track_id": "T-seam-nopath",
+        "project_id": PROJECT_ID,
+        "declared_phase": "active",
+        "derived_status": "done",
+        "action": "rejected_no_path",
+        "applied": False,
+        "evidence": {
+            "completed": 1,
+            "failed_terminal": 0,
+            "in_flight": 0,
+            "pr_ref": None,
+            "pr_merged": False,
+            "has_success_signal": True,
+        },
+    }
+
+
+def test_seam_path_walk_and_walk_failure(tmp_path, monkeypatch):
+    """A multi-step walk returns [declared, *steps]; a mid-walk failure names
+    the step reached and the exception type in `error`."""
+    sd = _build_db(tmp_path / "walk")
+    _seed_done_track(sd, "T-seam-walk", phase="queued")  # queued -> active -> done
+    result = track_reconciler.close_track_if_done(
+        sd, "T-seam-walk", PROJECT_ID, actor="operator", approval_id="SEAM-1"
+    )
+    assert result["action"] == "closed"
+    assert result["applied"] is True
+    assert result["path"] == ["queued", "active", "done"]
+    assert result["declared_phase"] == "done"
+    assert _phase(sd, "T-seam-walk") == "done"
+
+    sd2 = _build_db(tmp_path / "fail")
+    _seed_done_track(sd2, "T-seam-fail", phase="queued")  # queued -> active -> done
+
+    real = tracks_lib.transition_phase
+
+    def fail_on_done(state_dir, tid, pid, to_phase, **kw):
+        if to_phase == "done":
+            raise tracks_lib.InvalidTransitionError("injected second-step failure")
+        return real(state_dir, tid, pid, to_phase, **kw)
+
+    monkeypatch.setattr(tracks_lib, "transition_phase", fail_on_done)
+    result2 = track_reconciler.close_track_if_done(
+        sd2, "T-seam-fail", PROJECT_ID, actor="operator", approval_id="SEAM-2"
+    )
+    assert result2["action"] == "rejected_walk_failed"
+    assert result2["applied"] is False
+    assert result2["path"] == ["queued", "active", "done"]
+    assert result2["declared_phase"] == "active"  # the step actually reached
+    assert result2["error"].startswith("InvalidTransitionError:")
+    assert "injected second-step failure" in result2["error"]
+    assert _phase(sd2, "T-seam-fail") == "active"  # non-atomic: stuck mid-walk
