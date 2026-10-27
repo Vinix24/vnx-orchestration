@@ -527,16 +527,67 @@ def update_obligation(path: Path, **fields: Any) -> Dict[str, Any]:
     Returns the updated record. Raises OSError/ValueError on unreadable or
     malformed existing content — the runner treats that as a loud failure,
     never a skip.
+
+    The SCHEDULING writer: claims, retry counters, ``dispatch_still_running``
+    and every other piece of the runner's own bookkeeping. An OUTCOME booking
+    (the obligation marked fulfilled/failed/not_executable because a gate run
+    ended) goes through :func:`book_obligation_outcome` under the result
+    slot's lock instead (GE-4c).
     """
     path = Path(path)
+    record = _read_obligation_for_update(path)
+    record.update(fields)
+    _atomic_write_json(path, record)
+    return record
+
+
+def book_obligation_outcome(
+    path: Path,
+    fields: Dict[str, Any],
+    *,
+    attempt: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Merge an obligation OUTCOME booking into the record, idempotent by value (GE-4c).
+
+    The one writer of an obligation outcome, called by
+    ``gate_outcome.commit_gate_outcome`` (and its obligation-only sibling) while
+    it holds the RESULT slot's lock, so the booking shares the critical section
+    of the record and its ``review_gate_result`` receipt (ADR-046 §2 step 8).
+    Scheduling state keeps :func:`update_obligation`.
+
+    ``attempt`` stamps ``booked_for`` — ``commit_sha``/``attempt_seq`` off the
+    result record, gate and PR off the obligation — but idempotency is by VALUE:
+    a booking whose merged record equals the record on disk writes nothing. That
+    is what makes the crash recovery land exactly once.
+
+    Raises ValueError on an unreadable, malformed or missing record, the
+    discipline of :func:`update_obligation`: a booking into an obligation nobody
+    can read is loud, never a silent skip.
+    """
+    path = Path(path)
+    record = _read_obligation_for_update(path)
+    merged = {**record, **fields}
+    if attempt is not None:
+        merged["booked_for"] = {
+            "gate": record.get("gate"),
+            "pr_number": record.get("pr_number"),
+            "commit_sha": attempt.get("commit_sha") or "",
+            "attempt_seq": attempt.get("attempt_seq"),
+        }
+    if merged == record:
+        return record
+    _atomic_write_json(path, merged)
+    return merged
+
+
+def _read_obligation_for_update(path: Path) -> Dict[str, Any]:
+    """The obligation record on disk as a dict; loud on anything unreadable or non-object."""
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot update unreadable gate obligation {path.name}: {exc}") from exc
     if not isinstance(record, dict):
         raise ValueError(f"gate obligation {path.name} is not a JSON object")
-    record.update(fields)
-    _atomic_write_json(path, record)
     return record
 
 
@@ -574,4 +625,5 @@ __all__ = [
     "iter_obligations",
     "iter_obligations_in",
     "update_obligation",
+    "book_obligation_outcome",
 ]
