@@ -11,17 +11,25 @@ Merge semantics:
   permissions.deny:         union (VNX baseline + project entries, deduplicated)
   permissions.ask:          preserved (project-owned)
   permissions.additionalDirectories: preserved (project-owned)
-  hooks:                    replaced (VNX-owned)
+  hooks:                    VNX-owned handlers refreshed from the template, project
+                            handlers kept (--replace-hooks: every handler replaced)
   _vnx_meta:                replaced (VNX-owned)
   other top-level keys:     preserved (project-owned)
 
 Deny-over-allow: if a pattern exists in both deny and allow after merge,
 it is removed from allow and kept in deny.
 
+Hook ownership (OI-2057). A hook handler is VNX-owned when its command either
+equals one the template renders for the same event, or names a path inside a
+VNX install's hook tree (a ``scripts/hooks/`` segment, or anything under the
+central install's ``/.vnx-system/``). Everything else is a project hook and is
+kept: the merge refreshes what VNX installed and never deletes what it did not.
+
 Usage:
   python3 vnx_settings_merge.py --merge --project-root /path/to/project
   python3 vnx_settings_merge.py --full  --project-root /path/to/project
   python3 vnx_settings_merge.py --merge --project-root /path/to/project --dry-run
+  python3 vnx_settings_merge.py --merge --replace-hooks --project-root /path/to/project
 """
 
 import argparse
@@ -285,14 +293,179 @@ def merge_permissions(existing_perms: dict, vnx_perms: dict) -> dict:
     return result
 
 
-def merge_settings(existing: dict, vnx_template: dict) -> dict:
-    """Merge VNX template keys into existing settings with patch semantics."""
+# ── Hook ownership (OI-2057) ────────────────────────────────────────────────
+#
+# A hook handler belongs to VNX when its command either matches one the
+# template renders for the same event, or names a path in a VNX install's hook
+# tree. MEASURED 2026-10-27 on a pinned consumer
+# (``SEOcrawler_v2/.claude/settings.json``, 10 handlers): its 3 VNX handlers
+# all name ``~/.vnx-system/current/scripts/hooks/t0_context_guard.py``, and its
+# 7 project handlers name the project's own ``.claude/hooks/`` (4) or
+# ``.claude/vnx-system/hooks/`` (2) — note the missing ``scripts/`` prefix, so
+# a legacy embedded install's project-local hook directory stays project-owned.
+# The last handler is a project SessionStart chain of local scripts.
+#
+# ``scripts/hooks/`` is the path segment VNX ships its hook entries under, and
+# covers every install layout (central version dir, ``current``, dev checkout,
+# embedded ``.vnx/``); ``/.vnx-system/`` catches a handler that names the
+# central install without reaching into its hook tree. Both are literal
+# substrings of the command, so an anchor such as
+# ``$(git rev-parse --show-toplevel)/scripts/hooks/...`` counts too.
+_VNX_HOOK_PATH_MARKERS = ("scripts/hooks/", "/.vnx-system/")
+
+
+def _normalise_command(command: str) -> str:
+    """Whitespace-normalised command text, so a hand-edited double space still matches."""
+    return " ".join(command.split())
+
+
+def _command_of(handler: object) -> object:
+    """The handler's command, or None when the handler is not an object."""
+    if not isinstance(handler, dict):
+        return None
+    return handler.get("command")
+
+
+def is_vnx_owned_hook(handler: object, template_commands: set[str]) -> bool:
+    """Is this hook handler one VNX installed, and may the merge refresh it?
+
+    ``template_commands`` is the whitespace-normalised command set the template
+    renders for this event. The matcher is deliberately not part of the test:
+    a group whose matcher the harness never dispatches is repaired by a plain
+    ``--merge`` (``t0_state_health`` remediation), which only works if the
+    event's template commands decide ownership.
+
+    A handler with no readable command — not an object, no ``command`` key,
+    ``None``, a non-string or blank — establishes no VNX ownership and is
+    therefore kept: keeping a hook deletes nothing, while refreshing on a guess
+    can delete a project hook.
+    """
+    command = _command_of(handler)
+    if not isinstance(command, str) or not command.strip():
+        return False
+    if _normalise_command(command) in template_commands:
+        return True
+    return any(marker in command for marker in _VNX_HOOK_PATH_MARKERS)
+
+
+def _template_commands(groups: list) -> set[str]:
+    """Normalised commands the template's groups for one event register."""
+    commands = set()
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        for handler in group.get("hooks") or []:
+            command = _command_of(handler)
+            if isinstance(command, str) and command.strip():
+                commands.add(_normalise_command(command))
+    return commands
+
+
+def _flat_handlers(groups: list) -> list[tuple[object, object]]:
+    """(matcher, handler) for every handler in the groups, in file order."""
+    flat = []
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        matcher = group.get("matcher")
+        for handler in group.get("hooks") or []:
+            flat.append((matcher, handler))
+    return flat
+
+
+def merge_hooks(existing_hooks: dict, template_hooks: dict, *,
+                replace_hooks: bool = False) -> tuple[dict, dict]:
+    """Refresh the VNX-owned handlers and keep every project handler.
+
+    Returns ``(merged_hooks, report)``. The report is per event:
+    ``kept`` (project handlers left in place), ``added`` (template handlers
+    with no predecessor on that event) and ``replaced`` (an old handler and the
+    template handler that took its place, or ``new_command: None`` when the
+    template no longer registers that event and the old handler is dropped).
+
+    A group that held a VNX handler keeps the template's groups for the event in
+    that position, so the guard keeps its slot in the event's order; the
+    project part of a mixed group stays where it was. ``replace_hooks=True``
+    reproduces the pre-OI-2057 behaviour: every existing handler is replaced.
+    """
+    merged: dict = {}
+    report: dict = {}
+    existing_hooks = existing_hooks or {}
+    template_hooks = template_hooks or {}
+    events = list(existing_hooks) + [event for event in template_hooks if event not in existing_hooks]
+
+    for event in events:
+        old_groups = existing_hooks.get(event) or []
+        new_groups = template_hooks.get(event) or []
+        template_commands = _template_commands(new_groups)
+        kept: list = []
+        replaced: list = []
+        groups: list = []
+        spliced = False
+
+        for group in old_groups:
+            if not isinstance(group, dict):
+                # Unclassifiable input is kept so validate_settings refuses the
+                # merge out loud; dropping it would delete a hook silently.
+                groups.append(group)
+                continue
+            handlers = group.get("hooks") or []
+            project_handlers = []
+            for handler in handlers:
+                if replace_hooks or is_vnx_owned_hook(handler, template_commands):
+                    replaced.append({"matcher": group.get("matcher"),
+                                     "old_command": _command_of(handler)})
+                else:
+                    project_handlers.append(handler)
+                    kept.append({"matcher": group.get("matcher"),
+                                 "command": _command_of(handler)})
+            if project_handlers:
+                kept_group = dict(group)
+                kept_group["hooks"] = project_handlers
+                groups.append(kept_group)
+            if len(project_handlers) != len(handlers) and not spliced:
+                groups.extend(new_groups)
+                spliced = True
+        if not spliced:
+            groups.extend(new_groups)
+
+        new_flat = _flat_handlers(new_groups)
+        for index, entry in enumerate(replaced):
+            entry["new_command"] = (
+                _command_of(new_flat[index][1]) if index < len(new_flat) else None
+            )
+        added = [
+            {"matcher": matcher, "command": _command_of(handler)}
+            for matcher, handler in new_flat[len(replaced):]
+        ]
+
+        if groups:
+            merged[event] = groups
+        if kept or replaced or added:
+            report[event] = {"kept": kept, "added": added, "replaced": replaced}
+
+    return merged, report
+
+
+def _hooks_shape_error(hooks: object) -> str | None:
+    """Why this hooks tree cannot be merged, or None when it can be classified."""
+    if not isinstance(hooks, dict):
+        return "'hooks' is not an object"
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            return f"hooks.{event} is not an array"
+    return None
+
+
+def merge_settings_with_report(existing: dict, vnx_template: dict, *,
+                               replace_hooks: bool = False) -> tuple[dict, dict]:
+    """``merge_settings`` plus the per-event hook report the dry run prints."""
     result = {}
 
     # Start with all existing keys
     for key in existing:
-        if key == "_vnx_meta":
-            continue  # Will be replaced
+        if key in ("_vnx_meta", "hooks"):
+            continue  # Replaced or merged below
         result[key] = existing[key]
 
     # Merge env
@@ -305,14 +478,35 @@ def merge_settings(existing: dict, vnx_template: dict) -> dict:
     vnx_perms = vnx_template.get("permissions", {})
     result["permissions"] = merge_permissions(existing_perms, vnx_perms)
 
-    # Replace hooks (VNX-owned entirely)
+    # Refresh VNX-owned hooks, keep project hooks. A hooks tree that cannot be
+    # read refuses the merge rather than being guessed at: an unreadable tree is
+    # not evidence that its handlers are VNX-owned.
+    hook_report: dict = {}
+    if "hooks" in existing:
+        problem = _hooks_shape_error(existing["hooks"])
+        if problem:
+            print(
+                f"ERROR: existing settings.json cannot be merged: {problem} — "
+                "refusing to touch its hooks",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     if "hooks" in vnx_template:
-        result["hooks"] = vnx_template["hooks"]
+        result["hooks"], hook_report = merge_hooks(
+            existing.get("hooks", {}), vnx_template["hooks"], replace_hooks=replace_hooks,
+        )
+    elif "hooks" in existing:
+        result["hooks"] = existing["hooks"]
 
     # Set VNX meta
     result["_vnx_meta"] = vnx_template.get("_vnx_meta", {})
 
-    return result
+    return result, hook_report
+
+
+def merge_settings(existing: dict, vnx_template: dict, *, replace_hooks: bool = False) -> dict:
+    """Merge VNX template keys into existing settings with patch semantics."""
+    return merge_settings_with_report(existing, vnx_template, replace_hooks=replace_hooks)[0]
 
 
 def generate_full_settings(vnx_template: dict) -> dict:
@@ -393,7 +587,17 @@ def validate_settings(data: dict) -> list[str]:
     return issues
 
 
-def diff_summary(existing: dict | None, merged: dict) -> list[str]:
+def _hook_totals(hook_report: dict) -> tuple[int, int, int]:
+    """(kept, added, replaced) across every event of the report."""
+    kept = added = replaced = 0
+    for entry in hook_report.values():
+        kept += len(entry["kept"])
+        added += len(entry["added"])
+        replaced += len(entry["replaced"])
+    return kept, added, replaced
+
+
+def diff_summary(existing: dict | None, merged: dict, hook_report: dict | None = None) -> list[str]:
     """Generate a human-readable diff summary."""
     lines = []
 
@@ -425,15 +629,123 @@ def diff_summary(existing: dict | None, merged: dict) -> list[str]:
         if removed:
             lines.append(f"  permissions.{ptype}: -{len(removed)} entries")
 
-    # Hooks
-    old_hooks = existing.get("hooks", {})
-    new_hooks = merged.get("hooks", {})
-    if old_hooks != new_hooks:
-        old_events = set(old_hooks.keys())
-        new_events = set(new_hooks.keys())
-        lines.append(f"  hooks: replaced ({len(new_events)} event types)")
+    # Hooks: name the three outcomes rather than "replaced", which is only true
+    # of the VNX-owned part since OI-2057.
+    if hook_report:
+        kept, added, replaced = _hook_totals(hook_report)
+        lines.append(
+            f"  hooks: {added} added, {replaced} replaced, {kept} project hook(s) kept"
+        )
+    else:
+        old_hooks = existing.get("hooks", {})
+        new_hooks = merged.get("hooks", {})
+        if old_hooks != new_hooks:
+            lines.append(f"  hooks: replaced ({len(new_hooks)} event types)")
 
     return lines
+
+
+def _run_validate(settings_path: str) -> None:
+    existing = load_existing_settings(settings_path)
+    if existing is None:
+        print("ERROR: settings.json not found", file=sys.stderr)
+        sys.exit(1)
+    issues = validate_settings(existing)
+    if issues:
+        for issue in issues:
+            print(f"  FAIL: {issue}", file=sys.stderr)
+        sys.exit(1)
+    print("[regen-settings] settings.json structure is valid")
+    sys.exit(0)
+
+
+def _run_full(args, vnx_template: dict, settings_path: str) -> None:
+    """--full: generate from scratch (still replaces the whole file)."""
+    existing = load_existing_settings(settings_path)
+    result = generate_full_settings(vnx_template)
+
+    issues = validate_settings(result)
+    if issues:
+        print("ERROR: Generated settings failed validation:", file=sys.stderr)
+        for issue in issues:
+            print(f"  {issue}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.dry_run:
+        if args.json:
+            print(json.dumps(result, indent=2))
+        else:
+            print("[regen-settings] --full --dry-run: would create settings.json")
+            if existing:
+                print("[regen-settings] WARNING: would overwrite existing settings.json")
+            print(json.dumps(result, indent=2))
+        sys.exit(0)
+
+    # Backup existing if present
+    if existing and not args.no_backup:
+        bak = backup_settings(settings_path)
+        print(f"[regen-settings] Backup: {bak}")
+
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    write_settings(settings_path, result)
+    _print_done(f"[regen-settings] Created: {settings_path} (full)")
+
+
+def _run_merge(args, vnx_template: dict, settings_path: str) -> None:
+    """--merge: overlay VNX keys, refreshing only the VNX-owned hooks."""
+    existing = load_existing_settings(settings_path)
+    hook_report: dict = {}
+
+    if existing is None:
+        # No existing file — fall back to full generation
+        print("[regen-settings] No existing settings.json, generating full")
+        result = generate_full_settings(vnx_template)
+    else:
+        result, hook_report = merge_settings_with_report(
+            existing, vnx_template, replace_hooks=args.replace_hooks,
+        )
+
+    issues = validate_settings(result)
+    if issues:
+        print("ERROR: Merged settings failed validation:", file=sys.stderr)
+        for issue in issues:
+            print(f"  {issue}", file=sys.stderr)
+        sys.exit(1)
+
+    summary = diff_summary(existing, result, hook_report)
+
+    if args.dry_run:
+        if args.json:
+            # The merged settings stay the top-level object (that is what this
+            # mode always printed); the report rides beside them and is never
+            # written to disk — only this dry-run branch reads it.
+            payload = dict(result)
+            payload["_vnx_hook_report"] = {
+                "mode": "replace-hooks" if args.replace_hooks else "merge",
+                **hook_report,
+            }
+            print(json.dumps(payload, indent=2))
+        else:
+            print("[regen-settings] --merge --dry-run:")
+            if summary:
+                for line in summary:
+                    print(line)
+            else:
+                print("  (no changes)")
+        sys.exit(0)
+
+    # Backup existing if present
+    if existing and not args.no_backup:
+        bak = backup_settings(settings_path)
+        print(f"[regen-settings] Backup: {bak}")
+
+    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+    write_settings(settings_path, result)
+
+    if summary:
+        for line in summary:
+            print(line)
+    _print_done(f"[regen-settings] Updated: {settings_path} (merge)")
 
 
 def main():
@@ -456,106 +768,27 @@ def main():
                         help="Skip backup of existing settings.json")
     parser.add_argument("--json", action="store_true",
                         help="Output result as JSON (for scripting)")
+    parser.add_argument("--replace-hooks", action="store_true",
+                        help="Replace every hook with the template's set (the pre-OI-2057 "
+                             "--merge behaviour); project hooks are dropped")
 
     args = parser.parse_args()
+    if args.replace_hooks and not args.merge:
+        parser.error("--replace-hooks only applies to --merge")
 
     project_root = os.path.realpath(args.project_root)
     vnx_home = args.vnx_home or find_vnx_home(project_root)
     settings_path = os.path.join(project_root, ".claude", "settings.json")
 
-    # Validate mode
     if args.validate:
-        existing = load_existing_settings(settings_path)
-        if existing is None:
-            print("ERROR: settings.json not found", file=sys.stderr)
-            sys.exit(1)
-        issues = validate_settings(existing)
-        if issues:
-            for issue in issues:
-                print(f"  FAIL: {issue}", file=sys.stderr)
-            sys.exit(1)
-        else:
-            print("[regen-settings] settings.json structure is valid")
-            sys.exit(0)
+        _run_validate(settings_path)
 
-    # Load template
     vnx_template = load_template(vnx_home, project_root)
 
     if args.full:
-        # Full mode: generate from scratch
-        existing = load_existing_settings(settings_path)
-        result = generate_full_settings(vnx_template)
-
-        issues = validate_settings(result)
-        if issues:
-            print("ERROR: Generated settings failed validation:", file=sys.stderr)
-            for issue in issues:
-                print(f"  {issue}", file=sys.stderr)
-            sys.exit(1)
-
-        if args.dry_run:
-            if args.json:
-                print(json.dumps(result, indent=2))
-            else:
-                print("[regen-settings] --full --dry-run: would create settings.json")
-                if existing:
-                    print("[regen-settings] WARNING: would overwrite existing settings.json")
-                print(json.dumps(result, indent=2))
-            sys.exit(0)
-
-        # Backup existing if present
-        if existing and not args.no_backup:
-            bak = backup_settings(settings_path)
-            print(f"[regen-settings] Backup: {bak}")
-
-        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-        write_settings(settings_path, result)
-        _print_done(f"[regen-settings] Created: {settings_path} (full)")
-
+        _run_full(args, vnx_template, settings_path)
     elif args.merge:
-        # Merge mode: overlay VNX keys into existing
-        existing = load_existing_settings(settings_path)
-
-        if existing is None:
-            # No existing file — fall back to full generation
-            print("[regen-settings] No existing settings.json, generating full")
-            result = generate_full_settings(vnx_template)
-        else:
-            result = merge_settings(existing, vnx_template)
-
-        issues = validate_settings(result)
-        if issues:
-            print("ERROR: Merged settings failed validation:", file=sys.stderr)
-            for issue in issues:
-                print(f"  {issue}", file=sys.stderr)
-            sys.exit(1)
-
-        summary = diff_summary(existing, result)
-
-        if args.dry_run:
-            if args.json:
-                print(json.dumps(result, indent=2))
-            else:
-                print("[regen-settings] --merge --dry-run:")
-                if summary:
-                    for line in summary:
-                        print(line)
-                else:
-                    print("  (no changes)")
-            sys.exit(0)
-
-        # Backup existing if present
-        if existing and not args.no_backup:
-            bak = backup_settings(settings_path)
-            print(f"[regen-settings] Backup: {bak}")
-
-        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-        write_settings(settings_path, result)
-
-        if summary:
-            for line in summary:
-                print(line)
-        _print_done(f"[regen-settings] Updated: {settings_path} (merge)")
+        _run_merge(args, vnx_template, settings_path)
 
 
 if __name__ == "__main__":

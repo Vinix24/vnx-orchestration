@@ -210,6 +210,26 @@ def test_a_malformed_group_is_kept_and_fails_validation(tmp_path):
     assert any("must be an object" in issue for issue in engine.validate_settings(merged))
 
 
+@pytest.mark.parametrize("hooks", [
+    [],
+    "nope",
+    {"PreToolUse": {"matcher": "Bash"}},
+    {"PreToolUse": None},
+])
+def test_an_unmergeable_hooks_shape_is_refused(tmp_path, capsys, hooks):
+    """An unreadable hooks tree is no evidence that its handlers are VNX-owned."""
+    project = _write_project(tmp_path)
+    template = engine.load_template(str(REPO_ROOT), str(project))
+    existing = _settings_with_one_vnx_and_one_project_hook()
+    existing["hooks"] = hooks
+
+    with pytest.raises(SystemExit) as raised:
+        engine.merge_settings(existing, template)
+
+    assert raised.value.code == 1
+    assert "refusing to touch its hooks" in capsys.readouterr().err
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # The ownership rule, measured
 # ─────────────────────────────────────────────────────────────────────────
