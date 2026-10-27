@@ -33,12 +33,12 @@ from pathlib import Path
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple, TypedDict
 
 import tracks as tracks_lib  # same package; importable whenever scripts/lib/ is in sys.path
+from coordination_db import TERMINAL_DISPATCH_STATES  # the one canonical set (ADR-049)
 
 log = logging.getLogger(__name__)
 
 DB_FILENAME = "runtime_coordination.db"
 
-TERMINAL_DISPATCH_STATES = frozenset({"completed", "expired", "dead_letter"})
 IN_FLIGHT_DISPATCH_STATES = frozenset({
     "queued", "claimed", "delivering", "accepted", "running", "active",
 })
@@ -899,12 +899,14 @@ def reconcile_all_tracks(
 def _deliverable_stubs(
     conn: sqlite3.Connection, track_id: str, project_id: str
 ) -> List[sqlite3.Row]:
+    """Deliverable rows not in a terminal state: a withdrawn one is never a stub, so never ended."""
+    terminal = sorted(TERMINAL_DISPATCH_STATES)
     return conn.execute(
         "SELECT dispatch_id, state FROM dispatches "
         "WHERE track = ? AND project_id = ? "
         "AND output_ref IS NOT NULL AND output_ref != '' "
-        "AND state NOT IN ('completed', 'expired', 'dead_letter')",
-        (track_id, project_id),
+        f"AND state NOT IN ({','.join('?' * len(terminal))})",
+        (track_id, project_id, *terminal),
     ).fetchall()
 
 

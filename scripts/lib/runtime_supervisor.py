@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from runtime_coordination import (
+    TERMINAL_DISPATCH_STATES,
     get_connection,
     init_schema,
 )
@@ -63,10 +64,9 @@ ANOMALY_TYPES = {
     "bad_exit_no_artifacts":    {"severity": "warning",  "description": "Worker exited with code 0 but expected artifacts missing"},
 }
 
-# Dispatch states where the dispatch is finished — zombie detection trigger
-_TERMINAL_DISPATCH_STATES = frozenset({
-    "completed", "expired", "dead_letter",
-})
+# Dispatch states where the dispatch is finished — zombie detection trigger.
+# The canonical set from coordination_db (ADR-049), not a copy of it.
+_TERMINAL_DISPATCH_STATES = TERMINAL_DISPATCH_STATES
 
 # Dispatch states where work is actively claimed
 _ACTIVE_DISPATCH_STATES = frozenset({

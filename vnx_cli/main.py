@@ -915,7 +915,7 @@ def _register_objective_queue_verb(subs: argparse.Action) -> None:
     )
     p_queue.add_argument(
         "--all", action="store_true",
-        help="also show closed/done/cancelled deliverables (hidden by default)",
+        help="also show closed/done/cancelled/withdrawn deliverables (hidden by default)",
     )
 
 
@@ -987,6 +987,7 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
     p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
     _common_horizon_args(p_dlist)
     p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
 
     p_dpromote = subs.add_parser(
         "promote", help="human gate: promote deliverable from proposed -> ready",
@@ -1036,13 +1037,17 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
 
 
 def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
-    """`deliverable retarget`: move a deliverable that has not started to another track."""
+    """`deliverable retarget` and `withdraw`: move, or end, a deliverable that has not started."""
     p = subs.add_parser("retarget", help="move a proposed/ready deliverable to another track")
     _common_horizon_args(p)
     p.add_argument("dispatch_id")
     p.add_argument("--objective", required=True, metavar="TRACK_ID", help="the track to move it to")
     p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
     p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
+    p = subs.add_parser("withdraw", help="end a proposed/ready deliverable that will not be built")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
 
 
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:

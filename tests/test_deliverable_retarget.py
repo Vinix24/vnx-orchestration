@@ -233,6 +233,24 @@ def test_an_event_insert_that_raises_rolls_the_move_back(store, monkeypatch):
     assert aborted["abort_cause"] == "store_error: injected: event insert fails"
 
 
+def test_a_non_store_error_after_the_ledger_line_still_books_the_aborted_line(store, monkeypatch):
+    """kimi on PR-1: a non-sqlite3 error rolled the move back but left the intent line without its abort."""
+    dlv = _add(store, promote=True)
+    before = _row(store, dlv)
+
+    def _broken(*_a, **_k):
+        raise RuntimeError("injected: not a store error")
+
+    monkeypatch.setattr(planning_cli, "_append_coordination_event", _broken)
+    with pytest.raises(RuntimeError, match="not a store error"):
+        _retarget(store, dlv)
+    assert _row(store, dlv) == before and _events(store, dlv) == []
+    intent, aborted = _ledger(store)
+    assert (intent["trigger"], aborted["trigger"], aborted["retarget_id"]) == (INTENT, ABORTED, intent["retarget_id"])
+    assert (aborted["state"], aborted["track"]) == ("ready", SRC)
+    assert aborted["abort_cause"] == "error: RuntimeError: injected: not a store error"
+
+
 _INTENT_FIELDS = ("event_type", "receipt_kind", "terminal", "source", "trigger", "dispatch_id", "project_id",
                   "from_track", "to_track", "prior_state", "to_state", "actor", "reason")
 

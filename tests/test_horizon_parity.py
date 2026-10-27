@@ -334,6 +334,7 @@ _DELIVERABLE_ARGV = {
     "close": ["dlv-fake-id", "--evidence", "123"],
     "set": ["dlv-fake-id", "--task-class", "01_code_generation"],
     "retarget": ["dlv-fake-id", "--objective", "other-track", "--reason", "parity check"],
+    "withdraw": ["dlv-fake-id", "--reason", "parity check"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],
