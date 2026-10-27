@@ -1,0 +1,111 @@
+name: Red on base
+
+# The claimed red-on-base signal of track deterministische-testverificatie PR-3.
+# It is a workflow of its own, not a job of vnx-ci.yml, because its trigger
+# includes the `edited` action: editing a PR body must re-run this check and
+# NOTHING else. A skipped job still satisfies a required check, and a run in
+# which every pre-existing job is skipped concludes `success` — so an `edited`
+# event re-entering vnx-ci.yml would let a body change turn a red head green
+# for the required-check door and for the merge rule that reads the latest
+# `VNX CI` conclusion.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+jobs:
+  red-on-base:
+    name: Red on base (claimed tests prove a behaviour change)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Python with the pinned test tools, the vendored repo layout, ripgrep, the
+      # VNX paths and the doctor — exactly the environment Profile A sets up.
+      # red_on_base.py runs the PR's own tests through `sys.executable -m pytest`
+      # in two worktrees, so it needs that same interpreter and those same
+      # installed dependencies; without this step the earlier version of this
+      # job called the tool in a bare python3 environment with no pytest at all.
+      - name: Profile A prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Write the PR body to a file
+        # The body reaches the shell only through env: never as an inline
+        # expression in a run command (script injection).
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+
+      - name: Read the claimed red runs
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/red_run_claims.py "$RUNNER_TEMP/pr-body.md" \
+            --out "$RUNNER_TEMP/claims.txt"
+
+      - name: Compute the merge-base
+        # The base-branch tip is an input to this computation only. A regression that
+        # landed on base after the fork must never run as if it were the PR's code:
+        # the selection and red_on_base.py --base both use this one persisted value.
+        id: merge_base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          if [ -z "$merge_base" ]; then
+            echo "git merge-base returned an empty revision" >&2
+            exit 1
+          fi
+          echo "sha=$merge_base" >> "$GITHUB_OUTPUT"
+
+      - name: Select the PR's test files
+        env:
+          MERGE_BASE_SHA: ${{ steps.merge_base.outputs.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          : "${MERGE_BASE_SHA:?the merge-base step produced no sha}"
+          git -c core.quotePath=false diff --name-only --no-renames \
+            "$MERGE_BASE_SHA" "$HEAD_SHA" > "$RUNNER_TEMP/changed-paths.txt"
+          python3 scripts/ci/classify_ci_profile.py --tests-only \
+            --paths-file "$RUNNER_TEMP/changed-paths.txt" \
+            --root "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/selection.json"
+
+      - name: Run the claimed tests on base and on head
+        # red_on_base.py unions the claimed nodeids' files into the selection, so a
+        # claim still runs when the PR changes no test file at all.
+        env:
+          MERGE_BASE_SHA: ${{ steps.merge_base.outputs.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          : "${MERGE_BASE_SHA:?the merge-base step produced no sha}"
+          python3 scripts/ci/red_on_base.py \
+            --base "$MERGE_BASE_SHA" --head "$HEAD_SHA" \
+            --selection "$RUNNER_TEMP/selection.json" \
+            --claims "$RUNNER_TEMP/claims.txt" \
+            --out red_on_base.json
+
+      - name: Summarise the verdict
+        # `no_test` and an unclaimed `green_on_base` stay a neutral mark: the job is green.
+        if: always()
+        run: |
+          {
+            echo '### Red on base'
+            python3 -c 'import json; v = json.load(open("red_on_base.json")); print("summary:", v["summary"], "false_claims:", v["false_claims"], "no_test:", v["no_test"])' 2>/dev/null || echo 'no verdict was written'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-on-base-verdict
+          path: red_on_base.json
+          if-no-files-found: warn
