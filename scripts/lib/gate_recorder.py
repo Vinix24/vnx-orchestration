@@ -1728,6 +1728,21 @@ _RECEIPT_ENVELOPE_KEYS = frozenset({
 })
 
 
+def _gate_review_verification(passed: bool, blocking_count: int, pr_ref: str) -> Dict[str, Any]:
+    """The outcome receipt's ``verification``: one review run, and a fail counts at least one failure."""
+    tests_passed, tests_failed = (1, 0) if passed else (0, max(1, blocking_count))
+    return {
+        "method": "gate_review",
+        "tests_run": 1,
+        "tests_passed": tests_passed,
+        "tests_failed": tests_failed,
+        "command": None,
+        "pr_ref": pr_ref,
+        "push_verified": None,
+        "spec_deviation": None,
+    }
+
+
 def _emit_terminal_result_receipt(
     payload: Dict[str, Any],
     *,
@@ -1786,20 +1801,6 @@ def _emit_terminal_result_receipt(
     receipt_status = "completed" if passed else "failed"
     blocking = payload.get("blocking_findings") or []
     blocking_count = len(blocking) if isinstance(blocking, list) else 0
-    if passed:
-        tests_passed, tests_failed = 1, 0
-    else:
-        tests_passed, tests_failed = 0, max(1, blocking_count)
-    verification = {
-        "method": "gate_review",
-        "tests_run": 1,
-        "tests_passed": tests_passed,
-        "tests_failed": tests_failed,
-        "command": None,
-        "pr_ref": pr_ref,
-        "push_verified": None,
-        "spec_deviation": None,
-    }
 
     fields: Dict[str, Any] = {
         "gate": gate,
@@ -1807,7 +1808,7 @@ def _emit_terminal_result_receipt(
         "contract_hash": (payload.get("contract_hash") or "").strip(),
         "report_path": (payload.get("report_path") or "").strip(),
         "blocking_count": blocking_count,
-        "verification": verification,
+        "verification": _gate_review_verification(passed, blocking_count, pr_ref),
     }
     for key in ("dispatch_id", "provider", "model", "pr_id", "final_prompt_sha256", "seat", "takeover_from"):
         value = str(payload.get(key) or "").strip()
