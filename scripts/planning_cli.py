@@ -73,6 +73,7 @@ import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import plan_scope
 import provider_switch
+import schema_manifest
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -3016,21 +3017,25 @@ def _queue_pr_number(
 
     The PR lives on ``dispatches.pr_ref`` (``vnx deliverable close --evidence``
     writes it there); a round can carry it too but its ``output_ref`` is NULL,
-    so the match is the root id plus its ``<id>-r<n>`` prefix. The most recent
+    so the match is the root id plus its ``<id>-rK`` prefix for a positive
+    integer ``K`` — ``schema_manifest.is_round_of`` decides that shape, so a row
+    like ``<id>-r0`` or ``<id>-rX`` is not read as a round. The most recent
     non-empty ``pr_ref`` wins. A present-but-unparseable ``pr_ref`` raises
     ``ValueError`` instead of reading as "no PR" (fail-closed on evidence).
     """
     escaped = root_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    row = conn.execute(
+    rows = conn.execute(
         """
         SELECT dispatch_id, pr_ref FROM dispatches
         WHERE project_id = ? AND pr_ref IS NOT NULL AND pr_ref != ''
           AND (dispatch_id = ? OR dispatch_id LIKE ? ESCAPE '\\')
         ORDER BY updated_at DESC, id DESC
-        LIMIT 1
         """,
-        (project_id, root_id, escaped + "-r%"),
-    ).fetchone()
+        (project_id, root_id, escaped + schema_manifest.ROUND_SEPARATOR + "%"),
+    ).fetchall()
+    row = next((r for r in rows
+                if r["dispatch_id"] == root_id
+                or schema_manifest.is_round_of(root_id, r["dispatch_id"])), None)
     if row is None:
         return None
     normalized = _normalize_pr_ref(str(row["pr_ref"]).split(",", 1)[0].strip())
@@ -3281,6 +3286,12 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
     promote; the operator signs again here, and the attestation is named as
     such in the audit event so it is never mistaken for a verified merge.
 
+    Two endings, one rule (ADR-049 amendment for OI-2262). A ``ready`` deliverable ends
+    ``completed`` on the operator's evidence, as before; a ``failed_delivery`` or
+    ``timed_out`` base ends ``expired`` when its own ``<id>-rK`` round is ``completed``,
+    booked on that round's evidence and never on a PR that did not deliver it. Without a
+    completed round: refused, nothing changes.
+
     ADR-007: the lookup AND the audit event both carry the resolved project_id.
     No silent 'vnx-dev' fallback — an empty project_id is refused with exit 2.
     """
@@ -3339,16 +3350,10 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
             return 0
 
         if current_state != "ready":
-            hint = (
-                "Promote it first with `vnx deliverable promote "
-                f"{dispatch_id}`." if current_state == "proposed" else ""
+            return _close_off_ready(
+                args, conn, project_id=project_id, dispatch_id=dispatch_id,
+                current_state=current_state, pr_ref=pr_ref, evidence_number=evidence_number,
             )
-            print(
-                f"deliverable close: cannot close {dispatch_id!r}: expected state "
-                f"'ready', found {current_state!r}. {hint}No change made.".strip(),
-                file=sys.stderr,
-            )
-            return 2
 
         now = _now_utc()
         conn.execute(
@@ -3397,6 +3402,187 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Close a deliverable that is not `ready` (ADR-049 amendment, OI-2262)
+# ---------------------------------------------------------------------------
+
+#: States in which the deliverable's own attempt failed; only its own round can close one.
+SUPERSEDED_CLOSE_STATES = frozenset({"failed_delivery", "timed_out"})
+SUPERSEDED_EVENT = "deliverable_superseded"
+
+
+def _completed_round(conn: sqlite3.Connection, project_id: str, dispatch_id: str) -> Optional[str]:
+    """The newest ``<dispatch_id>-rK`` row of *project_id* in ``completed``, or None.
+
+    Fail-closed: no round, another project's row, an id that is not ``-rK`` for a positive
+    integer ``K`` and any state but ``completed`` are not evidence, so the caller keeps
+    refusing. The id shape is decided by ``schema_manifest.is_round_of`` — the same rule
+    the v37 view applies in SQL — so the round this close records is exactly the round the
+    view reads back as delivered (``-r0``, ``-r03``, ``-rX`` and a bare ``-r`` are not).
+    """
+    esc = dispatch_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    rows = conn.execute(
+        "SELECT dispatch_id, state FROM dispatches "
+        "WHERE project_id = ? AND dispatch_id LIKE ? ESCAPE '\\' "
+        "ORDER BY updated_at DESC, id DESC",
+        (project_id, esc + schema_manifest.ROUND_SEPARATOR + "%"),
+    ).fetchall()
+    for row in rows:
+        if (schema_manifest.is_round_of(dispatch_id, row["dispatch_id"])
+                and row["state"] == "completed"):
+            return row["dispatch_id"]
+    return None
+
+
+def _read_superseded_row(
+    conn: sqlite3.Connection, project_id: str, dispatch_id: str,
+) -> Optional[sqlite3.Row]:
+    """The row the supersede close binds: its state and its ``metadata_json`` text, read under the lock.
+
+    Both values are bound into the UPDATE's predicate, so a writer that changed either one
+    after A started its close — even one that bypasses ``BEGIN IMMEDIATE`` — makes the write
+    miss instead of overwriting the change it never saw.
+    """
+    return conn.execute(
+        "SELECT state, metadata_json FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+        (dispatch_id, project_id),
+    ).fetchone()
+
+
+def _book_superseded_attempt(
+    conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
+    pr_ref: str, evidence_number: int,
+) -> dict:
+    """The work under the lock: find the round, merge the metadata, write the row and the event.
+
+    Leaves the transaction open — ``_close_superseded_attempt`` commits or rolls it back.
+    Returns ``superseded``, ``no_round``, ``bad_metadata`` (metadata_json does not parse:
+    never overwritten) or ``row_changed`` (nothing written).
+    """
+    round_id = _completed_round(conn, project_id, dispatch_id)
+    if round_id is None:
+        return {"action": "no_round"}
+    row = _read_superseded_row(conn, project_id, dispatch_id)
+    if row is None or row["state"] != from_state:
+        return {"action": "row_changed"}
+    metadata_text = row["metadata_json"]
+    try:
+        metadata = json.loads(metadata_text or "{}")
+    except (TypeError, ValueError):
+        return {"action": "bad_metadata"}
+    if not isinstance(metadata, dict):
+        return {"action": "bad_metadata"}
+    now = _now_utc()
+    metadata.update(superseded_by=round_id, superseded_from=from_state,
+                    superseded_evidence_pr=evidence_number, superseded_at=now,
+                    attestation="operator")
+    changed = conn.execute(
+        """
+        UPDATE dispatches
+        SET state = 'expired', pr_ref = ?, metadata_json = ?, updated_at = ?
+        WHERE dispatch_id = ? AND project_id = ? AND state = ? AND metadata_json IS ?
+        """,
+        (pr_ref, json.dumps(metadata, default=str), now, dispatch_id, project_id, from_state,
+         metadata_text),
+    ).rowcount
+    if changed != 1:
+        return {"action": "row_changed"}
+    _append_coordination_event(
+        conn,
+        event_type=SUPERSEDED_EVENT,
+        dispatch_id=dispatch_id,
+        from_state=from_state,
+        to_state="expired",
+        actor="operator",
+        reason=f"deliverable close: PR {pr_ref} delivered by round {round_id} (operator attestation)",
+        project_id=project_id,
+        metadata={"evidence_pr": evidence_number, "pr_ref": pr_ref,
+                  "superseded_by": round_id, "attestation": "operator"},
+    )
+    return {"action": "superseded", "round": round_id}
+
+
+def _close_superseded_attempt(
+    conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
+    pr_ref: str, evidence_number: int,
+) -> dict:
+    """Book a base on its own completed round: ``expired`` plus ``metadata_json.superseded_by``.
+
+    ``expired`` is terminal and no delivery claim; the v37 view reads the pair as the
+    evidence. ``BEGIN IMMEDIATE`` goes on BEFORE the row is read, so the read, the merge,
+    the UPDATE and the one ``deliverable_superseded`` event are one serialized transaction:
+    no writer can change the state or the metadata between the read and the write. The
+    UPDATE still compares against both values it read (the compare-and-swap), so a writer
+    that bypasses the lock is caught instead of overwritten. Returns ``superseded``,
+    ``no_round``, ``bad_metadata`` (metadata_json does not parse: never overwritten) or
+    ``row_changed`` (nothing written).
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        outcome = _book_superseded_attempt(
+            conn, project_id=project_id, dispatch_id=dispatch_id, from_state=from_state,
+            pr_ref=pr_ref, evidence_number=evidence_number,
+        )
+    except BaseException:
+        conn.rollback()
+        raise
+    if outcome["action"] == "superseded":
+        conn.commit()
+    else:
+        conn.rollback()
+    return outcome
+
+
+def _close_off_ready(
+    args: argparse.Namespace, conn: sqlite3.Connection, *, project_id: str, dispatch_id: str,
+    current_state: str, pr_ref: str, evidence_number: int,
+) -> int:
+    """A ``failed_delivery``/``timed_out`` base: booked on its own round, or refused by name."""
+    if current_state in SUPERSEDED_CLOSE_STATES:
+        outcome = _close_superseded_attempt(
+            conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
+            pr_ref=pr_ref, evidence_number=evidence_number,
+        )
+        if outcome["action"] == "superseded":
+            round_id = outcome["round"]
+            if args.json:
+                print(json.dumps({
+                    "deliverable": dispatch_id, "project_id": project_id,
+                    "from_state": current_state, "to_state": "expired",
+                    "superseded_by": round_id, "evidence_pr": evidence_number,
+                    "pr_ref": pr_ref, "attestation": "operator",
+                    "action": "closed_on_round", "applied": True,
+                }, indent=2, default=str))
+            else:
+                print(f"\nvnx deliverable close — {dispatch_id} (project '{project_id}')\n")
+                print(f"  {current_state} -> expired; delivered by round {round_id} "
+                      f"(operator attestation: PR {pr_ref})\n")
+            return 0
+        reasons = {
+            "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
+                        "delivered this work (ADR-049: never closed on foreign evidence)",
+            "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
+            "row_changed": f"its state or its metadata_json changed under the read (it must still "
+                           f"be {current_state!r} with the metadata the write compared against)",
+        }
+        print(
+            f"deliverable close: cannot close {dispatch_id!r}: state {current_state!r}, and "
+            f"{reasons.get(outcome['action'], 'the transition was refused')}. No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    hint = (
+        "Promote it first with `vnx deliverable promote "
+        f"{dispatch_id}`." if current_state == "proposed" else ""
+    )
+    print(
+        f"deliverable close: cannot close {dispatch_id!r}: expected state "
+        f"'ready', found {current_state!r}. {hint}No change made.".strip(),
+        file=sys.stderr,
+    )
+    return 2
+
+
 # Back to plan: ready -> proposed (R2b, ADR-041)
 # ---------------------------------------------------------------------------
 
@@ -5964,7 +6150,8 @@ def _add_deliverable_parsers(sub: Any, common: Any) -> None:
     p_dclose = dlv_sub.add_parser(
         "close",
         help="afboeken (done): close a ready deliverable -> completed "
-             "(operator-attested PR evidence)",
+             "(operator-attested PR evidence), or a failed_delivery/timed_out "
+             "base -> expired on its own completed round <id>-rK",
     )
     common(p_dclose)
     p_dclose.add_argument("dispatch_id")
