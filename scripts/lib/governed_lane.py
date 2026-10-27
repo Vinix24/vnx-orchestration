@@ -19,8 +19,23 @@ the verdict, the ``--reprocess`` identity check and the evidence pair, the recor
 write through the recorder, and the printed outcome) are one body here,
 :func:`run_gate_tail`. The gate scripts hand it a :class:`GateRunState` — what
 their own phases 1-2 produced — so every provider difference lives on the
-register row, never in an ``if provider ==`` branch. Phases 1-2 and the CLI stay
-in the scripts until GE-5b turns them into shims.
+register row, never in an ``if provider ==`` branch.
+
+GE-5b moves phases 1-2 here too (:func:`run_gate_head`): the CLI (``--pr
+--diff-file --data-dir --model --timeout --json --reprocess`` — same names,
+defaults, help and exit codes), the request record written before any dispatch
+(OI-1435 defect 4), and the diff/report acquisition for both a live run and
+``--reprocess``. ``glm_gate.py`` and ``kimi_gate.py`` are now shims: they keep
+the CLI entry point, the module-level aliases the tests read, and a
+:class:`GateSeams` object bound to their OWN namespace (so every monkeypatch on
+``glm_gate._get_diff`` and friends still reaches the call), then hand over.
+
+Every seam is resolved off that object at CALL time, never snapshotted at import
+— the same mechanism the phase 3-6 tail has always used. The provider
+differences stay register fields: ``cli_description`` (the argparse description),
+``model_pin`` (glm admits exactly one model and refuses the rest loudly; kimi
+declares no pin and passes the model through), ``lane_provider``,
+``dispatch_id_prefix``, ``gate`` and the optional ``report_failure_lift``.
 
 ``deepseek_gate`` has no parser of its own: it runs on gate_runner's harness-lane
 path and its report is read by the provider-agnostic ``gate_report_recovery``
@@ -40,6 +55,7 @@ the module object also keeps every existing monkeypatch seam (tests patch
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -57,14 +73,16 @@ if _LIB not in sys.path:
 
 import gate_depth  # after the scripts/lib path guard
 from gate_lane_contract import (
+    MODEL_DEFAULTS,
     VERDICT_CONTRACT,
     canonical_review_verdict,
+    describe_dispatch_exception,
     harness_dispatcher_timeouts,
     lane_deadline_detail,
     reviews_with_tools,
 )
 from gate_artifacts import _compute_contract_hash
-from gate_prompt import build_review_prompt, merge_scan_findings
+from gate_prompt import build_review_prompt, merge_scan_findings, scan_diff_for_instructions
 from gate_report_recovery import (
     AmbiguousRecoveryCandidates,
     extract_relabeled_verdict,
@@ -116,6 +134,23 @@ def _last_json_verdict(text: str) -> dict:
 
 
 @dataclass(frozen=True)
+class ModelPin:
+    """A gate that admits exactly ONE model, declared on the register instead of branched in code.
+
+    ``allowed`` holds the canonical lowercase names, ``refusal`` is the operator-facing text printed
+    when a run names any other (``{model}`` and ``{allowed}`` are the only placeholders).
+    """
+
+    allowed: frozenset
+    refusal: str
+
+    def canonical(self, model: str) -> "Optional[str]":
+        """The canonical lowercase model, or None when this pin does not admit it."""
+        normalized = (model or "").strip().lower()
+        return normalized if normalized in self.allowed else None
+
+
+@dataclass(frozen=True)
 class ProviderRow:
     """One provider's row of the register.
 
@@ -126,9 +161,12 @@ class ProviderRow:
     register field rather than as an ``if provider == ...`` branch in a helper.
 
     ``lane_provider``/``dispatch_id_prefix`` are the lane name and the
-    ``<prefix>-pr<N>-<epoch>`` id shape; ``report_failure_lift`` is the optional
-    report-frontmatter failure-reason reader (glm's OI-1710 diagnosis, ``None``
-    for kimi) and ``lift_detail_label`` names it. No provider branch in the tail.
+    ``<prefix>-pr<N>-<epoch>`` id shape; ``cli_description`` is the argparse
+    description of the gate's CLI; ``model_pin`` is the optional one-model pin
+    (glm) or ``None`` for a provider whose lane admits whatever it is handed
+    (kimi); ``report_failure_lift`` is the optional report-frontmatter
+    failure-reason reader (glm's OI-1710 diagnosis, ``None`` for kimi) and
+    ``lift_detail_label`` names it. No provider branch in the head or the tail.
     """
 
     parser: Callable[[str], dict]
@@ -136,8 +174,10 @@ class ProviderRow:
     origin: str
     lane_provider: str
     dispatch_id_prefix: str
+    cli_description: str
     report_failure_lift: Optional[Callable[[str], Optional[str]]] = None
     lift_detail_label: str = "lane log"
+    model_pin: Optional[ModelPin] = None
 
 
 def lift_report_failure_reason(report_text: str) -> "Optional[str]":
@@ -175,11 +215,23 @@ GOVERNED_LANE_PROVIDERS: Dict[str, ProviderRow] = {
     "glm": ProviderRow(
         parser=_last_json_verdict, gate="glm_gate", origin="scripts/glm_gate.py:142 (pre-GE-5a)",
         lane_provider="glm-harness", dispatch_id_prefix="glm-gate-pr",
+        cli_description="GOVERNED glm-harness review gate.",
         report_failure_lift=lift_report_failure_reason, lift_detail_label="failure reason",
+        # The gate stays pinned to ONE model (glm-5.2) for a deterministic reviewer, narrower by
+        # design than deprecated-glm-models' allowlist (glm-5.2/5.3/5.3-flash since 2026-09-14,
+        # provider_constraints.yaml): the wider list is for lane measurements, not for this gate.
+        model_pin=ModelPin(
+            allowed=frozenset({MODEL_DEFAULTS["glm_gate"][1]}),
+            refusal=(
+                "glm_gate: REFUSING model {model!r} — only {allowed} is admitted for GLM "
+                "(deprecated-glm-models: GLM-4.5/4.6/5/5.1 are blocked, operator directive 2026-08-03)"
+            ),
+        ),
     ),
     "kimi": ProviderRow(
         parser=_last_json_verdict, gate="kimi_gate", origin="scripts/kimi_gate.py:153 (pre-GE-5a)",
         lane_provider="kimi", dispatch_id_prefix="kimi-gate-pr",
+        cli_description="Temporary GOVERNED kimi review gate.",
     ),
 }
 
@@ -549,9 +601,15 @@ def status_summary(provider: str, status: str, blocking: list, reason: str = "")
 
 @dataclass(frozen=True)
 class GateSeams:
-    """The phase-3..6 callables a gate script binds in its OWN namespace. Tests monkeypatch these on
-    ``glm_gate``/``kimi_gate``, so the tail resolves them off the script module's binding at CALL time."""
+    """Every callable a gate script binds in its OWN namespace, phases 1-6. Tests monkeypatch these on
+    ``glm_gate``/``kimi_gate``, so the shared body resolves them off the script module's binding at CALL
+    time — the script builds this object inside ``main``/``_gate_seams``, never at import."""
 
+    resolve_data_dir: Callable[..., Path]
+    get_diff: Callable[..., "Optional[str]"]
+    make_default_dispatcher: DispatcherFactory
+    persist_request: Callable[..., object]
+    max_diff_chars: Callable[..., int]
     get_pr_head_sha: Callable[..., str]
     get_pr_head_branch: Callable[..., str]
     record_terminal_result: Callable[..., object]
@@ -583,6 +641,248 @@ class GateRunState:
     scan_findings: list
     execution_depth: object
     seams: GateSeams
+
+
+@dataclass(frozen=True)
+class GateRunInputs:
+    """Phase 2's product — everything :class:`GateRunState` needs beyond the CLI/register facts."""
+
+    report_path_obj: Path
+    report_text: str
+    dispatch_error: str
+    duration: float
+    window_start: "Optional[float]"
+    window_end: float
+    prompt: "Optional[str]"
+    scan_findings: list
+    execution_depth: object
+
+
+# GE-5b: phases 1-2 of both review gates — arguments, request record, diff/report acquisition — one
+# body, driven by the register row. A difference between glm and kimi is a row edit, never a branch.
+
+
+def _gate_cli(row: ProviderRow) -> argparse.ArgumentParser:
+    """The CLI both gates share: same seven options, same names/defaults/help text; one description per row."""
+    model_env, default_model = MODEL_DEFAULTS[row.gate]
+    ap = argparse.ArgumentParser(description=row.cli_description)
+    ap.add_argument("--pr", required=True, help="PR number (use 0 with --diff-file for offline test)")
+    ap.add_argument("--diff-file", default=None, help="read the diff from a file instead of gh")
+    ap.add_argument("--data-dir", default=os.environ.get("VNX_DATA_DIR", ""),
+                    help="VNX data dir; report lands in <data-dir>/unified_reports/ and the "
+                         "result in <data-dir>/state/review_gates/results/")
+    ap.add_argument("--model", default=os.environ.get(model_env, default_model))
+    # OI-2066: no fixed default — unset, the deadline is resolved for the diff.
+    ap.add_argument("--timeout", type=int, default=None)
+    ap.add_argument("--json", action="store_true", help="print the result record as JSON")
+    ap.add_argument(
+        "--reprocess", metavar="DISPATCH_ID", default=None,
+        help="reprocess an already-completed dispatch from its on-disk report "
+             "instead of calling the dispatcher again — no diff fetch, no model "
+             "call, no new receipt. Recovers a verdict a companion report or a "
+             "wrong-label fence already carries. Requires --pr for identity/"
+             "staleness verification.",
+    )
+    return ap
+
+
+def _parse_gate_args(row: ProviderRow, argv: "Optional[list]") -> "Optional[argparse.Namespace]":
+    """Parse argv and admit the model; None means the row's own refusal was printed (exit 1).
+
+    A row with no ``model_pin`` (kimi) dispatches whatever model it was handed, unchanged — that is
+    the lane's own business, not the gate's. A pinned row (glm) refuses LOUDLY at its own entry
+    point, before the dispatcher is ever built, instead of failing deep inside the provider lane
+    where a blocked model would be indistinguishable from an outage.
+    """
+    args = _gate_cli(row).parse_args(argv)
+    if row.model_pin is None:
+        return args
+    canonical = row.model_pin.canonical(args.model)
+    if canonical is None:
+        print(row.model_pin.refusal.format(model=args.model, allowed=sorted(row.model_pin.allowed)),
+              file=sys.stderr)
+        return None
+    args.model = canonical
+    return args
+
+
+def _write_gate_request(
+    row: ProviderRow, args: argparse.Namespace, *, requests_dir: Path, report_path: str,
+    pr_number: "Optional[int]", dispatch_id: str, branch: str, commit_sha: str, test_run: bool,
+    seams: GateSeams,
+) -> "Optional[int]":
+    """OI-1435 defect 4: the request record exists BEFORE the gate ever dispatches.
+
+    Same on-disk shape (``pr-<N>-<gate>.json`` under ``state/review_gates/requests/``) as
+    ci_gate/codex_gate's own request writers, so a generic reader of that directory sees no
+    difference. Returns exit code 1 when the record cannot be written — a gate that cannot prove it
+    was requested must not go on to burn a dispatch (measured on PR #1672).
+    """
+    payload = {
+        "gate": row.gate,
+        "status": "requested",
+        "provider": row.lane_provider,
+        "branch": branch,
+        "pr_number": pr_number,
+        "commit_sha": commit_sha,
+        "report_path": report_path,
+        "requested_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "dispatch_id": dispatch_id,
+        "test_run": test_run,
+    }
+    try:
+        requests_dir.mkdir(parents=True, exist_ok=True)
+        seams.persist_request(requests_dir, row.gate, payload, pr_number=pr_number, pr_id="")
+    except OSError as exc:
+        print(f"{row.gate}: FAILED to write request record: {exc}", file=sys.stderr)
+        return 1
+    return None
+
+
+def _reprocess_inputs(
+    provider: str, row: ProviderRow, args: argparse.Namespace, base_data_dir: Path, dispatch_id: str,
+    branch: str, seams: GateSeams,
+) -> "Tuple[Optional[GateRunInputs], Optional[int]]":
+    """``--reprocess``: read the report the ORIGINAL run wrote, never a diff and never a model call.
+
+    Everything after (verdict extraction, recovery search, record) is the unchanged tail, so a
+    recovered verdict was produced by the gate itself, on the run's own commit, in the run's own
+    contract shape — not prose-to-verdict promotion of a new source.
+    """
+    report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
+    if not report_path_obj.is_file():
+        print(f"{row.gate}: --reprocess: no report on disk for dispatch_id={dispatch_id!r} "
+              f"at {report_path_obj}", file=sys.stderr)
+        return None, 1
+    report_text = report_path_obj.read_text(encoding="utf-8")
+    window_start = parse_dispatch_window_start(provider, dispatch_id, pr=args.pr)
+    if window_start is None:
+        print(f"{row.gate}: --reprocess: dispatch_id={dispatch_id!r} does not match the "
+              f"{row.dispatch_id_prefix}{args.pr}-<timestamp> shape this gate constructs — "
+              "refusing to guess a recovery time window", file=sys.stderr)
+        return None, 1
+    return GateRunInputs(
+        report_path_obj=report_path_obj, report_text=report_text, dispatch_error="",
+        duration=frontmatter_duration_seconds(report_text),
+        window_start=window_start, window_end=report_path_obj.stat().st_mtime,
+        prompt=None,  # never fetched in reprocess mode — see the contract_hash in the tail
+        # OI-1442: nothing to scan. Scanning the CURRENT diff would attach findings from one commit
+        # to a verdict formalized against another. OI-1618: no diff, so no depth measured — the
+        # "not measured" ExecutionDepth is never re-evaluated against a floor this run never had.
+        scan_findings=[], execution_depth=gate_depth.ExecutionDepth(),
+    ), None
+
+
+def _live_inputs(
+    provider: str, row: ProviderRow, args: argparse.Namespace, base_data_dir: Path, dispatch_id: str,
+    branch: str, seams: GateSeams,
+) -> "Tuple[Optional[GateRunInputs], Optional[int]]":
+    """A live run: the diff, the single-shot investigation depth, the governed dispatch and its report.
+
+    ``role="review-gate"`` (dispatch-20260823-beta2-j): the factory's default "plan-reviewer" carries
+    agents/plan-reviewer/CLAUDE.md, written for a plan-gate PANEL SEAT, and gives the model three
+    conflicting instructions against this gate's own contract (a different fence label, a different
+    verdict vocabulary, a different destination). agents/review-gate/CLAUDE.md is this gate's own
+    role: a role-level split, not a dispatch_id string check. ``base_ref`` (OI-1887) isolates the
+    governed dispatch on the PR's own branch instead of origin/main — measured 27-09 on PR #1950,
+    where a run without it fetched the branch itself in the orchestrator's own checkout.
+    """
+    diff = seams.get_diff(args.pr, args.diff_file)
+    if not diff:
+        print(f"{row.gate}: no diff for PR {args.pr}", file=sys.stderr)
+        return None, 1
+    # OI-1874 r3: resolved ONCE — the same cap feeds gate_depth.diff_coverage (below) and the prompt
+    # (build_prompt), so a config change between two calls can never make the recorded
+    # diff_truncated disagree with what the prompt actually truncated. OI-1618/OI-1851: the diff IS
+    # the investigation for a single-shot lane, so diff_chars (post-strip length, the degeneracy
+    # floor), the cap and the cut files are the depth.
+    diff_cap = seams.max_diff_chars(row.gate)
+    coverage = gate_depth.diff_coverage(diff, diff_cap)
+    execution_depth = gate_depth.single_shot_depth(
+        coverage["diff_chars"], coverage["diff_truncated"],
+        diff_limit=coverage["diff_limit"],
+        truncated_files=tuple(coverage["truncated_files"]),
+    )
+    dispatcher = review_dispatcher(
+        provider, base_data_dir, branch, coverage, args.timeout,
+        dispatcher_factory=seams.make_default_dispatcher,
+    )
+    prompt = build_prompt(provider, diff, args.pr, diff_cap)
+    # OI-1442: the deterministic half. The prompt asks the model to report instruction-shaped text
+    # in the diff as a finding; this scan does not depend on it having done so. Both land in the record.
+    scan_findings = scan_diff_for_instructions(diff)
+    start = time.monotonic()
+    report_text = ""
+    dispatch_error = ""
+    try:
+        report_text = dispatcher(row.lane_provider, args.model, prompt, dispatch_id)
+    except Exception as exc:  # The dispatcher's failure is booked as `unavailable`, never swallowed.
+        # OI-1142: do NOT bail without a record — a required gate that cannot fire must surface as
+        # ``unavailable`` in the results dir, not vanish. OI-2066: str(exc) of a TimeoutExpired is the
+        # whole argv, the diff included — describe it without argv or prompt, bounded.
+        dispatch_error = describe_dispatch_exception(exc, prompt=prompt)
+        print(f"{row.gate}: governed {provider} dispatch failed: {dispatch_error}", file=sys.stderr)
+    duration = time.monotonic() - start
+    report_path_obj = base_data_dir / "unified_reports" / f"{dispatch_id}.md"
+    # (a) OI-recovery-venster: reuse dispatch_id's OWN embedded int(time.time()) floor instead of a
+    # fresh sub-second time.time() read. Measured 26-08 as a real CI flake
+    # (test_search_recovers_verdict_from_companion[kimi], same commit 7a4d4a93: pass then fail):
+    # Linux stamps file mtimes from a COARSE clock, so a file written a fraction of a millisecond
+    # after a fine-clock reading can land one tick EARLIER. floor(t) sits a full second below the
+    # construction instant — far larger than the skew — and lowering window_start can only ADMIT
+    # more files, never exclude one the higher bound would have included. Cannot be None here: the
+    # id was just constructed in exactly this shape (the None path only exists for --reprocess).
+    window_start = parse_dispatch_window_start(provider, dispatch_id, pr=args.pr)
+    window_end = report_path_obj.stat().st_mtime if report_path_obj.is_file() else time.time()
+    return GateRunInputs(
+        report_path_obj=report_path_obj, report_text=report_text, dispatch_error=dispatch_error,
+        duration=duration, window_start=window_start, window_end=window_end, prompt=prompt,
+        scan_findings=scan_findings, execution_depth=execution_depth,
+    ), None
+
+
+def run_gate_head(
+    provider: str, argv: "Optional[list]", *, seams: GateSeams,
+) -> "Tuple[Optional[int], Optional[GateRunState]]":
+    """Phases 1-2 of a review gate: ``(exit_code, None)`` when it stops, ``(None, state)`` otherwise.
+
+    The script module owns the entry point and the seam bindings; this body owns every decision
+    between argv and the tail. A provider difference is read off the register row, so this function
+    carries no ``if provider == ...`` branch.
+    """
+    row = _row(provider)
+    args = _parse_gate_args(row, argv)
+    if args is None:
+        return 1, None
+    base_data_dir = seams.resolve_data_dir(args.data_dir or None)
+    pr_number = int(args.pr) if str(args.pr).isdigit() else None
+    dispatch_id = args.reprocess if args.reprocess else f"{row.dispatch_id_prefix}{args.pr}-{int(time.time())}"
+    # Offline runs read the diff from a file and are NOT tied to a live GitHub PR — the branch and
+    # commit_sha are resolved once here and reused for the request record and the result record.
+    test_run = bool(args.diff_file)
+    branch = "" if test_run else seams.get_pr_head_branch(pr_number)
+    commit_sha = "" if test_run else seams.get_pr_head_sha(pr_number)
+    requests_dir = base_data_dir / "state" / "review_gates" / "requests"
+    rc = _write_gate_request(
+        row, args, requests_dir=requests_dir,
+        report_path=str(base_data_dir / "unified_reports" / f"{dispatch_id}.md"),
+        pr_number=pr_number, dispatch_id=dispatch_id, branch=branch, commit_sha=commit_sha,
+        test_run=test_run, seams=seams,
+    )
+    if rc is not None:
+        return rc, None
+    build = _reprocess_inputs if args.reprocess else _live_inputs
+    inputs, rc = build(provider, row, args, base_data_dir, dispatch_id, branch, seams)
+    if inputs is None:
+        return rc, None
+    return None, GateRunState(
+        provider=provider, row=row, args=args, base_data_dir=base_data_dir, pr_number=pr_number,
+        dispatch_id=dispatch_id, branch=branch, commit_sha=commit_sha, requests_dir=requests_dir,
+        report_path_obj=inputs.report_path_obj, report_text=inputs.report_text,
+        dispatch_error=inputs.dispatch_error, duration=inputs.duration,
+        window_start=inputs.window_start, window_end=inputs.window_end, prompt=inputs.prompt,
+        scan_findings=inputs.scan_findings, execution_depth=inputs.execution_depth, seams=seams,
+    )
 
 
 @dataclass(frozen=True)
