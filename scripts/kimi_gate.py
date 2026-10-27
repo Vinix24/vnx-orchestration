@@ -112,6 +112,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from plan_gate_panel import _make_default_dispatcher, _resolve_data_dir  # governed provider_dispatch lane
+from governed_lane import extract_verdict  # GE-5a: the shared verdict parser
 from gate_recorder import (
     get_pr_head_branch,
     get_pr_head_sha,
@@ -151,23 +152,14 @@ _VALID_VERDICTS = VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a third
 
 
 def _extract_verdict(text: str) -> dict:
-    """Extract the worker's verdict: the LAST ```json``` block whose ``verdict`` is a
-    real verdict (pass/fail/blocked).
+    """Thin alias (GE-5a): the parser is ``governed_lane.extract_verdict`` with kimi's row.
 
-    The governed worker report echoes the instruction, so the FIRST ```json``` block is
-    our own contract example (its ``verdict`` is the literal "pass|fail|blocked", which is
-    not a valid single verdict and is skipped). Scanning from the end and requiring a real
-    verdict value selects the worker's actual answer, never the echoed template.
+    Kept as a module-level name because callers and tests read
+    ``kimi_gate._extract_verdict`` directly; the rule itself lives in the one
+    GovernedLane adapter (ADR-046 §4) so kimi and glm can never drift apart.
     """
-    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text or "", re.DOTALL)
-    for block in reversed(blocks):
-        try:
-            obj = json.loads(block)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(obj, dict) and canonical_review_verdict(obj.get("verdict")):
-            return obj
-    return {}
+    return extract_verdict(text, "kimi")
+
 
 # One source (C6 step 3): model env var/default, timeout, diff cap and verdict
 # contract come from gate_lane_contract — the SAME objects gate_runner and

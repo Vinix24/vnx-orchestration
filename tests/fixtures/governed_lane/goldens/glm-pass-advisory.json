@@ -1,0 +1,10 @@
+{
+  "findings": [
+    {
+      "message": "spawn_error=getattr(adapter_result, \"error\", None) mirrors the provider-lane form (provider_dispatch.py:1309); consistent and safe given _AdapterResult.error is a real field (envelope_types.py:85).",
+      "severity": "info"
+    }
+  ],
+  "residual_risk": null,
+  "verdict": "pass"
+}
