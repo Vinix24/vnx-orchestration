@@ -1,0 +1,459 @@
+"""Salvage of a worktree's commits into a directory of its own (PR-2a1).
+
+Every test builds a real bare ``origin``, a real main checkout and real ``git
+worktree`` trees under ``tmp_path``, then runs the real functions: the bundle is
+proved by cloning it, and every allowlist case by dirtying a real tree.
+"""
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts"))
+sys.path.insert(0, str(REPO / "scripts" / "lib"))
+
+import worktree_salvage as ws
+
+# The clock is pinned, so a directory name is a function of its content alone.
+STAMP = "20261027T120000Z"
+UNCOVERED = "tree has state this salvage does not cover: "
+GIT_ENV = {
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+}
+
+
+def git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    proc = subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True,
+        env={**os.environ, **GIT_ENV},
+    )
+    assert proc.returncode == 0, f"git {' '.join(args)} in {cwd}: {proc.stderr}"
+    return proc
+
+
+def git_status(wt: Path) -> str:
+    return git(wt, "status", "--porcelain=v1", "--untracked-files=all").stdout
+
+
+def head_of(tree: Path) -> str:
+    return git(tree, "rev-parse", "HEAD").stdout.strip()
+
+
+class Fixture:
+    """A bare origin, a main checkout that can hold worktrees, and a dest dir."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp = tmp_path
+        self.origin = tmp_path / "origin.git"
+        self.repo = tmp_path / "repo"
+        self.dest = tmp_path / "salvage"
+        git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
+        git(tmp_path, "init", "-q", "-b", "main", str(self.repo))
+        self.repo_config()
+        git(self.repo, "remote", "add", "origin", str(self.origin))
+        (self.repo / ".gitignore").write_text(".vnx-data/\n", encoding="utf-8")
+        (self.repo / "a.txt").write_text("a\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "base")
+        git(self.repo, "push", "-q", "origin", "main")
+        git(self.repo, "fetch", "-q", "origin")
+
+    def repo_config(self) -> None:
+        """No signing, whatever the operator's global config says."""
+        git(self.repo, "config", "commit.gpgsign", "false")
+        git(self.repo, "config", "tag.gpgsign", "false")
+        git(self.repo, "config", "protocol.file.allow", "always")
+
+    def worktree(self, name: str = "worktree-one", parent: str = "one") -> Path:
+        """A dispatch-style worktree on its own branch, cut from origin/main."""
+        wt = self.repo / ".vnx-data" / "worktrees" / parent / name
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        git(self.repo, "worktree", "add", "-q", "-b", f"dispatch/{parent}-{name}",
+            str(wt), "origin/main")
+        return wt
+
+    def commit(self, wt: Path, name: str, content: str, message: str) -> str:
+        (wt / name).write_text(content, encoding="utf-8")
+        git(wt, "add", name)
+        git(wt, "commit", "-q", "-m", message)
+        return head_of(wt)
+
+
+@pytest.fixture()
+def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
+    monkeypatch.setattr(ws, "_utc_stamp", lambda: STAMP)
+    return Fixture(tmp_path)
+
+
+def salvage(fx: Fixture, wt: Path, **kwargs) -> "ws.SalvageResult":
+    kwargs.setdefault("dry_run", False)
+    return ws.salvage(wt, fx.dest, repo_root=fx.repo, **kwargs)
+
+
+def verify(fx: Fixture, result: "ws.SalvageResult") -> list[str]:
+    return ws.verify(result, fx.dest, repo_root=fx.repo)
+
+
+def bundle_of(result: "ws.SalvageResult") -> Path:
+    return result.salvage_dir / f"{result.name}{ws.BUNDLE_SUFFIX}"
+
+
+def clone_bundle(fx: Fixture, bundle: Path, name: str) -> Path:
+    """A clone of a thin bundle: ``--reference`` supplies the excluded history."""
+    clone = fx.tmp / name
+    git(fx.tmp, "clone", "-q", "--reference", str(fx.repo), str(bundle), str(clone))
+    return clone
+
+
+# ---------------------------------------------------------------------------
+# 1-2. the commits, and a tree that has none to salvage
+# ---------------------------------------------------------------------------
+
+
+def test_a_local_commit_is_bundled_cloned_and_verified(fx: Fixture) -> None:
+    wt = fx.worktree()
+    head = fx.commit(wt, "local.txt", "local\n", "worker: local work")
+
+    result = salvage(fx, wt)
+
+    assert result.written is True and result.uncovered == []
+    assert (result.name, result.branch, result.head, result.unpushed) == (
+        "worktree-one", "dispatch/one-worktree-one", head, 1,
+    )
+    assert result.salvage_dir == fx.dest / f"worktree-one-{STAMP}-{head[:8]}"
+    assert result.artifacts == [f"{result.salvage_dir.name}/worktree-one.bundle"]
+    assert bundle_of(result).stat().st_size > 0
+
+    clone = clone_bundle(fx, bundle_of(result), "clone-from-bundle")
+    assert git(clone, "log", "-1", "--format=%s", head).stdout.strip() == "worker: local work"
+
+    manifest = (fx.dest / ws.MANIFEST_NAME).read_text(encoding="utf-8")
+    pattern = (
+        rf"worktree-one \| dispatch/one-worktree-one \| head={head} "
+        rf"\| niet-op-remote=1 \| (worktree-one-\d{{8}}T\d{{6}}Z-{head[:8]})/worktree-one\.bundle \n"
+    )
+    assert re.fullmatch(pattern, manifest), manifest
+    assert result.manifest_line == manifest.rstrip("\n")
+    assert result.manifest_line.endswith(f"{result.salvage_dir.name}/worktree-one.bundle ")
+    assert verify(fx, result) == []
+
+
+def test_a_clean_pushed_tree_salvages_only_its_manifest_line(fx: Fixture) -> None:
+    wt = fx.worktree(name="worktree-clean", parent="clean")
+    head = head_of(wt)
+
+    result = salvage(fx, wt)
+
+    assert result.artifacts == [] and result.unpushed == 0 and result.written is True
+    assert result.manifest_line == (
+        f"worktree-clean | dispatch/clean-worktree-clean | head={head} | niet-op-remote=0 | "
+    )
+    assert (fx.dest / ws.MANIFEST_NAME).read_text(encoding="utf-8") == result.manifest_line + "\n"
+    assert sorted(p.name for p in fx.dest.iterdir()) == sorted(
+        [ws.MANIFEST_NAME, result.salvage_dir.name]
+    )
+    assert verify(fx, result) == []
+
+
+def test_a_detached_tree_names_detached_in_its_line(fx: Fixture) -> None:
+    head = head_of(fx.repo)
+    wt = fx.tmp / "worktree-detached"
+    git(fx.repo, "worktree", "add", "-q", "--detach", str(wt), head)
+
+    result = salvage(fx, wt)
+
+    assert (result.branch, result.head, result.unpushed) == ("(detached)", head, 0)
+    assert result.manifest_line == (
+        f"worktree-detached | (detached) | head={head} | niet-op-remote=0 | "
+    )
+    assert verify(fx, result) == []
+
+
+# ---------------------------------------------------------------------------
+# 3. the allowlist: any status entry at all is a named problem
+# ---------------------------------------------------------------------------
+
+
+def test_a_modified_tracked_file_is_not_covered(fx: Fixture) -> None:
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["a.txt"]
+    assert verify(fx, result) == [UNCOVERED + "a.txt"]
+
+
+def test_a_staged_change_is_not_covered(fx: Fixture) -> None:
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nstaged\n", encoding="utf-8")
+    git(wt, "add", "a.txt")
+    assert git(wt, "status", "--porcelain=v2").stdout.startswith("1 A. ")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["a.txt"]
+    assert verify(fx, result) == [UNCOVERED + "a.txt"]
+
+
+def test_an_untracked_file_is_not_covered(fx: Fixture) -> None:
+    wt = fx.worktree()
+    (wt / "notes.txt").write_text("notes\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["notes.txt"]
+    assert verify(fx, result) == [UNCOVERED + "notes.txt"]
+
+
+def test_the_problem_names_the_first_path_and_counts_the_rest(fx: Fixture) -> None:
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    (wt / "notes.txt").write_text("notes\n", encoding="utf-8")
+
+    problems = verify(fx, salvage(fx, wt))
+
+    assert problems == [UNCOVERED + "a.txt (+1 more)"], problems
+
+
+def test_a_dirty_submodule_checkout_is_not_covered(fx: Fixture) -> None:
+    """OI-2405: the submodule's checkout has an edited tracked file."""
+    src = fx.tmp / "subsrc"
+    git(fx.tmp, "init", "-q", "-b", "main", str(src))
+    git(src, "config", "commit.gpgsign", "false")
+    (src / "f.txt").write_text("base\n", encoding="utf-8")
+    git(src, "add", "f.txt")
+    git(src, "commit", "-q", "-m", "sub base")
+    wt = fx.worktree()
+    git(wt, "submodule", "add", "-q", str(src), "sub")
+    git(wt, "commit", "-q", "-m", "add the submodule")
+    assert git_status(wt) == ""
+
+    (wt / "sub" / "f.txt").write_text("base\nedited in the submodule\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["sub"], git_status(wt)
+    assert verify(fx, result) == [UNCOVERED + "sub"]
+    assert bundle_of(result).is_file(), "the commit on top of origin is still salvaged"
+
+
+def test_an_unmerged_path_is_not_covered(fx: Fixture) -> None:
+    wt = fx.worktree()
+    fx.commit(wt, "a.txt", "a\nfrom the worktree\n", "worker: edit")
+    (fx.repo / "a.txt").write_text("a\nfrom main\n", encoding="utf-8")
+    git(fx.repo, "add", "a.txt")
+    git(fx.repo, "commit", "-q", "-m", "main moves on")
+    merge = subprocess.run(
+        ["git", "merge", "main"], cwd=str(wt), capture_output=True, text=True,
+        env={**os.environ, **GIT_ENV},
+    )
+    assert merge.returncode != 0, "the merge must conflict"
+    assert git(wt, "status", "--porcelain=v2").stdout.startswith("u UU ")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["a.txt"]
+    assert verify(fx, result) == [UNCOVERED + "a.txt"]
+
+
+# ---------------------------------------------------------------------------
+# 4. a valid bundle header over a pack that carries no object
+# ---------------------------------------------------------------------------
+
+
+def _salvaged_bundle(fx: Fixture) -> tuple["ws.SalvageResult", Path]:
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    result = salvage(fx, wt)
+    bundle = bundle_of(result)
+    assert bundle.is_file(), result.artifacts
+    return result, bundle
+
+
+def _empty_pack(repo: Path) -> bytes:
+    """A valid packfile that carries no object at all (header + empty trailer)."""
+    proc = subprocess.run(
+        ["git", "pack-objects", "--stdout"], cwd=str(repo), input=b"", capture_output=True,
+        env={**os.environ, **GIT_ENV},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout[:4] == b"PACK" and proc.stdout[8:12] == b"\0\0\0\0", proc.stdout[:16]
+    return proc.stdout
+
+
+def test_a_bundle_header_over_an_empty_pack_is_a_problem(fx: Fixture) -> None:
+    """The round-3 case of #2277: git calls it valid, the pack restores nothing."""
+    result, bundle = _salvaged_bundle(fx)
+    assert verify(fx, result) == []
+
+    data = bundle.read_bytes()
+    header = data[: data.index(b"\n\n") + 2]
+    bundle.write_bytes(header + _empty_pack(fx.repo))
+    assert git(fx.repo, "bundle", "verify", str(bundle)).returncode == 0
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(f"{result.salvage_dir.name}/worktree-one.bundle: "), problems
+    assert "unpack" in problems[0], problems
+
+
+# ---------------------------------------------------------------------------
+# 5. one unique directory per salvage, and never an existing one
+# ---------------------------------------------------------------------------
+
+
+def test_two_trees_with_the_same_basename_keep_their_own_directories(fx: Fixture) -> None:
+    first = fx.worktree(name="worktree-one", parent="alpha")
+    second = fx.worktree(name="worktree-one", parent="beta")
+    first_head = fx.commit(first, "one.txt", "one\n", "alpha work")
+    second_head = fx.commit(second, "two.txt", "two\n", "beta work")
+
+    one = salvage(fx, first)
+    two = salvage(fx, second)
+
+    assert one.salvage_dir != two.salvage_dir
+    assert two.salvage_dir.name == f"{one.salvage_dir.name}-2"
+    for result, head, name in (
+        (one, first_head, "clone-one"), (two, second_head, "clone-two"),
+    ):
+        clone = clone_bundle(fx, bundle_of(result), name)
+        assert git(clone, "rev-parse", head).returncode == 0
+    assert verify(fx, one) == []
+    assert verify(fx, two) == []
+
+    lines = (fx.dest / ws.MANIFEST_NAME).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert one.salvage_dir.name in lines[0] and two.salvage_dir.name not in lines[0]
+    assert two.salvage_dir.name in lines[1]
+
+
+def test_a_file_at_the_target_path_is_never_overwritten(fx: Fixture) -> None:
+    wt = fx.worktree()
+    head = head_of(wt)
+    fx.dest.mkdir(parents=True)
+    planted = fx.dest / f"worktree-one-{STAMP}-{head[:8]}"
+    planted.write_text("do not overwrite\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert planted.read_text(encoding="utf-8") == "do not overwrite\n"
+    assert result.salvage_dir.name == f"{planted.name}-2"
+    assert result.salvage_dir.is_dir() and verify(fx, result) == []
+
+
+# ---------------------------------------------------------------------------
+# 6. dry run, and the evidence checks of verify
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_writes_nothing(fx: Fixture) -> None:
+    wt = fx.worktree()
+    head = fx.commit(wt, "local.txt", "local\n", "worker: local work")
+
+    result = ws.salvage(wt, fx.dest, repo_root=fx.repo)
+
+    assert result.written is False
+    assert result.artifacts == [f"worktree-one-{STAMP}-{head[:8]}/worktree-one.bundle"]
+    assert result.manifest_line == (
+        f"worktree-one | dispatch/one-worktree-one | head={head} | niet-op-remote=1 | "
+        f"worktree-one-{STAMP}-{head[:8]}/worktree-one.bundle "
+    )
+    assert not fx.dest.exists()
+
+
+def test_an_empty_bundle_is_named(fx: Fixture) -> None:
+    result, bundle = _salvaged_bundle(fx)
+    assert verify(fx, result) == []
+
+    bundle.write_bytes(b"")
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert problems[0].endswith("worktree-one.bundle: empty"), problems
+
+
+def test_a_missing_bundle_is_named(fx: Fixture) -> None:
+    result, bundle = _salvaged_bundle(fx)
+
+    bundle.unlink()
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert problems[0].endswith("worktree-one.bundle: missing"), problems
+
+
+def test_verify_names_a_head_that_moved_after_the_salvage(fx: Fixture) -> None:
+    wt = fx.worktree()
+    head = fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    later = fx.commit(wt, "later.txt", "later\n", "worker: more work")
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert head in problems[0] and later in problems[0], problems
+
+
+def test_verify_without_the_tree_stays_blocking(fx: Fixture) -> None:
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    result = salvage(fx, wt)
+
+    git(fx.repo, "worktree", "remove", "--force", str(wt))
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert "no directory" in problems[0], problems
+
+
+def test_a_tree_without_head_is_a_problem(fx: Fixture) -> None:
+    empty = fx.tmp / "empty"
+    git(fx.tmp, "init", "-q", "-b", "main", str(empty))
+    result = ws.SalvageResult(
+        name="empty", branch="main", head="0" * 40, unpushed=0,
+        salvage_dir=fx.tmp / "nowhere", worktree=empty,
+    )
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert "HEAD" in problems[0], problems
+
+
+def test_verify_without_a_usable_repo_root_stays_blocking(fx: Fixture) -> None:
+    result, _bundle = _salvaged_bundle(fx)
+
+    problems = ws.verify(result, fx.dest, repo_root=fx.tmp / "not-a-checkout")
+
+    assert problems and "no usable repo_root" in problems[0], problems
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed: a git failure is a SalvageError, never a clean salvage
+# ---------------------------------------------------------------------------
+
+
+def test_a_directory_that_is_no_git_worktree_is_a_salvage_error(fx: Fixture) -> None:
+    plain = fx.tmp / "plain"
+    plain.mkdir()
+
+    with pytest.raises(ws.SalvageError):
+        salvage(fx, plain)
+
+
+def test_a_worktree_of_another_repository_is_a_salvage_error(fx: Fixture) -> None:
+    other = fx.tmp / "other"
+    git(fx.tmp, "init", "-q", "-b", "main", str(other))
+    wt = fx.worktree()
+
+    with pytest.raises(ws.SalvageError, match="not a worktree of"):
+        ws.salvage(wt, fx.dest, repo_root=other, dry_run=False)
