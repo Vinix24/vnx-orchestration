@@ -60,10 +60,25 @@ KIMI_MODEL = "kimi-k3"
 
 # The codex stream a real gate run leaves (tests/fixtures/gate_verdict/
 # pr-1869-codex_gate-bare-verdict.ndjson): one shell call, a bare verdict and a
-# turn.completed carrying the only usage the stream reports.
+# turn.completed carrying the only usage the stream reports. That usage reports
+# input_tokens 40939 WITH cached_input_tokens 33536 — codex's input count
+# includes the cached part (measured; see the fixture's line 7).
 CODEX_STREAM = (
     VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson"
 ).read_text(encoding="utf-8")
+
+# The same run from a codex build whose stream carries no cached count at all:
+# the input/cache split is then unmeasured, and the total input must never be
+# booked as the uncached part.
+_UNSPLIT_CODEX_STREAM = CODEX_STREAM.replace(
+    '{"type":"turn.completed","usage":{"input_tokens":40939,"cached_input_tokens":33536,'
+    '"cache_write_input_tokens":0,"output_tokens":991,"reasoning_output_tokens":786}}',
+    '{"type":"turn.completed","usage":{"input_tokens":40939,"output_tokens":991}}',
+)
+assert _UNSPLIT_CODEX_STREAM != CODEX_STREAM, "the fixture's turn.completed usage line moved"
+
+RUN_START = datetime(2026, 10, 27, 10, 0, tzinfo=timezone.utc)
+RUN_END = datetime(2026, 10, 27, 10, 1, tzinfo=timezone.utc)
 
 
 @pytest.fixture()
@@ -181,11 +196,14 @@ def _run_kimi_gate(store, monkeypatch, report: str) -> tuple:
 def test_a_codex_gate_books_one_partial_line_at_the_registry_price(store, monkeypatch):
     """The codex gate ends in ``GateRunner._run_subprocess_path``.
 
-    Its stream carries input and output tokens and no cache accounting at all,
-    so the line says ``partial:`` and names the three missing fields — and it is
-    still PRICED, because the openai registry entries charge input and output
-    only. Codex bills flat on the operator's login: 0 at the margin, the list
-    price as ``api_equivalent_usd``.
+    Its stream reports input 40939 with 33536 of it cached (turn.completed
+    ``cached_input_tokens``), so the line books the 7403 uncached part and the
+    33536 cache hits; codex's input count includes the cached part (OI-2407).
+    No cache-write accounting reaches the stream, so the line says ``partial:``
+    and names those two missing fields — and it is still PRICED, because the
+    openai registry entries charge input and output only. Codex bills flat on
+    the operator's login: 0 at the margin, the list price as
+    ``api_equivalent_usd``.
     """
     result = _run_codex_gate(store, monkeypatch)
     assert result["status"] == "completed", result.get("reason_detail")
@@ -195,14 +213,149 @@ def test_a_codex_gate_books_one_partial_line_at_the_registry_price(store, monkey
     assert line["role"] == "review" and line["provider"] == "codex"
     assert line["model"] == CODEX_MODEL
     assert line["tokens"] == {
-        "input_uncached": 40939, "cache_hit": None, "cache_write_5m": None,
+        "input_uncached": 7403, "cache_hit": 33536, "cache_write_5m": None,
         "cache_write_1h": None, "output": 991,
     }
-    assert line["usage_completeness"] == "partial:cache_hit,cache_write_1h,cache_write_5m"
+    assert line["usage_completeness"] == "partial:cache_write_1h,cache_write_5m"
     assert line["billing"] == "subscription" and line["cost_usd"] == 0.0
     # The ONE pricing function priced it; no second table exists (ADR-043).
     assert line["cost_source"].startswith("price_table@")
     assert line["api_equivalent_usd"] > 0
+
+
+# ---------------------------------------------------------------------------
+# (a2) the input/cache split is normalised per provider, from the measured source
+# ---------------------------------------------------------------------------
+
+
+def _book_codex_usage(store, caplog, usage: dict) -> dict:
+    """One codex builder booking from *usage*, through the real ledger, under a captured log."""
+    run = harness_run_cost.cli_run(
+        provider=harness_run_cost.CODEX_PROVIDER, model=CODEX_MODEL,
+        started=RUN_START, ended=RUN_END, token_usage=usage,
+    )
+    with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
+        record, reason = harness_run_cost.record_codex_run(
+            run, project_id=PROJECT, producer="provider_dispatch", ref="20261027-kp",
+            role=harness_run_cost.BUILDER_ROLE, ledger_path=store.ledger,
+        )
+    assert reason is None, reason
+    return record
+
+
+def _warnings(caplog) -> str:
+    return " | ".join(r.getMessage() for r in caplog.records if r.name == "harness_run_cost")
+
+
+def test_a_codex_usage_books_the_uncached_input_never_the_total(store, caplog):
+    """OI-2407 acceptance 1: input 40939 with 33536 cached books 7403 uncached.
+
+    Codex's ``input_tokens`` INCLUDES the cached input (the measured source is
+    ``tests/fixtures/gate_verdict/pr-1869-codex_gate-bare-verdict.ndjson`` line
+    7: one call reporting input_tokens 40939 and cached_input_tokens 33536).
+    Booking the total as uncached double-counts every cached token: the run
+    would be priced twice, once at the input rate and once at the cache rate.
+    """
+    record = _book_codex_usage(
+        store, caplog,
+        {"input_tokens": 40939, "cached_input_tokens": 33536, "output_tokens": 991},
+    )
+
+    assert record["tokens"]["input_uncached"] == 7403
+    assert record["tokens"]["cache_hit"] == 33536
+    assert record["tokens"]["output"] == 991
+    assert record["usage_completeness"] == "partial:cache_write_1h,cache_write_5m"
+    assert _warnings(caplog) == "", "a measured split is booked without a warning"
+
+
+def test_a_codex_usage_without_a_cached_count_never_books_the_total_as_uncached(store, caplog):
+    """Acceptance 2: no provider defaults 'input means uncached'.
+
+    A codex report that carries no cached count leaves the split unmeasured:
+    ``input_uncached`` AND ``cache_hit`` are ``None`` with
+    ``input_cache_split_unmeasured`` written down, because booking the total as
+    the uncached part is exactly the double count this round removes.
+    """
+    record = _book_codex_usage(store, caplog, {"input_tokens": 40939, "output_tokens": 991})
+
+    assert record["tokens"]["input_uncached"] is None
+    assert record["tokens"]["cache_hit"] is None
+    assert record["tokens"]["output"] == 991
+    assert record["usage_completeness"] == "partial:cache_hit,cache_write_1h,cache_write_5m,input_uncached"
+    assert harness_run_cost.INPUT_CACHE_SPLIT_UNMEASURED in _warnings(caplog)
+    assert "20261027-kp" in _warnings(caplog), "the warning names the run it could not split"
+
+
+def test_a_cached_count_larger_than_the_input_never_books_a_negative(store, caplog):
+    """OI-2407 acceptance 3: 100 input with 250 cached is a contradiction, not -150.
+
+    The two reported numbers disagree, so the DERIVED uncached part is unknown:
+    ``input_uncached`` is ``None`` with ``input_cache_split_invalid`` and the
+    line says ``partial:``. The reported cache count is still booked — it is
+    what the lane said — and the reason is never silent.
+    """
+    record = _book_codex_usage(
+        store, caplog,
+        {"input_tokens": 100, "cached_input_tokens": 250, "output_tokens": 10},
+    )
+
+    assert record["tokens"]["input_uncached"] is None
+    assert record["tokens"]["cache_hit"] == 250
+    assert record["usage_completeness"] == "partial:cache_write_1h,cache_write_5m,input_uncached"
+    assert harness_run_cost.INPUT_CACHE_SPLIT_INVALID in _warnings(caplog)
+
+
+def test_a_codex_gate_stream_without_a_cached_count_books_the_split_unknown(store, monkeypatch, caplog):
+    """OI-2407 acceptance 4, second half: the gate path never books total input as uncached.
+
+    The gate's ``ExecutionDepth`` is built from ``turn.completed``. A stream that
+    carries input and output but no ``cached_input_tokens`` cannot say how much
+    of that input was cached, so both split fields are ``None`` with a reason.
+    """
+    with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
+        result = _run_codex_gate(store, monkeypatch, result=_codex_result(stream=_UNSPLIT_CODEX_STREAM))
+    assert result["status"] == "completed", result.get("reason_detail")
+
+    (line,) = _lines(store)
+    assert line["tokens"]["input_uncached"] is None
+    assert line["tokens"]["cache_hit"] is None
+    assert line["tokens"]["output"] == 991
+    assert line["usage_completeness"] == "partial:cache_hit,cache_write_1h,cache_write_5m,input_uncached"
+    assert harness_run_cost.INPUT_CACHE_SPLIT_UNMEASURED in _warnings(caplog)
+
+
+def test_the_two_providers_get_one_normaliser_each():
+    """Acceptance 2: one function per provider, each with its measured source.
+
+    Codex's input INCLUDES the cached part (the gate fixture above); kimi's does
+    NOT — measured on the wire.jsonl ``StatusUpdate`` fixture this PR already
+    uses (``tests/test_kimi_token_capture.py::_status_update``): it records
+    ``input_other`` next to ``input_cache_read``, and
+    ``_parse_wire_token_usage`` sums ``input_other`` into ``input_tokens``, so a
+    kimi input count is new tokens only.
+    """
+    codex, codex_reason = harness_run_cost._cli_tokens(
+        {"input_tokens": 40939, "cached_input_tokens": 33536, "output_tokens": 991}, "codex",
+    )
+    kimi, kimi_reason = harness_run_cost._cli_tokens(
+        {"input_tokens": 42110, "cache_read_tokens": 39424, "output_tokens": 4223}, "kimi",
+    )
+
+    assert (codex["input_uncached"], codex["cache_hit"], codex_reason) == (7403, 33536, None)
+    # Kimi's 42110 already excludes the 39424 it read from cache: no subtraction.
+    assert (kimi["input_uncached"], kimi["cache_hit"], kimi_reason) == (42110, 39424, None)
+
+
+def test_a_provider_whose_split_was_never_measured_books_input_uncached_unknown():
+    """Acceptance 2: an unmeasured provider gets no default 'input means uncached'."""
+    tokens, reason = harness_run_cost._cli_tokens(
+        {"input_tokens": 100, "cache_read_tokens": 20, "output_tokens": 5}, "gemini",
+    )
+
+    assert tokens["input_uncached"] is None
+    assert tokens["cache_hit"] == 20
+    assert tokens["output"] == 5
+    assert reason == harness_run_cost.INPUT_CACHE_SPLIT_UNMEASURED
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +483,9 @@ def test_a_registry_read_error_returns_none_with_a_reason_and_one_warning(store,
         provider=harness_run_cost.CODEX_PROVIDER, model=CODEX_MODEL,
         started=datetime(2026, 10, 27, 10, 0, tzinfo=timezone.utc),
         ended=datetime(2026, 10, 27, 10, 1, tzinfo=timezone.utc),
-        token_usage={"input_tokens": 100, "output_tokens": 20},
+        # A complete codex usage (the cache count is explicit) so the only
+        # warning this test sees is the booking refusal itself.
+        token_usage={"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 0},
     )
     monkeypatch.setattr(cost_ledger, "record_next_attempt", _permission_denied)
     with caplog.at_level(logging.WARNING, logger="harness_run_cost"):

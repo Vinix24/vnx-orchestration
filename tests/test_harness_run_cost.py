@@ -614,11 +614,18 @@ class TestTheEnvelopeCallSite:
         assert receipt["cost_usd"] == 0.0
         assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
 
-    @pytest.mark.parametrize("provider,model", [("codex", "gpt-5.5"), ("kimi", "kimi-k3")])
-    def test_codex_and_kimi_write_their_own_line_and_no_old_event(self, store, provider, model):
+    @pytest.mark.parametrize("provider,model,token_usage", [
+        # Codex's input_tokens INCLUDES the cached part, so 14000 in with 10000
+        # cached is 4000 uncached (OI-2407).
+        ("codex", "gpt-5.5", {"input": 14000, "output": 500, "cache_hit": 10000}),
+        # Kimi's input is new tokens only: 4000 in, 10000 read from cache.
+        ("kimi", "kimi-k3", {"input": 4000, "output": 500, "cache_hit": 10000}),
+    ])
+    def test_codex_and_kimi_write_their_own_line_and_no_old_event(self, store, provider, model, token_usage):
         # K2b inverted this: the two CLI lanes book their own line now, so the
         # old event must be gone — a lane with both would double-count the run.
-        _govern(_envelope_spec(store, provider, model), _adapter(model, session_id="sess-not-read"))
+        _govern(_envelope_spec(store, provider, model),
+                _adapter(model, session_id="sess-not-read", token_usage=token_usage))
 
         (line,) = _ledger_lines(store.ledger)
         assert _old_lines(store.ledger) == [], "K2b books the codex/kimi lane itself"
@@ -935,10 +942,15 @@ class TestTheProviderDispatchCallSite:
 
     def test_codex_writes_its_own_line_and_no_old_event(self, store):
         # K2b inverted this: the codex builder's measured end books its line.
+        # The cache count is explicit (codex_spawn always emits it): codex's
+        # input_tokens includes the cached part, so a run with 0 cached input
+        # books its whole input as uncached (OI-2407).
         import provider_dispatch as pd
 
-        result = SimpleNamespace(token_usage={"input_tokens": 100, "output_tokens": 20}, completion_text="OK",
-                                 returncode=0, error=None, timed_out=False)
+        result = SimpleNamespace(
+            token_usage={"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 0},
+            completion_text="OK", returncode=0, error=None, timed_out=False,
+        )
         pd._emit_governance(_pd_args("codex"), "codex", "gpt-5.5", result, START, END, "success")
 
         (line,) = _ledger_lines(store.ledger)
