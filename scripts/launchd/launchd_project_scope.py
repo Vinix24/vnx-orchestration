@@ -30,7 +30,10 @@ static and one live:
      project must run that project's pin. Measured 2026-10-25: 0 of the 6 such
      jobs followed their pin (three on ``current``, three on
      ``versions/v1.7.1``), and ``check_installed_state`` reported ``ok``
-     because it only looks at Labels.
+     because it only looks at Labels. A job follows the pin only when its
+     ``VNX_HOME`` exists and RESOLVES to the installed pinned release
+     directory: a matching basename elsewhere, a missing path and a
+     same-named symlink into another release are all reported.
 
 ``main()`` is the live, read-only operator/CI entry point: it resolves this
 project's id (``vnx_paths.resolve_project_id()``), shells out to the real
@@ -72,7 +75,7 @@ for _root in (_ENGINE_ROOT, _ENGINE_ROOT.parent):
 from job_exit_capture import _parse_launchctl_list  # noqa: E402
 import pin_drift  # noqa: E402
 import vnx_paths  # noqa: E402
-from vnx_cli._reexec import _normalize_version, _read_pin, _versions_dir  # noqa: E402
+from vnx_cli._reexec import _read_pin, _versions_dir  # noqa: E402
 
 # Mirrors PROJECT_ID_RE / _vnx_valid_project_id (scripts/lib/vnx_paths.py,
 # scripts/lib/vnx_paths.sh) — kept as a small, deliberate duplicate here,
@@ -385,7 +388,19 @@ def _attributed_project(
 
 
 def _classify_home(vnx_home: Optional[str], pin: str, pin_record: Dict[str, Any]) -> Tuple[str, str]:
-    """Classify one installed job's VNX_HOME against its project's pin."""
+    """Classify one installed job's VNX_HOME against its project's pin.
+
+    ``pin_followed`` requires the job's directory to BE the installed release
+    the pin names: the home must exist and ``resolve()`` to
+    ``pin_record['release_dir']`` (the resolved installed pin dir, computed by
+    ``check_pin_alignment``). A name-only match is a false positive -- a
+    ``VNX_HOME`` of ``/nonexistent/v1.7.5`` or a ``v1.7.5`` symlink into
+    ``v1.7.4`` passes such a comparison while the job runs no such install.
+    Order: ``pin_dead``, the unusable home, the explicit ``current`` rejection
+    (decided on the name AS WRITTEN, before resolving, so a ``current`` link
+    that happens to point at the pinned release is still reported), then the
+    directory comparison. Everything unmeasured stays a violation.
+    """
     if pin_record["verdict"] in (pin_drift.VERDICT_DEAD, pin_drift.VERDICT_NON_RELEASE):
         return PIN_DEAD, (
             f"pin {pin!r} of {pin_record['root']} names no installed release dir "
@@ -402,10 +417,37 @@ def _classify_home(vnx_home: Optional[str], pin: str, pin_record: Dict[str, Any]
             f"VNX_HOME {vnx_home!r} follows the rolling 'current' link while the project "
             f"pins {pin!r}; a later flip silently changes the version this job runs"
         )
-    if _normalize_version(home_path.name) == pin_record["normalized"]:
-        return PIN_FOLLOWED, f"VNX_HOME {vnx_home!r} is the pinned release {pin!r}"
+    pinned_dir = pin_record.get("release_dir")
+    if not pinned_dir:
+        # No measured installed dir for a pin the store calls usable: that is
+        # an unmeasured job, never a followed pin (fail closed).
+        return PIN_IGNORED_OTHER_VERSION, (
+            f"no installed release directory was measured for pin {pin!r}, so VNX_HOME "
+            f"{vnx_home!r} cannot be shown to run it"
+        )
+    try:
+        present = home_path.is_dir()
+    except OSError:
+        present = False
+    if not present:
+        return PIN_IGNORED_OTHER_VERSION, (
+            f"VNX_HOME {str(home_path)!r} names no existing directory, so this job cannot "
+            f"run the pinned release {pin!r} installed at {str(pinned_dir)!r}"
+        )
+    try:
+        resolved = home_path.resolve()
+    except (OSError, RuntimeError) as exc:
+        return PIN_IGNORED_OTHER_VERSION, (
+            f"VNX_HOME {vnx_home!r} cannot be resolved ({type(exc).__name__}: {exc}), so this "
+            f"job cannot be measured against the pinned release {pin!r}"
+        )
+    if resolved == Path(str(pinned_dir)):
+        return PIN_FOLLOWED, (
+            f"VNX_HOME {vnx_home!r} resolves to the pinned release {pin!r} at {str(resolved)!r}"
+        )
     return PIN_IGNORED_OTHER_VERSION, (
-        f"VNX_HOME {vnx_home!r} runs {home_path.name!r}, not the pinned release {pin!r}"
+        f"VNX_HOME {vnx_home!r} resolves to {str(resolved)!r}, not the pinned release "
+        f"{pin!r} installed at {str(pinned_dir)!r}"
     )
 
 
@@ -421,13 +463,15 @@ def check_pin_alignment(
     ``.vnx-version`` is read; ``versions_dir`` is the store's ``versions/`` (the
     engine's own by default, injectable for callers/tests).
 
-    Each job is ``pin_followed``, ``pin_ignored_current`` (it follows the
-    rolling ``current`` link while the project pins a version),
-    ``pin_ignored_other_version`` (another release, or no release at all) or
-    ``pin_dead`` (the pinned release dir does not exist). Everything but
-    ``pin_followed`` is a violation -- an unreadable or unmeasured job is never
-    reported as following -- except a plist of a project without a pin (a dev
-    checkout), which is listed under ``unmeasured``. Pure read.
+    Each job is ``pin_followed`` (its ``VNX_HOME`` exists and resolves to the
+    installed release dir the pin names), ``pin_ignored_current`` (it follows
+    the rolling ``current`` link while the project pins a version),
+    ``pin_ignored_other_version`` (another release, a missing directory, or no
+    release at all) or ``pin_dead`` (the pinned release dir does not exist).
+    Everything but ``pin_followed`` is a violation -- an unreadable or
+    unmeasured job is never reported as following -- except a plist of a
+    project without a pin (a dev checkout), which is listed under
+    ``unmeasured``. Pure read.
     """
     plist_dir = Path(plist_dir)
     versions_dir = Path(versions_dir) if versions_dir is not None else _versions_dir(_ENGINE_ROOT)
@@ -458,8 +502,13 @@ def check_pin_alignment(
 
         if project_id not in pins:
             pin = _read_pin(roots[project_id])[0]
+            # ``release_dir`` is the RESOLVED installed dir the pin names (None
+            # when the store has none) -- the value _classify_home compares a
+            # job's resolved VNX_HOME against, so a same-named path elsewhere
+            # never counts as following.
+            pinned_dir = pin_drift.pinned_release_dir(versions_dir, pin) if pin else None
             pins[project_id] = {"root": str(roots[project_id]), "pin": pin,
-                                "normalized": _normalize_version(pin) if pin else None,
+                                "release_dir": str(pinned_dir) if pinned_dir is not None else None,
                                 "verdict": pin_drift.classify_pin(pin, versions_dir.parent).verdict if pin else None}
         pin_record, pin = pins[project_id], pins[project_id]["pin"]
 

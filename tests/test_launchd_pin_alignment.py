@@ -171,3 +171,85 @@ def test_main_json_names_a_job_that_ignores_its_project_pin(
     classes = [entry["classification"] for entry in payload["pin_alignment"]["entries"]]
     assert lps.PIN_IGNORED_CURRENT in classes
     assert lps.PIN_IGNORED_CURRENT in {v["kind"] for v in payload["violations"]}
+
+
+def test_a_home_that_does_not_exist_is_never_pin_followed(tmp_path: Path) -> None:
+    """A basename match is not a measurement: ``/<missing>/v1.7.5`` names the
+    pinned release but is not on disk, so the job runs nothing of the sort."""
+    store = _store(tmp_path)
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    missing = tmp_path / "nonexistent" / "v1.7.5"
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(missing), "VNX_PROJECT_ID": "mission-control"})
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    assert result["ok"] is False
+    entry = result["entries"][0]
+    assert entry["classification"] == lps.PIN_IGNORED_OTHER_VERSION
+    assert str(missing) in entry["detail"]
+    assert "no existing directory" in entry["detail"]
+    assert [violation["kind"] for violation in result["violations"]] == [lps.PIN_IGNORED_OTHER_VERSION]
+
+
+def test_a_same_named_path_that_resolves_elsewhere_is_never_pin_followed(tmp_path: Path) -> None:
+    """``v1.7.5`` is only the pinned release when it RESOLVES there: a symlink
+    into ``v1.7.4`` and a plain dir of that name elsewhere are both reported,
+    with the directory the job would actually run named in the detail."""
+    store = _store(tmp_path)
+    (store / "versions" / "v1.7.4").mkdir()
+    decoy_versions = tmp_path / "decoy-versions"
+    decoy_versions.mkdir()
+    link = decoy_versions / "v1.7.5"
+    link.symlink_to(store / "versions" / "v1.7.4")
+    elsewhere = tmp_path / "elsewhere" / "v1.7.5"
+    elsewhere.mkdir(parents=True)
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(link), "VNX_PROJECT_ID": "mission-control"})
+    _plist(plists, "com.vnx.gate-obligation-runner",
+           env={"VNX_HOME": str(elsewhere), "VNX_PROJECT_ID": "mission-control"})
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    assert result["ok"] is False
+    details = {entry["label"]: entry["detail"] for entry in result["entries"]}
+    assert {entry["label"]: entry["classification"] for entry in result["entries"]} == {
+        "com.vnx.ledger-health.mission-control": lps.PIN_IGNORED_OTHER_VERSION,
+        "com.vnx.gate-obligation-runner": lps.PIN_IGNORED_OTHER_VERSION,
+    }
+    assert str((store / "versions" / "v1.7.4").resolve()) in details["com.vnx.ledger-health.mission-control"]
+    assert str(elsewhere.resolve()) in details["com.vnx.gate-obligation-runner"]
+
+
+def test_the_installed_pinned_dir_follows_while_current_to_it_does_not(tmp_path: Path) -> None:
+    """The positive case is a real installed dir (or a link to it), and the
+    ``current`` rejection is decided on the name as written: a ``current``
+    link pointing AT the pinned release is still ``pin_ignored_current``."""
+    store = _store(tmp_path)
+    (store / "current").unlink()
+    (store / "current").symlink_to(store / "versions" / "v1.7.5")
+    project = _project(tmp_path, "mission-control", "1.7.5")
+    plists = tmp_path / "LaunchAgents"
+    link_to_pin = tmp_path / "pinned-link"
+    link_to_pin.symlink_to(store / "versions" / "v1.7.5")
+    _plist(plists, "com.vnx.ledger-health.mission-control",
+           env={"VNX_HOME": str(store / "versions" / "v1.7.5"), "VNX_PROJECT_ID": "mission-control"})
+    _plist(plists, "com.vnx.gate-obligation-runner",
+           env={"VNX_HOME": str(link_to_pin), "VNX_PROJECT_ID": "mission-control"})
+    _plist(plists, "com.vnx.cleanup-reviewed-worktrees.mission-control",
+           env={"VNX_HOME": str(store / "current"), "VNX_PROJECT_ID": "mission-control"})
+
+    result = lps.check_pin_alignment(plists, {"mission-control": project}, versions_dir=store / "versions")
+
+    assert {entry["label"]: entry["classification"] for entry in result["entries"]} == {
+        "com.vnx.ledger-health.mission-control": lps.PIN_FOLLOWED,
+        "com.vnx.gate-obligation-runner": lps.PIN_FOLLOWED,
+        "com.vnx.cleanup-reviewed-worktrees.mission-control": lps.PIN_IGNORED_CURRENT,
+    }
+    assert [violation["label"] for violation in result["violations"]] == [
+        "com.vnx.cleanup-reviewed-worktrees.mission-control"
+    ]
+    assert result["ok"] is False
