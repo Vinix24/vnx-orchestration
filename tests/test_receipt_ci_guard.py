@@ -19,6 +19,9 @@ APPROVED_WRITERS = {
     # model, and books the receipt ONLY from a verified model source, with
     # identity_restored=true (F1-3, 20260906-f13-gestrande-rapporten).
     "restore_stranded_reports.py",
+    # planning_cli.py: books a state_mutation receipt before the retarget DB write
+    # (ADR-005 amendment 2026-09-26, track deliverable-retarget-withdraw).
+    "planning_cli.py",
 }
 
 APPEND_HELPER_MARKERS = (
