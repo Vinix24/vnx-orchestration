@@ -1,0 +1,24 @@
+usage: glm_gate.py [-h] --pr PR [--diff-file DIFF_FILE] [--data-dir DATA_DIR]
+                   [--model MODEL] [--timeout TIMEOUT] [--json]
+                   [--reprocess DISPATCH_ID]
+
+GOVERNED glm-harness review gate.
+
+options:
+  -h, --help            show this help message and exit
+  --pr PR               PR number (use 0 with --diff-file for offline test)
+  --diff-file DIFF_FILE
+                        read the diff from a file instead of gh
+  --data-dir DATA_DIR   VNX data dir; report lands in <data-
+                        dir>/unified_reports/ and the result in <data-
+                        dir>/state/review_gates/results/
+  --model MODEL
+  --timeout TIMEOUT
+  --json                print the result record as JSON
+  --reprocess DISPATCH_ID
+                        reprocess an already-completed dispatch from its on-
+                        disk report instead of calling the dispatcher again —
+                        no diff fetch, no model call, no new receipt. Recovers
+                        a verdict a companion report or a wrong-label fence
+                        already carries. Requires --pr for identity/staleness
+                        verification.
