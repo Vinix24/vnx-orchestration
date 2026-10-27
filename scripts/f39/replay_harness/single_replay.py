@@ -20,7 +20,6 @@ _SCENARIOS_DIR = _REPO_ROOT / "tests" / "f39" / "scenarios"
 # Populated by __init__.py after sys.path setup; accessed via module reference for testability.
 from replay_context_assembler import (  # noqa: E402
     assemble_t0_context,
-    _DEFAULT_FEATURE_PLAN,
     _DEFAULT_SKILL,
     _DEFAULT_CLAUDE_MD,
 )
@@ -100,10 +99,11 @@ def _assemble_replay_prompt(receipt: dict[str, Any], state_snapshot: dict[str, A
         json.dump(state_snapshot, tmp)
         tmp_state_path = Path(tmp.name)
     try:
+        # ADR-047: a scenario fixture carries no tracks DB, so the prompt is
+        # assembled without a plan and without a track-goal section.
         prompt = assemble_t0_context(
             state_path=tmp_state_path,
             receipt=receipt,
-            feature_plan_path=_DEFAULT_FEATURE_PLAN if _DEFAULT_FEATURE_PLAN.exists() else Path("/dev/null"),
             skill_path=_DEFAULT_SKILL,
             claude_md_path=_DEFAULT_CLAUDE_MD,
         )

@@ -12,6 +12,7 @@ Proves the roadmap auto-next loop with controlled trial sequences:
 """
 
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
@@ -20,6 +21,7 @@ import pytest
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
+_MIGRATIONS = VNX_ROOT / "schemas" / "migrations"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
@@ -169,8 +171,10 @@ def _closure_fail(**kwargs):
 # Feature -> branch mapping in trial_env:
 #   feature-a -> feature/alpha, feature-b -> feature/bravo,
 #   feature-c -> feature/charlie, fixup-* -> feature/<fixup_id>.
-# The trial FEATURE_PLAN.md templates each declare a single "## PR-0:" heading,
-# so PR-0 is the only PR id _gates_incomplete looks up.
+# ADR-047: the PR ids _gates_incomplete looks up now come from the tracks DB —
+# the track's ``pr_ref`` plus every linked dispatch's ``pr_ref`` — not from a
+# "## PR-0:" heading in a plan file. ``_certify`` therefore seeds a dispatch
+# row carrying PR-0 before writing that PR's gate evidence.
 # ---------------------------------------------------------------------------
 
 # Branch names declared in trial_env's ROADMAP.yaml, keyed by feature id.
@@ -263,9 +267,93 @@ def _write_passing_gates(
         )
 
 
+def _build_tracks_db(state_dir: Path) -> None:
+    """Create the tracks-DB legs ``_feature_pr_ids`` reads (dispatches + tracks).
+
+    Mirrors tests/test_pr_queue_manager_no_plan.py::_build_tracks_db: the base
+    ``dispatches``/``coordination_events`` tables, then migrations 0022 (track
+    layer) and 0024 (tenant scoping). Only these two tables are queried —
+    ``tracks.get_track`` and ``tracks.get_linked_dispatches`` — so the deeper
+    planning-horizon migrations are not needed here.
+
+    ADR-007: rows are (id, project_id)-scoped, so this store is tenant-safe.
+    """
+    import schema_migration  # noqa: PLC0415
+
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir.parent / "events").mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dispatches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dispatch_id TEXT NOT NULL,
+            project_id TEXT NOT NULL DEFAULT 'vnx-dev',
+            state TEXT NOT NULL DEFAULT 'queued',
+            terminal_id TEXT, track TEXT, priority TEXT DEFAULT 'P2', pr_ref TEXT,
+            gate TEXT, attempt_count INTEGER NOT NULL DEFAULT 0, bundle_path TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+            expires_after TEXT, metadata_json TEXT DEFAULT '{}',
+            UNIQUE(dispatch_id, project_id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS coordination_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT, event_type TEXT NOT NULL,
+            entity_type TEXT NOT NULL DEFAULT 'dispatch', entity_id TEXT NOT NULL,
+            from_state TEXT, to_state TEXT, actor TEXT NOT NULL DEFAULT 'runtime',
+            reason TEXT, metadata_json TEXT DEFAULT '{}',
+            occurred_at TEXT NOT NULL, project_id TEXT
+        )
+        """
+    )
+    conn.commit()
+    for version, filename in ((22, "0022_track_layer.sql"), (24, "0024_tracks_tenant_scoping.sql")):
+        schema_migration.apply_script_if_below(
+            conn, version, (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        )
+        conn.commit()
+    conn.close()
+
+
+def _seed_feature_pr(state_dir: Path, track_id: str, pr_ref: str = "PR-0") -> None:
+    """Record ``track_id``'s PR identity in the tracks DB (ADR-047).
+
+    This dispatch row is what makes ``pr_ref`` the PR id ``_gates_incomplete``
+    verifies gate evidence for. Idempotent per (track_id, pr_ref) so repeated
+    ``_certify`` calls on the same feature do not duplicate rows.
+    """
+    _build_tracks_db(state_dir)
+    dispatch_id = f"dlv-{track_id}"
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    exists = conn.execute(
+        "SELECT 1 FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+        (dispatch_id, "vnx-dev"),
+    ).fetchone()
+    if not exists:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, track, pr_ref)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (dispatch_id, "vnx-dev", "completed", track_id, pr_ref),
+        )
+        conn.commit()
+    conn.close()
+
+
 def _certify(manager, feature_id: str, state_dir: Path, branch: str) -> None:
     """Provide the real gate evidence + human-approval token so advance() can
-    legitimately progress past the active feature."""
+    legitimately progress past the active feature.
+
+    ADR-047: the PR id whose gates are checked lives in the tracks DB, so the
+    dispatch row is seeded first; otherwise there is no PR to certify and the
+    feature stays correctly blocked.
+    """
+    _seed_feature_pr(state_dir, feature_id)
     _write_passing_gates(state_dir, branch, _required_gates_for(manager, feature_id))
     manager.approve(feature_id, actor="test-operator", justification="trial certification")
 
@@ -415,8 +503,14 @@ class TestBlockingDriftFixup:
         assert len(state["inserted_fixups"]) == 1
         assert state["blocked_reason"] is None  # fixup is now active, not blocked
 
-    def test_fixup_feature_plan_exists_on_disk(self, trial_env, monkeypatch):
-        """Inserted fixup generates an actual FEATURE_PLAN.md on disk."""
+    def test_fixup_feature_writes_no_plan_file(self, trial_env, monkeypatch):
+        """ADR-047: an inserted fixup is a state record, not a generated plan.
+
+        The fixup used to materialize a ``FEATURE_PLAN.md`` under the roadmap's
+        generated dir and record its path in ``inserted_fixups``. Neither
+        happens any more: the record carries the drift items (the only thing
+        that plan held) and no ``plan_path``, and no file appears on disk.
+        """
         manager = rm.RoadmapManager()
         manager.init_roadmap(trial_env["roadmap_file"])
         manager.load_feature("feature-a")
@@ -429,12 +523,16 @@ class TestBlockingDriftFixup:
         manager.advance()
         state = manager.load_state()
 
-        fixup_id = state["inserted_fixups"][0]["feature_id"]
-        plan_path = Path(state["inserted_fixups"][0]["plan_path"])
-        assert plan_path.exists()
-        content = plan_path.read_text(encoding="utf-8")
-        assert fixup_id in content
-        assert "Fix governance gap" in content
+        fixup_record = state["inserted_fixups"][0]
+        fixup_id = fixup_record["feature_id"]
+        assert "plan_path" not in fixup_record
+        assert fixup_record["items"][0]["title"] == "Fix governance gap"
+        fixup_feature = next(f for f in state["features"] if f["feature_id"] == fixup_id)
+        assert fixup_feature["plan_path"] is None
+        plan_files = list(trial_env["project_root"].rglob("FEATURE_PLAN.md"))
+        assert plan_files, "the fixture-authored feature plans are untouched"
+        fixup_plans = [str(path) for path in plan_files if fixup_id in str(path)]
+        assert not fixup_plans, f"no fixup plan may be written, found {fixup_plans}"
 
     def test_non_blocking_drift_does_not_insert_fixup(self, trial_env, monkeypatch):
         """Non-blocking drift items are ignored — advance proceeds normally."""
@@ -612,9 +710,10 @@ class TestMultiFeatureTrialPath:
         state = manager.load_state()
         assert result["reason"] == "blocking_fixup_inserted"
         assert len(state["inserted_fixups"]) == 1
-        plan_content = Path(state["inserted_fixups"][0]["plan_path"]).read_text(encoding="utf-8")
-        assert "Regression A" in plan_content
-        assert "Regression B" in plan_content
+        # ADR-047: the fixup record carries the consolidated items directly —
+        # there is no generated plan file to read them back from.
+        titles = [item["title"] for item in state["inserted_fixups"][0]["items"]]
+        assert titles == ["Regression A", "Regression B"]
 
 
 # ---------------------------------------------------------------------------

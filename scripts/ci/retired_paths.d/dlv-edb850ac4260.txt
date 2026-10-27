@@ -1,0 +1,12 @@
+# B2 (dlv-edb850ac4260)
+# Track retire-feature-plan-second-planning-layer, B2: the tracks DB is the
+# only plan source (ADR-047), so the last code that read or materialized a
+# FEATURE_PLAN.md goes. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md §1-§2 and the
+# uitvoeringsregel at line 105 ("B2 voor de laatste aanroeper die hem twee
+# planpaden geeft, scripts/roadmap_manager.py").
+scripts/roadmap_manager.py::RoadmapManager._materialize_plan
+scripts/roadmap_manager.py::_root_file
+scripts/roadmap_manager.py::RoadmapPaths.generated_dir
+scripts/f39/replay_context_assembler.py::_DEFAULT_FEATURE_PLAN
+scripts/f39/replay_context_assembler.py::_extract_active_feature_section

@@ -7,7 +7,7 @@ import argparse
 import json
 import os
 import re
-import shutil
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -27,6 +27,7 @@ from closure_verifier import verify_closure, _find_gate_result, _KNOWN_GATES
 from gate_status import is_pass as gate_is_pass, has_producer_identity as gate_has_producer_identity
 from project_scope import current_project_id
 from vnx_worktree import worktree_start
+import tracks as tracks_db
 
 
 ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/runtime regression"}
@@ -34,8 +35,18 @@ ALLOWED_DRIFT_CATEGORIES = {"bugfix", "post_cleanup", "governance_gap", "path/ru
 APPROVALS_SUBDIR = "roadmap_approvals"
 
 
-def _root_file(project_root: Path, name: str) -> Path:
-    return project_root / name
+def _pr_ids_from_ref(pr_ref: Any) -> List[str]:
+    """Split a tracks-DB ``pr_ref`` value into gate-result PR ids.
+
+    ``tracks.pr_ref`` and ``dispatches.pr_ref`` hold a PR number per row at
+    most, but a track may name several (comma or whitespace separated, the
+    same shape ``track_reconciler._parse_pr_numbers`` reads) and may carry the
+    ``#`` prefix the horizon CLI writes. Gate results are keyed by the bare
+    number (``gate_request_handler`` writes ``str(pr_number)``), so the prefix
+    is stripped here.
+    """
+    tokens = re.split(r"[,\s]+", str(pr_ref or "").strip())
+    return [token.lstrip("#") for token in tokens if token.lstrip("#")]
 
 
 def _base_review_stack() -> List[str]:
@@ -43,14 +54,15 @@ def _base_review_stack() -> List[str]:
 
     Reads the same ``VNX_DEFAULT_REVIEW_STACK`` config entry that
     ``review_gate_manager._build_default_review_stack()`` reads, so the
-    fix-up FEATURE_PLAN template never drifts from the registry default
-    (dispatch 20260914-poorten-punt3-s2 — the template previously hardcoded
-    the pre-s2 default in three places, which kept requesting gates that
-    dispatch had just dropped). ``review_gate_manager`` itself is not
-    imported here: its `_build_default_review_stack()` also appends
-    ``ci_gate`` when ``VNX_CI_GATE_REQUIRED`` is on, and this template must
-    carry the bare base stack the registry entry documents, not a
-    request-time composition that varies with that flag.
+    ``review_stack`` stamped on an inserted fix-up feature never drifts from
+    the registry default (dispatch 20260914-poorten-punt3-s2 — the fix-up
+    writer previously hardcoded the pre-s2 default in three places, which
+    kept requesting gates that dispatch had just dropped).
+    ``review_gate_manager`` itself is not imported here: its
+    `_build_default_review_stack()` also appends ``ci_gate`` when
+    ``VNX_CI_GATE_REQUIRED`` is on, and this writer must carry the bare base
+    stack the registry entry documents, not a request-time composition that
+    varies with that flag.
 
     Fails closed on an explicitly empty ``VNX_DEFAULT_REVIEW_STACK`` (dispatch
     20260914-poorten-punt3-s2/-fix2), rather than silently returning ``[]``.
@@ -59,13 +71,13 @@ def _base_review_stack() -> List[str]:
     ``["ci_gate"]`` whenever ``VNX_CI_GATE_REQUIRED`` is on -- and returning
     ``[]`` outright when it is off, which is the same silent hole this
     function used to have. This writer has no live-pipeline fallback to lean
-    on: it stamps ``**Review-Stack**:`` straight into a FEATURE_PLAN.md, and
+    on: it stamps the ``review_stack`` onto the inserted fix-up feature, and
     ``RoadmapManager._gates_incomplete`` treats an empty ``review_stack`` as
     "nothing required" (``if not required_gates: return False``) -- so a
-    silently empty base stack would write a fix-up template that
-    ``advance()`` will certify with ZERO review evidence. An operator who
-    explicitly zeroes the config wanted something to notice that, not a
-    feature plan that quietly requires no review at all.
+    silently empty base stack would insert a fix-up that ``advance()`` will
+    certify with ZERO review evidence. An operator who explicitly zeroes the
+    config wanted something to notice that, not a feature that quietly
+    requires no review at all.
     """
     import config_runtime
     raw = config_runtime.get("VNX_DEFAULT_REVIEW_STACK") or ""
@@ -73,7 +85,7 @@ def _base_review_stack() -> List[str]:
     if not stack:
         raise ValueError(
             "VNX_DEFAULT_REVIEW_STACK resolved to an empty review-gate stack; "
-            "refusing to write a FEATURE_PLAN.md that requires zero review "
+            "refusing to insert a fix-up feature that requires zero review "
             "gates. Set VNX_DEFAULT_REVIEW_STACK (scripts/lib/config_registry.py) "
             "to a non-empty comma-separated gate list."
         )
@@ -85,7 +97,6 @@ class RoadmapPaths:
     project_root: Path
     state_dir: Path
     state_file: Path
-    generated_dir: Path
 
 
 class RoadmapManager:
@@ -98,9 +109,7 @@ class RoadmapManager:
             project_root=self.project_root,
             state_dir=self.state_dir,
             state_file=self.state_dir / "roadmap_state.json",
-            generated_dir=self.state_dir / "roadmap_generated_features",
         )
-        self.paths.generated_dir.mkdir(parents=True, exist_ok=True)
 
     def _load_yaml(self, path: Path) -> Dict[str, Any]:
         return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -152,7 +161,9 @@ class RoadmapManager:
         return {
             "feature_id": raw["feature_id"],
             "title": raw["title"],
-            "plan_path": raw["plan_path"],
+            # ADR-047: nothing reads a plan file any more, so the field is
+            # optional metadata rather than a required pointer.
+            "plan_path": raw.get("plan_path"),
             "branch_name": raw["branch_name"],
             "risk_class": raw.get("risk_class", "medium"),
             "merge_policy": raw.get("merge_policy", "human"),
@@ -200,12 +211,6 @@ class RoadmapManager:
         )
         return state
 
-    def _materialize_plan(self, plan_path: Path) -> None:
-        # ADR-047: the tracks DB is the only plan source. The plan file is copied
-        # to the project root for reference only — it is never parsed into the PR
-        # queue (A6 retired ``PRQueueManager.load_feature_plan``).
-        shutil.copy2(plan_path, _root_file(self.project_root, "FEATURE_PLAN.md"))
-
     def _ensure_feature_branch(self, branch_name: str) -> bool:
         """Create feature branch from origin/main if absent. Idempotent; returns True if created."""
         cwd = str(self.project_root)
@@ -247,14 +252,9 @@ class RoadmapManager:
         if not feature:
             raise ValueError(f"Unknown feature_id: {feature_id}")
 
-        plan_path = Path(feature["plan_path"])
-        if not plan_path.is_absolute():
-            plan_path = self.project_root / plan_path
-        if not plan_path.exists():
-            raise FileNotFoundError(f"Feature plan not found: {plan_path}")
-
-        self._materialize_plan(plan_path)
-
+        # ADR-047: a feature record's ``plan_path`` is carried metadata, not an
+        # input. Loading a feature no longer reads, requires or writes a plan
+        # file — the tracks DB holds the plan.
         branch_name = feature["branch_name"]
         branch_created = self._ensure_feature_branch(branch_name)
         worktree_path = "" if no_worktree else self._provision_feature_worktree(branch_name)
@@ -321,71 +321,20 @@ class RoadmapManager:
         return deduped
 
     def _insert_fixup_feature(self, state: Dict[str, Any], drift_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Insert a fix-up feature for blocking drift, without writing a plan.
+
+        ADR-047: the tracks DB is the only plan source, so a fix-up is a state
+        record (feature + receipt), not a generated FEATURE_PLAN.md. Its PR
+        evidence arrives the way every other feature's does — a dispatch with
+        a ``pr_ref`` in the tracks DB. Until such a PR exists,
+        ``_gates_incomplete`` sees no PR to certify and refuses to advance.
+        """
         fixup_id = f"fixup-{utc_now_iso().replace(':', '').replace('-', '').lower()}"
-        plan_dir = self.paths.generated_dir / fixup_id
-        plan_dir.mkdir(parents=True, exist_ok=True)
-        plan_path = plan_dir / "FEATURE_PLAN.md"
-        bullet_list = "\n".join(f"- {item.get('title') or item.get('id') or item.get('category')}" for item in drift_items)
         review_stack = _base_review_stack()
-        review_stack_str = ",".join(review_stack)
-        plan_path.write_text(
-            f"""# Feature: Runtime Fix-up — {fixup_id}
-
-**Status**: Draft
-**Priority**: P0
-**Branch**: `feature/{fixup_id}`
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: {review_stack_str}
-
-Primary objective:
-Close the blocking post-feature drift discovered during roadmap reconciliation.
-
-## Blocking Drift
-{bullet_list}
-
-## Dependency Flow
-```text
-PR-0 (no dependencies)
-```
-
-## PR-0: Blocking Runtime Fix-up
-**Track**: C
-**Priority**: P0
-**Complexity**: Medium
-**Risk**: Medium
-**Skill**: @architect
-**Requires-Model**: opus
-**Risk-Class**: medium
-**Merge-Policy**: human
-**Review-Stack**: {review_stack_str}
-**Estimated Time**: 2-6 hours
-**Dependencies**: []
-
-### Description
-Implement the minimum blocking fix required before the roadmap may advance.
-
-### Scope
-{bullet_list}
-
-### Success Criteria
-- blocking drift is resolved
-- no unrelated roadmap scope is added
-- closure verifier passes after the fix-up merges
-
-### Quality Gate
-`gate_fixup_blocking_drift`:
-- [ ] Blocking drift is fully addressed
-- [ ] No unrelated feature work was folded into the fix-up
-- [ ] Verification evidence exists for the addressed issue
-""",
-            encoding="utf-8",
-        )
-
         feature = {
             "feature_id": fixup_id,
             "title": f"Runtime Fix-up — {fixup_id}",
-            "plan_path": str(plan_path),
+            "plan_path": None,
             "branch_name": f"feature/{fixup_id}",
             "risk_class": "medium",
             "merge_policy": "human",
@@ -401,7 +350,7 @@ Implement the minimum blocking fix required before the roadmap may advance.
         features.insert(insert_at, feature)
         state["features"] = features
         state.setdefault("inserted_fixups", []).append(
-            {"feature_id": fixup_id, "items": drift_items, "plan_path": str(plan_path), "inserted_at": utc_now_iso()}
+            {"feature_id": fixup_id, "items": drift_items, "inserted_at": utc_now_iso()}
         )
         state["updated_at"] = utc_now_iso()
         state["blocked_reason"] = "blocking_drift_fixup_inserted"
@@ -412,28 +361,50 @@ Implement the minimum blocking fix required before the roadmap may advance.
             receipt_kind="state_mutation",
             status="success",
             feature_id=fixup_id,
-            plan_path=str(plan_path),
+            review_stack=review_stack,
             drift_items=drift_items,
         )
         return state
+
+    def _feature_pr_ids(self, feature: Dict[str, Any]) -> List[str]:
+        """The PR ids this feature's review evidence must cover (ADR-047).
+
+        The source is the tracks DB only: the track's own ``pr_ref``
+        (ADR-047 §1) and the ``pr_ref`` of every dispatch linked to it (§2,
+        where per-PR identity lives). Both may hold a comma/space separated
+        list. Anything short of a clean read yields NO ids: the caller treats
+        an empty list as "evidence missing" and blocks, so a missing DB, a
+        missing table or a decoy store can never turn into a pass.
+        """
+        track_id = str(feature.get("feature_id") or "").strip()
+        if not track_id or not (self.state_dir / tracks_db.DB_FILENAME).exists():
+            return []
+        try:
+            track = tracks_db.get_track(self.state_dir, track_id, self.project_id)
+            dispatches = tracks_db.get_linked_dispatches(self.state_dir, track_id, self.project_id)
+        except (OSError, RuntimeError, sqlite3.Error):
+            # No readable tracks DB means no PR evidence at all; the caller
+            # blocks on the empty list rather than verifying a partial set.
+            return []
+        pr_ids: set[str] = set()
+        for row in [track or {}] + list(dispatches):
+            pr_ids.update(_pr_ids_from_ref(row.get("pr_ref")))
+        return sorted(pr_ids)
 
     def _gates_incomplete(self, feature: Dict[str, Any], gate_results_dir: Path) -> bool:
         """Return True when any required gate lacks a PASS result for the feature's PRs.
 
         Required gates: every entry in review_stack except claude_github_optional.
         ADR-007: project_id stamping is preserved — this check is additive.
+        ADR-047: the PR ids come from the tracks DB (``_feature_pr_ids``), not
+        from a plan file; no PR evidence is a block, never a pass.
         """
         review_stack = feature.get("review_stack") or []
         required_gates = [g for g in review_stack if g != "claude_github_optional"]
         if not required_gates:
             return False
 
-        feature_plan_path = _root_file(self.project_root, "FEATURE_PLAN.md")
-        pr_ids: List[str] = []
-        if feature_plan_path.exists():
-            content = feature_plan_path.read_text(encoding="utf-8")
-            pr_ids = re.findall(r"^##\s+(PR-\d+):", content, re.MULTILINE)
-
+        pr_ids = self._feature_pr_ids(feature)
         if not pr_ids:
             return True
 
@@ -708,9 +679,8 @@ Implement the minimum blocking fix required before the roadmap may advance.
         # ADR-047 / A6: plan-based dispatch creation is retired. A queued PR can
         # only come from a legacy PR-queue state, and nothing repopulates that
         # queue from a plan any more. Fail closed — never report a drained queue
-        # for work that could not be staged. Staging now belongs to the tracks DB
-        # and the single dispatch door (`vnx dispatch`); the track-driven step
-        # is B2's slice, not A6's.
+        # for work that could not be staged. Staging belongs to the tracks DB
+        # and the single dispatch door (`vnx dispatch`).
         emit_governance_receipt(
             "roadmap_dispatch_step",
             receipt_kind="sub_dispatch",
