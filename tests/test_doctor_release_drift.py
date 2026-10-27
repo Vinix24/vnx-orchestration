@@ -76,7 +76,6 @@ def _release(repo: Path, dest: Path, with_main_ref: bool = True) -> Path:
 class TestMeasure:
     def test_release_level_with_main_is_up_to_date(self, tmp_path):
         drift = _drift().measure(_release(_repo(tmp_path), tmp_path / "rel"))
-
         assert drift.status == _drift().UP_TO_DATE
         assert (drift.behind, drift.commits, drift.release) == (0, (), TAG)
         assert TAG in _drift().render_detail(drift)
@@ -97,7 +96,6 @@ class TestMeasure:
     def test_the_detail_shows_three_commits_and_counts_the_rest(self, tmp_path):
         drift = _drift().measure(_release(_repo(tmp_path, drift_commits=4), tmp_path / "rel"))
         detail = _drift().render_detail(drift)
-
         assert drift.behind == 4
         # Newest first, like git log; the tail counts what the line leaves out.
         assert drift.commits[0].paths == ("scripts/drift.py.3",)
@@ -107,7 +105,6 @@ class TestMeasure:
     def test_missing_main_ref_is_skipped_never_reported_as_level(self, tmp_path):
         repo = _repo(tmp_path, drift_commits=1)
         release = _release(repo, tmp_path / "rel", with_main_ref=False)
-
         assert _drift().measure(release).status == _drift().NO_MAIN_REF
         assert _drift().measure(release, main_repo=tmp_path / "absent").status == _drift().NO_MAIN_REF
         detail = _drift().render_detail(_drift().measure(release))
@@ -119,7 +116,6 @@ class TestMeasure:
         release = _release(_repo(tmp_path / "one"), tmp_path / "rel", with_main_ref=False)
         _git(release, "tag", "-d", TAG)
         _git(release, "update-ref", "refs/tags/v9.9.9", "HEAD")
-
         drift = _drift().measure(release, main_repo=_repo(tmp_path / "two"))
 
         assert drift.status == _drift().UNKNOWN_RELEASE
