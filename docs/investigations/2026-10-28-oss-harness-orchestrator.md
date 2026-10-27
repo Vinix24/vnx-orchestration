@@ -271,6 +271,15 @@ Per-cell evidence notes:
 - **kimi C4 covered.** The local package's default system prompt describes hierarchical `AGENTS.md` loading with a 32 KiB budget (`kimi_cli/agents/default/system.md:101-123`, `CHANGELOG.md:177`). That is the same mechanism the tri-file targets.
 - **OpenCode/Aider.** No local source at all. Per the plan-gate requirement 3, these cells cannot carry an adapter order.
 
+### 3.4 Minimum that must be built per candidate
+
+The plan's third deliverable asks per candidate not only what is covered but **what minimally has to be built**. Read against the measured cells:
+
+- **kimi.** Adapter work, not capability work: (a) a start-injection config that runs the existing role/state injection through `SessionStart` (`kimi_cli/hooks/config.py:6-18` is the event contract); (b) a permission scope around the approval runtime, because C2 is only *partly* measured — `kimi_cli/approval_runtime/models.py:1-25` gates tool calls but offers no allowlist or filesystem sandbox; (c) model-identity readout from `-m`/config; (d) token-usage parse, already in `scripts/lib/kimi_wrapper.py:43-76`; (e) the rotation/pane semantics from the claude adapter (tmux transport stays). Minimum: one adapter module plus a permission scope; no new hook engine.
+- **codex.** Adapter work plus one measurement and possibly one build: (a) measure C5 (start injection) — if codex has no start-of-session hook or equivalent, build the injection at the adapter boundary; (b) confirm C4 (`AGENTS.md` load at interactive start); (c) model-identity readout from `-m`/config; (d) sandbox and approval flags already give C2; (e) token-usage parse already in `scripts/lib/codex_wrapper.py:28-52`; (f) rotation/pane semantics as for kimi. Minimum: one adapter module plus whatever C5 needs; C4 is a measurement, not obviously a build.
+- **OpenCode and Aider.** Nothing can be built on evidence yet. Minimum first step is a measurement pass: install, capture `--help`, its hook/plugin docs and token-usage output, then fill the six cells. Building before that would be guesswork, which the plan-gate requirement 3 forbids.
+
+
 ## 4. Recommendation and ADR draft
 
 ### 4.1 Adapter order for golf 3
