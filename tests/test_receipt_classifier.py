@@ -200,7 +200,9 @@ def test_provider_haiku_invokes_correct_cli(env_state, monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
+        # The ledger write shells out too (project root); keep only the child.
+        if cmd and cmd[0] == "claude":
+            captured["cmd"] = cmd
         return subprocess.CompletedProcess(
             args=cmd, returncode=0, stdout='{"impact_class":"trivial","suggested_edit":null}', stderr=""
         )
