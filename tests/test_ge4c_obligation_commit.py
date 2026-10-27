@@ -11,6 +11,7 @@ artefacts shared a failure contract.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import threading
 from pathlib import Path
@@ -88,9 +89,13 @@ def _commit(env, head: str = HEAD_A, status: str = "pass", *, obligation=None, r
     )
 
 
+def _payload(status: str = "executing", **extra) -> dict:
+    return {"gate": GATE, "status": status, "pr_number": PR, "pr_id": str(PR), "branch": BRANCH,
+            "commit_sha": HEAD_A, "contract_hash": "hash-1", **extra}
+
+
 def _request(env, status: str = "executing", **extra) -> dict:
-    request = {"gate": GATE, "status": status, "pr_number": PR, "pr_id": str(PR), "branch": BRANCH,
-               "commit_sha": HEAD_A, "contract_hash": "hash-1", **extra}
+    request = _payload(status, **extra)
     gate_recorder.persist_request(env["requests_dir"], GATE, request, pr_number=PR, pr_id="")
     return request
 
@@ -344,3 +349,113 @@ def test_a_booking_into_an_obligation_nobody_registered_is_loud(env):
 
     with pytest.raises(ValueError):
         commit_obligation_outcome(_obligation(missing), result_path=_slot(env))
+
+
+# ---------------------------------------------------------------------------
+# GE-4c round 2, finding 1: a repeat that books an obligation writes its work
+# order first, so a booking that raises is recoverable instead of lost
+# ---------------------------------------------------------------------------
+
+
+def test_a_repeat_that_cannot_book_leaves_a_work_order_the_next_commit_pays_once(env, monkeypatch):
+    obligation_path = _register(env)
+    _commit(env)  # the decided outcome lands first, without an obligation
+    real_book, calls = gate_obligations.book_obligation_outcome, []
+
+    def crashes_once(path, fields, **kwargs):
+        calls.append(path)
+        if len(calls) == 1:
+            raise OSError("the obligation store is on fire")
+        return real_book(path, fields, **kwargs)
+
+    monkeypatch.setattr(gate_obligations, "book_obligation_outcome", crashes_once)
+
+    repeated, written = _commit(env, obligation=_obligation(obligation_path))
+
+    assert written is True and repeated["attempt_seq"] == 1, "a repeat advances no attempt"
+    owed = _json(_slot(env))
+    assert owed["obligation_pending"] is True, "the repeat path persists its work order before booking"
+    assert owed["obligation_booking"]["path"] == str(obligation_path)
+    assert owed["obligation_booking"]["fields"]["status"] == gate_obligations.STATUS_FULFILLED
+    assert _json(obligation_path)["status"] == gate_obligations.STATUS_PENDING, "the booking did not land"
+
+    # The next commit on the slot pays that debt, exactly once.
+    _commit(env, obligation=_obligation(obligation_path))
+
+    booked = _json(obligation_path)
+    assert booked["status"] == gate_obligations.STATUS_FULFILLED
+    assert booked["booked_for"] == {"gate": GATE, "pr_number": PR, "commit_sha": HEAD_A, "attempt_seq": 1}
+    assert "obligation_pending" not in _json(_slot(env)), "the marker is cleared"
+    settled = obligation_path.read_bytes()
+
+    _commit(env, obligation=_obligation(obligation_path))
+    assert obligation_path.read_bytes() == settled, "booked once, not once per commit"
+
+
+def test_a_repeat_with_an_obligation_books_once_and_leaves_no_marker(env):
+    obligation_path = _register(env)
+    _commit(env)
+
+    repeated, written = _commit(env, obligation=_obligation(obligation_path))
+
+    assert written is True and repeated["attempt_seq"] == 1
+    booked = _json(obligation_path)
+    assert booked["status"] == gate_obligations.STATUS_FULFILLED
+    assert booked["booked_for"]["attempt_seq"] == 1, "booked for the attempt the outcome names"
+    assert "obligation_pending" not in _json(_slot(env)), "the work order is cleared by the booking"
+    assert "obligation_pending" not in repeated
+    settled = obligation_path.read_bytes()
+
+    _commit(env, obligation=_obligation(obligation_path))
+    assert obligation_path.read_bytes() == settled, "idempotent by value"
+
+
+# ---------------------------------------------------------------------------
+# GE-4c round 2, finding 2: a refused writer ends the request it HOLDS, never
+# the one on the slot that belongs to someone else
+# ---------------------------------------------------------------------------
+
+
+def _refused(env, held: dict):
+    """A refusal on the slot (the pass already there vs an ``unavailable`` on the same head)."""
+    record, written = _commit(env, status="unavailable", request=_gate_request(env, held))
+    assert written is False, "the decided pass on the slot refuses the outage"
+    return record
+
+
+def test_a_refused_write_leaves_a_completed_request_and_its_metadata_intact(env, caplog):
+    _commit(env)  # a decided pass holds the result slot
+    completed = _payload("completed", commit_sha=HEAD_A, completed_at=BOOKED_AT)
+    gate_recorder.persist_request(env["requests_dir"], GATE, completed, pr_number=PR, pr_id="")
+    before = _request_slot(env).read_bytes()
+
+    with caplog.at_level(logging.WARNING, logger="gate_outcome"):
+        _refused(env, _payload())  # the caller's own request never reached this slot
+
+    assert _request_slot(env).read_bytes() == before, "a completed request keeps its status and completed_at"
+    assert "request_already_terminal" in caplog.text, "the refusal is named"
+
+
+def test_a_refused_write_leaves_a_newer_retry_in_the_same_slot_untouched(env, caplog):
+    _commit(env)
+    retry = _payload("executing", commit_sha=HEAD_B, contract_hash="hash-2",
+                     requested_at="2026-10-27T11:00:00Z")
+    gate_recorder.persist_request(env["requests_dir"], GATE, retry, pr_number=PR, pr_id="")
+    before = _request_slot(env).read_bytes()
+
+    held = _payload(requested_at="2026-10-27T10:00:00Z")  # the attempt that ran, one round earlier
+    with caplog.at_level(logging.WARNING, logger="gate_outcome"):
+        _refused(env, held)
+
+    assert _request_slot(env).read_bytes() == before, "the newer retry in the same gate/PR slot stays"
+    assert "request_belongs_to_another_attempt" in caplog.text, "the refusal is named"
+
+
+def test_a_refused_write_still_ends_its_own_executing_request(env):
+    _commit(env)
+    held = _request(env)  # the caller's request IS the record on the slot
+
+    _refused(env, held)
+
+    ended = _json(_request_slot(env))
+    assert (ended["status"], ended["failure_reason"]) == ("failed", "write_refused")

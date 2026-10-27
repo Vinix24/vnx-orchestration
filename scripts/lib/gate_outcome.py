@@ -50,15 +50,25 @@ Partial-failure contract (ADR-046 §3), fixed here before the code:
 8. **Obligation** (GE-4c). An admitted outcome, a repeat included, books the
    :class:`GateObligation` it was given here, through
    ``gate_obligations.book_obligation_outcome``. The record is written with
-   ``obligation_pending``/``obligation_booking`` BEFORE the booking is tried, so
-   a process that dies in between leaves a work order the next commit on the
-   slot books exactly once; one that cannot pay it refuses
-   (:class:`ObligationPendingRefused`) rather than replace that trace.
+   ``obligation_pending``/``obligation_booking`` BEFORE the booking is tried —
+   on the repeat path too, where the stamp goes onto the record already on the
+   slot (:func:`_persist_obligation_work_order`) — so a process that dies in
+   between, or a booking that raises, leaves a work order the next commit on
+   the slot books exactly once; one that cannot pay it refuses
+   (:class:`ObligationPendingRefused`) rather than replace that trace. No
+   commit returns success with neither a booking nor a work order on disk.
 9. **Refusal** (GE-4c, kimi advisory (a)). A request handed to a REFUSED
    commit is ended — the writer's own terminal end when it named one, else
    ``failed`` with ``failure_reason: write_refused`` — so ``execute_gate``
    short-circuits on it (:data:`gate_status.REQUEST_TERMINAL_STATUSES`) and a
    real retry is a NEW request record instead of a re-run into the same refusal.
+   Only the request the caller actually HOLDS may be ended (GE-4c round 2): the
+   request record on the slot is read under its own lock and its identity
+   (:data:`REQUEST_IDENTITY_FIELDS`) and status are compared first, so a
+   refusal never overwrites a request another writer already completed, nor a
+   newer retry in the same ``(gate, PR)`` slot. Both cases leave the record —
+   completion metadata included — exactly as it is and return a named
+   :class:`RequestLeftAlone` (:func:`_foreign_request_reason`).
 
 All of it runs under ``atomic_io.slot_lock`` on the record path. The forge
 publication, bundle archive and reachability feed stay outside, as before.
@@ -82,7 +92,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import gate_obligations
 import gate_recorder
@@ -128,6 +138,19 @@ OBLIGATION_BOOKING_KEY = "obligation_booking"
 # Step 9: what a request handed to a refused commit ends as.
 WRITE_REFUSED = "write_refused"
 
+# Step 9 (GE-4c round 2): the fields that identify ONE request in a slot. The
+# request's own ``requested_at`` stamp is the request id an attempt holds; the
+# rest are what a retry in the same (gate, PR) slot changes first. A field only
+# one side names identifies nothing, so it cannot be evidence of a match.
+REQUEST_IDENTITY_FIELDS: Tuple[str, ...] = (
+    "gate", "pr_number", "pr_id", "commit_sha", "contract_hash", "requested_at",
+)
+# The named refusals of a write that would end a request the caller does not hold.
+REQUEST_NOT_ON_DISK = "request_not_on_disk"
+REQUEST_UNREADABLE = "request_unreadable_on_disk"
+REQUEST_ALREADY_ENDED = "request_already_terminal"
+REQUEST_ANOTHER_ATTEMPT = "request_belongs_to_another_attempt"
+
 
 class ReceiptPendingRefused(gate_recorder.ResultOverwriteRefused):
     """The record on the slot still owes its receipt and booking it failed again (step 3).
@@ -164,6 +187,22 @@ class RequestWriteFailed(RuntimeError):
         super().__init__(message)
         self.record = dict(record)
         self.status = status
+
+
+@dataclass(frozen=True)
+class RequestLeftAlone:
+    """A refused write left the request on the slot untouched, because it is not the caller's (step 9).
+
+    ``reason`` is one of the ``REQUEST_*`` names: absent, unreadable, already
+    terminal, or another attempt's — and ``detail`` names the fact that
+    decided it (the differing identity field, or the terminal status). Returned
+    rather than raised: the commit itself was refused for its own reason, and
+    leaving a request that belongs to someone else alone is not a second
+    failure of this writer.
+    """
+
+    reason: str
+    detail: str
 
 
 # Refusals whose own text replaces the guard's in the audit line.
@@ -302,6 +341,7 @@ def commit_gate_outcome(
         else:
             if _repeats_the_slot(existing, record):
                 repeated = existing
+                _persist_obligation_work_order(path, repeated, obligation)
             else:
                 _write_record_then_receipt(
                     path, record, existing, gate=gate, pr_ref=pr_ref, receipt_fields=outcome.receipt_fields,
@@ -312,10 +352,13 @@ def commit_gate_outcome(
             if request is not None:
                 request_failure = _finish_request(request, repeated or record, outcome)
         if refusal is not None and request is not None:
-            # Step 9: the refused run must not be re-run into the same refusal.
-            request_failure = _finish_refused_request(
+            # Step 9: the refused run must not be re-run into the same refusal,
+            # and a request it does not hold must not be ended at all.
+            request_end = _finish_refused_request(
                 request, refusal, gate=gate, pr_number=outcome.pr_number, pr_id=outcome.pr_id,
-            ) or request_failure
+            )
+            if isinstance(request_end, RequestWriteFailed):
+                request_failure = request_end
     gate_recorder._archive_finished_gate_bundle(record, gate=gate, result_path=path)
     if request_failure is not None:
         raise request_failure
@@ -378,6 +421,29 @@ def _pay_outstanding_obligation(path: Path, existing: Any) -> None:
         f"still owes its obligation booking and booking it failed again; refusing to replace it "
         f"until that booking lands (ADR-046 §2 step 8)"
     )
+
+
+def _stamp_obligation_work_order(record: Dict[str, Any], obligation: GateObligation) -> None:
+    """Make ``record`` a durable work order for ``obligation`` (step 8): the two keys, nothing else."""
+    record[OBLIGATION_PENDING_KEY] = True
+    record[OBLIGATION_BOOKING_KEY] = {"path": str(obligation.path), "fields": dict(obligation.fields)}
+
+
+def _persist_obligation_work_order(
+    path: Path, record: Dict[str, Any], obligation: Optional[GateObligation],
+) -> None:
+    """Step 8 on the REPEAT path: stamp the booking on the record already on the slot, then write it.
+
+    A repeat writes no record of its own, so the work order has to be put
+    there before the booking is tried: a booking that raises otherwise leaves
+    nothing on disk, and the obligation is lost while the commit returns
+    success. A write that fails here raises BEFORE the booking is attempted,
+    so no commit returns with neither a booking nor a work order.
+    """
+    if obligation is None:
+        return
+    _stamp_obligation_work_order(record, obligation)
+    gate_recorder._write_result_atomic(path, record)
 
 
 def _obligation_attempt(record: Mapping[str, Any]) -> Dict[str, Any]:
@@ -548,8 +614,7 @@ def _write_record_then_receipt(
     else:
         record.pop("receipt_pending", None)
     if obligation is not None:
-        record[OBLIGATION_PENDING_KEY] = True
-        record[OBLIGATION_BOOKING_KEY] = {"path": str(obligation.path), "fields": dict(obligation.fields)}
+        _stamp_obligation_work_order(record, obligation)
     gate_recorder._write_result_atomic(path, record)
     if owes_receipt:
         _book_receipt(path, record, gate=gate, pr_ref=pr_ref)
@@ -583,10 +648,54 @@ def _finish_request(request: GateRequest, record: Dict[str, Any], outcome: GateO
     return None
 
 
+def _named(value: Any) -> bool:
+    """Positive evidence: a value that names something — not ``None``, not an empty or blank string."""
+    if value is None:
+        return False
+    return not (isinstance(value, str) and not value.strip())
+
+
+def _foreign_request_reason(
+    on_disk: gate_recorder.RequestOnDisk, held: Mapping[str, Any], *, gate: str,
+) -> Optional[Tuple[str, str]]:
+    """Step 9: why the request on the slot is NOT the one the caller holds, or ``None`` when it is.
+
+    Positive evidence only, in this order: the slot must hold a request at all,
+    that request must still be in flight, and every identity field either side
+    names (:data:`REQUEST_IDENTITY_FIELDS`) must be named on BOTH sides and be
+    equal. Absent, unreadable, already terminal and mismatched all leave the
+    record untouched — none of them is evidence that this write owns it.
+
+    Only the KNOWN terminal statuses (:data:`REQUEST_TERMINAL_STATUSES`) refuse
+    on the status: an unknown, empty or missing one is not read as "already
+    ended", because a status this code does not recognise is not evidence about
+    the request, and letting it block the write would leave the caller's own
+    in-flight request `executing` for ever — the re-run loop step 9 exists to
+    close. Identity, which can be verified, is what decides.
+    """
+    if not on_disk.present:
+        return REQUEST_NOT_ON_DISK, f"no request record at {on_disk.path}"
+    current = on_disk.record
+    if not isinstance(current, dict):
+        return REQUEST_UNREADABLE, f"the request at {on_disk.path} cannot be read as an object"
+    status = current.get("status")
+    if status in REQUEST_TERMINAL_STATUSES:
+        return REQUEST_ALREADY_ENDED, f"the request at {on_disk.path} already ended {status!r}"
+    for name in REQUEST_IDENTITY_FIELDS:
+        # The gate is the caller's own argument, not what its payload claims:
+        # the slot path this write targets was built from it.
+        mine, theirs = (gate if name == "gate" else held.get(name)), current.get(name)
+        if not (_named(mine) or _named(theirs)):
+            continue  # neither side names it: it identifies nothing and so decides nothing
+        if not (_named(mine) and _named(theirs)) or mine != theirs:
+            return REQUEST_ANOTHER_ATTEMPT, f"{name!r} differs ({theirs!r} on the slot, {mine!r} held)"
+    return None
+
+
 def _finish_refused_request(
     request: GateRequest, refusal: gate_recorder.ResultOverwriteRefused, *,
     gate: str, pr_number: Optional[int], pr_id: str,
-) -> Optional[RequestWriteFailed]:
+) -> Optional[Union[RequestWriteFailed, RequestLeftAlone]]:
     """Step 9: end a refused run's request, so it is never re-run into the refusal.
 
     ``failed`` + ``failure_reason: write_refused`` when the writer named no end
@@ -595,10 +704,18 @@ def _finish_refused_request(
     ``failed``/``unavailable``, ``record_not_executable``'s ``not_executable``:
     OI-1707 measured that a runner's diagnosis must not be displaced. All of
     them are terminal, so ``execute_gate`` short-circuits and a real retry is a
-    NEW request. An already ended request is left alone.
+    NEW request.
+
+    GE-4c round 2: the request ENDED is the one the caller holds, decided from
+    the record on the slot under that slot's lock (:func:`_foreign_request_reason`),
+    never from the caller's copy — the caller's ``payload`` is what it read
+    before the gate ran, and another writer may have ended or replaced that
+    record since. A request that is already terminal, or that belongs to another
+    attempt (a newer retry in the same ``(gate, PR)`` slot), is returned as
+    :class:`RequestLeftAlone` and not touched: overwriting it would delete the
+    completion metadata of a run that finished, or end a retry this writer never
+    ran.
     """
-    if request.payload.get("status") in REQUEST_TERMINAL_STATUSES:
-        return None
     named = request.status if request.status in REQUEST_TERMINAL_STATUSES else ""
     if named:
         # The writer named the end and carries its diagnosis in ``fields``
@@ -610,14 +727,25 @@ def _finish_refused_request(
         # No end of its own: the attempt ends here, and it ends unrecorded.
         status = "failed"
         ended = {**request.payload, "status": status, "failure_reason": WRITE_REFUSED}
+    held = request.payload
     try:
-        gate_recorder.persist_request(request.requests_dir, gate, ended, pr_number=pr_number, pr_id=pr_id)
+        refused = gate_recorder.persist_request(
+            request.requests_dir, gate, ended, pr_number=pr_number, pr_id=pr_id,
+            refuse_if=lambda on_disk: _foreign_request_reason(on_disk, held, gate=gate),
+        )
     except OSError as exc:
         return RequestWriteFailed(
             f"{gate} request for a refused write could not be ended {status!r}: "
             f"{type(exc).__name__}: {exc} (refusal: {refusal})",
             record=request.payload, status=status,
         )
+    if refused is not None:
+        logger.warning(
+            "gate_outcome: %s request for pr=%s left as it is — %s (%s); a refused write ends "
+            "only the request it holds (ADR-046 §2 step 9)",
+            gate, pr_id or pr_number, refused.reason, refused.detail,
+        )
+        return RequestLeftAlone(reason=refused.reason, detail=refused.detail)
     request.payload.update(ended)
     return None
 

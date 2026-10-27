@@ -183,13 +183,13 @@ def test_the_loser_leaves_the_winners_record_and_request_status(env, tmp_path, m
 
     record, request = _json(_slot(env, "codex_gate")), _json(_slot(env, "codex_gate", "requests"))
     assert results[0][1] is False and (record["status"], record["attempt_seq"]) == ("completed", 1)
-    # GE-4c, kimi advisory (a): the loser's attempt ends its request rather
-    # than leaving it ``executing`` for the next run to re-run into the same
-    # refusal. It names the same request slot here (same gate and PR), so the
-    # refused attempt's end is what the file carries last; the winner's record
-    # and receipt are untouched.
-    assert (request["status"], request["failure_reason"]) == ("failed", "write_refused")
-    assert "completed_at" not in request
+    # GE-4c round 2: the request on the slot is the WINNER's — already ended
+    # ``completed`` — and the loser holds a payload that never reached this
+    # slot. A refused write ends only the request it holds, so the winner's
+    # request keeps its status and its completion metadata; the winner's record
+    # and receipt are untouched too.
+    assert request["status"] == "completed" and request.get("completed_at")
+    assert "failure_reason" not in request
     assert [r["commit_sha"] for r in _receipts(env)] == [HEAD_A]
 
 
