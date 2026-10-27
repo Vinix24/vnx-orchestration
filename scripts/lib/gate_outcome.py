@@ -52,9 +52,11 @@ publication, bundle archive and reachability feed stay outside, as before.
 
 Limits: the key deduplicates within the append cache window (300 s), so a
 receipt that landed, whose clearing write then failed, and that is recovered
-after that window, can book a second line. The writers still on
-``write_result_guarded`` (``gate_request_handler``, a ci_gate ``running``
-snapshot) stamp no ``attempt_seq``, and no obligation is booked here (GE-4c-2).
+after that window, can book a second line. The writers that are no outcome
+still stamp no ``attempt_seq``: a ci_gate ``running`` snapshot,
+``gate_request_handler``'s optional-gate mirror (both ``write_result_guarded``)
+and a takeover annotation on a decided record
+(``annotate_result_guarded``, GE-4c-2). No obligation is booked here (GE-4c).
 A ``claude_github_optional`` record carries no head of its own (its receipt
 reads the head off the request), so it is never a repeat: an identical retry
 lands as the next attempt, and the key returns its receipt as a duplicate.
@@ -350,22 +352,28 @@ def _write_record_then_receipt(
 
 
 def _finish_request(request: GateRequest, record: Dict[str, Any], outcome: GateOutcome) -> None:
-    """Step 7; the caller holds the slot's lock and the record on the slot answers the request."""
+    """Step 7; the caller holds the slot's lock and the record on the slot answers the request.
+
+    The caller's ``payload`` is updated only once the write has landed
+    (GE-4c-2): it used to be mutated first with the failure only logged, so a
+    caller read back a request status the request on disk never reached.
+    """
     status = REQUEST_STATUS_OF.get(canonical_status(record))
     if status is None:
         logger.warning("gate_outcome: %s request pr=%s left as it was: status %r ends no request",
                        outcome.gate, outcome.pr_ref, record.get("status"))
         return
     status = request.status or status
-    request.payload.update(request.fields)
-    request.payload["status"] = status
+    ended = {**request.payload, **request.fields, "status": status}
     try:
         gate_recorder.persist_request(
-            request.requests_dir, outcome.gate, request.payload, pr_number=outcome.pr_number, pr_id=outcome.pr_id,
+            request.requests_dir, outcome.gate, ended, pr_number=outcome.pr_number, pr_id=outcome.pr_id,
         )
     except OSError as exc:
         logger.warning("gate_outcome: %s request pr=%s NOT set to %s (the record landed) — %s: %s",
                        outcome.gate, outcome.pr_ref, status, type(exc).__name__, exc)
+        return
+    request.payload.update(ended)
 
 
 def _book_receipt(path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str) -> bool:
