@@ -543,17 +543,14 @@ def test_is_round_of_accepts_only_a_positive_integer_round(round_id, expected):
 
 
 def test_the_view_and_the_helper_agree_on_every_round_shape(store):
-    """The view's SQL is a mirror of ``is_round_of``; this pins the two together."""
-    shapes = [("dlv-abc-r1", True), ("dlv-abc-r0", False), ("dlv-abc-r03", False),
-              ("dlv-abc-r", False), ("dlv-abc-rX", False)]
-    for round_id, expected in shapes:
-        assert schema_manifest.is_round_of("dlv-abc", round_id) is expected
+    """The view's SQL mirrors ``is_round_of``; this pins the two together on one store."""
     base = _set_state(store, _add(store), "expired")
     for label, expected in [("1", "done"), ("0", "failed"), ("03", "failed"),
                             ("", "failed"), ("X", "failed")]:
+        round_id = _add_round(store, base, label)
         _sql(store, "UPDATE dispatches SET metadata_json = ? WHERE dispatch_id = ?",
-             (json.dumps({"superseded_by": f"{base}-r{label}"}), base))
-        _add_round(store, base, label)
+             (json.dumps({"superseded_by": round_id}), base))
+        assert schema_manifest.is_round_of(base, round_id) is (expected == "done"), label
         assert _view(store, f"pr:{base}") == expected, label
 
 
