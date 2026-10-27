@@ -61,7 +61,7 @@ De volgorde binnen de view is vast: `done` (alles `completed`), dan `in_progress
 
 ### 4. Terugdraaien
 
-De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per rij het event `deliverable_withdrawn_reverted` in `coordination_events`, met de oude staat en de reden in de metadata. Zo ziet een oude lezer na een rollback een eindstatus die hij kent, en blijft de omzetting in het grootboek staan. `completed` blijft ongemoeid; de down-migratie raakt alleen `withdrawn`. De voorkant (0036) maakt de view opnieuw en werkt de schema-manifest bij in dezelfde PR, zodat manifest en store niet uiteenlopen.
+De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per rij het event `deliverable_withdrawn_reverted` in `coordination_events`, met de oude staat en de reden in de metadata. Zo ziet een oude lezer na een rollback een eindstatus die hij kent, en blijft de omzetting in het grootboek staan. Eerst boekt `apply_0036.revert_migration` één `state_mutation`-receipt (trigger `migration_0036_revert`, met de lijst `(dispatch_id, project_id)`) in de `t0_receipts.ndjson` naast de database; is het resultaat niet `appended`, dan weigert de revert en verandert er niets. Faalt de transactie daarna alsnog, dan boekt hij best-effort een `migration_0036_revert_aborted`-receipt voordat hij de fout doorgeeft. `completed` blijft ongemoeid; de down-migratie raakt alleen `withdrawn`. De voorkant (0036) maakt de view opnieuw en werkt de schema-manifest bij in dezelfde PR, zodat manifest en store niet uiteenlopen.
 
 ### 5. Gevolgen
 
