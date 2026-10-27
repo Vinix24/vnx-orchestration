@@ -4,8 +4,8 @@
 ADR-046 §4 names three adapter kinds: ``GovernedLane`` (``glm_gate``, ``kimi_gate``,
 ``deepseek_gate``), ``Deterministic`` and ``PathBinary``. This module is the
 ``GovernedLane``: the dispatcher wiring that used to live in
-``plan_gate__panel()._make_default_dispatcher``, the report reader that used to live
-in ``plan_gate__panel()._read_report``, and the one verdict parser the two standalone
+``plan_gate_panel._make_default_dispatcher``, the report reader that used to live
+in ``plan_gate_panel._read_report``, and the one verdict parser the two standalone
 gates used to carry as separate copies (``glm_gate._extract_verdict``,
 ``kimi_gate._extract_verdict``).
 
@@ -27,7 +27,7 @@ at import time, so this module and ``plan_gate_panel`` do not import each other 
 a cycle: the panel imports this adapter at module load, and the adapter imports
 the panel only when a dispatcher is actually built or called. Resolving them off
 the module object also keeps every existing monkeypatch seam (tests patch
-``plan_gate__panel()._run_provider_lane_child`` and friends) working unchanged.
+``plan_gate_panel._run_provider_lane_child`` and friends) working unchanged.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ if _LIB not in sys.path:
 from gate_lane_contract import canonical_review_verdict  # after the scripts/lib path guard
 
 # A dispatcher takes (provider, model_arg, instruction, dispatch_id) and returns
-# the panelist's report text. Same shape as ``plan_gate__panel().DispatcherFn`` —
+# the panelist's report text. Same shape as ``plan_gate_panel.DispatcherFn`` —
 # re-declared here because this module must not import the panel at import time.
 DispatcherFn = Callable[[str, str, str, str], str]
 
@@ -287,7 +287,7 @@ def _make_default_dispatcher(
             proc = _panel()._run_provider_lane_child(
                 cmd, env=env, timeout_seconds=timeout_seconds, dispatch_id=dispatch_id,
                 data_dir=base)
-            report = read_report(base, dispatch_id, proc.stderr)
+            report = _panel()._read_report(base, dispatch_id, proc.stderr)
             if report is None:
                 # provider_dispatch prints its actionable detail across both streams —
                 # surfacing only stderr once masked the real cause behind an unrelated

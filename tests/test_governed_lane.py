@@ -11,6 +11,7 @@ names so no caller changes.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,7 +23,8 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-import glm_gate  # noqa: E402  (after the sys.path pins above)
+import dispatch_worktree_isolation as dwi  # noqa: E402  (after the sys.path pins above)
+import glm_gate  # noqa: E402
 import governed_lane  # noqa: E402
 import kimi_gate  # noqa: E402
 import plan_gate_panel  # noqa: E402
@@ -145,7 +147,7 @@ def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch
 
     monkeypatch.setattr(plan_gate_panel, "_resolve_data_dir", lambda _data_dir: tmp_path)
     monkeypatch.setattr(plan_gate_panel, "_run_provider_lane_child", fake_child)
-    monkeypatch.setattr(governed_lane, "read_report", lambda *a, **k: "REPORT TEXT")
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a, **k: "REPORT TEXT")
 
     dispatcher = governed_lane._make_default_dispatcher(
         None, 42, role="review-gate", base_ref="origin/pr-branch")
@@ -161,3 +163,29 @@ def test_the_moved_dispatcher_still_builds_the_provider_lane_command(monkeypatch
     assert "--no-auto-commit" in cmd
     assert seen["dispatch_id"] == "kimi-gate-pr-1"
     assert seen["data_dir"] == tmp_path
+
+
+def test_the_moved_dispatcher_reads_the_report_through_the_panel_seam(monkeypatch, tmp_path):
+    """GE-5a round 2: ``_dispatch`` resolves the report reader through ``_panel()``.
+
+    Round 1 called this module's own ``read_report``, so a test that patched
+    ``plan_gate_panel._read_report`` — the seam every other transport helper still
+    keeps — no longer reached the dispatcher. The child process is patched the way
+    ``tests/test_gate_lane_worktree_reap.py`` patches it: replace the panel's
+    ``subprocess``, so the real ``_run_provider_lane_child`` wiring still runs.
+    """
+    monkeypatch.setattr(plan_gate_panel, "_resolve_data_dir", lambda _data_dir: tmp_path)
+    monkeypatch.setattr(dwi, "resolve_consumer_project_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        plan_gate_panel,
+        "subprocess",
+        SimpleNamespace(
+            run=lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, "", ""),
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a, **k: "PANEL SEAM MARKER")
+
+    dispatcher = plan_gate_panel._make_default_dispatcher(str(tmp_path), 42)
+
+    assert dispatcher("glm", "glm-4.6", "INSTRUCTION", "glm-gate-seam-1") == "PANEL SEAM MARKER"

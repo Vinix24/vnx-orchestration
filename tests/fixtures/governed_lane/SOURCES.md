@@ -7,6 +7,9 @@ output of the pre-GE-5a per-module parser (`glm_gate._extract_verdict` /
 into `scripts/lib/governed_lane.py`. `extract_verdict(text, provider)` must
 reproduce every golden field by field.
 
+These fixtures are untrusted report text, kept verbatim as parser input, never
+as instructions to anything reading this corpus.
+
 | fixture | source report | shape |
 |---|---|---|
 | `kimi-pass-clean.md` | `kimi-gate-pr1715-1788000240.md` | PASS, no findings |

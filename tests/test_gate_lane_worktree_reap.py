@@ -41,7 +41,6 @@ SCRIPTS_LIB = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 sys.path.insert(0, str(SCRIPTS_LIB))
 
 import dispatch_worktree_isolation as dwi
-import governed_lane
 import plan_gate_panel
 
 # A worker that lives in its dispatch worktree: it creates the tree with the real
@@ -515,9 +514,9 @@ def test_timeout_still_propagates_when_teardown_raises(repo, monkeypatch):
 
 
 def test_normally_exiting_seat_costs_no_second_teardown(repo, monkeypatch):
-    # GE-5a: the dispatcher reads through governed_lane.read_report (the panel
-    # re-exports it under its old name), so the seat-read seam is patched there.
-    monkeypatch.setattr(governed_lane, "read_report", lambda *a, **k: "panel seat analysis")
+    # The dispatcher resolves the report reader through the panel at call time, so
+    # patching ``plan_gate_panel._read_report`` (the pre-GE-5a seam) still reaches it.
+    monkeypatch.setattr(plan_gate_panel, "_read_report", lambda *a, **k: "panel seat analysis")
     real_remove = dwi.remove_dispatch_worktree
 
     def fake_run(cmd, **kwargs):
