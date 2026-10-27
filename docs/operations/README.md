@@ -36,6 +36,7 @@
 - Central install runbook (multi-project shared system install): `install-central-runbook.md`
 - Package build (local dev builds, editable installs, packaging smoke tests): `PACKAGE_BUILD.md`
 - Migration rollback runbook (Wave 2a rollback chain, migrations 0010+): `migration-rollback-runbook.md`
+- Legacy XDG store migration (copy a pre-#1437 store into `~/.vnx-data/<project_id>` with `vnx migrate --relocate-legacy`): `LEGACY-XDG-STORE-MIGRATION.md`
 
 > **Note**: `MONITORING_GUIDE.md` was retired. Runtime monitoring is now available
 > via the dashboard server (`dashboard/serve_dashboard.py`) at `/api/health`.
