@@ -34,6 +34,23 @@ from vnx_cli.commands.update import (
 
 INSTALL_CENTRAL_SCRIPT = Path(__file__).resolve().parent.parent.parent / "install-central.sh"
 
+# The only deviations a central install is ALLOWED to have against its tag:
+# install-central.sh strips the tracked tenant marker (" D .vnx-project-id") and
+# writes the install-mode marker ("?? .vnx-install-mode"). Measured on all 16
+# published dirs on 2026-10-25; any third deviation is drift and fails.
+VERIFY_ALLOWED_DELETED = ".vnx-project-id"
+VERIFY_ALLOWED_UNTRACKED = INSTALL_MODE_MARKER
+_VERIFY_ALLOWED_DELETE_CODES = (" D", "D ")
+
+# The default branch a release tag must be reachable from. The remote's own
+# symbolic HEAD wins (that is what "the default branch" means for a hosted
+# repo); the four literals cover a bare local clone (tests, air-gapped boxes)
+# and the pre-2020 default spelling.
+_DEFAULT_BRANCH_REFS = (
+    "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main",
+    "refs/remotes/origin/master", "refs/heads/master",
+)
+
 
 def _resolve_install_central() -> Path:
     env = os.environ.get("VNX_INSTALL_CENTRAL_SCRIPT")
@@ -223,6 +240,162 @@ def _current_flip_warning(tag: str) -> str:
     )
 
 
+def _rev_parse(repo: Path, ref: str) -> "str | None":
+    """Commit-ish ``ref`` in ``repo``, or None when it does not resolve."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "-q", "--verify", ref],
+        capture_output=True, text=True,
+    )
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def _unmerged_tag_message(repo: str, tag: str) -> "str | None":
+    """None when the tag is on the default branch, else why ancestry is unproven.
+
+    Fail-closed: a remote URL, an unresolvable default branch and a failing
+    ``merge-base`` are "not proven", never a pass.
+    """
+    if not Path(repo).is_dir():
+        return (f"cannot prove tag '{tag}' is on the default branch of {repo}: "
+                "not a local checkout, so there are no objects to walk")
+    for ref in _DEFAULT_BRANCH_REFS:
+        branch_commit = _rev_parse(Path(repo), f"{ref}^{{commit}}")
+        if branch_commit:
+            break
+    else:
+        return (f"cannot find the default branch in {repo} (origin/HEAD, origin/main, "
+                "main, origin/master, master), so the tag's ancestry is unproven")
+    args = ["git", "-C", repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", branch_commit]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode == 0:
+        return None
+    if result.returncode == 1:
+        return (f"tag '{tag}' is NOT on the default branch ({ref} @ {branch_commit[:12]}): "
+                f"its commit is not an ancestor of {ref}; merge it there and retag")
+    return (f"git merge-base --is-ancestor {tag} {branch_commit[:12]} failed (exit "
+            f"{result.returncode}): {result.stderr.strip() or 'no stderr'}")
+
+
+def _guard_publish_source(
+    repo: str, tag: str, allow_unmerged: "str | None"
+) -> "tuple[str | None, str]":
+    """Everything that must hold before any materialization; (tree_version, refusal).
+
+    Refuses a missing tag, an OI-1070 mislabeled tree and a tag outside the
+    default branch; --allow-unmerged-tag <reason> (non-empty, named in the
+    warning) is the only escape for the last. Runs in --dry-run.
+    """
+    if allow_unmerged is not None and not allow_unmerged.strip():
+        return None, "--allow-unmerged-tag requires a non-empty reason"
+    try:
+        if not _tag_exists(repo, tag):
+            return None, f"tag '{tag}' not found in {repo}"
+    except FileNotFoundError:
+        return None, "git executable not found in PATH"
+    except subprocess.CalledProcessError as exc:
+        return None, f"git operation failed: {exc}"
+
+    try:
+        ok, tree_version, tag_version = _check_version_matches_tag(repo, tag)
+    except subprocess.CalledProcessError as exc:
+        return None, f"cannot read VERSION from tag '{tag}' in {repo}: {exc.stderr.strip() or exc}"
+    except FileNotFoundError:
+        return None, "git executable not found in PATH"
+    if not ok:
+        return None, (f"VERSION mismatch for tag '{tag}': tree VERSION reads "
+                      f"'{tree_version}' but tag implies '{tag_version}'. Bump VERSION at "
+                      "the repo root and retag. Refusing to ship a mislabeled release.")
+
+    unmerged = _unmerged_tag_message(repo, tag)
+    if unmerged is None:
+        print(f"Default-branch guard OK: tag '{tag}' is on the default branch")
+        return tree_version, ""
+    if allow_unmerged is not None:
+        print(f"WARNING: {unmerged}", file=sys.stderr)
+        print("WARNING: publishing anyway in spite of --allow-unmerged-tag reason: "
+              f"{allow_unmerged.strip()}", file=sys.stderr)
+        return tree_version, ""
+    return None, f"{unmerged}. Or pass --allow-unmerged-tag \"<reason>\" to publish anyway."
+
+
+def _resolve_release_tag(places, version: str) -> "tuple[str | None, str | None]":
+    """``(tag, commit)`` for ``version``; the source checkout wins over the dir."""
+    candidates = [version] if version[:1] in ("v", "V") else [version, f"v{version}"]
+    for place in places:
+        if not Path(place).is_dir():
+            continue
+        for candidate in candidates:
+            commit = _rev_parse(Path(place), f"refs/tags/{candidate}^{{commit}}")
+            if commit:
+                return candidate, commit
+    return None, None
+
+
+def _verify_differences(version_dir: Path, tag: str, tag_commit: str) -> "list[str]":
+    """Every difference between ``version_dir`` and its tag, one line each.
+
+    HEAD must be the tag's commit and the tree clean against it except the two
+    generated files; ``--no-optional-locks`` leaves a read-only index alone.
+    """
+    head = _rev_parse(version_dir, "HEAD")
+    problems: "list[str]" = []
+    if head != tag_commit:
+        problems.append(f"HEAD {head or '?'} is not tag '{tag}' ({tag_commit})")
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "status",
+           "--porcelain", "--untracked-files=all"]
+    status = subprocess.run(cmd, capture_output=True, text=True)
+    if status.returncode != 0:
+        reason = status.stderr.strip() or f"git status exit {status.returncode}"
+        problems.append(f"cannot read the working tree: {reason}")
+        return problems
+    for line in status.stdout.splitlines():
+        if not line.strip():
+            continue
+        code, path = line[:2], line[3:]
+        generated = (code == "??" and path == VERIFY_ALLOWED_UNTRACKED) or (
+            code in _VERIFY_ALLOWED_DELETE_CODES and path == VERIFY_ALLOWED_DELETED)
+        if not generated:
+            problems.append(f"{code.strip()} {path}")
+    return problems
+
+
+def vnx_release_verify(args) -> int:
+    """`vnx release verify <version>` — exit 1 and name every differing path."""
+    try:
+        version = _validate_version_name(getattr(args, "version", None) or "")
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    version_dir = _resolve_root() / "versions" / version
+    if not version_dir.is_dir():
+        print(f"Error: release dir not found: {version_dir}. Publish '{version}' first "
+              "(vnx release publish --tag ...).", file=sys.stderr)
+        return 1
+    if _git_toplevel(version_dir) != version_dir:
+        print(f"Error: {version_dir} is not a git checkout, so it cannot be compared "
+              "against a tag tree. Re-publish the tag.", file=sys.stderr)
+        return 1
+
+    tag, tag_commit = _resolve_release_tag([_resolve_repo(args), version_dir], version)
+    if tag is None or tag_commit is None:
+        print(f"Error: no tag for '{version}' in {version_dir} nor {_resolve_repo(args)}: "
+              "without the tag there is nothing to check the release dir against.",
+              file=sys.stderr)
+        return 1
+
+    problems = _verify_differences(version_dir, tag, tag_commit)
+    if problems:
+        report = "\n".join(f"  {problem}" for problem in problems)
+        print(f"FAIL: {version_dir} is not the tree of tag '{tag}' ({tag_commit[:12]}):\n"
+              f"{report}", file=sys.stderr)
+        return 1
+    print(f"OK: {version_dir} matches tag '{tag}' ({tag_commit[:12]}): every tracked file "
+          f"is byte-identical; only the generated {VERIFY_ALLOWED_DELETED} (stripped) and "
+          f"{VERIFY_ALLOWED_UNTRACKED} (written) differ.")
+    return 0
+
+
 def vnx_release_publish(args) -> int:
     tag: "str | None" = getattr(args, "tag", None)
     dry_run: bool = getattr(args, "dry_run", False)
@@ -252,49 +425,18 @@ def vnx_release_publish(args) -> int:
 
     repo = _resolve_repo(args)
 
-    try:
-        if not _tag_exists(repo, tag):
-            print(f"Error: tag '{tag}' not found in {repo}", file=sys.stderr)
-            return 1
-    except FileNotFoundError:
-        print("Error: git executable not found in PATH", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as exc:
-        print(f"Error: git operation failed: {exc}", file=sys.stderr)
-        return 1
-
-    # OI-1070: refuse to publish a tag whose tree VERSION disagrees with the
-    # tag name. A mislabeled release (tree says 1.4.3, tag says v1.4.4) would
-    # otherwise silently ship as the wrong version. No --force escape: this
-    # is exactly the accident the guard exists to prevent. --dry-run performs
-    # the same check and surfaces it, so the mismatch is visible before any
-    # commit to a publish.
-    try:
-        ok, tree_version, tag_version = _check_version_matches_tag(repo, tag)
-    except subprocess.CalledProcessError as exc:
-        print(
-            f"Error: cannot read VERSION from tag '{tag}' in {repo}: {exc.stderr.strip() or exc}",
-            file=sys.stderr,
-        )
-        return 1
-    except FileNotFoundError:
-        print("Error: git executable not found in PATH", file=sys.stderr)
-        return 1
-    if not ok:
-        print(
-            f"Error: VERSION mismatch for tag '{tag}': tree VERSION reads "
-            f"'{tree_version}' but tag implies '{tag_version}'. "
-            "Bump VERSION at the repo root and retag before publishing. "
-            "Refusing to ship a mislabeled release.",
-            file=sys.stderr,
-        )
+    tree_version, refusal = _guard_publish_source(
+        repo, tag, getattr(args, "allow_unmerged_tag", None)
+    )
+    if refusal:
+        print(f"Error: {refusal}", file=sys.stderr)
         return 1
 
     if dry_run:
         print(f"[dry-run] VNX_HOME_ROOT: {root}")
         print(
             f"[dry-run] Version guard OK: tag '{tag}' tree VERSION '{tree_version}' "
-            f"== tag '{tag_version}'"
+            f"== tag '{_strip_leading_v(tag)}'"
         )
         print(
             f"[dry-run] Would materialize tag '{tag}' from {repo} -> {target_dir} "
@@ -368,7 +510,10 @@ def vnx_release_publish(args) -> int:
 
 
 def vnx_release(args) -> int:
-    if getattr(args, "release_subcommand", None) == "publish":
+    subcommand = getattr(args, "release_subcommand", None)
+    if subcommand == "publish":
         return vnx_release_publish(args)
-    print("Error: a release subcommand is required (publish).", file=sys.stderr)
+    if subcommand == "verify":
+        return vnx_release_verify(args)
+    print("Error: a release subcommand is required (publish, verify).", file=sys.stderr)
     return 1

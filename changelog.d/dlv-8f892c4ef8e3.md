@@ -1,0 +1,1 @@
+- Release (PR-6): `vnx release verify <version>` fails when a published version dir drifted from its tag, naming every differing path (only the stripped `.vnx-project-id` and the written `.vnx-install-mode` are allowed); `vnx release publish` refuses a tag whose commit is not on the default branch, with `--allow-unmerged-tag <reason>` as the only escape.

@@ -315,6 +315,7 @@ Commands:
   update --pin <tag>     Pin VNX version (respects lock on future updates)
   update --check         Dry-run: show current vs available version
   update --latest        Update ignoring version.lock
+  release publish|verify  Publish a tag as an immutable version / verify it against its tag
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
@@ -2498,6 +2499,12 @@ main() {
       ;;
     update)
       cmd_update "$@"
+      ;;
+    release)
+      # The release verbs live in the pip CLI (vnx_cli/commands/release.py);
+      # $VNX_HOME comes first so the tree's own code runs, not a pip-installed
+      # vnx_cli of another version.
+      PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main release "$@"
       ;;
     intelligence-export)
       cmd_intelligence_export
