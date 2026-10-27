@@ -365,6 +365,9 @@ _WRITER_MODULES = (
     # ``record-result`` CLI) and ``_persist_claude_github_files``.
     "scripts/lib/gate_result_parser.py",
     "scripts/lib/gate_request_handler.py",
+    # GE-4a: the one writer record_terminal_result and record_not_executable
+    # now route through (commit_gate_outcome).
+    "scripts/lib/gate_outcome.py",
 )
 
 
