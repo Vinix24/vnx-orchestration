@@ -91,10 +91,10 @@ trust the silent `vnx-dev` default in a multi-project context).
      cases differ. A PR linked before migration 0032 has no marking row and does not hold the
      track. A store without the `track_pr_delivery` table (0032 not applied) records no marking
      and holds every track (`unverifiable`, OI-1167).
-4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist and
-   `init-feature` turns it into OIs, run `import_open_items_to_tracks.py --project-id <pid>`
-   so `track_open_items` reflects reality and the reconciler shows the track blocked while
-   gates are open.
+4. **Bridge** — after `@planner` emits the FEATURE_PLAN quality-gate checklist, run
+   `import_open_items_to_tracks.py --project-id <pid>`; that replaces the retired
+   `init-feature` batch, turning the checklist into OIs so `track_open_items` reflects
+   reality and the reconciler shows the track blocked while gates are open.
 5. **Drift watch** — `vnx horizon drift` (alias: `vnx objective drift`, advisory) is your live
    "is this actually done" signal before closeout.
 

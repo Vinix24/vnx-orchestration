@@ -201,9 +201,10 @@ class RoadmapManager:
         return state
 
     def _materialize_plan(self, plan_path: Path) -> None:
+        # ADR-047: the tracks DB is the only plan source. The plan file is copied
+        # to the project root for reference only — it is never parsed into the PR
+        # queue (A6 retired ``PRQueueManager.load_feature_plan``).
         shutil.copy2(plan_path, _root_file(self.project_root, "FEATURE_PLAN.md"))
-        manager = PRQueueManager()
-        manager.load_feature_plan(str(_root_file(self.project_root, "FEATURE_PLAN.md")))
 
     def _ensure_feature_branch(self, branch_name: str) -> bool:
         """Create feature branch from origin/main if absent. Idempotent; returns True if created."""
@@ -675,9 +676,10 @@ Implement the minimum blocking fix required before the roadmap may advance.
         """Dispatch the next dependency-ready PR for the active feature.
 
         ADR-007: emits project_id-stamped roadmap_dispatch_step receipt.
-        Respects VNX_QUEUE_POPUP_ENABLED env switch via promote_dispatch.
-        Returns dispatch_id + pr_id on success, or a no_ready_pr status without
-        side effects when no queued PR is dependency-ready.
+        Returns no_ready_pr without side effects when no queued PR is
+        dependency-ready, and failed (fail-closed) when a queued PR exists:
+        ADR-047 retired plan-based dispatch creation, so this step can no
+        longer stage one (see the inline note below).
         """
         state = self.load_state()
         current_id = state.get("current_active_feature")
@@ -702,41 +704,26 @@ Implement the minimum blocking fix required before the roadmap may advance.
             }
 
         pr_id = next_pr["id"]
-        dispatch_id = pr_manager.create_dispatch_from_pr(pr_id)
-        if not dispatch_id:
-            return {
-                "status": "failed",
-                "feature_id": current_id,
-                "pr_id": pr_id,
-                "reason": "dispatch creation failed",
-            }
 
-        promoted = pr_manager.promote_dispatch(dispatch_id)
-        if not promoted:
-            return {
-                "status": "failed",
-                "feature_id": current_id,
-                "pr_id": pr_id,
-                "dispatch_id": dispatch_id,
-                "reason": "dispatch promotion failed",
-            }
-
-        pr_manager.update_pr_status(pr_id, "in_progress")
-
+        # ADR-047 / A6: plan-based dispatch creation is retired. A queued PR can
+        # only come from a legacy PR-queue state, and nothing repopulates that
+        # queue from a plan any more. Fail closed — never report a drained queue
+        # for work that could not be staged. Staging now belongs to the tracks DB
+        # and the single dispatch door (`vnx dispatch`); the track-driven step
+        # is B2's slice, not A6's.
         emit_governance_receipt(
             "roadmap_dispatch_step",
             receipt_kind="sub_dispatch",
-            status="success",
+            status="retired",
             project_id=self.project_id,
             feature_id=current_id,
             pr_id=pr_id,
-            dispatch_id=dispatch_id,
         )
         return {
-            "status": "dispatched",
+            "status": "failed",
             "feature_id": current_id,
             "pr_id": pr_id,
-            "dispatch_id": dispatch_id,
+            "reason": "plan-based dispatch creation retired (ADR-047); stage via vnx dispatch",
         }
 
     def autopilot_tick(self) -> Dict[str, Any]:
