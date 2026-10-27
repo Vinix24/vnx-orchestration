@@ -13,11 +13,20 @@ from typing import Any, Dict, List, Optional
 
 from gemini_prompt_renderer import GeminiReviewReceipt
 from claude_github_receipt import ClaudeGitHubReviewReceipt
+from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
 from gate_recorder import (
     ResultOverwriteRefused,
     get_pr_head_sha,
     stamp_request_identity,
     write_result_guarded,
+)
+from gate_status import INCOMPLETE_STATES, canonical_status
+
+# The fields record_result's receipt carries besides the generic ones
+# (gate_recorder._emit_terminal_result_receipt), all read off its record.
+_RECORD_RESULT_RECEIPT_FIELDS = (
+    "branch", "summary", "advisory_findings", "blocking_findings", "advisory_count",
+    "residual_risk", "required_reruns",
 )
 
 
@@ -64,8 +73,14 @@ class GateResultParserMixin:
         Per the headless review evidence contract, ``report_path`` and
         ``required_reruns`` are persisted so the closure verifier can validate
         the full evidence chain.
+
+        GE-4c-1: the record, its one ``review_gate_result`` receipt and the
+        contract request's end are one ``commit_gate_outcome``. The receipt
+        carries what ``_emit_claude_github_receipt`` booked before, the head
+        read off the contract request (it is not on this record) included. A
+        refusal raises :class:`ResultOverwriteRefused` and changes nothing.
         """
-        from review_gate_manager import _utc_now, emit_governance_receipt
+        from review_gate_manager import _utc_now
 
         raw_findings = findings or []
         request_payload = self._load_contract_request_payload("claude_github_optional", pr_id)
@@ -98,17 +113,21 @@ class GateResultParserMixin:
         full_payload["residual_risk"] = full_payload.get("residual_risk", "")
 
         result_file = self._contract_result_path("claude_github_optional", pr_id)
-        # GE-3: through the shared guard (slot lock, overwrite guard, atomic
-        # write) instead of a bare write_text. ``emit_outcome_receipt=False``:
-        # ``_emit_claude_github_receipt`` below books this outcome's one
-        # ``review_gate_result`` receipt, with the head read off the contract
-        # request (it is not on the record this call writes).
-        _payload_on_disk, written = write_result_guarded(
-            result_file,
-            full_payload,
-            gate="claude_github_optional",
-            pr_ref=pr_id,
-            emit_outcome_receipt=False,
+        # The head named on the contract request, under both names: the
+        # idempotency key reads ``commit_sha``, the round ledger its alias. A
+        # request that names no head stamps neither.
+        commit_sha = str(request_payload.get("commit_sha") or "").strip()
+        outcome = GateOutcome.from_record("claude_github_optional", full_payload, pr_id=pr_id, receipt_fields={
+            "branch": branch, "summary": summary,
+            "advisory_findings": full_payload["advisory_findings"],
+            "blocking_findings": full_payload["blocking_findings"],
+            "advisory_count": receipt.advisory_count,
+            "contributed_evidence": receipt.contributed_evidence(),
+            **({"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}),
+        })
+        _payload_on_disk, written = commit_gate_outcome(
+            outcome, results_dir=self.results_dir, result_path=result_file,
+            request=self._answered_request(request_payload, full_payload["completed_at"]),
         )
         if not written:
             raise ResultOverwriteRefused(
@@ -116,41 +135,17 @@ class GateResultParserMixin:
                 f"was refused by the overwrite guard: a decided, evidenced verdict "
                 f"already holds this slot; the record on disk is unchanged"
             )
-
-        self._emit_claude_github_receipt(
-            receipt, status=status, pr_id=pr_id, branch=branch,
-            summary=summary, contract_hash=effective_contract_hash,
-            commit_sha=str(request_payload.get("commit_sha") or "").strip(),
-        )
         return receipt
 
-    def _emit_claude_github_receipt(
-        self, receipt: "ClaudeGitHubReviewReceipt", *,
-        status: str, pr_id: str, branch: str, summary: str, contract_hash: str,
-        commit_sha: str = "",
-    ) -> None:
-        """Emit governance receipt for a Claude GitHub review result.
+    def _answered_request(self, request_payload: Dict[str, Any], completed_at: str) -> Optional[GateRequest]:
+        """The request on disk this result answers, or ``None`` when there is none to end.
 
-        ``commit_sha`` is the head named on the contract request (the result
-        record has no head field of its own). Stamped under both names so the
-        idempotency key sees the commit and the round ledger keeps its alias;
-        a path where the request names no head stamps neither.
+        An absent request stays absent: ending one would write a request no
+        one made.
         """
-        from review_gate_manager import emit_governance_receipt
-        head_fields = {"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}
-        emit_governance_receipt(
-            "review_gate_result",
-            receipt_kind="review_gate",
-            status=status, terminal="T0", pr_id=pr_id, branch=branch,
-            gate="claude_github_optional", summary=summary,
-            advisory_findings=[f.to_dict() for f in receipt.advisory_findings],
-            blocking_findings=[f.to_dict() for f in receipt.blocking_findings],
-            advisory_count=receipt.advisory_count,
-            blocking_count=receipt.blocking_count,
-            contract_hash=contract_hash,
-            contributed_evidence=receipt.contributed_evidence(),
-            **head_fields,
-        )
+        if not request_payload:
+            return None
+        return GateRequest(self.requests_dir, request_payload, {"completed_at": completed_at})
 
     def record_result(
         self,
@@ -180,7 +175,7 @@ class GateResultParserMixin:
         ``required_reruns`` are persisted in every gate result so the closure
         verifier can validate the full evidence chain.
         """
-        from review_gate_manager import _utc_now, emit_governance_receipt
+        from review_gate_manager import _utc_now
 
         raw_findings = findings or []
         request_payload = self._load_request_payload(gate, pr_number)
@@ -213,11 +208,7 @@ class GateResultParserMixin:
                 "commit_sha": get_pr_head_sha(pr_number),
             },
         )
-        self._validate_and_persist_result(payload, status, gate, pr_number)
-        self._emit_result_receipt(
-            payload, receipt, status=status, pr_number=pr_number,
-            pr_id=pr_id or str(pr_number), branch=branch, gate=gate, summary=summary,
-        )
+        self._validate_and_persist_result(payload, status, gate, pr_number, request_payload)
         return payload
 
     def _build_result_payload(
@@ -247,69 +238,46 @@ class GateResultParserMixin:
 
     def _validate_and_persist_result(
         self, payload: Dict[str, Any], status: str, gate: str, pr_number: int,
+        request_payload: Dict[str, Any],
     ) -> None:
-        """Validate pass/fail constraints and write the result through the guard.
+        """Validate pass/fail constraints, then commit the record, its receipt and its request's end.
 
-        GE-3: routed through :func:`gate_recorder.write_result_guarded` (slot
-        lock, overwrite guard, atomic write) instead of a bare ``write_text``
-        — a ``record-result`` must never erase a terminal record the runner
-        already wrote for the same PR, gate and head. A refusal raises
-        :class:`ResultOverwriteRefused` (a ``ValueError``), leaves the record
-        on disk untouched, and the caller books no receipt for a write that
-        never landed. ``emit_outcome_receipt=False``: ``_emit_result_receipt``
-        below books this outcome's one ``review_gate_result`` receipt, with
-        the residual risk, advisory/blocking findings and required reruns the
-        generic outcome receipt does not carry.
+        GE-3 put this writer behind the overwrite guard: a ``record-result``
+        must never erase a terminal record the runner already wrote for the
+        same PR, gate and head. GE-4c-1 makes it one ``commit_gate_outcome``:
+        the receipt is the commit's, with the residual risk, findings and
+        required reruns ``_emit_result_receipt`` booked before, and the
+        ``pr-<N>-<gate>`` request ends with it. A refusal raises
+        :class:`ResultOverwriteRefused` (a ``ValueError``) and changes nothing.
         """
         if status in {"pass", "fail"}:
             error = evidence_error(payload)
             if error:
                 raise ValueError(error)
         result_path = self._result_path(gate, pr_number)
-        _payload_on_disk, written = write_result_guarded(
-            result_path,
-            payload,
-            gate=gate,
-            pr_ref=str(payload.get("pr_id") or pr_number),
-            emit_outcome_receipt=False,
-        )
+        if canonical_status(payload) in INCOMPLETE_STATES:
+            # A queued or requested record is no outcome (ADR-046 §1): it keeps
+            # the overwrite guard alone, like a ci_gate running snapshot, and
+            # books no receipt and ends no request.
+            _payload_on_disk, written = write_result_guarded(
+                result_path, payload, gate=gate, pr_ref=str(payload.get("pr_id") or pr_number),
+            )
+        else:
+            # pr_id "": this record's slot and its request are both named by
+            # the number (``pr-<N>-<gate>.json``), whatever pr_id it carries.
+            outcome = GateOutcome.from_record(
+                gate, payload, pr_id="", receipt_fields={key: payload[key] for key in _RECORD_RESULT_RECEIPT_FIELDS},
+            )
+            _payload_on_disk, written = commit_gate_outcome(
+                outcome, results_dir=self.results_dir, result_path=result_path,
+                request=self._answered_request(request_payload, payload["recorded_at"]),
+            )
         if not written:
             raise ResultOverwriteRefused(
                 f"{gate} result for pr={pr_number} at {result_path} was refused by "
                 f"the overwrite guard: a decided, evidenced verdict already holds "
                 f"this slot for this head; the record on disk is unchanged"
             )
-
-    def _emit_result_receipt(
-        self, payload: Dict[str, Any], receipt: "GeminiReviewReceipt", *,
-        status: str, pr_number: int, pr_id: str, branch: str, gate: str, summary: str,
-    ) -> None:
-        """Emit governance receipt for the recorded result.
-
-        The head is already on ``payload`` (``stamp_request_identity`` stamps
-        ``commit_sha`` from the PR head before the result is persisted), so the
-        receipt books it under both names — ``commit_sha`` for ADR-045 point 4
-        and the idempotency key, ``head_sha`` as the round ledger's alias. A
-        payload without one stamps neither.
-        """
-        from review_gate_manager import emit_governance_receipt
-        commit_sha = str(payload.get("commit_sha") or "").strip()
-        head_fields = {"commit_sha": commit_sha, "head_sha": commit_sha} if commit_sha else {}
-        emit_governance_receipt(
-            "review_gate_result",
-            receipt_kind="review_gate",
-            status=status, terminal="T0", pr_number=pr_number,
-            pr_id=pr_id, branch=branch, gate=gate, summary=summary,
-            advisory_findings=payload["advisory_findings"],
-            blocking_findings=payload["blocking_findings"],
-            advisory_count=receipt.advisory_count,
-            blocking_count=receipt.blocking_count,
-            residual_risk=payload["residual_risk"],
-            contract_hash=payload["contract_hash"],
-            report_path=payload["report_path"],
-            required_reruns=payload["required_reruns"],
-            **head_fields,
-        )
 
     def _classify_unavailable(self, gate: str) -> tuple:
         """Return (reason_code, reason_detail) for an unavailable gate provider (GATE-4).

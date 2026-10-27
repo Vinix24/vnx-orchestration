@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
@@ -1721,6 +1721,13 @@ def owes_outcome_receipt(payload: Dict[str, Any]) -> bool:
     return canonical_status(payload) in (PASS_STATES | FAIL_STATES)
 
 
+# The receipt's own envelope, set by the emit call itself. A writer's extra
+# field under one of these names would collide with it, so it is not booked.
+_RECEIPT_ENVELOPE_KEYS = frozenset({
+    "event_type", "receipt_kind", "status", "terminal", "source", "timestamp", "receipts_file", "lock_timeout",
+})
+
+
 def _emit_terminal_result_receipt(
     payload: Dict[str, Any],
     *,
@@ -1728,6 +1735,7 @@ def _emit_terminal_result_receipt(
     pr_ref: str,
     lock_timeout: Optional[float] = None,
     raise_on_failure: bool = False,
+    extra_fields: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Emit the RESULT receipt for a decided gate verdict (OI-1702/OI-1703).
 
@@ -1760,6 +1768,12 @@ def _emit_terminal_result_receipt(
 
     ``provider``/``model`` come from the payload the writer already holds and
     are omitted when absent — never derived from the gate name.
+
+    ``extra_fields`` (GE-4c-1) are a writer's own receipt fields, read off the
+    record by ``commit_gate_outcome``: gate_result_parser's findings, summary,
+    residual risk and the claude_github head off its request. They fill keys
+    this function left unset and never replace one, so ``status``,
+    ``gate_status``, the record's head and ``attempt_seq`` stay its own.
     """
     from gate_status import canonical_status, is_pass
 
@@ -1818,6 +1832,9 @@ def _emit_terminal_result_receipt(
         value = payload.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             fields[key] = value
+    for key, value in (extra_fields or {}).items():
+        if key not in _RECEIPT_ENVELOPE_KEYS:
+            fields.setdefault(key, value)
 
     try:
         emit_governance_receipt(
@@ -1962,7 +1979,6 @@ def write_result_guarded(
     gate: str,
     pr_ref: str,
     audit_refusal: bool = True,
-    emit_outcome_receipt: bool = True,
 ) -> Tuple[Dict[str, Any], bool]:
     """Write a gate result unless it would downgrade an existing terminal one.
 
@@ -1981,7 +1997,7 @@ def write_result_guarded(
     ``record_terminal_result``                  commit_gate_outcome, raises
     ``record_not_executable``                   commit_gate_outcome
     ``record_failure`` (and its thin wrapper
-    ``record_failure_simple``)                  via this function
+    ``record_failure_simple``)                  commit_gate_outcome
     ``gate_report_generator``
     ``._write_not_executable_result``           commit_gate_outcome
     ``gate_report_generator``
@@ -1990,9 +2006,10 @@ def write_result_guarded(
     ``gate_executor._execute_ci_gate``          commit_gate_outcome; a
                                                 running snapshot via this
     ``gate_result_parser``
-    ``.record_claude_github_result``            raises on refusal
+    ``.record_claude_github_result``            commit_gate_outcome, raises
     ``gate_result_parser``
-    ``._validate_and_persist_result``           raises on refusal
+    ``._validate_and_persist_result``           commit_gate_outcome, raises;
+                                                a queued record via this
     ``gate_request_handler``
     ``._persist_claude_github_files``           via this function
     ==========================================  ==========================
@@ -2031,25 +2048,6 @@ def write_result_guarded(
     by also carrying its own skip-rationale write (with ``commit_sha``,
     since that is where the refusal's head now has to live), never by
     assumption.
-
-    ``emit_outcome_receipt=False`` is the same kind of opt-out on the other
-    axis (GE-3). This function books the outcome receipt
-    (:func:`_emit_terminal_result_receipt`) for a decided verdict that landed,
-    and for most callers that IS the one ``review_gate_result`` receipt of the
-    outcome. Two callers already emit a richer, contract-linked
-    ``review_gate_result`` receipt for the same outcome themselves —
-    ``gate_result_parser.record_claude_github_result``
-    (``_emit_claude_github_receipt``: carries findings, and the head lives only
-    on the contract request, not on the result record this function writes)
-    and ``gate_result_parser._validate_and_persist_result`` via
-    ``record_result`` (``_emit_result_receipt``: advisory/blocking findings,
-    residual risk, required reruns). Routed through this function without the
-    opt-out, one outcome would book two receipts under two idempotency keys —
-    they do not collapse, because the gate-specific emitters book the raw
-    status word while this one books the receipt vocabulary
-    (``pass`` -> ``completed``). Exactly one stays: the gate-specific emitter,
-    because it carries the fields above that this one cannot read off these
-    two records. The default stays ``True``.
     """
     with slot_lock(result_path):
         try:
@@ -2073,8 +2071,7 @@ def write_result_guarded(
     # write that never happened (the same reason record_failure gates its
     # register emit on ``written``, OI-1469/OI-1470).
     publish_forge_check_run(payload, gate=gate, result_path=result_path)
-    if emit_outcome_receipt:
-        _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
+    _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
     _feed_provider_reachability(payload, gate=gate, result_path=result_path)
     return payload, True
 
@@ -2208,14 +2205,12 @@ def record_not_executable(
     results_dir: Path,
     state_dir: Path,
 ) -> Dict[str, Any]:
-    """Record not_executable and write skip-rationale (GATE-4/9)."""
-    now = utc_now_iso()
-    request_payload["status"] = "not_executable"
-    request_payload["reason"] = reason
-    request_payload["reason_detail"] = reason_detail
-    request_payload["resolved_at"] = now
-    persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
+    """Record not_executable, end its request in the same commit, and write skip-rationale (GATE-4/9).
 
+    The request becomes ``not_executable`` only when the record is admitted
+    (GE-4c-1): a refused outcome leaves it, on disk and in ``request_payload``.
+    """
+    now = utc_now_iso()
     result_payload: Dict[str, Any] = {
         "gate": gate,
         "pr_id": pr_id or (str(pr_number) if pr_number else ""),
@@ -2236,7 +2231,7 @@ def record_not_executable(
 
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if rf:
-        from gate_outcome import GateOutcome, commit_gate_outcome  # deferred: it imports this module
+        from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome  # deferred: it imports this module
 
         # audit_refusal=False: the unconditional write_skip_rationale call
         # below already lands one line for this call whether or not the
@@ -2245,8 +2240,11 @@ def record_not_executable(
         outcome = GateOutcome(
             gate=gate, status="not_executable", pr_id=pr_id, pr_number=pr_number, record=result_payload,
         )
+        request = GateRequest(
+            requests_dir, request_payload, {"reason": reason, "reason_detail": reason_detail, "resolved_at": now},
+        )
         payload_on_disk, written = commit_gate_outcome(
-            outcome, results_dir=results_dir, result_path=rf, audit_refusal=False,
+            outcome, results_dir=results_dir, result_path=rf, audit_refusal=False, request=request,
         )
         result_payload = (
             payload_on_disk if written
@@ -2351,18 +2349,25 @@ def _book_failure_record(
     pr_number: Optional[int],
     pr_id: str,
     request_payload: Dict[str, Any],
+    requests_dir: Path,
     results_dir: Path,
+    now: str,
 ) -> Tuple[Dict[str, Any], bool]:
-    """Write the failure record through the overwrite guard and archive the run's bundle.
+    """Commit the failure record, its receipt and its request's end; archive the run's bundle.
 
     Returns the record as it now stands and whether the write landed. With no
     result path there is nothing to write and the record counts as written.
+    The request ends ``status`` (``unavailable`` or ``failed``), the value
+    this function booked before GE-4c-1, and only when the record is admitted.
     """
+    from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome  # deferred: it imports this module
+
     rf = result_file_path(results_dir, gate, pr_number=pr_number, pr_id=pr_id)
     if not rf:
         return failure_payload, True
-    payload_on_disk, written = write_result_guarded(
-        rf, failure_payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+    payload_on_disk, written = commit_gate_outcome(
+        GateOutcome.from_record(gate, failure_payload, pr_id=pr_id), results_dir=results_dir, result_path=rf,
+        request=GateRequest(requests_dir, request_payload, {"failed_at": now}, status=status),
     )
     failure_payload = (
         payload_on_disk if written
@@ -2428,10 +2433,6 @@ def record_failure(
     is_execution_failure = reason in EXECUTION_FAILURE_REASONS
     status = "unavailable" if is_execution_failure else "failed"
 
-    request_payload["status"] = status
-    request_payload["failed_at"] = now
-    persist_request(requests_dir, gate, request_payload, pr_number=pr_number, pr_id=pr_id)
-
     failure_payload = _failure_payload(
         gate=gate, pr_number=pr_number, pr_id=pr_id, result=result,
         request_payload=request_payload, status=status, reason=reason,
@@ -2440,7 +2441,7 @@ def record_failure(
     )
     failure_payload, written = _book_failure_record(
         failure_payload, gate=gate, status=status, pr_number=pr_number, pr_id=pr_id,
-        request_payload=request_payload, results_dir=results_dir,
+        request_payload=request_payload, requests_dir=requests_dir, results_dir=results_dir, now=now,
     )
 
     # Emit gate_failed for codex_gate only when the gate itself reported a verdict

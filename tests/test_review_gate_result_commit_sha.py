@@ -136,7 +136,7 @@ def test_a_result_without_a_head_stamps_no_head_field(env):
 
 
 # ---------------------------------------------------------------------------
-# gate_result_parser._emit_result_receipt (record_result)
+# gate_result_parser.record_result (its receipt is commit_gate_outcome's since GE-4c-1)
 # ---------------------------------------------------------------------------
 
 
@@ -174,7 +174,7 @@ def test_record_result_books_two_heads_as_two_receipts_with_two_keys(env, monkey
 
 
 # ---------------------------------------------------------------------------
-# gate_result_parser._emit_claude_github_receipt
+# gate_result_parser.record_claude_github_result (the head off its request, GE-4c-1)
 # ---------------------------------------------------------------------------
 
 
