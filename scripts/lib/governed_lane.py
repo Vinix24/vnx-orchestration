@@ -14,6 +14,14 @@ GE-5a is a pure extraction: every caller keeps importing the same names from
 old names) and ``glm_gate``/``kimi_gate`` keep a module-level ``_extract_verdict``
 alias, so no call site changes and no behaviour changes.
 
+GE-5b-2 adds the other half: phases 3-6 of both gates (the unread-run outcome and
+the verdict, the ``--reprocess`` identity check and the evidence pair, the record
+write through the recorder, and the printed outcome) are one body here,
+:func:`run_gate_tail`. The gate scripts hand it a :class:`GateRunState` — what
+their own phases 1-2 produced — so every provider difference lives on the
+register row, never in an ``if provider ==`` branch. Phases 1-2 and the CLI stay
+in the scripts until GE-5b turns them into shims.
+
 ``deepseek_gate`` has no parser of its own: it runs on gate_runner's harness-lane
 path and its report is read by the provider-agnostic ``gate_report_recovery``
 reader. It is therefore deliberately absent from ``GOVERNED_LANE_PROVIDERS`` —
@@ -38,7 +46,8 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
@@ -54,7 +63,13 @@ from gate_lane_contract import (
     lane_deadline_detail,
     reviews_with_tools,
 )
-from gate_prompt import build_review_prompt
+from gate_artifacts import _compute_contract_hash
+from gate_prompt import build_review_prompt, merge_scan_findings
+from gate_report_recovery import (
+    AmbiguousRecoveryCandidates,
+    extract_relabeled_verdict,
+    recovered_verdict_conflicts,
+)
 from governance_emit import _classify_lane_log_text, _read_lane_log_text
 from unified_report_schema import SchemaViolation, parse_frontmatter
 
@@ -109,11 +124,41 @@ class ProviderRow:
     ``reviews_with_tools``) and the slot/file stem ``--reprocess`` reads
     (``pr-<N>-<gate>.json``). It differs per provider, so it lives here as a
     register field rather than as an ``if provider == ...`` branch in a helper.
+
+    ``lane_provider``/``dispatch_id_prefix`` are the lane name and the
+    ``<prefix>-pr<N>-<epoch>`` id shape; ``report_failure_lift`` is the optional
+    report-frontmatter failure-reason reader (glm's OI-1710 diagnosis, ``None``
+    for kimi) and ``lift_detail_label`` names it. No provider branch in the tail.
     """
 
     parser: Callable[[str], dict]
     gate: str
     origin: str
+    lane_provider: str
+    dispatch_id_prefix: str
+    report_failure_lift: Optional[Callable[[str], Optional[str]]] = None
+    lift_detail_label: str = "lane log"
+
+
+def lift_report_failure_reason(report_text: str) -> "Optional[str]":
+    """OI-1710: read the canonical ``failure_reason`` the lane's own governance
+    emit already stamped onto the report frontmatter (the spawn-layer error, for
+    a run that died before the model could reply).
+
+    The lane-log lift reads the raw lane log — a spawn-layer failure (proxy
+    unreachable, harness refused to start) writes no lane log at all, so the
+    report is the only place the real reason survives. Returns the bounded
+    reason only when the frontmatter carries a real, non-empty value; returns
+    None — never invents a reason — on a missing/empty field or unreadable
+    frontmatter."""
+    if not report_text:
+        return None
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None
+    reason = frontmatter.get("failure_reason")
+    return (reason or "").strip() or None
 
 
 # Per-provider difference, measured at GE-5a (not assumed): there is NONE in the
@@ -129,9 +174,12 @@ class ProviderRow:
 GOVERNED_LANE_PROVIDERS: Dict[str, ProviderRow] = {
     "glm": ProviderRow(
         parser=_last_json_verdict, gate="glm_gate", origin="scripts/glm_gate.py:142 (pre-GE-5a)",
+        lane_provider="glm-harness", dispatch_id_prefix="glm-gate-pr",
+        report_failure_lift=lift_report_failure_reason, lift_detail_label="failure reason",
     ),
     "kimi": ProviderRow(
         parser=_last_json_verdict, gate="kimi_gate", origin="scripts/kimi_gate.py:153 (pre-GE-5a)",
+        lane_provider="kimi", dispatch_id_prefix="kimi-gate-pr",
     ),
 }
 
@@ -150,6 +198,11 @@ def _row(provider: str) -> ProviderRow:
             f"known providers: {', '.join(sorted(GOVERNED_LANE_PROVIDERS))}"
         )
     return row
+
+
+def provider_row(provider: str) -> ProviderRow:
+    """Public name for the register lookup — a gate script puts its row in :class:`GateRunState`."""
+    return _row(provider)
 
 
 def extract_verdict(text: str, provider: str) -> dict:
@@ -489,3 +542,281 @@ def status_summary(provider: str, status: str, blocking: list, reason: str = "")
         detail = UNAVAILABLE_SUMMARIES.get(reason) or "provider outage/no verdict"
         return f"{provider} gate: UNAVAILABLE ({detail} — NOT a review fail)"
     return f"{provider} gate: {status} ({len(blocking)} blocking finding(s))"
+
+
+# GE-5b-2: phases 3-6 of both review gates, one body per phase, fed by one GateRunState (phases 1-2).
+
+
+@dataclass(frozen=True)
+class GateSeams:
+    """The phase-3..6 callables a gate script binds in its OWN namespace. Tests monkeypatch these on
+    ``glm_gate``/``kimi_gate``, so the tail resolves them off the script module's binding at CALL time."""
+
+    get_pr_head_sha: Callable[..., str]
+    get_pr_head_branch: Callable[..., str]
+    record_terminal_result: Callable[..., object]
+    result_file_path: Callable[..., "Optional[Path]"]
+    stamp_request_identity: Callable[..., object]
+    find_recovery_candidate: Callable[..., object]
+
+
+@dataclass(frozen=True)
+class GateRunState:
+    """What a gate's phases 1-2 produced, handed to :func:`run_gate_tail` as one value."""
+
+    provider: str
+    row: ProviderRow
+    args: object
+    base_data_dir: Path
+    pr_number: "Optional[int]"
+    dispatch_id: str
+    branch: str
+    commit_sha: str
+    requests_dir: Path
+    report_path_obj: Path
+    report_text: str
+    dispatch_error: str
+    duration: float
+    window_start: "Optional[float]"
+    window_end: float
+    prompt: "Optional[str]"
+    scan_findings: list
+    execution_depth: object
+    seams: GateSeams
+
+
+@dataclass(frozen=True)
+class VerdictFacts:
+    """Phase 3's outcome: the record fields derived from one run's report."""
+
+    verdict: dict
+    status: str
+    blocking: list
+    residual: str
+    reason: str
+    recovered_path: "Optional[Path]" = None
+    lifted_reason: "Optional[str]" = None
+
+
+def _facts_for(state: GateRunState, verdict: dict, text: str, reason: str) -> VerdictFacts:
+    status, blocking, residual = verdict_to_status(state.provider, verdict, text)
+    return VerdictFacts(verdict, status, blocking, residual, reason)
+
+
+def _unread_or_verdict(state: GateRunState) -> VerdictFacts:
+    """Phase 3a: a raised dispatch or a deadline-killed report is never read for a verdict."""
+    unread = unread_run_outcome(state.provider, state.dispatch_error, state.report_text or "", state.duration)
+    if unread is not None:
+        status, blocking, residual, reason = unread
+        return VerdictFacts({}, status, blocking, residual, reason)
+    return _verdict_from_report(state)
+
+
+def _verdict_from_report(state: GateRunState) -> VerdictFacts:
+    """Phase 3b: this gate's own fence, then the relabeled fence, then the report frontmatter."""
+    text = state.report_text or ""
+    verdict = extract_verdict(text, state.provider)
+    if verdict:
+        return _facts_for(state, verdict, text, "verdict")
+    if not text.strip():
+        return _facts_for(state, {}, text, "no_verdict")
+    relabeled = extract_relabeled_verdict(text)
+    if relabeled:
+        return _facts_for(state, relabeled, text, "relabeled_verdict")
+    run_failed, exit_code, output_tokens = frontmatter_run_outcome(text)
+    if run_failed is True:
+        return _run_failed_facts(state, exit_code, output_tokens)
+    return _parse_miss_facts(state)
+
+
+def _run_failed_facts(state: GateRunState, exit_code: object, output_tokens: object) -> VerdictFacts:
+    """Phase 3c: the report's own frontmatter stamps the provider run as failed — an outage, not a review
+    outcome. The cause is lifted off the lane log, then the row's own report reader; never invented."""
+    text = state.report_text or ""
+    detail = (
+        f"{state.provider}'s own report frontmatter stamps this run as failed "
+        f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
+        "provider-side outage, not a review outcome"
+    )
+    lifted = lift_lane_log_reason(state.dispatch_id, state.base_data_dir)
+    if lifted is None and state.row.report_failure_lift is not None:
+        lifted = state.row.report_failure_lift(text)
+    if lifted:
+        detail += f" — {state.row.lift_detail_label}: {lifted}"
+    status, blocking, residual = verdict_to_status(
+        state.provider, {}, text, provider_failed_detail=detail,
+    )
+    return VerdictFacts({}, status, blocking, residual, "dispatch_error", lifted_reason=lifted)
+
+
+def _parse_miss_facts(state: GateRunState) -> VerdictFacts:
+    """Phase 3d: no readable verdict — the bounded companion-report search, refusing rather than guessing."""
+    text = state.report_text or ""
+    try:
+        candidate = state.seams.find_recovery_candidate(
+            state.base_data_dir / "unified_reports",
+            pr_id=str(state.args.pr),
+            exclude_name=f"{state.dispatch_id}.md",
+            window_start=state.window_start,
+            window_end=state.window_end,
+        )
+    except AmbiguousRecoveryCandidates as exc:
+        return VerdictFacts({}, "unavailable", [], (
+            f"{state.provider} returned a {len(text)}-char report with no readable verdict block; "
+            f"{len(exc.candidates)} companion reports were found for PR {state.args.pr} in the run's "
+            f"time window — refusing to guess which is real: {', '.join(str(p) for p in exc.candidates)}"
+        ), "recovery_ambiguous")
+    if candidate is None:
+        return VerdictFacts({}, "unavailable", [], (
+            f"{state.provider} returned a {len(text)}-char report with no readable ```json``` verdict "
+            f"block; searched unified_reports/ for a companion report for PR {state.args.pr} in the "
+            "run's time window and found none (parse miss — no recoverable evidence)"
+        ), "recovery_empty")
+    conflict = recovered_verdict_conflicts(text, candidate.verdict)
+    if conflict:
+        return VerdictFacts({}, "unavailable", [], (
+            f"a companion report ({candidate.path}) carried a parseable verdict, but it conflicts "
+            f"with the primary response: {conflict} — abstaining rather than overriding the primary "
+            "run with a second source"
+        ), "recovery_conflict")
+    status, blocking, recovered_residual = verdict_to_status(state.provider, candidate.verdict)
+    residual = (
+        f"{recovered_residual + ' — ' if recovered_residual else ''}"
+        f"verdict recovered from companion report {candidate.path} "
+        "(same dispatch run, found via bounded search; the harness-captured primary report lacked the fence)"
+    )
+    return VerdictFacts(candidate.verdict, status, blocking, residual, "recovered_verdict", recovered_path=candidate.path)
+
+
+def _reprocess_identity_facts(state: GateRunState, facts: VerdictFacts) -> VerdictFacts:
+    """Phase 4a: formalized only against the commit_sha the PR carried WHEN this dispatch ran, never a guess."""
+    if not (state.args.reprocess and facts.status in {"pass", "fail"}):
+        return facts
+    original_sha = reprocess_original_commit_sha(
+        state.provider, state.base_data_dir, state.args.pr, state.dispatch_id,
+    )
+    record_name = f"pr-{state.args.pr}-{state.row.gate}.json"
+    if original_sha is None:
+        return replace(facts, status="unavailable", blocking=[], reason="reprocess_no_identity_anchor", residual=(
+            "--reprocess found no addressable original result record for "
+            f"dispatch_id={state.dispatch_id!r} ({record_name} is missing, or now reflects a LATER "
+            "dispatch for this PR — results are keyed by PR number, not dispatch_id) — cannot verify "
+            "the commit_sha this run evaluated against, refusing rather than guessing"
+        ))
+    current_sha = state.seams.get_pr_head_sha(int(state.args.pr)) if str(state.args.pr).isdigit() else ""
+    if not current_sha or current_sha != original_sha:
+        return replace(facts, status="unavailable", blocking=[], reason="reprocess_stale_evidence", residual=(
+            f"--reprocess: PR {state.args.pr} head has moved since this dispatch ran "
+            f"(evaluated against commit_sha={original_sha!r}, current head is {current_sha!r}) — "
+            "the recovered evidence is stale, refusing to formalize it"
+        ))
+    return facts
+
+
+def _evidence_pair(state: GateRunState, facts: VerdictFacts) -> "Tuple[str, str]":
+    """Phase 4b: OI-1178's evidence pair — hash + report_path for a verdict, empty hash otherwise."""
+    if facts.status not in {"pass", "fail"}:
+        return "", str(state.report_path_obj)
+    report_path = str(facts.recovered_path) if facts.recovered_path is not None else str(state.report_path_obj)
+    if state.prompt is not None:
+        return _compute_contract_hash({"prompt": state.prompt}, state.row.gate), report_path
+    branch = state.seams.get_pr_head_branch(int(state.args.pr)) if str(state.args.pr).isdigit() else ""
+    return _compute_contract_hash({"branch": branch}, state.row.gate), report_path
+
+
+def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, report_path: str) -> dict:
+    """Phase 4c: the result record — one shape for both gates, names taken from the register row."""
+    return {
+        "gate": state.row.gate,
+        "pr_id": str(state.args.pr),
+        "pr_number": state.pr_number,
+        "test_run": bool(state.args.diff_file),
+        "status": facts.status,
+        "reason": facts.reason,
+        "duration_seconds": round(state.duration, 3),
+        "summary": status_summary(state.provider, facts.status, facts.blocking, facts.reason),
+        "contract_hash": contract_hash,
+        "report_path": report_path,
+        "report_path_informational": str(state.report_path_obj),
+        "provider": state.row.lane_provider,
+        "model": state.args.model,
+        "dispatch_id": state.dispatch_id,
+        "blocking_findings": facts.blocking,
+        "advisory_findings": merge_scan_findings(
+            [f for f in (facts.verdict.get("findings") or []) if f not in facts.blocking],
+            state.scan_findings,
+        ),
+        "required_reruns": [],
+        "residual_risk": facts.residual,
+        "failure_reason": facts.lifted_reason or "",
+        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "evidence_source": "reprocessed" if state.args.reprocess else "live",
+    }
+
+
+def _stamp_and_persist(state: GateRunState, record: dict) -> "Optional[int]":
+    """Phase 5: stamp identity from the FRESH request record (B8), write through the recorder; returns a
+    failure exit code or None (the recorder may downgrade ``record`` in place, which phase 6 reads)."""
+    request_file = state.seams.result_file_path(
+        state.requests_dir, state.row.gate, pr_number=state.pr_number, pr_id="",
+    )
+    disk_request_payload: "Optional[dict]" = None
+    if request_file is not None and request_file.exists():
+        try:
+            loaded = json.loads(request_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            loaded = None
+        if isinstance(loaded, dict):
+            disk_request_payload = loaded
+    if disk_request_payload is None:
+        disk_request_payload = {"gate": record["gate"], "pr_id": record["pr_id"]}
+    disk_request_payload["branch"] = state.branch
+    disk_request_payload["commit_sha"] = state.commit_sha
+    state.seams.stamp_request_identity(record, disk_request_payload)
+    results_dir = state.base_data_dir / "state" / "review_gates" / "results"
+    out = results_dir / f"pr-{state.args.pr}-{state.row.gate}.json"
+    try:
+        state.seams.record_terminal_result(
+            gate=state.row.gate, pr_id=record["pr_id"], result_path=out, payload=record,
+            execution_depth=state.execution_depth,
+        )
+    except (OSError, ValueError) as exc:
+        # A gate that cannot persist its own evidence must fail LOUDLY, never exit 0 with nothing on disk.
+        print(f"{state.row.gate}: FAILED to write result record to {out}: {exc}", file=sys.stderr)
+        return 1
+    print(f"{state.row.gate}: wrote {out}", file=sys.stderr)
+    return None
+
+
+def _emit_outcome(state: GateRunState, record: dict) -> int:
+    """Phase 6: print the record (or verdict), return the CLI's exit code: 0 pass, 2 fail/blocked, 1 else."""
+    status = record.get("status")
+    reason = record.get("reason", "")
+    residual = record.get("residual_risk", "")
+    blocking = record.get("blocking_findings", [])
+    if state.args.json:
+        print(json.dumps(record, indent=2))
+    elif status == "unavailable":
+        print(f"VERDICT: UNAVAILABLE  ({reason})")
+        print(f"  {residual}")
+    elif status == "partial_review":
+        print(f"VERDICT: PARTIAL_REVIEW  ({reason})")
+        print(f"  {record.get('reason_detail', '')}")
+    else:
+        print(f"VERDICT: {str(status).upper()}  ({len(blocking)} blocking)")
+        for finding in blocking:
+            print(f"  · [{finding.get('severity')}] {finding.get('message')}")
+    if status == "pass":
+        return 0
+    return 2 if status == "fail" else 1
+
+
+def run_gate_tail(state: GateRunState) -> int:
+    """Phases 3-6 of a review gate: verdict, reprocess identity, evidence pair, record, output."""
+    facts = _reprocess_identity_facts(state, _unread_or_verdict(state))
+    contract_hash, report_path = _evidence_pair(state, facts)
+    record = _build_record(state, facts, contract_hash, report_path)
+    rc = _stamp_and_persist(state, record)
+    if rc is not None:
+        return rc
+    return _emit_outcome(state, record)
