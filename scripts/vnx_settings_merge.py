@@ -294,22 +294,17 @@ def merge_permissions(existing_perms: dict, vnx_perms: dict) -> dict:
 
 
 # ── Hook ownership (OI-2057) ────────────────────────────────────────────────
-#
-# A hook handler belongs to VNX when its command either matches one the
-# template renders for the same event, or names a path in a VNX install's hook
-# tree. MEASURED 2026-10-27 on a pinned consumer
-# (``SEOcrawler_v2/.claude/settings.json``, 10 handlers): its 3 VNX handlers
-# all name ``~/.vnx-system/current/scripts/hooks/t0_context_guard.py``, and its
-# 7 project handlers name the project's own ``.claude/hooks/`` (4) or
-# ``.claude/vnx-system/hooks/`` (2) — note the missing ``scripts/`` prefix, so
-# a legacy embedded install's project-local hook directory stays project-owned.
-# The last handler is a project SessionStart chain of local scripts.
-#
-# ``scripts/hooks/`` is the path segment VNX ships its hook entries under, and
-# covers every install layout (central version dir, ``current``, dev checkout,
-# embedded ``.vnx/``); ``/.vnx-system/`` catches a handler that names the
-# central install without reaching into its hook tree. Both are literal
-# substrings of the command, so an anchor such as
+# A handler belongs to VNX when its command either matches one the template
+# renders for the same event, or names a path in a VNX install's hook tree.
+# MEASURED 2026-10-27 on a pinned consumer (10 handlers): its 3 VNX handlers
+# name ``~/.vnx-system/current/scripts/hooks/t0_context_guard.py``; its 7
+# project handlers name the project's own ``.claude/hooks/`` or
+# ``.claude/vnx-system/hooks/`` — no ``scripts/`` prefix, so a legacy embedded
+# install's project-local hook directory stays project-owned.
+# ``scripts/hooks/`` is the segment VNX ships its entries under in every install
+# layout (central version dir, ``current``, dev checkout, embedded ``.vnx/``);
+# ``/.vnx-system/`` catches a handler that names the central install without
+# reaching into its hook tree. Both are literal substrings, so an anchor such as
 # ``$(git rev-parse --show-toplevel)/scripts/hooks/...`` counts too.
 _VNX_HOOK_PATH_MARKERS = ("scripts/hooks/", "/.vnx-system/")
 
@@ -321,24 +316,17 @@ def _normalise_command(command: str) -> str:
 
 def _command_of(handler: object) -> object:
     """The handler's command, or None when the handler is not an object."""
-    if not isinstance(handler, dict):
-        return None
-    return handler.get("command")
+    return handler.get("command") if isinstance(handler, dict) else None
 
 
 def is_vnx_owned_hook(handler: object, template_commands: set[str]) -> bool:
-    """Is this hook handler one VNX installed, and may the merge refresh it?
+    """Is this handler one VNX installed, and may the merge refresh it?
 
-    ``template_commands`` is the whitespace-normalised command set the template
-    renders for this event. The matcher is deliberately not part of the test:
-    a group whose matcher the harness never dispatches is repaired by a plain
-    ``--merge`` (``t0_state_health`` remediation), which only works if the
-    event's template commands decide ownership.
-
-    A handler with no readable command — not an object, no ``command`` key,
-    ``None``, a non-string or blank — establishes no VNX ownership and is
-    therefore kept: keeping a hook deletes nothing, while refreshing on a guess
-    can delete a project hook.
+    ``template_commands`` holds the normalised commands the template renders for
+    this event; the matcher is not part of the test, because a dead matcher is
+    repaired by a plain ``--merge``. A handler with no readable command claims
+    no VNX ownership and is kept: keeping deletes nothing, refreshing on a guess
+    deletes a project hook.
     """
     command = _command_of(handler)
     if not isinstance(command, str) or not command.strip():
@@ -349,7 +337,7 @@ def is_vnx_owned_hook(handler: object, template_commands: set[str]) -> bool:
 
 
 def _template_commands(groups: list) -> set[str]:
-    """Normalised commands the template's groups for one event register."""
+    """Normalised commands the template registers for one event."""
     commands = set()
     for group in groups or []:
         if not isinstance(group, dict):
@@ -361,38 +349,24 @@ def _template_commands(groups: list) -> set[str]:
     return commands
 
 
-def _flat_handlers(groups: list) -> list[tuple[object, object]]:
-    """(matcher, handler) for every handler in the groups, in file order."""
-    flat = []
-    for group in groups or []:
-        if not isinstance(group, dict):
-            continue
-        matcher = group.get("matcher")
-        for handler in group.get("hooks") or []:
-            flat.append((matcher, handler))
-    return flat
-
-
 def merge_hooks(existing_hooks: dict, template_hooks: dict, *,
                 replace_hooks: bool = False) -> tuple[dict, dict]:
     """Refresh the VNX-owned handlers and keep every project handler.
 
-    Returns ``(merged_hooks, report)``. The report is per event:
-    ``kept`` (project handlers left in place), ``added`` (template handlers
-    with no predecessor on that event) and ``replaced`` (an old handler and the
-    template handler that took its place, or ``new_command: None`` when the
-    template no longer registers that event and the old handler is dropped).
-
-    A group that held a VNX handler keeps the template's groups for the event in
-    that position, so the guard keeps its slot in the event's order; the
-    project part of a mixed group stays where it was. ``replace_hooks=True``
-    reproduces the pre-OI-2057 behaviour: every existing handler is replaced.
+    Returns ``(merged_hooks, report)``; the report is per event, with ``kept``
+    (project handlers left in place), ``added`` (template handlers with no
+    predecessor on that event) and ``replaced`` (an old handler plus the
+    template handler that took its place, ``new_command: None`` when the
+    template dropped that event). A group that held a VNX handler gets the
+    template's groups for the event in that position, so a guard keeps its slot
+    in the event's order; the project part of a mixed group stays where it was.
+    ``replace_hooks=True`` reproduces the pre-OI-2057 behaviour.
     """
     merged: dict = {}
     report: dict = {}
     existing_hooks = existing_hooks or {}
     template_hooks = template_hooks or {}
-    events = list(existing_hooks) + [event for event in template_hooks if event not in existing_hooks]
+    events = list(dict.fromkeys([*existing_hooks, *template_hooks]))
 
     for event in events:
         old_groups = existing_hooks.get(event) or []
@@ -429,15 +403,15 @@ def merge_hooks(existing_hooks: dict, template_hooks: dict, *,
         if not spliced:
             groups.extend(new_groups)
 
-        new_flat = _flat_handlers(new_groups)
+        new_flat = [(group.get("matcher"), handler)
+                    for group in new_groups if isinstance(group, dict)
+                    for handler in group.get("hooks") or []]
         for index, entry in enumerate(replaced):
             entry["new_command"] = (
                 _command_of(new_flat[index][1]) if index < len(new_flat) else None
             )
-        added = [
-            {"matcher": matcher, "command": _command_of(handler)}
-            for matcher, handler in new_flat[len(replaced):]
-        ]
+        added = [{"matcher": matcher, "command": _command_of(handler)}
+                 for matcher, handler in new_flat[len(replaced):]]
 
         if groups:
             merged[event] = groups
@@ -659,38 +633,6 @@ def _run_validate(settings_path: str) -> None:
     sys.exit(0)
 
 
-def _run_full(args, vnx_template: dict, settings_path: str) -> None:
-    """--full: generate from scratch (still replaces the whole file)."""
-    existing = load_existing_settings(settings_path)
-    result = generate_full_settings(vnx_template)
-
-    issues = validate_settings(result)
-    if issues:
-        print("ERROR: Generated settings failed validation:", file=sys.stderr)
-        for issue in issues:
-            print(f"  {issue}", file=sys.stderr)
-        sys.exit(1)
-
-    if args.dry_run:
-        if args.json:
-            print(json.dumps(result, indent=2))
-        else:
-            print("[regen-settings] --full --dry-run: would create settings.json")
-            if existing:
-                print("[regen-settings] WARNING: would overwrite existing settings.json")
-            print(json.dumps(result, indent=2))
-        sys.exit(0)
-
-    # Backup existing if present
-    if existing and not args.no_backup:
-        bak = backup_settings(settings_path)
-        print(f"[regen-settings] Backup: {bak}")
-
-    os.makedirs(os.path.dirname(settings_path), exist_ok=True)
-    write_settings(settings_path, result)
-    _print_done(f"[regen-settings] Created: {settings_path} (full)")
-
-
 def _run_merge(args, vnx_template: dict, settings_path: str) -> None:
     """--merge: overlay VNX keys, refreshing only the VNX-owned hooks."""
     existing = load_existing_settings(settings_path)
@@ -786,7 +728,35 @@ def main():
     vnx_template = load_template(vnx_home, project_root)
 
     if args.full:
-        _run_full(args, vnx_template, settings_path)
+        # Full mode: generate from scratch
+        existing = load_existing_settings(settings_path)
+        result = generate_full_settings(vnx_template)
+
+        issues = validate_settings(result)
+        if issues:
+            print("ERROR: Generated settings failed validation:", file=sys.stderr)
+            for issue in issues:
+                print(f"  {issue}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.dry_run:
+            if args.json:
+                print(json.dumps(result, indent=2))
+            else:
+                print("[regen-settings] --full --dry-run: would create settings.json")
+                if existing:
+                    print("[regen-settings] WARNING: would overwrite existing settings.json")
+                print(json.dumps(result, indent=2))
+            sys.exit(0)
+
+        # Backup existing if present
+        if existing and not args.no_backup:
+            bak = backup_settings(settings_path)
+            print(f"[regen-settings] Backup: {bak}")
+
+        os.makedirs(os.path.dirname(settings_path), exist_ok=True)
+        write_settings(settings_path, result)
+        _print_done(f"[regen-settings] Created: {settings_path} (full)")
     elif args.merge:
         _run_merge(args, vnx_template, settings_path)
 
