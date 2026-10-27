@@ -221,9 +221,11 @@ def _build_skill_prefix_for(dispatch_metadata: "dict | None") -> str:
     Resolved against the checkout this install runs from — the same
     ``subprocess_dispatch.__file__`` walk the legacy role resolution uses — via
     ``skill_prefix.resolve_skill_dir``, the ONE existence resolver staging and the
-    door's compile_plan rule also use. A skill that no longer resolves (deleted
-    between staging and delivery) is not a delivery failure: log one WARNING
-    naming the slug and continue. A reviewer role never reaches this helper.
+    door's compile_plan rule also use. That resolver validates the slug, so a
+    skill reaches here either as an unknown folder or as an invalid slug (an
+    absolute path, ``..``, ``a/b``) — neither is a delivery failure: log one
+    WARNING naming the slug and continue. A reviewer role never reaches this
+    helper.
     """
     slug = ((dispatch_metadata or {}).get("skill") or "").strip()
     if not slug:
@@ -235,8 +237,9 @@ def _build_skill_prefix_for(dispatch_metadata: "dict | None") -> str:
     folder = resolve_skill_dir(project_root, slug)
     if folder is None:
         logger.warning(
-            "_inject_skill_context: skill %r no longer resolves under %s — continuing "
-            "without it (the refusal belongs to staging and the door)", slug, project_root,
+            "_inject_skill_context: skill %r is not a valid slug or no longer resolves "
+            "under %s — continuing without it (the refusal belongs to staging and the "
+            "door)", slug, project_root,
         )
         return ""
     return build_skill_prefix([slug], folder.parent)

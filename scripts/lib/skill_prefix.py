@@ -26,6 +26,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Optional
 
+from dispatch_spec import _validate_skill_slug
+
 
 _FRONTMATTER_DELIM = "---\n"
 _RESOURCE_SUBDIRS = ("references", "scripts")
@@ -37,13 +39,32 @@ _MAX_FIRSTLINE_CHARS = 70
 SKILL_TREES = ("skills", ".claude/skills")
 
 
+def _slug_text(raw: object) -> str:
+    """Normalise a caller-supplied slug; anything that is not a string is no slug.
+
+    Metadata can reach the seam carrying a non-string (a mocked attribute, a
+    hand-built dict). That is not a slug, so it resolves to nothing — the
+    fail-closed answer here — instead of raising out of the resolver and
+    taking the caller's whole prompt assembly down with it.
+    """
+    return raw.strip() if isinstance(raw, str) else ""
+
+
 def skill_search_paths(project_root: Path, slug: str) -> "tuple[Path, ...]":
     """The SKILL.md candidates for *slug*, in resolution order (canonical first).
+
+    The slug is validated HERE (``dispatch_spec._validate_skill_slug``), before
+    it is joined into any path: an invalid slug — an absolute path, ``..``,
+    ``a/b``, an empty string — yields an empty tuple, so no caller can turn it
+    into a candidate outside the two skill trees. Callers need not validate.
 
     Feeds the refusal messages at staging and at the door, so both name exactly
     what resolve_skill_dir() looked at. ``Path()`` as the root yields the
     repo-relative forms, for a caller that has no root to resolve against.
     """
+    slug = _slug_text(slug)
+    if _validate_skill_slug(slug) is not None:
+        return ()
     root = Path(project_root)
     return tuple(root / tree / slug / "SKILL.md" for tree in SKILL_TREES)
 
@@ -53,10 +74,13 @@ def resolve_skill_dir(project_root: Path, slug: str) -> Optional[Path]:
 
     A skill exists when ``skills/<slug>/SKILL.md`` or
     ``.claude/skills/<slug>/SKILL.md`` is a regular file under *project_root*;
-    the folder hosting the winning file is returned (canonical tree wins). The
-    slug must already be validated — this joins it into a path.
+    the folder hosting the winning file is returned (canonical tree wins).
+
+    The slug is validated HERE (``dispatch_spec._validate_skill_slug``), before
+    any path is joined, so an invalid slug returns None instead of resolving —
+    callers need not validate, including the provider lane's ``--skill`` CLI.
     """
-    slug = (slug or "").strip()
+    slug = _slug_text(slug)
     if not slug:
         return None
     for candidate in skill_search_paths(project_root, slug):

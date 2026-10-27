@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 import envelope_prepare  # noqa: E402
 import provider_dispatch  # noqa: E402
+import skill_context  # noqa: E402
+import skill_prefix  # noqa: E402
 import subprocess_dispatch  # noqa: E402
 from dispatch_plan import ExecutionPlan, RuntimeSnapshot, compile_plan  # noqa: E402
 from dispatch_spec import (  # noqa: E402
@@ -36,6 +38,8 @@ from envelope_types import EnvelopeSpec  # noqa: E402
 MARKER = "RS2-SKILL-MARKER-4f1c"
 SKILL = "tmpskill"
 ROLE_HEADER = "# Role: Backend Developer"
+OUTSIDE_MARKER = "RS2-OUTSIDE-SKILL-MARKER-9d2e"
+CLI_SKILL = "cliskill"
 
 
 @pytest.fixture
@@ -179,3 +183,101 @@ def test_skill_that_no_longer_resolves_logs_one_warning_and_continues(
     assert len(warnings) == 1, f"expected one WARNING for the slug, got {caplog.records}"
     assert MARKER not in prompt
     assert "Refactor the module." in prompt
+
+
+# ---------------------------------------------------------------------------
+# RS-2 round 2 — the resolver validates the slug, so no caller can turn it
+# into a path (codex finding on 07c11454: --skill bypassed DispatchSpec.validate)
+# ---------------------------------------------------------------------------
+
+
+def _outside_skill_dir(tmp_path: Path) -> Path:
+    """A directory well outside both skill trees that DOES hold a SKILL.md."""
+    outside = tmp_path / "outside-skill"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(
+        f"---\nname: outside\n---\n\n{OUTSIDE_MARKER}: do the outside thing.\n",
+        encoding="utf-8",
+    )
+    return outside
+
+
+def test_resolve_skill_dir_refuses_an_absolute_path_that_holds_a_skill_md(
+    project_root: Path, tmp_path: Path
+) -> None:
+    outside = _outside_skill_dir(tmp_path)
+    assert skill_prefix.resolve_skill_dir(project_root, str(outside)) is None, (
+        "an absolute --skill path escaped both skill trees: pathlib discards the root"
+    )
+    assert skill_prefix.skill_search_paths(project_root, str(outside)) == ()
+
+
+@pytest.mark.parametrize("bad", ["../x", "a/b", ""])
+def test_resolve_skill_dir_refuses_a_slug_that_is_not_a_slug(
+    project_root: Path, bad: str
+) -> None:
+    assert skill_prefix.resolve_skill_dir(project_root, bad) is None
+    assert skill_prefix.skill_search_paths(project_root, bad) == ()
+
+
+def test_resolve_skill_dir_treats_a_non_string_as_no_skill(project_root: Path) -> None:
+    """A mocked/malformed metadata value resolves to nothing instead of raising."""
+    assert skill_prefix.resolve_skill_dir(project_root, None) is None
+    assert skill_prefix.resolve_skill_dir(project_root, object()) is None
+    assert skill_prefix.skill_search_paths(project_root, None) == ()
+
+
+def test_resolve_skill_dir_still_resolves_a_valid_slug_in_both_trees(
+    project_root: Path,
+) -> None:
+    assert skill_prefix.resolve_skill_dir(project_root, SKILL) == project_root / "skills" / SKILL
+    mirror = project_root / ".claude" / "skills" / CLI_SKILL
+    mirror.mkdir(parents=True)
+    (mirror / "SKILL.md").write_text(MARKER, encoding="utf-8")
+    assert skill_prefix.resolve_skill_dir(project_root, CLI_SKILL) == mirror
+    # canonical tree wins when the slug exists in both
+    assert skill_prefix.resolve_skill_dir(project_root, SKILL) == project_root / "skills" / SKILL
+
+
+def test_the_seam_refuses_an_absolute_skill_path_and_names_it(
+    project_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    outside = _outside_skill_dir(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="skill_context"):
+        prefix = skill_context._build_skill_prefix_for({"skill": str(outside)})
+    assert prefix == "", "an absolute skill path must not be read into the worker prompt"
+    assert OUTSIDE_MARKER not in prefix
+    warnings = [r for r in caplog.records
+                if r.levelno == logging.WARNING and str(outside) in r.getMessage()]
+    assert len(warnings) == 1, f"expected one WARNING for the path, got {caplog.records}"
+
+
+def test_the_envelope_prompt_never_carries_an_absolute_skill_path(
+    project_root: Path, tmp_path: Path
+) -> None:
+    outside = _outside_skill_dir(tmp_path)
+    prompt = _prepare(_envelope_spec(tmp_path, skill=str(outside)))
+    assert OUTSIDE_MARKER not in prompt
+    assert "Refactor the module." in prompt
+
+
+@pytest.mark.parametrize("bad", ["/abs/path", "../x"])
+def test_provider_cli_refuses_a_skill_that_is_a_path(
+    project_root: Path, tmp_path: Path, bad: str
+) -> None:
+    argv = [
+        "--provider", "kimi", "--terminal-id", "T1", "--dispatch-id", "rs2-cli",
+        "--instruction", "Refactor the module.", "--skill", bad,
+    ]
+    with pytest.raises(SystemExit) as exc:
+        provider_dispatch._build_parser().parse_args(argv)
+    assert exc.value.code == 2, f"--skill {bad!r} must exit 2 at the parser, got {exc.value.code}"
+
+
+def test_provider_cli_carries_a_valid_skill_slug(project_root: Path) -> None:
+    argv = [
+        "--provider", "kimi", "--terminal-id", "T1", "--dispatch-id", "rs2-cli",
+        "--instruction", "Refactor the module.", "--skill", f"  {CLI_SKILL}  ",
+    ]
+    args = provider_dispatch._build_parser().parse_args(argv)
+    assert args.skill == CLI_SKILL

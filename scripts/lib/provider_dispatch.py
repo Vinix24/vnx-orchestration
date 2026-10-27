@@ -35,6 +35,7 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
     _IDENTITY_UNRESOLVED,
     normalize_role,
 )
+from dispatch_spec import _validate_skill_slug
 from fail_closed_evidence import (
     FailClosedBlockError,
     with_block_or_raise as _with_block_or_raise,
@@ -2275,13 +2276,30 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _skill_slug_arg(raw: str) -> str:
+    """argparse ``type=`` for ``--skill``: strip, then refuse a non-slug.
+
+    A standalone provider dispatch never runs ``DispatchSpec.validate()``, so
+    this is the CLI's own guard: argparse exits 2 before any lane work starts
+    instead of carrying an absolute path into the prompt seam. The resolver
+    (``skill_prefix.resolve_skill_dir``) validates again for callers that do
+    not come through this parser.
+    """
+    slug = (raw or "").strip()
+    error = _validate_skill_slug(slug)
+    if error is not None:
+        raise argparse.ArgumentTypeError(f"invalid skill slug {raw!r} ({error})")
+    return slug
+
+
 def _add_skill_argument(parser: argparse.ArgumentParser) -> None:
     """RS-2: ``--skill`` carries the spec-bound skill into the prompt seam (kept out
     of _build_parser's body so the parser stays inside the function-size ratchet)."""
     parser.add_argument(
-        "--skill", default=None,
+        "--skill", default=None, type=_skill_slug_arg,
         help="Skill slug bound by the dispatch spec (RS-2). Reaches the prompt seam as "
-             "dispatch_metadata['skill']; unknown slugs are refused at the door.",
+             "dispatch_metadata['skill']; a value that is not a slug is refused here, "
+             "and an unknown slug is refused at the door.",
     )
 
 
