@@ -1,0 +1,41 @@
+{
+  "advisory_findings": [],
+  "attempt_seq": 1,
+  "blocking_findings": [
+    {
+      "message": "tests/test_price_provenance.py: the three zai models are added to _PINNED_PRICES and removed from _UNVERIFIED, but NOT added to _VERIFIED. test_the_split_covers_every_model (line 356) asserts _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES), which breaks: glm-5.2/glm-5.3/glm-5.3-flash are in _PINNED_PRICES but in neither _UNVERIFIED nor _VERIFIED. The wave7_models.yaml entries now carry price_source 'OpenRouter /api/v1/models endpoint, verified by operator' (not 'unverified'), so they belong in _VERIFIED \u2014 add the three ('zai','glm-5.2'), ('zai','glm-5.3'), ('zai','glm-5.3-flash') tuples to _VERIFIED to keep the split invariant and test_verified_prices_did_not_quietly_become_guesses consistent.",
+      "severity": "error"
+    }
+  ],
+  "branch": "",
+  "commit_sha": "",
+  "contract_hash": "6c7095670d1e3690",
+  "evidence_source": "live",
+  "execution_depth": {
+    "agent_messages": 0,
+    "diff_chars": 203,
+    "diff_limit": 800000,
+    "diff_truncated": false,
+    "files_read": 0,
+    "input_tokens": 0,
+    "investigative_actions": 0,
+    "mode": "single_shot",
+    "output_tokens": 0,
+    "parsed": true,
+    "shell_calls": 0,
+    "truncated_files": [],
+    "unrecognised_item_types": []
+  },
+  "failure_reason": "1 blocking finding(s): tests/test_price_provenance.py: the three zai models are added to _PINNED_PRICES and removed from _UNVERIFIED, but NOT added to _VERIFIED. test_the_split_covers_every_model (line 356) asserts _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES), which breaks: glm-5.2/glm-5.3/glm-5.3-flash are in _PINNED_PRICES but in neither _UNVERIFIED nor _VERIFIED. The wave7_models.yaml entries now carry price_source 'OpenRouter /api/v1/models endpoint, verified by operator' (not 'unverified'), so they belong in _VERIFIED \u2014 add the three ('zai','glm-5.2'), ('zai','glm-5.3'), ('zai','glm-5.3-flash') tuples to _VERIFIED to keep the split invariant and test_verified_prices_did_not_quietly_become_guesses consistent.",
+  "gate": "glm_gate",
+  "model": "glm-5.2",
+  "pr_id": "0",
+  "pr_number": 0,
+  "provider": "glm-harness",
+  "reason": "verdict",
+  "required_reruns": [],
+  "residual_risk": "If the three zai tuples are added to _VERIFIED in the same PR, the invariant is restored; the gate's own model pin (glm_gate.py ALLOWED_MODELS=frozenset({DEFAULT_MODEL})) is unchanged and stays deterministic, so no residual risk there.",
+  "status": "fail",
+  "summary": "glm gate: fail (1 blocking finding(s))",
+  "test_run": true
+}

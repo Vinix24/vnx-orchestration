@@ -99,11 +99,13 @@ sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from plan_gate_panel import _make_default_dispatcher, _resolve_data_dir  # governed provider_dispatch lane
 from governed_lane import (  # GE-5a/GE-5b: one shared adapter for the harness lanes
-    build_prompt, extract_verdict, frontmatter_duration_seconds as _frontmatter_duration_seconds,
+    GateRunState, GateSeams, build_prompt, extract_verdict,
+    frontmatter_duration_seconds as _frontmatter_duration_seconds,
     frontmatter_run_outcome as _frontmatter_run_outcome, get_diff as _get_diff,
-    lift_lane_log_reason as _lift_lane_log_reason, parse_dispatch_window_start,
-    reprocess_original_commit_sha, review_dispatcher, status_summary, unread_run_outcome,
-    verdict_to_status,
+    lift_lane_log_reason as _lift_lane_log_reason,
+    lift_report_failure_reason as _lift_report_failure_reason, parse_dispatch_window_start,
+    provider_row, reprocess_original_commit_sha, review_dispatcher, run_gate_tail, status_summary,
+    unread_run_outcome, verdict_to_status,
 )
 from gate_recorder import (
     get_pr_head_branch,
@@ -114,7 +116,7 @@ from gate_recorder import (
     stamp_request_identity,
 )
 import gate_depth  # OI-1618: a verdict without investigation is no verdict, on every lane
-from gate_artifacts import _compute_contract_hash  # canonical hash source — never a second hasher
+from gate_artifacts import _compute_contract_hash  # canonical hasher; the tail uses governed_lane's binding
 from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS,
     VALID_VERDICTS,
@@ -122,17 +124,8 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     describe_dispatch_exception,
     max_diff_chars,
 )
-from gate_prompt import (  # OI-1442: the diff is data, not instruction
-    merge_scan_findings,
-    scan_diff_for_instructions,
-)
-from unified_report_schema import SchemaViolation, parse_frontmatter
-from gate_report_recovery import (
-    AmbiguousRecoveryCandidates,
-    extract_relabeled_verdict,
-    find_recovery_candidate,
-    recovered_verdict_conflicts,
-)
+from gate_prompt import scan_diff_for_instructions  # OI-1442: the diff is data, not instruction
+from gate_report_recovery import find_recovery_candidate
 
 _VALID_VERDICTS = VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
 
@@ -140,6 +133,7 @@ _VALID_VERDICTS = VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourt
 # bound HERE because ``main`` resolves them off this module and the test patches on
 # ``_get_diff`` / ``_make_default_dispatcher`` must keep reaching what ``main`` calls.
 _PROVIDER = "glm"
+_ROW = provider_row(_PROVIDER)  # gate/provider names, dispatch-id prefix and lifts
 
 _extract_verdict = partial(extract_verdict, provider=_PROVIDER)  # text is the first argument
 _build_prompt = partial(build_prompt, _PROVIDER)
@@ -192,25 +186,18 @@ def _validate_model(model: str) -> "str | None":
     return None
 
 
-def _lift_report_failure_reason(report_text: str) -> "str | None":
-    """OI-1710: read the canonical ``failure_reason`` the lane's own governance
-    emit already stamped onto the report frontmatter (the spawn-layer error, for
-    a run that died before the model could reply).
+# OI-1710: the report-frontmatter failure lift now lives in ``governed_lane`` and is on the glm
+# register row (``report_failure_lift``), so the shared tail calls it without a provider branch.
+# The alias stays here for readers of this module.
 
-    The lane-log lift above only reads the raw lane log — a spawn-layer failure
-    (proxy unreachable, harness refused to start) writes no lane log at all, so
-    the report is the only place the real reason survives. Returns the bounded
-    reason only when the frontmatter carries a real, non-empty value; returns
-    None — never invents a reason — on a missing/empty field or unreadable
-    frontmatter."""
-    if not report_text:
-        return None
-    try:
-        frontmatter = parse_frontmatter(report_text)
-    except SchemaViolation:
-        return None
-    reason = frontmatter.get("failure_reason")
-    return (reason or "").strip() or None
+
+def _gate_seams() -> GateSeams:
+    """Phase 3-6 callables, resolved off THIS module at call time (tests patch these names here)."""
+    return GateSeams(
+        get_pr_head_sha=get_pr_head_sha, get_pr_head_branch=get_pr_head_branch,
+        record_terminal_result=record_terminal_result, result_file_path=result_file_path,
+        stamp_request_identity=stamp_request_identity, find_recovery_candidate=find_recovery_candidate,
+    )
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -253,7 +240,7 @@ def main(argv: "list[str] | None" = None) -> int:
     # if/else that follows (both --reprocess and a live run need the SAME
     # dispatch_id their downstream code uses — see the (now-redundant)
     # reassignments removed from both arms below this block).
-    dispatch_id = args.reprocess if args.reprocess else f"glm-gate-pr{args.pr}-{int(time.time())}"
+    dispatch_id = args.reprocess if args.reprocess else f"{_ROW.dispatch_id_prefix}{args.pr}-{int(time.time())}"
     # Offline runs read the diff from a file (--diff-file) and are NOT tied to
     # a live GitHub PR — branch/commit_sha are computed once, here, and reused
     # for both the request record below and the result record's identity
@@ -274,7 +261,7 @@ def main(argv: "list[str] | None" = None) -> int:
     request_payload = {
         "gate": "glm_gate",
         "status": "requested",
-        "provider": "glm-harness",
+        "provider": _ROW.lane_provider,
         "branch": branch,
         "pr_number": pr_number,
         "commit_sha": commit_sha,
@@ -407,7 +394,7 @@ def main(argv: "list[str] | None" = None) -> int:
             # report, returns its text. "glm-harness" is the real provider string
             # provider_dispatch.py dispatches on (see plan_gate_panel.py's own
             # diverse-assurance panel entry: provider="glm-harness").
-            report_text = dispatcher("glm-harness", args.model, prompt, dispatch_id)
+            report_text = dispatcher(_ROW.lane_provider, args.model, prompt, dispatch_id)
         except Exception as exc:  # noqa: BLE001 — dispatch/report-read failure
             # OI-1142: do NOT bail without a record — a required gate that cannot fire
             # must surface as ``unavailable`` in the results dir, not vanish.
@@ -449,343 +436,16 @@ def main(argv: "list[str] | None" = None) -> int:
         window_start = _parse_dispatch_window_start(dispatch_id, pr=args.pr)
         window_end = report_path_obj.stat().st_mtime if report_path_obj.is_file() else time.time()
 
-    recovered_path: "Path | None" = None
-
-    # OI-1452 fix-forward: tracked across both branches below so the record
-    # build can stamp the canonical failure_reason field (see there) — only
-    # ever set by the lane-log lift in the run_failed branch, never guessed.
-    # OI-1710: also lifted from the report frontmatter when the lane log does
-    # not exist at all (a spawn-layer failure writes no lane log).
-    lifted_reason: "str | None" = None
-    unread = _unread_run_outcome(dispatch_error, report_text or "", duration)
-    if unread is not None:
-        verdict: dict = {}
-        status, blocking, residual, reason = unread
-    else:
-        verdict = _extract_verdict(report_text or "")
-        if verdict:
-            reason = "verdict"
-            status, blocking, residual = _verdict_to_status(verdict, report_text or "")
-        elif not (report_text or "").strip():
-            reason = "no_verdict"
-            status, blocking, residual = _verdict_to_status({}, report_text or "")
-        else:
-            # dispatch-20260823-beta2-j: cheap check BEFORE the frontmatter/
-            # search path — the verdict may be sitting right here, inline,
-            # under the plan-reviewer role's fence label instead of ours
-            # (measured on glm-gate-pr1677-1787477675.md). No search needed.
-            relabeled = extract_relabeled_verdict(report_text or "")
-            if relabeled:
-                reason = "relabeled_verdict"
-                verdict = relabeled
-                status, blocking, residual = _verdict_to_status(relabeled, report_text or "")
-            else:
-                # Only consult the frontmatter once BOTH verdict extractions
-                # have failed — a real parsed verdict always wins regardless
-                # of what exit_code says.
-                run_failed, exit_code, output_tokens = _frontmatter_run_outcome(report_text or "")
-                if run_failed is True:
-                    reason = "dispatch_error"
-                    provider_failed_detail = (
-                        "glm's own report frontmatter stamps this run as failed "
-                        f"(exit_code={exit_code!r}, token_usage.output={output_tokens!r}) — "
-                        "provider-side outage, not a review outcome"
-                    )
-                    # OI-1452: the frontmatter above tells us the run failed, not
-                    # WHY. Lift the real reason off the raw lane log so the
-                    # request-time takeover classifier (which scans this same
-                    # provider_failed_detail once it lands in residual_risk) can
-                    # actually see a billing/quota exhaustion marker instead of a
-                    # generic exit_code/token_usage summary. The glm lane does
-                    # not always write this log — a missing file degrades to the
-                    # frontmatter-only detail above, never a crash or a guess.
-                    lifted_reason = _lift_lane_log_reason(dispatch_id, base_data_dir)
-                    if lifted_reason is None:
-                        # OI-1710: a spawn-layer failure (proxy unreachable,
-                        # harness refused to start) writes no lane log at all —
-                        # the lane died before the tee started. The report's own
-                        # frontmatter carries the canonical failure_reason the
-                        # governance emit stamped from the spawn error.
-                        lifted_reason = _lift_report_failure_reason(report_text or "")
-                    if lifted_reason:
-                        provider_failed_detail += f" — failure reason: {lifted_reason}"
-                    status, blocking, residual = _verdict_to_status(
-                        {}, report_text or "", provider_failed_detail=provider_failed_detail
-                    )
-                else:
-                    # A genuine parse miss on a clean (or unreadable-frontmatter)
-                    # run: search for a companion report before giving up (Deel 2).
-                    try:
-                        candidate = find_recovery_candidate(
-                            base_data_dir / "unified_reports",
-                            pr_id=str(args.pr),
-                            exclude_name=f"{dispatch_id}.md",
-                            window_start=window_start,
-                            window_end=window_end,
-                        )
-                    except AmbiguousRecoveryCandidates as exc:
-                        reason = "recovery_ambiguous"
-                        status, blocking = "unavailable", []
-                        residual = (
-                            f"glm returned a {len(report_text)}-char report with no readable "
-                            f"verdict block; {len(exc.candidates)} companion reports were "
-                            f"found for PR {args.pr} in the run's time window — refusing to "
-                            f"guess which is real: {', '.join(str(p) for p in exc.candidates)}"
-                        )
-                    else:
-                        if candidate is None:
-                            reason = "recovery_empty"
-                            status, blocking = "unavailable", []
-                            residual = (
-                                f"glm returned a {len(report_text)}-char report with no "
-                                "readable ```json``` verdict block; searched "
-                                f"unified_reports/ for a companion report for PR {args.pr} "
-                                "in the run's time window and found none (parse miss — "
-                                "no recoverable evidence)"
-                            )
-                        else:
-                            conflict = recovered_verdict_conflicts(report_text or "", candidate.verdict)
-                            if conflict:
-                                reason = "recovery_conflict"
-                                status, blocking = "unavailable", []
-                                residual = (
-                                    f"a companion report ({candidate.path}) carried a "
-                                    f"parseable verdict, but it conflicts with the primary "
-                                    f"response: {conflict} — abstaining rather than "
-                                    "overriding the primary run with a second source"
-                                )
-                            else:
-                                reason = "recovered_verdict"
-                                verdict = candidate.verdict
-                                status, blocking, recovered_residual = _verdict_to_status(candidate.verdict)
-                                residual = (
-                                    f"{recovered_residual + ' — ' if recovered_residual else ''}"
-                                    f"verdict recovered from companion report {candidate.path} "
-                                    "(same dispatch run, found via bounded search; the "
-                                    "harness-captured primary report lacked the fence)"
-                                )
-                                recovered_path = candidate.path
-
-    # dispatch-20260823-beta2-j, Deel 3 precondition #2: a reprocessed verdict
-    # may only be formalized against the commit_sha the PR carried WHEN THIS
-    # DISPATCH RAN. Results are keyed by PR number, not dispatch_id, so this
-    # is only checkable when the stored pr-<N>-glm_gate.json record still
-    # belongs to THIS exact dispatch_id; a stale or superseded slot refuses
-    # rather than guesses. Only runs once a terminal verdict is about to be
-    # formalized — an already-unavailable status needs no staleness check.
-    if args.reprocess and status in {"pass", "fail"}:
-        original_sha = _reprocess_original_commit_sha(base_data_dir, args.pr, dispatch_id)
-        if original_sha is None:
-            status, blocking = "unavailable", []
-            reason = "reprocess_no_identity_anchor"
-            residual = (
-                f"--reprocess found no addressable original result record for "
-                f"dispatch_id={dispatch_id!r} (pr-{args.pr}-glm_gate.json is missing, or "
-                "now reflects a LATER dispatch for this PR — results are keyed by PR "
-                "number, not dispatch_id) — cannot verify the commit_sha this run "
-                "evaluated against, refusing rather than guessing"
-            )
-        else:
-            current_sha = get_pr_head_sha(int(args.pr)) if str(args.pr).isdigit() else ""
-            if not current_sha or current_sha != original_sha:
-                status, blocking = "unavailable", []
-                reason = "reprocess_stale_evidence"
-                residual = (
-                    f"--reprocess: PR {args.pr} head has moved since this dispatch ran "
-                    f"(evaluated against commit_sha={original_sha!r}, current head is "
-                    f"{current_sha!r}) — the recovered evidence is stale, refusing to "
-                    "formalize it"
-                )
-
-    # OI-1178 / OI-1435: a terminal verdict must carry the same evidence pair
-    # codex_gate/kimi_gate stamp — contract_hash (gate_artifacts' single
-    # canonical hasher) + report_path. An unavailable result (no readable
-    # verdict, or the dispatch itself failed) leaves contract_hash empty —
-    # THAT is what keeps OI-1142's outage/verdict separation intact, because
-    # gate_status.has_complete_evidence checks gate_status.is_terminal()
-    # BEFORE it ever looks at contract_hash/report_path, and "unavailable" is
-    # never terminal (gate_status.is_terminal only admits pass/fail/
-    # not_executable). A filled-in report_path on an unavailable record
-    # therefore still cannot pass has_complete_evidence or the merge-time
-    # evidence check (closure_verifier.check_merge_readiness) — both refuse
-    # on is_terminal()/gate_is_terminal() first, contract_hash empty or not.
-    #
-    # OI-1477: report_path used to be left empty here too (both fields
-    # blanked "for symmetry" with contract_hash), which broke the ONE case
-    # this evidence trail exists for: a real provider outage, where the
-    # report text under report_path_informational is the only place the
-    # failure reason (e.g. an OpenRouter 402) can be read from. The report
-    # file at report_path_informational is already on disk by this point
-    # (governance_emit.emit_unified_report ran inside the dispatcher call
-    # above, live or --reprocess) — populating report_path here lets
-    # gate_request_handler._read_lane_log_or_report_text find it directly
-    # off the result record instead of needing to re-derive the same path
-    # from dispatch_id as a second fallback.
-    if status in {"pass", "fail"}:
-        report_path = str(recovered_path) if recovered_path is not None else str(report_path_obj)
-        if prompt is not None:
-            contract_hash = _compute_contract_hash({"prompt": prompt}, "glm_gate")
-        else:
-            # --reprocess never re-fetches the diff (Deel 3), so there is no
-            # prompt to hash — fall back to gate_artifacts' own branch-based
-            # fallback (the same fallback codex_gate uses when it has no
-            # prompt tracked either), seeded with the PR's real branch so the
-            # hash at least varies per PR instead of being a gate-wide constant.
-            contract_hash = _compute_contract_hash(
-                {"branch": get_pr_head_branch(int(args.pr)) if str(args.pr).isdigit() else ""},
-                "glm_gate",
-            )
-    else:
-        contract_hash = ""
-        report_path = report_path_informational
-
-    record = {
-        "gate": "glm_gate",
-        "pr_id": str(args.pr),
-        "pr_number": pr_number,
-        # Offline runs read the diff from a file (--diff-file) and are NOT tied
-        # to a live GitHub PR; they must never count as gate evidence. The
-        # closure verifier refuses records with test_run: true.
-        "test_run": test_run,
-        "status": status,
-        "reason": reason,
-        "duration_seconds": round(duration, 3),
-        "summary": _status_summary(status, blocking, reason),
-        "contract_hash": contract_hash,
-        "report_path": report_path,
-        # Kept alongside ``report_path`` for backward compatibility with any
-        # reader keyed on this field name specifically — NEVER read by
-        # has_complete_evidence/is_terminal. As of OI-1477 this is the same
-        # value as ``report_path`` on an unavailable result (see above); the
-        # two only diverge on a terminal "recovered_verdict" result, where
-        # ``report_path`` points at the companion report the verdict was
-        # actually recovered from instead of this gate's own (fence-less)
-        # report.
-        "report_path_informational": report_path_informational,
-        "provider": "glm-harness",
-        "model": args.model,
-        "dispatch_id": dispatch_id,
-        "blocking_findings": blocking,
-        # OI-1442: the model's advisory findings PLUS the deterministic
-        # injection scan's, always. A model that read past an injection (or
-        # was talked out of mentioning it) cannot suppress the scan's hit; a
-        # model that reported it produces the identical dict and is
-        # deduplicated. Scan findings are severity=warning by construction, so
-        # they land here and never in ``blocking_findings`` — a regex must not
-        # be able to close a merge door by itself.
-        "advisory_findings": merge_scan_findings(
-            [f for f in (verdict.get("findings") or []) if f not in blocking],
-            scan_findings,
-        ),
-        "required_reruns": [],
-        "residual_risk": residual,
-        # OI-1452 fix-forward (OI-1453 tracks the other four gates): also
-        # stamp the canonical failure_reason field (established OI-1415,
-        # scripts/lib/phantom_guard.py) with the SAME text placed above in
-        # residual_risk, but ONLY the lifted reason — never a placeholder or a
-        # summary of the frontmatter fields when the lift found nothing.
-        # OI-1710: the lifted reason now has a second real source — the report
-        # frontmatter's own failure_reason (the spawn-layer error, for a run
-        # that died before writing any lane log). Three ways to be wrong here,
-        # in ascending order of danger: an EMPTY field fails visibly (a reader
-        # can tell the cause is unknown); a PLACEHOLDER ("unknown", "n/a")
-        # passes every presence check and fails silently; a SUMMARY that
-        # merely looks like a cause is worst of all, because it cannot be told
-        # apart from a real one. Filling this field with anything but the real
-        # lifted reason would make every existing record look complete while
-        # explaining nothing — a regression hidden BEHIND the fix meant to
-        # surface it.
-        "failure_reason": lifted_reason or "",
-        "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        # dispatch-20260823-beta2-j: audit marker distinguishing a record
-        # produced by a live model call from one formalized by --reprocess
-        # against evidence that already existed on disk from an earlier run.
-        "evidence_source": "reprocessed" if args.reprocess else "live",
-    }
-
-    # Stamp branch + commit_sha through the shared writer so the merge door
-    # can join a glm_gate result on the PR head (GitHub), not the local
-    # checkout HEAD. Offline runs (--diff-file) are not tied to a live PR and
-    # legitimately carry neither. Reuses the SAME branch/commit_sha resolved
-    # once above (for the request record) instead of a second gh lookup.
-    #
-    # B8 (golf B, 2026-09-07): read the request record fresh from disk here
-    # instead of handing stamp_request_identity a dict that carries only
-    # gate/pr_id/branch/commit_sha. gate_request_handler
-    # ._stamp_takeover_annotations annotates THIS SAME request file with
-    # takeover provenance on a request_reviews() poll — a poll that can land
-    # any time during this gate's own (multi-minute) governed dispatch call
-    # above, i.e. strictly AFTER this run's own request write at the top of
-    # main() but strictly BEFORE this point. A freshly-built dict here would
-    # silently drop that annotation even though it is sitting on disk; a
-    # request_file_path resolved via the SAME naming ``result_file_path``
-    # already encodes (mirrored onto the requests dir) picks it up. Offline
-    # runs and any run where the request file is missing/unreadable fall back
-    # to exactly the pre-B8 minimal dict — no takeover key, same as before.
-    request_file = result_file_path(requests_dir, "glm_gate", pr_number=pr_number, pr_id="")
-    disk_request_payload: "dict | None" = None
-    if request_file is not None and request_file.exists():
-        try:
-            loaded = json.loads(request_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            loaded = None
-        if isinstance(loaded, dict):
-            disk_request_payload = loaded
-    if disk_request_payload is None:
-        disk_request_payload = {"gate": record["gate"], "pr_id": record["pr_id"]}
-    disk_request_payload["branch"] = branch
-    disk_request_payload["commit_sha"] = commit_sha
-    stamp_request_identity(record, disk_request_payload)
-
-    # Unconditional, and resolved from the SAME base_data_dir the report path
-    # above is built from (never the raw, possibly-empty ``data_dir`` CLI
-    # value) — a poort run with no explicit --data-dir must still land its
-    # result where the merge door and closure verifier can find it (residu of
-    # OI-1178/OI-1435: this guard used to check the raw arg, so an omitted
-    # --data-dir silently skipped this entire block on a fully successful,
-    # fully-billed run).
-    results_dir = base_data_dir / "state" / "review_gates" / "results"
-    out = results_dir / f"pr-{args.pr}-glm_gate.json"
-    try:
-        record_terminal_result(
-            gate="glm_gate", pr_id=record["pr_id"], result_path=out, payload=record,
-            execution_depth=execution_depth,
-        )
-    except (OSError, ValueError) as exc:
-        # A poort that cannot persist its own evidence must fail LOUDLY, not
-        # burn the dispatch cost and exit 0 with nothing on disk.
-        print(f"glm_gate: FAILED to write result record to {out}: {exc}", file=sys.stderr)
-        return 1
-    print(f"glm_gate: wrote {out}", file=sys.stderr)
-
-    # OI-1618: the recorder may have just downgraded a degenerate pass/fail to
-    # unavailable IN PLACE — `record` is the same dict object, so it already
-    # reflects that. Resync the locals so the printed VERDICT and the exit
-    # code below match what actually landed on disk, instead of echoing a
-    # verdict this run never earned.
-    status = record.get("status", status)
-    reason = record.get("reason", reason)
-    residual = record.get("residual_risk", residual)
-    blocking = record.get("blocking_findings", blocking)
-
-    if args.json:
-        print(json.dumps(record, indent=2))
-    elif status == "unavailable":
-        print(f"VERDICT: UNAVAILABLE  ({reason})")
-        print(f"  {residual}")
-    elif status == "partial_review":  # OI-1851: never exit 0
-        print(f"VERDICT: PARTIAL_REVIEW  ({reason})")
-        print(f"  {record.get('reason_detail', '')}")
-    else:
-        print(f"VERDICT: {status.upper()}  ({len(blocking)} blocking)")
-        for f in blocking:
-            print(f"  · [{f.get('severity')}] {f.get('message')}")
-
-    # 0 = pass, 2 = a REAL parsed fail/blocked verdict, 1 = unavailable/infra
-    # or partial_review (OI-1851).
-    if status == "pass":
-        return 0
-    return 2 if status == "fail" else 1
+    state = GateRunState(
+        provider=_PROVIDER, row=_ROW, args=args, base_data_dir=base_data_dir,
+        pr_number=pr_number, dispatch_id=dispatch_id, branch=branch, commit_sha=commit_sha,
+        requests_dir=requests_dir, report_path_obj=report_path_obj, report_text=report_text,
+        dispatch_error=dispatch_error, duration=duration, window_start=window_start,
+        window_end=window_end, prompt=prompt, scan_findings=scan_findings,
+        execution_depth=execution_depth, seams=_gate_seams(),
+    )
+    # GE-5b-2: phases 3-6 are ONE body in governed_lane, fed this module's own seam bindings.
+    return run_gate_tail(state)
 
 
 if __name__ == "__main__":
