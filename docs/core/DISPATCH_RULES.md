@@ -228,6 +228,15 @@ The table above is the OI-1180 measurement of what each provider emits without t
 
 ## 9. Manager-block contract
 
+A dispatch is delivered exactly once: `vnx dispatch <id>` fires the staged spec bundle through the
+door and the lane hands it to the worker. A staged dispatch is never ALSO written out as a manager
+block — that is the duplicate delivery the promote-vs-manager-block rule forbids. Manager blocks are
+only for work outside the staged system: ad-hoc follow-up instructions, new issues or decisions no
+dispatch covers, and a re-dispatch after rejection with changed instructions. The staging-`.md`
+promote flow that used to sit in front of this rule is retired (T-A10,
+`terminal-binding-afbouwen`): `pending/<id>/dispatch-spec.json` is the only queue and
+`vnx dispatch <id>` is the only command that fires it.
+
 Every dispatch: `[[TARGET:A|B|C]]` … `[[DONE]]`, headers `Role/Track/Terminal/PR-ID/Priority/Cognition/Dispatch-ID/Parent-Dispatch/Reason`, `Workflow` + `Context`, explicit success criteria. A headless-gate dispatch must name the expected report path + receipt/result linkage. Report contract (every worker): `## Summary` (≥50 chars) / `## Changes` / `## Verification` / `## Open Items`, with the `Dispatch-ID`. Validate roles: `python3 scripts/validate_skill.py --list`.
 
 ## 10. Operational runbooks (not inlined — see scripts)
