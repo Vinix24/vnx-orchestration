@@ -176,8 +176,9 @@ def test_a_missing_sidecar_keeps_the_text_counts_without_a_rejection(
     assert "junit_rejected" not in verification
 
 
-def test_setting_off_is_todays_receipt_byte_for_byte(tmp_path: Path) -> None:
+def test_setting_off_is_todays_receipt_byte_for_byte(tmp_path: Path, monkeypatch) -> None:
     from verification_runs import verification_record
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "0")
     body = _report_body(TEXT_12_PASSED)
     report = tmp_path / f"{DISPATCH}.md"
     report.write_text(body, encoding="utf-8")
@@ -187,6 +188,83 @@ def test_setting_off_is_todays_receipt_byte_for_byte(tmp_path: Path) -> None:
     assert verification["tests_passed"] == 12
     for key in ("count_source", "count_mismatch", "junit_rejected"):
         assert key not in verification
+
+
+# ---------------------------------------------------------------------------
+# PR-5: the envelope sub-path reads the same sidecar with the same rule
+# ---------------------------------------------------------------------------
+
+def _path1_verification(report: Path) -> Dict[str, Any]:
+    """Path 1 exactly as ``envelope_govern`` calls it."""
+    from envelope_govern_support import _verification_from_report
+    return _verification_from_report(report)
+
+
+def _write_report_and_sidecar(tmp_path: Path, verification: str,
+                              **xml_kwargs: Any) -> Path:
+    report = tmp_path / f"{DISPATCH}.md"
+    report.write_text(_report_body(verification), encoding="utf-8")
+    (tmp_path / f"{DISPATCH}.junit.xml").write_text(_xml_body(**xml_kwargs), encoding="utf-8")
+    return report
+
+
+def test_envelope_subpath_prefers_xml_over_the_text_counts(tmp_path: Path,
+                                                           monkeypatch) -> None:
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")
+    report = _write_report_and_sidecar(
+        tmp_path, TEXT_12_PASSED, tests=5, failures=1, errors=0, skipped=1)
+    verification = _path1_verification(report)
+    assert verification["count_source"] == "junit_worker"
+    assert verification["tests_passed"] == 3
+    assert verification["tests_failed"] >= 1
+    assert verification["count_mismatch"] is True
+
+
+def test_envelope_subpath_without_a_sidecar_keeps_the_text_counts(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")
+    report = tmp_path / f"{DISPATCH}.md"
+    report.write_text(_report_body(TEXT_12_PASSED), encoding="utf-8")
+    verification = _path1_verification(report)
+    assert verification["tests_passed"] == 12
+    assert verification["count_source"] == "report_text"
+    assert "junit_rejected" not in verification
+
+
+def test_envelope_subpath_refuses_a_sidecar_named_for_another_suite(
+        tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")
+    report = _write_report_and_sidecar(tmp_path, TEXT_12_PASSED, name="pytest")
+    verification = _path1_verification(report)
+    assert verification["tests_passed"] == 12
+    assert verification["count_source"] == "report_text"
+    assert "does not equal" in verification["junit_rejected"]
+
+
+def test_both_write_paths_yield_one_verification(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")
+    report = _write_report_and_sidecar(
+        tmp_path, TEXT_2_FAILED, tests=8, failures=0, errors=0, skipped=0)
+    path1 = _path1_verification(report)
+    path2 = ReportParser().parse_report(str(report))["verification"]
+    assert path1 == path2
+    assert path1["count_source"] == "junit_worker"
+    assert path1["count_mismatch"] is True
+
+
+def test_setting_off_both_paths_add_no_new_key(tmp_path: Path, monkeypatch) -> None:
+    from verification_runs import verification_record
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "0")
+    body = _report_body(TEXT_12_PASSED)
+    report = tmp_path / f"{DISPATCH}.md"
+    report.write_text(body, encoding="utf-8")
+    (tmp_path / f"{DISPATCH}.junit.xml").write_text(_xml_body(), encoding="utf-8")
+    expected = verification_record(ReportParser().extract_validation(body), DISPATCH)
+    for verification in (_path1_verification(report),
+                         ReportParser().parse_report(str(report))["verification"]):
+        assert verification == expected
+        for key in ("count_source", "count_mismatch", "junit_rejected"):
+            assert key not in verification
 
 
 # ---------------------------------------------------------------------------

@@ -157,7 +157,7 @@ Refusal receipt written to t0_receipts.ndjson (a refused merge):
 Its own event_type, NOT a ``pr_merged`` carrying ``conclusion: "refused"``:
 every merged-PR reader in the tree filters on the literal string
 ``pr_merged`` and none of them reads ``conclusion`` (track_reconciler.py:320,
-build_feature_plan.py:212, build_t0_state.py:999, pr_queue_state.py:128,
+build_t0_state.py:999, pr_queue_state.py:128,
 traceability_audit.py:610, digest/collectors/progress.py:63), so reusing the
 event type would make every one of them count a refused merge as a merge.
 ``--dry-run`` writes no refusal receipt: that flag is documented as "no

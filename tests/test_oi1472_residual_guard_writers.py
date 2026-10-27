@@ -358,6 +358,16 @@ _WRITER_MODULES = (
     "scripts/lib/gate_recorder.py",
     "scripts/lib/gate_artifacts.py",
     "scripts/lib/gate_report_generator.py",
+    # GE-3: the two modules that were outside this guard's reach until the
+    # inventory (20261024-inv-poortmotor, §3.1) counted eleven writers and
+    # found these three still landing a result record with a bare write_text:
+    # ``record_claude_github_result``, ``_validate_and_persist_result`` (the
+    # ``record-result`` CLI) and ``_persist_claude_github_files``.
+    "scripts/lib/gate_result_parser.py",
+    "scripts/lib/gate_request_handler.py",
+    # GE-4a: the one writer record_terminal_result and record_not_executable
+    # now route through (commit_gate_outcome).
+    "scripts/lib/gate_outcome.py",
 )
 
 
@@ -384,8 +394,11 @@ def test_no_writer_bypasses_the_guard_with_a_raw_write():
 
 
 def test_the_enumerated_writers_all_exist():
-    """The docstring names six writers. A rename that leaves the table stale
+    """The docstring names nine writers. A rename that leaves the table stale
     makes the claim unverifiable — catch it here instead."""
+    import gate_request_handler
+    import gate_result_parser
+
     assert callable(gate_recorder.record_terminal_result)
     assert callable(gate_recorder.record_not_executable)
     assert callable(gate_recorder.record_failure)
@@ -393,3 +406,7 @@ def test_the_enumerated_writers_all_exist():
     assert callable(gate_artifacts._write_result_record)
     assert callable(GateReportGeneratorMixin._write_not_executable_result)
     assert callable(GateReportGeneratorMixin._write_failure_result)
+    # GE-3: the three writers the guard could not see before.
+    assert callable(gate_result_parser.GateResultParserMixin.record_claude_github_result)
+    assert callable(gate_result_parser.GateResultParserMixin._validate_and_persist_result)
+    assert callable(gate_request_handler.GateRequestHandlerMixin._persist_claude_github_files)

@@ -93,7 +93,7 @@ import re
 import sys
 import time
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
@@ -1303,6 +1303,16 @@ class LedgerTotals:
             return f"onvolledig: {unreadable} in het grootboek"
         return None
 
+    @property
+    def complete_runs(self) -> int:
+        """The runs whose ``usage_completeness`` is exactly ``complete``; a missing or other value never counts."""
+        return sum(1 for record in self.runs.values() if record.get("usage_completeness") == "complete")
+
+    @property
+    def unknown_token_runs(self) -> int:
+        """The runs with at least one unknown token count (a ``null`` or a missing field)."""
+        return sum(1 for record in self.runs.values() if _has_unknown_token(record))
+
 
 def _counted(count: int, one: str, many: str) -> str:
     """``count`` and the noun phrase in the singular for one, else in the plural."""
@@ -1523,15 +1533,99 @@ def aggregate_runs(
     return _totals(read, select)
 
 
-def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bool]]) -> LedgerTotals:
-    """The :class:`LedgerTotals` of one read of the ledger and the spool (:func:`_ledger_and_spool`)."""
-    text, spooled, spool_unreadable, quarantined, unlocked = read
-    whole, torn = _split_torn_tail(text)
-    records, legacy, unreadable = _parse_lines(whole)
-    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
-    waiting = [run for run in spooled if not all(_has_landed(record, by_id, origins) for record in run)]
-    last = {record["run_id"]: record for record in records}
-    runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
+GROUP_KEYS = ("model", "role", "day", "provider")
+UNKNOWN_GROUP = "(unknown)"
+
+
+@dataclass(frozen=True)
+class GroupedTotals:
+    """The ledger per group from one read: ``totals`` is the whole selection and carries the read-level counts.
+
+    Every entry of ``groups`` is a :class:`LedgerTotals` over that group's
+    effective runs; its read-level fields are zero because the spool and the
+    line counts belong to the read and are counted once, on ``totals``.
+    """
+
+    key: str
+    groups: Mapping[str, LedgerTotals]
+    totals: LedgerTotals
+
+
+def aggregate_groups(
+    key: str,
+    ledger_path: Optional[Path] = None,
+    *,
+    select: Optional[Callable[[Mapping[str, Any]], bool]] = None,
+) -> GroupedTotals:
+    """Sum the ledger per group (``model``, ``role``, ``day`` or ``provider``), in one read.
+
+    The ledger is read and the spool counted once (:func:`_ledger_and_spool`);
+    ``totals`` is what :func:`aggregate_runs` returns for that read, and every
+    group is a :class:`LedgerTotals` over its effective runs, summed by the same
+    :func:`_sum_runs`. ``day`` is the UTC date of ``occurred_from``, never
+    ``recorded_at``; a record whose key field is missing or not a non-empty
+    string is grouped in ``(unknown)``, never dropped. ``select`` filters on the
+    effective record, so a correction that moves a run out of the selection takes
+    the whole run out. An unknown ``key`` raises ``ValueError`` before anything
+    is read.
+    """
+    if key not in GROUP_KEYS:
+        raise ValueError(f"group key {key!r} is not one of {list(GROUP_KEYS)}")
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    with _ledger_and_spool(path) as read:
+        pass
+    totals = _totals(read, select)
+    return GroupedTotals(key=key, groups=_groups_of(key, totals.runs), totals=totals)
+
+
+def _groups_of(key: str, runs: Mapping[str, Mapping[str, Any]]) -> Dict[str, LedgerTotals]:
+    """``{group: LedgerTotals}`` for these effective runs; the read-level counts stay on the result's totals."""
+    grouped: Dict[str, Dict[str, Mapping[str, Any]]] = {}
+    for run_id, record in runs.items():
+        grouped.setdefault(_group_of(record, key), {})[run_id] = record
+    return {name: _totals_with(grouped[name]) for name in sorted(grouped)}
+
+
+def _group_of(record: Mapping[str, Any], key: str) -> str:
+    """The group name of an effective record: its key field, the UTC day, or ``(unknown)``."""
+    value = utc_day(record.get("occurred_from")) if key == "day" else record.get(key)
+    return value if isinstance(value, str) and value else UNKNOWN_GROUP
+
+
+def utc_day(value: object) -> Optional[str]:
+    """The UTC date (``YYYY-MM-DD``) of an ISO-8601 timestamp, or ``None`` when it is not one.
+
+    A missing value, a non-string, one that does not parse and one without a
+    timezone give ``None``: a day is never guessed from local time.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc).date().isoformat() if parsed.tzinfo else None
+
+
+def _is_count(value: object) -> bool:
+    """True for a token count: an ``int`` that is not a ``bool``."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _has_unknown_token(record: Mapping[str, Any]) -> bool:
+    """True when the run has at least one token count that is not an int (``null`` or missing)."""
+    counts = record.get("tokens") if isinstance(record.get("tokens"), dict) else {}
+    return any(not _is_count(counts.get(name)) for name in TOKEN_FIELDS)
+
+
+def _sum_runs(
+    runs: Mapping[str, Mapping[str, Any]],
+) -> Tuple[float, float, Dict[str, int], Dict[str, int], Tuple[str, ...]]:
+    """``(cost_usd, api_equivalent_usd, tokens, tokens_unknown, unavailable)`` of these effective runs.
+
+    The one summing loop: a run without a price is in no sum (it is listed in
+    ``unavailable``) and an unknown token count is counted, never summed as 0.
+    """
     cost = api = 0.0
     tokens = dict.fromkeys(TOKEN_FIELDS, 0)
     unknown = dict.fromkeys(TOKEN_FIELDS, 0)
@@ -1540,7 +1634,7 @@ def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bo
         counts = record.get("tokens") if isinstance(record.get("tokens"), dict) else {}
         for name in TOKEN_FIELDS:
             value = counts.get(name)
-            if isinstance(value, int) and not isinstance(value, bool):
+            if _is_count(value):
                 tokens[name] += value
             else:
                 unknown[name] += 1
@@ -1550,13 +1644,36 @@ def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bo
             continue
         cost += amounts[0]
         api += amounts[1]
+    return round(cost, 8), round(api, 8), tokens, unknown, tuple(unavailable)
+
+
+def _totals_with(runs: Mapping[str, Mapping[str, Any]]) -> LedgerTotals:
+    """A :class:`LedgerTotals` over these runs, the read-level counts zero (:func:`_totals` sets them)."""
+    cost, api, tokens, unknown, unavailable = _sum_runs(runs)
     return LedgerTotals(
-        runs=runs, cost_usd=round(cost, 8), api_equivalent_usd=round(api, 8), tokens=tokens,
-        tokens_unknown=unknown, unavailable=tuple(unavailable), legacy_lines=legacy,
-        unreadable_lines=unreadable + int(torn), spool_pending=len(waiting), spool_unreadable=spool_unreadable,
-        spool_conflicts=len(_second_executions(records, waiting)), spool_quarantined=quarantined, torn_tail=torn,
+        runs=runs, cost_usd=cost, api_equivalent_usd=api, tokens=tokens, tokens_unknown=unknown,
+        unavailable=unavailable, legacy_lines=0, unreadable_lines=0, spool_pending=0, spool_unreadable=False,
+        spool_conflicts=0, spool_quarantined=0, torn_tail=False, unlocked_read=False,
+    )
+
+
+def _totals(read: _LedgerRead, select: Optional[Callable[[Mapping[str, Any]], bool]]) -> LedgerTotals:
+    """The :class:`LedgerTotals` of one read of the ledger and the spool (:func:`_ledger_and_spool`)."""
+    text, spooled, spool_unreadable, quarantined, unlocked = read
+    whole, torn = _split_torn_tail(text)
+    records, legacy, unreadable = _parse_lines(whole)
+    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
+    waiting = [run for run in spooled if not all(_has_landed(record, by_id, origins) for record in run)]
+    last = {record["run_id"]: record for record in records}
+    runs = {run_id: record for run_id, record in last.items() if select is None or select(record)}
+    return replace(
+        _totals_with(runs), legacy_lines=legacy, unreadable_lines=unreadable + int(torn), torn_tail=torn,
+        spool_pending=len(waiting), spool_unreadable=spool_unreadable,
+        spool_conflicts=len(_second_executions(records, waiting)), spool_quarantined=quarantined,
         unlocked_read=unlocked,
     )
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -2493,7 +2610,9 @@ __all__ = [
     "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "ReplayResult", "LedgerFiles",
+    "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "GroupedTotals", "ReplayResult",
+    "LedgerFiles", "GROUP_KEYS", "UNKNOWN_GROUP",
     "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "aggregate_runs",
+    "aggregate_groups", "utc_day",
     "replay_spool", "spool_dir_for", "spool_file_for", "report_spool_health", "ledger_files",
 ]

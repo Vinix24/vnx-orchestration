@@ -29,6 +29,7 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
+from fixtures.closure_track_fixture import CLOSURE_TRACK_ID, seed_done_track
 from review_contract import (
     Deliverable,
     DeterministicFinding,
@@ -66,47 +67,11 @@ def verifier_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_REPORTS_DIR", str(data_dir / "unified_reports"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
 
-    feature_plan = project_root / "FEATURE_PLAN.md"
-    feature_plan.write_text(
-        """# Feature: Demo Feature
-
-**Status**: Complete
-
-## Dependency Flow
-```text
-PR-0 (no dependencies)
-```
-
-## PR-0: Demo PR
-**Track**: C
-**Priority**: P1
-**Complexity**: Medium
-**Skill**: @architect
-**Dependencies**: []
-""",
-        encoding="utf-8",
-    )
-    pr_queue = project_root / "PR_QUEUE.md"
-    pr_queue.write_text(
-        """# PR Queue - Feature: Demo Feature
-
-## Progress Overview
-Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ██████████ 100%
-
-## Status
-
-## Dependency Flow
-```
-PR-0 (no dependencies)
-```
-""",
-        encoding="utf-8",
-    )
+    seed_done_track(state_dir, monkeypatch)
     claim_file = state_dir / "closure_claim.json"
     claim_file.write_text(
         json.dumps({
-            "test_files": ["FEATURE_PLAN.md"],
+            "test_files": ["README.md"],
             "test_command": "python3 -m pytest tests/test_demo.py",
             "parallel_assignments": [{"terminal": "T1"}, {"terminal": "T2"}],
         }),
@@ -115,8 +80,6 @@ PR-0 (no dependencies)
 
     return {
         "project_root": project_root,
-        "feature_plan": feature_plan,
-        "pr_queue": pr_queue,
         "claim_file": claim_file,
         "dispatch_dir": dispatch_dir,
     }
@@ -178,8 +141,7 @@ def _run_closure(verifier_env, contract, results_dir, monkeypatch):
     monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload())
     return cv.verify_closure(
         project_root=verifier_env["project_root"],
-        feature_plan=verifier_env["feature_plan"],
-        pr_queue=verifier_env["pr_queue"],
+        track_id=CLOSURE_TRACK_ID,
         branch="feature/demo",
         mode="pre_merge",
         claim_file=verifier_env["claim_file"],

@@ -4,8 +4,9 @@
 A ReviewContract is the structured document that every review gate
 (Gemini advisory, Codex final gate, Claude GitHub optional) consumes
 to produce deliverable-aware reviews. It is materialized deterministically
-from FEATURE_PLAN.md, PR_QUEUE.md, changed files, declared tests,
-quality gates, and deterministic verifier findings.
+from FEATURE_PLAN.md, the dispatch register (the closure stage, ADR-047 §6),
+changed files, declared tests, quality gates, and deterministic verifier
+findings.
 
 The contract is the single source of truth for what a PR promises to
 deliver, what it explicitly excludes, and what evidence must be present
@@ -19,7 +20,7 @@ import json
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 
 SCHEMA_VERSION = "1.0.0"
@@ -28,6 +29,12 @@ SCHEMA_VERSION = "1.0.0"
 # or a non-ASCII digit that `str.isdigit()` would accept but `int()` could
 # reject (e.g. superscripts), so `_normalize_line` below can never raise.
 _LINE_STRING_RE = re.compile(r"^-?[0-9]+$")
+
+# A GitHub PR number as a contract or register may write it: ``2176`` or ``#2176``.
+_PR_NUMBER_RE = re.compile(r"^#?\s*([0-9]+)$")
+
+# Register events that are a review result on the PR (ADR-047 §6: ``in_review``).
+_REVIEW_RESULT_EVENTS = frozenset({"gate_passed", "gate_failed"})
 
 
 def _normalize_line(raw_line: Any) -> int:
@@ -283,22 +290,47 @@ def _parse_feature_title(content: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _parse_pr_queue_status(content: str, pr_id: str) -> str:
-    """Determine closure stage from PR_QUEUE.md."""
-    if re.search(rf"^\s*-\s+{re.escape(pr_id)}:", content, re.MULTILINE):
-        completed_section = re.search(
-            r"###\s+.*Completed.*?\n(.*?)(?=###|\Z)", content, re.DOTALL | re.IGNORECASE
-        )
-        if completed_section and pr_id in completed_section.group(1):
+def _pr_number(value: Any) -> Optional[int]:
+    """``2176``, ``"2176"`` and ``"#2176"`` are PR 2176; a label, a bool or anything else is None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    match = _PR_NUMBER_RE.match(value.strip()) if isinstance(value, str) else None
+    number = int(match.group(1)) if match else 0
+    return number if number > 0 else None
+
+
+def _event_names_pr(event: Dict[str, Any], pr_number: Optional[int], dispatch_id: str) -> bool:
+    """A GitHub number joins the event's ``pr_number``; a label joins only through ``dispatch_id``.
+
+    The two namespaces never cross: label ``PR-3`` is not GitHub PR #3.
+    """
+    if pr_number is not None:
+        return _pr_number(event.get("pr_number")) == pr_number
+    return bool(dispatch_id) and event.get("dispatch_id") == dispatch_id
+
+
+def derive_closure_stage(pr_id: str, dispatch_id: str, register_events: Iterable[Any]) -> str:
+    """The PR's closure stage from the dispatch register, never from a plan file (ADR-047 §6).
+
+    ``merged`` when a ``pr_merged`` event names the PR (``scripts/pr_merge.py``
+    appends it at the merge), ``in_review`` when a review result
+    (``gate_passed`` or ``gate_failed``) names it, otherwise ``open``. Only an
+    exact event type on an event that names the PR moves the stage: a
+    malformed event, an unknown type or an empty register leaves ``open``,
+    the stage that claims nothing.
+    """
+    pr_number = _pr_number(pr_id)
+    stage = "open"
+    for event in register_events:
+        if not isinstance(event, dict) or not _event_names_pr(event, pr_number, dispatch_id):
+            continue
+        if event.get("event") == "pr_merged":
             return "merged"
-
-        active_section = re.search(
-            r"###\s+.*Active.*?\n(.*?)(?=###|\Z)", content, re.DOTALL | re.IGNORECASE
-        )
-        if active_section and pr_id in active_section.group(1):
-            return "in_review"
-
-    return "open"
+        if event.get("event") in _REVIEW_RESULT_EVENTS:
+            stage = "in_review"
+    return stage
 
 
 def _derive_non_goals(pr_section: Dict[str, Any], all_pr_ids: List[str], pr_id: str) -> List[str]:
@@ -332,7 +364,7 @@ def materialize_review_contract(
     *,
     pr_id: str,
     feature_plan_content: str,
-    pr_queue_content: str,
+    register_events: Iterable[Any],
     branch: str = "",
     changed_files: Optional[List[str]] = None,
     deleted_files: Optional[List[str]] = None,
@@ -341,6 +373,9 @@ def materialize_review_contract(
     dispatch_id: str = "",
 ) -> ReviewContract:
     """Materialize a ReviewContract from source inputs.
+
+    ``register_events`` are the dispatch-register events the closure stage is
+    derived from (:func:`derive_closure_stage`); pass ``[]`` when there are none.
 
     This function is deterministic: the same inputs always produce
     the same contract (including content_hash).
@@ -352,7 +387,7 @@ def materialize_review_contract(
         raise ValueError(f"PR section '{pr_id}' not found in FEATURE_PLAN")
 
     all_pr_ids = re.findall(r"^##\s+(PR-\d+):", feature_plan_content, re.MULTILINE)
-    closure_stage = _parse_pr_queue_status(pr_queue_content, pr_id)
+    closure_stage = derive_closure_stage(pr_id, dispatch_id, register_events)
 
     scope_items = pr_section.get("scope_items") or []
     success_criteria = pr_section.get("success_criteria") or []
@@ -430,7 +465,7 @@ def materialize_from_files(
     *,
     pr_id: str,
     feature_plan_path: Path,
-    pr_queue_path: Path,
+    state_dir: Path,
     branch: str = "",
     changed_files: Optional[List[str]] = None,
     deleted_files: Optional[List[str]] = None,
@@ -438,13 +473,18 @@ def materialize_from_files(
     deterministic_findings: Optional[List[DeterministicFinding]] = None,
     dispatch_id: str = "",
 ) -> ReviewContract:
-    """Convenience wrapper that reads files from disk before materializing."""
+    """Read the plan file and the dispatch register under ``state_dir``, then materialize.
+
+    No ``PR_QUEUE.md`` is read (ADR-047). ``read_events`` gives an absent or
+    unreadable register as no events, so the closure stage stays ``open``.
+    """
+    from dispatch_register import read_events
+
     feature_plan_content = feature_plan_path.read_text(encoding="utf-8")
-    pr_queue_content = pr_queue_path.read_text(encoding="utf-8")
     return materialize_review_contract(
         pr_id=pr_id,
         feature_plan_content=feature_plan_content,
-        pr_queue_content=pr_queue_content,
+        register_events=read_events(state_dir=state_dir),
         branch=branch,
         changed_files=changed_files,
         deleted_files=deleted_files,

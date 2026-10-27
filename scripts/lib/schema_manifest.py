@@ -340,6 +340,46 @@ WHERE output_ref IS NOT NULL
 GROUP BY project_id, output_ref
 """)
 
+# deliverables view at v36 (ADR-049, migration 0036): withdrawn is its own status and count,
+# in no other tally and no failure branch. Without withdrawn rows it derives what v27 derives.
+_DELIVERABLES_VIEW_V36 = ViewInvariant("deliverables", """
+CREATE VIEW deliverables AS
+SELECT
+    project_id AS project_id,
+    output_ref AS deliverable_ref,
+    MIN(output_kind) AS output_kind,
+    MIN(track) AS track,
+    COUNT(*) AS dispatch_count,
+    SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) AS completed_count,
+    SUM(CASE WHEN state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+             THEN 1 ELSE 0 END) AS in_flight_count,
+    SUM(CASE WHEN state IN ('proposed', 'ready', 'queued')
+             THEN 1 ELSE 0 END) AS planned_count,
+    SUM(CASE WHEN state = 'withdrawn' THEN 1 ELSE 0 END) AS withdrawn_count,
+    CASE
+        WHEN SUM(CASE WHEN state = 'completed' THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN state IN ('completed', 'withdrawn') THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'done'
+        WHEN SUM(CASE WHEN state IN ('active', 'running', 'delivering', 'claimed', 'accepted')
+                      THEN 1 ELSE 0 END) > 0
+            THEN 'in_progress'
+        WHEN SUM(CASE WHEN state = 'withdrawn' THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'withdrawn'
+        WHEN SUM(CASE WHEN state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out')
+                      THEN 1 ELSE 0 END) > 0
+         AND SUM(CASE WHEN state IN ('failed', 'failed_delivery', 'dead_letter', 'expired', 'timed_out',
+                                     'withdrawn') THEN 1 ELSE 0 END) = COUNT(*)
+            THEN 'failed'
+        WHEN SUM(CASE WHEN state = 'ready' THEN 1 ELSE 0 END) > 0
+            THEN 'ready'
+        ELSE 'proposed'
+    END AS derived_status,
+    MAX(updated_at) AS last_activity
+FROM dispatches
+WHERE output_ref IS NOT NULL
+GROUP BY project_id, output_ref
+""")
+
 _OI_BLOCKER_IDX = (IndexInvariant("idx_track_oi_active_blockers",
                                   ("track_id", "project_id", "link_type"), partial=True,
                                   where="resolved_at IS NULL"),)
@@ -581,7 +621,7 @@ def _review_cap_verdicts() -> TableInvariant:
 
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
-    return {
+    manifest = {
         22: VersionManifest(22, (
             _dispatches(_DISPATCH_COLS_BASE), _tracks_v22(), _tph_v22(),
             _td_v22(), _toi_v22())),
@@ -639,6 +679,9 @@ def _build_manifest() -> Dict[int, VersionManifest]:
             *_runtime_tables_v34(), _track_pr_delivery(), _review_cap_verdicts()),
             (_DELIVERABLES_VIEW,)),
     }
+    # v36 (0036): the v35 tables unchanged, the deliverables view replaced.
+    manifest[36] = VersionManifest(36, manifest[35].tables, (_DELIVERABLES_VIEW_V36,))
+    return manifest
 
 
 SCHEMA_MANIFEST: Dict[int, VersionManifest] = _build_manifest()
@@ -800,13 +843,15 @@ def validate_table(conn: sqlite3.Connection, tbl: TableInvariant) -> List[str]:
     return out
 
 
-def validate_view(conn: sqlite3.Connection, view: ViewInvariant) -> List[str]:
+def validate_view(conn: sqlite3.Connection, view: ViewInvariant,
+                  later: Tuple[ViewInvariant, ...] = ()) -> List[str]:
+    """*later*: the same view as a later version defines it, which also holds (as an extra column does)."""
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='view' AND name=?", (view.name,)
     ).fetchone()
     if row is None:
         return [f"missing view '{view.name}'"]
-    if _normalize_sql(row[0]) != _normalize_sql(view.sql):
+    if _normalize_sql(row[0]) not in {_normalize_sql(v.sql) for v in (view, *later)}:
         return [f"view '{view.name}': normalized SQL mismatch"]
     return []
 
@@ -852,7 +897,9 @@ def validate_db_at_version(conn: sqlite3.Connection, version: int) -> List[str]:
             continue
         out += validate_table(conn, tbl)
     for view in manifest.views:
-        out += validate_view(conn, view)
+        later = tuple(v for n in SCHEMA_MANIFEST if n > version
+                      for v in SCHEMA_MANIFEST[n].views if v.name == view.name)
+        out += validate_view(conn, view, later)
     return out
 
 
@@ -913,6 +960,13 @@ def table_at(version: int, table: str) -> Optional[TableInvariant]:
     for tbl in SCHEMA_MANIFEST[version].tables:
         if tbl.name == table:
             return tbl
+    return None
+
+
+def view_at(version: int, view: str) -> Optional[ViewInvariant]:
+    for inv in SCHEMA_MANIFEST[version].views:
+        if inv.name == view:
+            return inv
     return None
 
 

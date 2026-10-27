@@ -50,6 +50,16 @@ class EnvelopeSpec:
     # Empty tuple (the default) means the dispatch declared no per-path scope —
     # the same "no narrowing" default the hook already applies to a missing var.
     dispatch_paths: tuple = ()
+    # OI-865: an explicit per-dispatch opt-in carried from the plan. True makes
+    # the claude_headless spawn keep its normal ambient MCP config instead of
+    # the scoped force-empty ``--mcp-config`` + ``mcp__*`` deny; False (the
+    # default, matching DispatchSpec/ExecutionPlan) leaves today's argv byte for
+    # byte unchanged.
+    requires_mcp: bool = False
+    # RS-2: the skill slug staging verified and compile_plan carried onto the plan.
+    # PREPARE hands it to the one prompt seam (skill_context), which prepends the
+    # skill body before the role block. None = no skill = byte-identical prompt.
+    skill: Optional[str] = None
 
 
 @dataclass

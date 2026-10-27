@@ -42,11 +42,9 @@ found exactly one companion report carrying one — see
 (that search found 2+ candidates — fail-closed, refuses rather than guesses).
 Only ``dispatch_error``/``no_verdict`` may claim a provider outage in their
 summary text; the recovery-related reasons must not, since the provider
-plainly produced output. See ``kimi_gate._frontmatter_run_outcome`` (reused
-verbatim below — same governed-report frontmatter shape, same ``exit_code``/
-``token_usage_measured`` discrimination, provider-agnostic) for the
-dispatch_error/genuine-parse-miss split that gates entry into the recovery
-path.
+plainly produced output. See ``governed_lane.frontmatter_run_outcome`` (same governed-report
+frontmatter shape, same ``exit_code``/``token_usage_measured`` discrimination) for the
+dispatch_error/genuine-parse-miss split gating entry into the recovery path.
 
 OI-2066: ``timeout`` is the report whose frontmatter says the lane's own
 deadline stopped the run (``deadline_exceeded``). It is checked before any
@@ -91,16 +89,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
-import subprocess
 import sys
 import time
+from functools import partial
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from plan_gate_panel import _make_default_dispatcher, _resolve_data_dir  # governed provider_dispatch lane
+from governed_lane import (  # GE-5a/GE-5b: one shared adapter for the harness lanes
+    build_prompt, extract_verdict, frontmatter_duration_seconds as _frontmatter_duration_seconds,
+    frontmatter_run_outcome as _frontmatter_run_outcome, get_diff as _get_diff,
+    lift_lane_log_reason as _lift_lane_log_reason, parse_dispatch_window_start,
+    reprocess_original_commit_sha, review_dispatcher, status_summary, unread_run_outcome,
+    verdict_to_status,
+)
 from gate_recorder import (
     get_pr_head_branch,
     get_pr_head_sha,
@@ -115,19 +119,13 @@ from gate_lane_contract import (  # C6 step 3: one source, three readers
     MODEL_DEFAULTS,
     VALID_VERDICTS,
     VERDICT_CONTRACT,
-    canonical_review_verdict,
     describe_dispatch_exception,
-    harness_dispatcher_timeouts,
-    lane_deadline_detail,
     max_diff_chars,
-    reviews_with_tools,
 )
 from gate_prompt import (  # OI-1442: the diff is data, not instruction
-    build_review_prompt,
     merge_scan_findings,
     scan_diff_for_instructions,
 )
-from governance_emit import _classify_lane_log_text, _read_lane_log_text  # OI-1452: lift the real reason off the raw lane log — same classifier OI-1433 built, never a second marker scan
 from unified_report_schema import SchemaViolation, parse_frontmatter
 from gate_report_recovery import (
     AmbiguousRecoveryCandidates,
@@ -138,30 +136,26 @@ from gate_report_recovery import (
 
 _VALID_VERDICTS = VALID_VERDICTS  # C6 step 3 + OI-1767: one source, not a fourth literal copy
 
+# GE-5b: one body per helper now lives in ``governed_lane`` (ADR-046 §4); these names stay
+# bound HERE because ``main`` resolves them off this module and the test patches on
+# ``_get_diff`` / ``_make_default_dispatcher`` must keep reaching what ``main`` calls.
+_PROVIDER = "glm"
 
-def _extract_verdict(text: str) -> dict:
-    """Extract the worker's verdict: the LAST ```json``` block whose ``verdict`` is a
-    real verdict (pass/fail/blocked).
+_extract_verdict = partial(extract_verdict, provider=_PROVIDER)  # text is the first argument
+_build_prompt = partial(build_prompt, _PROVIDER)
+_parse_dispatch_window_start = partial(parse_dispatch_window_start, _PROVIDER)
+_reprocess_original_commit_sha = partial(reprocess_original_commit_sha, _PROVIDER)
+_verdict_to_status = partial(verdict_to_status, _PROVIDER)
+_unread_run_outcome = partial(unread_run_outcome, _PROVIDER)
+_status_summary = partial(status_summary, _PROVIDER)
 
-    Identical logic to ``kimi_gate._extract_verdict`` — kept as a single copy
-    per gate module (not imported cross-module) so each gate's parser stays
-    self-contained, but the RULE must never diverge: the same review read
-    through kimi_gate and glm_gate must resolve to the same verdict shape.
-    The governed worker report echoes the instruction, so the FIRST ```json```
-    block is our own contract example (its ``verdict`` is the literal
-    "pass|fail|blocked", which is not a valid single verdict and is skipped).
-    Scanning from the end and requiring a real verdict value selects the
-    worker's actual answer, never the echoed template.
-    """
-    blocks = re.findall(r"```json\s*(\{.*?\})\s*```", text or "", re.DOTALL)
-    for block in reversed(blocks):
-        try:
-            obj = json.loads(block)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(obj, dict) and canonical_review_verdict(obj.get("verdict")):
-            return obj
-    return {}
+
+def _review_dispatcher(base_data_dir: Path, branch: str, coverage: dict, explicit_timeout):
+    """This gate's governed dispatcher (OI-2066): the one body, THIS module's factory."""
+    return review_dispatcher(
+        _PROVIDER, base_data_dir, branch, coverage, explicit_timeout,
+        dispatcher_factory=_make_default_dispatcher,
+    )
 
 
 # One source (C6 step 3): model env var/default, timeout, diff cap and verdict
@@ -172,28 +166,6 @@ def _extract_verdict(text: str) -> dict:
 # (``_review_dispatcher``).
 _MODEL_ENV, DEFAULT_MODEL = MODEL_DEFAULTS["glm_gate"]
 _VERDICT_CONTRACT = VERDICT_CONTRACT
-
-
-def _review_dispatcher(
-    base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "int | None",
-):
-    """The governed dispatcher for one glm_gate run, with a deadline that fits the diff.
-
-    OI-2066, identical to ``kimi_gate._review_dispatcher``: the lane deadline
-    comes from ``gate_lane_contract.harness_timeout_seconds`` for the part of
-    the diff that enters the prompt (``gate_depth.prompt_diff_chars``), unless
-    the operator passed ``--timeout``. It reaches the lane as its own deadline
-    (``VNX_TOTAL_DEADLINE`` in the child env) and, plus a margin, as the outer
-    subprocess timeout. Before this both were a fixed 900 s. role and
-    base_ref: see the call site.
-    """
-    return _make_default_dispatcher(
-        str(base_data_dir), role="review-gate",
-        base_ref=(f"origin/{branch}" if branch else None),
-        **harness_dispatcher_timeouts(
-            "glm_gate", gate_depth.prompt_diff_chars(coverage), explicit=explicit_timeout,
-        ),
-    )
 
 # This gate pins to exactly the configured default model (MODEL_DEFAULTS /
 # VNX_GLM_GATE_MODEL) — narrower by design than deprecated-glm-models, which
@@ -220,276 +192,6 @@ def _validate_model(model: str) -> "str | None":
     return None
 
 
-def _build_prompt(diff_text: str, pr: str, max_chars: int) -> str:
-    """Build the review prompt with the diff as delimited, untrusted DATA.
-
-    OI-1442: this used to end with ``"DIFF:\\n" + diff_text`` — the PR
-    author's own text, unmarked, in the last and most weighted position of the
-    prompt. ``gate_prompt.build_review_prompt`` puts it in an explicitly
-    delimited block and restates the instruction after it, so the gate has the
-    last word. The verdict contract is the shared gate_lane_contract source
-    (C6 step 3), identical by design for glm_gate, kimi_gate and gate_runner's
-    harness-lane path; gate_runner's ``_REVIEWER_VERDICT_TEMPLATE``
-    (codex/gemini) is a different, richer shape and is not this contract.
-
-    ``max_chars`` is resolved ONCE by the caller (``main()``) and passed in —
-    not re-resolved here — so the truncation this prompt applies and the
-    ``diff_truncated``/``diff_limit`` recorded alongside it (from the same
-    caller's own ``gate_depth.diff_coverage`` call) can never disagree because
-    ``gate_lane_contract.max_diff_chars`` read mutable project config
-    differently between two calls in the same run (OI-1874 r3).
-    """
-    return build_review_prompt(
-        gate_name="glm_gate",
-        pr=pr,
-        diff_text=diff_text,
-        verdict_contract=_VERDICT_CONTRACT,
-        max_chars=max_chars,
-        agentic=reviews_with_tools("glm_gate"),
-    )
-
-
-def _get_diff(pr: str, diff_file: "str | None") -> "str | None":
-    if diff_file:
-        p = Path(diff_file)
-        return p.read_text(encoding="utf-8") if p.is_file() else None
-    try:
-        res = subprocess.run(
-            ["gh", "pr", "diff", pr],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60,
-        )
-        return res.stdout if res.returncode == 0 and res.stdout.strip() else None
-    except (subprocess.SubprocessError, OSError):
-        return None
-
-
-def _frontmatter_run_outcome(report_text: str) -> "tuple[bool | None, object, object]":
-    """Read ``exit_code``/``token_usage.output`` off the report's own YAML
-    frontmatter to tell a provider-side run failure apart from a genuine
-    parse miss (ported from ``kimi_gate._frontmatter_run_outcome`` — the
-    governed unified-report frontmatter shape is provider-agnostic, so the
-    same logic applies unchanged to the glm-harness lane).
-
-    Content existing is not proof glm actually completed a review: the
-    failure-path ``emit_unified_report`` call writes a report too, so a
-    spooled error body is "content" by the same measure as a real review.
-    The frontmatter's ``exit_code`` field is stamped by the lane from the
-    actual spawn result, not guessed from the response text — that is the
-    signal that can't be faked by error-page prose.
-
-    ``exit_code`` alone decides the outcome. ``token_usage.output`` is only
-    consulted when the frontmatter's own ``token_usage_measured`` flag is
-    true — the same conditional weighting kimi_gate uses, so a lane where
-    post-run token capture is unavailable does not get its unmeasured zero
-    read as a failure signal.
-
-    Returns ``(outcome, exit_code, output_tokens)`` where ``outcome`` is:
-        True  — frontmatter is readable and the run did not complete cleanly:
-                non-zero exit code, or (only when ``token_usage_measured`` is
-                true) a measured zero output-token count. A provider-side
-                failure, not a review outcome.
-        False — frontmatter is readable and stamps a clean run (exit_code 0,
-                and either tokens aren't measured or a measured non-zero
-                count): a missing verdict block here is a genuine parse miss.
-        None  — no readable frontmatter, or no ``exit_code`` field in it
-                (older/foreign report shape). Callers fall back to the same
-                default as False (content present, no signal either way ->
-                attempt recovery rather than assume a provider failure).
-    """
-    try:
-        frontmatter = parse_frontmatter(report_text)
-    except SchemaViolation:
-        return None, None, None
-    if "exit_code" not in frontmatter:
-        return None, None, None
-    exit_code = frontmatter.get("exit_code")
-    token_usage = frontmatter.get("token_usage")
-    output_tokens = token_usage.get("output") if isinstance(token_usage, dict) else None
-    tokens_measured = bool(frontmatter.get("token_usage_measured"))
-    if exit_code != 0:
-        return True, exit_code, output_tokens
-    if tokens_measured and output_tokens == 0:
-        return True, exit_code, output_tokens
-    return False, exit_code, output_tokens
-
-
-def _parse_dispatch_window_start(dispatch_id: str, *, pr: str) -> "float | None":
-    """Extract a dispatch's start time (unix seconds, whole-second floor) from
-    its own dispatch_id, which this gate always constructs as
-    ``f"glm-gate-pr{pr}-{int(time.time())}"``. Returns None when *dispatch_id*
-    does not match that exact shape for *pr* — refuse rather than guess a
-    recovery time window.
-
-    Used for BOTH the live-dispatch recovery window (the timestamp this exact
-    dispatch_id was just built with, moments earlier in the same run — see
-    ``main()``'s non-reprocess branch) and the ``--reprocess`` window (an
-    externally-supplied, possibly-malformed dispatch_id, where the None return
-    above is the real refusal path). Reusing the same parser for both means
-    the two windows can never derive their start bound differently."""
-    prefix = f"glm-gate-pr{pr}-"
-    if not dispatch_id.startswith(prefix):
-        return None
-    ts_part = dispatch_id[len(prefix):]
-    if not ts_part.isdigit():
-        return None
-    return float(ts_part)
-
-
-def _frontmatter_duration_seconds(report_text: str) -> float:
-    """Best-effort ``duration_seconds`` read off a report's own frontmatter —
-    used only by ``--reprocess``, where no live dispatcher call happens to
-    time directly."""
-    try:
-        frontmatter = parse_frontmatter(report_text)
-    except SchemaViolation:
-        return 0.0
-    try:
-        return float(frontmatter.get("duration_seconds", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        return 0.0
-
-
-def _reprocess_original_commit_sha(base_data_dir: Path, pr: str, dispatch_id: str) -> "str | None":
-    """Return the commit_sha this EXACT dispatch's own result record was
-    stamped with, or None when no addressable identity exists for it.
-
-    Results are keyed by PR number, not dispatch_id
-    (``pr-<N>-glm_gate.json``) — a LATER dispatch for the same PR overwrites
-    an EARLIER one's slot. When the stored record's own ``dispatch_id`` no
-    longer matches the dispatch being reprocessed, there is no reliable
-    historical commit_sha left to verify staleness against, and
-    ``--reprocess`` must refuse rather than guess one."""
-    path = base_data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-glm_gate.json"
-    if not path.is_file():
-        return None
-    try:
-        record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if record.get("dispatch_id") != dispatch_id:
-        return None
-    sha = record.get("commit_sha") or ""
-    return sha or None
-
-
-def _verdict_to_status(
-    verdict: dict, report_text: str = "", *, provider_failed_detail: "str | None" = None
-) -> "tuple[str, list, str]":
-    """Map the extracted verdict to (status, blocking_findings, residual_risk).
-
-    OI-1142: an empty ``verdict`` means no readable verdict could be extracted.
-    If ``report_text`` itself is empty/whitespace, the provider delivered
-    nothing at all (a real outage/empty-completion signal). If ``report_text``
-    has content but no readable ```json``` block, the provider DID respond —
-    the block just failed to parse, which is a parse miss, not an outage.
-    Either way this maps to ``unavailable`` and only a REAL parsed verdict may
-    ever produce ``fail``.
-
-    ``provider_failed_detail``: the caller passes this when it has already
-    read the report's own frontmatter via ``_frontmatter_run_outcome`` and
-    found a non-zero exit code (or a measured-zero output-token count). When
-    set, THIS function returns that provider-outage residual instead of the
-    "glm did respond" parse-miss residual below — the report having content
-    is not proof glm ran; the frontmatter's own exit_code is.
-    """
-    v = canonical_review_verdict(verdict.get("verdict")) if verdict else ""
-    findings = verdict.get("findings") or [] if verdict else []
-    blocking = [
-        f for f in findings
-        if isinstance(f, dict) and str(f.get("severity", "")).lower() in {"error", "blocked", "blocker"}
-    ]
-    residual = (verdict.get("residual_risk") if verdict else "") or ""
-    if v == "pass" and not blocking:
-        return "pass", [], residual
-    if v in {"fail", "blocked"} or blocking:
-        return "fail", blocking, residual or "glm gate reported blocking findings"
-    if residual:
-        return "unavailable", [], residual
-    if provider_failed_detail:
-        return "unavailable", [], provider_failed_detail
-    if (report_text or "").strip():
-        return (
-            "unavailable",
-            [],
-            f"glm returned a {len(report_text)}-char report, but it contained no "
-            "readable ```json``` verdict block (parse miss — glm did respond)",
-        )
-    return (
-        "unavailable",
-        [],
-        "glm produced no readable verdict (provider outage/quota/truncation) — not a review outcome",
-    )
-
-
-# dispatch-20260823-beta2-j: reason-specific unavailable summaries. "parse_error"
-# (a single bucket for "no readable verdict on a clean run") is retired — every
-# case that used to land there now either recovers (reason="relabeled_verdict"
-# / "recovered_verdict") or gets its OWN distinguishing reason, so a reader can
-# tell "searched, found nothing" apart from "searched, found too much" apart
-# from "never searched at all" (T0 correction: these were silently the same
-# reason before, which erased exactly the information the search exists to add).
-_UNAVAILABLE_SUMMARIES = {
-    "recovery_empty": "recovery_empty — searched for a companion report, found none",
-    "recovery_ambiguous": "recovery_ambiguous — multiple companion reports found, refusing to guess",
-    "recovery_conflict": "recovery_conflict — a companion report's verdict conflicted with the primary response",
-    "reprocess_no_identity_anchor": "reprocess_no_identity_anchor — no addressable original result record to verify against",
-    "reprocess_stale_evidence": "reprocess_stale_evidence — PR head has moved since this dispatch ran",
-    "timeout": "timeout — the lane's own deadline stopped the run before the review finished",
-}
-
-
-def _unread_run_outcome(
-    dispatch_error: str, report_text: str, duration: float,
-) -> "tuple[str, list, str, str] | None":
-    """``(status, blocking, residual, reason)`` for a run whose report is never
-    read for a verdict, else None. Same two cases as
-    ``kimi_gate._unread_run_outcome``, both ``unavailable``:
-
-    - the dispatcher raised (``dispatch_error``): there is no report to read;
-    - OI-2066: the report says the lane's OWN deadline stopped the run
-      (``gate_lane_contract.lane_deadline_detail``, the reader gate_runner's
-      harness lane uses). Such a report can still hold a partial ```json```
-      block with a pass in it, and codex reproduced exactly that on 4ac2669a:
-      ``pass``, exit 0, for a review that never finished. It books
-      ``timeout`` as gate_runner does, and no verdict, relabeled verdict or
-      companion report is read for it.
-    """
-    if dispatch_error:
-        return "unavailable", [], f"governed glm dispatch failed: {dispatch_error[:400]}", "dispatch_error"
-    deadline = lane_deadline_detail(report_text, duration)
-    if deadline is not None:
-        return "unavailable", [], f"glm_gate timed out: {deadline} — not a review outcome", "timeout"
-    return None
-
-
-def _lift_lane_log_reason(dispatch_id: str, data_dir: "Path | None") -> "str | None":
-    """OI-1452: when ``_frontmatter_run_outcome`` says the run failed but the
-    frontmatter itself carries no WHY (just ``exit_code``/``token_usage``),
-    read the per-dispatch raw lane log (``logs/conversations/<dispatch_id>.log``)
-    and classify it with governance_emit's shared classifier — the SAME
-    function OI-1433 built for this exact purpose and kimi_gate.py reuses
-    identically. Never a second hand-rolled marker scan.
-
-    The glm lane does not always write a per-dispatch log (a run can die
-    before the tee starts). Returns the bounded reason snippet only when the
-    log carries a real billing/quota exhaustion marker
-    (``_classify_lane_log_text`` -> ``lane_exhausted``). Returns None —
-    never invents a reason — when the log is missing/empty
-    (``_read_lane_log_text`` already collapses every read failure to None)
-    or when the log has content but no exhaustion marker
-    (``unreadable_verdict``): the frontmatter-only detail stays exactly as
-    informative as it already was, and the gate does not fail on a missing
-    log.
-    """
-    if data_dir is None:
-        return None
-    text = _read_lane_log_text(dispatch_id, data_dir)
-    if not text:
-        return None
-    state, reason = _classify_lane_log_text(text)
-    return reason if state == "lane_exhausted" else None
-
-
 def _lift_report_failure_reason(report_text: str) -> "str | None":
     """OI-1710: read the canonical ``failure_reason`` the lane's own governance
     emit already stamped onto the report frontmatter (the spawn-layer error, for
@@ -509,16 +211,6 @@ def _lift_report_failure_reason(report_text: str) -> "str | None":
         return None
     reason = frontmatter.get("failure_reason")
     return (reason or "").strip() or None
-
-
-def _status_summary(status: str, blocking: list, reason: str = "") -> str:
-    """Summary line for the result record — outage vs recovery vs verdict must be unmistakable."""
-    if status == "unavailable":
-        detail = _UNAVAILABLE_SUMMARIES.get(reason)
-        if detail:
-            return f"glm gate: UNAVAILABLE ({detail} — NOT a review fail)"
-        return "glm gate: UNAVAILABLE (provider outage/no verdict — NOT a review fail)"
-    return f"glm gate: {status} ({len(blocking)} blocking finding(s))"
 
 
 def main(argv: "list[str] | None" = None) -> int:

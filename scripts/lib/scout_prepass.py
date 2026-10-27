@@ -438,11 +438,13 @@ def _project_of_state_dir(state_dir: "Path | str | None") -> Optional[str]:
 
 def _invoke_scout_model(
     prompt: str, provider_name: str, project_id: Optional[str] = None
-) -> "tuple[Optional[Dict[str, Any]], str, float, int]":
+) -> "tuple[Optional[Dict[str, Any]], str, Optional[float], int]":
     """Call the cheap key-auth classifier.
 
     Returns (parsed JSON | None, model, cost_usd, latency_ms) — the cost/latency feed
     the scout receipt so the model call is cost-tracked in the governed audit trail.
+    ``cost_usd`` is the ledger's amount for the call, and ``None`` when the ledger
+    refused the line or could not write it: unknown, never a silent 0 in the receipt.
 
     A provider family the operator switched off (``vnx providers``) makes no call: the result is
     the empty verdict, with one WARNING and the skip counted in ``SCOUT_SWITCH_SKIPS``.
@@ -467,7 +469,7 @@ def _invoke_scout_model(
         return None, "", 0.0, 0
     result = provider.classify(prompt)
     model = str((result.extra or {}).get("model") or "")
-    cost = float(result.cost_usd or 0.0)
+    cost = result.cost_usd
     latency_ms = int(result.latency_ms or 0)
     if result.error or not result.parsed_json:
         logger.debug("scout: provider %r returned no usable JSON (%s)", provider_name, result.error)
@@ -545,7 +547,7 @@ def _emit_scout_receipt(
     dispatch_id: str,
     provider: str,
     model: str,
-    cost_usd: float,
+    cost_usd: Optional[float],
     latency_ms: int,
     sidecar: Dict[str, Any],
     sidecar_path: Path,
@@ -565,7 +567,8 @@ def _emit_scout_receipt(
             "dispatch_id": dispatch_id,
             "provider": provider,
             "model": model,
-            "cost_usd": round(float(cost_usd or 0.0), 6),
+            # None is unknown (the ledger refused or could not write the line), never 0.
+            "cost_usd": None if cost_usd is None else round(float(cost_usd), 6),
             "duration_seconds": round((latency_ms or 0) / 1000.0, 3),
             "sidecar_path": str(sidecar_path),
             "scouted_instruction_sha256": instruction_sha256,

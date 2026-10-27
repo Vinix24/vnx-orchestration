@@ -157,6 +157,14 @@ def test_full_mode_forwards_branch_and_mode(project_env):
     kwargs = mock.call_args.kwargs
     assert kwargs["branch"] == "feat/x"
     assert kwargs["mode"] == "post_merge"
+    assert kwargs["track_id"] is None
+
+
+def test_full_mode_forwards_track_id(project_env):
+    """Whole-feature path: --track-id names the track verify_closure() reads (ADR-047 §3)."""
+    with patch.object(cv, "verify_closure", return_value=_stub_verify_closure_return()) as mock:
+        cv.main(["--branch", "feat/x", "--track-id", "demo-track"])
+    assert mock.call_args.kwargs["track_id"] == "demo-track"
 
 
 def test_full_mode_forwards_review_contract(project_env, tmp_path):
@@ -226,18 +234,15 @@ def test_verify_closure_invokes_contradiction_detector(project_env, tmp_path):
          patch.object(cv, "_validate_test_claims", return_value=[]), \
          patch.object(cv, "_remote_branch_exists", return_value=True), \
          patch.object(cv, "_find_branch_pr", return_value=None), \
-         patch.object(cv, "_parse_feature_plan", return_value={
-             "title": "f", "status": "complete", "dependency_flow": "x", "pr_ids": ["PR-9"]
-         }), \
-         patch.object(cv, "_parse_pr_queue", return_value={
-             "title": "f", "overview": (1, 1, 0, 0, 0), "dependency_flow": "x"
-         }):
+         patch.object(cv, "_read_track_evidence", return_value=cv.TrackEvidence(
+             track_id="f", title="f", derived_status="done", pr_numbers=frozenset({9}), pr_ids=frozenset({"9"}),
+         )), \
+         patch.object(cv, "_track_closure_checks", return_value=[]):
         from review_contract import ReviewContract
         contract = ReviewContract.from_json(contract_path.read_text())
         cv.verify_closure(
             project_root=project_env,
-            feature_plan=project_env / "FEATURE_PLAN.md",
-            pr_queue=project_env / "PR_QUEUE.md",
+            track_id="f",
             branch="feat/x",
             mode="pre_merge",
             review_contract=contract,

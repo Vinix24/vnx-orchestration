@@ -44,7 +44,7 @@ import dispatch_envelope
 import provider_dispatch
 import skill_context
 from dispatch_envelope import EnvelopeSpec, _AdapterResult
-from role_application import _validate_slug, verify_role_applied
+from role_application import _candidate_sources, _validate_slug, verify_role_applied
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -547,3 +547,11 @@ def test_oi983_provider_enrich_stashes_enriched_instruction(tmp_path):
     assert "Backend Developer" in _stashed, (
         "OI-983 FAIL: enriched instruction does not contain role content"
     )
+
+
+def test_candidate_sources_no_longer_offer_the_dead_skills_tier():
+    """RS-4 (ADR-048): a skill folder holds SKILL.md, so ``.claude/skills/<role>/CLAUDE.md``
+    resolved 0 of 38,380 receipts. It must not be a role source any more."""
+    tiers = [tier for tier, _path in
+             _candidate_sources("T1", "backend-developer", Path("/root"))]
+    assert tiers == ["prompt_assembler", "agents", "terminal"], tiers

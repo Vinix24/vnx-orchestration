@@ -90,9 +90,11 @@ def _compute_derived_status(
     # do not hold — see _delivery_hold for the measured motivation.
     hold = _delivery_hold(conn, track_id, project_id, track_pr_ref)
 
-    # 4. Dispatch state aggregation.
+    # 4. Dispatch state aggregation. A withdrawn row is no delivery signal and no
+    #    open work (ADR-049): it is left out, so a track whose rows are all
+    #    withdrawn falls to the pr_ref / declared-phase path below, never 'done'.
     dispatches = conn.execute(
-        "SELECT dispatch_id, state FROM dispatches WHERE track = ? AND project_id = ?",
+        "SELECT dispatch_id, state FROM dispatches WHERE track = ? AND project_id = ? AND state IS NOT 'withdrawn'",
         (track_id, project_id),
     ).fetchall()
 

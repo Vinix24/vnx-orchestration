@@ -128,6 +128,8 @@ A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a
 | api design | api-developer | tests | test-engineer | perf | performance-profiler | security | security-engineer |
 | architecture/planning (NOT implementation) | architect | skills | skill-creator |
 
+This table routes a dispatch to a role. Binding a *skill* — a method document that rides along with an existing role — is a spec field, not a routing decision: see §15 (ADR-048).
+
 ## 5. Lane selection (which dispatch path)
 
 | Task | Lane |
@@ -352,3 +354,42 @@ receipt, or (b) an operator explicitly overrides.
 Staleness windowing (a frozen historical batch should not read as live
 churn) is delegated to the existing `contract_invalid_window.py` — not
 reimplemented in the ledger module.
+
+## 15. Binding a skill to a dispatch
+
+§4 routes work to a *role*. A skill is not a role: it is a method document bound to one dispatch of an existing role, so it reaches both roles that refactor (`backend-developer`, `quality-engineer`) without a fourth role register. ADR-048 records the decision; this section is the operating half.
+
+**How to bind.** The staged spec carries one optional field, `skill` (`scripts/lib/dispatch_spec.py:242`): a single slug naming a folder under `skills/` or `.claude/skills/`. Set it through the bridge that writes every bundle — `dispatch_bridge.stage_spec_bundle(..., skill="<slug>")`. Resolution at delivery is `skills/<slug>/SKILL.md` first, then `.claude/skills/<slug>/SKILL.md`; both roots are tracked and the two copies of a skill are kept byte-equal. One slug, not a list.
+
+**What staging refuses.** An unknown slug. The bridge is the FIRST writer of a `dispatch-spec.json`, so the refusal lives there, the same boundary that already refuses an out-of-range deadline (`scripts/lib/dispatch_bridge.py:293`): the stage fails loud and nothing is written. `validate()` deliberately leaves skill presence to the plan layer (`scripts/lib/dispatch_spec.py:404`), so a spec written by hand instead of by the bridge is not refused at staging — the delivery measurement below is what catches that case.
+
+The block is additive, never a replacement: the role source (`agents/<role>/CLAUDE.md` or the role prompt under `scripts/lib/prompts/roles/`) still reaches the worker and `role_applied` still measures it. The order the seam produces is fixed (ADR-048 "Relatie tot ADR-022"):
+
+```
+<skill block: ## Skill: <slug> + SKILL.md body, frontmatter stripped>
+<role block: agents/<role>/CLAUDE.md or scripts/lib/prompts/roles/<role>.md>
+<dispatch instruction, with the intelligence section if any>
+<report-body-contract directive>
+```
+
+**What the receipt shows.** Three optional fields; an absent `skill_applied` reads as "no skill was requested", so every older receipt stays valid.
+
+| Case | `skill_applied` | `skill_source_path` | `skill_unapplied_reason` |
+|---|---|---|---|
+| spec without `skill` | absent | absent | absent |
+| skill resolved, and the bytes of the resolved `SKILL.md` (frontmatter stripped) are literally present in the prompt the lane gave the worker | `true` | absolute path of the resolved `SKILL.md` | absent |
+| skill in the spec, resolution fails at delivery time | `false` | absent | `resolution_failed: <reason>` |
+| skill in the spec, dispatch bound to a reviewer | `false` | absent | `reviewer_bound` |
+
+`skill_applied: true` is a measurement on the prompt, never a flag the seam sets: the seam compares the bytes of the resolved `SKILL.md` with the prompt the lane actually handed the worker. A delivery route that never passed the seam stamps `false` with `resolution_failed: lane_without_seam`, so a coverage gap shows on the receipt instead of vanishing into a log line. `role_applied` is not stretched to cover skills — a reviewer already carries `role_applied: true` with no source at all (`scripts/lib/role_application.py:234-237`), so reusing it would make the receipt lie about which source proved arrival.
+
+**What it costs per lane.** The skill is prompt text, so the cost is tokens in a prompt the lane already builds — never an extra model call.
+
+| Lane | Where the skill enters | What it costs |
+|---|---|---|
+| headless envelope (`claude_headless`) | the shared injector (`scripts/lib/envelope_prepare.py:83`) | the skill's bytes in the prompt; subscription tokens, no extra call |
+| provider (`provider_dispatch`) | the same injector (`scripts/lib/provider_dispatch.py:369`) | the same bytes at that provider's token price, no extra call |
+| pool | spawns `subprocess_dispatch` (`scripts/lib/pool_manager.py:121`), which passes the same injector (`scripts/lib/subprocess_dispatch.py:167`) | nothing extra; no separate plumbing |
+| any reviewer seat | nowhere | nothing; `enrichment_allowed` (`scripts/lib/reviewer_roles.py:32`) refuses it and the receipt reads `reviewer_bound` |
+
+**Rollback (ADR-048 §6).** RS-3 (the receipt fields), then RS-2 (the injection), then RS-1 (the staging refusal); RS-5 and the ADR revert independently of those three.

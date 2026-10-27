@@ -1,19 +1,14 @@
 # ============================================================================
 # ROADMAP.yaml is the SINGLE SOURCE OF TRUTH for the feature roadmap.
 #
-# It is the only hand-edited planning surface. Two views are GENERATED from it
-# and must never be hand-edited:
-#   - FEATURE_PLAN.md  <- scripts/build_feature_plan.py
-#   - PR_QUEUE.md      <- scripts/build_pr_queue.py
+# It is the only hand-edited planning surface. No view is generated from it any
+# more: FEATURE_PLAN.md and its generator scripts/build_feature_plan.py are gone
+# (ADR-047), the tracks DB is the only plan source.
 #
-# After editing this file, regenerate both views and commit them together:
-#   python3 scripts/build_feature_plan.py
-#   python3 scripts/build_pr_queue.py
-# CI guards this: tests/test_roadmap_consistency.py runs the generators with
-# --check and fails the build if either view drifts from this file.
+# CI keeps the file honest: tests/test_roadmap_consistency.py checks the format.
 #
 # This shipped file is an ILLUSTRATIVE EXAMPLE of the roadmap format. Replace the
-# example features below with your own; the generators and CI guard work the same.
+# example features below with your own.
 #
 # ADR-007: every new central-DB table needs a composite UNIQUE/PK over
 # project_id. Cite it explicitly in review-gate prompts for schema work.

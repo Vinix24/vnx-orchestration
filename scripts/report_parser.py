@@ -796,51 +796,20 @@ class ReportParser:
         except Exception:
             return _IDENTITY_UNRESOLVED
 
-    def _junit_counts_enabled(self) -> bool:
-        """VNX_JUNIT_COUNTS, read through the runtime config façade.
-
-        Off is today's behaviour, so an unreadable config reads as off.
-        """
-        try:
-            import config_runtime
-            return config_runtime.get_bool("VNX_JUNIT_COUNTS")
-        except Exception:  # vnx-silent-except: config module unavailable -> the pre-flag behaviour (text counts)
-            return False
-
     def _build_verification(self, validation: Dict[str, Any], dispatch_id: Any,
                             report_path: str) -> Dict[str, Any]:
-        """verification{} for this receipt, from the JUnit sidecar when the setting is on.
+        """verification{} for this receipt — Path 2 of the two receipt write paths.
 
-        deterministische-testverificatie PR-4. Off is exactly
-        ``verification_record(validation, dispatch_id)``, no new keys. On, the
-        counts come from ``<report>.junit.xml`` (``count_source``); a refused
-        sidecar keeps the text counts and names why (``junit_rejected``). A
-        failure recorded in either place is never erased (failed = the higher
-        of the two, stamped ``count_mismatch``).
+        deterministische-testverificatie PR-4/PR-5. The sidecar decision (the
+        setting, the ``<report>.junit.xml`` path, ``from_junit``, the mismatch
+        rule and the three keys) lives in
+        ``verification_runs.verification_record_for_report``, which Path 1
+        (``envelope_govern_support._verification_from_report``) calls too, so
+        the two paths cannot drift. Off is exactly
+        ``verification_record(validation, dispatch_id)``, no new keys.
         """
-        from verification_runs import from_junit, junit_sidecar_path, verification_record
-        if not self._junit_counts_enabled():
-            return verification_record(validation, dispatch_id)
-        xml_path = junit_sidecar_path(report_path)
-        if not xml_path.is_file():
-            return verification_record(validation, dispatch_id, count_source="report_text")
-        counts, rejected = from_junit(xml_path, dispatch_id)
-        if counts is None:
-            return verification_record(validation, dispatch_id, count_source="report_text",
-                                       junit_rejected=rejected)
-        # A text run exists only when extract_validation counted one; without
-        # one there is nothing to disagree with (0/0 is not a claim).
-        text_present = "test_method" in validation
-        text_passed = int(validation.get("tests_passed") or 0)
-        text_failed = int(validation.get("tests_failed") or 0)
-        mismatch = text_present and (
-            text_passed != counts["passed"] or text_failed != counts["failed"])
-        merged = dict(validation)
-        merged["tests_passed"] = counts["passed"]
-        merged["tests_failed"] = max(counts["failed"], text_failed)
-        merged["test_method"] = "pytest"
-        return verification_record(merged, dispatch_id, count_source="junit_worker",
-                                   count_mismatch=mismatch)
+        from verification_runs import verification_record_for_report
+        return verification_record_for_report(validation, dispatch_id, report_path)
 
     def _build_enhanced_receipt(self, extracted: Dict, report_path: str) -> Dict[str, Any]:
         """Build enhanced receipt structure from extracted data"""

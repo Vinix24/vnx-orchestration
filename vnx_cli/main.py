@@ -340,7 +340,12 @@ def _register_guard_subparser(subparsers: argparse.Action) -> None:
     )
     check_parser.add_argument(
         "--scan-root", action="append", default=[], metavar="DIR",
-        help="also inventory every .vnx-project-id under DIR (depth 3); repeatable",
+        help="also inventory every .vnx-project-id and T0 folder under DIR (depth 3); repeatable",
+    )
+    check_parser.add_argument(
+        "--require-user", action="store_true",
+        help="every project that passes rule 1 must be covered at user level on every account; "
+             "a project-level registration alone fails",
     )
     for sub in (install_parser, check_parser):
         sub.add_argument(
@@ -654,17 +659,34 @@ def _common_horizon_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--json", action="store_true", help="emit JSON instead of a table")
 
 
-def _register_objective_verbs(subs: argparse.Action) -> None:
-    """Register the objective-domain verbs shared by `vnx horizon` and the
-    `vnx objective` backward-compat alias — same flags, same handlers."""
-    _register_objective_add(subs)
+def _register_objective_list_verb(subs: argparse.Action) -> None:
+    """`list`: the horizon table, plus the repeatable blocked-track count.
 
+    A separate registrar because ``_register_objective_verbs`` is already over
+    the 70-executable-line ratchet limit: a new flag added inline would grow it.
+    Flags mirror ``planning_cli``'s ``objective list`` parser exactly (enforced
+    by tests/test_horizon_parity.py).
+    """
     p_list = subs.add_parser("list", help="list objectives grouped by horizon")
     _common_horizon_args(p_list)
     p_list.add_argument("--horizon", choices=_HORIZON_CHOICES, default=None)
     p_list.add_argument("--phase", choices=_PHASE_CHOICES, default=None)
     p_list.add_argument("--all", action="store_true",
                         help="include done tracks (hidden by default)")
+    p_list.add_argument(
+        "--count-blocked", action="store_true", dest="count_blocked",
+        help="print one repeatable count of blocked tracks: every track whose stored "
+             "derived_status is 'blocked', over ALL tracks — the same definition as "
+             "the 14-08 baseline of 76 — split plan-gate > dependency > other, each "
+             "track counted once; --json lists every reason per track",
+    )
+
+
+def _register_objective_verbs(subs: argparse.Action) -> None:
+    """Register the objective-domain verbs shared by `vnx horizon` and the
+    `vnx objective` backward-compat alias — same flags, same handlers."""
+    _register_objective_add(subs)
+    _register_objective_list_verb(subs)
 
     p_show = subs.add_parser("show", help="show one objective")
     _common_horizon_args(p_show)
@@ -893,7 +915,7 @@ def _register_objective_queue_verb(subs: argparse.Action) -> None:
     )
     p_queue.add_argument(
         "--all", action="store_true",
-        help="also show closed/done/cancelled deliverables (hidden by default)",
+        help="also show closed/done/cancelled/withdrawn deliverables (hidden by default)",
     )
 
 
@@ -962,9 +984,7 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
              "plan-gate run without --dispatch-paths reads them",
     )
 
-    p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
-    _common_horizon_args(p_dlist)
-    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    _register_deliverable_list_verb(subs)
 
     p_dpromote = subs.add_parser(
         "promote", help="human gate: promote deliverable from proposed -> ready",
@@ -1010,6 +1030,29 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
         help="comma-separated repo paths this deliverable will touch (replaces "
              "the stored list)",
     )
+    _register_deliverable_retarget_verb(subs)
+
+
+def _register_deliverable_list_verb(subs: argparse.Action) -> None:
+    """`deliverable list`: grouped by objective, withdrawn ones only with --all."""
+    p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
+    _common_horizon_args(p_dlist)
+    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
+
+
+def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
+    """`deliverable retarget` and `withdraw`: move, or end, a deliverable that has not started."""
+    p = subs.add_parser("retarget", help="move a proposed/ready deliverable to another track")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--objective", required=True, metavar="TRACK_ID", help="the track to move it to")
+    p.add_argument("--reason", required=True, help="why it moves (REQUIRED, in the audit event)")
+    p.add_argument("--include-parked", action="store_true", dest="include_parked", help="allow a parked target")
+    p = subs.add_parser("withdraw", help="end a proposed/ready deliverable that will not be built")
+    _common_horizon_args(p)
+    p.add_argument("dispatch_id")
+    p.add_argument("--reason", required=True, help="why it is not built (REQUIRED, in the audit event)")
 
 
 def _register_plan_gate_verbs(subs: argparse.Action) -> None:

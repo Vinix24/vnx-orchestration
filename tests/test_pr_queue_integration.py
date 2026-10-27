@@ -9,7 +9,6 @@ import pytest
 import json
 import yaml
 import sys
-import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -53,8 +52,9 @@ def _real_pr_queue_md_untouched():
     """OI-1919: no test in this module may write PR_QUEUE.md in the real checkout.
 
     Compares mtime plus content of the real-root PR_QUEUE.md before and after the
-    module. A leak (PRQueueManager() resolving PROJECT_ROOT to the real repo)
-    fails the module here instead of tripping the harness-lane main-checkout guard.
+    module. ADR-047 B4 retired the file and its writer, so both reads are
+    ``None``; a writer that comes back fails the module here instead of tripping
+    the harness-lane main-checkout guard.
     """
     real_queue = _real_project_root() / "PR_QUEUE.md"
     before = _snapshot(real_queue)
@@ -68,7 +68,7 @@ def _tmp_project_root(tmp_path, monkeypatch):
     """OI-1919: point PROJECT_ROOT (and VNX_HOME) of every test at tmp_path.
 
     VNX_PROJECT_ROOT is the override vnx_paths honours ahead of the git
-    heuristics; PRQueueManager writes PR_QUEUE.md under the resolved root.
+    heuristics, so nothing a test resolves under the project root lands in the repo.
     """
     project_root = tmp_path / "project-root"
     project_root.mkdir(parents=True, exist_ok=True)
@@ -130,53 +130,16 @@ def clean_state(tmp_path, monkeypatch):
     yield state_dir
 
 
-@pytest.fixture
-def sample_feature_plan(tmp_path):
-    """Create a sample FEATURE_PLAN.md for testing"""
-    # Note: PR IDs must match format '## PR-X:' for validation
-    plan_content = """# Feature: VNX PR Queue Integration
-
-## PR-1: Queue Structure
-Dependencies: []
-Size: 200 lines
-Skill: @architect
-
-Implement core PR queue manager with state persistence.
-
-## PR-2: Dependency Checker
-Dependencies: [PR-1]
-Size: 150 lines
-Skill: @backend-developer
-
-Add dependency validation and topological sort.
-
-## PR-3: Recommendation Integration
-Dependencies: [PR-1, PR-2]
-Size: 100 lines
-Skill: @backend-developer
-
-Integrate PR queue with recommendation engine.
-"""
-
-    plan_file = tmp_path / "FEATURE_PLAN.md"
-    plan_file.write_text(plan_content)
-    return plan_file
-
-
 class TestPRQueueStateCreation:
     """Test PR queue state file creation (PR 2.1 + 2.4)"""
 
-    def test_pr_queue_state_creation(self, clean_state, sample_feature_plan):
+    def test_pr_queue_state_creation(self, clean_state):
         """Test PR queue state file is created correctly"""
         manager = PRQueueManager()
         manager.clear_queue()
         manager.set_feature("VNX PR Queue Integration")
 
-        # Validate feature plan
-        valid, error = manager.validate_feature_plan(str(sample_feature_plan))
-        assert valid, f"Feature plan invalid: {error}"
-
-        # Add PRs from feature plan (matching the fixture PR IDs)
+        # Add PRs
         prs = [
             {
                 'id': 'PR-1',
@@ -356,43 +319,65 @@ class TestRecommendationEngineIntegration:
         pr_ready = [r for r in engine.recommendations if r['trigger'] == 'pr_ready']
         assert len(pr_ready) > 0, "Should generate PR_READY recommendation"
         assert pr_ready[0]['pr_id'] == 'PR-1'
-        assert 'command' in pr_ready[0], "Should include dispatch command"
-        assert 'dispatch PR-1' in pr_ready[0]['command']
+        # A6 round 4 (OI-2373): the `pr_queue_manager.py dispatch` verb is
+        # retired (ADR-047), so the pr_ready recommendation must not hand the
+        # operator a dead command. It names the surviving route instead.
+        assert 'command' not in pr_ready[0], "Retired dispatch verb: no command field"
+        assert 'vnx dispatch' in pr_ready[0]['suggested_instruction']
 
-    def test_pr_blocked_recommendation(self, clean_state):
-        """Test PR_BLOCKED recommendation for dependencies"""
-        # Create manager with blocked PR
-        manager = PRQueueManager()
-        manager.clear_queue()
-        manager.set_feature("Test Feature")
+    def test_no_recommendation_points_at_removed_dispatch_verb(self, clean_state):
+        """A6 round 4 (OI-2373): nothing turns a PR id into a dispatch any more.
 
-        manager.add_pr({
-            'id': 'PR-1',
-            'dependencies': [],
-            'title': 'Base',
-            'skill': '@developer',
-            'size': 100
-        })
-        manager.add_pr({
-            'id': 'PR-2',
-            'dependencies': ['PR-1'],
-            'title': 'Dependent',
-            'skill': '@developer',
-            'size': 100
-        })
+        `scripts/pr_queue_manager.py` no longer parses a `dispatch` verb (it
+        exits `Unknown command: dispatch`), so no recommendation may carry that
+        dead command — whether it hides in a bare `command` key or inside a
+        string field such as `suggested_instruction`. The check walks every
+        string reachable from every recommendation, so a nested message cannot
+        reintroduce it either.
+        """
+        pr_state_file = clean_state / "pr_queue_state.yaml"
+        pr_state_content = {
+            'active_feature': {
+                'name': 'Legacy Feature',
+                'plan_file': 'FEATURE_PLAN.md'
+            },
+            'completed_prs': [],
+            'in_progress': None,
+            'blocked': [],
+            'next_available': ['PR-1', 'PR-2'],
+            'execution_order': ['PR-1', 'PR-2'],
+            'updated_at': datetime.now().isoformat()
+        }
 
-        # Set PR-2 as in_progress (but dependencies not met)
-        manager.update_pr_status('PR-2', 'in_progress')
+        with open(pr_state_file, 'w') as f:
+            yaml.dump(pr_state_content, f)
 
-        # Load recommendation engine
         engine = RecommendationEngine(lookback_minutes=5)
         engine.load_pr_queue_state()
         engine.add_pr_dependency_recommendation()
 
-        # Verify PR_BLOCKED recommendation exists
-        pr_blocked = [r for r in engine.recommendations if r['trigger'] == 'pr_blocked']
-        assert len(pr_blocked) > 0, "Should generate PR_BLOCKED recommendation"
-        assert pr_blocked[0]['pr_id'] == 'PR-2'
+        assert engine.recommendations, "Should generate the pr_ready recommendation"
+        assert any(r.get('trigger') == 'pr_ready' for r in engine.recommendations)
+
+        dead_command = "pr_queue_manager.py dispatch "
+
+        def _string_fields(value):
+            """Every string reachable from a recommendation, at any depth."""
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for nested in value.values():
+                    yield from _string_fields(nested)
+            elif isinstance(value, (list, tuple, set)):
+                for nested in value:
+                    yield from _string_fields(nested)
+
+        for rec in engine.recommendations:
+            for text in _string_fields(rec):
+                assert dead_command not in text, (
+                    f"recommendation {rec.get('trigger')!r} still points at the "
+                    f"removed `pr_queue_manager.py dispatch` verb: {text!r}"
+                )
 
     def test_recommendation_inputs_do_not_read_legacy_by_default(self, clean_state, monkeypatch):
         """Canonical cutover: legacy-only sources should be ignored unless rollback is enabled."""
@@ -516,143 +501,6 @@ class TestRecommendationEngineIntegration:
         assert "open_item_blocker" in triggers
 
 
-class TestDispatchCreation:
-    """Test PR dispatch creation (PR 2.5)"""
-
-    def test_dispatch_creation_from_pr(self, tmp_path):
-        """Test PR creates valid dispatch file"""
-        manager = PRQueueManager()
-        manager.clear_queue()
-        manager.set_feature("Test Feature")
-
-        # Add test PR
-        manager.add_pr({
-            'id': 'PR-TEST',
-            'title': 'Test PR',
-            'description': 'Test description for dispatch',
-            'track': 'A',
-            'skill': '@developer',
-            'dependencies': [],
-            'size': 100,
-            'gate': 'implementation',
-            'priority': 'P1',
-            'success_criteria': 'Tests pass'
-        })
-
-        # Create dispatch
-        dispatch_id = manager.create_dispatch_from_pr('PR-TEST')
-        assert dispatch_id is not None, "Should create dispatch ID"
-
-        # Verify dispatch file exists
-        staging_dir = manager.dispatch_dir / "staging"
-        dispatch_file = staging_dir / f"{dispatch_id}.md"
-        assert dispatch_file.exists(), f"Dispatch file should exist: {dispatch_file}"
-
-        # Verify Manager Block v2 format
-        content = dispatch_file.read_text()
-        assert '[[TARGET:A]]' in content, "Should have TARGET marker"
-        assert 'Role: developer' in content, "Should have skill without @ prefix"
-        assert 'Track: A' in content, "Should have track"
-        assert 'Gate: implementation' in content, "Should have gate"
-        assert 'Test description for dispatch' in content, "Should have description"
-        assert '[[DONE]]' in content, "Should have DONE marker"
-
-        # Cleanup
-        dispatch_file.unlink()
-
-    def test_dispatch_blocked_by_dependencies(self):
-        """Test dispatch creation is blocked by dependencies"""
-        manager = PRQueueManager()
-        manager.clear_queue()
-
-        # Add PRs with dependencies
-        manager.add_pr({
-            'id': 'PR-1',
-            'dependencies': [],
-            'title': 'Base',
-            'skill': '@developer',
-            'size': 100
-        })
-        manager.add_pr({
-            'id': 'PR-2',
-            'dependencies': ['PR-1'],
-            'title': 'Dependent',
-            'skill': '@developer',
-            'size': 100
-        })
-
-        # Try to create dispatch for PR-2 (should fail)
-        dispatch_id = manager.create_dispatch_from_pr('PR-2')
-        assert dispatch_id is None, "Should not create dispatch with unmet dependencies"
-
-        # Complete PR-1
-        manager.update_pr_status('PR-1', 'completed')
-
-        # Now PR-2 should work
-        dispatch_id = manager.create_dispatch_from_pr('PR-2')
-        assert dispatch_id is not None, "Should create dispatch after dependencies met"
-
-        # Cleanup
-        staging_dir = manager.dispatch_dir / "staging"
-        dispatch_file = staging_dir / f"{dispatch_id}.md"
-        if dispatch_file.exists():
-            dispatch_file.unlink()
-
-    def test_manager_block_v2_format_validation(self):
-        """Test Manager Block v2 format is correct"""
-        manager = PRQueueManager()
-        manager.clear_queue()
-
-        manager.add_pr({
-            'id': 'PR-FORMAT',
-            'title': 'Format test',
-            'description': 'Testing v2 format',
-            'track': 'B',
-            'skill': '@backend-developer',
-            'dependencies': [],
-            'size': 150,
-            'gate': 'review',
-            'priority': 'P2',
-        })
-
-        # Create dispatch
-        dispatch_id = manager.create_dispatch_from_pr('PR-FORMAT')
-        assert dispatch_id is not None
-
-        # Read dispatch file
-        staging_dir = manager.dispatch_dir / "staging"
-        dispatch_file = staging_dir / f"{dispatch_id}.md"
-        content = dispatch_file.read_text()
-
-        # Validate v2 format fields
-        required_v2_fields = [
-            '[[TARGET:B]]',
-            'Manager Block',
-            'Role: backend-developer',  # NO @ prefix
-            'Track: B',
-            'Terminal: T2',
-            'Gate: review',
-            'Priority: P2',
-            'Cognition: normal',
-            f'Dispatch-ID: {dispatch_id}',
-            'Parent-Dispatch: none',
-            'On-Success: review',
-            'On-Failure: investigation',
-            'Context: [[@FEATURE_PLAN.md]]',
-            'Instruction:',
-            '[[DONE]]'
-        ]
-
-        for field in required_v2_fields:
-            assert field in content, f"Missing v2 field: {field}"
-
-        # Verify NO @ prefix in Role
-        assert 'Role: @' not in content, "Role should NOT have @ prefix in v2"
-
-        # Cleanup
-        dispatch_file.unlink()
-
-
 class TestWorkflowIntegration:
     """Test complete workflow integration"""
 
@@ -686,81 +534,11 @@ class TestWorkflowIntegration:
         engine.add_pr_dependency_recommendation()
         pr_ready = [r for r in engine.recommendations if r['trigger'] == 'pr_ready']
         assert len(pr_ready) > 0
-        assert 'command' in pr_ready[0]
-
-        # Step 4: Create dispatch (simulating T0 running the command)
-        dispatch_id = manager.create_dispatch_from_pr('PR-E2E')
-        assert dispatch_id is not None
-
-        # Step 5: Verify dispatch in queue
-        staging_dir = manager.dispatch_dir / "staging"
-        dispatch_file = staging_dir / f"{dispatch_id}.md"
-        assert dispatch_file.exists()
-
-        # Step 6: Verify Manager Block v2 format
-        content = dispatch_file.read_text()
-        assert '[[TARGET:A]]' in content
-        assert 'Role: developer' in content  # No @ prefix
-        assert '[[DONE]]' in content
-
-        # Cleanup
-        dispatch_file.unlink()
-
-    def test_dependency_chain_workflow(self):
-        """Test workflow with dependency chain"""
-        manager = PRQueueManager()
-        manager.clear_queue()
-        manager.set_feature("Dependency Chain Test")
-
-        # Create dependency chain: PR-1 → PR-2 → PR-3
-        prs = [
-            {'id': 'PR-1', 'dependencies': [], 'title': 'Base', 'skill': '@developer', 'size': 100},
-            {'id': 'PR-2', 'dependencies': ['PR-1'], 'title': 'Middle', 'skill': '@developer', 'size': 100},
-            {'id': 'PR-3', 'dependencies': ['PR-2'], 'title': 'Top', 'skill': '@developer', 'size': 100}
-        ]
-
-        for pr in prs:
-            manager.add_pr(pr)
-
-        # Only PR-1 should be available
-        next_pr = manager.get_next_pr()
-        assert next_pr['id'] == 'PR-1'
-
-        # Create dispatch for PR-1
-        dispatch_id_1 = manager.create_dispatch_from_pr('PR-1')
-        assert dispatch_id_1 is not None
-
-        # PR-2 should still be blocked
-        dispatch_id_2 = manager.create_dispatch_from_pr('PR-2')
-        assert dispatch_id_2 is None
-
-        # Complete PR-1
-        manager.update_pr_status('PR-1', 'completed')
-
-        # Now PR-2 should be available
-        next_pr = manager.get_next_pr()
-        assert next_pr['id'] == 'PR-2'
-
-        dispatch_id_2 = manager.create_dispatch_from_pr('PR-2')
-        assert dispatch_id_2 is not None
-
-        # Complete PR-2
-        manager.update_pr_status('PR-2', 'completed')
-
-        # Now PR-3 should be available
-        next_pr = manager.get_next_pr()
-        assert next_pr['id'] == 'PR-3'
-
-        dispatch_id_3 = manager.create_dispatch_from_pr('PR-3')
-        assert dispatch_id_3 is not None
-
-        # Cleanup
-        staging_dir = manager.dispatch_dir / "staging"
-        for dispatch_id in [dispatch_id_1, dispatch_id_2, dispatch_id_3]:
-            if dispatch_id:
-                dispatch_file = staging_dir / f"{dispatch_id}.md"
-                if dispatch_file.exists():
-                    dispatch_file.unlink()
+        # A6 round 4 (OI-2373): the retired `pr_queue_manager.py dispatch` verb
+        # must not reappear as a recommendation command; the instruction names
+        # the surviving `vnx dispatch` route instead.
+        assert 'command' not in pr_ready[0]
+        assert 'vnx dispatch' in pr_ready[0]['suggested_instruction']
 
 
 def test_clean_state_does_not_leak_recs_module_globals():

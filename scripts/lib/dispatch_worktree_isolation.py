@@ -153,7 +153,7 @@ def _dispatch_worktree_dir(project_root: Path, dispatch_id: str) -> Path:
 # letting tests pin it to one shared temp dir with VNX_DATA_DIR_EXPLICIT=1.
 # ---------------------------------------------------------------------------
 
-def _claim_dir(project_root: Path) -> Path:
+def _claim_dir(project_root: Path, data_dir: Optional[Path] = None) -> Path:
     """Return the SHARED dispatch-worktree claim registry directory.
 
     Resolved via ``vnx_paths.resolve_data_root(project_root)`` — the canonical
@@ -161,10 +161,18 @@ def _claim_dir(project_root: Path) -> Path:
     a hardcoded ``<repo>/.vnx-data/state``.  Honors ``VNX_DATA_DIR_EXPLICIT=1``
     + ``VNX_DATA_DIR`` for tests and CI, so two simulated worktrees can share
     one temp claim map.
+
+    An explicit *data_dir* wins over that ambient resolution: a parent that
+    pinned its child to ``VNX_DATA_DIR=<data_dir>`` + ``VNX_DATA_DIR_EXPLICIT=1``
+    passes the same dir here, so it reads the registry the child wrote — the
+    child's ``resolve_data_root`` returns ``Path(VNX_DATA_DIR).expanduser().resolve()``
+    on that pin, which is exactly what this resolves *data_dir* to.
     """
+    if data_dir is not None:
+        return claims_dir_for_state_dir(Path(data_dir).expanduser().resolve() / "state")
     from vnx_paths import resolve_data_root  # noqa: PLC0415
-    data_dir = Path(resolve_data_root(project_root))
-    return claims_dir_for_state_dir(data_dir / "state")
+    resolved_data_dir = Path(resolve_data_root(project_root))
+    return claims_dir_for_state_dir(resolved_data_dir / "state")
 
 
 def claims_dir_for_state_dir(state_dir: Path) -> Path:
@@ -178,13 +186,15 @@ def claims_dir_for_state_dir(state_dir: Path) -> Path:
     return Path(state_dir) / "dispatch_worktree_claims"
 
 
-def _claim_path(safe_id: str, project_root: Path) -> Path:
-    return _claim_dir(project_root) / f"{safe_id}.json"
+def _claim_path(safe_id: str, project_root: Path, data_dir: Optional[Path] = None) -> Path:
+    return _claim_dir(project_root, data_dir) / f"{safe_id}.json"
 
 
-def _read_claim_entry(safe_id: str, project_root: Path) -> "dict | None":
+def _read_claim_entry(
+    safe_id: str, project_root: Path, data_dir: Optional[Path] = None
+) -> "dict | None":
     """Read the claim for *safe_id*; None when absent or corrupt (never raises)."""
-    path = _claim_path(safe_id, project_root)
+    path = _claim_path(safe_id, project_root, data_dir)
     try:
         raw = path.read_text(encoding="utf-8")
         entry = json.loads(raw)
@@ -203,8 +213,10 @@ def _read_claim_entry(safe_id: str, project_root: Path) -> "dict | None":
         return None
 
 
-def _read_claim(dispatch_id: str, project_root: Path) -> "dict | None":
-    return _read_claim_entry(_sanitize_dispatch_id(dispatch_id), project_root)
+def _read_claim(
+    dispatch_id: str, project_root: Path, data_dir: Optional[Path] = None
+) -> "dict | None":
+    return _read_claim_entry(_sanitize_dispatch_id(dispatch_id), project_root, data_dir)
 
 
 def _write_claim_atomic(
@@ -274,10 +286,14 @@ def _write_claim_atomic(
     return claim
 
 
-def _clear_claim(dispatch_id: str, project_root: Path) -> None:
+def _clear_claim(
+    dispatch_id: str, project_root: Path, data_dir: Optional[Path] = None
+) -> None:
     """Remove the claim for *dispatch_id*.  Idempotent, never raises."""
     try:
-        _claim_path(_sanitize_dispatch_id(dispatch_id), project_root).unlink(missing_ok=True)
+        _claim_path(_sanitize_dispatch_id(dispatch_id), project_root, data_dir).unlink(
+            missing_ok=True
+        )
     except OSError as exc:
         log.debug(
             "dispatch_worktree_isolation: clear claim failed for %s: %s",
@@ -542,8 +558,27 @@ def _worktree_lock(root: Path):
 _OCCUPANCY_LOCKS: "dict[str, object]" = {}
 
 
-def _occupancy_lock_path(safe_id: str, project_root: Path) -> Path:
-    return _claim_dir(project_root) / f"{safe_id}.occupancy"
+def _occupancy_lock_path(
+    safe_id: str, project_root: Path, data_dir: Optional[Path] = None
+) -> Path:
+    return _claim_dir(project_root, data_dir) / f"{safe_id}.occupancy"
+
+
+def _flock_exclusive_nonblocking(fh) -> bool:
+    """Take ``LOCK_EX | LOCK_NB`` on *fh*; False when another description holds it.
+
+    The one exclusive-occupancy primitive, shared by ``_acquire_occupancy``
+    (creation) and ``_hold_occupancy_for_reap`` (parent-side teardown).  A
+    holder is any other open file description: a sibling process, or this
+    very process through a second ``open()`` — flock locks belong to the
+    description, not the process.  Any OSError other than a held lock
+    propagates: an unmeasurable lock is never treated as a free one.
+    """
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
 
 
 def _acquire_occupancy(dispatch_id: str, wt_path: Path, project_root: Path) -> None:
@@ -562,8 +597,11 @@ def _acquire_occupancy(dispatch_id: str, wt_path: Path, project_root: Path) -> N
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(lock_path, "a")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+        locked = _flock_exclusive_nonblocking(fh)
+    except OSError:
+        fh.close()
+        raise
+    if not locked:
         fh.close()
         raise WorktreeOccupied(
             f"worktree for dispatch {dispatch_id!r} ({wt_path}) is already "
@@ -571,7 +609,7 @@ def _acquire_occupancy(dispatch_id: str, wt_path: Path, project_root: Path) -> N
             f"worktree to a second concurrent claim (OI-1232) — a sibling "
             f"dispatch must never mutate a branch that another dispatch is "
             f"still using"
-        ) from None
+        )
     _OCCUPANCY_LOCKS[key] = fh
 
 
@@ -587,6 +625,11 @@ def _release_occupancy(wt_path: Path) -> None:
     fh = _OCCUPANCY_LOCKS.pop(key, None)
     if fh is None:
         return
+    _unlock_and_close(fh, wt_path)
+
+
+def _unlock_and_close(fh, wt_path: Optional[Path]) -> None:
+    """Drop the flock on *fh* and close it.  Never raises."""
     try:
         fcntl.flock(fh, fcntl.LOCK_UN)
     except OSError as exc:
@@ -906,8 +949,8 @@ def remove_dispatch_worktree(
     *,
     project_root: Optional[Path] = None,
     terminal_id: str = "",
-    review_only: bool = False,
-) -> None:
+    review_only: bool = False, data_dir: Optional[Path] = None,
+) -> Optional[str]:
     """Remove the ephemeral dispatch worktree.  Idempotent.
 
     **L3 provider-lane reap (2026-08-08):** the worktree is CLASSIFIED before
@@ -940,22 +983,31 @@ def remove_dispatch_worktree(
     OI-1232: releases this process's occupancy lock (see ``_acquire_occupancy``)
     unconditionally, before anything else — the calling process is done with
     the worktree the moment teardown starts, regardless of what classification
-    or reap decide to do with it.
+    or reap decide to do with it.  It never TAKES the occupancy lock, so a
+    caller that holds the lock through its own description
+    (``remove_dispatch_worktree_if_present``) keeps holding it here.
 
-    Called on both success and failure paths.  Best-effort — never raises.
+    *data_dir* pins the claim registry and the event store to one explicit
+    data dir (``<data_dir>/state/dispatch_worktree_claims``,
+    ``<data_dir>/events``) instead of this process's ambient resolution — for
+    a parent tearing down the worktree of a child it pinned to that dir.
+
+    Returns the classification the worktree was reaped under, or None when it
+    was already absent.  Called on both success and failure paths.
+    Best-effort — never raises.
     """
     root = _resolve_project_root(project_root)
     wt_path = _dispatch_worktree_dir(root, dispatch_id)
     _release_occupancy(wt_path)
 
     if not wt_path.exists():
-        _clear_claim(dispatch_id, root)
+        _clear_claim(dispatch_id, root, data_dir)
         log.debug("remove_dispatch_worktree: already absent: %s", wt_path)
-        return
+        return None
 
     # OI-861 hard refusal on teardown: never reap a worktree that is stamped
     # for a DIFFERENT dispatch id.
-    claim = _read_claim(dispatch_id, root)
+    claim = _read_claim(dispatch_id, root, data_dir)
     if claim is not None:
         _claim_belongs_to_or_raise(dispatch_id, claim, wt_path)
 
@@ -1138,53 +1190,273 @@ def remove_dispatch_worktree(
     # A dirty worktree stays claimed so a later dispatch mapping to the same
     # safe id knows this slot is occupied.
     if reap_result.removed:
-        _clear_claim(dispatch_id, root)
+        _clear_claim(dispatch_id, root, data_dir)
 
     # ── L3: emit worktree_state event ─────────────────────────────────────
     if terminal_id:
-        try:
-            from event_store import EventStore  # noqa: PLC0415
-            store = EventStore()
+        _emit_provider_teardown_events(
+            terminal_id, dispatch_id, classification, reap_result, claim,
+            fabric_versions=(_claim_fabric_version, _current_fabric_version),
+            data_dir=data_dir,
+        )
+    return classification
+
+
+def _emit_provider_teardown_events(
+    terminal_id: str,
+    dispatch_id: str,
+    classification: str,
+    reap_result,
+    claim: "dict | None",
+    *,
+    fabric_versions: "tuple[str, str]",
+    data_dir: Optional[Path],
+) -> None:
+    """Emit ``provider_teardown_worktree`` (+ ``provider_teardown_preserved``
+    for a dirty tree) under *terminal_id*.  Never raises.
+
+    The event store is ``<data_dir>/events`` when *data_dir* is given, else
+    the ambient ``EventStore()`` resolution — the same dir the claim registry
+    was read from in ``remove_dispatch_worktree``.
+    """
+    fabric_at_create, fabric_at_teardown = fabric_versions
+    preserved_path = str(reap_result.preserved_path) if reap_result.preserved_path else None
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+        store = EventStore(events_dir=Path(data_dir) / "events" if data_dir is not None else None)
+        store.append(
+            terminal_id,
+            {
+                "type": "provider_teardown_worktree",
+                "dispatch_id": dispatch_id,
+                "data": {
+                    "worktree_state": classification,
+                    "branch_kept_local": reap_result.branch_kept_local,
+                    "branch_kept_remote": reap_result.branch_kept_remote,
+                    "preserved_path": preserved_path,
+                    "fabric_version_at_create": fabric_at_create or None,
+                    "fabric_version_at_teardown": fabric_at_teardown or None,
+                    "unpushed_local_commits_at_create": (claim or {}).get(
+                        "unpushed_local_commits"
+                    ),
+                },
+            },
+        )
+        if classification == "dirty":
             store.append(
                 terminal_id,
                 {
-                    "type": "provider_teardown_worktree",
+                    "type": "provider_teardown_preserved",
                     "dispatch_id": dispatch_id,
-                    "data": {
-                        "worktree_state": classification,
-                        "branch_kept_local": reap_result.branch_kept_local,
-                        "branch_kept_remote": reap_result.branch_kept_remote,
-                        "preserved_path": str(reap_result.preserved_path)
-                        if reap_result.preserved_path
-                        else None,
-                        "fabric_version_at_create": _claim_fabric_version or None,
-                        "fabric_version_at_teardown": _current_fabric_version or None,
-                        "unpushed_local_commits_at_create": (claim or {}).get(
-                            "unpushed_local_commits"
-                        ),
-                    },
+                    "data": {"preserved_path": preserved_path},
                 },
             )
-            if classification == "dirty":
-                store.append(
-                    terminal_id,
-                    {
-                        "type": "provider_teardown_preserved",
-                        "dispatch_id": dispatch_id,
-                        "data": {
-                            "preserved_path": str(reap_result.preserved_path)
-                            if reap_result.preserved_path
-                            else None,
-                        },
-                    },
-                )
+        log.info(
+            "remove_dispatch_worktree: emitted provider_teardown_worktree "
+            "state=%s for %s",
+            classification, dispatch_id,
+        )
+    except Exception as _event_exc:
+        log.warning(
+            "remove_dispatch_worktree: event emission failed for %s: %s",
+            dispatch_id, _event_exc,
+        )
+
+
+def _hold_occupancy_for_reap(
+    dispatch_id: str, wt_path: Path, root: Path, data_dir: Optional[Path]
+) -> "tuple[object | None, str]":
+    """Take *wt_path*'s occupancy lock exclusively for a parent-side reap.
+
+    Returns ``(fh, "")`` with ``LOCK_EX`` held on *fh*, or ``(None, reason)``
+    when the reap must be skipped.  The lock is taken NON-blocking: a live
+    holder (a sibling dispatch still running in the tree, or this very
+    process) means hands off, never a wait.
+
+    *fh* is deliberately NOT registered in ``_OCCUPANCY_LOCKS``:
+    ``remove_dispatch_worktree`` opens with ``_release_occupancy(wt_path)``,
+    which would drop a registered lock the instant teardown starts.  Kept out
+    of that map, the lock stays held through the whole teardown and a sibling
+    ``create_dispatch_worktree`` re-entry gets ``WorktreeOccupied`` meanwhile.
+    The caller releases it with ``_unlock_and_close``.
+
+    A reap is destructive, so it proceeds on positive evidence only: the lock
+    file must exist under the registry of *data_dir* (it is opened, never
+    created — a tree created under another registry is not provably this
+    run's), and the claim must name *dispatch_id* for exactly this path.
+    Anything else is a skip with the reason named.
+    """
+    if str(Path(wt_path).resolve()) in _OCCUPANCY_LOCKS:
+        return None, "this process itself occupies the worktree"
+    lock_path = _occupancy_lock_path(_sanitize_dispatch_id(dispatch_id), root, data_dir)
+    try:
+        fh = open(lock_path, "r")
+    except FileNotFoundError:
+        return None, (
+            f"no occupancy record at {lock_path}; the tree was not created under "
+            f"this data dir, so it is not provably this run's"
+        )
+    try:
+        locked = _flock_exclusive_nonblocking(fh)
+    except OSError:
+        fh.close()
+        raise
+    if not locked:
+        fh.close()
+        return None, f"occupancy lock {lock_path} is held by a live process"
+    claim = _read_claim(dispatch_id, root, data_dir)
+    reason = ""
+    if claim is None:
+        reason = f"no claim for this dispatch under {_claim_dir(root, data_dir)}"
+    else:
+        try:
+            _claim_belongs_to_or_raise(dispatch_id, claim, wt_path)
+        except WorktreeClaimError as exc:
+            reason = f"the claim refuses this identity: {exc}"
+    if reason:
+        _unlock_and_close(fh, wt_path)
+        return None, reason
+    return fh, ""
+
+
+def remove_dispatch_worktree_if_present(
+    dispatch_id: str,
+    *,
+    project_root: Optional[Path] = None,
+    review_only: bool = True,
+    data_dir: Optional[Path] = None,
+    terminal_id: str = "",
+) -> bool:
+    """Reap a dispatch worktree that may have outlived its lane.  Never raises.
+
+    A provider-lane child (``provider_dispatch.py``) creates its isolated
+    worktree itself and removes it in its own ``finally``.  When the parent
+    kills that child for exceeding ``subprocess.run(timeout=...)`` (SIGKILL),
+    the child's ``finally`` never runs and the parent holds no handle to the
+    tree — measured 2026-10-24: eleven ``dispatch-{glm,kimi,deepseek}-gate-*``
+    worktrees left behind under ``.vnx-data/worktrees/``.  This is the
+    parent-side safety net; ``reap_child_worktree_on_exit`` is the wrapper a
+    caller puts around the child.
+
+    The project root is resolved exactly the way the child resolved it —
+    ``resolve_consumer_project_root()``, the ``vnx_paths`` PROJECT_ROOT
+    resolution ``provider_dispatch`` passes into ``create_dispatch_worktree``
+    — never a hard-coded path.  The path comes from the same
+    ``_dispatch_worktree_dir`` the allocator used, so a
+    ``VNX_BENCH_WORKTREE_ROOT`` relocation is honored too.
+
+    The tree is touched only while this call holds its occupancy lock
+    exclusively (``_hold_occupancy_for_reap``): a duplicate dispatch that
+    exited on ``WorktreeOccupied`` must never reap the tree its live sibling
+    is still working in.  The lock is held through ``remove_dispatch_worktree``
+    — which releases only locks registered in ``_OCCUPANCY_LOCKS`` and never
+    takes one, so it cannot deadlock on it — and released in a ``finally``.
+
+    *data_dir* is the data dir the child was pinned to: the claim registry,
+    the occupancy lock and the teardown event are read from and written to
+    that dir, not this process's ambient one.  *terminal_id* is forwarded so
+    ``remove_dispatch_worktree`` emits its ``provider_teardown_worktree`` event.
+
+    *review_only* defaults to True: a gate seat materializes only a disposable
+    PR reproduction, which ``remove_dispatch_worktree`` discards before
+    classification — but only while HEAD still equals the recorded base, so a
+    real local commit is never thrown away (teardown degrades to the normal
+    committed/dirty preservation instead).
+
+    Every decision is logged at INFO with the dispatch id and the path: the
+    classification the tree was reaped under, or the reason it was not.
+    Returns True when the teardown ran, False when the tree was absent (no git
+    call is made), the reap was skipped, or the teardown raised.  Any exception
+    is logged and swallowed — this runs from a caller's ``finally`` and must
+    never replace the exception propagating there.  Raises nothing.
+    """
+    wt_path: Optional[Path] = None
+    lock_fh = None
+    try:
+        root = (
+            Path(project_root).resolve()
+            if project_root is not None
+            else resolve_consumer_project_root()
+        )
+        wt_path = _dispatch_worktree_dir(root, dispatch_id)
+        if not wt_path.exists():
             log.info(
-                "remove_dispatch_worktree: emitted provider_teardown_worktree "
-                "state=%s for %s",
-                classification, dispatch_id,
+                "parent-side reap skipped for dispatch %s (worktree %s): already absent",
+                dispatch_id, wt_path,
             )
-        except Exception as _event_exc:
-            log.warning(
-                "remove_dispatch_worktree: event emission failed for %s: %s",
-                dispatch_id, _event_exc,
+            return False
+        lock_fh, skip_reason = _hold_occupancy_for_reap(dispatch_id, wt_path, root, data_dir)
+        if lock_fh is None:
+            log.info(
+                "parent-side reap skipped for dispatch %s (worktree %s): %s",
+                dispatch_id, wt_path, skip_reason,
+            )
+            return False
+        classification = remove_dispatch_worktree(
+            dispatch_id, project_root=root, terminal_id=terminal_id,
+            review_only=review_only, data_dir=data_dir,
+        )
+        log.info(
+            "parent-side reap of dispatch %s (worktree %s): classified %s",
+            dispatch_id, wt_path, classification,
+        )
+        return True
+    except Exception as exc:  # vnx-silent-except: a caller's finally must not be replaced
+        log.warning(
+            "remove_dispatch_worktree_if_present: teardown failed for dispatch %s "
+            "(worktree %s): %s",
+            dispatch_id,
+            wt_path if wt_path is not None else "<unresolved>",
+            exc,
+        )
+        return False
+    finally:
+        if lock_fh is not None:
+            _unlock_and_close(lock_fh, wt_path)
+
+
+@contextmanager
+def reap_child_worktree_on_exit(
+    dispatch_id: str,
+    *,
+    data_dir: Path,
+    terminal_id: str,
+    review_only: bool = True,
+):
+    """Wrap a child that creates its own dispatch worktree; reap it on exit.
+
+    Records BEFORE the child runs whether the worktree path already exists.
+    A tree that existed before was not created by this child run — a live
+    sibling's, or one preserved by an earlier run — and is never reaped,
+    whatever the lock says.  A path that cannot be measured before the run
+    counts the same way: an unmeasured tree is never reaped.  Only a tree that
+    appeared during the run goes to ``remove_dispatch_worktree_if_present``
+    on exit, which still demands the exclusive occupancy lock (a sibling may
+    have created it concurrently and still hold it).
+
+    The body's outcome is never altered: an exception raised in it (for
+    example ``subprocess.TimeoutExpired``) propagates after the reap.
+    """
+    root: Optional[Path] = None
+    wt_path: Optional[Path] = None
+    skip_reason = ""
+    try:
+        root = resolve_consumer_project_root()
+        wt_path = _dispatch_worktree_dir(root, dispatch_id)
+        if wt_path.exists():
+            skip_reason = "the worktree existed before the run, so this run did not create it"
+    except Exception as exc:  # vnx-silent-except: the reason is logged at exit and the reap is skipped
+        skip_reason = f"the worktree path could not be measured before the run ({exc})"
+    try:
+        yield
+    finally:
+        if skip_reason:
+            log.info(
+                "parent-side reap skipped for dispatch %s (worktree %s): %s",
+                dispatch_id, wt_path if wt_path is not None else "<unresolved>", skip_reason,
+            )
+        else:
+            remove_dispatch_worktree_if_present(
+                dispatch_id, project_root=root, review_only=review_only,
+                data_dir=data_dir, terminal_id=terminal_id,
             )

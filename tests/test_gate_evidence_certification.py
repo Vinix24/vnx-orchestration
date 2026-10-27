@@ -45,38 +45,6 @@ from review_contract import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-FEATURE_PLAN_CONTENT = """\
-# Feature: Gate Evidence Certification Feature
-
-**Status**: Active
-**Risk-Class**: high
-
-## PR-0: Contract
-**Track**: C
-**Priority**: P1
-**Skill**: @architect
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Dependencies**: []
-
-`gate_pr0_contract`
-
----
-
-## PR-1: Implementation
-**Track**: B
-**Priority**: P1
-**Skill**: @backend-developer
-**Risk-Class**: high
-**Merge-Policy**: human
-**Review-Stack**: gemini_review,codex_gate,claude_github_optional
-**Dependencies**: [PR-0]
-
-`gate_pr1_implementation`
-
----
-"""
 
 
 def _write_dispatch(path: Path, pr_id: str, dispatch_id: str, track: str = "C") -> None:
@@ -152,7 +120,6 @@ def env(tmp_path, monkeypatch):
     results_dir = state_dir / "review_gates" / "results"
     results_dir.mkdir(parents=True)
 
-    (project_root / "FEATURE_PLAN.md").write_text(FEATURE_PLAN_CONTENT, encoding="utf-8")
 
     monkeypatch.setenv("VNX_HOME", str(VNX_ROOT))
     monkeypatch.setenv("PROJECT_ROOT", str(project_root))
@@ -173,7 +140,6 @@ def env(tmp_path, monkeypatch):
         "results_dir": results_dir,
         "reports_dir": reports_dir,
         "receipts": state_dir / "t0_receipts.ndjson",
-        "feature_plan": project_root / "FEATURE_PLAN.md",
     }
 
 
@@ -462,7 +428,6 @@ class TestCert6GithubPrRequired:
             result = cv.verify_pr_closure(
                 pr_id="PR-0",
                 project_root=env["project_root"],
-                feature_plan=env["feature_plan"],
                 dispatch_dir=dd,
                 receipts_file=env["receipts"],
                 state_dir=env["state_dir"],
@@ -483,7 +448,6 @@ class TestCert6GithubPrRequired:
         result = cv.verify_pr_closure(
             pr_id="PR-0",
             project_root=env["project_root"],
-            feature_plan=env["feature_plan"],
             dispatch_dir=dd,
             receipts_file=env["receipts"],
             state_dir=env["state_dir"],
@@ -516,7 +480,6 @@ class TestCert7GithubCiRequired:
             result = cv.verify_pr_closure(
                 pr_id="PR-0",
                 project_root=env["project_root"],
-                feature_plan=env["feature_plan"],
                 dispatch_dir=dd,
                 receipts_file=env["receipts"],
                 state_dir=env["state_dir"],
@@ -542,7 +505,6 @@ class TestCert7GithubCiRequired:
             result = cv.verify_pr_closure(
                 pr_id="PR-0",
                 project_root=env["project_root"],
-                feature_plan=env["feature_plan"],
                 dispatch_dir=dd,
                 receipts_file=env["receipts"],
                 state_dir=env["state_dir"],
@@ -570,7 +532,6 @@ class TestCert7GithubCiRequired:
             result = cv.verify_pr_closure(
                 pr_id="PR-0",
                 project_root=env["project_root"],
-                feature_plan=env["feature_plan"],
                 dispatch_dir=dd,
                 receipts_file=env["receipts"],
                 state_dir=env["state_dir"],

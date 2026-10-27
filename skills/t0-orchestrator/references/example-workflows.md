@@ -83,30 +83,7 @@ Next Action: Monitor T2, review when receipt arrives
 ================================
 ```
 
-## Example 4: Feature Initialization
-
-```
-=== ORCHESTRATION DECISION ===
-Status: DISPATCH
-Reason: New feature plan ready, initializing batch dispatch
-
-Action taken:
-1. python pr_queue_manager.py init-feature FEATURE_PLAN.md
-   → Generated 8 PR dispatches to staging/
-   → Created 24 open items from quality gates
-2. python pr_queue_manager.py staging-list
-   → PR-5: ✅ deps met (ready to promote)
-   → PR-6: ⏳ depends on PR-5
-   → PR-7: ⏳ depends on PR-5
-   → PR-8: ⏳ depends on PR-6, PR-7
-3. python pr_queue_manager.py promote PR-5-dispatch-id
-
-Terminal States: T1=idle T2=idle T3=idle
-Queue: pending=0 active=0 → promoting PR-5
-================================
-```
-
-## Example 5: ESCALATE Decision
+## Example 4: ESCALATE Decision
 
 ```
 === ORCHESTRATION DECISION ===

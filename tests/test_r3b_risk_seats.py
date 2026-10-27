@@ -49,6 +49,7 @@ import review_risk_class
 import review_seat_evaluation as rse
 import smart_router
 from review_seat_support import pin_review_stack
+from fixtures.closure_track_fixture import CLOSURE_TRACK_ID, seed_done_track
 
 # Captured at import, before the autouse offline stub in tests/conftest.py replaces it.
 _REAL_FETCH = review_risk_class.fetch_merge_refs
@@ -455,37 +456,6 @@ FAIL_REPORT = (
     "# review\n\nThe change breaks every caller.\n\n```json\n"
     '{"verdict": "fail", "findings": [{"severity": "blocking", "message": "breaks every caller"}]}\n```\n'
 )
-FEATURE_PLAN = """# Feature: Review stopregel
-
-**Status**: Complete
-
-## Dependency Flow
-```text
-PR-0 (no dependencies)
-```
-
-## PR-0: R3b
-**Track**: A
-**Priority**: P1
-**Complexity**: Medium
-**Skill**: @backend-developer
-**Dependencies**: []
-"""
-PR_QUEUE = """# PR Queue - Feature: Review stopregel
-
-## Progress Overview
-Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ██████████ 100%
-
-## Status
-
-## Dependency Flow
-```
-PR-0 (no dependencies)
-```
-"""
-
-
 def _kimi(store, status: str, head: str, branch: str) -> None:
     """kimi's own record on ``head``: a PASS with a clean report, or a FAIL whose report says so too."""
     fails = status == "fail"
@@ -510,17 +480,20 @@ def _record_merge(store, review_seats: Any) -> None:
 
 
 def _track_closure(store, tmp_path, monkeypatch, branch: str) -> Dict[str, Any]:
-    """The complete ``verify_closure`` verdict of the merged PR, git and GitHub probes answered offline."""
-    (tmp_path / "FEATURE_PLAN.md").write_text(FEATURE_PLAN, encoding="utf-8")
-    (tmp_path / "PR_QUEUE.md").write_text(PR_QUEUE, encoding="utf-8")
+    """The complete ``verify_closure`` verdict of the merged PR, git and GitHub probes answered offline.
+
+    The track is done in the tracks DB; the merge evidence is the test's own ``pr_merged`` receipt.
+    """
+    if not (store["state"] / "runtime_coordination.db").exists():
+        seed_done_track(store["state"], monkeypatch, pr_numbers=(PR,), merged=False)
     claim = tmp_path / "closure_claim.json"
-    claim.write_text(json.dumps({"test_files": ["FEATURE_PLAN.md"], "test_command": "pytest -q"}), encoding="utf-8")
+    claim.write_text(json.dumps({"test_files": ["closure_claim.json"], "test_command": "pytest -q"}), encoding="utf-8")
     merged = {"number": PR, "state": "MERGED", "mergeCommit": {"oid": "c" * 40}}
     monkeypatch.setattr(closure_verifier, "_remote_branch_exists", lambda name, root: True)
     monkeypatch.setattr(closure_verifier, "_find_branch_pr", lambda name: dict(merged))
     monkeypatch.setattr(closure_verifier, "_merge_commit_on_main", lambda oid, root: True)
     return closure_verifier.verify_closure(
-        project_root=tmp_path, feature_plan=tmp_path / "FEATURE_PLAN.md", pr_queue=tmp_path / "PR_QUEUE.md",
+        project_root=tmp_path, track_id=CLOSURE_TRACK_ID,
         branch=branch, mode="post_merge", claim_file=claim, review_contract=_contract(branch),
         gate_results_dir=store["results"],
     )

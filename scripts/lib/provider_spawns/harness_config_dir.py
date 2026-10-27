@@ -30,11 +30,14 @@ listing of the official marketplace (install counts, token costs), read only by 
 session context; a plugin needs ``installed_plugins.json`` or an enabled entry in
 settings. No env variable stops the fetch (measured in the 2.1.302 binary), and a CLI
 update can start writing more files, so the list stays closed: any other entry under
-``plugins/`` keeps the refusal and is named in the message.
+``plugins/`` keeps the refusal and is named in the message. On 2026-10-27 claude 2.1.311
+started writing ``plugins/store/cc-plugin-agents-md_builtin-<hash>.json`` at every session
+start (OI-2373); that one subdirectory is allowed when it holds only plain files of that name.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import logging
 import os
@@ -92,6 +95,12 @@ PLUGIN_CACHE_ALLOWLIST = (
     "plugin-catalog-cache.json",
     "plugin-directory-cache-v2.json",
 )
+
+# The one subdirectory allowed under ``plugins/``, and the file names allowed in it. Since
+# claude 2.1.311 every session start writes a usage-row marker there for its built-in
+# AGENTS.md plugin (``cc-plugin-agents-md_builtin-<hash>.json``, 92 bytes, nothing enabled).
+PLUGIN_STORE_DIR = "store"
+PLUGIN_STORE_PATTERN = "cc-plugin-*_builtin-*.json"
 
 # Env pair that every harness spawn overlays last.
 AUTO_MEMORY_OFF_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
@@ -164,10 +173,33 @@ def _check_plugins_entry(plugins_dir: Path, lane_dir: Path) -> None:
     except OSError as exc:
         raise HarnessConfigDirError(f"cannot read {plugins_dir}: {exc}") from exc
     for child in children:
+        if child.name == PLUGIN_STORE_DIR:
+            _check_plugin_store(child, lane_dir)
+            continue
         plain_file = child.is_file() and not child.is_symlink()
         if child.name not in PLUGIN_CACHE_ALLOWLIST or not plain_file:
             raise HarnessConfigDirError(
                 f"{refusal}: plugins/{child.name} is not an allowed CLI cache file: {lane_dir}"
+            )
+
+
+def _check_plugin_store(store_dir: Path, lane_dir: Path) -> None:
+    """Allow ``plugins/store`` only as a plain dir of plain built-in marker files."""
+    refusal = "harness config dir holds user-level context (plugins)"
+    if store_dir.is_symlink() or not store_dir.is_dir():
+        raise HarnessConfigDirError(
+            f"{refusal}: plugins/{PLUGIN_STORE_DIR} is not a plain directory: {lane_dir}"
+        )
+    try:
+        children = list(store_dir.iterdir())
+    except OSError as exc:
+        raise HarnessConfigDirError(f"cannot read {store_dir}: {exc}") from exc
+    for child in children:
+        plain_file = child.is_file() and not child.is_symlink()
+        if not fnmatch.fnmatchcase(child.name, PLUGIN_STORE_PATTERN) or not plain_file:
+            raise HarnessConfigDirError(
+                f"{refusal}: plugins/{PLUGIN_STORE_DIR}/{child.name} is not an allowed "
+                f"CLI store file: {lane_dir}"
             )
 
 
