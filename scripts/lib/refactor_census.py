@@ -28,6 +28,9 @@ DEFENSIVE_PREFIXES = ("scripts/", "vnx_cli/", "dashboard/")
 CORPUS_SUFFIXES = (".py", ".sh", ".md", ".yml", ".yaml", ".json", ".ts", ".tsx", ".toml")
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WORD_RE = re.compile(r"[a-z0-9_]+")
+TEST_PREFIX = "tests/"
+DUNDER_RE = re.compile(r"__[A-Za-z0-9_]+__")
+METHOD_NAME_MIN_LENGTH = 4
 
 
 class CensusError(RuntimeError):
@@ -155,28 +158,116 @@ def defensive_markers(texts: dict[str, str]) -> dict[str, Any]:
     return {"count": len(items), "items": items}
 
 
-def _identifier_counts(texts: dict[str, str], tracked: list[str], root: Path, commit: Optional[str]) -> Counter:
-    return Counter(
-        word for path in tracked if path.endswith(CORPUS_SUFFIXES)
-        for word in IDENTIFIER_RE.findall(texts.get(path) or _text(root, commit, path))
-    )
+def _identifier_counts(texts: dict[str, str], tracked: list[str], root: Path,
+                       commit: Optional[str]) -> tuple[Counter, Counter]:
+    """(production, test) identifier counts from one read of the corpus.
+
+    A path under ``tests/`` feeds the test counter, everything else the
+    production counter, so a reference from a test file is never mistaken for a
+    caller. Both counters are read in the same pass: the corpus is walked once.
+    """
+    production, test = Counter(), Counter()
+    for path in tracked:
+        if not path.endswith(CORPUS_SUFFIXES):
+            continue
+        text = texts[path] if path in texts else _text(root, commit, path)
+        (test if path.startswith(TEST_PREFIX) else production).update(IDENTIFIER_RE.findall(text))
+    return production, test
 
 
-def dead_module_functions(trees: dict[str, ast.Module], texts: dict[str, str], counts: Counter) -> dict[str, Any]:
+def _own_references(lines: list[str], lineno: int, name: str) -> int:
+    """Occurrences of ``name`` on the definition's own line (the ``def`` itself)."""
+    return sum(1 for match in IDENTIFIER_RE.finditer(lines[lineno - 1]) if match.group() == name)
+
+
+def _class_summary(items: list[dict[str, Any]]) -> dict[str, Any]:
+    outside = sum(1 for item in items if not item["in_seed"])
+    return {"count": len(items), "outside_seeds": outside, "seeds": len(items) - outside, "items": items}
+
+
+def dead_module_functions(trees: dict[str, ast.Module], texts: dict[str, str],
+                          production: Counter, test: Counter) -> dict[str, Any]:
+    """Module functions with no reference at all beyond their own ``def`` line."""
     items = []
     for path in sorted(trees):
-        if path.startswith("tests/"):
+        if path.startswith(TEST_PREFIX):
             continue
         lines = texts[path].splitlines()
         for node in trees[path].body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name.startswith("test_"):
                 continue
-            own = sum(1 for m in IDENTIFIER_RE.finditer(lines[node.lineno - 1]) if m.group() == node.name)
-            if counts[node.name] - own <= 0:
+            own = _own_references(lines, node.lineno, node.name)
+            if production[node.name] + test[node.name] - own <= 0:
                 items.append({"path": path, "line": node.lineno, "name": node.name,
                               "in_seed": bool(SEED_RE.match(path))})
-    outside = sum(1 for item in items if not item["in_seed"])
-    return {"count": len(items), "outside_seeds": outside, "seeds": len(items) - outside, "items": items}
+    return _class_summary(items)
+
+
+def test_only_functions(trees: dict[str, ast.Module], texts: dict[str, str],
+                        production: Counter, test: Counter) -> dict[str, Any]:
+    """Module functions only a ``tests/`` file references: not proven dead.
+
+    Zero production references beyond the ``def`` line and at least one test
+    reference. A ``test_``-prefixed name is skipped here exactly as the dead
+    class skips it: it is a test function, not a production function a test
+    happens to call.
+    """
+    items = []
+    for path in sorted(trees):
+        if path.startswith(TEST_PREFIX):
+            continue
+        lines = texts[path].splitlines()
+        for node in trees[path].body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name.startswith("test_"):
+                continue
+            if production[node.name] - _own_references(lines, node.lineno, node.name) <= 0 and test[node.name] > 0:
+                items.append({"path": path, "line": node.lineno, "name": node.name,
+                              "test_refs": test[node.name], "in_seed": bool(SEED_RE.match(path))})
+    return _class_summary(items)
+
+
+def _method_owner_counts(trees: dict[str, ast.Module]) -> dict[str, int]:
+    """How many distinct (file, class) pairs define a method of each name."""
+    owners: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for path in sorted(trees):
+        for node in ast.walk(trees[path]):
+            if isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        owners[member.name].add((path, node.name))
+    return {name: len(classes) for name, classes in owners.items()}
+
+
+def test_only_methods(trees: dict[str, ast.Module], texts: dict[str, str],
+                      production: Counter, test: Counter) -> dict[str, Any]:
+    """Methods only a ``tests/`` file references: not proven dead, never dead.
+
+    Same rule as ``test_only_functions`` over ``def``s directly inside a class
+    body. Dunders, names that another class in the corpus also defines (an
+    override or a protocol method the base class spells) and names of three
+    characters or fewer are left out: the identifier counter cannot tell their
+    callers apart, so a hit there would not be evidence.
+    """
+    owners = _method_owner_counts(trees)
+    items = []
+    for path in sorted(trees):
+        if path.startswith(TEST_PREFIX):
+            continue
+        lines = texts[path].splitlines()
+        for cls in ast.walk(trees[path]):
+            if not isinstance(cls, ast.ClassDef):
+                continue
+            for node in cls.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if (DUNDER_RE.fullmatch(node.name) or len(node.name) < METHOD_NAME_MIN_LENGTH
+                        or owners[node.name] > 1):
+                    continue
+                if production[node.name] - _own_references(lines, node.lineno, node.name) <= 0 and test[node.name] > 0:
+                    items.append({"path": path, "line": node.lineno, "name": node.name,
+                                  "test_refs": test[node.name], "in_seed": bool(SEED_RE.match(path))})
+    return _class_summary(items)
+
 
 
 def _words(text: str) -> set[str]:
@@ -225,20 +316,24 @@ def census(root_or_commit: Any, paths: Optional[Any] = None, repo: Optional[str]
             continue
         texts[path] = text
     long_result = long_functions(trees, texts)
-    counts = _identifier_counts(texts, tracked, root, commit)
+    production, test = _identifier_counts(texts, tracked, root, commit)
     return {
         "source": commit or str(root), "commit": commit, "tracked_files": len(tracked),
         "python_files": len(python_files), "functions": long_result["function_count"],
         "unparsed": sorted(unparsed), "long_functions": long_result,
         "exact_duplicates": exact_duplicates(trees), "doubled_banners": doubled_banners(texts),
         "version_suffixed_paths": version_suffixed_paths(tracked),
-        "defensive_markers": defensive_markers(texts), "dead_module_functions": dead_module_functions(trees, texts, counts),
+        "defensive_markers": defensive_markers(texts),
+        "dead_module_functions": dead_module_functions(trees, texts, production, test),
+        "test_only_functions": test_only_functions(trees, texts, production, test),
+        "test_only_methods": test_only_methods(trees, texts, production, test),
         "restating_comments": restating_comments(texts),
     }
 
 
 def render_table(result: dict[str, Any]) -> str:
     long_result, dupes, dead = result["long_functions"], result["exact_duplicates"], result["dead_module_functions"]
+    test_fn, test_method = result["test_only_functions"], result["test_only_methods"]
     count = long_result["counts"]
     rows = [
         ("python files", result["python_files"], f"{result['functions']} functions"),
@@ -250,6 +345,12 @@ def render_table(result: dict[str, Any]) -> str:
         ("version-suffixed paths", result["version_suffixed_paths"]["count"], ""),
         ("defensive markers", result["defensive_markers"]["count"], ""),
         ("dead module functions", dead["count"], f"{dead['outside_seeds']} outside seeds, {dead['seeds']} in seeds"),
+        ("test-only functions", test_fn["count"],
+         "not proven dead; sole references under tests/ "
+         f"({test_fn['outside_seeds']} outside seeds, {test_fn['seeds']} in seeds)"),
+        ("test-only methods", test_method["count"],
+         "not proven dead; sole references under tests/ "
+         f"({test_method['outside_seeds']} outside seeds, {test_method['seeds']} in seeds)"),
         ("restating comments", result["restating_comments"]["count"], f"{result['restating_comments']['file_count']} files"),
     ]
     width = max(len(row[0]) for row in rows)
