@@ -2543,9 +2543,7 @@ def _book_existing_evidence(
             evidence_path, gate, evidence_pr_number, dispatch_id,
         )
         updated = _book_obligation_outcome(
-            path,
-            record_path=evidence_path,
-            status=STATUS_FULFILLED,
+            path, record_path=evidence_path, status=STATUS_FULFILLED,
             reason="fulfilled_by_existing_evidence",
             reason_detail=(
                 f"{gate} already produced a complete-evidence PASS for "
@@ -2579,9 +2577,7 @@ def _book_existing_evidence(
     # not_executable / failed" doc comment).
     _passed, verdict_reason = _gate_is_pass(evidence_record)
     updated = _book_obligation_outcome(
-        path,
-        record_path=evidence_path,
-        status=STATUS_FAILED,
+        path, record_path=evidence_path, status=STATUS_FAILED,
         reason="failed_by_existing_evidence",
         reason_detail=(
             f"{gate} already produced a complete-evidence FAIL for "
@@ -3336,9 +3332,7 @@ def fulfill_obligation(
                 f"resolved_by_gate={successor_gate!r} (D2e)."
             )
             updated = _book_obligation_outcome(
-                path,
-                record_path=successor_path,
-                status=terminal,
+                path, record_path=successor_path, status=terminal,
                 pr_number=pr_number,
                 branch=branch,
                 attempts=attempts,
@@ -3421,9 +3415,7 @@ def fulfill_obligation(
                     else f"{temp_reason}_timeout"
                 )
                 _book_obligation_outcome(
-                    path,
-                    record_path=result_file,
-                    status=STATUS_NOT_EXECUTABLE,
+                    path, record_path=result_file, status=STATUS_NOT_EXECUTABLE,
                     pr_number=pr_number,
                     branch=branch,
                     attempts=attempts,
@@ -3568,9 +3560,7 @@ def fulfill_obligation(
                 result_file, gate, pr_number, dispatch_id,
             )
         updated = _book_obligation_outcome(
-            path,
-            record_path=result_file,
-            status=terminal,
+            path, record_path=result_file, status=terminal,
             pr_number=pr_number,
             branch=branch,
             attempts=attempts,
