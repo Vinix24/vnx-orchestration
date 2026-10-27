@@ -578,6 +578,19 @@ def test_an_artifact_symlinked_into_the_worktree_is_refused(fx: Fixture) -> None
     assert "resolves inside the worktree" in problems[0], problems
 
 
+def test_an_artifact_whose_location_cannot_be_resolved_is_refused(fx: Fixture) -> None:
+    """A symlink loop proves no location at all; that is a problem, never a pass."""
+    result, bundle = _salvaged_bundle(fx)
+    assert verify(fx, result) == []
+
+    bundle.unlink()
+    bundle.symlink_to(bundle)
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert "cannot resolve its location" in problems[0], problems
+
+
 def test_a_dest_dir_beside_the_worktree_is_outside(fx: Fixture) -> None:
     """A path that merely shares the worktree's name prefix is not inside it."""
     wt = fx.worktree()

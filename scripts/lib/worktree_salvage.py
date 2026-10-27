@@ -408,13 +408,13 @@ def verify(
     if result.worktree is not None:
         try:
             tree = Path(result.worktree).resolve()
-        except OSError as exc:  # cannot place the tree: no artifact can be proven outside
+        except (OSError, RuntimeError) as exc:  # 3.12 calls a symlink loop a RuntimeError
             problems.append(f"cannot resolve the worktree {result.worktree!r} ({exc})")
     for artifact in result.artifacts:
         path = dest / artifact
         try:
             resolved = path.resolve()
-        except OSError as exc:
+        except (OSError, RuntimeError) as exc:  # cannot place it: nothing is proven outside
             problems.append(f"{artifact}: cannot resolve its location ({exc})")
             continue
         # Removal deletes the whole tree, so evidence that would be deleted with
