@@ -116,11 +116,13 @@ def test_ci_gate_books_one_of_each_a_repeat_none_and_a_new_head_the_next_attempt
     assert [(r["commit_sha"], r["gate_status"], r["attempt_seq"]) for r in _receipts(env)] == [(HEAD_A, "pass", 1), (HEAD_B, "fail", 2)]
 
 
-def test_a_refused_ci_gate_outcome_changes_no_request(env):
+def test_a_refused_ci_gate_outcome_ends_its_request_instead_of_leaving_it_executing(env):
+    """GE-4c, kimi advisory (a): ``executing`` was the loop — the next call re-ran the gate into the same refusal."""
     _slot(env, "ci_gate").write_text('{"status": "pa', encoding="utf-8")
     assert _run_ci(env, HEAD_A)["write_refused"] is True
     request = _json(_slot(env, "ci_gate", "requests"))
-    assert (request["status"], "completed_at" in request) == ("executing", False)
+    assert (request["status"], request["failure_reason"]) == ("failed", "write_refused")
+    assert "completed_at" not in request
     assert _slot(env, "ci_gate").read_text(encoding="utf-8") == '{"status": "pa' and _receipts(env) == []
 
 
@@ -133,13 +135,16 @@ def test_the_artifacts_writer_commits_record_receipt_and_request(env, tmp_path, 
     assert len(_receipts(env)) == receipts
 
 
-def test_a_refused_artifacts_write_changes_no_request_and_books_nothing(env, tmp_path):
+def test_a_refused_artifacts_write_books_nothing_and_ends_its_request(env, tmp_path):
+    """GE-4c, kimi advisory (a): the record and the receipt stay refused; the attempt still ends."""
     _slot(env, "codex_gate").write_text('{"status": "comp', encoding="utf-8")
     request = _request(env, "codex_gate", HEAD_A)
-    before = _slot(env, "codex_gate", "requests").read_bytes()
     assert "refused by the overwrite guard" in _artifacts(env, _verdict(HEAD_A), request, tmp_path)
-    assert _slot(env, "codex_gate", "requests").read_bytes() == before and "completed_at" not in request
-    assert request["status"] == "executing" and _receipts(env) == []
+    ended = _json(_slot(env, "codex_gate", "requests"))
+    assert (ended["status"], ended["failure_reason"]) == ("failed", "write_refused")
+    assert "completed_at" not in ended
+    assert (request["status"], request["failure_reason"]) == ("failed", "write_refused"), "memory mirrors disk"
+    assert _slot(env, "codex_gate").read_text(encoding="utf-8") == '{"status": "comp' and _receipts(env) == []
 
 
 def test_the_report_generator_writers_stamp_attempt_seq_and_a_refusal_books_nothing(env):
@@ -178,7 +183,13 @@ def test_the_loser_leaves_the_winners_record_and_request_status(env, tmp_path, m
 
     record, request = _json(_slot(env, "codex_gate")), _json(_slot(env, "codex_gate", "requests"))
     assert results[0][1] is False and (record["status"], record["attempt_seq"]) == ("completed", 1)
-    assert (request["status"], "marker" in request) == ("completed", False)
+    # GE-4c, kimi advisory (a): the loser's attempt ends its request rather
+    # than leaving it ``executing`` for the next run to re-run into the same
+    # refusal. It names the same request slot here (same gate and PR), so the
+    # refused attempt's end is what the file carries last; the winner's record
+    # and receipt are untouched.
+    assert (request["status"], request["failure_reason"]) == ("failed", "write_refused")
+    assert "completed_at" not in request
     assert [r["commit_sha"] for r in _receipts(env)] == [HEAD_A]
 
 

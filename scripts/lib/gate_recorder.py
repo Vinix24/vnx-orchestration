@@ -2332,6 +2332,11 @@ def record_not_executable(
         )
         request = GateRequest(
             requests_dir, request_payload, {"reason": reason, "reason_detail": reason_detail, "resolved_at": now},
+            # Its own end, named: this request reports the runner's refusal, and a
+            # refused write must not turn that diagnosis into ``failed``/``write_refused``
+            # (GE-4c step 9, OI-1707). ``not_executable`` is terminal, so the retry
+            # still short-circuits instead of re-running the refusal.
+            status="not_executable",
         )
         payload_on_disk, written = commit_gate_outcome(
             outcome, results_dir=results_dir, result_path=rf, audit_refusal=False, request=request,
