@@ -1,2 +1,4 @@
 - Red-run claims (track deterministische-testverificatie, PR-3a): `scripts/ci/red_run_claims.py` turns a PR body's red-run claims into `red_on_base.py --claims` input, labels imported from `report_body_contract.RED_RUN_LABELS`.
 - A claim the parser cannot read exits 3 and writes no claims file instead of silently becoming "no claim"; whitespace inside a parametrize part such as `test_always[hello world]` is now read exactly.
+- A bare path a space cut in two (`tests/my test.py::test_one`, `tests/x.py ::test`) is refused as one unreadable fragment instead of being dropped as two words no claim detector reads.
+- The nodeids of a claim line are read by one left-to-right scan of its backticked and bare tokens, so the claims keep the order the body writes them in instead of listing every backticked id first.

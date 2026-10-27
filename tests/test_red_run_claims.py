@@ -85,6 +85,87 @@ def test_whitespace_in_the_path_or_the_name_is_not_read_as_a_nodeid():
         assert raised.value.tokens == [token]
 
 
+def test_a_bare_claim_with_a_space_in_its_path_is_refused_by_parse_claims():
+    # Bare ids are whitespace-split, so "tests/my test.py::test_one" arrives as "tests/my" plus
+    # "test.py::test_one". Neither half looks like a claim on its own; the path was cut in two
+    # and the line must be refused, never read as "no claim".
+    with pytest.raises(rrc.UnreadableClaim) as raised:
+        rrc.parse_claims("**Red run** on abc123:\n- tests/my test.py::test_one\n")
+    assert raised.value.tokens == ["tests/my test.py::test_one"]
+
+
+def test_a_bare_claim_with_a_space_in_its_path_exits_three_and_writes_no_claims_file(tmp_path, capsys):
+    body = tmp_path / "body.md"
+    body.write_text("**Red run** on abc123:\n- tests/my test.py::test_one\n", encoding="utf-8")
+    out = tmp_path / "claims.txt"
+    assert rrc.main([str(body), "--out", str(out)]) == 3
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "red_run_claims: unreadable claim: tests/my test.py::test_one" in captured.err
+    assert not out.exists()
+
+
+def test_a_bare_path_without_its_test_address_is_refused_when_the_address_follows():
+    # "tests/x.py ::test" is one path a space cut in two, not two words nobody has to read.
+    with pytest.raises(rrc.UnreadableClaim) as raised:
+        rrc.parse_claims("**Red run**:\n- tests/x.py ::test\n")
+    assert raised.value.tokens == ["tests/x.py ::test"]
+
+
+def test_a_space_in_the_test_name_outside_the_brackets_keeps_the_address_it_gives():
+    # Nothing on the line says the trailing word belongs to the name, so the first word is read
+    # as the address it is; red_on_base refuses the claim as a false claim because no test
+    # carries that id, which keeps the claim blocking instead of dropping it.
+    assert rrc.parse_claims("**Red run**:\n- tests/test_a.py::test one\n") == ["tests/test_a.py::test"]
+
+
+def test_a_prose_word_under_tests_does_not_refuse_a_later_claim():
+    # A "tests/" word that another nodeid follows is prose: a split path continues with a word
+    # that does not start under tests/ again.
+    body = "**Red run**:\n- the tests/ tree moved; see tests/test_a.py::test_one\n"
+    assert rrc.parse_claims(body) == ["tests/test_a.py::test_one"]
+
+
+def test_a_claim_line_keeps_the_order_of_a_bare_and_a_backticked_id():
+    # The body order is the order of the line, whichever form each id is written in.
+    for line, expected in (
+        ("tests/test_a.py::test_first `tests/test_b.py::test_second`",
+         ["tests/test_a.py::test_first", "tests/test_b.py::test_second"]),
+        ("`tests/test_b.py::test_second` tests/test_a.py::test_first",
+         ["tests/test_b.py::test_second", "tests/test_a.py::test_first"]),
+    ):
+        assert rrc.parse_claims(f"**Red run** on abc123:\n- {line}\n") == expected
+
+
+def test_the_list_lines_below_a_claim_keep_body_order_across_both_forms():
+    body = ("**Red run** on abc123:\n"
+            "- tests/test_a.py::test_first `tests/test_b.py::test_second`\n"
+            "- `tests/test_c.py::test_third` tests/test_d.py::test_fourth\n")
+    assert rrc.parse_claims(body) == ["tests/test_a.py::test_first", "tests/test_b.py::test_second",
+                                      "tests/test_c.py::test_third", "tests/test_d.py::test_fourth"]
+
+
+@pytest.mark.parametrize("token, bare", [
+    ("tests/test_a.py::test_one", True),
+    ("tests/test_a.py::TestK::test_two", True),
+    ("tests/sub/dir/test_a.py::test_three", True),
+    ("tests/test_a.py::test_param[1]", True),
+    ("tests/test_a.py::test_param[a-b_c]", True),
+    (SPACED, False),
+])
+def test_every_nodeid_that_parsed_before_still_parses_to_the_same_value(token, bare):
+    # The one ordered scan must not change what an id that already parsed parses to. A bare id
+    # is one whitespace-free word, so only the backticked form carries a spaced parametrize part.
+    assert rrc.parse_claims(f"**Red run**:\n- `{token}`\n") == [token]
+    if bare:
+        assert rrc.parse_claims(f"**Red run**:\n- {token}\n") == [token]
+
+
+def test_a_trailing_comma_after_a_bare_id_still_parses():
+    assert rrc.parse_claims("Rode run: tests/test_b.py::test_x, tests/test_b.py::test_y\n") == [
+        "tests/test_b.py::test_x", "tests/test_b.py::test_y"]
+
+
 def test_a_parameter_id_with_a_space_goes_through_main(tmp_path):
     body = tmp_path / "body.md"
     body.write_text(f"**Red run** on abc123:\n- `{SPACED}`\n", encoding="utf-8")

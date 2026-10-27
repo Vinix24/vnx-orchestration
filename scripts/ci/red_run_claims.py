@@ -10,7 +10,9 @@ imported, never copied, so a new label reaches this parser.
 Whitespace is allowed only inside a parametrize part: ``tests/test_a.py::test_one[hello
 world]`` is a nodeid, ``tests/my test.py::test_one`` is not. A token inside a claim that
 looks like a nodeid but cannot be read is never dropped silently, because a claim the parser
-cannot read must not become "no claim": it exits 3 and writes no claims file.
+cannot read must not become "no claim": it exits 3 and writes no claims file. That includes a
+bare path a space cut in two: ``tests/my test.py::test_one`` or ``tests/x.py ::test`` are
+refused as one unreadable fragment, never split into two words nobody reads.
 
 Exit 2 when the body cannot be read; exit 3 when a claim cannot be read.
 """
@@ -30,7 +32,11 @@ _LABEL_ALTERNATION = "|".join(
     re.escape(label) for label in sorted(RED_RUN_LABELS, key=len, reverse=True))
 _CLAIM_LINE = re.compile(
     rf"^(?:\*\*)?(?:{_LABEL_ALTERNATION})(?:\*\*)?(?:\s+on\s+[^\s:]+)?\s*:")
-_BACKTICKED = re.compile(r"`([^`]+)`")
+# The two token forms of a claim line, scanned in one left-to-right pass so the ids keep the
+# order they are written in: a backticked span, or one bare whitespace-free word.
+_TOKEN = re.compile(r"`([^`]+)`|([^\s`]+)")
+# Trailing punctuation a prose sentence puts after a bare id; a backticked span bounds itself.
+_TRAILING_PUNCTUATION = ",;."
 # A nodeid: a whitespace-free path and test address. The second branch is the parametrize
 # form, where whitespace is allowed inside ``[...]`` and nowhere else. The first branch is
 # the older all-whitespace-free shape, kept so every id it already accepted still parses.
@@ -79,18 +85,54 @@ def _take(token: str, backticked: bool, found: list[str], unreadable: list[str])
         found.append(token)
 
 
+def _line_tokens(line: str) -> list[tuple[str, bool]]:
+    """``(token, backticked)`` for every token of *line*, left to right, in one scan."""
+    return [(match.group(1), True) if match.group(1) is not None
+            else (match.group(2).rstrip(_TRAILING_PUNCTUATION), False)
+            for match in _TOKEN.finditer(line)]
+
+
+def _split_path(tokens: list[tuple[str, bool]], index: int) -> str | None:
+    """The joined fragment when ``tokens[index]`` is the first half of a path a space cut in two.
+
+    A bare word under ``tests/`` without a ``.py::`` is only half a nodeid. It is the front half
+    of one when the words after it complete a ``tests/...py::...`` path before another word
+    under ``tests/`` starts (that one is a nodeid of its own) or the claim line ends. Undoing the
+    split is what the shape test reads, so the words are joined without the space that cut them
+    (``tests/x.py`` + ``::test`` is ``tests/x.py::test``); the fragment itself is named as the
+    line wrote it. Anything else is prose, and prose is not a claim: a word under ``tests/``
+    that never completes a ``.py::`` path is the module's documented non-claim (a lone file
+    path is not a nodeid), and refusing it would refuse the prose of every claim line instead
+    of the one thing this guard exists for, a path a space cut in two.
+    """
+    token, backticked = tokens[index]
+    if backticked or _looks_like_a_claim(token) or not token.startswith("tests/"):
+        return None
+    parts = [token]
+    for later, later_backticked in tokens[index + 1:]:
+        if later_backticked or later.startswith("tests/"):
+            return None
+        parts.append(later)
+        if ".py::" in "".join(parts):
+            return " ".join(parts)
+    return None
+
+
 def _nodeids(line: str) -> list[str]:
     """The backticked and bare ``tests/...py::...`` tokens of one claim line, in reading order.
 
     Raises ``UnreadableClaim`` when the line holds a token shaped like a nodeid that cannot be
     read; nothing of that line is kept then, and the caller writes no claims file.
     """
+    tokens = _line_tokens(line)
     found: list[str] = []
     unreadable: list[str] = []
-    for token in _BACKTICKED.findall(line):
-        _take(token, True, found, unreadable)
-    for token in _BACKTICKED.sub(" ", line).split():
-        _take(token.rstrip(",;."), False, found, unreadable)
+    for index, (token, backticked) in enumerate(tokens):
+        fragment = _split_path(tokens, index)
+        if fragment is not None:
+            unreadable.append(fragment)
+        else:
+            _take(token, backticked, found, unreadable)
     if unreadable:
         raise UnreadableClaim(unreadable)
     return found
