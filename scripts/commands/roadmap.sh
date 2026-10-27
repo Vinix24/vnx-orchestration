@@ -9,7 +9,7 @@ Usage: vnx roadmap <init|status|load|reconcile|advance|approve|step|autopilot> [
 Commands:
   init <ROADMAP.yaml>                         Initialize roadmap registry state
   status                                      Show current roadmap status
-  load <feature_id>                           Materialize one feature into root FEATURE_PLAN.md
+  load <feature_id>                           Mark it active; create its branch and worktree
   reconcile                                   Verify closure truth and detect blocking drift
   advance                                     Auto-load next feature after merged + verified closure
   approve <feature_id> --actor <name> --justification <text>
