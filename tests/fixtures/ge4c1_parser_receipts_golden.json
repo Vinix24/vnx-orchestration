@@ -1,0 +1,92 @@
+{
+  "_about": "review_gate_result receipt lines as gate_result_parser booked them on 0977a7fc (GE-4c-1, dlv-cda65b5aa104), before both writers moved to commit_gate_outcome. Inputs: tests/test_ge4c1_failure_and_parser_routes.py::CLAUDE_INPUTS and ::RECORD_INPUTS, with the chain-link env (VNX_PARENT_DISPATCH, VNX_TASK_CLASS, VNX_TIER_FROM, VNX_TIER_TO) unset: the append layer stamps those from the process, not from the writer. <store> is the throwaway store root.",
+  "receipts": {
+    "claude_github_optional": {
+      "advisory_count": 1,
+      "advisory_findings": [
+        {
+          "category": "style",
+          "file_path": "",
+          "line": 0,
+          "message": "nit",
+          "severity": "advisory"
+        }
+      ],
+      "blocking_count": 0,
+      "blocking_findings": [],
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "contract_hash": "contract-hash",
+      "contributed_evidence": true,
+      "event_type": "review_gate_result",
+      "gate": "claude_github_optional",
+      "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "ingested_at": "2026-10-27T08:16:25Z",
+      "open_items_created": 0,
+      "outcome_id": "1bc54661bb209cd88e9bb2ac5f012b387fe1b69adbcd87ea174dcc7d5b67bf03",
+      "pr_id": "PR-4",
+      "receipt_kind": "review_gate",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "pass",
+      "summary": "clean",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T08:16:25Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='pass' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      }
+    },
+    "kimi_gate": {
+      "advisory_count": 1,
+      "advisory_findings": [
+        {
+          "category": "general",
+          "file_path": "",
+          "line": 0,
+          "message": "",
+          "severity": "advisory"
+        }
+      ],
+      "blocking_count": 1,
+      "blocking_findings": [
+        {
+          "category": "general",
+          "file_path": "",
+          "line": 0,
+          "message": "",
+          "severity": "blocking"
+        }
+      ],
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "commit_sha": "9f3c2a1b7e4d5c6a8b0f1e2d3c4b5a6978879605",
+      "contract_hash": "contract-hash",
+      "event_type": "review_gate_result",
+      "gate": "kimi_gate",
+      "head_sha": "9f3c2a1b7e4d5c6a8b0f1e2d3c4b5a6978879605",
+      "ingested_at": "2026-10-27T08:16:25Z",
+      "open_items_created": 0,
+      "outcome_id": "8d5a77e25d349bb3732cbdab81b83dea3ac37652f93ff67e4f2ac08ab955a7de",
+      "pr_id": "1926",
+      "pr_number": 1926,
+      "receipt_kind": "review_gate",
+      "report_path": "<store>/project/.vnx-data/unified_reports/r.md",
+      "required_reruns": [
+        "kimi_gate"
+      ],
+      "residual_risk": "medium",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "fail",
+      "summary": "blocked",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T08:16:25Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='fail' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      }
+    }
+  }
+}

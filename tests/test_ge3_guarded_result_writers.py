@@ -93,7 +93,7 @@ def test_record_claude_github_result_lands_at_the_same_path_with_the_same_keys(e
     ``_contract_result_path``: ``results/<slug>-claude_github_optional-contract.json``
     with the receipt's own ``to_dict`` keys plus the three evidence fields the
     method adds (``findings``, ``report_path``, ``required_reruns``) and
-    ``residual_risk``.
+    ``residual_risk``, and the ``attempt_seq`` the commit stamps (GE-4c-1).
     """
     manager = _manager()
     report_path = _report(env, "claude-report.md")
@@ -115,7 +115,7 @@ def test_record_claude_github_result_lands_at_the_same_path_with_the_same_keys(e
     saved = json.loads(result_path.read_text(encoding="utf-8"))
 
     expected_keys = set(receipt.to_dict()) | {
-        "findings", "report_path", "required_reruns", "residual_risk",
+        "findings", "report_path", "required_reruns", "residual_risk", "attempt_seq",
     }
     assert set(saved) == expected_keys, (
         "the shared write path changed the record's keys\n"
@@ -241,10 +241,10 @@ def test_record_result_is_refused_over_a_terminal_record_on_the_same_head(env, m
     saved = json.loads(slot.read_text(encoding="utf-8"))
     assert saved["status"] == status, "a verdict about another head must not hold this slot (OI-1668)"
     assert saved["commit_sha"] == COMMIT_B
-    # ``record_result`` books its outcome through ``_emit_result_receipt``
-    # (unchanged by GE-3); what matters is that ONE receipt exists, for the
-    # write that landed — the refused write above booked none.
-    assert len(_receipts(env)) == 1
+    # GE-4c-1: the receipt is commit_gate_outcome's, and an ``unavailable`` or
+    # ``not_executable`` is no decided verdict, so it owes none (ADR-046 §2);
+    # ``_emit_result_receipt`` booked one for any status before.
+    assert _receipts(env) == []
 
 
 # ---------------------------------------------------------------------------
