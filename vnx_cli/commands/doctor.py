@@ -355,8 +355,11 @@ def _check_release_main_drift(project_dir: Path) -> Check:
 
     Blocking, never a WARN (tiebreaker 2026-10-25, ``plan-tiebreak-fleet-release-
     and-rollout``): a WARN would let ``vnx doctor`` exit 0 while the fleet runs a
-    release dozens of commits behind main. Outside a git checkout, or with no local
-    main ref, it reports ``skipped: <reason>`` (never fetching): unmeasured is not level.
+    release dozens of commits behind main. A git command that fails is a FAIL
+    naming the command — a failed measurement is not a pass. Only a release that
+    legitimately cannot be compared (not a git checkout, no local main ref, a
+    release ref the checkout does not know) reports ``skipped: <reason>``; this
+    check never fetches.
     """
     release_dir, source = _resolve_running_release(project_dir)
     if release_dir is None:
@@ -364,14 +367,16 @@ def _check_release_main_drift(project_dir: Path) -> Check:
                      "(no .vnx-version pin and no ~/.vnx-system/current on this machine)")
     try:
         _engine.ensure_engine_on_path()
-        from release_drift import BEHIND, measure, render_detail
+        from release_drift import NON_BLOCKING_STATUSES, measure, render_detail
 
         drift = measure(release_dir, main_repo=_engine.engine_root())
     except Exception as exc:  # fail-closed: cannot measure is not measured clean
         return Check("release:main-drift", FAIL,
                      f"release drift of {release_dir} ({source}) could not be measured ({exc})")
-    return Check("release:main-drift", FAIL if drift.status == BEHIND else PASS,
-                 f"{render_detail(drift)} (release dir from {source})")
+    # PASS on level or a documented skip; BEHIND blocks, and so does a failed
+    # measurement — or any status this doctor does not know (fail-closed).
+    status = PASS if drift.status in NON_BLOCKING_STATUSES else FAIL
+    return Check("release:main-drift", status, f"{render_detail(drift)} (release dir from {source})")
 
 
 def _check_state_root_location(data_root: Path) -> Check:

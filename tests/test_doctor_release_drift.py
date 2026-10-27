@@ -73,6 +73,26 @@ def _release(repo: Path, dest: Path, with_main_ref: bool = True) -> Path:
     return dest
 
 
+def _fake_git(drift_module, subcommand: str, *, returncode: int = 128,
+              stdout: str = "", stderr: str = "fatal: bad object\n",
+              raises: Exception | None = None):
+    """A ``subprocess.run`` that fails one git subcommand and runs the rest.
+
+    Patched onto ``release_drift``'s call site so the failure is a real failing
+    subprocess answer, exactly what the finding confirmed against the checkout.
+    """
+    real_run = drift_module.subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if subcommand in command:
+            if raises is not None:
+                raise raises
+            return subprocess.CompletedProcess(command, returncode, stdout=stdout, stderr=stderr)
+        return real_run(command, *args, **kwargs)
+
+    return fake_run
+
+
 class TestMeasure:
     def test_release_level_with_main_is_up_to_date(self, tmp_path):
         drift = _drift().measure(_release(_repo(tmp_path), tmp_path / "rel"))
@@ -122,6 +142,56 @@ class TestMeasure:
         assert "v9.9.9" in _drift().render_detail(drift)
 
 
+class TestFailedMeasurement:
+    """A git call that FAILS is a failed measurement — never a skip, never level.
+
+    The finding (codex on 1ad57b8b): both refs resolved, ``rev-list`` broke, and
+    the check passed because ``measure`` collapsed "the command failed" into the
+    UNKNOWN_RELEASE it also uses for a legitimately absent ref. Only a documented
+    absence may skip; a command that exits non-zero must block.
+    """
+
+    def test_a_failed_rev_list_is_a_failed_measurement_not_a_skip(self, tmp_path, monkeypatch):
+        drift_module = _drift()
+        release = _release(_repo(tmp_path, drift_commits=1), tmp_path / "rel")
+        monkeypatch.setattr(drift_module.subprocess, "run", _fake_git(drift_module, "rev-list"))
+
+        drift = drift_module.measure(release)
+
+        assert drift.status == drift_module.MEASURE_FAILED
+        detail = drift_module.render_detail(drift)
+        assert "rev-list" in detail and "fatal: bad object" in detail
+        assert "skipped" not in detail
+
+    def test_a_silent_rev_list_answer_is_not_a_zero_count(self, tmp_path, monkeypatch):
+        """Exit 0 with no count measured nothing; it is not "level" either."""
+        drift_module = _drift()
+        release = _release(_repo(tmp_path, drift_commits=1), tmp_path / "rel")
+        monkeypatch.setattr(
+            drift_module.subprocess, "run",
+            _fake_git(drift_module, "rev-list", returncode=0, stdout="", stderr=""),
+        )
+
+        drift = drift_module.measure(release)
+
+        assert drift.status == drift_module.MEASURE_FAILED
+        assert "rev-list" in drift_module.render_detail(drift)
+
+    def test_git_that_cannot_run_is_a_failed_measurement(self, tmp_path, monkeypatch):
+        drift_module = _drift()
+        release = _release(_repo(tmp_path, drift_commits=1), tmp_path / "rel")
+        monkeypatch.setattr(
+            drift_module.subprocess, "run",
+            _fake_git(drift_module, "rev-list", raises=OSError("git vanished")),
+        )
+
+        drift = drift_module.measure(release)
+
+        assert drift.status == drift_module.MEASURE_FAILED
+        detail = drift_module.render_detail(drift)
+        assert "rev-list" in detail and "git vanished" in detail
+
+
 class TestDoctorCheck:
     @pytest.fixture
     def env(self, tmp_path, monkeypatch):
@@ -162,6 +232,36 @@ class TestDoctorCheck:
         assert checks["release:main-drift"]["status"] == FAIL
         assert sha in detail and subject in detail and "scripts/drift.py" in detail
         assert rc == 1
+
+    def test_a_failed_measurement_blocks_doctor_naming_the_command(self, env, tmp_path, capsys, monkeypatch):
+        home, project = env
+        (home / ".vnx-system" / "current").symlink_to(
+            _release(_repo(tmp_path, drift_commits=1), tmp_path / "rel")
+        )
+        drift_module = _drift()
+        monkeypatch.setattr(drift_module.subprocess, "run", _fake_git(drift_module, "rev-list"))
+
+        rc, checks = self._doctor(project, capsys)
+
+        check = checks["release:main-drift"]
+        assert check["status"] == FAIL
+        assert "rev-list" in check["detail"] and "fatal: bad object" in check["detail"]
+        assert not check["detail"].startswith("skipped:")
+        assert rc == 1
+
+    def test_no_main_ref_still_passes_with_a_skip_and_exits_zero(self, env, tmp_path, capsys, monkeypatch):
+        home, project = env
+        release = _release(_repo(tmp_path, drift_commits=1), tmp_path / "rel", with_main_ref=False)
+        (home / ".vnx-system" / "current").symlink_to(release)
+        monkeypatch.setattr("vnx_cli._engine.engine_root", lambda: tmp_path / "not-a-checkout")
+
+        rc, checks = self._doctor(project, capsys)
+
+        check = checks["release:main-drift"]
+        assert check["status"] == PASS
+        assert check["detail"].startswith("skipped:")
+        assert "origin/main" in check["detail"]
+        assert rc == 0
 
     @pytest.mark.parametrize("make_release, expected", [("plain", "not a git checkout"), ("none", "no release")])
     def test_a_skip_names_its_reason_and_exits_zero(self, env, tmp_path, capsys, make_release, expected):
