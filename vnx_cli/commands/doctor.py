@@ -15,7 +15,7 @@ from typing import NamedTuple
 from xml.parsers.expat import ExpatError
 
 from vnx_cli import _engine
-from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir, _normalize_version
+from vnx_cli._reexec import PIN_FILE_NAME, _find_pin_dir, _normalize_version, _resolve_pinned_dir
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +328,55 @@ def _check_install_mode(project_dir: Path) -> Check:
         status=WARN,
         detail="no VNX install detected (no embedded, central, packaged, or source scripts/ tree found)",
     )
+
+
+def _resolve_running_release(project_dir: Path) -> "tuple[Path | None, str]":
+    """The release this project runs: its ``.vnx-version`` pin, else ``current``.
+
+    Returns ``(path, source)``, or ``(None, "")`` when the project pins nothing and
+    this machine has no central install. A pin naming no existing version dir falls
+    through to ``current``. Never falls back to ``_engine.engine_root()``: a dev
+    checkout at an untagged HEAD is not a release.
+    """
+    central = Path.home() / ".vnx-system"
+    pin, _pin_dir = _read_project_pin(project_dir)
+    if pin not in ("unset", "error"):
+        pinned = _resolve_pinned_dir(central / "versions", pin)
+        if pinned is not None:
+            return pinned, f".vnx-version pin {pin}"
+    current = central / "current"
+    if current.is_dir():
+        return current, f"current -> {_resolve_active_version(current)}"
+    return None, ""
+
+
+def _check_release_main_drift(project_dir: Path) -> Check:
+    """FAIL when the running release lacks commits ``origin/main`` already has.
+
+    Blocking, never a WARN (tiebreaker 2026-10-25, ``plan-tiebreak-fleet-release-
+    and-rollout``): a WARN would let ``vnx doctor`` exit 0 while the fleet runs a
+    release dozens of commits behind main. A git command that fails is a FAIL
+    naming the command — a failed measurement is not a pass. Only a release that
+    legitimately cannot be compared (not a git checkout, no local main ref, a
+    release ref the checkout does not know) reports ``skipped: <reason>``; this
+    check never fetches.
+    """
+    release_dir, source = _resolve_running_release(project_dir)
+    if release_dir is None:
+        return Check("release:main-drift", PASS, "skipped: no release to compare "
+                     "(no .vnx-version pin and no ~/.vnx-system/current on this machine)")
+    try:
+        _engine.ensure_engine_on_path()
+        from release_drift import NON_BLOCKING_STATUSES, measure, render_detail
+
+        drift = measure(release_dir, main_repo=_engine.engine_root())
+    except Exception as exc:  # fail-closed: cannot measure is not measured clean
+        return Check("release:main-drift", FAIL,
+                     f"release drift of {release_dir} ({source}) could not be measured ({exc})")
+    # PASS on level or a documented skip; BEHIND blocks, and so does a failed
+    # measurement — or any status this doctor does not know (fail-closed).
+    status = PASS if drift.status in NON_BLOCKING_STATUSES else FAIL
+    return Check("release:main-drift", status, f"{render_detail(drift)} (release dir from {source})")
 
 
 def _check_state_root_location(data_root: Path) -> Check:
@@ -1312,6 +1361,8 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_tools())
     checks.extend(_check_directories(project_dir, data_root))
     checks.append(_check_install_mode(project_dir))
+    # Blocking: a release that is behind main is the fleet-release goal's defect.
+    checks.append(_check_release_main_drift(project_dir))
     checks.append(_check_state_root_location(data_root))
     # Read-only: names a pre-#1437 XDG store that no resolver reads any more.
     legacy_project_id = _engine.derive_project_id(project_dir)

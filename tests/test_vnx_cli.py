@@ -161,6 +161,12 @@ def test_doctor_detects_missing_dirs(tmp_path, capsys):
 
 def test_doctor_passes_valid_project(tmp_path, capsys, monkeypatch):
     """vnx doctor passes with complete setup (after vnx init)."""
+    # Home is isolated: ``release:main-drift`` reads this machine's
+    # ~/.vnx-system/current, and a release that lags main belongs to the
+    # machine, not to the validity of a freshly initialized project.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home))
     vnx_init(_init_args(tmp_path))
 
     # Add a dummy agent dir so the agents check is PASS not WARN
