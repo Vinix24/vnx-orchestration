@@ -2925,10 +2925,8 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _fetch_deliverable_records(
-    state_dir, project_id: str, objective: Optional[str] = None, *, include_metadata: bool = False,
-    include_withdrawn: bool = False,
-) -> list[dict]:
+def _fetch_deliverable_records(state_dir, project_id: str, objective: Optional[str] = None, *,
+                               include_metadata: bool = False, include_withdrawn: bool = False) -> list[dict]:
     """The single read path over the deliverable plane — the view rollup when
     migration 0027 has been applied, the raw-dispatches fallback otherwise.
 
@@ -2985,8 +2983,7 @@ def _fetch_deliverable_records(
                     """,
                     (project_id,),
                 ).fetchall()
-            records = [dict(r) for r in rows
-                       if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
+            records = [dict(r) for r in rows if include_withdrawn or r["derived_status"] != WITHDRAWN_STATE]
             if include_metadata:
                 for r in records:
                     meta = json.loads(r.pop("metadata_json", None) or "{}")

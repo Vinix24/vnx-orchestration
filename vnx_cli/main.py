@@ -984,10 +984,7 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
              "plan-gate run without --dispatch-paths reads them",
     )
 
-    p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
-    _common_horizon_args(p_dlist)
-    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
-    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
+    _register_deliverable_list_verb(subs)
 
     p_dpromote = subs.add_parser(
         "promote", help="human gate: promote deliverable from proposed -> ready",
@@ -1034,6 +1031,14 @@ def _register_deliverable_verbs(subs: argparse.Action) -> None:
              "the stored list)",
     )
     _register_deliverable_retarget_verb(subs)
+
+
+def _register_deliverable_list_verb(subs: argparse.Action) -> None:
+    """`deliverable list`: grouped by objective, withdrawn ones only with --all."""
+    p_dlist = subs.add_parser("list", help="list deliverables grouped by objective")
+    _common_horizon_args(p_dlist)
+    p_dlist.add_argument("--objective", default=None, metavar="TRACK_ID")
+    p_dlist.add_argument("--all", action="store_true", help="also show withdrawn deliverables (hidden by default)")
 
 
 def _register_deliverable_retarget_verb(subs: argparse.Action) -> None:
