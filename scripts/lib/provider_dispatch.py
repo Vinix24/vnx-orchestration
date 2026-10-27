@@ -1444,22 +1444,19 @@ def _emit_old_cost_event(
     return cost_usd, cost_source
 
 
-def _cli_spawn_refused(provider: str, result: Any) -> Optional[str]:
-    """The condition under which a codex/kimi builder spawn never reached a model, else ``None``.
+def _cli_spawn_refused(result: Any) -> Optional[str]:
+    """The explicit refusal evidence of a codex/kimi builder spawn, else ``None``.
 
-    The codex spawn reports its launch refusals — an unresolvable model, a
-    process that never started — as ``error`` with no usage at all: nothing ran,
-    so that attempt books a refused spawn, not a run nobody measured. kimi gets
-    no such mapping: a kimi run reporting nothing is exactly the
-    ``unknown:kimi_cli_no_usage`` shape the ledger documents.
+    Only a launch refusal — the model would not resolve, the binary was missing,
+    the process never started — is named in ``spawn_refused`` by the spawn
+    itself. No usage is NOT evidence of one: codex also returns no usage after a
+    stream failure that followed model output, and that run books ``unknown``
+    usage with its reason, exactly like kimi, never a zero-token
+    ``unavailable:spawn_refused`` line (K2b round 2).
     """
     refused = getattr(result, "spawn_refused", None)
     if isinstance(refused, str) and refused.strip():
         return refused.strip()
-    if provider == "codex" and getattr(result, "token_usage", None) is None:
-        error = getattr(result, "error", None)
-        if isinstance(error, str) and error.strip():
-            return error.strip()
     return None
 
 
@@ -1484,7 +1481,7 @@ def _book_cli_builder_run(
     record, _reason = harness_run_cost.book_cli_builder(
         provider=provider, model_requested=model_used, started=window[0], ended=window[1],
         token_usage=getattr(result, "token_usage", None),
-        spawn_refused=_cli_spawn_refused(provider, result),
+        spawn_refused=_cli_spawn_refused(result),
         project_id=harness_run_cost.ledger_project_id(state_dir),
         producer=COST_LEDGER_PRODUCER, ref=args.dispatch_id,
         # The store this lane resolved (state_dir is its <data>/state), so a

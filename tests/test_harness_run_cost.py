@@ -947,6 +947,61 @@ class TestTheProviderDispatchCallSite:
         assert line["provider"] == "codex" and line["billing"] == "subscription"
         assert line["tokens"]["input_uncached"] == 100 and line["tokens"]["output"] == 20
 
+    def test_a_codex_run_that_started_and_reported_no_usage_is_unknown_not_refused(self, store):
+        # K2b round 2: codex also returns no usage after a stream failure that
+        # followed model output. An error without explicit refusal evidence is
+        # an unknown-usage run, never a zero-token spawn_refused line.
+        import provider_dispatch as pd
+
+        result = SimpleNamespace(
+            token_usage=None, completion_text="", returncode=1,
+            error="stream disconnected before completion: idle timeout",
+            timed_out=False, spawn_refused=None,
+        )
+
+        cost, source, run_ids = pd._book_dispatch_cost(
+            _pd_args("codex"), "codex", "gpt-5.5", result, {}, (START, END), store.state,
+        )
+
+        (line,) = _ledger_lines(store.ledger)
+        assert line["usage_completeness"] == "unknown:no_usage_fields"
+        assert line["cost_source"] == "unavailable:no_usage_fields"
+        assert all(value is None for value in line["tokens"].values())
+        # A subscription line books 0 at the margin when nothing can be priced;
+        # the honest signal is the unavailable source, never a spawn refusal.
+        assert (cost, source, run_ids) == (0.0, "unavailable:no_usage_fields", [line["run_id"]])
+        assert pd._cli_spawn_refused(result) is None, "no usage alone is not refusal evidence"
+
+    def test_a_codex_run_with_explicit_refusal_evidence_still_books_the_zero_line(self, store):
+        import provider_dispatch as pd
+
+        result = SimpleNamespace(
+            token_usage=None, completion_text="", returncode=1,
+            error="codex_model_unresolved: no codex model in the registry",
+            timed_out=False, spawn_refused="codex_model_unresolved: no codex model in the registry",
+        )
+
+        cost, source, run_ids = pd._book_dispatch_cost(
+            _pd_args("codex"), "codex", "gpt-5.5", result, {}, (START, END), store.state,
+        )
+
+        (line,) = _ledger_lines(store.ledger)
+        assert line["usage_completeness"] == "complete"
+        assert line["cost_source"] == "unavailable:spawn_refused"
+        assert all(value == 0 for value in line["tokens"].values())
+        assert (cost, source) == (0.0, "unavailable:spawn_refused")
+
+    def test_the_refusal_helper_reads_only_the_explicit_field(self):
+        import provider_dispatch as pd
+
+        started_then_failed = SimpleNamespace(token_usage=None, error="stream failed", spawn_refused=None)
+        refused = SimpleNamespace(token_usage=None, error="binary missing", spawn_refused="binary missing")
+        no_field = SimpleNamespace(token_usage=None, error="stream failed")
+
+        assert pd._cli_spawn_refused(started_then_failed) is None
+        assert pd._cli_spawn_refused(no_field) is None, "no inference from error + no usage"
+        assert pd._cli_spawn_refused(refused) == "binary missing"
+
     def test_a_plan_gate_seat_keeps_the_old_line(self, store):
         import provider_dispatch as pd
 

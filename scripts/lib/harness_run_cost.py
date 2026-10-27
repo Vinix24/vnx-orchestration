@@ -570,6 +570,13 @@ def _book_cli_run(
     silent: each refusal is a WARNING naming the ref (dispatch id or gate run
     id), the provider, the role and the reason. The opposite of
     :func:`record_builder_run`, which propagates.
+
+    ``OSError`` is caught beside the ledger's own errors because
+    :func:`cost_ledger.record_next_attempt` deliberately propagates the
+    registry/ledger read error unchanged (a ``PermissionError`` on a store the
+    process may not read): booking runs before a gate records its verdict, so an
+    escaping ``OSError`` would cost the verdict itself. ``BaseException`` stays
+    uncaught — a ``KeyboardInterrupt`` is not a booking failure.
     """
     if run.provider != provider:
         raise cost_ledger.InvalidRecord(f"a {provider} run cannot book provider {run.provider!r}")
@@ -585,7 +592,7 @@ def _book_cli_run(
 
     try:
         record = cost_ledger.record_next_attempt(project_id, producer, ref, make_run, ledger_path=ledger_path)
-    except (cost_ledger.CostLedgerRefusal, cost_ledger.CostLedgerWriteError) as exc:
+    except (cost_ledger.CostLedgerRefusal, cost_ledger.CostLedgerWriteError, OSError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
         logger.warning(
             "harness_run_cost: %s %s run %s not booked (%s): %s",

@@ -33,9 +33,11 @@ governed lane's dispatcher.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -48,6 +50,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import cost_ledger  # noqa: E402
 import gate_runner  # noqa: E402
+import harness_run_cost  # noqa: E402
 import kimi_gate  # noqa: E402
 from gate_runner import GateRunner  # noqa: E402
 
@@ -303,3 +306,62 @@ def test_a_ledger_write_that_raises_does_not_change_the_gate_verdict(store, monk
     assert "kimi" in message and "review" in message
     assert "CostLedgerWriteError" in message, "a failed booking is never silent"
     assert "kimi-gate-pr0-" in message, "the warning names the run it could not book"
+
+
+# ---------------------------------------------------------------------------
+# (e) fail-open on every booking error: a cost line never costs a verdict
+# ---------------------------------------------------------------------------
+
+
+def _permission_denied(*_args, **_kwargs):
+    """The registry/ledger read ``record_next_attempt`` propagates unchanged (an OSError)."""
+    raise PermissionError(errno.EACCES, "Permission denied", "/store/state/provider_costs.ndjson")
+
+
+def test_a_registry_read_error_returns_none_with_a_reason_and_one_warning(store, monkeypatch, caplog):
+    """An OSError reading the ledger is not a CostLedger* error, and it must not escape either.
+
+    ``cost_ledger.record_next_attempt`` propagates an OSError from reading the
+    registry unchanged; a booker that only catches the ledger's own errors lets
+    it through, and a gate that books before recording its verdict then has no
+    verdict at all.
+    """
+    run = harness_run_cost.cli_run(
+        provider=harness_run_cost.CODEX_PROVIDER, model=CODEX_MODEL,
+        started=datetime(2026, 10, 27, 10, 0, tzinfo=timezone.utc),
+        ended=datetime(2026, 10, 27, 10, 1, tzinfo=timezone.utc),
+        token_usage={"input_tokens": 100, "output_tokens": 20},
+    )
+    monkeypatch.setattr(cost_ledger, "record_next_attempt", _permission_denied)
+    with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
+        record, reason = harness_run_cost.record_codex_run(
+            run, project_id=PROJECT, producer="codex_gate", ref="PR-1234",
+            ledger_path=store.ledger,
+        )
+
+    assert record is None and "PermissionError" in reason
+    (warning,) = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "harness_run_cost"
+    ]
+    message = warning.getMessage()
+    assert "codex" in message and "review" in message and "PR-1234" in message
+    assert "PermissionError" in message, "a failed booking is never silent"
+
+
+def test_a_permission_error_reading_the_ledger_does_not_change_the_codex_gate_verdict(store, monkeypatch, caplog):
+    """The codex gate books BEFORE it records its verdict, so an escaping error would drop the verdict."""
+    monkeypatch.setattr(cost_ledger, "record_next_attempt", _permission_denied)
+    with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
+        result = _run_codex_gate(store, monkeypatch)
+
+    assert result["status"] == "completed", result.get("reason_detail")
+    # The canonical slot for a gate run that carries a pr_id (gate_recorder.result_file_path).
+    recorded = json.loads((store.results / "pr1234-codex_gate-contract.json").read_text(encoding="utf-8"))
+    assert recorded["status"] == result["status"], "the gate verdict was still recorded"
+    assert _lines(store) == [], "the booking failed, and the gate still decided"
+    (warning,) = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and r.name == "harness_run_cost"
+    ]
+    assert "PermissionError" in warning.getMessage()
