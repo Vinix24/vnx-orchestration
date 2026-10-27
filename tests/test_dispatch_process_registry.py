@@ -16,6 +16,7 @@ pass on this branch.  Run:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -332,6 +333,12 @@ def test_group_liveness_is_three_valued(monkeypatch):
 
     Red run on the old ``_group_is_valid``: its ``PermissionError`` branch
     returns False, so the unknown case is reported as dead.
+
+    Red run on 70b23b41: with every recorded member gone the old probe answered
+    ``dead`` without asking the group itself, so a child that outlived its
+    parent was classified dead.  Absence from the recorded snapshot is not
+    group absence: only ``killpg(pgid, 0)`` answering ``ProcessLookupError``
+    proves the group is gone.
     """
     from dispatch_process_registry import (
         GROUP_ALIVE,
@@ -346,11 +353,43 @@ def test_group_liveness_is_three_valued(monkeypatch):
     def _gone(pid):
         raise ProcessLookupError(pid)
 
-    monkeypatch.setattr(os, "getpgid", _gone)
-    assert probe_group_liveness(4242, [1, 2]).state == GROUP_DEAD
-
     def _denied(pid):
         raise PermissionError(pid)
+
+    def _killpg_alive(pgid, sig):
+        return None  # the group still exists (or the PGID was reused)
+
+    def _killpg_denied(pgid, sig):
+        raise PermissionError(pgid)
+
+    def _killpg_missing(pgid, sig):
+        raise ProcessLookupError(pgid)
+
+    def _killpg_unmeasurable(pgid, sig):
+        raise OSError("probe unavailable")
+
+    monkeypatch.setattr(os, "getpgid", _gone)
+
+    # No recorded member carries the PGID any more, but the group itself is
+    # still there: a child spawned after the snapshot, or a reused PGID.  Both
+    # are "alive" for a removal guard — the safe side.
+    monkeypatch.setattr(os, "killpg", _killpg_alive)
+    assert probe_group_liveness(4242, [1, 2]).state == GROUP_ALIVE
+
+    # A signal probe the kernel refuses for lack of permission still proves
+    # the group exists: that is alive, not unknown.
+    monkeypatch.setattr(os, "killpg", _killpg_denied)
+    assert probe_group_liveness(4242, [1, 2]).state == GROUP_ALIVE
+
+    # Only ProcessLookupError from the group probe is evidence of absence.
+    monkeypatch.setattr(os, "killpg", _killpg_missing)
+    assert probe_group_liveness(4242, [1, 2]).state == GROUP_DEAD
+
+    # Any other OSError means the group could not be measured: unknown.
+    monkeypatch.setattr(os, "killpg", _killpg_unmeasurable)
+    probe = probe_group_liveness(4242, [1, 2])
+    assert probe.state == GROUP_UNKNOWN
+    assert probe.detail, "an unknown group must name why it could not be measured"
 
     monkeypatch.setattr(os, "getpgid", _denied)
     probe = probe_group_liveness(4242, [1, 2])
@@ -393,3 +432,52 @@ def test_live_process_groups_unreadable_entry_is_unmeasurable(tmp_path):
     report = live_process_groups("dispatch-corrupt", repo_root=tmp_path)
     assert report.unmeasurable, "an unreadable entry is not evidence that nothing is alive"
     assert bool(report) is True
+
+
+# ---------------------------------------------------------------------------
+# A reused PGID must never become a kill target (PR-4a round 2)
+# ---------------------------------------------------------------------------
+
+def _write_registry(tmp_path: Path, dispatch_id: str, groups: "dict[int, list[int]]") -> Path:
+    """Write a registry entry directly, with exactly the recorded members given."""
+    path = tmp_path / ".vnx-data" / "state" / "dispatch_pgids" / f"{dispatch_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "dispatch_id": dispatch_id,
+                "groups": {str(pgid): members for pgid, members in groups.items()},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _reaped_pid() -> int:
+    """Return the pid of a process that has exited and been waited for."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait(timeout=10)
+    return proc.pid
+
+
+def test_reused_pgid_alone_is_never_signalled(tmp_path: Path):
+    """A live group with no recorded member left is not provably this dispatch's.
+
+    ``probe_group_liveness`` now answers alive for such a group (the removal
+    guard must keep the tree), but teardown must still signal a group only
+    when a *recorded member* carries the PGID — otherwise a reused PGID would
+    turn the fix into a kill of a stranger's process group.
+    """
+    from dispatch_process_registry import kill_dispatch_pgids
+
+    main = tmp_path / "main"
+    main.mkdir()
+    proc, child_pid, child_pgid = _spawn_sleeping_child(main)
+    try:
+        _write_registry(tmp_path, "dispatch-reused-pgid", {child_pgid: [_reaped_pid()]})
+        killed = kill_dispatch_pgids("dispatch-reused-pgid", repo_root=tmp_path, grace=0.0)
+        assert killed == 0, "no recorded member is left, so nothing may be signalled"
+        assert _pid_alive(child_pid), "an unrelated group sharing the PGID must survive"
+    finally:
+        _reap(proc)

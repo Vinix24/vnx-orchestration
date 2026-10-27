@@ -31,6 +31,7 @@ REASON_DIRTY = "dirty"
 REASON_HEAD_MOVED = "head_moved"
 REASON_GIT_UNMEASURABLE = "git_unmeasurable"
 REASON_REMOVE_FAILED = "remove_failed"
+REASON_DECISION_UNRECORDED = "decision_unrecorded"
 
 _GATE_PREFIX = "gate-"
 
@@ -129,9 +130,42 @@ def _dispatch_slot(
     return fh, None
 
 
+def _record_removal_decision(dispatch_id: str, wt: Path, head: str) -> str:
+    """Persist the removal decision before the tree is removed (ADR-005).
+
+    Returns ``""`` only when the line actually landed in the ledger; anything
+    else is the named reason the write produced no recorded evidence.
+    """
+    try:
+        from state_mutation import emit_state_mutation
+    except ImportError as exc:
+        return f"state_mutation is not importable: {exc}"
+    # The existing helper carries three free fields; together they name the
+    # dispatch, the tree and the evidence that cleared it.
+    section = (
+        f"head={head} dispatch_id={dispatch_id or '-'} "
+        "evidence=clean status, HEAD unchanged under the repository lock"
+    )
+    try:
+        result = emit_state_mutation(
+            str(wt),
+            trigger=f"worktree_remove:{dispatch_id or '-'}",
+            section=section,
+        )
+    except Exception as exc:  # a failed ledger write must refuse, never remove
+        return f"emit_state_mutation raised: {exc}"
+    if result is None:
+        return "emit_state_mutation reported no write"
+    status = getattr(result, "status", None)
+    if status not in ("appended", "duplicate"):
+        return f"emit_state_mutation status {status!r} is not a recorded write"
+    return ""
+
+
 def _assess(
     wt: Path, root: Path, dispatch_id: str, *, dry_run: bool,
     pause_hook: "Optional[Callable[[str], None]]",
+    before_remove: "Optional[Callable[[str], None]]" = None,
 ) -> GuardResult:
     """Judge and (unless dry_run) remove, while the caller holds the slot."""
     reason, detail = _liveness_refusal(dispatch_id, root)
@@ -149,6 +183,22 @@ def _assess(
             False, REASON_DRY_RUN, "clean under the slot", dry_run=True, would_remove=True,
         )
     with _worktree_lock(root):
+        if before_remove is not None:
+            before_remove("before_remove")
+        # Revalidate every call, not only with a pause_hook: taking the
+        # repository lock can block, and anything written into the tree or
+        # committed there during that wait must be seen before it is deleted.
+        again, reason, detail = _evidence(wt)
+        if not reason and again != head:
+            reason, detail = (
+                REASON_HEAD_MOVED,
+                f"HEAD moved {head[:12]} -> {again[:12]} under the repository lock",
+            )
+        if reason:
+            return GuardResult(False, reason, detail, dry_run)
+        failure = _record_removal_decision(dispatch_id, wt, again)
+        if failure:
+            return GuardResult(False, REASON_DECISION_UNRECORDED, failure, dry_run)
         ok, detail = _git(root, ["worktree", "remove", "--force", str(wt)])
     if ok:
         return GuardResult(True, REASON_REMOVED)
@@ -162,12 +212,17 @@ def guarded_remove(
     repo_root: Path,
     dry_run: bool = True,
     pause_hook: "Optional[Callable[[str], None]]" = None,
+    before_remove: "Optional[Callable[[str], None]]" = None,
 ) -> GuardResult:
     """Remove only on evidence measured under the held slot; ``dry_run`` removes nothing.
 
-    Every refusal has a reason; with a *pause_hook* the clean/HEAD evidence is
-    taken once, the hook runs, and it is taken again, so a change in between is
-    refused instead of force-removed.
+    Every refusal has a reason.  The clean/HEAD evidence is taken again under
+    the repository lock immediately before the removal, so a change made while
+    the guard waited for that lock is refused instead of force-removed.
+    *pause_hook* (before the lock) and *before_remove* (inside it) exist so a
+    test can move the evidence at either point.  The removal decision is
+    persisted to the state-mutation ledger before ``git worktree remove``; if
+    that write does not land, nothing is removed.
     """
     wt, root = Path(worktree_path), Path(repo_root)
     if not wt.exists():
@@ -178,7 +233,10 @@ def guarded_remove(
         if refused is not None:
             return refused
         try:
-            return _assess(wt, root, dispatch_id, dry_run=dry_run, pause_hook=pause_hook)
+            return _assess(
+                wt, root, dispatch_id, dry_run=dry_run,
+                pause_hook=pause_hook, before_remove=before_remove,
+            )
         finally:
             os.close(fd)
             if not wt.exists():
@@ -191,7 +249,10 @@ def guarded_remove(
     if refused is not None:
         return refused
     try:
-        return _assess(wt, root, dispatch_id, dry_run=dry_run, pause_hook=pause_hook)
+        return _assess(
+            wt, root, dispatch_id, dry_run=dry_run,
+            pause_hook=pause_hook, before_remove=before_remove,
+        )
     finally:
         import dispatch_worktree_isolation as dwi
 

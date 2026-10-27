@@ -21,9 +21,12 @@ Real git repos under ``tmp_path`` and real second processes; only
 
 from __future__ import annotations
 
+import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -328,3 +331,259 @@ def test_uncommitted_file_is_refused_and_kept(tmp_path, pinned_state):
     assert result.removed is False
     assert result.reason == REASON_DIRTY, result.detail
     assert kept.read_text(encoding="utf-8") == "must survive\n"
+
+
+# ---------------------------------------------------------------------------
+# 6. round-2 finding — a child that outlives its recorded parent keeps the
+#    group alive, and the guard refuses (reused PGID is the safe side)
+# ---------------------------------------------------------------------------
+
+_OUTLIVING_PARENT_SCRIPT = """
+import os, subprocess, sys
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(120)"],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+print(os.getpid(), child.pid, flush=True)
+"""
+
+
+def _wait_pid_gone(pid: int, timeout: float = 10.0) -> bool:
+    """True once *pid* no longer exists; a zombie counts as gone for our use."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.02)
+    return False
+
+
+def _write_registry_members(root: Path, dispatch_id: str, pgid: int, members: "list[int]") -> Path:
+    path = root / ".vnx-data" / "state" / "dispatch_pgids" / f"{dispatch_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"dispatch_id": dispatch_id, "groups": {str(pgid): members}}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_child_outliving_its_recorded_parent_keeps_the_group_alive(tmp_path, pinned_state):
+    """Absence from the spawn-time snapshot is not group absence.
+
+    The worker spawns a child *after* the registry snapshot and exits.  The
+    child keeps the worker's PGID, so the group is alive: the old probe
+    (every recorded member gone -> dead) let the removal delete a worktree a
+    surviving process still had a claim on.
+    """
+    from dispatch_process_registry import GROUP_ALIVE, GROUP_DEAD, probe_group_liveness
+    from worktree_removal_guard import REASON_LIVENESS_ALIVE, guarded_remove
+
+    dispatch_id = "dlv-guard-outliving"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+
+    parent = subprocess.Popen(
+        [sys.executable, "-c", _OUTLIVING_PARENT_SCRIPT],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        start_new_session=True,
+    )
+    child_pid = None
+    try:
+        out = parent.stdout.readline().strip()
+        assert out, "the parent never reported its pids"
+        parent_pid, child_pid = (int(part) for part in out.split())
+        assert os.getpgid(parent_pid) == parent_pid, "the parent must lead its own group"
+
+        # The registry snapshot only ever saw the parent; the child came later.
+        _write_registry_members(root, dispatch_id, parent_pid, [parent_pid])
+
+        parent.wait(timeout=10)
+        assert _wait_pid_gone(parent_pid), "the recorded parent must be gone"
+        assert not _wait_pid_gone(child_pid, timeout=0.2), "the child must outlive its parent"
+
+        probe = probe_group_liveness(parent_pid, [parent_pid])
+        assert probe.state == GROUP_ALIVE, (
+            f"the child still carries PGID {parent_pid}: {probe.detail}"
+        )
+
+        result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+        assert result.removed is False
+        assert result.reason == REASON_LIVENESS_ALIVE, result.detail
+        assert wt.exists(), "a surviving process in the group must keep the worktree"
+
+        os.kill(child_pid, signal.SIGKILL)
+        assert _wait_pid_gone(child_pid), "the surviving child must be gone"
+        assert probe_group_liveness(parent_pid, [parent_pid]).state == GROUP_DEAD, (
+            "with the last group member gone, the group probe is the only evidence of death"
+        )
+    finally:
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if parent.poll() is None:
+            parent.kill()
+        parent.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# 7. round-2 finding — revalidation under the repository lock, no pause_hook
+# ---------------------------------------------------------------------------
+
+def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+    """A change made while the guard waits for the repository lock is refused.
+
+    Old code re-checked only when ``pause_hook`` was supplied, so a normal
+    call could pass the evidence once, block on the lock, and then delete a
+    tree that had become dirty in the interval.
+    """
+    from worktree_removal_guard import REASON_DIRTY, guarded_remove
+
+    dispatch_id = "dlv-guard-late-dirty"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    injected = wt / "injected-after-lock.txt"
+
+    def hook(label: str) -> None:
+        assert label == "before_remove"
+        injected.write_text("late write\n", encoding="utf-8")
+
+    result = guarded_remove(
+        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, before_remove=hook,
+    )
+    assert result.removed is False
+    assert result.reason == REASON_DIRTY, result.detail
+    assert wt.exists(), "a tree made dirty under the lock must survive"
+    assert injected.exists()
+
+
+def test_head_moved_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+    from worktree_removal_guard import REASON_HEAD_MOVED, guarded_remove
+
+    dispatch_id = "dlv-guard-late-head"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    moved: "list[bool]" = []
+
+    def hook(label: str) -> None:
+        assert label == "before_remove"
+        _git(["commit", "--allow-empty", "-m", "HEAD moved under the lock"], wt)
+        moved.append(True)
+
+    result = guarded_remove(
+        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, before_remove=hook,
+    )
+    assert moved == [True]
+    assert result.removed is False
+    assert result.reason == REASON_HEAD_MOVED, result.detail
+    assert wt.exists()
+
+
+# ---------------------------------------------------------------------------
+# 8. round-2 advisory — the removal decision is in the ledger before removal
+# ---------------------------------------------------------------------------
+
+def test_removal_decision_is_recorded_before_git_remove(tmp_path, pinned_state, monkeypatch):
+    """ADR-005 ordering: one state-mutation line, before ``git worktree remove``."""
+    import types
+
+    import state_mutation
+    import worktree_removal_guard as guard
+
+    dispatch_id = "dlv-guard-ledger"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    head = _git(["rev-parse", "HEAD"], wt).strip()
+
+    events: "list[tuple[str, object]]" = []
+    real_git = guard._git
+
+    def _record_emit(file: str, **kwargs) -> object:
+        events.append(("emit", {"file": file, **kwargs}))
+        return types.SimpleNamespace(status="appended")
+
+    def _record_git(cwd: Path, args: "list[str]") -> "tuple[bool, str]":
+        events.append(("git", list(args)))
+        return real_git(cwd, args)
+
+    monkeypatch.setattr(state_mutation, "emit_state_mutation", _record_emit)
+    monkeypatch.setattr(guard, "_git", _record_git)
+
+    result = guard.guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+
+    assert result.removed is True, result.detail
+    emits = [event for event in events if event[0] == "emit"]
+    removes = [
+        index for index, event in enumerate(events)
+        if event[0] == "git" and list(event[1])[:2] == ["worktree", "remove"]
+    ]
+    assert len(emits) == 1, f"exactly one state-mutation line per removal, got {emits}"
+    assert len(removes) == 1, "exactly one git worktree remove"
+    assert events.index(emits[0]) < removes[0], (
+        f"the decision must be persisted before removal, order was {events}"
+    )
+    recorded = json.dumps(emits[0][1], sort_keys=True)
+    assert dispatch_id in recorded, f"dispatch id missing from {recorded}"
+    assert str(wt) in recorded, f"worktree path missing from {recorded}"
+    assert head in recorded, f"HEAD missing from {recorded}"
+
+
+def test_recording_failure_refuses_the_removal(tmp_path, pinned_state, monkeypatch):
+    """A removal whose decision cannot be persisted is not performed."""
+    import state_mutation
+    from worktree_removal_guard import REASON_DECISION_UNRECORDED, guarded_remove
+
+    dispatch_id = "dlv-guard-unrecorded"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+
+    def _boom(*args, **kwargs):
+        raise OSError("ledger is read-only")
+
+    monkeypatch.setattr(state_mutation, "emit_state_mutation", _boom)
+
+    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    assert result.removed is False
+    assert result.reason == REASON_DECISION_UNRECORDED, result.detail
+    assert wt.exists(), "no removal without a recorded decision"
+
+
+def test_no_recorded_write_refuses_the_removal(tmp_path, pinned_state, monkeypatch):
+    """``emit_state_mutation``'s failure contract (None) is not a pass."""
+    import state_mutation
+    from worktree_removal_guard import REASON_DECISION_UNRECORDED, guarded_remove
+
+    dispatch_id = "dlv-guard-unrecorded-none"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    monkeypatch.setattr(state_mutation, "emit_state_mutation", lambda *a, **k: None)
+
+    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    assert result.removed is False
+    assert result.reason == REASON_DECISION_UNRECORDED, result.detail
+    assert wt.exists()
+
+
+# ---------------------------------------------------------------------------
+# 9. fail-closed on evidence — an unknown liveness state never clears removal
+# ---------------------------------------------------------------------------
+
+def test_unknown_group_probe_never_clears_a_removal(tmp_path, pinned_state, monkeypatch):
+    from dispatch_process_registry import record_dispatch_pgids
+    from worktree_removal_guard import REASON_LIVENESS_UNKNOWN, guarded_remove
+
+    dispatch_id = "dlv-guard-unknown-probe"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    record_dispatch_pgids(dispatch_id, [os.getpgid(0)], repo_root=root)
+
+    def _gone(pid):
+        raise ProcessLookupError(pid)
+
+    def _unmeasurable(pgid, sig):
+        raise OSError("probe unavailable")
+
+    monkeypatch.setattr(os, "getpgid", _gone)
+    monkeypatch.setattr(os, "killpg", _unmeasurable)
+
+    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    assert result.removed is False
+    assert result.reason == REASON_LIVENESS_UNKNOWN, result.detail
+    assert wt.exists(), "an unmeasurable group is never evidence that nothing is alive"
