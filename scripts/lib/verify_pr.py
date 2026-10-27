@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import evidence_bound_gate
@@ -150,6 +151,114 @@ def classify_pr(
     return "feature"
 
 
+@contextmanager
+def _trusted_allowed_signers(
+    repo_root: Path,
+    base_ref: str,
+    allowed_signers_override: "str | Path | None",
+):
+    """Yield the trusted allowed_signers path for the whole verification.
+
+    Yields ``None`` when the base branch carries no allowed_signers file — the
+    caller turns that into the CONFIG ERROR verdict.
+
+    With an override the given path is used as-is: never copied, never
+    deleted.  Without one the base-branch file is materialised into a single
+    temporary file that stays alive until the caller's block ends, because
+    BOTH gate phases read it (provenance verification, then the evidence-bound
+    check which passes it to ``ssh-keygen -Y verify -f``).  It is unlinked
+    exactly once on exit — normal return, early return or exception.
+    """
+    if allowed_signers_override is not None:
+        yield Path(allowed_signers_override)
+        return
+
+    from attest_record import read_allowed_signers_from_base
+
+    raw = read_allowed_signers_from_base(repo_root, base_ref)
+    if raw is None:
+        yield None
+        return
+
+    fd, tmp_str = tempfile.mkstemp(suffix=".allowed_signers")
+    try:
+        try:
+            os.write(fd, raw)
+        finally:
+            os.close(fd)
+        yield Path(tmp_str)
+    finally:
+        try:
+            os.unlink(tmp_str)
+        except OSError:  # vnx-silent-except: temp-file cleanup is best effort
+            pass
+
+
+def _evidence_bound_failure(
+    *,
+    repo_root: Path,
+    base_ref: str,
+    head_ref: str,
+    allowed_signers_path: Path,
+    verbose: bool,
+) -> "tuple[int, str] | None":
+    """Run the evidence-bound gate; return a failure verdict or None.
+
+    MUST be called while ``allowed_signers_path`` still exists — the evidence
+    signatures are verified against that file.
+
+    Advisory by default, never weakens the provenance-only verdict above.
+    Reuses D1/D2 signing and the hash-chain.
+    """
+    state = evidence_bound_gate.gate_state()
+    if state == "off":
+        return None
+
+    try:
+        from content_key import compute_diff_hash
+
+        content_key = compute_diff_hash(
+            repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
+        )
+        record_path = repo_root / ".vnx-attest" / f"{content_key}.json"
+        manifest = json.loads(record_path.read_text(encoding="utf-8"))
+        ev_ok, ev_status, ev_details = (
+            evidence_bound_gate.verify_evidence_bound(
+                repo_root=repo_root,
+                base_ref=base_ref,
+                head_ref=head_ref,
+                allowed_signers=allowed_signers_path,
+                manifest=manifest,
+                verbose=verbose,
+            )
+        )
+        if not ev_ok:
+            if state == "required":
+                return (1, f"FAIL: evidence-bound gate required — {ev_status}")
+            # Advisory mode: make the gap visible but allow the merge.
+            for detail in ev_details:
+                print(
+                    f"[evidence-bound advisory] {detail}",
+                    file=sys.stderr,
+                )
+            if verbose:
+                print(
+                    f"[evidence-bound advisory] status={ev_status}",
+                    file=sys.stderr,
+                )
+    except Exception as exc:
+        # Any internal evidence-check failure is surfaced as an advisory
+        # only — the provenance gate must not crash because of a
+        # bootstrap instrumentation problem.
+        if state == "required":
+            return (1, f"FAIL: evidence-bound gate required — internal error: {exc}")
+        print(
+            f"[evidence-bound advisory] internal error: {exc}",
+            file=sys.stderr,
+        )
+    return None
+
+
 def verify_pr(
     *,
     repo_root: "str | Path | None" = None,
@@ -206,34 +315,25 @@ def verify_pr(
         )
 
     # Feature code in this PR — gate fires.
-    # Resolve allowed_signers from base branch (never from PR tree).
-    tmp_path = None
+    # Resolve allowed_signers from base branch (never from PR tree).  The
+    # base-branch copy is materialised once and stays alive until BOTH the
+    # provenance and the evidence-bound phase are done.
     ok = False
     reason = "unknown"
     ov_ok = False
     ov_manifest = None
     _ov_detail = ""
-    try:
-        if allowed_signers_override is not None:
-            allowed_signers_path = Path(allowed_signers_override)
-        else:
-            from attest_record import read_allowed_signers_from_base
-            raw = read_allowed_signers_from_base(repo_root, base_ref)
-            if raw is None:
-                return (
-                    2,
-                    f"CONFIG ERROR: .vnx-attest/allowed_signers not found at "
-                    f"base branch {base_ref!r}. "
-                    "Add .vnx-attest/allowed_signers at the base branch "
-                    "(see docs/governance/KEY_PROVISIONING.md).",
-                )
-            fd, tmp_str = tempfile.mkstemp(suffix=".allowed_signers")
-            try:
-                os.write(fd, raw)
-            finally:
-                os.close(fd)
-            tmp_path = tmp_str
-            allowed_signers_path = Path(tmp_path)
+    with _trusted_allowed_signers(
+        repo_root, base_ref, allowed_signers_override
+    ) as allowed_signers_path:
+        if allowed_signers_path is None:
+            return (
+                2,
+                f"CONFIG ERROR: .vnx-attest/allowed_signers not found at "
+                f"base branch {base_ref!r}. "
+                "Add .vnx-attest/allowed_signers at the base branch "
+                "(see docs/governance/KEY_PROVISIONING.md).",
+            )
 
         from attest_record import verify_attest_record
         ok, reason = verify_attest_record(
@@ -328,70 +428,19 @@ def verify_pr(
                             _ov_detail = (
                                 f"override budget exhausted ({_used}/{_budget})"
                             )
-    finally:
-        if tmp_path:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-    if ok:
-        # Evidence-bound gate (D3 bootstrap): advisory by default, never weakens
-        # the provenance-only pass above.  Reuses D1/D2 signing and the hash-chain.
-        state = evidence_bound_gate.gate_state()
-        if state != "off":
-            try:
-                from content_key import compute_diff_hash
-
-                content_key = compute_diff_hash(
-                    repo_root=repo_root, base_ref=base_ref, head_ref=head_ref
-                )
-                record_path = repo_root / ".vnx-attest" / f"{content_key}.json"
-                manifest = json.loads(
-                    record_path.read_text(encoding="utf-8")
-                )
-                ev_ok, ev_status, ev_details = (
-                    evidence_bound_gate.verify_evidence_bound(
-                        repo_root=repo_root,
-                        base_ref=base_ref,
-                        head_ref=head_ref,
-                        allowed_signers=allowed_signers_path,
-                        manifest=manifest,
-                        verbose=verbose,
-                    )
-                )
-                if not ev_ok:
-                    if state == "required":
-                        return (
-                            1,
-                            f"FAIL: evidence-bound gate required — {ev_status}",
-                        )
-                    # Advisory mode: make the gap visible but allow the merge.
-                    for detail in ev_details:
-                        print(
-                            f"[evidence-bound advisory] {detail}",
-                            file=sys.stderr,
-                        )
-                    if verbose:
-                        print(
-                            f"[evidence-bound advisory] status={ev_status}",
-                            file=sys.stderr,
-                        )
-            except Exception as exc:
-                # Any internal evidence-check failure is surfaced as an advisory
-                # only — the provenance gate must not crash because of a
-                # bootstrap instrumentation problem.
-                if state == "required":
-                    return (
-                        1,
-                        f"FAIL: evidence-bound gate required — internal error: {exc}",
-                    )
-                print(
-                    f"[evidence-bound advisory] internal error: {exc}",
-                    file=sys.stderr,
-                )
-
-        return (0, "PASS: attestation valid")
+        if ok:
+            # Evidence-bound phase — still inside the signer-file scope, so the
+            # evidence signatures verify against a file that exists.
+            failure = _evidence_bound_failure(
+                repo_root=repo_root,
+                base_ref=base_ref,
+                head_ref=head_ref,
+                allowed_signers_path=allowed_signers_path,
+                verbose=verbose,
+            )
+            if failure is not None:
+                return failure
+            return (0, "PASS: attestation valid")
 
     if ov_ok and ov_manifest is not None:
         signer = ov_manifest.get("signer_identity", "unknown")
