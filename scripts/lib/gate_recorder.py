@@ -550,15 +550,16 @@ def persist_request(
     pr_number: Optional[int],
     pr_id: str,
 ) -> None:
-    """Write request payload to disk."""
-    if pr_id:
-        slug = pr_id.lower().replace("-", "")
-        path = requests_dir / f"{slug}-{gate}-contract.json"
-    elif pr_number is not None:
-        path = requests_dir / f"pr-{pr_number}-{gate}.json"
-    else:
+    """Write a request atomically under its own slot lock (GE-4b); a reader never sees half of one.
+
+    The file name is the result slot's (:func:`result_file_path`). ``commit_gate_outcome`` takes
+    this lock inside the result slot's lock, never the other way round.
+    """
+    path = result_file_path(requests_dir, gate, pr_number, pr_id)
+    if path is None:
         return
-    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with slot_lock(path):
+        atomic_write_json(path, payload)
 
 
 def _repo_root() -> Path:
@@ -1982,10 +1983,12 @@ def write_result_guarded(
     ``record_failure`` (and its thin wrapper
     ``record_failure_simple``)                  via this function
     ``gate_report_generator``
-    ``._write_not_executable_result``           via this function
+    ``._write_not_executable_result``           commit_gate_outcome
     ``gate_report_generator``
-    ``._write_failure_result``                  via this function
-    ``gate_artifacts._write_result_record``     via this function
+    ``._write_failure_result``                  commit_gate_outcome
+    ``gate_artifacts._write_result_record``     commit_gate_outcome
+    ``gate_executor._execute_ci_gate``          commit_gate_outcome; a
+                                                running snapshot via this
     ``gate_result_parser``
     ``.record_claude_github_result``            raises on refusal
     ``gate_result_parser``

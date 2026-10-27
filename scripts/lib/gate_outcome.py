@@ -31,27 +31,30 @@ Partial-failure contract (ADR-046 §3), fixed here before the code:
    records: an ``unavailable`` or ``not_executable`` owes no receipt, and its
    newer ``reason_detail`` (a quota refusal on a retry) still lands and feeds
    the provider-reachability ledger.
+7. **Request** (GE-4b). An admitted outcome, a repeat included, then gives
+   its :class:`GateRequest` the terminal status of the record on the slot
+   (:data:`REQUEST_STATUS_OF`), under the request path's lock inside this one.
+   A refusal changes no request; a failed request write is logged.
 
 All of it runs under ``atomic_io.slot_lock`` on the record path. The forge
 publication, bundle archive and reachability feed stay outside, as before.
 
 Limits: the key deduplicates within the append cache window (300 s), so a
 receipt that landed, whose clearing write then failed, and that is recovered
-after that window, can book a second line. And only ``record_terminal_result``
-and ``record_not_executable`` route through here; the writers still on
-``write_result_guarded`` stamp no ``attempt_seq`` (GE-4b moves them).
+after that window, can book a second line. The writers still on
+``write_result_guarded`` stamp no ``attempt_seq``, and no obligation is booked here (GE-4c).
 """
 
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import gate_recorder
 from atomic_io import slot_lock
-from gate_status import FAIL_STATES, PASS_STATES, UNAVAILABLE_STATES, canonical_status, is_pass
+from gate_status import FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, UNAVAILABLE_STATES, canonical_status, is_pass
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +65,13 @@ OUTCOME_STATUSES: Tuple[str, ...] = ("pass", "fail", "unavailable", "not_executa
 # empty and unknown statuses are absent, so a lookup miss is a refusal.
 OUTCOME_OF: Dict[str, str] = {
     **dict.fromkeys(PASS_STATES, "pass"), **dict.fromkeys(FAIL_STATES, "fail"),
+    **dict.fromkeys(UNAVAILABLE_STATES, "unavailable"), "not_executable": "not_executable",
+}
+# A request's terminal status per status of the record that answers it (step 7).
+# A pass, a fail and a partial review all completed the requested run, as
+# gate_artifacts and ci_gate booked it before. A lookup miss ends no request.
+REQUEST_STATUS_OF: Dict[str, str] = {
+    **dict.fromkeys(PASS_STATES | FAIL_STATES | PARTIAL_REVIEW_STATES, "completed"),
     **dict.fromkeys(UNAVAILABLE_STATES, "unavailable"), "not_executable": "not_executable",
 }
 
@@ -98,8 +108,12 @@ class GateOutcome:
             raise ValueError(f"gate={self.gate!r} status={self.status!r}: an outcome is one of {OUTCOME_STATUSES}")
 
     @classmethod
-    def from_record(cls, gate: str, record: Dict[str, Any], *, pr_id: str) -> "GateOutcome":
-        status = OUTCOME_OF.get(canonical_status(record), "")
+    def from_record(cls, gate: str, record: Dict[str, Any], *, pr_id: str, downgraded: bool = False) -> "GateOutcome":
+        """``downgraded``: the writer downgraded a pass on a cut diff itself (gate_artifacts)."""
+        record_status = canonical_status(record)
+        status = OUTCOME_OF.get(record_status, "")
+        if downgraded and record_status in PARTIAL_REVIEW_STATES:
+            status = "pass"
         if not status:
             raise ValueError(
                 f"{gate} result for pr={pr_id!r} has status {record.get('status')!r}: "
@@ -115,6 +129,15 @@ class GateOutcome:
         return self.pr_id or str(self.pr_number or "")
 
 
+@dataclass(frozen=True)
+class GateRequest:
+    """The request an outcome answers (step 7); ``fields`` land on it only when the outcome is admitted."""
+
+    requests_dir: Path
+    payload: Dict[str, Any]
+    fields: Mapping[str, Any] = field(default_factory=dict)
+
+
 def commit_gate_outcome(
     outcome: GateOutcome,
     *,
@@ -122,8 +145,9 @@ def commit_gate_outcome(
     result_path: Optional[Path] = None,
     audit_refusal: bool = True,
     raise_on_refusal: bool = False,
+    request: Optional[GateRequest] = None,
 ) -> Tuple[Dict[str, Any], bool]:
-    """Write one outcome's record and its one receipt under the slot's lock (ADR-046 §2).
+    """Write one outcome's record, its one receipt and its request's end under the slot's lock (ADR-046 §2).
 
     ``result_path`` names the slot when its file name is not
     ``gate_recorder.result_file_path``'s. Returns ``(payload_on_disk,
@@ -132,7 +156,8 @@ def commit_gate_outcome(
     bundle archive. ``audit_refusal`` is ``write_result_guarded``'s opt-out.
     A repeat (step 6) returns ``(stored_record, True)``: the slot holds this
     outcome and nothing was refused, but nothing was written or published
-    either, and the caller's ``record`` is left unstamped.
+    either, and the caller's ``record`` is left unstamped. ``request`` is the
+    request this outcome answers (step 7).
     """
     path = result_path or gate_recorder.result_file_path(
         results_dir, outcome.gate, outcome.pr_number, outcome.pr_id,
@@ -160,6 +185,8 @@ def commit_gate_outcome(
                 repeated = existing
             else:
                 _write_record_then_receipt(path, record, existing, gate=gate, pr_ref=pr_ref)
+            if request is not None:
+                _finish_request(request, repeated or record, outcome)
     gate_recorder._archive_finished_gate_bundle(record, gate=gate, result_path=path)
     if refusal is not None:
         if raise_on_refusal:
@@ -221,6 +248,24 @@ def _write_record_then_receipt(
     gate_recorder._write_result_atomic(path, record)
     if owes_receipt:
         _book_receipt(path, record, gate=gate, pr_ref=pr_ref)
+
+
+def _finish_request(request: GateRequest, record: Dict[str, Any], outcome: GateOutcome) -> None:
+    """Step 7; the caller holds the slot's lock and the record on the slot answers the request."""
+    status = REQUEST_STATUS_OF.get(canonical_status(record))
+    if status is None:
+        logger.warning("gate_outcome: %s request pr=%s left as it was: status %r ends no request",
+                       outcome.gate, outcome.pr_ref, record.get("status"))
+        return
+    request.payload.update(request.fields)
+    request.payload["status"] = status
+    try:
+        gate_recorder.persist_request(
+            request.requests_dir, outcome.gate, request.payload, pr_number=outcome.pr_number, pr_id=outcome.pr_id,
+        )
+    except OSError as exc:
+        logger.warning("gate_outcome: %s request pr=%s NOT set to %s (the record landed) — %s: %s",
+                       outcome.gate, outcome.pr_ref, status, type(exc).__name__, exc)
 
 
 def _book_receipt(path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str) -> bool:
