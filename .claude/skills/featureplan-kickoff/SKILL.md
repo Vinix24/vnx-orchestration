@@ -133,21 +133,7 @@ Classify:
 
 If the worktree or queue is clearly unsafe, stop and explain exactly why.
 
-### 3.3 Initialize or refresh the queue
-
-Before queue init, treat the active root `FEATURE_PLAN.md` as a materialized artifact that must match canonical expectations.
-Use the reference plan below to sanity-check structure and metadata quality.
-
-Run:
-
-```bash
-python3 scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
-python3 scripts/pr_queue_manager.py staging-list
-```
-
-If the command fails, stop and report the failure instead of improvising.
-
-### 3.4 Find the first promoteable dispatch
+### 3.3 Find the first promoteable dispatch
 
 Rules:
 1. prefer the earliest PR with no unmet dependencies
@@ -171,7 +157,7 @@ Validate:
 - correct `Merge-Policy`
 - correct `Review-Stack`
 
-### 3.5 Promote exactly one dispatch
+### 3.4 Promote exactly one dispatch
 
 Only if validation passes:
 

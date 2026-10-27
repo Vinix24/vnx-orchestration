@@ -2555,9 +2555,6 @@ main() {
     promote)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" promote "$@"
       ;;
-    init-feature)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" init-feature "$@"
-      ;;
     queue-status)
       "$VNX_PYTHON" "$VNX_HOME/scripts/pr_queue_manager.py" queue-status "$@"
       ;;

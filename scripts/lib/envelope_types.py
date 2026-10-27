@@ -56,6 +56,10 @@ class EnvelopeSpec:
     # default, matching DispatchSpec/ExecutionPlan) leaves today's argv byte for
     # byte unchanged.
     requires_mcp: bool = False
+    # RS-2: the skill slug staging verified and compile_plan carried onto the plan.
+    # PREPARE hands it to the one prompt seam (skill_context), which prepends the
+    # skill body before the role block. None = no skill = byte-identical prompt.
+    skill: Optional[str] = None
 
 
 @dataclass

@@ -80,6 +80,9 @@ def _prepare(spec: EnvelopeSpec) -> str:
         }
         if spec.pr_id:
             dispatch_metadata["pr_id"] = spec.pr_id
+        # RS-2: the verified skill rides to the seam (absent key = unchanged prompt).
+        if spec.skill:
+            dispatch_metadata["skill"] = spec.skill
         instruction = _inject_skill_context(
             spec.terminal_id,
             instruction,
