@@ -1,0 +1,169 @@
+{
+  "_about": "review_gate_request receipt lines as gate_request_handler booked them on 9ce62b5f (GE-4c-2, dlv-636dc9d85875), before its four emitters became one. One line per call path: 'stack' is request_reviews, 'gemini_contract' is request_gemini_with_contract, 'claude_github_contract' is request_claude_github_with_contract, 'ci_gate_contract' is request_ci_gate_with_contract. Captured with the chain-link env (VNX_PARENT_DISPATCH, VNX_TASK_CLASS, VNX_TIER_FROM, VNX_TIER_TO) unset, the manager clock pinned to 2026-10-27T10:00:00Z and secrets.token_hex pinned to zeros: the append layer stamps the chain-link env from the process, not from the writer, so a golden taken inside a dispatch carried the dispatch's own task_class and tier_to and failed on CI. <store> is the throwaway store root.",
+  "receipts": {
+    "ci_gate_contract": {
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "changed_files": [
+        "scripts/lib/gate_request_handler.py"
+      ],
+      "contract_hash": "contract-hash",
+      "dispatch_id": "dlv-golden-ci",
+      "event_type": "review_gate_request",
+      "gate": "ci_gate",
+      "ingested_at": "2026-10-27T17:13:16Z",
+      "open_items_created": 0,
+      "outcome_id": "7380fc7192fce0eecc991f3aa0255d286c40ea098b02d915c4691286165d1ef3",
+      "pr_id": "PR-4",
+      "receipt_kind": "review_gate",
+      "review_mode": "per_pr",
+      "risk_class": "medium",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "requested",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T17:13:16Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='requested' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      }
+    },
+    "claude_github_contract": {
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "changed_files": [
+        "scripts/lib/gate_request_handler.py"
+      ],
+      "contract_hash": "contract-hash",
+      "contributed_evidence": false,
+      "dispatch_id": "dlv-golden-claude-gh",
+      "event_type": "review_gate_request",
+      "gate": "claude_github_optional",
+      "ingested_at": "2026-10-27T17:13:16Z",
+      "open_items_created": 0,
+      "outcome_id": "b89c703197852c7c0070d9ff25d9896b50cbe76983fca1bc3c11a0d7c53fa606",
+      "pr_id": "PR-4",
+      "receipt_kind": "review_gate",
+      "review_mode": "per_pr",
+      "risk_class": "medium",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "not_configured",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T17:13:16Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='not_configured' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      },
+      "was_intentionally_absent": true
+    },
+    "gemini_contract": {
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "changed_files": [
+        "scripts/lib/gate_request_handler.py"
+      ],
+      "contract_hash": "contract-hash",
+      "dispatch_id": "dlv-golden-gemini",
+      "event_type": "review_gate_request",
+      "gate": "gemini_review",
+      "ingested_at": "2026-10-27T17:13:16Z",
+      "open_items_created": 0,
+      "outcome_id": "261afee879c0e2b389ca2bb438ac39aa54c1db16b3c0fcef756d0427d9258bde",
+      "pr_id": "PR-4",
+      "receipt_kind": "review_gate",
+      "review_mode": "per_pr",
+      "risk_class": "medium",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "requested",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T17:13:16Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='requested' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      }
+    },
+    "stack": {
+      "branch": "dispatch/20260926-review-stack-subscription-first",
+      "changed_files": [
+        "scripts/lib/gate_request_handler.py"
+      ],
+      "dispatch_id": "dlv-golden-stack",
+      "event_type": "review_gate_request",
+      "gate": "codex_gate",
+      "ingested_at": "2026-10-27T17:13:16Z",
+      "open_items_created": 0,
+      "outcome_id": "c7d75def59dc23bc710f2708e8eec21d05e4ecb4a81de4f19bf383d86eb65800",
+      "pr_id": "1926",
+      "pr_number": 1926,
+      "receipt_kind": "review_gate",
+      "request": {
+        "branch": "dispatch/20260926-review-stack-subscription-first",
+        "builder_vendor": {
+          "builder_model": null,
+          "dispatch_id": "dlv-golden-stack",
+          "model": null,
+          "provider": null,
+          "reason": "no dispatch-spec.json for dlv-golden-stack under <store>/project/.vnx-data/dispatches",
+          "rule": "not_applied",
+          "source": null,
+          "vendor": null
+        },
+        "changed_files": [
+          "scripts/lib/gate_request_handler.py"
+        ],
+        "commit_sha": "9f3c2a1b7e4d5c6a8b0f1e2d3c4b5a6978879605",
+        "dispatch_id": "dlv-golden-stack",
+        "gate": "codex_gate",
+        "model": "",
+        "pr_number": 1926,
+        "provider": "codex_headless",
+        "report_path": "<store>/project/.vnx-data/unified_reports/headless/20261027-100000-HEADLESS-codex_gate-pr-1926-000000.md",
+        "requested_at": "2026-10-27T10:00:00Z",
+        "required": false,
+        "review_mode": "per_pr",
+        "review_risk": {
+          "base_ref": "",
+          "caller": "medium",
+          "deciding": [],
+          "derived": "high",
+          "files": 0,
+          "head_sha": "9f3c2a1b7e4d5c6a8b0f1e2d3c4b5a6978879605",
+          "irreversible": false,
+          "merge_base": "",
+          "note": "",
+          "reason": "fail-closed: the PR's base branch is not known ('' given); no base is assumed; the caller's --risk-class medium does not lower it",
+          "risk_class": "high",
+          "rule_version": "67591075cb2c59b7",
+          "source": "derived"
+        },
+        "review_seats": {
+          "extra_gates": [],
+          "key": "",
+          "profile_stack": null,
+          "seats": [
+            "codex_gate"
+          ],
+          "source": "explicit",
+          "value": "codex_gate"
+        },
+        "risk_class": "high",
+        "seat": "codex_gate",
+        "status": "requested"
+      },
+      "review_mode": "per_pr",
+      "risk_class": "high",
+      "schema_version": 2,
+      "source": "vnx_governance",
+      "status": "requested",
+      "terminal": "T0",
+      "timestamp": "2026-10-27T17:13:16Z",
+      "verdict": {
+        "decision": "investigate",
+        "evidence_complete": true,
+        "reason": "status='requested' is neither a hard-failure status nor a recognized success status \u2014 no basis for accept"
+      }
+    }
+  }
+}
