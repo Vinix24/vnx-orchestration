@@ -35,22 +35,38 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
-from gate_lane_contract import canonical_review_verdict  # after the scripts/lib path guard
+import gate_depth  # after the scripts/lib path guard
+from gate_lane_contract import (
+    VERDICT_CONTRACT,
+    canonical_review_verdict,
+    harness_dispatcher_timeouts,
+    lane_deadline_detail,
+    reviews_with_tools,
+)
+from gate_prompt import build_review_prompt
+from governance_emit import _classify_lane_log_text, _read_lane_log_text
+from unified_report_schema import SchemaViolation, parse_frontmatter
 
 # A dispatcher takes (provider, model_arg, instruction, dispatch_id) and returns
 # the panelist's report text. Same shape as ``plan_gate_panel.DispatcherFn`` —
 # re-declared here because this module must not import the panel at import time.
 DispatcherFn = Callable[[str, str, str, str], str]
+# A dispatcher FACTORY takes the panel's own keyword contract and returns a
+# DispatcherFn. Injected into :func:`review_dispatcher` rather than imported
+# here: each gate keeps the factory bound in its own namespace, and every test
+# patches it there.
+DispatcherFactory = Callable[..., DispatcherFn]
 
 
 def _panel():
@@ -86,9 +102,17 @@ def _last_json_verdict(text: str) -> dict:
 
 @dataclass(frozen=True)
 class ProviderRow:
-    """One provider's row of the parser register."""
+    """One provider's row of the register.
+
+    ``gate`` is the gate name the shared helpers hand to
+    ``gate_lane_contract`` (``harness_dispatcher_timeouts``,
+    ``reviews_with_tools``) and the slot/file stem ``--reprocess`` reads
+    (``pr-<N>-<gate>.json``). It differs per provider, so it lives here as a
+    register field rather than as an ``if provider == ...`` branch in a helper.
+    """
 
     parser: Callable[[str], dict]
+    gate: str
     origin: str
 
 
@@ -103,26 +127,38 @@ class ProviderRow:
 # Kept as one row per provider anyway: a quirk discovered for one provider
 # becomes a row edit here and can never silently change its neighbour's gate.
 GOVERNED_LANE_PROVIDERS: Dict[str, ProviderRow] = {
-    "glm": ProviderRow(parser=_last_json_verdict, origin="scripts/glm_gate.py:142 (pre-GE-5a)"),
-    "kimi": ProviderRow(parser=_last_json_verdict, origin="scripts/kimi_gate.py:153 (pre-GE-5a)"),
+    "glm": ProviderRow(
+        parser=_last_json_verdict, gate="glm_gate", origin="scripts/glm_gate.py:142 (pre-GE-5a)",
+    ),
+    "kimi": ProviderRow(
+        parser=_last_json_verdict, gate="kimi_gate", origin="scripts/kimi_gate.py:153 (pre-GE-5a)",
+    ),
 }
+
+
+def _row(provider: str) -> ProviderRow:
+    """The register row of *provider*, or a loud refusal.
+
+    An unknown provider RAISES instead of falling back to a neighbour's row: a
+    wrong parser that answers "no verdict" would silently book a real review as
+    unreadable, and a wrong gate name would read another gate's result slot.
+    """
+    row = GOVERNED_LANE_PROVIDERS.get((provider or "").strip().lower())
+    if row is None:
+        raise ValueError(
+            f"governed_lane: no row registered for provider {provider!r}; "
+            f"known providers: {', '.join(sorted(GOVERNED_LANE_PROVIDERS))}"
+        )
+    return row
 
 
 def extract_verdict(text: str, provider: str) -> dict:
     """Read *text* with the register row of *provider*.
 
-    An unknown provider RAISES instead of falling back to a neighbour's parser:
-    a wrong parser that answers "no verdict" would silently book a real review
-    as unreadable. Missing or malformed text reads as "no verdict" ({}), the
-    answer every caller already maps to ``unavailable`` — never to a pass.
+    Missing or malformed text reads as "no verdict" ({}), the answer every
+    caller already maps to ``unavailable`` — never to a pass.
     """
-    row = GOVERNED_LANE_PROVIDERS.get((provider or "").strip().lower())
-    if row is None:
-        raise ValueError(
-            f"governed_lane: no parser registered for provider {provider!r}; "
-            f"known providers: {', '.join(sorted(GOVERNED_LANE_PROVIDERS))}"
-        )
-    return row.parser(text)
+    return _row(provider).parser(text)
 
 
 def read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional[str]:
@@ -308,3 +344,148 @@ def _make_default_dispatcher(
     return _dispatch
 
 
+
+# GE-5b: the twelve helpers glm_gate and kimi_gate each carried a copy of. One body each, with the
+# provider (or its register row's gate name) as an argument — never an ``if provider ==`` branch.
+
+
+def get_diff(pr: str, diff_file: "Optional[str]") -> "Optional[str]":
+    """The diff under review: *diff_file* when given, else ``gh pr diff <pr>``; None on any failure."""
+    if diff_file:
+        p = Path(diff_file)
+        return p.read_text(encoding="utf-8") if p.is_file() else None
+    try:
+        res = subprocess.run(["gh", "pr", "diff", pr], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+        return res.stdout if res.returncode == 0 and res.stdout.strip() else None
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+def build_prompt(provider: str, diff_text: str, pr: str, max_chars: int) -> str:
+    """OI-1442's delimited-data prompt for *provider*'s gate; *max_chars* is resolved once by the caller (OI-1874 r3)."""
+    gate = _row(provider).gate
+    return build_review_prompt(gate_name=gate, pr=pr, diff_text=diff_text, verdict_contract=VERDICT_CONTRACT, max_chars=max_chars, agentic=reviews_with_tools(gate))
+
+
+def review_dispatcher(provider: str, base_data_dir: Path, branch: str, coverage: dict, explicit_timeout: "Optional[int]", *, dispatcher_factory: DispatcherFactory) -> DispatcherFn:
+    """OI-2066's per-run dispatcher. *dispatcher_factory* is INJECTED, never resolved here: each
+    gate's tests patch ``<script>._make_default_dispatcher``, so the caller hands in that name."""
+    gate = _row(provider).gate
+    return dispatcher_factory(
+        str(base_data_dir), role="review-gate", base_ref=(f"origin/{branch}" if branch else None),
+        **harness_dispatcher_timeouts(gate, gate_depth.prompt_diff_chars(coverage), explicit=explicit_timeout),
+    )
+
+
+def frontmatter_run_outcome(report_text: str) -> "Tuple[Optional[bool], object, object]":
+    """``(failed, exit_code, output_tokens)`` off the report frontmatter; ``exit_code`` (stamped from the
+    spawn) decides, since the failure path writes report content too. ``token_usage.output`` counts only
+    when ``token_usage_measured`` is true (OI-1291). None when there is no readable ``exit_code``."""
+    try:
+        frontmatter = parse_frontmatter(report_text)
+    except SchemaViolation:
+        return None, None, None
+    if "exit_code" not in frontmatter:
+        return None, None, None
+    exit_code = frontmatter.get("exit_code")
+    token_usage = frontmatter.get("token_usage")
+    output_tokens = token_usage.get("output") if isinstance(token_usage, dict) else None
+    measured_zero = bool(frontmatter.get("token_usage_measured")) and output_tokens == 0
+    return (exit_code != 0 or measured_zero), exit_code, output_tokens
+
+
+def parse_dispatch_window_start(provider: str, dispatch_id: str, *, pr: str) -> "Optional[float]":
+    """Start time from a ``{provider}-gate-pr{pr}-<seconds>`` dispatch_id, or None when the id is not that
+    exact shape: refuse rather than guess a recovery window (live run and ``--reprocess`` alike)."""
+    prefix = f"{provider}-gate-pr{pr}-"
+    ts_part = dispatch_id[len(prefix):]
+    if not dispatch_id.startswith(prefix) or not ts_part.isdigit():
+        return None
+    return float(ts_part)
+
+
+def frontmatter_duration_seconds(report_text: str) -> float:
+    """Best-effort ``duration_seconds`` off the frontmatter — ``--reprocess`` only."""
+    try:
+        return float(parse_frontmatter(report_text).get("duration_seconds", 0.0) or 0.0)
+    except (SchemaViolation, TypeError, ValueError):
+        return 0.0
+
+
+def reprocess_original_commit_sha(provider: str, base_data_dir: Path, pr: str, dispatch_id: str) -> "Optional[str]":
+    """The commit_sha THIS dispatch's own result slot carries, or None. Results are keyed by PR, so a
+    later dispatch leaves no addressable identity: ``--reprocess`` must refuse rather than guess."""
+    path = base_data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-{_row(provider).gate}.json"
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if record.get("dispatch_id") != dispatch_id:
+        return None
+    return record.get("commit_sha") or None
+
+
+def verdict_to_status(provider: str, verdict: dict, report_text: str = "", *, provider_failed_detail: "Optional[str]" = None) -> "Tuple[str, list, str]":
+    """``(status, blocking_findings, residual_risk)`` for one extracted verdict. OI-1142: only a REAL
+    parsed verdict may produce ``fail``. ``provider_failed_detail`` (from ``frontmatter_run_outcome``)
+    replaces the parse-miss residual when the report's own frontmatter says the provider run failed."""
+    v = canonical_review_verdict(verdict.get("verdict")) if verdict else ""
+    findings = verdict.get("findings") or [] if verdict else []
+    blocking = [f for f in findings if isinstance(f, dict) and str(f.get("severity", "")).lower() in {"error", "blocked", "blocker"}]
+    residual = (verdict.get("residual_risk") if verdict else "") or ""
+    if v == "pass" and not blocking:
+        return "pass", [], residual
+    if v in {"fail", "blocked"} or blocking:
+        return "fail", blocking, residual or f"{provider} gate reported blocking findings"
+    if residual:
+        return "unavailable", [], residual
+    if provider_failed_detail:
+        return "unavailable", [], provider_failed_detail
+    if (report_text or "").strip():
+        return "unavailable", [], (
+            f"{provider} returned a {len(report_text)}-char report, but it contained no readable ```json``` "
+            f"verdict block (parse miss — {provider} did respond)")
+    return "unavailable", [], f"{provider} produced no readable verdict (provider outage/quota/truncation) — not a review outcome"
+
+
+# dispatch-20260823-beta2-j: reason-specific unavailable summaries — every case that used to land in
+# "parse_error" now either recovers or gets its own reason.
+UNAVAILABLE_SUMMARIES = {
+    "recovery_empty": "recovery_empty — searched for a companion report, found none",
+    "recovery_ambiguous": "recovery_ambiguous — multiple companion reports found, refusing to guess",
+    "recovery_conflict": "recovery_conflict — a companion report's verdict conflicted with the primary response",
+    "reprocess_no_identity_anchor": "reprocess_no_identity_anchor — no addressable original result record to verify against",
+    "reprocess_stale_evidence": "reprocess_stale_evidence — PR head has moved since this dispatch ran",
+    "timeout": "timeout — the lane's own deadline stopped the run before the review finished",
+}
+
+
+def unread_run_outcome(provider: str, dispatch_error: str, report_text: str, duration: float) -> "Optional[Tuple[str, list, str, str]]":
+    """``(status, blocking, residual, reason)`` when the report is never read for a verdict, else None:
+    a raised dispatch, or OI-2066's deadline-killed run (it can still hold a partial pass block)."""
+    if dispatch_error:
+        return "unavailable", [], f"governed {provider} dispatch failed: {dispatch_error[:400]}", "dispatch_error"
+    deadline = lane_deadline_detail(report_text, duration)
+    if deadline is not None:
+        return "unavailable", [], f"{provider}_gate timed out: {deadline} — not a review outcome", "timeout"
+    return None
+
+
+def lift_lane_log_reason(dispatch_id: str, data_dir: "Optional[Path]") -> "Optional[str]":
+    """OI-1452: the real crash reason off the raw lane log, classified by governance_emit's shared
+    classifier — never a second marker scan. None (never an invented reason) on a missing log."""
+    text = _read_lane_log_text(dispatch_id, data_dir) if data_dir is not None else None
+    if not text:
+        return None
+    state, reason = _classify_lane_log_text(text)
+    return reason if state == "lane_exhausted" else None
+
+
+def status_summary(provider: str, status: str, blocking: list, reason: str = "") -> str:
+    """The result record's summary line, naming the gate that booked it."""
+    if status == "unavailable":
+        detail = UNAVAILABLE_SUMMARIES.get(reason) or "provider outage/no verdict"
+        return f"{provider} gate: UNAVAILABLE ({detail} — NOT a review fail)"
+    return f"{provider} gate: {status} ({len(blocking)} blocking finding(s))"
