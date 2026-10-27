@@ -9,6 +9,10 @@ backlog, legacy and unreadable lines, torn tail, unlocked read) print once below
 the totals, never in a group's sums. Money: two decimals here, unrounded in
 ``--json``.
 
+``--by provider`` also carries the calibration of the same window (K5b) in ``--json``:
+the measured spend next to the ledger's metered sum, with the deviation in percent,
+or ``unavailable:<reason>`` — never a zero, and in no sum.
+
 Exit codes: 0 a report (incomplete too: it says so), 1 an unreadable ledger,
 2 usage (an unknown ``--by`` or a bad ``--since``).
 
@@ -30,6 +34,7 @@ for _p in (str(SCRIPT_DIR / "lib"), str(SCRIPT_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import account_observations  # noqa: E402
 import cost_ledger  # noqa: E402
 
 EXIT_FAILED = 1
@@ -116,6 +121,18 @@ def _ordered(report) -> List:
                   key=lambda item: (-(item[1].cost_usd + item[1].api_equivalent_usd), item[0]))
 
 
+def _calibration(name: str, totals, ledger: Path, since: Optional[str]) -> Dict[str, object]:
+    """The measured spend of the window next to the ledger's metered sum, or why it has no number."""
+    account = account_observations.account_for(name)
+    if account is None:
+        return {"account": None, "spend_usd": None, "observations": 0, "deviation_pct": None,
+                "unavailable": account_observations.NO_ACCOUNT, "ledger_cost_usd": totals.cost_usd}
+    delta = account_observations.calibration_delta(account, since, ledger_path=ledger)
+    return {"account": account, "spend_usd": delta["spend_usd"], "observations": delta["observations"],
+            "unavailable": delta["unavailable"], "ledger_cost_usd": totals.cost_usd,
+            "deviation_pct": account_observations.deviation_pct(totals.cost_usd, delta["spend_usd"])}
+
+
 def _as_text(key: str, ledger: Path, since: Optional[str], report) -> str:
     title = f"cost ledger report by {key} (ledger: {ledger}" + (f", since: {since})" if since else ")")
     rows = [_cells(name, totals) for name, totals in _ordered(report)] + [_cells("total", report.totals)]
@@ -124,18 +141,24 @@ def _as_text(key: str, ledger: Path, since: Optional[str], report) -> str:
     return "\n".join(lines + (["", *read_lines] if read_lines else []))
 
 
-def _row(name: str, totals) -> Dict[str, object]:
-    """One group (or the total) as JSON: the sums unrounded, the counts as they are."""
-    return {"group": name, "runs": len(totals.runs), "cost_usd": totals.cost_usd,
-            "api_equivalent_usd": totals.api_equivalent_usd, "tokens": dict(totals.tokens),
-            "tokens_unknown": dict(totals.tokens_unknown), "unknown_token_runs": totals.unknown_token_runs,
-            "unavailable_runs": len(totals.unavailable), "complete_runs": totals.complete_runs}
+def _row(name: str, totals, calibration: Optional[Dict[str, object]] = None) -> Dict[str, object]:
+    """One group (or the total) as JSON: the sums unrounded, the counts as they are, and the calibration."""
+    row: Dict[str, object] = {"group": name, "runs": len(totals.runs), "cost_usd": totals.cost_usd,
+                              "api_equivalent_usd": totals.api_equivalent_usd, "tokens": dict(totals.tokens),
+                              "tokens_unknown": dict(totals.tokens_unknown),
+                              "unknown_token_runs": totals.unknown_token_runs,
+                              "unavailable_runs": len(totals.unavailable), "complete_runs": totals.complete_runs}
+    if calibration is not None:
+        row["calibration"] = calibration
+    return row
 
 
 def _as_json(key: str, ledger: Path, since: Optional[str], report) -> Dict[str, object]:
-    totals = report.totals
+    totals, measured = report.totals, key == "provider"
     return {"by": key, "since": since, "ledger": str(ledger),
-            "groups": [_row(name, group) for name, group in _ordered(report)], "totals": _row("total", totals),
+            "groups": [_row(name, group, _calibration(name, group, ledger, since) if measured else None)
+                       for name, group in _ordered(report)],
+            "totals": _row("total", totals, _calibration("total", totals, ledger, since) if measured else None),
             "spool_pending": totals.spool_pending, "spool_unreadable": totals.spool_unreadable,
             "spool_conflicts": totals.spool_conflicts, "spool_quarantined": totals.spool_quarantined,
             "legacy_lines": totals.legacy_lines, "unreadable_lines": totals.unreadable_lines,
