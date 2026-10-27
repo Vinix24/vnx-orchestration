@@ -128,12 +128,14 @@ def _compute_derived_status(
             # No PR to verify — all work terminal → done.
             return "done"
 
-        # Check for a pr_merged coordination event on any dispatch in this track.
+        # A delivery signal on any dispatch in this track: a merged PR, or a superseded
+        # close on a completed round (ADR-049 amendment, OI-2262 — the operator attested
+        # that round's PR delivered).
         placeholders = ",".join("?" * len(dispatch_ids))
         merged_event = conn.execute(
             f"""
             SELECT 1 FROM coordination_events
-            WHERE event_type = 'pr_merged'
+            WHERE event_type IN ('pr_merged', 'deliverable_superseded')
               AND entity_id IN ({placeholders})
             LIMIT 1
             """,

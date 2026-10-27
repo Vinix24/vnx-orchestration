@@ -381,8 +381,8 @@ def _check_legacy_store(project_id: str, central_dir: Path) -> Check:
     store: alongside a central ``~/.vnx-data/<id>`` store it is inert history
     (PASS, path named), and a directory without ``state/runtime_coordination.db``
     is an empty skeleton, not a store (PASS). Relocating one is
-    ``vnx migrate --relocate-legacy``, added by a later PR; this check never
-    writes, moves or deletes anything.
+    ``vnx migrate --relocate-legacy``; this check never writes, moves or
+    deletes anything.
     """
     name = "store:legacy-xdg"
     try:
@@ -406,8 +406,10 @@ def _check_legacy_store(project_id: str, central_dir: Path) -> Check:
     return Check(name, WARN, f"legacy XDG store {legacy} (holds "
                 "state/runtime_coordination.db) is NOT used — this project's central "
                 f"store {central_dir} does not exist, so the state there is invisible "
-                "to every vnx command. Moving it is not wired yet: "
-                "`vnx migrate --relocate-legacy` will be available in a later release")
+                "to every vnx command. Move it with "
+                f"`vnx migrate --relocate-legacy --legacy-path {legacy} --project-id {project_id}` "
+                "(it copies, nothing is deleted); runbook: "
+                "docs/operations/LEGACY-XDG-STORE-MIGRATION.md")
 
 
 def _central_store_dir(project_id: str) -> Path:

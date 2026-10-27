@@ -176,6 +176,59 @@ _t0_static_hook_injects_skill() {
   _t0_static_settings_wires_hook "$root" "$hook"
 }
 
+# Payload of the canonical-role block in $1: every line strictly between
+# <!-- VNX:BEGIN T0-ROLE --> and <!-- VNX:END T0-ROLE -->, markers excluded.
+# Returns 1 without printing when either marker is missing — a block that
+# cannot be delimited cannot be measured, and an unmeasurable mirror is never
+# "current". Mirrors scripts/fleet_role_drift.py's _extract_marked_block.
+_t0_static_role_block() {
+  local file="$1"
+  grep -q '<!-- VNX:BEGIN T0-ROLE -->' "$file" 2>/dev/null || return 1
+  grep -q '<!-- VNX:END T0-ROLE -->' "$file" 2>/dev/null || return 1
+  awk '
+    index($0, "<!-- VNX:BEGIN T0-ROLE -->") { in_block = 1; next }
+    in_block && index($0, "<!-- VNX:END T0-ROLE -->") { exit }
+    in_block
+  ' "$file"
+}
+
+# Content axis for the codex/gemini surfaces: is the mirrored block in
+# AGENTS.md / GEMINI.md still the SAME TEXT as the role file it mirrors?
+# `vnx role sync` writes role-orchestrator.md and both marked blocks from one
+# source, so after a sync all three are byte-identical; a block that differs
+# means the mirror was edited (or the role file moved and the mirror did
+# not). Marker PRESENCE is not currency: measured 2026-10-27, a hand-edited
+# AGENTS.md block produced byte-identical audit output to a current one.
+#
+# Compared against the project's own role-orchestrator.md, not the shipped
+# canon: a role file that is itself behind the canon is
+# scripts/fleet_role_drift.py's content axis, while this check answers the
+# local question the audit is asked — does this project's mirror match the
+# role file this project carries?
+#
+# Prints one PROVIDER-ROLE-DRIFT line per finding; nothing when clean. A
+# provider file with NO block is not a finding: AGENTS.md/GEMINI.md are
+# gitignored artefacts `vnx role sync` generates, so a project that does not
+# use that route legitimately has none.
+_t0_static_provider_role_drift() {
+  local t0_dir="$1"
+  local role_md="$t0_dir/role-orchestrator.md"
+  local provider_file payload_file
+  for provider_file in "$t0_dir/AGENTS.md" "$t0_dir/GEMINI.md"; do
+    [ -f "$provider_file" ] || continue
+    grep -q '<!-- VNX:BEGIN T0-ROLE -->' "$provider_file" 2>/dev/null || continue
+    if [ ! -f "$role_md" ]; then
+      echo "PROVIDER-ROLE-DRIFT: $provider_file carries a canonical-role block but $role_md does not exist — nothing to compare it against (run 'vnx role sync --apply')"
+      continue
+    fi
+    payload_file="$(mktemp)"
+    if ! _t0_static_role_block "$provider_file" > "$payload_file" || ! cmp -s "$role_md" "$payload_file"; then
+      echo "PROVIDER-ROLE-DRIFT: $provider_file carries a canonical-role block that is not the text of $role_md — the codex/gemini role surface has diverged from the canonical role (run 'vnx role sync --apply')"
+    fi
+    rm -f "$payload_file"
+  done
+}
+
 # Static role<->skill invocability check for one project root. Prints one
 # finding per line (IMPORT-MISSING / SKILL-UNLOADABLE) to stdout; returns 0
 # when clean, 1 when any finding was printed.
@@ -216,6 +269,10 @@ _t0_static_hook_injects_skill() {
 #                        playbook body in-context there. A tracked, reported
 #                        gap (finding 2, codex, 2026-07-16) — not silently
 #                        clean, but not required to block on today.
+#   PROVIDER-ROLE-DRIFT — the marked block in AGENTS.md/GEMINI.md is not the
+#                        text of the project's role-orchestrator.md, or the
+#                        block cannot be delimited / there is no role file to
+#                        compare against. See _t0_static_provider_role_drift.
 _t0_static_check() {
   local root="$1"
   local t0_dir="$root/.claude/terminals/T0"
@@ -292,6 +349,13 @@ _t0_static_check() {
     echo "PLAYBOOK-MECHANISM-GAP: $provider_file carries the T0 role but has no SessionStart-hook equivalent to deliver the t0-orchestrator playbook body in-context on this surface (tracked open item, not currently blocking)"
     findings=$((findings + 1))
   done
+
+  local provider_drift_out
+  provider_drift_out="$(_t0_static_provider_role_drift "$t0_dir")"
+  if [ -n "$provider_drift_out" ]; then
+    printf '%s\n' "$provider_drift_out"
+    findings=$((findings + $(printf '%s\n' "$provider_drift_out" | wc -l)))
+  fi
 
   local sources_out
   sources_out="$(_t0_static_sources_audit "$root")"
