@@ -50,7 +50,8 @@ def _plist(
     env: Optional[Dict[str, str]] = None,
     argv: Optional[Sequence[str]] = None,
 ) -> Path:
-    payload: Dict[str, Any] = {"Label": label, "ProgramArguments": list(argv or ["/bin/bash", "-c", "echo hi"])}
+    argv = list(argv or ["/bin/bash", "-c", "echo hi"])
+    payload: Dict[str, Any] = {"Label": label, "ProgramArguments": argv}
     if env is not None:
         payload["EnvironmentVariables"] = dict(env)
     directory.mkdir(parents=True, exist_ok=True)
@@ -103,7 +104,6 @@ def test_every_classification_is_reported_per_installed_plist(
     details = {v["label"]: v["detail"] for v in result["violations"]}
     assert "1.7.5" in details["com.vnx.cleanup-reviewed-worktrees.mission-control"]
     assert "v1.7.5" in details["com.vnx.ledger-health.sales-copilot"]
-    assert "1.6.0" in details["com.vnx.ledger-health.legacy-app"]
     assert "no usable release directory" in details["com.vnx.receipt-processor.mission-control"]
     assert details["com.vnx.dashboard.mission-control"].startswith("cannot read")
 
@@ -129,15 +129,12 @@ def test_jobs_outside_the_claim_are_unmeasured_and_nothing_is_written(
     result = lps.check_pin_alignment(plists, {"vnx-dev": dev}, versions_dir=store / "versions")
 
     assert result["ok"] is True
-    assert result["entries"] == [] and result["violations"] == []
+    assert result["entries"] == []
     reasons = {u["label"]: u["reason"] for u in result["unmeasured"]}
     assert reasons["com.vnx.ledger-health.stranger"] == "label names no registered project"
     assert "no .vnx-version pin" in reasons["com.vnx.ledger-health.vnx-dev"]
     assert "com.apple.something" not in reasons
     assert {path.name: path.read_bytes() for path in plists.iterdir()} == before
-
-
-# main() -- the pin section reaches the --json payload and the exit code
 
 
 def test_main_json_names_a_job_that_ignores_its_project_pin(

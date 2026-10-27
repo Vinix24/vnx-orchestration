@@ -310,7 +310,10 @@ def test_main_fails_closed_when_project_id_unresolvable(monkeypatch, capsys) -> 
     assert "cannot resolve a project id" in capsys.readouterr().err
 
 
-def test_main_reports_violations_with_nonzero_exit(monkeypatch, capsys) -> None:
+def test_main_reports_violations_with_nonzero_exit(monkeypatch, capsys, tmp_path) -> None:
+    # The pin-alignment section reads $HOME by default: point it at an empty
+    # home so this test never measures the machine it runs on.
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(lps.sys, "platform", "darwin")
     monkeypatch.setattr(
         lps, "_run_real_launchctl_list", lambda: "PID\tStatus\tLabel"
@@ -322,8 +325,10 @@ def test_main_reports_violations_with_nonzero_exit(monkeypatch, capsys) -> None:
     assert "missing_instance" in out
 
 
-def test_main_json_mode_emits_parseable_json(monkeypatch, capsys) -> None:
+def test_main_json_mode_emits_parseable_json(monkeypatch, capsys, tmp_path) -> None:
     import json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     monkeypatch.setattr(lps.sys, "platform", "darwin")
     monkeypatch.setattr(
