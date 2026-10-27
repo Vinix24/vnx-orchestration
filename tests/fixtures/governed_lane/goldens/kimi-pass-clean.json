@@ -1,0 +1,5 @@
+{
+  "findings": [],
+  "residual_risk": "The new guards prevent silent registry drift, but they do not validate the pinned prices against live provider pricing; 19 prices remain self-declared unverified.",
+  "verdict": "pass"
+}

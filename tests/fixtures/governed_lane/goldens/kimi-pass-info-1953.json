@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "file_path": "docs/_archive/ARCHIVED_MANIFEST.md",
+      "line": 94,
+      "message": "Deletion of a doc with operator-workstation scope; manifest records the removal decision instead of archiving content, which is a deliberate and documented deviation from the archive-with-content rule. Acceptable as stated.",
+      "severity": "info"
+    }
+  ],
+  "residual_risk": null,
+  "verdict": "pass"
+}

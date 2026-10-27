@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "file_path": "scripts/ci/test_exclusions.txt",
+      "line": 126,
+      "message": "Comment-only change; verified claims match a solo run (2 failed, 90 passed). The underlying exclusion of test_conversation_analyzer.py remains in place under OI-1958 \u2014 ensure that open item is tracked to resolution.",
+      "severity": "info"
+    }
+  ],
+  "residual_risk": "Low \u2014 two tests in tests/test_conversation_analyzer.py stay excluded from CI until OI-1958 resolves them; they assert pre-#805 behaviour and currently fail solo.",
+  "verdict": "pass"
+}

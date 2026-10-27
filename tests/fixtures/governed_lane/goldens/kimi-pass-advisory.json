@@ -1,0 +1,10 @@
+{
+  "findings": [
+    {
+      "message": "tests/test_oi1486_concurrent_result_writers.py:89-91 and tests/test_oi1486_concurrent_result_writers.py:172-175 join threads with timeout=60 but do not assert thread completion; a future deadlock could leave a daemon thread blocked while the test still passes.",
+      "severity": "warning"
+    }
+  ],
+  "residual_risk": "The new flock protection is advisory and serializes only writers that use slot_lock; non-cooperating writers can still interleave with guarded read-check-write sequences.",
+  "verdict": "pass"
+}
