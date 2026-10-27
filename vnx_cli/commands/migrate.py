@@ -35,11 +35,16 @@ _DATA_PATH_PID_RE = re.compile(r"(?:^|/)\.vnx-data/([a-z0-9][a-z0-9._-]{0,63})/?
 #: so they are never copied on their own (a lone -wal next to a fresh copy lies).
 _SQLITE_SIDECAR_GLOBS = ("*-wal", "*-shm", "*-journal")
 
-#: Suffixes that name a SQLite database; the file magic is the other signal.
-_SQLITE_SUFFIXES = (".db", ".sqlite", ".sqlite3")
+#: First bytes of every SQLite database file. The header, not the file name, is
+#: the evidence: a store may hold a database called ``state`` with no suffix.
+_SQLITE_HEADER = b"SQLite format 3\x00"
 
 #: Migration record written next to the state DBs of a relocated store.
 _RELOCATE_RECORD_NAME = "relocate-legacy.json"
+
+#: The store's canonical receipt ledger (ADR-005) and the trigger it books under.
+_RECEIPTS_NAME = "t0_receipts.ndjson"
+_RELOCATE_TRIGGER = "migrate_relocate_legacy"
 
 
 class _RelocateRefused(RuntimeError):
@@ -169,14 +174,32 @@ def _readonly_uri(path: Path) -> str:
     return path.resolve().as_uri() + "?mode=ro"
 
 
+def _read_header(path: Path) -> bytes:
+    """The first bytes of *path*; unreadable refuses the relocation, naming the file."""
+    try:
+        with path.open("rb") as handle:
+            return handle.read(len(_SQLITE_HEADER))
+    except OSError as exc:
+        raise _RelocateRefused(
+            f"cannot read the header of {path} to tell a SQLite database from a plain "
+            f"file ({exc}); refusing to relocate the store.") from exc
+
+
 def _iter_databases(root: Path) -> list[Path]:
-    """Every ``*.db`` database below *root*, sorted (sidecars end otherwise)."""
-    return sorted(
-        Path(current) / name
-        for current, _dirs, files in os.walk(root)
-        for name in files
-        if name.endswith(_SQLITE_SUFFIXES)
-    )
+    """Every SQLite database below *root*, recognised by its header, sorted.
+
+    The file name is not evidence: a database called ``state`` (no suffix) is
+    copied through the backup API like any other, and a ``*.db`` file without
+    the header is a plain file. A header that cannot be read refuses the
+    relocation with the path — the store is not copied on a guess.
+    """
+    found: list[Path] = []
+    for current, _dirs, files in os.walk(root):
+        for name in files:
+            path = Path(current) / name
+            if _read_header(path) == _SQLITE_HEADER:
+                found.append(path)
+    return sorted(found)
 
 
 def _copy_sqlite_database(src: Path, dst: Path) -> None:
@@ -191,10 +214,19 @@ def _copy_sqlite_database(src: Path, dst: Path) -> None:
 
 
 def _copy_store_consistent(source: Path, staging: Path) -> None:
-    """Rule 3: SQLite DBs through the backup API, every other file a plain copy."""
+    """Rule 3: detected SQLite DBs through the backup API, everything else a plain copy."""
     databases = _iter_databases(source)
-    shutil.copytree(source, staging, dirs_exist_ok=True, ignore=shutil.ignore_patterns(
-        *_SQLITE_SUFFIXES, *_SQLITE_SIDECAR_GLOBS))
+    database_paths = {db.resolve() for db in databases}
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        """Leave the detected databases and every sidecar to the backup API."""
+        return {
+            name for name in names
+            if name.endswith(_SQLITE_SIDECAR_GLOBS)
+            or (Path(directory) / name).resolve() in database_paths
+        }
+
+    shutil.copytree(source, staging, dirs_exist_ok=True, ignore=_ignore)
     for db_path in databases:
         _copy_sqlite_database(db_path, staging / db_path.relative_to(source))
 
@@ -310,7 +342,9 @@ def _relocate_preflight(project_dir: Path, legacy_path, project_id: str) -> tupl
             f"{source} holds no state/runtime_coordination.db — not a store (or only an "
             "empty skeleton), so there is nothing to relocate.")
     shadow = project_dir / ".vnx-data" / "state"
-    if shadow.is_dir() and _iter_databases(shadow):
+    # Any file in it means a repo-local store: header detection cannot recognise a
+    # database this store has not written yet, so presence is the evidence here.
+    if shadow.is_dir() and any(shadow.iterdir()):
         raise _RelocateRefused(
             f"{project_dir} has its own repo-local store at {shadow.parent}; it would "
             "shadow the central target. Relocate or remove it first.")
@@ -331,8 +365,29 @@ def _relocate_preflight(project_dir: Path, legacy_path, project_id: str) -> tupl
     return source, target
 
 
-def _verify_integrity(root: Path) -> None:
-    """``PRAGMA integrity_check`` must answer exactly ``ok`` for every database."""
+def _table_row_counts(db_path: Path) -> dict[str, int]:
+    """``{table: row count}`` for every user table of *db_path* (opened read-only)."""
+    conn = sqlite3.connect(_readonly_uri(db_path), uri=True)
+    try:
+        names = [row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite_%'")]
+        counts: dict[str, int] = {}
+        for name in names:
+            quoted = '"' + name.replace('"', '""') + '"'  # named by sqlite_master
+            counts[name] = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+        return counts
+    finally:
+        conn.close()
+
+
+def _verify_integrity(root: Path, source: Path | None = None) -> None:
+    """``PRAGMA integrity_check`` must answer exactly ``ok`` for every database.
+
+    With *source* given, the copy's row count per table must also equal the
+    source's: a database copied raw loses the committed frames that live only
+    in its WAL, and ``integrity_check`` answers ``ok`` on that shorter copy.
+    """
     databases = _iter_databases(root)
     if not databases:
         raise RuntimeError(f"no SQLite database found under {root}")
@@ -344,6 +399,15 @@ def _verify_integrity(root: Path) -> None:
             conn.close()
         if rows != [("ok",)]:
             raise RuntimeError(f"PRAGMA integrity_check on {db_path} returned {rows!r}")
+        if source is None:
+            continue
+        source_db = source / db_path.relative_to(root)
+        expected = _table_row_counts(source_db)
+        actual = _table_row_counts(db_path)
+        if actual != expected:
+            raise RuntimeError(
+                f"the copy {db_path} does not hold the same rows per table as "
+                f"{source_db}: source {expected!r}, copy {actual!r}")
 
 
 def _upgrade_staging(staging: Path, project_id: str) -> None:
@@ -383,6 +447,47 @@ def _write_relocate_record(
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(tmp, path)  # atomic: the record lands whole or not at all
+
+
+def _book_ownership_receipt(
+    store: Path, project_id: str, source: Path,
+    stamps: dict[str, set[str]], assume_owner: str | None,
+) -> None:
+    """Book the ownership decision as a ``state_mutation`` receipt (ADR-005).
+
+    The receipt lands in the store's own ``state/t0_receipts.ndjson`` through the
+    shared append writer. Fail-closed: anything but ``appended`` raises, so the
+    caller can un-publish a copy whose decision was never booked.
+    """
+    assumed = not stamps
+    receipt = {
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "event_type": "state_mutation",
+        "receipt_kind": "state_mutation",
+        "terminal": "T0",
+        "source": "vnx_migrate",
+        "trigger": _RELOCATE_TRIGGER,
+        "status": f"{_RELOCATE_TRIGGER}:{'owner_assumed' if assumed else 'owner_confirmed'}",
+        "project_id": project_id,
+        "relocated_from": str(source),
+        "owner_assumed": assumed,
+        "owner_reason": (assume_owner or "").strip() if assumed else None,
+        "source_stamps": {key: sorted(values) for key, values in sorted(stamps.items())},
+    }
+    ledger = store / "state" / _RECEIPTS_NAME
+    _engine.ensure_engine_on_path()
+    from append_receipt import append_receipt_payload
+
+    try:
+        result = append_receipt_payload(
+            receipt, receipts_file=str(ledger), skip_enrichment=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f"the ownership receipt was not written to {ledger}: {exc}") from exc
+    status = getattr(result, "status", None)
+    if status != "appended":
+        raise RuntimeError(
+            f"the ownership receipt was not appended to {ledger} (append result {status!r})")
 
 
 def _print_relocate_success(target: Path, source: Path, project_dir: Path) -> None:
@@ -427,11 +532,21 @@ def relocate_legacy(args) -> int:
     (staged_store / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
     try:
         _copy_store_consistent(source, staged_store)
+        # Row parity between source and copy, before the upgrade rewrites the copy.
+        _verify_integrity(staged_store, source=source)
         _upgrade_staging(staged_store, project_id)
         _write_relocate_record(staged_store, source, project_id, stamps, assume_owner)
         if target.exists():  # appeared while staging: never overwrite it
             raise RuntimeError(f"{target} appeared during the relocation")
         os.rename(staged_store, target)  # rule 5: one rename publishes the store
+        # The receipt goes to the published ledger: written to the staging path
+        # instead, the append writer's central mirror would create the not-yet-
+        # published target as a side effect. No receipt, no store: un-publish.
+        try:
+            _book_ownership_receipt(target, project_id, source, stamps, assume_owner)
+        except Exception:
+            os.rename(target, staged_store)
+            raise
     except Exception as exc:  # every step is fatal; the staging dir is kept
         print(f"\n  error: relocation failed: {exc}", file=sys.stderr)
         print(f"  staging dir kept for inspection: {staging}", file=sys.stderr)

@@ -66,6 +66,22 @@ def pipeline_guard(monkeypatch):
     schema_migration._PREFLIGHT_HOOKS.update(saved)
 
 
+@pytest.fixture(autouse=True)
+def _central_store_guard(monkeypatch):
+    """The target IS ``$HOME/.vnx-data/<pid>`` and this module's HOME is a tmp dir.
+
+    The relocation books its ownership receipt in the published store's ledger,
+    which sits under ``$HOME/.vnx-data`` by construction. The class-wide guard
+    cannot tell a tmp ``HOME`` from the operator's own, so it would refuse a
+    write that never leaves the tmp tree. Neutralise it here: isolation is real.
+    """
+    import vnx_paths
+
+    monkeypatch.setattr(
+        vnx_paths, "refuse_real_central_store_write_under_test_runner",
+        lambda _target: None)
+
+
 def _terminal_version() -> int:
     import migrate_future_system as mfs
 
@@ -191,6 +207,137 @@ class TestRelocate:
         assert (target / "state" / "runtime_coordination.db").is_file()
         assert _staging_dirs(env) == []
         assert source.is_dir()  # the tree behind the link stays put
+
+
+# ---------------------------------------------------------------------------
+# A database is recognised by its header, never by its file name
+# ---------------------------------------------------------------------------
+
+class TestDetectedDatabases:
+    def test_extensionless_database_keeps_its_wal_row(
+            self, env, pipeline_guard, capsys):
+        """A committed row that lives only in the WAL survives the relocation.
+
+        The file is named ``state`` (no ``.db``), so an extension-based walk
+        copies it raw, drops the ``-wal`` and the row with it, and
+        ``integrity_check`` still answers ``ok`` on the truncated copy.
+        """
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        db = source / "state" / "state"
+        writer = sqlite3.connect(str(db))
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE committed_in_wal (x TEXT NOT NULL)")
+        writer.execute("INSERT INTO committed_in_wal VALUES ('kept')")
+        writer.commit()
+        try:
+            assert _run(_args(env, source)) == 0
+        finally:
+            writer.close()
+
+        copy_path = _target(env) / "state" / "state"
+        assert copy_path.is_file()
+        copy = sqlite3.connect(str(copy_path))
+        try:
+            assert copy.execute("SELECT x FROM committed_in_wal").fetchall() == [("kept",)]
+        finally:
+            copy.close()
+        # The backup API folded the WAL frames in; no sidecar is copied along.
+        assert not (_target(env) / "state" / "state-wal").exists()
+        assert _staging_dirs(env) == []
+
+    def test_a_db_name_without_the_sqlite_header_is_a_plain_file(
+            self, env, pipeline_guard, capsys):
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        plain = source / "state" / "not-a-database.db"
+        plain.write_text("operator notes in a .db name\n", encoding="utf-8")
+
+        assert _run(_args(env, source)) == 0
+
+        copy = _target(env) / "state" / "not-a-database.db"
+        assert copy.read_text(encoding="utf-8") == "operator notes in a .db name\n"
+
+    def test_an_unreadable_header_refuses_with_the_path(self, env, monkeypatch, capsys):
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        blocked = source / "state" / "mystery"
+        blocked.write_bytes(b"x")
+        real_open = Path.open
+
+        def _open(path_self, *args, **kwargs):
+            if path_self == blocked:
+                raise PermissionError("permission denied")
+            return real_open(path_self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", _open)
+
+        assert _run(_args(env, source)) != 0
+
+        err = capsys.readouterr().err
+        assert str(blocked) in err and "header" in err
+        assert not _target(env).exists() and _staging_dirs(env) == []
+
+
+# ---------------------------------------------------------------------------
+# The ownership decision is booked in the canonical ledger
+# ---------------------------------------------------------------------------
+
+def _ledger(env) -> list:
+    path = _target(env) / "state" / "t0_receipts.ndjson"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+class TestOwnershipReceipt:
+    def test_the_relocation_books_exactly_one_ownership_receipt(
+            self, env, pipeline_guard, capsys):
+        source = _legacy(env)
+
+        assert _run(_args(env, source, assume_owner="pre-#1437 store of this project")) == 0
+
+        mutations = [row for row in _ledger(env)
+                     if row.get("event_type") == "state_mutation"]
+        assert len(mutations) == 1
+        receipt = mutations[0]
+        assert receipt["trigger"] == "migrate_relocate_legacy"
+        assert receipt["project_id"] == PROJECT_ID
+        assert receipt["owner_assumed"] is True
+        assert receipt["owner_reason"] == "pre-#1437 store of this project"
+        assert receipt["source_stamps"] == {}
+        assert receipt["relocated_from"] == str(source.resolve())
+
+    def test_a_confirmed_owner_is_booked_too(self, env, pipeline_guard, capsys):
+        source = _legacy(env, stamps=(PROJECT_ID,))
+
+        assert _run(_args(env, source)) == 0
+
+        mutations = [row for row in _ledger(env)
+                     if row.get("event_type") == "state_mutation"]
+        assert len(mutations) == 1
+        assert mutations[0]["owner_assumed"] is False
+        assert mutations[0]["owner_reason"] is None
+        assert mutations[0]["source_stamps"] == {
+            "state/runtime_coordination.db:legacy_owner": [PROJECT_ID]}
+
+    def test_a_failing_receipt_write_fails_the_relocation(
+            self, env, pipeline_guard, monkeypatch, capsys):
+        import append_receipt
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("the ledger is unwritable")
+
+        monkeypatch.setattr(append_receipt, "append_receipt_payload", _boom)
+        source = _legacy(env, stamps=(PROJECT_ID,))
+        before = _hash_tree(source)
+
+        assert _run(_args(env, source)) != 0
+
+        err = capsys.readouterr().err
+        assert "ownership receipt" in err
+        assert not _target(env).exists()  # un-published: no receipt, no success
+        staging = _staging_dirs(env)
+        assert len(staging) == 1
+        assert (staging[0] / PROJECT_ID / "state" / "runtime_coordination.db").is_file()
+        assert _hash_tree(source) == before
 
 
 # ---------------------------------------------------------------------------
