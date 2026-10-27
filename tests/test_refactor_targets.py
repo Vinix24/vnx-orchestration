@@ -19,7 +19,10 @@ if str(_ROOT / "scripts" / "lib") not in sys.path:
 import refactor_census  # noqa: E402
 
 RAW_LIMIT = 200
-TARGETS = {"close_track_if_done": "scripts/lib/track_reconciler_closure.py"}
+TARGETS = {
+    "close_track_if_done": "scripts/lib/track_reconciler_closure.py",
+    "run_reconcile": "scripts/lib/objective_reconcile.py",
+}
 
 
 def _raw_length(path: str, qualname: str) -> int:
@@ -44,4 +47,26 @@ def test_function_under_200_raw_lines(qualname: str) -> None:
     assert raw < RAW_LIMIT, (
         f"{path}::{qualname} is {raw} raw lines (limit {RAW_LIMIT}); "
         f"extract the next block instead of extending it"
+    )
+
+
+def test_close_track_if_done_after_s3() -> None:
+    """S3 ratchet: gates and phase walk extracted, so close_track_if_done must
+    now sit under 150 raw lines and at most 70 executable lines (was 165 raw /
+    77 executable before the split)."""
+    path = TARGETS["close_track_if_done"]
+    raw = _raw_length(path, "close_track_if_done")
+    measured = refactor_census.measure_source(
+        (_ROOT / path).read_text(encoding="utf-8"), filename=path
+    )
+    matches = [f for f in measured if f.qualname == "close_track_if_done"]
+    assert len(matches) == 1, f"expected exactly one close_track_if_done, found {len(matches)}"
+    executable = matches[0].executable_lines
+    assert raw < 150, (
+        f"{path}::close_track_if_done is {raw} raw lines after S3 (limit 150); "
+        f"executable={executable} (limit 70)"
+    )
+    assert executable <= 70, (
+        f"{path}::close_track_if_done is {executable} executable lines after S3 "
+        f"(limit 70); raw={raw} (limit 150)"
     )

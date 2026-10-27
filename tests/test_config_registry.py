@@ -537,3 +537,34 @@ def test_wiring_gate_shadow_mode_decision_tied_to_closure_verifier_exclusion():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# vnx-fleet-pin-audit PR-7: the lag threshold is registry-backed, and the
+# code fallback mirrors the registry default (the same contract OI-1718 pins
+# for VNX_CUTOVER_MAX_BEHIND_COMMITS).
+# ---------------------------------------------------------------------------
+
+
+def test_fleet_pin_max_lag_registered_and_mirrors_the_code_default():
+    entry = cr.CONFIG_REGISTRY["VNX_FLEET_PIN_MAX_LAG_RELEASES"]
+    # The registry stores every threshold as a string; the reader parses int.
+    assert entry.type == "string"
+    assert entry.default == "3"
+    assert entry.category == "gate"  # same category as the cutover precedent
+    assert entry.description.strip()
+    assert entry.subsystem == "fleet-pin-audit"
+    assert entry.status in cr.ALLOWED_STATUSES
+
+    sys.path.insert(0, str(REPO / "scripts"))
+    import fleet_pin_audit as fpa
+
+    assert entry.default == str(fpa.DEFAULT_MAX_LAG_RELEASES)
+    assert fpa.max_lag_releases() == fpa.DEFAULT_MAX_LAG_RELEASES
+
+
+def test_fleet_pin_max_lag_reads_through_the_precedence_chain(monkeypatch):
+    monkeypatch.setenv("VNX_FLEET_PIN_MAX_LAG_RELEASES", "7")
+    assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "7"
+    monkeypatch.setenv("VNX_OVERRIDE_FLEET_PIN_MAX_LAG_RELEASES", "9")
+    assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "9"

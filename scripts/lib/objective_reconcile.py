@@ -42,14 +42,16 @@ import tracks as tracks_lib  # same package; importable when scripts/lib/ is in 
 import track_reconciler
 from track_reconciler import _parse_pr_numbers, EvidenceSnapshot
 
-# Steps 2, 2b and 3 of run_reconcile, moved verbatim to their own module (S4).
-# _parse_reopen_stamp is imported here as a re-export: the reopen-guard tests
-# import it from this module.
+# Steps 2, 2b, 3, 4a and 4b of run_reconcile, moved verbatim to their own
+# module (S4, then S5). _parse_reopen_stamp is imported here as a re-export:
+# the reopen-guard tests import it from this module.
 from objective_reconcile_steps import (
     _parse_reopen_stamp,
+    gh_unavailable_result,
     nominate_candidates,
     recompute_dispatch_outcomes,
     refresh_derived,
+    verify_candidates,
 )
 
 log = logging.getLogger(__name__)
@@ -857,102 +859,26 @@ def run_reconcile(
     # Resolve the binary once per run and reuse it for every PR lookup, so a
     # PATH that differs from an interactive shell (launchd/cron background)
     # cannot flip a live gh to "absent" partway through a run.
-    # ------------------------------------------------------------------ step 4a
-    gh_binary = _resolve_gh_binary()
-    gh_health = _detect_gh(repo_root, gh_binary)
-    if gh_health in ("absent", "auth_failed", "timeout"):
-        per_track = [
-            {
-                "track_id": c["track_id"],
-                "verdict": "unverified",
-                "pr_ref": c["pr_ref"],
-                "reason": gh_health,
-            }
-            for c in candidates
-        ] + guarded_tracks + held_tracks
-        counts = {
-            "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
-            "closed": 0, "closed_sibling": 0, "open_pr": 0,
-            "unverified": len(candidates), "deferred": 0, "stale": 0,
-            "reopened_guard": len(guarded_tracks),
-            "delivery_hold": len(held_tracks),
-        }
-        summary = {
-            "run_id": run_id, "project_id": project_id, "mode": mode,
-            "started_at": started_at, "finished_at": _now_utc(),
-            "evidence_source_health": {"gh": gh_health},
-            "provenance": provenance,
-            "dispatch_outcomes": dispatch_outcomes_summary,
-            "counts": counts,
-            "per_track": per_track,
-        }
-        _persist_summary(state_dir, summary)
-        return summary, 3
+    degraded, gh_binary, gh_health = gh_unavailable_result(
+        state_dir, project_id, repo_root,
+        run_id=run_id, mode=mode, started_at=started_at, provenance=provenance,
+        dispatch_outcomes_summary=dispatch_outcomes_summary,
+        total_tracks=total_tracks, nominated=nominated, candidates=candidates,
+        guarded_tracks=guarded_tracks, held_tracks=held_tracks,
+    )
+    if degraded is not None:
+        return degraded
 
     # ------------------------------------------------------------------ step 4b
     # Per-candidate verification with persistent MERGED cache.
-    repo_key = _get_repo_key(repo_root)
-    pr_cache = _load_pr_state_cache(state_dir, repo_key)
-    gh_calls_used = 0
-    counts = {
-        "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
-        "closed": 0, "closed_sibling": 0, "open_pr": 0,
-        "unverified": 0, "deferred": 0, "stale": 0,
-        "reopened_guard": len(guarded_tracks),
-        "delivery_hold": len(held_tracks),
-    }
-    confirmed_candidates: List[Dict[str, Any]] = []
-    per_track: List[Dict[str, Any]] = []
-
-    for cand in candidates:
-        track_id = cand["track_id"]
-        pr_numbers: FrozenSet[int] = cand["pr_numbers"]
-        pr_ref = cand["pr_ref"]
-
-        # Split: cached MERGED vs needs a live gh call.
-        pr_results: Dict[int, Optional[Dict[str, Any]]] = {}
-        prs_to_fetch: List[int] = []
-        for pn in pr_numbers:
-            cached = pr_cache.get(str(pn))
-            if cached and _is_merged(cached):
-                pr_results[pn] = cached
-            else:
-                prs_to_fetch.append(pn)
-
-        # Defer if fetching would exceed the cap.
-        if prs_to_fetch and gh_calls_used + len(prs_to_fetch) > max_gh_calls:
-            per_track.append({"track_id": track_id, "verdict": "deferred", "pr_ref": pr_ref})
-            counts["deferred"] += 1
-            continue
-
-        # Fetch live states; cache any MERGED results.
-        for pn in prs_to_fetch:
-            gh_calls_used += 1
-            data = _gh_pr_view(pn, repo_root, gh_binary=gh_binary)
-            pr_results[pn] = data
-            if data is not None and _is_merged(data):
-                pr_cache[str(pn)] = data
-
-        # Persist cache after each candidate's batch so timeouts don't lose cached merges.
-        _save_pr_state_cache(state_dir, repo_key, pr_cache)
-
-        verdict, pr_list = _decide_candidate(pr_numbers, pr_results, allow_closed_siblings)
-
-        entry: Dict[str, Any] = {
-            "track_id": track_id,
-            "verdict": verdict,
-            "pr_ref": pr_ref,
-            "pr_results": pr_list,
-        }
-        per_track.append(entry)
-
-        if verdict == "CONFIRMED":
-            counts["confirmed"] += 1
-            confirmed_candidates.append({
-                "track_id": track_id, "pr_ref": pr_ref, "pr_results": pr_list,
-            })
-        else:
-            counts[verdict] = counts.get(verdict, 0) + 1
+    verified = verify_candidates(
+        state_dir, repo_root, candidates, guarded_tracks, held_tracks,
+        gh_binary=gh_binary, total_tracks=total_tracks, nominated=nominated,
+        max_gh_calls=max_gh_calls, allow_closed_siblings=allow_closed_siblings,
+    )
+    per_track = verified["per_track"]
+    counts = verified["counts"]
+    confirmed_candidates = verified["confirmed_candidates"]
 
     # ------------------------------------------------------------------ step 4c
     # OI-1064: thread the gh-confirmed merge evidence into the derived-status

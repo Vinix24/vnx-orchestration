@@ -80,6 +80,8 @@ Het kopje in het voorbeeld zelf liegt ook: `ROADMAP.yaml:2` noemt het bestand "d
 
 **Uitvoering.** A5. De check `pr_exists_in_plan` (`scripts/closure_verifier.py:2340`) verdwijnt; er komt geen vervanger, want de vraag "bestaat deze PR in het plan" is de vraag "bestaat deze dispatch".
 
+A5 (dlv-911435339b17) voert dat uit als hernoeming: de check heet `pr_has_dispatch` en stelt alleen nog de dispatchvraag van punt 1. Een plan of de projectie voegt geen PR toe en haalt er geen weg. Daarnaast eist `pr_completed` nu de terminale receipt van punt 1. Een dispatch in `completed/` zonder die receipt is geen gesloten PR meer.
+
 ### 3. Heel-feature-closure
 
 **Regel.** Een feature is een track. Een track is klaar als elk deliverable op die track met bewijs is afgeboekt en elke PR die de track noemt gemerged is.
