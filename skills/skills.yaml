@@ -135,6 +135,12 @@ skills:
     file: "fabric-reference/SKILL.md"
     type: reference
 
+  refactor-safe:
+    name: "@refactor-safe"
+    file: "refactor-safe/SKILL.md"
+    type: implementation
+    domain: refactoring
+
   featureplan-kickoff:
     name: "@featureplan-kickoff"
     file: "featureplan-kickoff/SKILL.md"

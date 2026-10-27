@@ -250,8 +250,12 @@ def spawn_claude(
     resume_session:
         Prior session ID for ``--resume`` (session continuity).
     skip_permissions:
-        Forwarded for interface parity with future providers; currently unused
-        because SubprocessAdapter always passes ``--dangerously-skip-permissions``.
+        Forwarded for interface parity with future providers; currently unused.
+        SubprocessAdapter's posture is resolved by ``_build_worker_scope_args``:
+        scoped by default (acceptEdits + empty MCP + the ``mcp__*`` deny + the
+        role allow-list), with ``--dangerously-skip-permissions`` reached only
+        through the explicit ``VNX_WORKER_BLANKET_SKIP=1`` / falsy
+        ``VNX_WORKER_SCOPED`` opt-out.
     role:
         Dispatch role forwarded to SubprocessAdapter.deliver so role-specific
         capability scoping is applied (tool allow-list, MCP isolation). Falls

@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import shutil
 import sqlite3
 import subprocess
@@ -43,12 +42,23 @@ import tracks as tracks_lib  # same package; importable when scripts/lib/ is in 
 import track_reconciler
 from track_reconciler import _parse_pr_numbers, EvidenceSnapshot
 
+# Steps 2, 2b, 3, 4a and 4b of run_reconcile, moved verbatim to their own
+# module (S4, then S5). _parse_reopen_stamp is imported here as a re-export:
+# the reopen-guard tests import it from this module.
+from objective_reconcile_steps import (
+    _parse_reopen_stamp,
+    gh_unavailable_result,
+    nominate_candidates,
+    recompute_dispatch_outcomes,
+    refresh_derived,
+    verify_candidates,
+)
+
 log = logging.getLogger(__name__)
 
 _PR_STATE_CACHE_FILE = "pr_state_cache.json"
 _SUMMARY_FILE = "reconcile_summary.json"
 _HISTORY_FILE = "reconcile_history.ndjson"
-_SKIP_PHASES: FrozenSet[str] = frozenset({"done", "parked"})
 _VALID_VERDICTS: FrozenSet[str] = frozenset({"ok", "false-candidate"})
 
 # Number of consecutive clean advisory runs required before VNX_AUTO_CLOSE may flip.
@@ -421,77 +431,6 @@ def _is_merged(pr_data: Optional[Dict[str, Any]]) -> bool:
     if not pr_data:
         return False
     return pr_data.get("state") == "MERGED" and bool(pr_data.get("mergedAt"))
-
-
-# ---------------------------------------------------------------------------
-# Re-close guard helpers (D6)
-# ---------------------------------------------------------------------------
-
-def _get_latest_done_to_active_history(
-    state_dir: Path, track_id: str, project_id: str
-) -> Optional[Dict[str, Any]]:
-    """Return the latest track_phase_history row (from_phase=done, to_phase=active)
-    for this track, project-scoped. Returns None when no such row exists or on error."""
-    db_path = state_dir / track_reconciler.DB_FILENAME
-    try:
-        conn = sqlite3.connect(str(db_path), timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        try:
-            row = conn.execute(
-                """
-                SELECT reason, approval_id, occurred_at
-                FROM track_phase_history
-                WHERE track_id = ? AND project_id = ?
-                  AND from_phase = 'done' AND to_phase = 'active'
-                ORDER BY occurred_at DESC
-                LIMIT 1
-                """,
-                (track_id, project_id),
-            ).fetchone()
-            return dict(row) if row else None
-        finally:
-            conn.close()
-    except Exception as exc:
-        log.debug("reopen guard DB lookup failed for %s: %s", track_id, exc)
-        return None
-
-
-_REOPEN_STAMP_PREFIX = "reopen pr_ref="
-_JSON_STRING_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"')
-
-
-def _parse_reopen_stamp(reason: str) -> Optional[str]:
-    """Parse the stamped pr_ref from a reopen history reason string.
-
-    New format: 'reopen pr_ref="<json-string>" | <operator text>'
-    The value is a JSON string literal so embedded pipes/quotes are safe.
-
-    Backwards-compat: old-format raw stamps (no leading quote) and garbled
-    stamps return None — callers treat None as GUARDED (fail-closed).
-
-    Returns the decoded pr_ref string ('' for the '-' sentinel), or None
-    when the format is not the new JSON format.
-    """
-    if not reason:
-        return None
-    if not reason.startswith(_REOPEN_STAMP_PREFIX):
-        return None
-    rest = reason[len(_REOPEN_STAMP_PREFIX):]
-    # New format: JSON string literal starting with '"'
-    m = _JSON_STRING_RE.match(rest)
-    if not m:
-        # Old-format (no leading quote) or malformed → fail-closed
-        return None
-    try:
-        val = json.loads(m.group(0))
-    except (json.JSONDecodeError, ValueError):
-        return None
-    # Remainder must be empty or start with ' | ' — anything else is garbled.
-    remainder = rest[m.end():]
-    if remainder and not remainder.startswith(" | "):
-        return None
-    # '-' is the sentinel for empty pr_ref
-    return "" if val == "-" else val
 
 
 # ---------------------------------------------------------------------------
@@ -886,127 +825,32 @@ def run_reconcile(
 
     # ------------------------------------------------------------------ step 1
     # Provenance sweep — best-effort; never blocks the rest.
-    # ------------------------------------------------------------------ step 1
     provenance = _run_provenance_sweep(state_dir, repo_root, project_id)
 
     # ------------------------------------------------------------------ step 2
     # Derived refresh — persists derived_status for every track.
-    # ------------------------------------------------------------------ step 2
-    try:
-        reconcile_results = track_reconciler.reconcile_all_tracks(
-            state_dir, project_id, repo_root=repo_root
-        )
-    except RuntimeError as exc:
-        summary: Dict[str, Any] = {
-            "run_id": run_id, "project_id": project_id, "mode": mode,
-            "started_at": started_at, "finished_at": _now_utc(),
-            "error": str(exc),
-            "evidence_source_health": {"gh": "unknown"},
-            "provenance": provenance,
-            "counts": {k: 0 for k in (
-                "tracks", "nominated", "confirmed", "closed",
-                "closed_sibling", "open_pr", "unverified", "deferred", "stale",
-                "delivery_hold",
-            )},
-            "per_track": [],
-        }
-        _persist_summary(state_dir, summary)
-        return summary, 2
+    reconcile_results, refresh_failure = refresh_derived(
+        state_dir, project_id, repo_root,
+        run_id=run_id, mode=mode, started_at=started_at, provenance=provenance,
+    )
+    if refresh_failure is not None:
+        return refresh_failure
 
     total_tracks = len(reconcile_results)
 
     # ------------------------------------------------------------------ step 2b
     # Dispatch-outcome recompute (receipt-quality PR-B3) — same cadence as the
     # derived-status refresh above. Best-effort; failure never blocks the
-    # track-close pipeline below. The abandoned sweep is not a separate pass:
-    # it is one branch of the same per-dispatch classify_outcome() this call
-    # already runs for every dispatch in the project.
-    # ------------------------------------------------------------------ step 2b
-    dispatch_outcomes_summary: Dict[str, Any] = {"closed": 0, "total": 0, "error": None}
-    try:
-        import dispatch_outcome_classifier  # noqa: PLC0415
-        outcome_results = dispatch_outcome_classifier.reconcile_all_dispatch_outcomes(
-            state_dir, state_dir.parent, project_id, repo_root=repo_root,
-        )
-        dispatch_outcomes_summary["total"] = len(outcome_results)
-        dispatch_outcomes_summary["closed"] = sum(
-            1 for r in outcome_results if r.get("outcome") is not None
-        )
-    except Exception as exc:  # noqa: BLE001 — advisory sweep, never blocks reconcile
-        log.debug("dispatch-outcome recompute non-fatal: %s", exc)
-        dispatch_outcomes_summary["error"] = str(exc)
+    # track-close pipeline below.
+    dispatch_outcomes_summary = recompute_dispatch_outcomes(
+        state_dir, project_id, repo_root
+    )
 
     # ------------------------------------------------------------------ step 3
     # Nomination: non-empty pr_ref + declared phase not in {done, parked}.
     # Re-close guard: skip tracks reopened from done→active when pr_ref
     # matches the stamp (unchanged) — reported as reopened_guard, not closed.
-    # ------------------------------------------------------------------ step 3
-    all_tracks = tracks_lib.list_tracks(state_dir, project_id)
-    candidates: List[Dict[str, Any]] = []
-    guarded_tracks: List[Dict[str, Any]] = []
-    held_tracks: List[Dict[str, Any]] = []
-    # OI-1098: one shared read-only connection for the per-track delivery-hold
-    # check (the nomination loop previously did no DB reads of its own).
-    hold_conn = track_reconciler._get_conn(state_dir)
-    try:
-        for t in all_tracks:
-            phase = (t.get("phase") or "").strip()
-            pr_ref = (t.get("pr_ref") or "").strip()
-            if not pr_ref or phase in _SKIP_PHASES:
-                continue
-            pr_numbers = _parse_pr_numbers(pr_ref)
-            if not pr_numbers:
-                continue
-
-            # OI-1098 fail-closed + visible: an explicit non-'complete'
-            # delivery marking on ANY currently-linked PR vetoes the
-            # nomination — and the track must stay VISIBLE in the report with
-            # the reason, never silently drop out of the candidate set.
-            hold = track_reconciler._delivery_hold(
-                hold_conn, t["track_id"], project_id, pr_ref
-            )
-            if hold is not None:
-                held_tracks.append({
-                    "track_id": t["track_id"],
-                    "verdict": "delivery_hold",
-                    "pr_ref": pr_ref,
-                    "reason": hold["reason"],
-                })
-                continue
-
-            # Re-close guard: if a done→active reopen history row exists,
-            # compare its stamped pr_ref against the current pr_ref.
-            reopen_hist = _get_latest_done_to_active_history(state_dir, t["track_id"], project_id)
-            if reopen_hist is not None:
-                stamped_pr_ref = _parse_reopen_stamp(reopen_hist.get("reason") or "")
-                if stamped_pr_ref is None:
-                    # Unparseable stamp — fail-closed.
-                    guarded_tracks.append({
-                        "track_id": t["track_id"],
-                        "verdict": "reopened_guard",
-                        "pr_ref": pr_ref,
-                        "reason": "unparseable_reopen_stamp",
-                    })
-                    continue
-                if stamped_pr_ref == pr_ref:
-                    # pr_ref unchanged since reopen — skip.
-                    guarded_tracks.append({
-                        "track_id": t["track_id"],
-                        "verdict": "reopened_guard",
-                        "pr_ref": pr_ref,
-                        "reason": "pr_ref_unchanged_since_reopen",
-                    })
-                    continue
-                # pr_ref changed — re-armed; fall through to normal nomination.
-
-            candidates.append({
-                "track_id": t["track_id"],
-                "pr_ref": pr_ref,
-                "pr_numbers": pr_numbers,
-                "phase": phase,
-            })
-    finally:
-        hold_conn.close()
+    candidates, guarded_tracks, held_tracks = nominate_candidates(state_dir, project_id)
 
     nominated = len(candidates)
 
@@ -1015,103 +859,26 @@ def run_reconcile(
     # Resolve the binary once per run and reuse it for every PR lookup, so a
     # PATH that differs from an interactive shell (launchd/cron background)
     # cannot flip a live gh to "absent" partway through a run.
-    # ------------------------------------------------------------------ step 4a
-    gh_binary = _resolve_gh_binary()
-    gh_health = _detect_gh(repo_root, gh_binary)
-    if gh_health in ("absent", "auth_failed", "timeout"):
-        per_track = [
-            {
-                "track_id": c["track_id"],
-                "verdict": "unverified",
-                "pr_ref": c["pr_ref"],
-                "reason": gh_health,
-            }
-            for c in candidates
-        ] + guarded_tracks + held_tracks
-        counts = {
-            "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
-            "closed": 0, "closed_sibling": 0, "open_pr": 0,
-            "unverified": len(candidates), "deferred": 0, "stale": 0,
-            "reopened_guard": len(guarded_tracks),
-            "delivery_hold": len(held_tracks),
-        }
-        summary = {
-            "run_id": run_id, "project_id": project_id, "mode": mode,
-            "started_at": started_at, "finished_at": _now_utc(),
-            "evidence_source_health": {"gh": gh_health},
-            "provenance": provenance,
-            "dispatch_outcomes": dispatch_outcomes_summary,
-            "counts": counts,
-            "per_track": per_track,
-        }
-        _persist_summary(state_dir, summary)
-        return summary, 3
+    degraded, gh_binary, gh_health = gh_unavailable_result(
+        state_dir, project_id, repo_root,
+        run_id=run_id, mode=mode, started_at=started_at, provenance=provenance,
+        dispatch_outcomes_summary=dispatch_outcomes_summary,
+        total_tracks=total_tracks, nominated=nominated, candidates=candidates,
+        guarded_tracks=guarded_tracks, held_tracks=held_tracks,
+    )
+    if degraded is not None:
+        return degraded
 
     # ------------------------------------------------------------------ step 4b
     # Per-candidate verification with persistent MERGED cache.
-    # ------------------------------------------------------------------ step 4b
-    repo_key = _get_repo_key(repo_root)
-    pr_cache = _load_pr_state_cache(state_dir, repo_key)
-    gh_calls_used = 0
-    counts = {
-        "tracks": total_tracks, "nominated": nominated, "confirmed": 0,
-        "closed": 0, "closed_sibling": 0, "open_pr": 0,
-        "unverified": 0, "deferred": 0, "stale": 0,
-        "reopened_guard": len(guarded_tracks),
-        "delivery_hold": len(held_tracks),
-    }
-    confirmed_candidates: List[Dict[str, Any]] = []
-    per_track: List[Dict[str, Any]] = []
-
-    for cand in candidates:
-        track_id = cand["track_id"]
-        pr_numbers: FrozenSet[int] = cand["pr_numbers"]
-        pr_ref = cand["pr_ref"]
-
-        # Split: cached MERGED vs needs a live gh call.
-        pr_results: Dict[int, Optional[Dict[str, Any]]] = {}
-        prs_to_fetch: List[int] = []
-        for pn in pr_numbers:
-            cached = pr_cache.get(str(pn))
-            if cached and _is_merged(cached):
-                pr_results[pn] = cached
-            else:
-                prs_to_fetch.append(pn)
-
-        # Defer if fetching would exceed the cap.
-        if prs_to_fetch and gh_calls_used + len(prs_to_fetch) > max_gh_calls:
-            per_track.append({"track_id": track_id, "verdict": "deferred", "pr_ref": pr_ref})
-            counts["deferred"] += 1
-            continue
-
-        # Fetch live states; cache any MERGED results.
-        for pn in prs_to_fetch:
-            gh_calls_used += 1
-            data = _gh_pr_view(pn, repo_root, gh_binary=gh_binary)
-            pr_results[pn] = data
-            if data is not None and _is_merged(data):
-                pr_cache[str(pn)] = data
-
-        # Persist cache after each candidate's batch so timeouts don't lose cached merges.
-        _save_pr_state_cache(state_dir, repo_key, pr_cache)
-
-        verdict, pr_list = _decide_candidate(pr_numbers, pr_results, allow_closed_siblings)
-
-        entry: Dict[str, Any] = {
-            "track_id": track_id,
-            "verdict": verdict,
-            "pr_ref": pr_ref,
-            "pr_results": pr_list,
-        }
-        per_track.append(entry)
-
-        if verdict == "CONFIRMED":
-            counts["confirmed"] += 1
-            confirmed_candidates.append({
-                "track_id": track_id, "pr_ref": pr_ref, "pr_results": pr_list,
-            })
-        else:
-            counts[verdict] = counts.get(verdict, 0) + 1
+    verified = verify_candidates(
+        state_dir, repo_root, candidates, guarded_tracks, held_tracks,
+        gh_binary=gh_binary, total_tracks=total_tracks, nominated=nominated,
+        max_gh_calls=max_gh_calls, allow_closed_siblings=allow_closed_siblings,
+    )
+    per_track = verified["per_track"]
+    counts = verified["counts"]
+    confirmed_candidates = verified["confirmed_candidates"]
 
     # ------------------------------------------------------------------ step 4c
     # OI-1064: thread the gh-confirmed merge evidence into the derived-status
@@ -1208,7 +975,6 @@ def run_reconcile(
 
     # ------------------------------------------------------------------ step 6
     # Summary + history.
-    # ------------------------------------------------------------------ step 6
     finished_at = _now_utc()
     exit_code = 3 if counts["unverified"] > 0 else 0
 

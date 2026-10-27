@@ -367,10 +367,30 @@ class GateExecutorMixin:
             "recorded_at": now,
         }
         _rec.stamp_request_identity(result_payload, request_payload)
+        return self._book_ci_gate_result(gate, pr_number, pr_id, result_payload, request_payload, now)
+
+    def _book_ci_gate_result(
+        self, gate: str, pr_number: Optional[int], pr_id: str,
+        result_payload: Dict[str, Any], request_payload: Dict[str, Any], now: str,
+    ) -> Dict[str, Any]:
+        """Book a pass/fail and end its request in one ``commit_gate_outcome`` (GE-4b).
+
+        A ``running`` snapshot is no outcome (ADR-046 §1) and keeps the overwrite guard alone.
+        """
+        import gate_recorder as _rec
+        from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
 
         rf = _rec.result_file_path(
             self.results_dir, gate, pr_number=pr_number, pr_id=pr_id,
         )
+        if result_payload["status"] != "running":
+            if not rf:
+                return result_payload
+            payload_on_disk, written = commit_gate_outcome(
+                GateOutcome.from_record(gate, result_payload, pr_id=pr_id), results_dir=self.results_dir,
+                result_path=rf, request=GateRequest(self.requests_dir, request_payload, {"completed_at": now}),
+            )
+            return payload_on_disk if written else _rec.annotate_refused_write(payload_on_disk, result_payload)
         if rf:
             # OI-1469/OI-1470: refuse a write that would downgrade an existing
             # terminal, evidenced result (e.g. a stale "running" re-check must
@@ -388,13 +408,9 @@ class GateExecutorMixin:
         # Setting it to "completed" would cause execute_gate to short-circuit on
         # the next call (status in ("not_executable", "completed", "failed")),
         # leaving the gate permanently stuck with a "running" snapshot.
-        if verdict == "running":
-            request_payload["status"] = "requested"
-            request_payload.pop("started_at", None)
-            request_payload.pop("runner_pid", None)
-        else:
-            request_payload["status"] = "completed"
-            request_payload["completed_at"] = now
+        request_payload["status"] = "requested"
+        request_payload.pop("started_at", None)
+        request_payload.pop("runner_pid", None)
         _rec.persist_request(
             self.requests_dir, gate, request_payload,
             pr_number=pr_number, pr_id=pr_id,

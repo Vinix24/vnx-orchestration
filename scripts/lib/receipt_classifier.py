@@ -513,7 +513,11 @@ def _run_classification(
     prompt = _build_prompt(receipts)
 
     result: ClassifierResult = prov.classify(prompt)
-    if result.cost_usd > 0:
+    # The ledger's amount, when the call was booked. None means the ledger
+    # refused or could not write the line: track no cost at all rather than a 0
+    # the call may not have cost, and record why in the result.
+    cost_error = (result.extra or {}).get("cost_error")
+    if result.cost_usd is not None and result.cost_usd > 0:
         track_cost(prov.name, result.cost_usd)
 
     if result.error:
@@ -522,6 +526,7 @@ def _run_classification(
             "error": result.error,
             "provider": prov.name,
             "latency_ms": result.latency_ms,
+            "cost_error": cost_error,
         }
 
     parsed = result.parsed_json
@@ -530,6 +535,7 @@ def _run_classification(
             "status": "parse_error",
             "raw_response": result.raw_response[:1000],
             "provider": prov.name,
+            "cost_error": cost_error,
         }
 
     queued: List[str] = []
@@ -547,6 +553,7 @@ def _run_classification(
         "queued_edit_ids": queued,
         "switched_off_receipts": switched_off,
         "cost_usd": result.cost_usd,
+        "cost_error": cost_error,
         "latency_ms": result.latency_ms,
     }
 

@@ -7,14 +7,16 @@ Covers:
   - Provider readiness checks (ready, misconfigured, unsupported)
   - Model readiness checks (ready, ready_with_switch, unsupported)
   - Pinned assumption verification
-  - FEATURE_PLAN requirement extraction
   - Full preflight report generation
   - Routing state classification (unsupported, unavailable, misconfigured)
+  - The CLI: explicit requirements decide with no plan file anywhere
 """
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -30,6 +32,9 @@ import routing_preflight as rp
 # Helpers
 # ---------------------------------------------------------------------------
 
+_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "routing_preflight.py"
+
+
 def _clean_env():
     """Remove all VNX terminal env vars to reset to defaults."""
     for tid in ("T0", "T1", "T2", "T3"):
@@ -37,12 +42,19 @@ def _clean_env():
         os.environ.pop(f"VNX_{tid}_MODEL", None)
 
 
-def _write_feature_plan(content: str) -> Path:
-    """Write a temporary FEATURE_PLAN.md and return its path."""
-    f = tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False)
-    f.write(content)
-    f.close()
-    return Path(f.name)
+def _run_cli(args, cwd: Path):
+    """Run the script in its own process with a clean terminal env."""
+    env = dict(os.environ)
+    for tid in ("T0", "T1", "T2", "T3"):
+        env.pop(f"VNX_{tid}_PROVIDER", None)
+        env.pop(f"VNX_{tid}_MODEL", None)
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT), *args],
+        cwd=str(cwd),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,66 +188,32 @@ def test_pinned_model_drift():
 
 
 # ---------------------------------------------------------------------------
-# Section 4: FEATURE_PLAN extraction
+# Section 4: CLI — explicit requirements decide, no plan on disk
 # ---------------------------------------------------------------------------
 
-SAMPLE_FEATURE_PLAN = """\
-# Feature: Test
-
-## PR-1: Provider Test
-**Track**: B
-**Priority**: P1
-
-### Scope
-- Requires-Provider: codex_cli required
-- Requires-Model: opus
-
-## PR-2: Model Test
-**Track**: C
-**Priority**: P1
-
-### Scope
-- Requires-Model: sonnet required
-"""
+def test_cli_explicit_requirements_without_a_plan():
+    """ADR-047: readiness comes from the CLI or the dispatch, never a plan file."""
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_cli(
+            [
+                "--terminal", "T1",
+                "--provider", "claude_code", "required",
+                "--model", "sonnet", "required",
+                "--json",
+            ],
+            cwd=Path(tmp),
+        )
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["ready"] is True
+    assert len(report["checks"]) == 2, report["checks"]
 
 
-def test_feature_plan_extraction():
-    fp = _write_feature_plan(SAMPLE_FEATURE_PLAN)
-    try:
-        reqs = rp.extract_requirements_from_feature_plan(fp)
-        assert len(reqs) == 3, f"expected 3 requirements, got {len(reqs)}"
-
-        # PR-1 provider
-        pr1_prov = [r for r in reqs if r.pr_id == "PR-1" and r.dimension == "provider"]
-        assert len(pr1_prov) == 1
-        assert pr1_prov[0].value == "codex_cli"
-        assert pr1_prov[0].strength == "required"
-        assert pr1_prov[0].terminal_id == "T2"  # Track B -> T2
-
-        # PR-1 model
-        pr1_model = [r for r in reqs if r.pr_id == "PR-1" and r.dimension == "model"]
-        assert len(pr1_model) == 1
-        assert pr1_model[0].value == "opus"
-        assert pr1_model[0].strength == "advisory"
-
-        # PR-2 model
-        pr2_model = [r for r in reqs if r.pr_id == "PR-2" and r.dimension == "model"]
-        assert len(pr2_model) == 1
-        assert pr2_model[0].value == "sonnet"
-        assert pr2_model[0].strength == "required"
-        assert pr2_model[0].terminal_id == "T3"  # Track C -> T3
-    finally:
-        os.unlink(fp)
-
-
-def test_feature_plan_filter_by_pr():
-    fp = _write_feature_plan(SAMPLE_FEATURE_PLAN)
-    try:
-        reqs = rp.extract_requirements_from_feature_plan(fp, pr_id="PR-2")
-        assert len(reqs) == 1
-        assert reqs[0].pr_id == "PR-2"
-    finally:
-        os.unlink(fp)
+def test_cli_no_requirement_source_is_a_usage_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_cli([], cwd=Path(tmp))
+    assert result.returncode == 2, f"expected 2, got {result.returncode}: {result.stderr}"
+    assert "No routing requirement source" in result.stderr
 
 
 # ---------------------------------------------------------------------------

@@ -1644,7 +1644,11 @@ def test_non_plan_role_provider_lane_passes_role_through(tmp_path):
     seen_cmds = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
+        # A provider-lane seat's teardown probes the project root through
+        # resolve_consumer_project_root(), which shells out to git — record only
+        # the provider_dispatch child this test is about.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_cmds.append(cmd)
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1727,7 +1731,10 @@ def test_provider_lane_dispatcher_does_not_set_scoped_spawn_env(tmp_path, monkey
     seen_envs: list = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_envs.append(kwargs.get("env"))
+        # Only the provider_dispatch child's env is under test; the seat's
+        # teardown probes the project root through git, which uses no env kwarg.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_envs.append(kwargs.get("env"))
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1771,7 +1778,10 @@ def test_provider_lane_dispatcher_sets_vnx_data_dir_env(tmp_path, monkeypatch):
     seen_envs: list = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_envs.append(kwargs.get("env"))
+        # Only the provider_dispatch child's env is under test; the seat's
+        # teardown probes the project root through git, which uses no env kwarg.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_envs.append(kwargs.get("env"))
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1813,7 +1823,11 @@ def test_provider_lane_dispatcher_carries_read_only_task_class(tmp_path):
     seen_cmds = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
+        # A provider-lane seat's teardown probes the project root through
+        # resolve_consumer_project_root(), which shells out to git — record only
+        # the provider_dispatch child this test is about.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_cmds.append(cmd)
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1843,7 +1857,11 @@ def test_provider_lane_dispatcher_omits_base_ref_by_default(tmp_path):
     seen_cmds = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
+        # A provider-lane seat's teardown probes the project root through
+        # resolve_consumer_project_root(), which shells out to git — record only
+        # the provider_dispatch child this test is about.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_cmds.append(cmd)
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1868,7 +1886,11 @@ def test_provider_lane_dispatcher_threads_base_ref_into_provider_dispatch_cmd(tm
     seen_cmds = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
+        # A provider-lane seat's teardown probes the project root through
+        # resolve_consumer_project_root(), which shells out to git — record only
+        # the provider_dispatch child this test is about.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_cmds.append(cmd)
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 
@@ -1898,7 +1920,11 @@ def test_provider_lane_task_class_disarms_kimi_fabrication_guard_on_clean_worktr
     seen_cmds = []
 
     def _mock_subprocess_run(cmd, **kwargs):
-        seen_cmds.append(cmd)
+        # A provider-lane seat's teardown probes the project root through
+        # resolve_consumer_project_root(), which shells out to git — record only
+        # the provider_dispatch child this test is about.
+        if str(pgp.PROVIDER_DISPATCH) in cmd:
+            seen_cmds.append(cmd)
         import subprocess as _sp
         return _sp.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
 

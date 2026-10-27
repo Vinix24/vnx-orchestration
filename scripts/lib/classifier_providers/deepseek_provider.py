@@ -18,8 +18,11 @@ import os
 import shutil
 import subprocess
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
+import harness_run_cost
 import provider_switch
 from load_deepseek_key import resolve_deepseek_api_key
 
@@ -34,7 +37,6 @@ from .base import ClassifierProvider, ClassifierResult, parse_json_block
 
 _DEFAULT_MODEL = "deepseek-v4-flash"
 _DEFAULT_TIMEOUT = 60
-_DEFAULT_FLAT_COST_USD = 0.0005
 _DEEPSEEK_ANTHROPIC_BASE_URL = "https://api.deepseek.com/anthropic"
 
 
@@ -43,12 +45,12 @@ class DeepSeekProvider(ClassifierProvider):
 
     name = "deepseek"
     reachability_key = "deepseek-harness"
+    ledger_provider = "deepseek-harness"
 
     def __init__(
         self,
         model: Optional[str] = None,
         timeout_seconds: Optional[int] = None,
-        flat_cost_usd: Optional[float] = None,
     ) -> None:
         self.model = model or os.environ.get("VNX_DEEPSEEK_CLASSIFIER_MODEL", _DEFAULT_MODEL)
         self.timeout_seconds = int(
@@ -56,14 +58,6 @@ class DeepSeekProvider(ClassifierProvider):
             if timeout_seconds is not None
             else os.environ.get("VNX_DEEPSEEK_CLASSIFIER_TIMEOUT", _DEFAULT_TIMEOUT)
         )
-        try:
-            self.flat_cost_usd = float(
-                flat_cost_usd
-                if flat_cost_usd is not None
-                else os.environ.get("VNX_DEEPSEEK_CLASSIFIER_FLAT_COST_USD", _DEFAULT_FLAT_COST_USD)
-            )
-        except (TypeError, ValueError):
-            self.flat_cost_usd = _DEFAULT_FLAT_COST_USD
 
     def is_present(self) -> bool:
         # Requires the claude CLI AND the operator's own DeepSeek key (never the
@@ -92,55 +86,42 @@ class DeepSeekProvider(ClassifierProvider):
         return env
 
     def classify(self, prompt: str, _max_tokens: int = 1500) -> ClassifierResult:
-        provider_switch.require(self.name, consumer="classifier_providers.deepseek",
-                                project_id=self.switch_project_id)
-        cmd = [
-            "claude", "--print", *bare_harness_cli_args(), "--model", self.model,
-            "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-        ]
+        started = datetime.now(timezone.utc)
+        session_id = str(uuid.uuid4())
+        model = harness_run_cost.lane_model(self.ledger_provider, self.model)
         start = time.monotonic()
+        try:
+            provider_switch.require(self.name, consumer="classifier_providers.deepseek",
+                                    project_id=self.switch_project_id)
+        except provider_switch.ProviderDisabledError as exc:
+            self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                            spawn_refused=f"provider_disabled: {exc}")
+            raise
+        cmd = [
+            "claude", "--print", *bare_harness_cli_args(), "--session-id", session_id,
+            "--model", model, "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        ]
         try:
             child_env = self._harness_env()
         except HarnessConfigDirError as exc:
-            return ClassifierResult(
-                raw_response="", parsed_json=None, cost_usd=0.0,
-                latency_ms=int((time.monotonic() - start) * 1000),
-                provider=self.name, error=f"harness config dir unsafe: {exc}",
-            )
+            return self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                                   spawn_refused=f"harness_config_dir: {exc}",
+                                   error=f"harness config dir unsafe: {exc}")
         try:
-            proc = subprocess.run(
-                cmd,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_seconds,
-                env=child_env,
-            )
+            proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                                  timeout=self.timeout_seconds, env=child_env)
         except FileNotFoundError as exc:
-            return ClassifierResult(
-                raw_response="", parsed_json=None, cost_usd=0.0,
-                latency_ms=int((time.monotonic() - start) * 1000),
-                provider=self.name, error=f"claude CLI not found: {exc}",
-            )
+            return self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                                   spawn_refused=f"claude_cli_missing: {exc}",
+                                   error=f"claude CLI not found: {exc}")
         except subprocess.TimeoutExpired as exc:
-            return ClassifierResult(
-                raw_response="", parsed_json=None, cost_usd=0.0,
-                latency_ms=int((time.monotonic() - start) * 1000),
-                provider=self.name, error=f"timeout after {self.timeout_seconds}s: {exc}",
-            )
-        latency_ms = int((time.monotonic() - start) * 1000)
-        if proc.returncode != 0:
-            return ClassifierResult(
-                raw_response=proc.stdout or "", parsed_json=None, cost_usd=0.0,
-                latency_ms=latency_ms, provider=self.name,
-                error=f"exit {proc.returncode}: {(proc.stderr or '').strip()[:500]}",
-            )
+            return self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                                   error=f"timeout after {self.timeout_seconds}s: {exc}")
         raw = proc.stdout or ""
-        return ClassifierResult(
-            raw_response=raw,
-            parsed_json=parse_json_block(raw),
-            cost_usd=self.flat_cost_usd,
-            latency_ms=latency_ms,
-            provider=self.name,
-            extra={"model": self.model, "lane": "deepseek-harness"},
-        )
+        extra = {"model": model, "lane": self.ledger_provider}
+        if proc.returncode != 0:
+            return self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                                   raw_response=raw, extra=extra,
+                                   error=f"exit {proc.returncode}: {(proc.stderr or '').strip()[:500]}")
+        return self.finish_run(session_id=session_id, model=model, started=started, monotonic_start=start,
+                               raw_response=raw, parsed_json=parse_json_block(raw), extra=extra)

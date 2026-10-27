@@ -371,6 +371,92 @@ def _check_state_root_location(data_root: Path) -> Check:
     )
 
 
+def _check_legacy_store(project_id: str, central_dir: Path) -> Check:
+    """Report a pre-#1437 XDG store of this project (read-only, nothing moved).
+
+    Before PR #1437 (2026-10-08) ``vnx init`` put the runtime store in the
+    pre-#1437 XDG data-home store (see ``legacy_store_path``); no resolver
+    reads that location any more, so an upgraded operator keeps an abandoned
+    copy with nothing pointing at it. WARN only when it is the project's *only*
+    store: alongside a central ``~/.vnx-data/<id>`` store it is inert history
+    (PASS, path named), and a directory without ``state/runtime_coordination.db``
+    is an empty skeleton, not a store (PASS). Relocating one is
+    ``vnx migrate --relocate-legacy``, added by a later PR; this check never
+    writes, moves or deletes anything.
+    """
+    name = "store:legacy-xdg"
+    try:
+        _engine.ensure_engine_on_path()
+        from legacy_store_path import legacy_data_home, legacy_store_for
+    except Exception as exc:  # vnx-silent-except: surfaced in the check detail, never swallowed
+        return Check(name, WARN, f"could not load the legacy XDG store probe: {exc}")
+
+    legacy = legacy_store_for(project_id)
+    if legacy is None:
+        skeleton = legacy_data_home() / project_id
+        if skeleton.is_dir():
+            return Check(name, PASS, f"legacy XDG skeleton {skeleton} has no "
+                        "state/runtime_coordination.db — not a store, nothing to move")
+        return Check(name, PASS, f"no legacy XDG store for {project_id}")
+
+    if central_dir.is_dir():
+        return Check(name, PASS, f"a legacy XDG copy also exists at {legacy} "
+                    f"(not used; active central store: {central_dir})")
+
+    return Check(name, WARN, f"legacy XDG store {legacy} (holds "
+                "state/runtime_coordination.db) is NOT used — this project's central "
+                f"store {central_dir} does not exist, so the state there is invisible "
+                "to every vnx command. Moving it is not wired yet: "
+                "`vnx migrate --relocate-legacy` will be available in a later release")
+
+
+def _central_store_dir(project_id: str) -> Path:
+    """Return ``~/.vnx-data/<project_id>`` — the central store this project uses.
+
+    ``project_id`` comes from ``_engine.derive_project_id``, which only returns
+    an id matching ``PROJECT_ID_RE``, so the resolver cannot refuse it.
+    """
+    _engine.ensure_engine_on_path()
+    import vnx_paths
+
+    return vnx_paths.resolve_central_data_dir(project_id)
+
+
+def _lagging_pin_warn(embedded_resolved: Path, central_resolved: Path) -> Check | None:
+    """WARN when the embedded link lands on an older release inside the store.
+
+    A project that deliberately pins an older release (``.claude/vnx-system``
+    -> ``versions/v1.7.5`` while ``current`` -> ``versions/v1.7.6``) resolves
+    to a directory that lives inside the same central store. That is a pin
+    that lags, not a second install: there is one store and one tree per
+    release, so the dual-install FAIL and its "remove embedded install" advice
+    would delete a working, intentional link.
+
+    Returns ``None`` when the branch does not apply, so the caller keeps its
+    existing FAIL for a real second install or a link outside the store. A
+    link that resolves to ``versions/`` itself is not a pinned release and
+    also falls through. Fail-closed: when the store's ``versions/`` dir cannot
+    be resolved the caller's FAIL stands.
+    """
+    try:
+        versions_resolved = (Path.home() / ".vnx-system" / "versions").resolve(strict=False)
+    except OSError as exc:
+        logger.warning("doctor: could not resolve central store versions dir: %s", exc)
+        return None
+    if embedded_resolved == versions_resolved:
+        return None
+    if not embedded_resolved.is_relative_to(versions_resolved):
+        return None
+    return Check(
+        name="install:dual",
+        status=WARN,
+        detail=(
+            f"lagging pin: linked to {embedded_resolved.name}, "
+            f"current is {central_resolved.name} (not a dual install)"
+        ),
+    )
+
+
 def _check_dual_install(project_dir: Path) -> Check:
     """Fail only on a genuine dual install: two DISTINCT real install trees.
 
@@ -384,7 +470,9 @@ def _check_dual_install(project_dir: Path) -> Check:
     Resolution is the fix: resolve both sides to real paths and compare. A real
     embedded copy (a directory that is NOT a symlink into the central store,
     carrying its own ``scripts/``) still resolves to a distinct directory and
-    still FAILs with the existing, correct advice.
+    still FAILs with the existing, correct advice. A link to an older release
+    dir inside the same store is a lagging pin, not a conflict: it WARNs and
+    names both versions instead.
     """
     embedded_path = project_dir / ".claude" / "vnx-system"
     central_path = Path.home() / ".vnx-system" / "current"
@@ -450,6 +538,12 @@ def _check_dual_install(project_dir: Path) -> Check:
                 f"({embedded_resolved})"
             ),
         )
+
+    # A link to older release dir INSIDE the same store is a lagging pin, not
+    # a second install; that branch is split out to keep this function small.
+    lagging_pin = _lagging_pin_warn(embedded_resolved, central_resolved)
+    if lagging_pin is not None:
+        return lagging_pin
 
     # Genuinely distinct installs: a real embedded directory with its own
     # scripts/, or a symlink pointing outside the central store entirely.
@@ -1217,6 +1311,11 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_directories(project_dir, data_root))
     checks.append(_check_install_mode(project_dir))
     checks.append(_check_state_root_location(data_root))
+    # Read-only: names a pre-#1437 XDG store that no resolver reads any more.
+    legacy_project_id = _engine.derive_project_id(project_dir)
+    checks.append(
+        _check_legacy_store(legacy_project_id, _central_store_dir(legacy_project_id))
+    )
     checks.append(_check_dual_install(project_dir))
     checks.extend(_check_schema_versions(data_root))
     checks.append(_check_skill_coverage(project_dir, data_root, strict=strict))

@@ -359,8 +359,8 @@ T0 does not invoke it per dispatch but should know the opt-in flags:
 # Refresh state mid-session
 python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/build_t0_state.py"
 
-# On-demand queue drift repair
-python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/reconcile_queue_state.py" --repair
+# Queue state (read-only; the tracks DB is the plan source — ADR-047)
+python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/planning_cli.py" horizon queue
 
 # Open items (if digest needs refresh)
 python3 "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/open_items_manager.py" digest
@@ -441,6 +441,7 @@ Every dispatch instruction MUST include the following footer (codified — don't
 - DO NOT bypass tests with --no-verify
 - DO NOT run the full suite (`pytest tests/`) — test ONLY the files you touched plus their direct neighbours. CI Profile A sweeps the whole tree on every PR; that run is not yours to duplicate
 - Order is: targeted tests green → COMMIT → PUSH → anything slower. A pushed branch with a red suite is an ordinary PR state; uncommitted work in a reaped worktree is loss
+- Run your targeted pytest with `--junitxml=<report path without .md>.junit.xml -o junit_suite_name=<dispatch_id>` and leave that file beside the report — the receipt counts read it
 - The red run (new tests on the OLD code) goes in the report under a line or heading that STARTS with `Red run` / `Rode run` / `Before the fix` / `Voor de fix` (e.g. `**Red run** on <old sha>:`). Only a run under that label is left out of the receipt's test count; every other failure shown counts (`report_body_contract.RED_RUN_LABELS`)
 - DO NOT abort if first sub-task succeeds — continue with rest
 - After commit: PUSH and CREATE PR (or update if existing) — dispatch is INCOMPLETE without PR

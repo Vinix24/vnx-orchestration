@@ -263,11 +263,10 @@ class TestRenderGeminiPromptCompleteness:
     def test_prompt_includes_content_hash_when_present(self):
         from review_contract import materialize_review_contract
         feature_plan = _sample_feature_plan()
-        pr_queue = _sample_pr_queue()
         contract = materialize_review_contract(
             pr_id="PR-1",
             feature_plan_content=feature_plan,
-            pr_queue_content=pr_queue,
+            register_events=[],
             branch="feature/test",
             changed_files=["scripts/lib/review_contract.py"],
         )
@@ -605,15 +604,4 @@ Define the canonical review contract schema.
 `gate_pr1_review_contract_schema`:
 - [ ] Review contract schema covers deliverables
 - [ ] Contract generation is deterministic
-"""
-
-
-def _sample_pr_queue() -> str:
-    return """\
-# PR Queue
-
-## Status
-
-### ⏳ Queued PRs
-- PR-1: Review Contract Schema (dependencies: none) [risk=medium]
 """

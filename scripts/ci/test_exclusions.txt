@@ -183,7 +183,6 @@ tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain 
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_repo_map.py  # OI-1420 gemeten 21-08: valt onder volle sweep (13 failed), ANDERE oorzaak dan ADR-007 — CI image mist tree-sitter (_TSParser NameError) en networkx (ModuleNotFoundError), bewust niet geïnstalleerd (zie het "networkx is deliberately NOT installed" commentaar in de "Install Python deps"-stap van .github/actions/profile-a-prelude/action.yml); een "CI image"-reden zoals elders in dit bestand
 tests/test_review_adapters.py  # OI-1227: red solo — ValueError not raised for unknown adapter (7 failed, 28 passed)
-tests/test_roadmap_consistency.py  # OI-1227: red solo — PR_QUEUE.md stale vs build_pr_queue.py (1 failed, 3 passed)
 tests/test_routing_policy.py  # OI-952: order/load-dependent flake, passes solo on both main and branch (OI-658 class)
 tests/test_runtime_coordination_schema_drift.py  # OI-1227: red solo — schema-code drift: columns referenced but absent (1 failed, 9 passed)
 tests/test_runtime_facade_registry_integration.py  # OI-1227: red solo — Invalid terminal_id 'A0' must match ^T[0-9]+$ (1 failed, 19 passed)

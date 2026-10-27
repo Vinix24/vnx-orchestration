@@ -2386,7 +2386,20 @@ class GateRequestHandlerMixin:
         result_payload = dict(payload)
         result_payload["gate"] = "claude_github_optional"
         result_payload["recorded_at"] = requested_at
-        result_file.write_text(json.dumps(result_payload, indent=2), encoding="utf-8")
+        # GE-3: through the shared guard (slot lock, overwrite guard, atomic
+        # write) instead of a bare write_text. This mirror shares its slot
+        # with ``gate_result_parser.record_claude_github_result``, so a fresh
+        # request must never erase the decided result recorded there. A
+        # refusal is audited by the guard and does NOT fail the request: the
+        # request file and the ``review_gate_request`` receipt still stand,
+        # and the decided record stays on disk. Nothing is emitted for a
+        # write that did not land.
+        write_result_guarded(
+            result_file,
+            result_payload,
+            gate="claude_github_optional",
+            pr_ref=contract.pr_id,
+        )
 
     def _build_claude_github_receipt(
         self,

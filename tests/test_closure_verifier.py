@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,14 @@ sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
+from fixtures.closure_track_fixture import (
+    CLOSURE_TRACK_ID,
+    add_dispatch,
+    link_blocker,
+    seed_done_track,
+    seed_track,
+    set_delivery,
+)
 from review_contract import (
     Deliverable,
     DeterministicFinding,
@@ -51,48 +60,12 @@ def verifier_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_REPORTS_DIR", str(data_dir / "unified_reports"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
 
-    feature_plan = project_root / "FEATURE_PLAN.md"
-    feature_plan.write_text(
-        """# Feature: Demo Feature
-
-**Status**: Complete
-
-## Dependency Flow
-```text
-PR-0 (no dependencies)
-```
-
-## PR-0: Demo PR
-**Track**: C
-**Priority**: P1
-**Complexity**: Medium
-**Skill**: @architect
-**Dependencies**: []
-""",
-        encoding="utf-8",
-    )
-    pr_queue = project_root / "PR_QUEUE.md"
-    pr_queue.write_text(
-        """# PR Queue - Feature: Demo Feature
-
-## Progress Overview
-Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ██████████ 100%
-
-## Status
-
-## Dependency Flow
-```
-PR-0 (no dependencies)
-```
-""",
-        encoding="utf-8",
-    )
+    seed_done_track(state_dir, monkeypatch)
     claim_file = state_dir / "closure_claim.json"
     claim_file.write_text(
         json.dumps(
             {
-                "test_files": ["FEATURE_PLAN.md"],
+                "test_files": ["README.md"],
                 "test_command": "python3 -m pytest tests/test_demo.py",
                 "parallel_assignments": [{"terminal": "T1"}, {"terminal": "T2"}],
             }
@@ -102,8 +75,7 @@ PR-0 (no dependencies)
 
     return {
         "project_root": project_root,
-        "feature_plan": feature_plan,
-        "pr_queue": pr_queue,
+        "state_dir": state_dir,
         "claim_file": claim_file,
         "dispatch_dir": dispatch_dir,
     }
@@ -129,8 +101,7 @@ def test_verify_closure_fails_when_pr_missing(verifier_env, monkeypatch):
 
     result = cv.verify_closure(
         project_root=verifier_env["project_root"],
-        feature_plan=verifier_env["feature_plan"],
-        pr_queue=verifier_env["pr_queue"],
+        track_id=CLOSURE_TRACK_ID,
         branch="feature/demo",
         mode="pre_merge",
         claim_file=verifier_env["claim_file"],
@@ -141,39 +112,6 @@ def test_verify_closure_fails_when_pr_missing(verifier_env, monkeypatch):
     assert "pr_exists" in failed
 
 
-def test_verify_closure_fails_on_metadata_drift(verifier_env, monkeypatch):
-    verifier_env["pr_queue"].write_text(
-        """# PR Queue - Feature: Wrong Feature
-
-## Progress Overview
-Total: 1 PRs | Complete: 1 | Active: 0 | Queued: 0 | Blocked: 0
-Progress: ██████████ 100%
-
-## Status
-
-## Dependency Flow
-```
-PR-0 -> PR-1
-```
-""",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(cv, "_remote_branch_exists", lambda branch, project_root: True)
-    monkeypatch.setattr(cv, "_find_branch_pr", lambda branch: _good_pr_payload())
-
-    result = cv.verify_closure(
-        project_root=verifier_env["project_root"],
-        feature_plan=verifier_env["feature_plan"],
-        pr_queue=verifier_env["pr_queue"],
-        branch="feature/demo",
-        mode="pre_merge",
-        claim_file=verifier_env["claim_file"],
-    )
-
-    failed = {check["name"] for check in result["checks"] if check["status"] == "FAIL"}
-    assert "metadata_sync" in failed
-
-
 def test_verify_closure_fails_when_stale_staging_dispatches_present(verifier_env, monkeypatch):
     stale_dispatch = verifier_env["dispatch_dir"] / "staging" / "stale.md"
     stale_dispatch.write_text("PR-ID: PR-999\n", encoding="utf-8")
@@ -182,8 +120,7 @@ def test_verify_closure_fails_when_stale_staging_dispatches_present(verifier_env
 
     result = cv.verify_closure(
         project_root=verifier_env["project_root"],
-        feature_plan=verifier_env["feature_plan"],
-        pr_queue=verifier_env["pr_queue"],
+        track_id=CLOSURE_TRACK_ID,
         branch="feature/demo",
         mode="pre_merge",
         claim_file=verifier_env["claim_file"],
@@ -200,8 +137,7 @@ def test_verify_closure_passes_for_valid_post_merge_state(verifier_env, monkeypa
 
     result = cv.verify_closure(
         project_root=verifier_env["project_root"],
-        feature_plan=verifier_env["feature_plan"],
-        pr_queue=verifier_env["pr_queue"],
+        track_id=CLOSURE_TRACK_ID,
         branch="feature/demo",
         mode="post_merge",
         claim_file=verifier_env["claim_file"],
@@ -312,8 +248,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -336,8 +271,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -360,8 +294,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -385,8 +318,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -412,8 +344,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -443,8 +374,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -471,8 +401,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -495,8 +424,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -520,8 +448,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -547,8 +474,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -577,8 +503,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -620,8 +545,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -646,8 +570,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -683,8 +606,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -716,8 +638,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -748,8 +669,7 @@ class TestClosureVerifierContractEnforcement:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -842,8 +762,7 @@ class TestClosureVerifierRoundOneCodexFindings:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -886,8 +805,7 @@ class TestClosureVerifierRoundOneCodexFindings:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -930,8 +848,7 @@ class TestClosureVerifierRoundOneCodexFindings:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -972,8 +889,7 @@ class TestClosureVerifierRoundOneCodexFindings:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -1001,8 +917,7 @@ class TestClosureVerifierRoundOneCodexFindings:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -1121,8 +1036,7 @@ class TestValidateReviewEvidencePropagatesBranch:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -1158,8 +1072,7 @@ class TestValidateReviewEvidencePropagatesBranch:
 
         result = cv.verify_closure(
             project_root=verifier_env["project_root"],
-            feature_plan=verifier_env["feature_plan"],
-            pr_queue=verifier_env["pr_queue"],
+            track_id=CLOSURE_TRACK_ID,
             branch="feature/demo",
             mode="pre_merge",
             claim_file=verifier_env["claim_file"],
@@ -1198,8 +1111,6 @@ class TestCLIForwardsBranchAndRequireGithubPr:
             "--pr-id", "PR-0",
             "--branch", "feature/demo",
             "--require-github-pr",
-            "--feature-plan", str(verifier_env["feature_plan"]),
-            "--pr-queue", str(verifier_env["pr_queue"]),
             "--json",
         ])
         assert rc == 0
@@ -1219,9 +1130,164 @@ class TestCLIForwardsBranchAndRequireGithubPr:
         rc = cv.main([
             "--pr-id", "PR-0",
             "--mode", "post_merge",
-            "--feature-plan", str(verifier_env["feature_plan"]),
-            "--pr-queue", str(verifier_env["pr_queue"]),
             "--json",
         ])
         assert rc == 0
         assert captured["require_github_pr"] is False
+
+
+# ---------------------------------------------------------------------------
+# ADR-047 §3: whole-feature closure reads the track from the tracks DB
+# ---------------------------------------------------------------------------
+
+
+def _full_evidence(tmp_path):
+    """A review contract plus passing gate results for PR-0 on feature/demo."""
+    reports_dir = tmp_path / "evidence_reports"
+    reports_dir.mkdir(parents=True)
+    gemini_report = reports_dir / "gemini-PR-0.md"
+    gemini_report.write_text("# Gemini Review\n")
+    codex_report = reports_dir / "codex-PR-0.md"
+    codex_report.write_text("# Codex Gate\n")
+    results_dir = tmp_path / "evidence_results"
+    _write_gate_result(results_dir, "gemini_review", "PR-0", _make_gemini_result(report_path=str(gemini_report)))
+    _write_gate_result(results_dir, "codex_gate", "PR-0", _make_codex_result(report_path=str(codex_report)))
+    _write_gate_result(results_dir, "claude_github_optional", "PR-0", _make_claude_result())
+    return _make_contract(risk_class="high"), results_dir
+
+
+def _track_closure(verifier_env, monkeypatch, tmp_path, **kwargs):
+    monkeypatch.setattr(cv, "_remote_branch_exists", lambda b, p: True)
+    monkeypatch.setattr(cv, "_find_branch_pr", lambda b: _good_pr_payload(state="MERGED"))
+    monkeypatch.setattr(cv, "_merge_commit_on_main", lambda oid, project_root: True)
+    contract, results_dir = _full_evidence(tmp_path)
+    call = {
+        "project_root": verifier_env["project_root"],
+        "branch": "feature/demo",
+        "mode": "post_merge",
+        "track_id": CLOSURE_TRACK_ID,
+        "claim_file": verifier_env["claim_file"],
+        "review_contract": contract,
+        "gate_results_dir": results_dir,
+    }
+    call.update(kwargs)
+    result = cv.verify_closure(**call)
+    return result, {c["name"]: c for c in result["checks"]}
+
+
+class TestTrackClosureFromTracksDb:
+    def test_done_track_with_merged_prs_passes_without_any_plan_file(self, verifier_env, monkeypatch, tmp_path):
+        root = verifier_env["project_root"]
+        assert not (root / "FEATURE_PLAN.md").exists() and not (root / "PR_QUEUE.md").exists()
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert result["verdict"] == "pass", [c for c in result["checks"] if c["status"] != "PASS"]
+        assert checks["track_derived_status"]["status"] == "PASS"
+        assert checks["track_prs_delivered"]["status"] == "PASS"
+        assert {"feature_plan_status", "pr_queue_complete", "metadata_sync"}.isdisjoint(checks)
+        assert result["track_id"] == CLOSURE_TRACK_ID
+        assert result["feature_title"] == "Demo Feature"
+
+    def test_open_delivery_hold_fails_and_names_the_pr(self, verifier_env, monkeypatch, tmp_path):
+        set_delivery(verifier_env["state_dir"], 45, "partial")
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert result["verdict"] == "fail"
+        assert checks["track_prs_delivered"]["status"] == "FAIL"
+        assert "delivery hold on #45" in checks["track_prs_delivered"]["detail"]
+
+    def test_missing_delivery_table_holds_every_pr(self, verifier_env, monkeypatch, tmp_path):
+        conn = sqlite3.connect(str(verifier_env["state_dir"] / "runtime_coordination.db"))
+        conn.execute("DROP TABLE track_pr_delivery")
+        conn.commit()
+        conn.close()
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert checks["track_prs_delivered"]["status"] == "FAIL"
+        assert "delivery hold on #45" in checks["track_prs_delivered"]["detail"]
+
+    def test_unmerged_pr_fails_and_names_it(self, verifier_env, monkeypatch, tmp_path):
+        seed_track(verifier_env["state_dir"], track_id="two-prs", derived_status="done", pr_ref="#45,#46")
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path, track_id="two-prs")
+
+        assert result["verdict"] == "fail"
+        assert "recomputed: in_progress" in checks["track_derived_status"]["detail"]
+        assert "not merged: #46" in checks["track_prs_delivered"]["detail"]
+
+    def test_stale_stored_done_with_an_open_blocker_fails(self, verifier_env, monkeypatch, tmp_path):
+        """The stored value alone cannot close: a blocker linked after the last reconcile holds."""
+        link_blocker(verifier_env["state_dir"], "OI-9999")
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert result["verdict"] == "fail"
+        assert checks["track_derived_status"]["status"] == "FAIL"
+        assert "done (recomputed: blocked)" in checks["track_derived_status"]["detail"]
+
+    @pytest.mark.parametrize("derived_status", [None, "in_progress", "queued", "blocked", "DONE", "weird"])
+    def test_derived_status_other_than_done_fails(self, verifier_env, monkeypatch, tmp_path, derived_status):
+        seed_track(verifier_env["state_dir"], track_id="not-done", derived_status=derived_status, pr_ref="#45")
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path, track_id="not-done")
+
+        assert result["verdict"] == "fail"
+        assert checks["track_derived_status"]["status"] == "FAIL"
+        assert checks["track_prs_delivered"]["status"] == "FAIL"
+
+    def test_track_without_pr_ref_fails(self, verifier_env, monkeypatch, tmp_path):
+        seed_track(verifier_env["state_dir"], track_id="no-prs", derived_status="done", pr_ref=None)
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path, track_id="no-prs")
+
+        assert checks["track_prs_delivered"]["status"] == "FAIL"
+        assert "names no PR" in checks["track_prs_delivered"]["detail"]
+
+    @pytest.mark.parametrize(
+        "kwargs, reason",
+        [
+            ({"track_id": "absent-track"}, "not found"),
+            ({"track_id": None, "branch": "feature/demo"}, "is not dispatch/<dispatch_id>"),
+            ({"track_id": None, "branch": "dispatch/unknown-dispatch"}, "names no track"),
+        ],
+    )
+    def test_unresolvable_track_fails_both_checks(self, verifier_env, monkeypatch, tmp_path, kwargs, reason):
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path, **kwargs)
+
+        assert result["verdict"] == "fail"
+        for name in ("track_derived_status", "track_prs_delivered"):
+            assert checks[name]["status"] == "FAIL"
+            assert reason in checks[name]["detail"]
+
+    def test_missing_tracks_db_fails_and_creates_nothing(self, verifier_env, monkeypatch, tmp_path):
+        empty_state = tmp_path / "empty_state"
+        empty_state.mkdir()
+        monkeypatch.setenv("VNX_STATE_DIR", str(empty_state))
+
+        result, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert checks["track_derived_status"]["status"] == "FAIL"
+        assert "tracks DB not found" in checks["track_derived_status"]["detail"]
+        assert not (empty_state / "runtime_coordination.db").exists()
+
+    def test_dispatch_branch_resolves_the_track(self, verifier_env, monkeypatch, tmp_path):
+        add_dispatch(verifier_env["state_dir"], dispatch_id="dlv-demo", pr_ref="#45")
+
+        result, checks = _track_closure(
+            verifier_env, monkeypatch, tmp_path, track_id=None, branch="dispatch/dlv-demo"
+        )
+
+        assert checks["track_derived_status"]["status"] == "PASS"
+        assert checks["track_prs_delivered"]["status"] == "PASS"
+        assert result["track_id"] == CLOSURE_TRACK_ID
+
+    @pytest.mark.parametrize("pr_id, stale", [("#45", False), ("45", False), ("PR-999", True), ("#46", True)])
+    def test_stale_staging_compares_against_the_track_prs(self, verifier_env, monkeypatch, tmp_path, pr_id, stale):
+        (verifier_env["dispatch_dir"] / "staging" / "d.md").write_text(f"PR-ID: {pr_id}\n", encoding="utf-8")
+
+        _, checks = _track_closure(verifier_env, monkeypatch, tmp_path)
+
+        assert checks["stale_staging"]["status"] == ("FAIL" if stale else "PASS")

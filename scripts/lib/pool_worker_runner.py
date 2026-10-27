@@ -88,7 +88,8 @@ def _resolve_dispatch_dir() -> Path:
 
 def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
                     model: str, role: Optional[str], gate: str,
-                    deadline_seconds: int = 900) -> int:
+                    deadline_seconds: int = 900,
+                    skill: Optional[str] = None) -> int:
     # PR-12: route through the single-entry door when VNX_SINGLE_ENTRY_DISPATCH=1; OFF default =
     # the legacy deliver_with_recovery call (the lambda), byte-identical.
     try:
@@ -98,11 +99,11 @@ def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
             lambda: deliver_with_recovery(
                 terminal_id=terminal_id, instruction=instruction, model=model,
                 dispatch_id=dispatch_id, role=role, gate=gate, max_retries=1,
-                total_deadline=float(deadline_seconds),
+                total_deadline=float(deadline_seconds), skill=skill,
             ),
             instruction_text=instruction, dispatch_id=dispatch_id, role=role,
             target_slot=terminal_id, provider="claude", model=model, gate=gate,
-            deadline_seconds=deadline_seconds,
+            deadline_seconds=deadline_seconds, skill=skill,
         )
         return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
@@ -112,7 +113,8 @@ def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
 
 def _deliver_provider(provider: str, terminal_id: str, dispatch_id: str,
                       instruction: str, model: str, role: Optional[str], gate: str,
-                      deadline_seconds: int = 900) -> int:
+                      deadline_seconds: int = 900,
+                      skill: Optional[str] = None) -> int:
     try:
         import provider_dispatch as pd  # noqa: PLC0415
         import dispatch_bridge  # noqa: PLC0415
@@ -125,12 +127,14 @@ def _deliver_provider(provider: str, terminal_id: str, dispatch_id: str,
                 argv += ["--role", role]
             if gate:
                 argv += ["--gate", gate]
+            if skill:
+                argv += ["--skill", skill]
             return (pd.main(argv) or 0) == 0
 
         ok = dispatch_bridge.deliver_via_door(
             _legacy, instruction_text=instruction, dispatch_id=dispatch_id, role=role,
             target_slot=terminal_id, provider=provider, model=model, gate=gate,
-            deadline_seconds=deadline_seconds,
+            deadline_seconds=deadline_seconds, skill=skill,
         )
         return EXIT_OK if ok else EXIT_DELIVERY_FAILED
     except Exception as exc:
@@ -200,29 +204,39 @@ def run(terminal_id: str, project_id: str, *,
     role: Optional[str] = tp.get("role") or None
     gate = (bundle.get("gate") or "").strip()
 
-    # Read deadline_seconds from the staged dispatch-spec.json (default 900 matches
-    # spawn_claude's own default so dispatches without a deadline are unchanged).
+    # Read deadline_seconds and the spec-bound skill from the staged dispatch-spec.json
+    # (default 900 matches spawn_claude's own default so dispatches without a deadline
+    # are unchanged).
     deadline_seconds = 900
+    skill: Optional[str] = None
     spec_path = broker.get_bundle_path(dispatch_id) / "dispatch-spec.json"
     if spec_path.exists():
         try:
             import json as _json
             _spec_data = _json.loads(spec_path.read_text(encoding="utf-8"))
             deadline_seconds = int(_spec_data.get("deadline_seconds", 900))
+            # OI-2372: the skill staging bound to this dispatch rides the same spec
+            # read as the deadline. Absent / null / blank = no skill, so the prompt
+            # is unchanged. A non-string is not a skill name: treat it as absent
+            # rather than handing a Python object to the seam.
+            _raw_skill = _spec_data.get("skill")
+            if isinstance(_raw_skill, str) and _raw_skill.strip():
+                skill = _raw_skill.strip()
         except Exception:
             logger.warning(
-                "Failed to read deadline_seconds from spec %s; falling back to 900s",
+                "Failed to read deadline_seconds/skill from spec %s; falling back to 900s "
+                "and no skill",
                 spec_path, exc_info=True,
             )
 
-    logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds",
-                dispatch_id, provider, role, _model, deadline_seconds)
+    logger.info("Executing %r provider=%r role=%r model=%r deadline=%ds skill=%r",
+                dispatch_id, provider, role, _model, deadline_seconds, skill)
 
     if provider == "claude":
         return _deliver_claude(terminal_id, dispatch_id, instruction, _model, role, gate,
-                               deadline_seconds=deadline_seconds)
+                               deadline_seconds=deadline_seconds, skill=skill)
     return _deliver_provider(provider, terminal_id, dispatch_id, instruction, _model, role, gate,
-                             deadline_seconds=deadline_seconds)
+                             deadline_seconds=deadline_seconds, skill=skill)
 
 
 def main(argv=None) -> int:

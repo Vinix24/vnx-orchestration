@@ -54,8 +54,10 @@ elsewhere in a sentence marks a run: "baseline", "mutation", "on main" or
 
 ``verification_record`` turns that reading into the ADR-035 ``verification{}``
 shape. Both write paths (``report_parser._build_enhanced_receipt`` and
-``envelope_govern_support._verification_from_report``) call it, so one report
-yields one verification on either path. A gate-runner dispatch
+``envelope_govern_support._verification_from_report``) call
+``verification_record_for_report``, which decides the JUnit sidecar question
+and then delegates to ``verification_record``, so one report yields one
+verification on either path and the two paths cannot drift. A gate-runner dispatch
 (``kimi-gate-pr<N>-<ts>``) is review evidence for another dispatch's PR, not a
 work run: its reviewer's own test runs are not that PR's verification, so it
 gets ``method="gate_evidence"``, no counts, and ``receipt_verdict`` treats
@@ -66,7 +68,9 @@ old receipts keep what they were written with.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union
+from xml.etree import ElementTree
 
 from receipt_outcome import GATE_DISPATCH_RE
 from report_body_contract import GREEN_COLON_LABELS, GREEN_RUN_LABELS, RED_RUN_LABELS
@@ -269,9 +273,151 @@ def is_gate_runner(dispatch_id: Any) -> bool:
     return bool(GATE_DISPATCH_RE.match(str(dispatch_id or "").strip()))
 
 
+def junit_sidecar_path(report_path: Union[str, Path]) -> Path:
+    """The XML a builder writes beside its report: ``<report without .md>.junit.xml``.
+
+    One helper for every reader (PR-4's report path and PR-5's envelope path).
+    """
+    path = Path(report_path)
+    stem = path.with_suffix("") if path.suffix.lower() == ".md" else path
+    return stem.with_name(stem.name + ".junit.xml")
+
+
+# A testsuite without these cannot be counted: absence is no measurement, not 0.
+_JUNIT_COUNT_ATTRS = ("tests", "failures", "errors")
+
+
+def _junit_int(suite: ElementTree.Element, attr: str) -> Optional[int]:
+    raw = suite.get(attr)
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def from_junit(xml_path: Union[str, Path],
+               expected_suite: Any) -> Tuple[Optional[Dict[str, int]], Optional[str]]:
+    """Counts from the builder's JUnit XML, or ``(None, reason)`` when it is refused.
+
+    Success is ``({"passed", "failed", "skipped"}, None)``, summed over every
+    ``testsuite``. A missing or unparseable file, no testsuite, a ``name`` that
+    is not ``expected_suite`` (the dispatch id the builder passes as
+    ``pytest -o junit_suite_name=<dispatch_id>``), or a count that is not a
+    whole number is refused with a reason: a receipt that cannot prove its
+    numbers keeps the text counts (fail-closed on evidence). Never raises.
+    """
+    try:
+        path = Path(xml_path)
+        try:
+            root = ElementTree.parse(path).getroot()
+        except FileNotFoundError:
+            return None, f"no JUnit file at {path}"
+        except ElementTree.ParseError as exc:
+            return None, f"JUnit file does not parse: {exc}"
+        except OSError as exc:
+            return None, f"JUnit file cannot be read: {exc}"
+        suites = list(root.iter("testsuite"))
+        if not suites:
+            return None, "JUnit file carries no testsuite"
+        suite_name = str(expected_suite or "").strip()
+        passed = failed = skipped = 0
+        for suite in suites:
+            name = (suite.get("name") or "").strip()
+            # The builder stamps the dispatch id as the suite name; a file that
+            # names another suite is another run's evidence, not this report's.
+            if not suite_name or name != suite_name:
+                return None, (f"testsuite name {name!r} does not equal the dispatch id "
+                              f"{suite_name!r}")
+            counts = {attr: _junit_int(suite, attr) for attr in _JUNIT_COUNT_ATTRS}
+            for attr, value in counts.items():
+                if value is None:
+                    return None, f"testsuite {name!r} has no usable {attr} count"
+            tests, failures, errors = (counts[attr] for attr in _JUNIT_COUNT_ATTRS)
+            skips = _junit_int(suite, "skipped")
+            if skips is None:
+                # pytest always writes the attribute; a missing one is not a 0
+                # we may silently assume. Refuse instead of guessing.
+                return None, f"testsuite {name!r} has no usable skipped count"
+            failed += failures + errors
+            skipped += skips
+            passed += max(tests - failures - errors - skips, 0)
+        return {"passed": passed, "failed": failed, "skipped": skipped}, None
+    except Exception as exc:  # the reader's contract is "never raise", and the reason is returned
+        return None, f"JUnit file could not be read: {type(exc).__name__}: {exc}"
+
+
+def junit_counts_enabled() -> bool:
+    """The one reading of ``VNX_JUNIT_COUNTS`` for BOTH receipt write paths.
+
+    Off is today's behaviour (the text counts, no new keys), so an unreadable
+    config reads as off: turning machine-measured counts on takes positive
+    evidence, never the absence of a readable setting. Both paths call this
+    through ``verification_record_for_report`` below, so the two cannot
+    switch independently.
+    """
+    try:
+        import config_runtime
+        return config_runtime.get_bool("VNX_JUNIT_COUNTS")
+    except Exception:  # vnx-silent-except: config module unavailable -> the pre-flag text-count behaviour
+        return False
+
+
+def verification_record_for_report(validation: Dict[str, Any],
+                                   dispatch_id: Any,
+                                   report_path: Union[str, Path]) -> Dict[str, Any]:
+    """The ``verification{}`` both receipt write paths build for one report.
+
+    ADR-035 §12: with ``VNX_JUNIT_COUNTS`` on, the counts come from the
+    builder's JUnit sidecar (``count_source: "junit_worker"``); a missing
+    sidecar keeps the text counts with ``count_source: "report_text"``; a
+    refused one keeps them and names why (``junit_rejected``). A failure
+    recorded in either reading is never erased: ``tests_failed`` is the
+    higher of the two and ``count_mismatch`` says they disagreed. Off is
+    exactly ``verification_record(validation, dispatch_id)``, no new keys.
+
+    Path 1 (``envelope_govern_support._verification_from_report``) and
+    Path 2 (``report_parser._build_verification``) both call this, so no
+    window exists in which one path reads the XML while the other reads the
+    report text.
+    """
+    if not junit_counts_enabled():
+        return verification_record(validation, dispatch_id)
+    xml_path = junit_sidecar_path(report_path)
+    if not xml_path.is_file():
+        return verification_record(validation, dispatch_id, count_source="report_text")
+    counts, rejected = from_junit(xml_path, dispatch_id)
+    if counts is None:
+        return verification_record(validation, dispatch_id, count_source="report_text",
+                                   junit_rejected=rejected)
+    # A text run exists only when extract_validation counted one; without
+    # one there is nothing to disagree with (0/0 is not a claim).
+    text_present = "test_method" in validation
+    text_passed = int(validation.get("tests_passed") or 0)
+    text_failed = int(validation.get("tests_failed") or 0)
+    mismatch = text_present and (
+        text_passed != counts["passed"] or text_failed != counts["failed"])
+    merged = dict(validation)
+    merged["tests_passed"] = counts["passed"]
+    merged["tests_failed"] = max(counts["failed"], text_failed)
+    merged["test_method"] = "pytest"
+    return verification_record(merged, dispatch_id, count_source="junit_worker",
+                               count_mismatch=mismatch)
+
+
 def verification_record(validation: Dict[str, Any],
-                        dispatch_id: Any = None) -> Dict[str, Any]:
-    """ADR-035 ``verification{}`` from ``extract_validation`` output."""
+                        dispatch_id: Any = None, *,
+                        count_source: Optional[str] = None,
+                        count_mismatch: bool = False,
+                        junit_rejected: Optional[str] = None) -> Dict[str, Any]:
+    """ADR-035 ``verification{}`` from ``extract_validation`` output.
+
+    ``count_source``/``count_mismatch``/``junit_rejected`` are the
+    deterministische-testverificatie fields, OMITTED unless a caller passes
+    them: an existing caller writes exactly the receipt it wrote before.
+    """
     tests_passed = int(validation.get("tests_passed") or 0)
     tests_failed = int(validation.get("tests_failed") or 0)
     tests_run = tests_passed + tests_failed
@@ -284,7 +430,7 @@ def verification_record(validation: Dict[str, Any],
         method = "manual"
     else:
         method = "unknown"
-    return {
+    record = {
         "method": method,
         "tests_run": tests_run if tests_run > 0 else None,
         "tests_passed": tests_passed if tests_run > 0 else None,
@@ -294,3 +440,10 @@ def verification_record(validation: Dict[str, Any],
         "push_verified": None,
         "spec_deviation": None,
     }
+    if count_source is not None:
+        record["count_source"] = count_source
+    if count_mismatch:
+        record["count_mismatch"] = True
+    if junit_rejected:
+        record["junit_rejected"] = junit_rejected
+    return record

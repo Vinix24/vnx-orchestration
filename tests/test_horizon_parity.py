@@ -311,6 +311,7 @@ _OBJECTIVE_ARGV = {
     "add": ["delegate-track", "Delegate Title", "Delegate goal state"],
     "list": [],
     "show": ["delegate-track"],
+    "queue": ["--objective", "delegate-track", "--all"],
     "sync": [],
     "drift": [],
     "reconcile": [],
@@ -332,6 +333,8 @@ _DELIVERABLE_ARGV = {
     "promote": ["dlv-fake-id"],
     "close": ["dlv-fake-id", "--evidence", "123"],
     "set": ["dlv-fake-id", "--task-class", "01_code_generation"],
+    "retarget": ["dlv-fake-id", "--objective", "other-track", "--reason", "parity check"],
+    "withdraw": ["dlv-fake-id", "--reason", "parity check"],
 }
 _PLAN_GATE_ARGV = {
     "seed": ["delegate-track"],

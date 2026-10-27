@@ -183,6 +183,12 @@ def _cmd_show(args: Any) -> int:
     return pc.cmd_objective_show(args)
 
 
+def _cmd_queue(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_queue(args)
+
+
 def _cmd_sync(args: Any) -> int:
     pc = _require_planning_cli()
     _prep_repo(args, default="roadmap")
@@ -271,6 +277,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_add,
     "list": _cmd_list,
     "show": _cmd_show,
+    "queue": _cmd_queue,
     "sync": _cmd_sync,
     "drift": _cmd_drift,
     "reconcile": _cmd_reconcile,
@@ -322,12 +329,26 @@ def _cmd_deliverable_set(args: Any) -> int:
     return pc.cmd_deliverable_set(args)
 
 
+def _cmd_deliverable_retarget(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_retarget(args)
+
+
+def _cmd_deliverable_withdraw(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_deliverable_withdraw(args)
+
+
 _DELIVERABLE_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_deliverable_add,
     "list": _cmd_deliverable_list,
     "promote": _cmd_deliverable_promote,
     "close": _cmd_deliverable_close,
     "set": _cmd_deliverable_set,
+    "retarget": _cmd_deliverable_retarget,
+    "withdraw": _cmd_deliverable_withdraw,
 }
 
 

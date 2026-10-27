@@ -102,9 +102,9 @@ def _schema(db: Path):
 def test_a_v34_store_reaches_35_with_the_table_and_its_key(v34_store):
     assert TABLE not in {row[1] for row in _schema(v34_store)}
 
-    assert auto_apply(v34_store) == [35]
+    assert auto_apply(v34_store) == [35, 36]
 
-    assert _user_version(v34_store) == 35
+    assert _user_version(v34_store) == 36
     conn = sqlite3.connect(str(v34_store))
     try:
         info = conn.execute(f"PRAGMA table_info({TABLE})").fetchall()
@@ -118,7 +118,7 @@ def test_a_v34_store_reaches_35_with_the_table_and_its_key(v34_store):
     assert defaults["project_id"] == "'proj-a'"
     assert (audit["missing"], audit["failures"]) == ([], [])
     assert manifest == []
-    assert schema_manifest.TERMINAL_VERSION == 35
+    assert schema_manifest.TERMINAL_VERSION == 36
 
 
 def test_a_second_run_is_a_noop(v34_store):

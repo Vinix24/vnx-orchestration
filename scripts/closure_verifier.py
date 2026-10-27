@@ -187,35 +187,6 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _parse_feature_plan(path: Path) -> Dict[str, Any]:
-    content = _read_text(path)
-    title_match = re.search(r"^#\s*Feature:\s*(.+)$", content, re.MULTILINE)
-    status_match = re.search(r"^\*\*Status\*\*:\s*(.+)$", content, re.MULTILINE)
-    deps_match = re.search(r"^## Dependency Flow\s*```text\s*(.+?)```", content, re.MULTILINE | re.DOTALL)
-    pr_ids = re.findall(r"^##\s+(PR-\d+):", content, re.MULTILINE)
-    return {
-        "title": title_match.group(1).strip() if title_match else "",
-        "status": status_match.group(1).strip() if status_match else "",
-        "dependency_flow": deps_match.group(1).strip() if deps_match else "",
-        "pr_ids": pr_ids,
-    }
-
-
-def _parse_pr_queue(path: Path) -> Dict[str, Any]:
-    content = _read_text(path)
-    title_match = re.search(r"^# PR Queue(?:\s*-\s*Feature:|\s*—\s*FP\d+:\s*)(.+)$", content, re.MULTILINE)
-    overview_match = re.search(
-        r"Total:\s*(\d+)\s+PRs\s*\|\s*Complete:\s*(\d+)\s*\|\s*Active:\s*(\d+)\s*\|\s*Queued:\s*(\d+)\s*\|\s*Blocked:\s*(\d+)",
-        content,
-    )
-    deps_match = re.search(r"## Dependency Flow(?: \(executed\))?\s*```\s*(.+?)```", content, re.DOTALL)
-    return {
-        "title": title_match.group(1).strip() if title_match else "",
-        "overview": tuple(int(x) for x in overview_match.groups()) if overview_match else None,
-        "dependency_flow": deps_match.group(1).strip() if deps_match else "",
-    }
-
-
 def _find_branch_pr(branch: str) -> Optional[Dict[str, Any]]:
     result = _run(
         [
@@ -2276,18 +2247,31 @@ def _merge_record_names(record: Dict[str, Any], pr_id: str, normalise) -> bool:
     return bool(label) and normalise(label) == normalise(pr_id)
 
 
+def _canonical_pr_id(value: str) -> str:
+    """``#2176``, ``2176`` and `` 2176 `` are one PR; any other id stays as written."""
+    text = value.strip()
+    digits = text.lstrip("#").strip()
+    return str(int(digits)) if digits.isdigit() else text
+
+
 def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) -> CheckResult:
+    """A staging dispatch for a PR the closing track does not name is stale.
+
+    ``active_pr_ids`` are the track's PR identities from the tracks DB
+    (ADR-047 §4). When the track could not be read the set is empty, so every
+    staging dispatch that names a PR is stale: fail closed.
+    """
     staging_dir = Path(paths["VNX_DISPATCH_DIR"]) / "staging"
     if not staging_dir.exists():
         return CheckResult("stale_staging", "PASS", "no staging directory")
 
-    active_set = set(active_pr_ids)
+    active_set = {_canonical_pr_id(pr_id) for pr_id in active_pr_ids}
     stale: List[str] = []
     for dispatch in staging_dir.glob("*.md"):
         content = _read_text(dispatch)
         match = re.search(r"^PR-ID:\s*(.+)$", content, re.MULTILINE)
         pr_id = match.group(1).strip() if match else ""
-        if pr_id and pr_id not in active_set:
+        if pr_id and _canonical_pr_id(pr_id) not in active_set:
             stale.append(dispatch.name)
 
     if stale:
@@ -2295,11 +2279,31 @@ def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) ->
     return CheckResult("stale_staging", "PASS", "no stale staging dispatches")
 
 
+def _pr_dispatch_checks(pr_id: str, pr_reconciled: Any) -> List[CheckResult]:
+    """``pr_has_dispatch`` PASS for a reconciled PR, then ``pr_completed`` (ADR-047 §2).
+
+    Completed means the dispatch is in ``completed/`` AND has a terminal
+    receipt. Only an exact ``receipt_confirmed is True`` counts: a missing,
+    ``None`` or malformed flag is no receipt, so the PR is not completed.
+    """
+    provenance = pr_reconciled.provenance
+    has_dispatch = CheckResult(
+        "pr_has_dispatch", "PASS",
+        f"dispatch {provenance.get('dispatch_id') or '?'} names {pr_id}",
+    )
+    if pr_reconciled.state != "completed":
+        detail, status = f"{pr_id} state is {pr_reconciled.state}, not completed", "FAIL"
+    elif provenance.get("receipt_confirmed") is True:
+        detail, status = f"{pr_id} is completed via {provenance.get('source', '?')} with a terminal receipt", "PASS"
+    else:
+        detail, status = f"{pr_id} dispatch is in completed/ but has no terminal receipt, so it is not completed", "FAIL"
+    return [has_dispatch, CheckResult("pr_completed", status, detail)]
+
+
 def verify_pr_closure(
     *,
     pr_id: str,
     project_root: Path,
-    feature_plan: Path,
     dispatch_dir: Path,
     receipts_file: Path,
     state_dir: Path,
@@ -2313,6 +2317,12 @@ def verify_pr_closure(
     This runs queue reconciliation to derive the PR's current state,
     validates gate evidence for that PR, and detects contradictions
     between structured gate results and normalized reports.
+
+    No plan file is read (ADR-047 §2). The PR exists when a dispatch names it
+    (``pr_has_dispatch``); the ``pr_queue_state.json`` projection only feeds
+    drift detection and never adds or removes a PR. ``pr_completed`` needs the
+    dispatch in ``completed/`` AND a terminal receipt for it: a completed
+    dispatch without that receipt is not a closed PR.
 
     When ``branch`` is provided and ``require_github_pr`` is True, also verifies
     that a real GitHub PR exists for the branch and that required CI checks are
@@ -2329,7 +2339,6 @@ def verify_pr_closure(
     reconciler = QueueReconciler(
         dispatch_dir=dispatch_dir,
         receipts_file=receipts_file,
-        feature_plan=feature_plan,
         projection_file=projection_file if projection_file.is_file() else None,
     )
     result = reconciler.reconcile()
@@ -2337,8 +2346,8 @@ def verify_pr_closure(
     pr_reconciled = next((p for p in result.prs if p.pr_id == pr_id), None)
     if pr_reconciled is None:
         checks.append(CheckResult(
-            "pr_exists_in_plan", "FAIL",
-            f"{pr_id} not found in FEATURE_PLAN.md",
+            "pr_has_dispatch", "FAIL",
+            f"no dispatch names {pr_id}, so it is not in the queue",
         ))
         return {
             "verdict": "fail",
@@ -2348,21 +2357,8 @@ def verify_pr_closure(
             "reconciled_state": None,
             "review_evidence": None,
         }
-
-    # 2. PR must be completed per reconciliation
-    if pr_reconciled.state == "completed":
-        receipt_note = ""
-        if not pr_reconciled.provenance.get("receipt_confirmed"):
-            receipt_note = " (unconfirmed — no terminal receipt)"
-        checks.append(CheckResult(
-            "pr_completed", "PASS",
-            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')}{receipt_note}",
-        ))
-    else:
-        checks.append(CheckResult(
-            "pr_completed", "FAIL",
-            f"{pr_id} state is {pr_reconciled.state}, not completed",
-        ))
+    # 2. The dispatch names the PR, and the PR is completed with a terminal receipt
+    checks.extend(_pr_dispatch_checks(pr_id, pr_reconciled))
 
     # 3. Check for blocking drift affecting this PR
     pr_drift = [w for w in result.drift_warnings if w.pr_id == pr_id and w.severity == "blocking"]
@@ -2835,50 +2831,158 @@ def _report_blocking_indicators(report_path: Path) -> Optional[int]:
     return _count_report_blocking_indicators(content)
 
 
+_DISPATCH_BRANCH_PREFIX = "dispatch/"
+
+
+@dataclass(frozen=True)
+class TrackEvidence:
+    """What the tracks DB says about the track a whole-feature closure closes.
+
+    A feature is a track (ADR-047 §3). ``derived_status`` is the stored value
+    the track reconciler wrote; ``recomputed_status`` is ``_compute_derived_status``
+    on the store as it is now, so a stale stored ``done`` cannot close a track
+    that a later blocker or an unmerged PR holds. ``error`` names why the track
+    could not be read; when it is set the other fields are empty and the track
+    checks fail.
+    """
+
+    track_id: str = ""
+    title: str = ""
+    derived_status: Optional[str] = None
+    recomputed_status: Optional[str] = None
+    pr_numbers: frozenset = frozenset()
+    merged: frozenset = frozenset()
+    pr_ids: frozenset = frozenset()
+    hold: Optional[Dict[str, Any]] = None
+    error: str = ""
+
+
+def _track_evidence_from_conn(
+    conn: Any, project_id: str, branch: str, track_id: Optional[str], state_dir: Path, project_root: Path
+) -> TrackEvidence:
+    """Resolve the track (explicit, else the dispatch behind ``dispatch/<id>``) and read it."""
+    from track_reconciler import (
+        _compute_derived_status,
+        _delivery_hold,
+        _has_col,
+        _load_merged_pr_numbers,
+        _parse_pr_numbers,
+    )
+
+    if not track_id:
+        if not branch.startswith(_DISPATCH_BRANCH_PREFIX):
+            return TrackEvidence(error=f"no track given and branch {branch!r} is not dispatch/<dispatch_id>")
+        dispatch_id = branch[len(_DISPATCH_BRANCH_PREFIX):]
+        row = conn.execute(
+            "SELECT track FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, project_id),
+        ).fetchone()
+        track_id = str((row["track"] if row else None) or "").strip()
+        if not track_id:
+            return TrackEvidence(error=f"dispatch {dispatch_id!r} names no track in project {project_id!r}")
+    if not _has_col(conn, "tracks", "derived_status"):
+        return TrackEvidence(track_id=track_id, error="tracks.derived_status absent: migration 0028 not applied")
+    track = conn.execute(
+        "SELECT title, derived_status, pr_ref FROM tracks WHERE track_id = ? AND project_id = ?",
+        (track_id, project_id),
+    ).fetchone()
+    if track is None:
+        return TrackEvidence(track_id=track_id, error=f"track {track_id!r} not found in project {project_id!r}")
+    dispatch_refs = [
+        row["pr_ref"] for row in conn.execute(
+            "SELECT pr_ref FROM dispatches WHERE track = ? AND project_id = ? AND pr_ref IS NOT NULL",
+            (track_id, project_id),
+        )
+    ]
+    pr_numbers = _parse_pr_numbers(track["pr_ref"])
+    pr_ids = {str(n) for ref in dispatch_refs for n in _parse_pr_numbers(ref)} | {str(n) for n in pr_numbers}
+    merged = _load_merged_pr_numbers(state_dir, project_root) if pr_numbers else frozenset()
+    return TrackEvidence(
+        track_id=track_id,
+        title=track["title"] or "",
+        derived_status=track["derived_status"],
+        recomputed_status=_compute_derived_status(conn, track_id, project_id, merged),
+        pr_numbers=pr_numbers,
+        merged=frozenset(merged),
+        pr_ids=frozenset(pr_ids),
+        hold=_delivery_hold(conn, track_id, project_id, track["pr_ref"]),
+    )
+
+
+def _read_track_evidence(state_dir: Path, project_root: Path, branch: str, track_id: Optional[str]) -> TrackEvidence:
+    """Read the closing track from the tracks DB. Anything not derivable is an error, never a pass."""
+    import sqlite3
+
+    import tracks as tracks_lib
+    from project_root import resolve_project_id
+
+    db_path = tracks_lib._db_path(state_dir)
+    if not db_path.is_file():
+        return TrackEvidence(error=f"tracks DB not found: {db_path}")
+    try:
+        project_id = resolve_project_id(project_root)
+    except RuntimeError as exc:
+        return TrackEvidence(error=f"project_id not resolvable (ADR-007): {exc}")
+    try:
+        conn = tracks_lib._get_conn(state_dir)
+    except (sqlite3.Error, tracks_lib.EmptySchemaDecoyError) as exc:
+        return TrackEvidence(error=f"tracks DB unreadable: {exc}")
+    try:
+        return _track_evidence_from_conn(conn, project_id, branch, track_id, state_dir, project_root)
+    except sqlite3.Error as exc:
+        return TrackEvidence(error=f"tracks DB query failed: {exc}")
+    finally:
+        conn.close()
+
+
+def _track_closure_checks(track: TrackEvidence) -> List[CheckResult]:
+    """ADR-047 §3: ``track_derived_status`` replaces feature_plan_status, ``track_prs_delivered``
+    replaces pr_queue_complete; metadata_sync is gone without a replacement."""
+    if track.error:
+        return [
+            CheckResult("track_derived_status", "FAIL", track.error),
+            CheckResult("track_prs_delivered", "FAIL", track.error),
+        ]
+    status = f"{track.derived_status or 'missing'} (recomputed: {track.recomputed_status or 'missing'})"
+    done = track.derived_status == "done" and track.recomputed_status == "done"
+    problems: List[str] = [] if done else [f"derived_status is {status}, not done"]
+    if not track.pr_numbers:
+        problems.append("tracks.pr_ref names no PR")
+    unmerged = sorted(track.pr_numbers - track.merged)
+    if unmerged:
+        problems.append("not merged: " + ", ".join(f"#{n}" for n in unmerged))
+    if track.hold is not None:
+        held = ", ".join(f"#{n}" for n in track.hold["held_prs"])
+        problems.append(f"delivery hold on {held}: {track.hold['reason']}")
+    prs = ", ".join(f"#{n}" for n in sorted(track.pr_numbers))
+    return [
+        CheckResult("track_derived_status", "PASS" if done else "FAIL", f"track {track.track_id} derived_status is {status}"),
+        CheckResult(
+            "track_prs_delivered",
+            "FAIL" if problems else "PASS",
+            "; ".join(problems) if problems else f"track {track.track_id}: {prs} merged, no delivery hold",
+        ),
+    ]
+
+
 def verify_closure(
     *,
     project_root: Path,
-    feature_plan: Path,
-    pr_queue: Path,
     branch: str,
     mode: str,
+    track_id: Optional[str] = None,
     claim_file: Optional[Path] = None,
     review_contract: Optional[ReviewContract] = None,
     gate_results_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    feature = _parse_feature_plan(feature_plan)
-    queue = _parse_pr_queue(pr_queue)
+    """Whole-feature closure. The feature is a track, read from the tracks DB
+    (``track_id``, else the dispatch behind a ``dispatch/<id>`` branch); no plan file is read."""
     claims = _load_claim_file(claim_file)
     paths = ensure_env()
+    state_dir = Path(paths["VNX_STATE_DIR"])
 
-    checks: List[CheckResult] = []
-
-    checks.append(
-        CheckResult(
-            "feature_plan_status",
-            "PASS" if feature["status"].lower() == "complete" else "FAIL",
-            f"FEATURE_PLAN status is {feature['status'] or 'missing'}",
-        )
-    )
-
-    queue_match = queue["overview"] is not None and queue["overview"][0] == queue["overview"][1]
-    checks.append(
-        CheckResult(
-            "pr_queue_complete",
-            "PASS" if queue_match else "FAIL",
-            "PR queue is fully complete" if queue_match else "PR queue totals are not fully complete",
-        )
-    )
-
-    checks.append(
-        CheckResult(
-            "metadata_sync",
-            "PASS" if feature["title"] and feature["title"] == queue["title"] and feature["dependency_flow"] == queue["dependency_flow"] else "FAIL",
-            "FEATURE_PLAN and PR_QUEUE titles/dependency flow match"
-            if feature["title"] and feature["title"] == queue["title"] and feature["dependency_flow"] == queue["dependency_flow"]
-            else "FEATURE_PLAN and PR_QUEUE drift detected",
-        )
-    )
+    track = _read_track_evidence(state_dir, project_root, branch, track_id)
+    checks: List[CheckResult] = _track_closure_checks(track)
 
     branch_exists = _remote_branch_exists(branch, project_root)
     checks.append(
@@ -2938,7 +3042,7 @@ def verify_closure(
             )
 
     checks.extend(_validate_test_claims(claims, project_root))
-    checks.append(_check_stale_staging(paths, feature["pr_ids"]))
+    checks.append(_check_stale_staging(paths, track.pr_ids))
 
     # Review contract and gate evidence enforcement
     review_evidence_summary: Optional[Dict[str, Any]] = None
@@ -2976,7 +3080,8 @@ def verify_closure(
         "verdict": verdict,
         "mode": mode,
         "branch": branch,
-        "feature_title": feature["title"],
+        "track_id": track.track_id or None,
+        "feature_title": track.title,
         "checks": [check.__dict__ for check in checks],
         "pr": pr,
         "claim_file": str(claim_file) if claim_file else None,
@@ -2998,9 +3103,12 @@ def _default_claim_file(paths: Dict[str, str]) -> Path:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="VNX closure verifier")
-    parser.add_argument("--feature-plan", default="FEATURE_PLAN.md")
-    parser.add_argument("--pr-queue", default="PR_QUEUE.md")
     parser.add_argument("--branch", default=None)
+    parser.add_argument(
+        "--track-id",
+        default=None,
+        help="Whole-feature closure: the track to close (default: the track of the dispatch behind a dispatch/<id> branch)",
+    )
     parser.add_argument("--mode", choices=("pre_merge", "post_merge"), default="pre_merge")
     parser.add_argument("--claim-file", default=None)
     parser.add_argument("--review-contract", default=None, help="Path to review contract JSON")
@@ -3030,11 +3138,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # Per-PR closure mode
     if args.pr_id:
-        feature_plan_path = (
-            project_root / args.feature_plan
-            if not Path(args.feature_plan).is_absolute()
-            else Path(args.feature_plan)
-        )
         # Infer the current branch when --branch is omitted so the caller does
         # not have to repeat themselves and so require_github_pr is reachable
         # with just --pr-id + --mode pre_merge.
@@ -3047,7 +3150,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         result = verify_pr_closure(
             pr_id=args.pr_id,
             project_root=project_root,
-            feature_plan=feature_plan_path,
             dispatch_dir=Path(paths["VNX_DISPATCH_DIR"]),
             receipts_file=Path(paths["VNX_STATE_DIR"]) / "t0_receipts.ndjson",
             state_dir=Path(paths["VNX_STATE_DIR"]),
@@ -3062,10 +3164,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         result = verify_closure(
             project_root=project_root,
-            feature_plan=(project_root / args.feature_plan if not Path(args.feature_plan).is_absolute() else Path(args.feature_plan)),
-            pr_queue=(project_root / args.pr_queue if not Path(args.pr_queue).is_absolute() else Path(args.pr_queue)),
             branch=branch,
             mode=args.mode,
+            track_id=args.track_id,
             claim_file=claim_file if claim_file.exists() else None,
             review_contract=contract,
             gate_results_dir=gate_results_dir,

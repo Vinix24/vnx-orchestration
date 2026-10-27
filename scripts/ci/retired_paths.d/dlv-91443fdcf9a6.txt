@@ -1,0 +1,13 @@
+# Cluster B5 of track `retire-feature-plan-second-planning-layer`
+# (dispatch dlv-91443fdcf9a6): the last plan-file scaffolds and the plan
+# templates are gone. `new-worktree` writes neither FEATURE_PLAN.md nor
+# PR_QUEUE.md into a new worktree and `vnx init` writes no FEATURE_PLAN.md,
+# so the three templates and the repo-root ROADMAP.md are deleted.
+# PR_QUEUE.md itself is not listed: the tests that assert it is absent name
+# it as a plain string literal, which the check reads as a live reference,
+# so listing it would fail its own red run. Source:
+# docs/governance/decisions/ADR-047-tracks-db-enige-planbron.md
+templates/FEATURE_PLAN_TEMPLATE.md
+templates/PR_QUEUE_TEMPLATE.md
+templates/DOMAIN_FEATURE_PLAN_TEMPLATE.md
+ROADMAP.md

@@ -735,6 +735,17 @@ def test_plan_gate_with_a_schema_path_needs_both_voices(gate):
     assert result.decision != "PASS", "a schema plan does not pass on one readable voice"
 
 
+def test_plan_gate_with_a_receipt_format_path_runs_both_seats_from_the_start(gate):
+    lanes = _Lanes({"codex": _seat_report("pass"), "claude": _seat_report("pass")})
+    result = gate(lanes, dispatch_paths="docs/x.md,scripts/lib/receipt_schema.py")
+    assert lanes.providers == ["codex", "claude"], "an irreversible path brings the second seat in"
+    assert result.decision == "PASS"
+    assert (
+        "both seats from the start (irreversible receipt-format path scripts/lib/receipt_schema.py)"
+        in result.gov_trace
+    )
+
+
 def test_plan_gate_with_a_plain_path_runs_one_seat(gate):
     lanes = _Lanes({"codex": _seat_report("pass"), "claude": _seat_report("pass")})
     result = gate(lanes, dispatch_paths="scripts/lib/report_writer.py")

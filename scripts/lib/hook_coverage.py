@@ -90,6 +90,15 @@ or file): the folder ``git rev-parse --show-toplevel`` names, found without star
 has 10 s; ``git`` waited up to 10 s of its own, and a walk starts no subprocess at all.
 ``scripts/hooks/vnx_hook_shim.sh`` applies the same rule in sh before Python starts.
 
+``session_project_root(cwd, env)`` is rule 1 for a session, with one order both sides take: the
+cwd first, and only when that yields no rule-1 root ``CLAUDE_PROJECT_DIR`` from ``env``. A
+candidate under ``.vnx-data/worktrees/`` yields nothing and stops the resolution there, so a
+dispatch worktree stays silent even when ``CLAUDE_PROJECT_DIR`` names the main checkout. An empty
+or unset ``CLAUDE_PROJECT_DIR`` yields nothing, and so does a session with no project on either
+step. There is no transcript fallback: the shim cannot read the payload without consuming stdin,
+so a step only Python could take would let the shim stop a run the guard would have made. The
+shim's ``rule1_root`` takes the same two steps in sh.
+
 WHICH CODE THE SHIM RUNS. ``shim_entry_file(root, entry, env)`` is the shim's step 2. The
 fabric repo runs its own ``<root>/scripts/hooks/<entry>``. Every other root runs, for a
 user-scope call, the entry beside the shim its command names (``user_shim``), and for a
@@ -255,6 +264,35 @@ def t0_project_root(cwd: Optional[str]) -> Optional[Path]:
     if not (root / ".claude" / "terminals" / "T0" / "CLAUDE.md").is_file():
         return None
     return root if project_id(root) else None
+
+
+def _under_worktree(path: Optional[str]) -> bool:
+    """``path`` is, or physically resolves to, a dispatch worktree."""
+    if not path:
+        return False
+    if _WORKTREE_RE.search(path.replace("\\", "/")):
+        return True
+    return bool(_WORKTREE_RE.search(os.path.realpath(path).replace("\\", "/")))
+
+
+def session_project_root(cwd: Optional[str], env: Mapping[str, str]) -> Optional[Path]:
+    """Rule 1's root for the session: (a) the cwd's root, else (b) ``CLAUDE_PROJECT_DIR``'s.
+
+    One order and one set of exclusions, shared with ``scripts/hooks/vnx_hook_shim.sh``
+    (``rule1_root``). A candidate under ``.vnx-data/worktrees/`` yields nothing and stops the
+    resolution, so a dispatch worktree stays silent even when ``CLAUDE_PROJECT_DIR`` names the
+    main checkout. An empty or unset ``CLAUDE_PROJECT_DIR`` yields nothing, and so does a session
+    with no project on either step. There is no transcript fallback (module docstring).
+    """
+    root = t0_project_root(cwd)
+    if root is not None:
+        return root
+    if _under_worktree(cwd):
+        return None
+    project_dir = env.get("CLAUDE_PROJECT_DIR") or ""
+    if not project_dir or _under_worktree(project_dir):
+        return None
+    return t0_project_root(project_dir)
 
 
 # ── shim step 2: which code runs ─────────────────────────────────────────────

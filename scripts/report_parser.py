@@ -796,6 +796,21 @@ class ReportParser:
         except Exception:
             return _IDENTITY_UNRESOLVED
 
+    def _build_verification(self, validation: Dict[str, Any], dispatch_id: Any,
+                            report_path: str) -> Dict[str, Any]:
+        """verification{} for this receipt — Path 2 of the two receipt write paths.
+
+        deterministische-testverificatie PR-4/PR-5. The sidecar decision (the
+        setting, the ``<report>.junit.xml`` path, ``from_junit``, the mismatch
+        rule and the three keys) lives in
+        ``verification_runs.verification_record_for_report``, which Path 1
+        (``envelope_govern_support._verification_from_report``) calls too, so
+        the two paths cannot drift. Off is exactly
+        ``verification_record(validation, dispatch_id)``, no new keys.
+        """
+        from verification_runs import verification_record_for_report
+        return verification_record_for_report(validation, dispatch_id, report_path)
+
     def _build_enhanced_receipt(self, extracted: Dict, report_path: str) -> Dict[str, Any]:
         """Build enhanced receipt structure from extracted data"""
         metadata = extracted.get('metadata', {})
@@ -915,9 +930,8 @@ class ReportParser:
         # verification{} reads to compute_verdict as evidence_complete=True
         # (method=None isn't in INCOMPLETE_EVIDENCE_METHODS), which is wrong —
         # "unknown" is the honest default when no evidence was found (§3.1).
-        from verification_runs import verification_record
-        receipt['verification'] = verification_record(
-            extracted.get('validation') or {}, receipt.get('dispatch_id'))
+        receipt['verification'] = self._build_verification(
+            extracted.get('validation') or {}, receipt.get('dispatch_id'), report_path)
 
         # INTELLIGENCE INTEGRATION (PR #8): Add quality_context to receipt
         # (pattern_count/quality_context are live readers, §3.2; prevention_rules

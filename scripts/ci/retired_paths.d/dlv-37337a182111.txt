@@ -1,0 +1,6 @@
+# Cluster A6 of track `retire-feature-plan`
+# (dispatch dlv-37337a182111): the plan parser left `scripts/pr_queue_manager.py`
+# together with the `init-feature`/batch path, so the one test module that only
+# exercised that path is gone with it. Removed functions are proven by
+# `tests/test_pr_queue_manager_no_plan.py`; only the deleted file is listed here.
+tests/test_pr_queue_roadmap_metadata.py

@@ -17,11 +17,16 @@ The caller (``planning_cli plan-gate run``) resolves the ``OI-PLAN-<track>``
 blocker on PASS, which — via ``track_reconciler`` — flips the track's
 ``derived_status`` away from ``blocked`` and lets ``deliverable promote`` proceed.
 
+The roster keeps ONE seat per provider family: two seats that resolve to the
+same registry family (``seat_family``) would count one vendor twice, so the
+loader refuses such a config at load time, naming both seats.
+
 Panel composition (operator decision 2026-10-17, P2): ONE seat reads the plan,
 the configured ``default_seat`` (codex). A second seat, ``escalation_seat``
 (opus), reads the same plan in the same run when the first returns BLOCK, or
 from the start when the plan's dispatch paths fall in the schema or security
-class (P1, ``second_seat_from_start``). Both labels live in
+class (P1) or in an irreversible category (ADR-030, amendment 2026-10-25),
+``second_seat_from_start``. Both labels live in
 ``configs/plan_gate_panel.yaml``; ``--panel-seats`` replaces the composition for
 one run (``compose_panel``).
 
@@ -57,12 +62,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
+import dispatch_worktree_isolation
+
 # R6 (OI-2039): a seat whose report carries no verdict fence may still have its
 # verdict in its final answer, the result event of its archived event stream.
 # A claude seat's stream is archived when its run ends (_archive_seat_stream).
 import event_store
 import final_answer_verdict
 import provider_switch
+
+# GE-5a / ADR-046 §4: the dispatcher wiring and the report reader are the one
+# GovernedLane adapter (governed_lane.py) the review gates share. Imported back
+# under their historical names so every caller — glm_gate, kimi_gate,
+# gate_runner, both tiebreakers, panel.py and run_panel itself — keeps working
+# without a change. The INTERIM side-door marker travels with the function
+# (its docstring in governed_lane.py).
+from governed_lane import _make_default_dispatcher, read_report as _read_report
 
 HERE =Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
@@ -138,6 +153,15 @@ _HEADLESS_LANE = "claude_headless"
 # (OI-2115), so seats running at the same time never share one stream.
 _PANEL_TERMINAL_ID = event_store.HARNESS_SEAT_TERMINAL
 
+# The terminal a PARENT-side reap of a provider seat's worktree files its
+# provider_teardown_worktree event under (_run_provider_lane_child). Deliberately not
+# _PANEL_TERMINAL_ID: that is the seat's own terminal, where the child records its own
+# teardown. A reap by the parent means the child never reached that teardown (killed on
+# timeout), and a terminal of its own keeps that visible. The event itself is unchanged:
+# remove_dispatch_worktree builds it, this only names the stream
+# (<data_dir>/events/plan-gate-parent.ndjson).
+_PARENT_REAP_TERMINAL_ID = "plan-gate-parent"
+
 # The seat roster a run picks from: (label, provider string, model_arg), one per provider
 # family (Anthropic / Moonshot / Zhipu / DeepSeek / OpenAI). A plan-gate run uses the
 # default seat and, on BLOCK, the escalation seat (compose_panel); an operator names any
@@ -187,7 +211,13 @@ def resolve_codex_seat_models(seats: List[Dict[str, str]]) -> List[Dict[str, str
 
 
 def default_panel() -> List[Dict[str, str]]:
-    """The shipped five-seat roster, with the codex model resolved from the registry."""
+    """The shipped five-seat roster, with the codex model resolved from the registry.
+
+    Holds the same one-seat-per-family invariant ``load_panel_seats`` enforces:
+    the config's fallback must not seat two votes from one vendor either, so an
+    edit to the code constant fails loud exactly where a config edit would.
+    """
+    _refuse_shared_families(_DEFAULT_PANEL_SEATS)
     return resolve_codex_seat_models(_DEFAULT_PANEL_SEATS)
 
 VERDICT_FENCE = "vnx-plan-verdict"
@@ -264,6 +294,75 @@ def _valid_provider_strings() -> List[str]:
     return [p.value for p in Provider]
 
 
+# LANE registry key -> VENDOR family. The enforcer's key is a ROUTE identity
+# (which lane/model block a provider string dispatches through), so one vendor
+# can surface under two keys: Moonshot's Kimi models live under both the
+# ``kimi_cli`` lane and the ``moonshot`` litellm block. The seat family is a
+# VENDOR identity, so the lane key folds to its vendor key here and nowhere
+# else — ``_registry_key_for`` keeps its route keys for the code that routes on
+# them.
+_LANE_KEY_VENDOR = {"kimi_cli": "moonshot"}
+
+
+def seat_family(provider: str) -> str:
+    """The provider FAMILY a seat's ``provider`` string belongs to.
+
+    Two seats in one family are two votes from one vendor, so the panel may seat
+    at most one per family. The family is the wave7 registry key the constraint
+    enforcer already assigns (ADR-036: ``claude`` -> ``anthropic``, ``codex`` ->
+    ``openai``, ``glm-harness`` and ``litellm:zai`` -> ``zai``), imported rather
+    than re-tabulated here so a new provider alias cannot slide a second seat on
+    the same vendor past the loader with a second mapping table that drifts.
+
+    A trailing ``_harness`` is folded away because it names a LANE, not a vendor:
+    ``deepseek-harness`` -> ``deepseek_harness`` and ``litellm:deepseek`` ->
+    ``deepseek`` bill the same provider and must count as one family. The same
+    lane-vs-vendor split puts ``kimi`` (``kimi_cli``) and ``litellm:moonshot``
+    (``moonshot``) on one vendor, so ``_LANE_KEY_VENDOR`` folds that lane key to
+    its vendor key after the ``_harness`` fold.
+
+    Fails CLOSED: a provider whose family cannot be read raises instead of
+    returning an empty placeholder — two unplaceable seats would otherwise
+    compare equal for the wrong reason, and one unplaceable seat beside a real
+    one would pass a distinctness check that never actually read its family.
+    """
+    from providers.constraint_enforcer import _registry_key_for  # noqa: PLC0415
+
+    family = (_registry_key_for(str(provider or ""), None) or "").strip().lower()
+    if family.endswith("_harness"):
+        family = family[: -len("_harness")]
+    family = _LANE_KEY_VENDOR.get(family, family)
+    if not family:
+        raise ValueError(
+            f"plan-gate panel: cannot resolve the provider family of {provider!r} — "
+            f"a seat whose family is unreadable cannot be proven to sit alone"
+        )
+    return family
+
+
+def _refuse_shared_families(seats: List[Dict[str, str]]) -> None:
+    """Refuse a seat list in which two seats read from one provider family.
+
+    Runs on seats ``_validate_seat`` already accepted, so a malformed seat keeps
+    its own, more specific error. Raises ``ValueError`` naming BOTH seats, both
+    provider strings and the shared family: a config that seats one vendor twice
+    is a miscount, and a miscount must surface at load time, never as a second
+    "independent" vote at verdict time.
+    """
+    seat_of_family: Dict[str, Dict[str, str]] = {}
+    for seat in seats:
+        family = seat_family(seat["provider"])
+        first = seat_of_family.get(family)
+        if first is None:
+            seat_of_family[family] = seat
+            continue
+        raise ValueError(
+            f"plan-gate panel: seats {first['label']!r} and {seat['label']!r} share "
+            f"provider family {family!r} ({first['provider']}, {seat['provider']}); "
+            f"each seat must come from a different provider family"
+        )
+
+
 def _validate_seat(seat: Any, index: int, valid_providers: List[str]) -> Dict[str, str]:
     """Validate ONE seat from the config. Raises ``ValueError`` loud when the
     seat is malformed — never silently drops it, because a dropped seat reads as
@@ -303,6 +402,11 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
     is never silently dropped — a dropped seat reads as an abstention and turns
     into a REVISE via the fail-safe rule, so misconfiguration must surface at
     load time, not at verdict time.
+
+    The same holds for two seats on one provider family (``seat_family``): a
+    config that seats one vendor twice is refused, naming both seats, and the
+    check runs AFTER the per-seat validation so a malformed seat keeps its own
+    error.
     """
     path = Path(config_path) if config_path is not None else _default_panel_config_path()
     if not path.is_file():
@@ -331,9 +435,9 @@ def load_panel_seats(config_path: Optional[Path] = None) -> List[Dict[str, str]]
             f"{type(raw_seats).__name__}"
         )
     valid_providers = _valid_provider_strings()
-    return resolve_codex_seat_models(
-        [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
-    )
+    seats = [_validate_seat(s, i, valid_providers) for i, s in enumerate(raw_seats)]
+    _refuse_shared_families(seats)
+    return resolve_codex_seat_models(seats)
 
 
 def load_goal_min_chars(config_path: Optional[Path] = None) -> int:
@@ -476,7 +580,7 @@ class PanelComposition:
     ``panel_floor(len(seats))`` for an override, the quorum the rule always had.
 
     ``second_seat`` (P1) names why the escalation seat sits from the start: a
-    schema or security path (``second_seat_from_start``). Both seats are then
+    schema, security or irreversible path (``second_seat_from_start``). Both seats are then
     in ``seats``, ``escalation`` is None, and the quorum is 2, because the
     second voice is the point.
     """
@@ -531,7 +635,7 @@ def compose_panel(
 
     Without ``requested_labels`` (no ``--panel-seats``): the default seat, the
     escalation seat for a BLOCK, quorum 1. When ``dispatch_paths`` fall in the
-    schema or security class (``second_seat_from_start``), both seats sit from
+    schema, security or an irreversible class (``second_seat_from_start``), both seats sit from
     the start, quorum 2. With ``requested_labels``: exactly those seats in
     configured order, no escalation, quorum ``panel_floor(n)``. Both roles must name
     a configured seat whichever way the run goes, so a broken config surfaces on
@@ -1363,26 +1467,6 @@ def apply_panel_rule(
     )
 
 
-def _read_report(base: Optional[Path], dispatch_id: str, stderr: str) -> Optional[str]:
-    """Locate a panelist's unified report. Authoritative source: the ``Report: <path>``
-    line provider_dispatch prints to stderr; falls back to the deterministic path.
-
-    Only a path whose filename is exactly ``{dispatch_id}.md`` is accepted — a foreign
-    or stale ``Report:`` line must never feed this panelist a different dispatch's
-    verdict (the gate's verdict-source integrity)."""
-    expected = f"{dispatch_id}.md"
-    for line in (stderr or "").splitlines():
-        if line.startswith("Report: "):
-            p = Path(line[len("Report: "):].strip())
-            if p.name == expected and p.is_file():
-                return p.read_text(encoding="utf-8")
-    if base is not None:
-        p = base / "unified_reports" / expected
-        if p.is_file():
-            return p.read_text(encoding="utf-8")
-    return None
-
-
 def _resolve_data_dir(data_dir: Optional[str]) -> Path:
     """Resolve the data_dir the panel reports are written under and read back from.
 
@@ -1656,168 +1740,51 @@ def _seat_child_env(base: Path, total_deadline_seconds: Optional[int]) -> Dict[s
     return env
 
 
-def _make_default_dispatcher(
-    data_dir: Optional[str], timeout_seconds: int,
-    *, role: str = "plan-reviewer", base_ref: Optional[str] = None,
-    total_deadline_seconds: Optional[int] = None,
-) -> DispatcherFn:
-    """Real dispatcher: run a panelist through its governed lane, return the report text.
+def _run_provider_lane_child(
+    cmd: List[str],
+    *,
+    env: Dict[str, str],
+    timeout_seconds: int,
+    dispatch_id: str,
+    data_dir: Path,
+) -> subprocess.CompletedProcess:
+    """Run the ``provider_dispatch.py`` child and reap its worktree if it dies.
 
-    INTERIM — PR-12 consolidation target. This dispatches WITHOUT going through the
-    single-entry door (`vnx dispatch` / dispatch_bridge), which is a side door. Once the
-    door is wired and flipped, this MUST route through that one door instead. The split
-    below is exactly what the door decides internally:
-      claude            -> headless lane, `claude -p` via ClaudeSubprocessAdapter, on
-                           the SUBSCRIPTION (measured 2026-08-11; the door's default for
-                           claude since A2, 2026-08-26). NOT provider_dispatch — it
-                           refuses claude.
-      kimi/glm/deepseek -> provider_dispatch (constraint-safe per provider).
+    The child creates its own isolated worktree and removes it in its own
+    ``finally``.  A child killed for exceeding *timeout_seconds* (SIGKILL from
+    ``subprocess.run``) never reaches that ``finally``, so the parent reaps the
+    tree here — otherwise every timed-out gate seat leaks a
+    ``dispatch-*-gate-*`` worktree under ``.vnx-data/worktrees/`` (measured
+    2026-10-24: 11 such trees).  The reap never alters the outcome: a
+    ``TimeoutExpired`` still propagates to the caller after it.
 
-    ``role``: OI-811 — this factory is reused by callers whose instruction is NOT a plan
-    review (e.g. the deliberation panel's diverge/contrarian/verify/synthesis stages).
-    Defaults to "plan-reviewer" for backward compatibility with ``run_panel``. A caller
-    with a different role gets the generic (non-plan-framed) file-ref instruction on the
-    claude seat, and that role is stamped on both lanes so govern() and the phantom-guard
-    evaluate it correctly instead of being told it is a plan review.
+    The reap is narrowed to a tree this child run could have created
+    (``reap_child_worktree_on_exit``): whether the path exists is recorded
+    BEFORE ``subprocess.run``, and a tree that existed before is never reaped.
+    A tree that appeared during the run is reaped only while the parent holds
+    its occupancy lock exclusively, so a duplicate seat that exited on
+    ``WorktreeOccupied`` never tears down its live sibling's tree.
 
-    ``base_ref``: OI-1887 — threaded straight into ``provider_dispatch.py --base-ref``
-    (which already threads it into ``create_dispatch_worktree``, see that module) so a
-    review-gate caller reviewing a PR can isolate the provider's worktree on
-    ``origin/<pr-branch>`` instead of the default ``origin/main``. None (the default)
-    leaves the plan-gate and deliberation-panel callers unchanged: neither reviews a PR
-    branch, so both keep isolating on main. Never applies to the claude branch below —
-    that lane isolates via ``dispatch_worktree_isolation`` on its own dispatch_id and has
-    no PR branch to isolate on either.
+    *data_dir* is the dispatcher's resolved ``base`` — the ``VNX_DATA_DIR``
+    pinned into *env* — so the reap reads the claim registry the child wrote,
+    not one this process would resolve from its own environment.  The teardown
+    event is filed under ``_PARENT_REAP_TERMINAL_ID``.
 
-    ``total_deadline_seconds``: OI-2066 — the lane's OWN deadline, set as
-    ``VNX_TOTAL_DEADLINE`` in the provider_dispatch child's environment (the drainer and
-    the claude-harness adapter read it there). ``timeout_seconds`` stays the outer
-    subprocess timeout; a review gate passes it with a margin on top so the lane's own
-    deadline fires first and the lane writes its own report. Only the child env carries
-    it — this process's ``os.environ`` is never touched. None (the default) leaves the
-    plan-gate and deliberation-panel callers exactly as they were. The claude branch
-    keeps running its seat with ``timeout_seconds`` as its deadline; no review gate
-    routes through it.
+    ``review_only=True`` is correct for every seat this dispatcher builds: they
+    run with ``--no-auto-commit`` and materialize only a disposable PR
+    reproduction, which ``remove_dispatch_worktree`` discards before
+    classification — and only while HEAD still equals the recorded base, so a
+    real local commit's branch is never discarded.  The claude branch never
+    reaches this helper.
     """
-    base = _resolve_data_dir(data_dir)
-
-    def _dispatch(provider: str, model_arg: str, instruction: str, dispatch_id: str) -> str:
-        # OI-1153: pin the seat subprocess to the SAME data dir this dispatcher
-        # resolved (`base`), or the lane re-resolves its own. provider_dispatch
-        # honors the two-key VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 contract (see
-        # its _resolve_data_dir); without it the seat's report write path can land
-        # outside the dir _read_report reads back from (e.g. the legacy
-        # ~/.vnx-data/unified_reports root), and the seat report is silently
-        # never found. The claude branch pins the same two keys — see
-        # _run_claude_headless_seat, which sets them on os.environ because on that
-        # lane they must bind in this process as well as in the child.
-        env = _seat_child_env(base, total_deadline_seconds)
-        _tmp_doc_path: Optional[str] = None
-        try:
-            if provider in _CLAUDE_PROVIDERS:
-                # BUG-2 FIX (file-ref): the instruction already has the full plan doc inlined
-                # by run_panel's build_plan_review_instruction call. For the claude seat we
-                # replace it with a compact file-ref instruction so the ~50k-char body never
-                # has to travel as one prompt argument.
-                #
-                # We write the original inline instruction to a temp file so the worker can
-                # read the plan + rubric + verdict contract from a stable on-disk path.
-                # The expected report path is derived from data_dir (resolved above, never
-                # None) so the file-ref instruction's write path and _read_report's read path
-                # agree.
-                report_path_str = str(base / "unified_reports" / f"{dispatch_id}.md")
-
-                # Write the full inline instruction (plan + rubric + contract) to a temp file.
-                # The worker reads this file; the short file-ref instruction points to it.
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    suffix=".vnx_plan_review.md",
-                    delete=False,
-                    encoding="utf-8",
-                    prefix=f"plan_gate_{dispatch_id}_",
-                ) as fh:
-                    fh.write(instruction)
-                    _tmp_doc_path = fh.name
-
-                # Short instruction: rubric + verdict contract + explicit report-path directive.
-                # No 50k doc body — the worker reads it from _tmp_doc_path. A non-plan-review
-                # caller (OI-811) gets the generic file-ref framing instead — never told it is
-                # reviewing an IMPLEMENTATION PLAN.
-                if role == "plan-reviewer":
-                    claude_instruction = build_plan_review_instruction_fileref(
-                        doc_path=_tmp_doc_path,
-                        track_id="<see file>",
-                        report_path=report_path_str,
-                    )
-                else:
-                    claude_instruction = build_generic_fileref_instruction(
-                        doc_path=_tmp_doc_path,
-                        report_path=report_path_str,
-                    )
-
-                return _run_claude_headless_seat(
-                    dispatch_id=dispatch_id,
-                    model=model_arg,
-                    instruction=claude_instruction,
-                    role=role,
-                    base=base,
-                    timeout_seconds=timeout_seconds,
-                )
-
-            cmd = [
-                sys.executable, str(PROVIDER_DISPATCH),
-                "--provider", provider,
-                "--terminal-id", _PANEL_TERMINAL_ID,
-                "--dispatch-id", dispatch_id,
-                "--model", model_arg,
-                "--role", role,
-                # OI-1422: every seat this dispatcher builds (plan-reviewer,
-                # deliberation-panelist) is a read-only verdict/analysis worker —
-                # it reads a doc and writes a report, it never touches repo files.
-                # Without an explicit --task-class, provider_dispatch.py's
-                # argparse default ("") falls through to VNX_TASK_CLASS, which is
-                # unset here, so _build_frontmatter's own fallback stamps
-                # task_class="implementation" on the receipt (provider_dispatch.py
-                # _build_frontmatter). kimi_spawn.py's completion-vs-execution
-                # fabrication guard (_finalize_kimi_result) keys off task_class
-                # ALONE — it has no role parameter — so "implementation" leaves a
-                # clean-worktree kimi seat classified as a delivery worker that
-                # produced nothing, and the guard fires a false "completion
-                # without execution" failure on real panel/review output.
-                # "research_structured" is the fabric's own canonical task_class
-                # for reviewer/architect/planner/security-engineer/data-analyst
-                # work (dispatch_router.py SKILL_TO_TASK_CLASS) and is already a
-                # member of phantom_guard.REVIEW_TASK_CLASSES, so this exempts the
-                # seat through both guards without widening either SSOT.
-                "--task-class", "research_structured",
-                "--instruction", instruction,
-                "--no-auto-commit",
-            ]
-            if base_ref:
-                cmd += ["--base-ref", base_ref]
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout_seconds,
-                check=False, env=env,
-            )
-            report = _read_report(base, dispatch_id, proc.stderr)
-            if report is None:
-                # provider_dispatch prints its actionable detail across both streams —
-                # surfacing only stderr once masked the real cause behind an unrelated
-                # last-stderr-line red herring for a full day.
-                raise RuntimeError(
-                    f"no report for {dispatch_id} (rc={proc.returncode}): "
-                    f"stdout: {(proc.stdout or '')[-800:]} | stderr: {(proc.stderr or '')[-400:]}"
-                )
-            return report
-        finally:
-            # Always clean up the temp doc file regardless of success or failure.
-            if _tmp_doc_path is not None:
-                try:
-                    os.unlink(_tmp_doc_path)
-                except OSError:
-                    pass
-
-    return _dispatch
+    with dispatch_worktree_isolation.reap_child_worktree_on_exit(
+        dispatch_id, data_dir=data_dir, terminal_id=_PARENT_REAP_TERMINAL_ID,
+        review_only=True,
+    ):
+        return subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout_seconds,
+            check=False, env=env,
+        )
 
 
 def _panel_retry_count() -> int:
@@ -2275,19 +2242,32 @@ def second_seat_from_start(dispatch_paths: Optional[List[str]]) -> Optional[str]
     whose dispatch paths fall in the schema or security class
     (``smart_router.plan_scope_path_category``) gets both seats in its first
     round, and so does one with a path that leaves the repository, which no
-    class can clear. Returns the class and the first path that put it there,
+    class can clear. After those, a path in an irreversible category
+    (``smart_router.irreversible_path_category``: schema-migration,
+    receipt-format, fleet-default, in that order) does too (ADR-030, amendment
+    2026-10-25). Returns the class and the first path that put it there,
     normalised as it was classified.
     """
     import smart_router
 
+    paths = list(dispatch_paths or [])
     classes = {
         smart_router.PLAN_SCOPE_SCHEMA, smart_router.PLAN_SCOPE_SECURITY,
         smart_router.PLAN_SCOPE_OUTSIDE_REPO,
     }
-    for path in dispatch_paths or []:
+    for path in paths:
         category = smart_router.plan_scope_path_category(path)
         if category in classes:
             return f"{category} path {smart_router.normalize_dispatch_path(path)}"
+    first_by_category: Dict[str, str] = {}
+    for path in paths:
+        category = smart_router.irreversible_path_category(path)
+        if category:
+            first_by_category.setdefault(category, path)
+    for category in smart_router.IRREVERSIBLE_CATEGORY_PRECEDENCE:
+        if category in first_by_category:
+            path = smart_router.normalize_dispatch_path(first_by_category[category])
+            return f"irreversible {category} path {path}"
     return None
 
 

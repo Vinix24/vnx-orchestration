@@ -1,0 +1,6 @@
+# GE-2b (dlv-8c5b32ca31ad)
+# Gate engine consolidation, row GE-2b: the Codex prompt renderer left
+# scripts/codex_final_gate.py. Only tests called it; no script, hook or
+# workflow did. Source:
+# claudedocs/2026-10-24-nachtrun-golf-1-3/plannen/gate-engine-consolidation.md
+scripts/codex_final_gate.py::render_codex_prompt

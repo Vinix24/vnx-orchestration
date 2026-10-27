@@ -28,7 +28,7 @@ class GateReportGeneratorMixin:
     ) -> Tuple[Dict[str, Any], bool]:
         """Write a not_executable result record (GATE-4).
 
-        Routes through ``gate_recorder.write_result_guarded`` (OI-1469/
+        Routes through ``gate_outcome.commit_gate_outcome`` (GE-4b; OI-1469/
         OI-1470/OI-1471) instead of a bare ``write_text``. This is a
         REQUEST-time writer -- ``_mark_gate_unavailable`` calls it when a
         gate is (re-)requested and its binary is unavailable, which fires
@@ -76,7 +76,7 @@ class GateReportGeneratorMixin:
         never silently unaudited. A caller must earn the opt-out by also
         carrying the skip-rationale write.
         """
-        from gate_recorder import write_result_guarded
+        from gate_outcome import GateOutcome, commit_gate_outcome
         from review_gate_manager import _utc_now
 
         now = _utc_now()
@@ -109,9 +109,9 @@ class GateReportGeneratorMixin:
             result_file = self._result_path(gate, pr_number)
         else:
             return payload, True
-        return write_result_guarded(
-            result_file, payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
-            audit_refusal=audit_refusal,
+        return commit_gate_outcome(
+            GateOutcome.from_record(gate, payload, pr_id=pr_id), results_dir=result_file.parent,
+            result_path=result_file, audit_refusal=audit_refusal,
         )
 
     def _write_skip_rationale(
@@ -174,7 +174,7 @@ class GateReportGeneratorMixin:
     ) -> Tuple[Dict[str, Any], bool]:
         """Write a failed result record for timeout/stall (GATE-6/7).
 
-        Routes through ``gate_recorder.write_result_guarded`` (OI-1472),
+        Routes through ``gate_outcome.commit_gate_outcome`` (GE-4b; OI-1472),
         exactly like its sibling ``_write_not_executable_result`` directly
         above. It was left on a bare ``write_text`` when that one was
         converted, and its payload is precisely the shape the OI-1470 guard
@@ -191,7 +191,7 @@ class GateReportGeneratorMixin:
         and ``payload_on_disk`` is then the untouched pre-existing record,
         NOT the failure payload built here.
         """
-        from gate_recorder import write_result_guarded
+        from gate_outcome import GateOutcome, commit_gate_outcome
         from review_gate_manager import _utc_now
 
         now = _utc_now()
@@ -221,6 +221,7 @@ class GateReportGeneratorMixin:
             result_file = self._result_path(gate, pr_number)
         else:
             return payload, True
-        return write_result_guarded(
-            result_file, payload, gate=gate, pr_ref=pr_id or str(pr_number or ""),
+        return commit_gate_outcome(
+            GateOutcome.from_record(gate, payload, pr_id=pr_id), results_dir=result_file.parent,
+            result_path=result_file,
         )

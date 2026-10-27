@@ -37,6 +37,7 @@ from review_contract import (
     QualityGate,
     ReviewContract,
 )
+import gate_recorder
 import review_gate_manager as rgm
 
 
@@ -527,8 +528,9 @@ class TestRecordClaudeGitHubResult:
 
     def test_result_governance_receipt_includes_contract_hash(self, review_env, monkeypatch):
         receipts = []
+        # GE-4c-1: the receipt is commit_gate_outcome's, emitted by gate_recorder.
         monkeypatch.setattr(
-            rgm, "emit_governance_receipt",
+            gate_recorder, "emit_governance_receipt",
             lambda event, **kw: receipts.append({"event": event, **kw})
         )
 
@@ -710,8 +712,9 @@ class TestRequestClaudeGitHubInvalidPrNumber:
 
 
 class TestRecordClaudeGitHubReceiptHashFallback:
-    """`_emit_claude_github_receipt` must use the request-payload-derived
-    contract_hash when callers omit one — not the raw (empty) argument.
+    """The result receipt (commit_gate_outcome's since GE-4c-1) must use the
+    request-payload-derived contract_hash when callers omit one — not the raw
+    (empty) argument.
 
     Otherwise the result file links to the contract correctly while the
     audit receipt carries an empty contract_hash, breaking downstream
@@ -732,7 +735,7 @@ class TestRecordClaudeGitHubReceiptHashFallback:
         # The receipt emission must fall back to the request payload's hash.
         receipts: list = []
         monkeypatch.setattr(
-            rgm, "emit_governance_receipt",
+            gate_recorder, "emit_governance_receipt",
             lambda event, **kw: receipts.append({"event": event, **kw}),
         )
 

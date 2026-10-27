@@ -127,7 +127,6 @@ def trigger_headless_t0(
     try:
         from context_assembler import (  # noqa: PLC0415
             assemble_t0_context,
-            _DEFAULT_FEATURE_PLAN,
             _DEFAULT_SKILL,
             _DEFAULT_CLAUDE_MD,
         )
@@ -150,7 +149,9 @@ def trigger_headless_t0(
         prompt = assemble_t0_context(
             state_path=state_dir / "t0_state.json",
             receipt=receipt,
-            feature_plan_path=_DEFAULT_FEATURE_PLAN,
+            # ADR-047: the track-goal section is read from this state dir's
+            # tracks DB; there is no plan file to hand over any more.
+            state_dir=state_dir,
             skill_path=_DEFAULT_SKILL,
             claude_md_path=_DEFAULT_CLAUDE_MD,
         )
