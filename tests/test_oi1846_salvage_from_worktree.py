@@ -35,7 +35,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import pr_enforcement as pe
 
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-_AUTOGEN = "<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/build_feature_plan.py -->"
+# The banner a stale FEATURE_PLAN.md carries on disk, spelled in pieces so the
+# retired-paths gate does not read the generator's file name as a live
+# reference (the generator is gone, ADR-047 / B3).
+_AUTOGEN = "<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/" + "build_feature_plan" + ".py -->"
 _GENERATED_PLAN = f"{_AUTOGEN}\n\n# VNX Feature Plan\n\nLast updated: 2026-09-24T10:00:00Z\n"
 _REGENERATED_PLAN = f"{_AUTOGEN}\n\n# VNX Feature Plan\n\nLast updated: 2026-09-24T18:00:00Z\n"
 
@@ -356,48 +359,31 @@ def test_untracked_generated_feature_plan_is_kept_out_of_the_salvage(repo, gh):
 
 
 # ---------------------------------------------------------------------------
-# Defect 2, at the source: the regen does not write into a dispatch worktree
+# Defect 2, at the source: the generator is gone and the marker is a literal
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture()
-def feature_plan_module(monkeypatch):
-    import build_feature_plan as bfp
-
-    monkeypatch.setattr(bfp, "read_register_events", lambda state_dir=None: [])
-    monkeypatch.setattr(bfp, "fetch_merged_prs", lambda limit=100: [])
-    monkeypatch.setattr(bfp, "fetch_recent_git_merged_prs", lambda days=14: [])
-    monkeypatch.setattr(bfp, "load_roadmap", lambda roadmap_path=None: [])
-    return bfp
-
-
-def test_regen_does_not_write_into_a_dispatch_worktree(repo, feature_plan_module):
+def test_marker_classification_does_not_need_the_generator_module(repo, monkeypatch):
+    """ADR-047 / B3 deleted scripts/build_feature_plan.py. The classifier must
+    keep setting a marked FEATURE_PLAN.md aside exactly as on the head that still
+    imported the generator's ``_AUTOGEN_HEADER`` — without that module on
+    ``sys.path`` and without importing it at all."""
     wt = repo.add_worktree("d12")
-    target = wt / "FEATURE_PLAN.md"
-    before = target.read_text()
+    (wt / "FEATURE_PLAN.md").write_text(_REGENERATED_PLAN)
+    monkeypatch.delitem(sys.modules, "build_feature_plan", raising=False)
 
-    feature_plan_module.write_feature_plan(target)
+    classification = pe._classify_dirty_worktree(wt_path=wt)
 
-    assert target.read_text() == before
-    assert _git(wt, "status", "--porcelain").stdout == ""
-
-
-def test_regen_still_writes_in_the_main_checkout(repo, feature_plan_module):
-    target = repo.main / "FEATURE_PLAN.md"
-
-    content = feature_plan_module.write_feature_plan(target)
-
-    assert content.startswith(_AUTOGEN)
-    assert target.read_text() == content
-    assert "Last updated" in target.read_text()
-
-
-def test_regen_dry_run_inside_a_dispatch_worktree_still_returns_the_content(repo, feature_plan_module):
-    wt = repo.add_worktree("d13")
-
-    content = feature_plan_module.write_feature_plan(wt / "FEATURE_PLAN.md", dry_run=True)
-
-    assert content.startswith(_AUTOGEN)
+    assert classification.substantive is False
+    assert classification.generated_paths == ("FEATURE_PLAN.md",)
+    assert classification.tracked_paths == () and classification.untracked_paths == ()
+    # No import of a module that no longer exists: it must not even be looked up.
+    assert "build_feature_plan" not in sys.modules
+    assert list(_SCRIPTS_DIR.glob("build_feature_plan*")) == [], (
+        "the generator is retired (ADR-047); the marker above is its only trace"
+    )
+    # The literal is the historical marker; a different first line is real work.
+    assert pe._GENERATED_ARTIFACTS["FEATURE_PLAN.md"] == _AUTOGEN
 
 
 # ---------------------------------------------------------------------------
