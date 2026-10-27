@@ -1,0 +1,1 @@
+- Review round cap (RG-1): B3.2 now also caps a PR once three codex FAIL rounds (default `VNX_REVIEW_ROUND_CAP`, per project) fell on distinct heads since the last opened line; the record and the refusal name the threshold (`blockers` or `rounds`), and a malformed setting raises instead of falling back to 3.

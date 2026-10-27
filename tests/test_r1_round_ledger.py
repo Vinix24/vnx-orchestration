@@ -48,6 +48,17 @@ def _clean_config_registry(monkeypatch):
     yield from isolate_config_registry(monkeypatch)
 
 
+@pytest.fixture(autouse=True)
+def _pin_round_cap_high(_clean_config_registry, monkeypatch):
+    """This file pins the B3.1/B3.2 BLOCKER thresholds; RG-1's round cap has its own file.
+
+    Without this, a third codex FAIL round would cap a fixture under
+    ``threshold == "rounds"`` before the blocker threshold the case is about
+    fires. ``tests/test_review_round_cap.py`` pins the round cap itself.
+    """
+    monkeypatch.setenv("VNX_OVERRIDE_REVIEW_ROUND_CAP", "999")
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     store = build_project_store(tmp_path, monkeypatch)
@@ -1540,6 +1551,9 @@ class TestTheCount:
         cap = review_rounds.cap_state(lines, PR)
 
         assert (cap.rule, cap.cap_round) == (rule, cap_round)
+        # RG-1 folded the round cap into B3.2: these cases are about the blocker
+        # thresholds, and the round cap is pinned high above (_pin_round_cap_high).
+        assert cap.threshold == ("blockers" if rule else ""), cap.summary()
 
     def test_the_cap_is_sticky_a_later_pass_does_not_lift_it(self):
         import review_rounds

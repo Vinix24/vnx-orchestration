@@ -20,7 +20,7 @@ De plan-gate van 18-10 liet R2 door met twee bindende voorwaarden. Eén: zonder 
 | Cap | Betekenis (DISPATCH_RULES §3) | Uitkomsten |
 |---|---|---|
 | B3.1 | Een ontwerpprobleem: drie of meer blockers in één ronde | `verkleinen` of `terug-naar-plan` |
-| B3.2 | Geen convergentie: de laatste ronde heeft een blocker en de som is zes of meer | `verkleinen` of `mergen-met-OI` |
+| B3.2 | Geen convergentie: (a) de laatste ronde heeft een blocker en de som is zes of meer, of (b) het aantal codex-FAIL-rondes op verschillende koppen sinds de laatste `opened`-regel bereikt de rondegrens (R1e: standaard 3, per project) | `verkleinen` of `mergen-met-OI` |
 
 R2a voert `verkleinen` uit, R2b `terug-naar-plan`. `mergen-met-OI` komt met R2c: kiest het model die, dan wordt hij vastgelegd als `outcome_unavailable_in_r2a`, met de keuze van het model in `chosen_outcome`. De cap blijft dan dicht en de T0 handelt het af zoals nu: uitstellen met een OI.
 
@@ -85,3 +85,16 @@ Drie regels, elk deterministisch en elk met een test (`tests/test_r2a_cap_tiebre
 - **De merge-deur weigert een PR die terug naar plan ging (R2b).** Staat er een `terug-naar-plan`-uitspraak (na de laatste geattesteerde `opened`-regel), dan telt de deur geen PASS meer van die PR: van geen enkele stoel, op de kop van de uitspraak en op elke andere kop, en ook niet met `--override-b3`. Die override heft de cap op, geen uitspraak. De deur leest de rijen en de receipts samen (`review_cap_verdicts.standing_verdicts`): een `terug-naar-plan`-receipt van dit project en deze telling waarvan de rij niet landde, weigert precies zoals de rij. Een onderbroken projectie wist de uitspraak niet. Voor die receipts geldt dezelfde regel als bij het herstel uit een receipt (OI-2207). Kan de deur de uitspraken van een PR op de cap niet lezen, of staan er receipts terwijl de store geen project noemt, dan telt hij ook geen PASS, want of de PR terug ging is dan niet vast te stellen. De regel staat in `review_seat_evaluation.door_rounds` en heeft zijn eigen test (`tests/test_r2b_terug_naar_plan.py::TestTheMergeDoorRefusesAPrSentBackToPlan`).
 - **De deliverable-levenscyclus krijgt één overgang terug**: `ready` naar `proposed`, alleen via de uitspraak, met een event `deliverable_returned_to_plan` en een lege `operator_approved_at`. Het werk komt daarna in een nieuwe PR, na een nieuwe promotie.
 - **De koppeling PR naar deliverable loopt alleen via `output_ref`.** Een bouwdispatch die de deur zonder `output_ref` start, hoort bij geen deliverable. In zo'n store gaat er niets terug naar plan, en de uitvoer zegt dat luid. De deliverable wordt dan met de hand verplaatst.
+
+## Amendement R1e - de rondegrens is deel van B3.2
+
+**Toegevoegd:** 2026-10-27, RG-1 (dispatch `dlv-5c8bb4e59ead`, track `review-rondegrens-met-tiebreaker`).
+
+Op 27-10 werden vier PR's met de hand gesloten "volgens B3: na ronde 3" (#2214, #2221, #2276, #2277), terwijl `review_rounds.cap_state` alleen op blockers capte: de praktijk telde rondes, de code telde blockers, en de rol zei iets anders. R1e maakt de ronde de tweede drempel van B3.2, zodat de drie regels één worden.
+
+- **De drempel.** `review_rounds.cap_state` capt onder B3.2 ook zodra het aantal codex-rondes met `verdict == "fail"` op verschillende koppen sinds de laatste geattesteerde `opened`-regel `review_rounds.round_cap()` bereikt. B3.1 en de blockerdrempel van B3.2 blijven onveranderd en worden eerst getoetst. De regelnaam blijft B3.2: de `CHECK (cap_rule IN ('B3.1','B3.2'))` van migratie 0035 blijft, en er komt geen migratie.
+- **De instelling.** `VNX_REVIEW_ROUND_CAP` in `config_registry` (categorie `gate`), default `"3"`, per project. De keten is `VNX_OVERRIDE_REVIEW_ROUND_CAP` (env) > de `project_config`-rij van het project > `VNX_REVIEW_ROUND_CAP` (env) > default. Een misvormde waarde (leeg, nul, negatief, geen geheel getal) weigert luid (`RoundCapError`) en valt nooit stil terug op 3 — hetzelfde contract als de `max_rounds` van de plan-gate.
+- **Het record.** `CapState.threshold` is `blockers` of `rounds` en staat in `summary()`, `to_record()` en `cap_refusal_text`, zodat het grootboekrecord, het merge-record en de receipt zeggen welke drempel afging. `CapState.round_limit` draagt de effectieve grens.
+- **Terugdraaien.** Zet `VNX_OVERRIDE_REVIEW_ROUND_CAP` hoog. Geen code, geen migratie, geen nieuwe regel in het grootboek.
+- **Niets met terugwerkende kracht.** Het grootboek wordt gelezen, niet herschreven. De cap van een PR die al dicht of gemerged is verandert niet; #2141 en #2170 blijven zoals ze zijn.
+- **Een FAIL-ronde is `verdict == "fail"`.** In alle gemeten codex-rondes droeg elke FAIL minstens één blocker. Een test legt die equivalentie in de fixtures vast, zodat een FAIL zonder blocker een ontwerpkeuze wordt en geen ongeluk.

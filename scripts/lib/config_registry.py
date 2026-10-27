@@ -181,6 +181,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Env-only: read from the process environment at launch.",
         writable=False,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # RG-1 (track review-rondegrens-met-tiebreaker, ADR-041 amendment R1e): the
+    # codex review-round cap. B3.2 also caps a PR once this many codex FAIL
+    # rounds fell on distinct heads since the PR's last `opened` line. Read-site
+    # is ``review_rounds.round_cap`` through ``config_runtime.get`` (the
+    # per-project chain); the value is a string holding a positive integer and
+    # a malformed one fails loud there instead of falling back to the default.
+    "VNX_REVIEW_ROUND_CAP": _e(
+        "VNX_REVIEW_ROUND_CAP", "string", "3", "gate",
+        "Codex review-round cap: how many codex FAIL rounds on distinct heads, counted since "
+        "the PR's last opened line in the round ledger, put the PR at the B3.2 cap. Default 3. "
+        "Resolved per project through config_runtime (VNX_OVERRIDE_REVIEW_ROUND_CAP > "
+        "project_config row > VNX_REVIEW_ROUND_CAP > default); review_rounds.round_cap parses it "
+        "as a positive integer and fails loud on an empty, zero, negative or non-integer value. "
+        "There is no vnx config verb: a non-default goes through dashboard/api_config.py or a "
+        "project_config row. Setting it high is the rollback without code.",
+        subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
