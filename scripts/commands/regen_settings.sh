@@ -11,7 +11,8 @@
 #            - env: VNX_* keys replaced, project keys preserved
 #            - permissions.allow/deny: union (deduplicated), deny > allow
 #            - permissions.ask/additionalDirectories: preserved
-#            - hooks: replaced (VNX-owned)
+#            - hooks: VNX-owned handlers refreshed, project handlers kept
+#                     (--replace-hooks: every handler replaced, as before OI-2057)
 #   --full:  Generate complete settings.json from VNX template (first-time init)
 
 cmd_regen_settings() {
@@ -19,6 +20,7 @@ cmd_regen_settings() {
   local dry_run=0
   local no_backup=0
   local json_output=0
+  local replace_hooks=0
 
   while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -40,6 +42,9 @@ cmd_regen_settings() {
       --json)
         json_output=1
         ;;
+      --replace-hooks)
+        replace_hooks=1
+        ;;
       -h|--help)
         cat <<HELP
 Usage: vnx regen-settings <--merge|--full|--validate> [options]
@@ -50,16 +55,20 @@ Modes:
   --validate   Validate existing settings.json structure
 
 Options:
-  --dry-run    Show what would change without writing
-  --no-backup  Skip backup of existing settings.json
-  --json       Output result as JSON (for scripting)
-  -h, --help   Show this help
+  --dry-run       Show what would change without writing
+  --no-backup     Skip backup of existing settings.json
+  --json          Output result as JSON (for scripting)
+  --replace-hooks With --merge: replace every hook with the template's set
+                  (the pre-OI-2057 behaviour); project hooks are dropped
+  -h, --help      Show this help
 
 Merge semantics:
   env          VNX_* keys managed, project keys preserved
   permissions  allow/deny: union (deduplicated), deny takes precedence
                ask/additionalDirectories: preserved (project-owned)
-  hooks        Replaced entirely (VNX-owned)
+  hooks        VNX-owned handlers refreshed in place, project handlers kept
+               --replace-hooks instead replaces the whole hooks block, which
+               restores the old behaviour and drops every project hook
 HELP
         return 0
         ;;
@@ -73,6 +82,14 @@ HELP
 
   if [ -z "$mode" ]; then
     err "[regen-settings] Specify --merge, --full, or --validate"
+    return 1
+  fi
+
+  # --replace-hooks modifies --merge only. The merge engine refuses the
+  # combination too, but the wrapper rejects it here so the operator gets the
+  # reason instead of a python argparse error after a template render.
+  if [ "$replace_hooks" -eq 1 ] && [ "$mode" != "--merge" ]; then
+    err "[regen-settings] --replace-hooks only applies to --merge"
     return 1
   fi
 
@@ -111,6 +128,9 @@ HELP
   fi
   if [ "$json_output" -eq 1 ]; then
     cmd_args+=("--json")
+  fi
+  if [ "$replace_hooks" -eq 1 ]; then
+    cmd_args+=("--replace-hooks")
   fi
 
   python3 "$merge_script" "${cmd_args[@]}"
