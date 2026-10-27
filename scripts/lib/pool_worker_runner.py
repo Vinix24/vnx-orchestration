@@ -3,9 +3,16 @@
 
 No loop. Pool manager re-spawns on each tick. BILLING SAFETY: No Anthropic SDK.
 Claude: deliver_with_recovery (subprocess.Popen). Non-Claude: provider_dispatch.main.
+
+Lease ownership (ADR-042 besluit 6, amended 2026-10-27): the pool starts this runner by
+default and delivers through the single-entry door. From the moment the pool manager writes
+the `terminal_leases` row for a worker, THIS worker owns it: it renews
+`last_heartbeat_at` while it runs (``_PoolLease``) and releases the row when it ends. The
+legacy ``subprocess_dispatch._pool_heartbeat_loop`` still renews for the rollback route
+(``VNX_SINGLE_ENTRY_DISPATCH=0``); T-G1 removes it once this path is green on main.
 """
 from __future__ import annotations
-import logging, os, re, sys
+import logging, os, re, sys, threading, time
 from pathlib import Path
 from typing import Optional
 
@@ -13,9 +20,16 @@ _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
+from coordination_db import db_path_from_state_dir  # noqa: E402
+from pool_state_repo import PoolStateRepository  # noqa: E402
 from runtime_coordination import claim_next_queued_dispatch, get_connection, get_dispatch  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Renewal cadence for the lease this worker owns. The env override exists so tests and
+# slow hosts can shorten it; a malformed value falls back to the normal cadence (loudly).
+LEASE_HEARTBEAT_ENV = "VNX_POOL_LEASE_HEARTBEAT_SECONDS"
+LEASE_HEARTBEAT_DEFAULT_S = 15.0
 
 # Public exit codes — contract for pool manager (ADR-018 pool tick)
 EXIT_OK = 0
@@ -84,6 +98,76 @@ def _resolve_dispatch_dir() -> Path:
     if canonical is not None:
         return canonical / "dispatches"
     return _LIB_DIR.parents[1] / ".vnx-data" / "dispatches"
+
+
+def _lease_heartbeat_interval() -> float:
+    """Renewal interval in seconds (``VNX_POOL_LEASE_HEARTBEAT_SECONDS`` overrides 15s)."""
+    raw = os.environ.get(LEASE_HEARTBEAT_ENV)
+    if not raw:
+        return LEASE_HEARTBEAT_DEFAULT_S
+    try:
+        interval = float(raw)
+    except ValueError:
+        logger.warning("Ignoring non-numeric %s=%r; renewing every %ss",
+                       LEASE_HEARTBEAT_ENV, raw, LEASE_HEARTBEAT_DEFAULT_S)
+        return LEASE_HEARTBEAT_DEFAULT_S
+    if interval <= 0:
+        logger.warning("Ignoring non-positive %s=%r; renewing every %ss",
+                       LEASE_HEARTBEAT_ENV, raw, LEASE_HEARTBEAT_DEFAULT_S)
+        return LEASE_HEARTBEAT_DEFAULT_S
+    return interval
+
+
+class _PoolLease:
+    """Owns the ``terminal_leases`` row of the terminal this worker serves (ADR-042 §6).
+
+    The pool manager writes the row right after it spawns a worker
+    (``PoolStateRepository.add_or_refresh_pool_lease``, ``worker_pid`` = this process). From
+    then on the worker owns renewal: ``__enter__`` takes one heartbeat immediately and
+    starts a daemon thread that renews ``last_heartbeat_at`` every interval; ``__exit__``
+    stops the thread and releases the row, so a finished worker never leaves a live-looking
+    lease behind or blocks the re-spawn of its terminal (single-claim, ADR-018 Rule 2).
+
+    A failed renewal or release is a liveness signal, not evidence: it is logged and the
+    worker keeps running (the pool reaper's dead-PID path still collects a dead worker).
+    """
+
+    def __init__(self, state_dir: Path, project_id: str, terminal_id: str,
+                 interval: Optional[float] = None) -> None:
+        self.terminal_id = terminal_id
+        self.project_id = project_id
+        self.interval = _lease_heartbeat_interval() if interval is None else interval
+        self._repo = PoolStateRepository(db_path_from_state_dir(state_dir), project_id)
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _renew(self) -> None:
+        try:
+            self._repo.update_heartbeat_by_terminal(self.terminal_id, time.time())
+        except Exception as exc:  # vnx-silent-except: liveness signal, see class docstring
+            logger.warning("lease heartbeat failed for terminal=%s: %s", self.terminal_id, exc)
+
+    def _renew_loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._renew()
+
+    def __enter__(self) -> "_PoolLease":
+        self._renew()
+        self._thread = threading.Thread(
+            target=self._renew_loop, daemon=True, name=f"pool-lease-{self.terminal_id}",
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc_info) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        try:
+            self._repo.release_pool_lease(self.terminal_id, "pool_worker_exit", time.time())
+        except Exception as exc:  # vnx-silent-except: liveness signal, see class docstring
+            logger.warning("lease release failed for terminal=%s: %s", self.terminal_id, exc)
+        return None
 
 
 def _deliver_claude(terminal_id: str, dispatch_id: str, instruction: str,
@@ -250,10 +334,12 @@ def main(argv=None) -> int:
     p.add_argument("--dispatch-dir", default=None)
     p.add_argument("--model", default=None)
     a = p.parse_args(argv)
-    return run(terminal_id=a.terminal_id, project_id=a.project_id,
-               state_dir=Path(a.state_dir) if a.state_dir else None,
-               dispatch_dir=Path(a.dispatch_dir) if a.dispatch_dir else None,
-               model=a.model)
+    state_dir = Path(a.state_dir) if a.state_dir else _resolve_state_dir()
+    dispatch_dir = Path(a.dispatch_dir) if a.dispatch_dir else _resolve_dispatch_dir()
+    # The worker process owns its terminal lease for as long as it runs (ADR-042 §6).
+    with _PoolLease(state_dir, a.project_id, a.terminal_id):
+        return run(terminal_id=a.terminal_id, project_id=a.project_id,
+                   state_dir=state_dir, dispatch_dir=dispatch_dir, model=a.model)
 
 
 if __name__ == "__main__":
