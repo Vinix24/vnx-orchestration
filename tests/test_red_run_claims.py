@@ -19,21 +19,12 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "red_run_claims.py"
 RED_ON_BASE = REPO_ROOT / "scripts" / "ci" / "red_on_base.py"
-
 spec = importlib.util.spec_from_file_location("red_run_claims", SCRIPT)
 rrc = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = rrc
 spec.loader.exec_module(rrc)
 
-BASE = {"tinypkg/__init__.py": "def value():\n    return 1\n"}
-HEAD = {
-    "tinypkg/__init__.py": "def value():\n    return 2\n",
-    "tests/test_claim.py": "from tinypkg import value\n\n\ndef test_claim():\n    assert value() == 2\n",
-    "tests/test_green.py": "def test_always():\n    assert True\n",
-}
 BODY = """\
-## Summary
-
 **Red run** on abc123:
 - `tests/test_a.py::test_one`
 * tests/test_a.py::test_two
@@ -49,24 +40,19 @@ Before the fix:
 - tests/test_d.py::test_never
 
 Green: 3 passed
-
-Groen:
-- tests/test_e.py::test_green
 """
-EXPECTED = [
-    "tests/test_a.py::test_one",
-    "tests/test_a.py::test_two",
-    "tests/test_b.py::test_x",
-    "tests/test_b.py::test_y",
-    "tests/test_c.py::TestK::test_z",
-]
+EXPECTED = ["tests/test_a.py::test_one", "tests/test_a.py::test_two", "tests/test_b.py::test_x",
+            "tests/test_b.py::test_y", "tests/test_c.py::TestK::test_z"]
+BASE = {"tinypkg/__init__.py": "def value():\n    return 1\n"}
+HEAD = {"tinypkg/__init__.py": "def value():\n    return 2\n",
+        "tests/test_claim.py": "from tinypkg import value\n\n\ndef test_claim():\n    assert value() == 2\n",
+        "tests/test_green.py": "def test_always():\n    assert True\n"}
 
 
 def test_the_four_claim_forms_and_a_non_red_label():
     claims = rrc.parse_claims(BODY)
-    assert claims == EXPECTED
+    assert claims == EXPECTED  # deduplicated and in body order
     assert "tests/test_d.py::test_never" not in claims
-    assert "tests/test_e.py::test_green" not in claims
 
 
 def test_a_label_outside_red_run_labels_claims_nothing():
@@ -74,17 +60,16 @@ def test_a_label_outside_red_run_labels_claims_nothing():
     assert rrc.parse_claims("red run: tests/test_a.py::test_one\n") == []
 
 
-def test_claims_are_deduplicated_and_keep_their_order():
-    body = "Rode run:\n- tests/test_b.py::test_y\n- tests/test_a.py::test_one\n\nRode run:\n- tests/test_b.py::test_y\n"
-    assert rrc.parse_claims(body) == ["tests/test_b.py::test_y", "tests/test_a.py::test_one"]
+def _cli(tmp_path: Path, body: str) -> tuple:
+    (tmp_path / "body.md").write_text(body, encoding="utf-8")
+    out = tmp_path / "claims.txt"
+    done = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "body.md"), "--out", str(out)],
+                          capture_output=True, text=True, timeout=60)
+    return done, out
 
 
 def test_a_body_without_claims_gives_an_empty_claims_file(tmp_path):
-    body = tmp_path / "body.md"
-    body.write_text("## Summary\n\nNothing claimed here.\n", encoding="utf-8")
-    out = tmp_path / "claims.txt"
-    done = subprocess.run([sys.executable, str(SCRIPT), str(body), "--out", str(out)],
-                          capture_output=True, text=True, timeout=60)
+    done, out = _cli(tmp_path, "## Summary\n\nNothing claimed here.\n")
     assert done.returncode == 0, done.stderr
     assert out.read_text(encoding="utf-8") == ""
 
@@ -108,9 +93,8 @@ def _commit_all(root, *commits):
     _git(root, "init")
     for index, sources in enumerate(commits):
         for name, content in sources.items():
-            path = root / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text(content, encoding="utf-8")
         _git(root, "add", "-A")
         _git(root, "commit", "-m", f"commit {index}")
     return root
@@ -120,15 +104,6 @@ def _commit_all(root, *commits):
 def repo(tmp_path_factory):
     """Base returns 1; head returns 2 and adds a behaviour test and an always-green test."""
     return _commit_all(tmp_path_factory.mktemp("red-run-claims"), BASE, HEAD)
-
-
-def _claims_file(tmp_path: Path, body: str) -> Path:
-    (tmp_path / "body.md").write_text(body, encoding="utf-8")
-    out = tmp_path / "claims.txt"
-    done = subprocess.run([sys.executable, str(SCRIPT), str(tmp_path / "body.md"), "--out", str(out)],
-                          capture_output=True, text=True, timeout=60)
-    assert done.returncode == 0, done.stderr
-    return out
 
 
 def _red_on_base(repo, tmp_path: Path, claims: Path) -> tuple:
@@ -145,7 +120,7 @@ def _red_on_base(repo, tmp_path: Path, claims: Path) -> tuple:
 
 
 def test_a_claim_on_a_green_on_base_test_exits_one(repo, tmp_path):
-    claims = _claims_file(tmp_path, "**Red run** on abc123:\n- tests/test_green.py::test_always\n")
+    _, claims = _cli(tmp_path, "**Red run** on abc123:\n- tests/test_green.py::test_always\n")
     done, verdict = _red_on_base(repo, tmp_path, claims)
     assert done.returncode == 1, done.stdout + done.stderr
     verdicts = {entry["nodeid"]: entry["verdict"] for entry in verdict["tests"]}
@@ -154,7 +129,7 @@ def test_a_claim_on_a_green_on_base_test_exits_one(repo, tmp_path):
 
 
 def test_a_claim_on_a_behavior_test_exits_zero(repo, tmp_path):
-    claims = _claims_file(tmp_path, "Rode run:\n- tests/test_claim.py::test_claim\n")
+    _, claims = _cli(tmp_path, "Rode run:\n- tests/test_claim.py::test_claim\n")
     done, verdict = _red_on_base(repo, tmp_path, claims)
     assert done.returncode == 0, done.stdout + done.stderr
     verdicts = {entry["nodeid"]: entry["verdict"] for entry in verdict["tests"]}

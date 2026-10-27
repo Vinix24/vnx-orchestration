@@ -39,11 +39,8 @@ def _triggers(workflow: dict) -> dict:
     return workflow["on"] if "on" in workflow else workflow[True]
 
 
-def test_the_job_exists_and_runs_on_pull_requests_only(jobs):
+def test_the_job_is_pr_only_bounded_and_checks_out_full_history(jobs):
     assert jobs[JOB]["if"] == "github.event_name == 'pull_request'"
-
-
-def test_the_job_is_bounded_and_checks_out_full_history(jobs):
     assert jobs[JOB]["timeout-minutes"] == 30
     checkout = _by_name(jobs[JOB])["Checkout"]
     assert checkout["uses"].startswith("actions/checkout@")

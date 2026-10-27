@@ -4,11 +4,15 @@ on:
   push:
     branches: ["main", "baseline/**"]
   pull_request:
+    # `edited` keeps the claimed-red-on-base signal in step with the PR body;
+    # every pre-existing job excludes that action explicitly.
+    types: [opened, synchronize, reopened, edited]
 
 jobs:
   profile-a:
     name: Profile A (doctor + core tests)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
     # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
     # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
@@ -268,6 +272,7 @@ jobs:
   profile-a-xdist-shadow:
     name: Profile A (xdist shadow)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     timeout-minutes: 80
 
     steps:
@@ -449,7 +454,7 @@ jobs:
     name: xdist parity
     runs-on: ubuntu-latest
     needs: [profile-a, profile-a-xdist-shadow]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.event.action != 'edited' }}
     timeout-minutes: 55
 
     steps:
@@ -664,6 +669,7 @@ jobs:
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -713,6 +719,7 @@ jobs:
   slug-match-check:
     name: Dispatch-ID Slug-Match Gate
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -786,6 +793,7 @@ jobs:
   profile-c:
     name: Profile C (adoption smoke tests)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
@@ -843,6 +851,7 @@ jobs:
   profile-b:
     name: Profile B (snapshot integration)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
@@ -945,6 +954,7 @@ jobs:
   dashboard-lint:
     name: Dashboard TS Lint (fixture-gate + typecheck)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -971,6 +981,7 @@ jobs:
   lint-patterns:
     name: Lint Patterns (silent-except + atomic-write)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1055,6 +1066,7 @@ jobs:
   profile-d:
     name: Profile D (pip install smoke)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1080,6 +1092,7 @@ jobs:
   context-rotation-plugin:
     name: Context-rotation plugin tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's 6-hour hard limit.
     timeout-minutes: 15
     strategy:
@@ -1108,6 +1121,7 @@ jobs:
   state-pin-gate:
     name: Repo-local state-pin gate (#1043 footgun)
     runs-on: ubuntu-latest
+    if: github.event.action != 'edited'
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1183,3 +1197,74 @@ jobs:
             exit 1
           fi
           echo "[ok] no repo-local VNX_STATE_DIR pins in shipped surfaces"
+
+  red-on-base:
+    name: Red on base (claimed tests prove a behaviour change)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Write the PR body to a file
+        # The body reaches the shell only through env: never as an inline
+        # expression in a run command (script injection).
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$PR_BODY" > "$RUNNER_TEMP/pr-body.md"
+
+      - name: Read the claimed red runs
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/red_run_claims.py "$RUNNER_TEMP/pr-body.md" \
+            --out "$RUNNER_TEMP/claims.txt"
+
+      - name: Select the PR's test files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          merge_base=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          git -c core.quotePath=false diff --name-only --no-renames \
+            "$merge_base" "$HEAD_SHA" > "$RUNNER_TEMP/changed-paths.txt"
+          python3 scripts/ci/classify_ci_profile.py --tests-only \
+            --paths-file "$RUNNER_TEMP/changed-paths.txt" \
+            --root "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/selection.json"
+
+      - name: Run the claimed tests on base and on head
+        # red_on_base.py unions the claimed nodeids' files into the selection, so a
+        # claim still runs when the PR changes no test file at all.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/red_on_base.py \
+            --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --selection "$RUNNER_TEMP/selection.json" \
+            --claims "$RUNNER_TEMP/claims.txt" \
+            --out red_on_base.json
+
+      - name: Summarise the verdict
+        # `no_test` and an unclaimed `green_on_base` stay a neutral mark: the job is green.
+        if: always()
+        run: |
+          {
+            echo '### Red on base'
+            python3 -c 'import json; v = json.load(open("red_on_base.json")); print("summary:", v["summary"], "false_claims:", v["false_claims"], "no_test:", v["no_test"])' 2>/dev/null || echo 'no verdict was written'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: red-on-base-verdict
+          path: red_on_base.json
+          if-no-files-found: warn
