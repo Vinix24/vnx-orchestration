@@ -1742,6 +1742,7 @@ class GateRequestHandlerMixin:
         dispatch_id: str = "",
         head_sha: Optional[str] = None,
         override_b3: str = "",
+        override_b3_carrier: str = "",
         force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request every seat of the review stack for ``pr_number``, each from its own reviewer.
@@ -1777,6 +1778,8 @@ class GateRequestHandlerMixin:
         obligation runner, ``vnx gate``, a takeover), so no entry runs past it.
         ``override_b3`` is the reason of an ``--override-b3``: it wins over the
         B3 cap for the codex seat and travels on that seat's request.
+        ``override_b3_carrier`` (``flag`` or ``env``, RG-5) names what carried
+        the reason and is recorded in that request's ``override_b3`` field.
 
         ``force_rerun`` (R10) is the reason of an operator force-rerun from the
         obligation runner. It is logged once and travels as ``force_rerun`` on
@@ -1810,7 +1813,7 @@ class GateRequestHandlerMixin:
             seat_fields.update(operator_fields)
             payload = self._round_refusal(
                 rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
-                override_b3=override_b3,
+                override_b3=override_b3, override_b3_carrier=override_b3_carrier,
             ) or self._dispatch_review_seat(
                 gate, pr_number, branch, risk.risk_class, changed_files, mode, dispatch_id, chain=chain,
                 held=_held_reviewers(requested), head=head, seat_fields=seat_fields, builder=builder,
@@ -1872,7 +1875,7 @@ class GateRequestHandlerMixin:
 
     def _round_refusal(
         self, rounds: _PrRounds, head: _PrHead, *, pr_number: int, branch: str,
-        seat_fields: Dict[str, Any], override_b3: str,
+        seat_fields: Dict[str, Any], override_b3: str, override_b3_carrier: str = "",
     ) -> Optional[Dict[str, Any]]:
         """The seat's payload when the round ledger refuses its run (R1), else ``None``.
 
@@ -1921,7 +1924,10 @@ class GateRequestHandlerMixin:
         if review_rounds.round_granted_past_cap(cap, head_sha=head.sha(), grant=grant, lines=rounds.lines):
             return None
         if override_b3.strip():
-            seat_fields["override_b3"] = review_rounds.override_record(override_b3.strip(), cap)
+            carrier = override_b3_carrier or review_rounds.OVERRIDE_CARRIER_FLAG
+            seat_fields["override_b3"] = review_rounds.override_record(
+                override_b3.strip(), cap, carrier=carrier,
+            )
             logger.warning(
                 "gate_request_handler: --override-b3 applied for pr=%s seat %s -- %s; reason: %s",
                 pr_number, seat, cap.summary(), override_b3.strip(),
@@ -2090,6 +2096,7 @@ class GateRequestHandlerMixin:
         refused = self._round_refusal(
             _PrRounds.read(self.results_dir.parent, pr_number), head, pr_number=pr_number, branch=branch,
             seat_fields=seat_fields, override_b3=str(override.get("reason") or ""),
+            override_b3_carrier=str(override.get("carrier") or ""),
         )
         if refused is not None:
             logger.warning(

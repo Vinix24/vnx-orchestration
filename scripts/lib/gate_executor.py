@@ -590,6 +590,7 @@ class GateExecutorMixin:
         mode: str,
         dispatch_id: str = "",
         override_b3: str = "",
+        override_b3_carrier: str = "",
         force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request and immediately execute all gates atomically.
@@ -617,7 +618,8 @@ class GateExecutorMixin:
         or FAIL, is never superseded, so a blocking verdict always reaches
         ``has_required_failure``. ``review_seats`` is the seat list the round
         requested (``request_reviews``). ``override_b3`` goes to the request
-        round, where the round ledger judges every seat (R1).
+        round, where the round ledger judges every seat (R1);
+        ``override_b3_carrier`` (``flag`` or ``env``, RG-5) travels with it.
         """
         import gate_recorder as _rec
 
@@ -635,6 +637,7 @@ class GateExecutorMixin:
             dispatch_id=dispatch_id,
             head_sha=head_sha,
             **({"override_b3": override_b3} if override_b3 else {}),
+            **({"override_b3_carrier": override_b3_carrier} if override_b3_carrier else {}),
             **({"force_rerun": force_rerun} if force_rerun else {}),
         )
 

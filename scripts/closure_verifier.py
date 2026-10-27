@@ -1219,6 +1219,7 @@ def check_review_gate_for_merge(
     seats: Optional[Sequence[str]] = None,
     seats_source: Optional[str] = None,
     b3_override: str = "",
+    b3_override_carrier: str = "",
     checkout: Optional[Path] = None,
     base_branch: Optional[str] = None,
 ) -> Dict[str, Any]:
@@ -1290,14 +1291,15 @@ def check_review_gate_for_merge(
     R1: every filled seat is counted against the round ledger
     (``review_seat_evaluation.counted_fill``). ``b3_override`` is the reason of
     the door's ``--override-b3``: it lets the codex seat of a PR at the B3 cap
-    count, and lands in ``review_seats.round_ledger``.
+    count, and lands in ``review_seats.round_ledger``. ``b3_override_carrier``
+    (``flag`` or ``env``, RG-5) records what carried that reason.
     """
     from review_seat_evaluation import SOURCE_EXPLICIT, evaluate_review_seats
 
     evaluation = evaluate_review_seats(
         pr_id, results_dir, branch=branch, project_id=project_id, head_sha=head_sha,
         seats=seats, seats_source=seats_source or SOURCE_EXPLICIT, b3_override=b3_override,
-        checkout=checkout, base_branch=base_branch,
+        b3_override_carrier=b3_override_carrier, checkout=checkout, base_branch=base_branch,
     )
     verdict: Dict[str, Any] = {
         "verdict": "GO" if evaluation.go else "NO-GO",
