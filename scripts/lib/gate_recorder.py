@@ -2049,6 +2049,12 @@ def write_result_guarded(
                                                 a queued record via this
     ``gate_request_handler``
     ``._persist_claude_github_files``           via this function
+    ``gate_request_handler``
+    ``._stamp_takeover_annotations``            annotate_result_guarded
+                                                (GE-4c-2: an annotation is
+                                                no outcome -- it takes this
+                                                lock and this guard without
+                                                deciding a status)
     ==========================================  ==========================
 
     A new writer that calls ``write_text`` on a results path instead is
@@ -2111,6 +2117,53 @@ def write_result_guarded(
     _emit_terminal_result_receipt(payload, gate=gate, pr_ref=pr_ref)
     _feed_provider_reachability(payload, gate=gate, result_path=result_path)
     return payload, True
+
+
+def annotate_result_guarded(
+    result_path: Path,
+    annotations: Dict[str, Any],
+    *,
+    gate: str,
+    pr_ref: str,
+    audit_refusal: bool = True,
+) -> Tuple[Dict[str, Any], bool]:
+    """Merge ``annotations`` onto the record on the slot under ONE slot lock (GE-4c-2, R11).
+
+    The takeover-annotation writer, deliberately not an outcome writer: what
+    it adds is provenance about a record someone else decided
+    (``takeover_from``, ``failure_reason``, ``takeover_path``), so it never
+    chooses the record's status, never stamps ``attempt_seq`` and never
+    refuses one for being in flight -- the three things
+    ``commit_gate_outcome`` cannot do here (ADR-046 §1 has no outcome for a
+    ``requested`` record or a ci_gate ``running`` snapshot; annotating a
+    decided verdict must not invent a second attempt for it).
+
+    It shares the critical section that matters: read, merge and write inside
+    ``slot_lock`` behind ``_check_overwrite_guard``, the receipt emitter
+    outside it afterwards -- as :func:`write_result_guarded` does. Until
+    GE-4c-2 the caller read and merged outside that lock, so a verdict
+    landing in the gap was replaced by an annotated copy of the record it
+    had superseded. An absent or unreadable record is not annotated:
+    ``({}, False)``, no audit line, nothing attempted.
+    """
+    with slot_lock(result_path):
+        existing = _read_existing_result(result_path)
+        if not isinstance(existing, dict):
+            return {}, False
+        merged = {**existing, **annotations}
+        try:
+            _check_overwrite_guard(result_path, merged, gate=gate, pr_ref=pr_ref)
+            _book_round(result_path, merged, gate=gate)
+        except ResultOverwriteRefused:
+            if audit_refusal:
+                _audit_write_refusal(result_path, gate, pr_ref, merged)
+            return existing, False
+        _write_result_atomic(result_path, merged)
+    _archive_finished_gate_bundle(merged, gate=gate, result_path=result_path)
+    publish_forge_check_run(merged, gate=gate, result_path=result_path)
+    _emit_terminal_result_receipt(merged, gate=gate, pr_ref=pr_ref)
+    _feed_provider_reachability(merged, gate=gate, result_path=result_path)
+    return merged, True
 
 
 def record_terminal_result(

@@ -334,6 +334,22 @@ python3 scripts/ledger_health.py --data-dir "$VNX_DATA_DIR" --state-dir "$VNX_ST
 
 ---
 
+## 7. Store Location: Pre-#1437 XDG Stores to the Central Store
+
+Before PR #1437 (2026-10-08) `vnx init` put a project's runtime store under
+`${XDG_DATA_HOME:-~/.local/share}/vnx/<project_id>`; the store is now the central
+`~/.vnx-data/<project_id>` (ADR-026) and no resolver reads the old location any
+more. `vnx doctor` names the old copy as `store:legacy-xdg` — `WARN` when it is
+the project's only store, `PASS` when a central store already exists. To copy it
+into the central store, follow
+[Legacy XDG Store Migration](operations/LEGACY-XDG-STORE-MIGRATION.md):
+`vnx migrate --relocate-legacy` copies and upgrades but deletes nothing, and
+removing the old store is your own final step. That runbook covers the
+measurement, the flags and the command's refusals, the checks (`vnx doctor`,
+`PRAGMA integrity_check`, `PRAGMA user_version`) and the removal.
+
+---
+
 ## Appendix A: Two binaries
 
 See [Onboarding Guide, Appendix A](onboarding/ONBOARDING_GUIDE.md#appendix-a-two-binaries-and-the-full-pip-cli-surface)
