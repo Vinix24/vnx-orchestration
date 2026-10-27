@@ -1,0 +1,37 @@
+{
+  "advisory_count": 1,
+  "advisory_findings": [
+    {
+      "description": "CI check 'ci/docs' was SKIPPED",
+      "severity": "advisory",
+      "title": "ci/docs"
+    }
+  ],
+  "attempt_seq": 1,
+  "blocking_count": 1,
+  "blocking_findings": [
+    {
+      "description": "CI check 'ci/security' concluded with FAILURE",
+      "severity": "blocking",
+      "title": "ci/security"
+    }
+  ],
+  "branch": "dispatch/ge-6-fixture",
+  "commit_sha": "4f2c9a1b7e6d5c4a3b2f1e0d9c8b7a6958473625",
+  "contract_hash": "ge6fixturehash01",
+  "failed_checks": [
+    "ci/security"
+  ],
+  "failure_reason": "1 blocking finding(s): ci/security",
+  "gate": "ci_gate",
+  "passed_checks": [
+    "ci/test"
+  ],
+  "pr_id": "4242",
+  "pr_number": 4242,
+  "report_path": "<reports>/ci_gate-pr-4242.md",
+  "required_reruns": [],
+  "residual_risk": "CI gate fail: 1 failed check(s)",
+  "status": "fail",
+  "summary": "CI gate FAIL: 1 failed check(s): ci/security"
+}

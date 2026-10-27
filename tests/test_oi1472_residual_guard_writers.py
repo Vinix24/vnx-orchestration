@@ -368,6 +368,10 @@ _WRITER_MODULES = (
     # GE-4a: the one writer record_terminal_result and record_not_executable
     # now route through (commit_gate_outcome).
     "scripts/lib/gate_outcome.py",
+    # GE-6: the ``deterministic`` adapter kind. It builds the outcome record of
+    # ci_gate and wiring_gate and writes their report, and it must never write a
+    # result record itself — the one writer does that (commit_gate_outcome).
+    "scripts/lib/deterministic_gate.py",
 )
 
 
