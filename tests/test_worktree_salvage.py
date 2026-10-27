@@ -394,3 +394,71 @@ def test_unmerged_paths_refuse_the_salvage_and_name_the_path(fx: Fixture) -> Non
 
     with pytest.raises(ws.SalvageError, match="unmerged"):
         salvage(fx, wt)
+
+
+# ---------------------------------------------------------------------------
+# 7. round 2: verify proves the bundle's packed objects unpack
+# ---------------------------------------------------------------------------
+
+
+def _salvaged_bundle(fx: Fixture) -> tuple["ws.SalvageResult", Path]:
+    """A real salvage that wrote a bundle, and the bundle path."""
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    (wt / "a.txt").write_text("a\nmodified\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    bundle = result.salvage_dir / f"{result.name}{ws.BUNDLE_SUFFIX}"
+    assert bundle.is_file(), result.artifacts
+    return result, bundle
+
+
+def _bundle_problems(result: "ws.SalvageResult", fx: Fixture) -> list[str]:
+    return ws.verify(result, fx.dest, repo_root=fx.repo)
+
+
+def test_verify_refuses_a_bundle_truncated_right_after_its_header(fx: Fixture) -> None:
+    """The codex reproduction: `git bundle verify` says okay, the pack is gone."""
+    result, bundle = _salvaged_bundle(fx)
+    assert _bundle_problems(result, fx) == []
+
+    data = bundle.read_bytes()
+    header_end = data.index(b"\n\n") + 2
+    assert header_end < len(data), "the bundle must carry a pack for this to mean anything"
+    bundle.write_bytes(data[:header_end])
+    # The evidence the old check accepted: the header and prerequisites alone.
+    assert git(fx.repo, "bundle", "verify", str(bundle)).returncode == 0
+
+    problems = _bundle_problems(result, fx)
+    assert len(problems) == 1, problems
+    assert f"worktree-one{ws.BUNDLE_SUFFIX}: bundle_unpack_failed: " in problems[0], problems
+
+
+def test_verify_refuses_a_bundle_whose_pack_data_was_altered(fx: Fixture) -> None:
+    """A pack byte flipped in place: verify must not take the header's word."""
+    result, bundle = _salvaged_bundle(fx)
+    assert _bundle_problems(result, fx) == []
+
+    data = bytearray(bundle.read_bytes())
+    pack_start = data.index(b"PACK")
+    offset = pack_start + 12 + 20  # inside the packed object data, not the header
+    assert offset < len(data) - 20, "the pack must be big enough to hold a corrupted byte"
+    data[offset] ^= 0xFF
+    bundle.write_bytes(bytes(data))
+    assert git(fx.repo, "bundle", "verify", str(bundle)).returncode == 0
+
+    problems = _bundle_problems(result, fx)
+    assert len(problems) == 1, problems
+    assert f"worktree-one{ws.BUNDLE_SUFFIX}: bundle_unpack_failed: " in problems[0], problems
+
+
+def test_verify_unpacks_in_a_scratch_store_and_leaves_the_repository_alone(fx: Fixture) -> None:
+    """The unpack borrows the repository's objects; it never writes into it."""
+    result, bundle = _salvaged_bundle(fx)
+    before = git(fx.repo, "count-objects", "-v").stdout
+
+    assert _bundle_problems(result, fx) == []
+
+    data = bundle.read_bytes()
+    bundle.write_bytes(data[:data.index(b"\n\n") + 2])
+    assert _bundle_problems(result, fx) != []
+    assert git(fx.repo, "count-objects", "-v").stdout == before

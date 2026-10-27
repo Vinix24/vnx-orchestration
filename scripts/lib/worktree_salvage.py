@@ -31,6 +31,9 @@ PATCH_SUFFIX = ".patch"
 _DETACHED = "(detached)"
 _STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 _SHA_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+# A bundle header is one line per prerequisite; this bounds the read of a file
+# whose header may never end.
+_HEADER_LIMIT = 1 << 20
 # Fixed output whatever the operator's diff config says, so the patch applies.
 _DIFF = ["diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv",
          "--src-prefix=a/", "--dst-prefix=b/"]
@@ -259,12 +262,117 @@ def _patch_problems(paths: list[Path], head: str, cwd: Path) -> list[str]:
     return []
 
 
+def _git_failure(args: list[str], cwd: Path) -> str | None:
+    """The first stderr line of a failing git command — its ``fatal:``/``error:``
+    reason, not the multi-line fallout that follows — or None on a zero exit."""
+    try:
+        proc = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True)
+    except OSError as exc:
+        return f"cannot run git: {exc}"
+    if proc.returncode == 0:
+        return None
+    lines = proc.stderr.decode("utf-8", "replace").strip().splitlines()
+    if lines:
+        return lines[0]
+    return proc.stdout.decode("utf-8", "replace").strip() or f"exit status {proc.returncode}"
+
+
+def _bundle_prerequisites(path: Path) -> tuple[list[str], str | None]:
+    """The commits a thin bundle leaves out, read from the bundle's own header
+    (``-<sha> <ref>`` lines) rather than from git's localised verify output.
+    ``(prerequisites, problem)``: an unreadable or unterminated header is a
+    problem, never an empty prerequisite list."""
+    try:
+        with path.open("rb") as fh:
+            data = fh.read(_HEADER_LIMIT)
+    except OSError as exc:
+        return [], f"cannot read the bundle header ({exc})"
+    lines = data.split(b"\n")
+    if not lines[0].startswith(b"# v"):
+        return [], f"not a bundle header ({lines[0][:40]!r})"
+    prerequisites: list[str] = []
+    for raw in lines[1:]:
+        if not raw:
+            return prerequisites, None
+        line = raw.decode("utf-8", "replace")
+        if not line.startswith("-"):
+            continue  # a ref line, or a v3 capability line
+        sha = line[1:].split(" ", 1)[0]
+        if not _SHA_RE.fullmatch(sha):
+            return [], f"unreadable bundle prerequisite {line[:60]!r}"
+    return [], "bundle header is not terminated inside the file"
+
+
+def _unpack_problems(
+    scratch: Path, bundle: Path, head: str, prerequisites: list[str], repo: Path
+) -> list[str]:
+    """Unpack ``bundle`` in the empty ``scratch`` directory as a bare repository
+    that borrows ``repo``'s objects; every problem that surfaces is named."""
+    problem, objects = _git_problem(
+        ["rev-parse", "--path-format=absolute", "--git-path", "objects"], repo
+    )
+    if problem:
+        return [f"bundle_unpack_failed: cannot find {repo}'s objects: {problem}"]
+    # Match the repository's hash algorithm, or a sha256 pack cannot unpack here.
+    problem, algorithm = _git_problem(["rev-parse", "--show-object-format"], repo)
+    fmt = ["--object-format=" + algorithm] if not problem and algorithm else []
+    failure = _git_failure(["init", "-q", "--bare", *fmt, str(scratch)], scratch)
+    if failure:
+        return [f"bundle_unpack_failed: cannot create the scratch repository: {failure}"]
+    try:
+        (scratch / "objects" / "info" / "alternates").write_text(objects + "\n", encoding="utf-8")
+    except OSError as exc:
+        return [f"bundle_unpack_failed: cannot lend the repository's objects: {exc}"]
+    failure = _git_failure(["bundle", "unbundle", str(bundle)], scratch)
+    if failure:
+        return [f"bundle_unpack_failed: {failure}"]
+    failure = _git_failure(["cat-file", "-e", f"{head}^{{commit}}"], scratch)
+    if failure:
+        return [f"bundle_unpack_failed: head {head} is no commit: {failure}"]
+    # Walk what the pack carries: an object that cannot be reached from head is
+    # a bundle that restores less than it advertises.
+    failure = _git_failure(
+        ["rev-list", "--objects", head, *(["--not", *prerequisites] if prerequisites else [])],
+        scratch,
+    )
+    if failure:
+        return [f"bundle_unpack_failed: {failure}"]
+    return []
+
+
+def _bundle_problems(path: Path, head: str, cwd: Path) -> list[str]:
+    """Every problem that keeps this bundle from restoring ``head``.
+
+    ``git bundle verify`` reads the header and the prerequisites and never a
+    packed object, so a bundle truncated right after its header still verifies.
+    Only an unpack proves the objects are there: into a temporary bare
+    repository whose ``objects/info/alternates`` lends it ``cwd``'s objects (so
+    a thin bundle's prerequisites resolve) and which writes nothing back into
+    ``cwd``."""
+    bundle = path.resolve()  # the commands below run in another directory
+    failure = _git_failure(["bundle", "verify", str(bundle)], cwd)
+    if failure:
+        return [failure]
+    problem, advertised = _git_problem(["bundle", "list-heads", str(bundle)], cwd)
+    if problem:
+        return [problem]
+    heads = {line.split()[0] for line in advertised.splitlines() if line.split()}
+    if head not in heads:
+        return [f"bundle does not advertise head {head}"]
+    prerequisites, problem = _bundle_prerequisites(bundle)
+    if problem:
+        return [problem]
+    with tempfile.TemporaryDirectory(prefix="salvage-unpack.") as scratch:
+        return _unpack_problems(Path(scratch), bundle, head, prerequisites, cwd)
+
+
 def verify(
     result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str | None = None
 ) -> list[str]:
     """Every problem that keeps this salvage from being complete; only an empty list
-    lets a removal act: a missing or empty artifact, a rejected bundle, a patch that
-    does not apply to ``result.head``, untracked work, and no usable ``repo_root``."""
+    lets a removal act: a missing or empty artifact, a bundle that does not verify
+    OR does not unpack to the commit it advertises, a patch that does not apply to
+    ``result.head``, untracked work, and no usable ``repo_root``."""
     dest = Path(dest_dir)
     cwd = Path(repo_root) if repo_root is not None else None
     if cwd is None or not cwd.is_dir() or _git_problem(["rev-parse", "--git-dir"], cwd)[0]:
@@ -285,9 +393,7 @@ def verify(
         elif size == 0:
             problems.append(f"{artifact}: empty")
         elif artifact.endswith(BUNDLE_SUFFIX) and cwd is not None:
-            problem, _out = _git_problem(["bundle", "verify", str(path)], cwd)
-            if problem:
-                problems.append(f"{artifact}: {problem}")
+            problems.extend(f"{artifact}: {p}" for p in _bundle_problems(path, result.head, cwd))
         else:
             usable.add(artifact)
     # Staged first: the worktree patch starts from the index, not from HEAD.

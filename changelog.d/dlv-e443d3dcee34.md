@@ -6,3 +6,10 @@
   `git status` rather than an empty diff, and `verify` returns an empty list only when every artifact
   exists, the bundle verifies and both patches apply in order. Untracked files are PR-2b's, so a tree
   with any is reported (`untracked_pending`) and never verifies clean. No caller and no removal yet.
+- Worktree salvage, round 2: `verify` no longer takes `git bundle verify`'s word for a bundle. That
+  command reads the header and the prerequisites and never a packed object, so a bundle truncated
+  right after its header still verified clean. After it passes, the bundle must unpack inside a
+  throwaway bare repository that borrows the checkout's objects through `objects/info/alternates`
+  (nothing is written into the checkout) and `head` must be a commit whose carried objects
+  `rev-list --objects` can walk. Any failure is named `bundle_unpack_failed: <reason>` and keeps the
+  salvage from ever reading as safe to remove.
