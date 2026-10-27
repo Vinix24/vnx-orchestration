@@ -2,16 +2,20 @@
 """``red_on_base``: run a PR's own tests on base code and on head code, verdict per test.
 
 Two worktrees, both removed in a ``finally``; HEAD's selected test files and changed
-conftests are copied into the base tree, so only the code under test differs. One
-pytest run per side writes JUnit XML plus a collection manifest
-(``pytest_collection_manifest``), keyed by ``check_xdist_parity.junit_key_function()``;
-input is the selection of ``classify_ci_profile.py --tests-only``.
+conftests are copied into the base tree and the conftests the PR deleted are deleted
+there too, so only the code under test differs. One pytest run per side writes JUnit XML
+plus a collection manifest (``pytest_collection_manifest``), keyed by
+``check_xdist_parity.junit_key_function()``; input is the selection of
+``classify_ci_profile.py --tests-only``. ``behavior`` needs a demonstrable assertion
+failure on base: a failure record naming an ``AssertionError`` (or pytest's rewritten
+assert); any other exception on base is ``error_on_base`` and confirms no claim.
 
 Exit codes: 1 on any ``fails_on_head``, ``incomplete`` or false claim (a claimed nodeid
 whose verdict is not ``behavior``), 0 otherwise, 2 on unusable input. Fail-closed:
 missing or unparsable evidence, a pytest run that did not complete (exit other than 0 or
 1, a signal, a timeout), a collection failure or skip, an unrecognised result child, a
-test neither side collected and a copy that would leave either tree never pass.
+test neither side collected and a copy or mirrored deletion that would leave either tree
+never pass.
 """
 
 from __future__ import annotations
@@ -34,13 +38,16 @@ sys.path.insert(0, str(SCRIPTS_CI))
 
 from check_xdist_parity import EvidenceError, junit_key_function, load_manifest
 
-VERDICTS = ("behavior", "not_behavior", "green_on_base", "fails_on_head", "skipped", "incomplete")
-BEHAVIOR, NOT_BEHAVIOR, GREEN_ON_BASE, FAILS_ON_HEAD, SKIPPED, INCOMPLETE = VERDICTS
+VERDICTS = ("behavior", "error_on_base", "not_behavior", "green_on_base", "fails_on_head", "skipped",
+            "incomplete")
+(BEHAVIOR, ERROR_ON_BASE, NOT_BEHAVIOR, GREEN_ON_BASE, FAILS_ON_HEAD, SKIPPED, INCOMPLETE) = VERDICTS
 PASSED, FAILED, ERRORED = "passed", "failed", "error"
 COLLECTION_ERROR, COLLECTION_SKIPPED, MISSING, UNKNOWN = (
     "collection_error", "collection_skipped", "missing", "unknown")
-NOT_BEHAVIOR_EXCEPTIONS = re.compile(
-    r"\b(?:ImportError|ModuleNotFoundError|AttributeError|TypeError|KeyError|NameError)\b")
+ASSERTION_EXCEPTION = "AssertionError"
+EXCEPTION_TAIL = re.compile(r":\d+:\s*([A-Za-z_][\w.]*)\s*$")  # pytest longrepr: "path:line: ExceptionName"
+EXCEPTION_PREFIX = re.compile(r"([A-Za-z_][\w.]*)\s*:")  # a failure message: "ExceptionName: message"
+REWRITTEN_ASSERTION = re.compile(r"^E\s+assert\b", re.MULTILINE)  # pytest's rewritten assert line
 COMPLETED_RUN = (0, 1)  # pytest exit codes of a run that went to the end: all passed, some failed
 _RESULT_TAGS = ("failure", "error", "skipped")
 _IGNORED_TAGS = frozenset({"system-out", "system-err", "properties"})
@@ -52,10 +59,12 @@ class InputError(Exception):
 
 @dataclass(frozen=True)
 class Outcome:
-    """What one side says about one test; *message* carries the exception evidence."""
+    """What one side says about one test; *message* carries the exception evidence and *exception*
+    the exception class its record names (``""`` when the evidence names none)."""
 
     kind: str
     message: str = ""
+    exception: str = ""
 
 
 # One side's evidence: JUnit outcomes by key, collected nodeids, collection outcomes, problems.
@@ -72,6 +81,21 @@ def outcome_for(side: Side, key: tuple, nodeid: str) -> Outcome:
     return Outcome(MISSING, "; ".join(side.problems))
 
 
+def named_exception(kind: str | None, message: str | None, text: str) -> str:
+    """The exception class one failure record names: its ``type`` attribute, the longrepr tail
+    (``path:line: ExceptionName``), the message prefix (``ExceptionName: ...``) or pytest's rewritten
+    assert line. ``""`` when the record names none, which never proves an assertion (fail-closed)."""
+    if kind:
+        return kind.strip()
+    tails = EXCEPTION_TAIL.findall(text or "")
+    if tails:
+        return tails[-1]
+    prefix = EXCEPTION_PREFIX.match(message or "")
+    if prefix:
+        return prefix.group(1)
+    return ASSERTION_EXCEPTION if REWRITTEN_ASSERTION.search(text or "") else ""
+
+
 def outcome_of(testcase) -> Outcome:
     """Outcome of one ``<testcase>``; an unrecognised result child is ``unknown`` (fail-closed)."""
     result = None
@@ -80,13 +104,23 @@ def outcome_of(testcase) -> Outcome:
             continue
         if child.tag not in _RESULT_TAGS:
             return Outcome(UNKNOWN, child.tag)
-        lines = (child.text or "").strip().splitlines()
-        evidence = " ".join(p for p in (child.get("type"), child.get("message"), lines[0] if lines else None) if p)
+        text = (child.text or "").strip()
+        lines = text.splitlines()
+        evidence = " ".join(p for p in (child.get("type"), child.get("message"),
+                                        lines[0] if lines else None) if p)
+        exception = named_exception(child.get("type"), child.get("message"), text)
         if child.tag == "error":
-            return Outcome(ERRORED, evidence)
+            return Outcome(ERRORED, evidence, exception)
         if child.tag == "failure" or result is None:
-            result = Outcome(FAILED if child.tag == "failure" else SKIPPED, evidence)
+            result = Outcome(FAILED if child.tag == "failure" else SKIPPED, evidence, exception)
     return result or Outcome(PASSED)
+
+
+def is_assertion_failure(base: Outcome) -> bool:
+    """Whether a base failure proves asserted behaviour: its record names an ``AssertionError`` (or a
+    subclass). Any other exception, and a record that names none, is not behaviour."""
+    name = base.exception or named_exception(None, base.message, "")
+    return name == ASSERTION_EXCEPTION or name.endswith("." + ASSERTION_EXCEPTION)
 
 
 def classify_verdict(base: Outcome, head: Outcome) -> str:
@@ -104,7 +138,7 @@ def classify_verdict(base: Outcome, head: Outcome) -> str:
     if base.kind == PASSED:
         return GREEN_ON_BASE
     if base.kind == FAILED:
-        return NOT_BEHAVIOR if NOT_BEHAVIOR_EXCEPTIONS.search(base.message) else BEHAVIOR
+        return BEHAVIOR if is_assertion_failure(base) else ERROR_ON_BASE
     return INCOMPLETE
 
 
@@ -158,17 +192,36 @@ def copy_refusal(head_tree: Path, base_tree: Path, rel: str) -> str:
     return ""
 
 
+def delete_refusal(base_tree: Path, rel: str) -> str:
+    """Why deleting *rel* from the base tree could leave or write through a link outside it; ``""`` when
+    it cannot (the file, when base has it, is then gone)."""
+    target = base_tree / rel
+    if not target.parent.resolve().is_relative_to(base_tree.resolve()):
+        return (f"refused to delete {rel}: {target.parent} resolves to {target.parent.resolve()}, "
+                f"outside {base_tree}")
+    if target.is_symlink():
+        return f"refused to delete {rel}: {target} is a symlink"
+    if target.is_file():
+        target.unlink()
+    return ""
+
+
 def copy_head_tests(head_tree: Path, base_tree: Path, files: list, conftests: list) -> dict:
-    """Copy HEAD's test files and changed conftests into the base tree; ``{file: reason}`` for every file
-    that cannot be compared: absent from head, its copy refused, or any conftest copy refused."""
+    """Copy HEAD's test files and changed conftests into the base tree, and delete the conftests the PR
+    deleted from it; ``{file: reason}`` for every file that cannot be compared: absent from head, a copy
+    or a mirrored deletion refused, or any conftest that could not be mirrored."""
     reasons = {}
     for rel in conftests + files:
-        reasons[rel] = copy_refusal(head_tree, base_tree, rel)
-        if not reasons[rel] and (head_tree / rel).is_file():
-            (base_tree / rel).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(head_tree / rel, base_tree / rel)
-        elif not reasons[rel] and rel in files:
-            reasons[rel] = "test file is absent from the head tree"
+        present = (head_tree / rel).is_file()
+        if present or rel in files:
+            reasons[rel] = copy_refusal(head_tree, base_tree, rel)
+            if not reasons[rel] and present:
+                (base_tree / rel).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(head_tree / rel, base_tree / rel)
+            elif not reasons[rel]:
+                reasons[rel] = "test file is absent from the head tree"
+        else:  # a conftest the PR deleted leaves the base tree too, so it cannot fail base only
+            reasons[rel] = delete_refusal(base_tree, rel)
     refused_conftests = "; ".join(reasons[rel] for rel in conftests if reasons[rel])
     return {rel: refused_conftests or reasons[rel] for rel in files if refused_conftests or reasons[rel]}
 

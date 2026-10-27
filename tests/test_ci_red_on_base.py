@@ -23,6 +23,13 @@ HEAD = {
     "tests/test_skip.py": "import pytest\n\n\ndef test_skipped():\n    pytest.skip('later')\n",
     "tests/test_claim_green.py": "def test_claimed_green():\n    assert True\n",
 }
+DELETE = object()  # a ``{path: DELETE}`` entry in ``_commit_all`` commits the removal of that path
+VALUE_ERROR_BASE = {"tinypkg/__init__.py": "def value():\n    raise ValueError('the base has no value')\n"}
+VALUE_ERROR_TEST = "from tinypkg import value\n\n\ndef test_it():\n    assert value() == 2\n"
+STALE_CONFTEST = (  # an autouse fixture that makes a head test fail on base only
+    "import pytest\n\n\n@pytest.fixture(autouse=True)\ndef old_value(monkeypatch):\n"
+    "    import tinypkg\n\n    monkeypatch.setattr(tinypkg, 'value', lambda: 1)\n")
+DELETED_CONFTEST_TEST = "import tinypkg\n\n\ndef test_claim():\n    assert tinypkg.value() == 2\n"
 
 spec = importlib.util.spec_from_file_location("red_on_base", SCRIPT)
 rl = importlib.util.module_from_spec(spec)
@@ -38,7 +45,8 @@ def _git(repo, *args):
 
 
 def _commit_all(root, *commits):
-    """One commit per ``{path: text}``; a ``Path`` value is committed as a symlink to that path."""
+    """One commit per ``{path: text}``; a ``Path`` value is committed as a symlink to that path and
+    ``DELETE`` as the removal of that path."""
     _git(root, "init")
     for index, sources in enumerate(commits):
         for name, content in sources.items():
@@ -46,6 +54,9 @@ def _commit_all(root, *commits):
             for link in (path, *(root / parent for parent in Path(name).parents[:-1])):
                 if link.is_symlink():  # the previous commit's symlink: never write through it
                     link.unlink()
+            if content is DELETE:
+                path.unlink()
+                continue
             path.parent.mkdir(parents=True, exist_ok=True)
             if isinstance(content, Path):
                 path.symlink_to(content)
@@ -88,7 +99,7 @@ def test_one_verdict_per_case_and_exit_zero(repo, tmp_path):
     assert verdicts["tests/test_not_behavior.py::test_new"] == "not_behavior"
     assert verdicts["tests/test_skip.py::test_skipped"] == "skipped"
     assert verdict["false_claims"] == [] and verdict["no_test"] is False
-    assert verdict["summary"] == {"behavior": 1, "not_behavior": 1, "green_on_base": 1,
+    assert verdict["summary"] == {"behavior": 1, "error_on_base": 0, "not_behavior": 1, "green_on_base": 1,
                                   "fails_on_head": 0, "skipped": 1, "incomplete": 0}
 
 
@@ -100,6 +111,41 @@ def test_fails_on_head_and_false_claim_exit_one(repo, tmp_path):
     assert verdicts["tests/test_head_fail.py::test_red_on_head"] == "fails_on_head"
     assert verdicts["tests/test_claim_green.py::test_claimed_green"] == "green_on_base"
     assert verdict["false_claims"] == ["tests/test_claim_green.py::test_claimed_green"]
+
+
+@pytest.fixture(scope="module")
+def value_error_repo(tmp_path_factory):
+    """Base raises ``ValueError``; head returns 2 and adds a test that is green there only."""
+    head = {"tinypkg/__init__.py": HEAD["tinypkg/__init__.py"], "tests/test_value.py": VALUE_ERROR_TEST}
+    return _commit_all(tmp_path_factory.mktemp("value-error"), VALUE_ERROR_BASE, head)
+
+
+def test_a_base_value_error_never_confirms_a_claim(value_error_repo, tmp_path):
+    done, verdict = _run(value_error_repo, tmp_path, ["tests/test_value.py"],
+                         claims=["tests/test_value.py::test_it"])
+    assert done.returncode == 1, done.stdout + done.stderr
+    entry = {item["nodeid"]: item for item in verdict["tests"]}["tests/test_value.py::test_it"]
+    assert (entry["verdict"], entry["base_outcome"], entry["head_outcome"]) == (
+        "error_on_base", "failed", "passed")
+    assert verdict["false_claims"] == ["tests/test_value.py::test_it"]
+
+
+@pytest.fixture(scope="module")
+def deleted_conftest_repo(tmp_path_factory):
+    """Base already returns 2, but a stale autouse conftest fixture hides it; head deletes that conftest
+    and adds a test that is green on base as soon as the deletion is mirrored there."""
+    base = {"tinypkg/__init__.py": "def value():\n    return 2\n", "tests/conftest.py": STALE_CONFTEST}
+    head = {"tests/conftest.py": DELETE, "tests/test_claim.py": DELETED_CONFTEST_TEST}
+    return _commit_all(tmp_path_factory.mktemp("deleted-conftest"), base, head)
+
+
+def test_a_deleted_conftest_is_deleted_on_base_too(deleted_conftest_repo, tmp_path):
+    done, verdict = _run(deleted_conftest_repo, tmp_path, ["tests/test_claim.py"],
+                         claims=["tests/test_claim.py::test_claim"])
+    assert done.returncode == 1, done.stdout + done.stderr
+    entry = {item["nodeid"]: item for item in verdict["tests"]}["tests/test_claim.py::test_claim"]
+    assert (entry["verdict"], entry["head_outcome"]) == ("green_on_base", "passed")
+    assert verdict["false_claims"] == ["tests/test_claim.py::test_claim"]
 
 
 def test_empty_selection_is_no_test(repo, tmp_path):
@@ -120,7 +166,12 @@ def test_classifier_and_unreadable_evidence(tmp_path):
     assert case("<properties/><failure/>").kind == "failed"
     assert case("<unexpected/>").kind == "unknown"  # fail-closed: never a pass
     assert rl.classify_verdict(outcome("failed", "AssertionError: 1 != 2"), outcome("passed")) == "behavior"
-    assert rl.classify_verdict(outcome("failed", "TypeError: bad call"), outcome("passed")) == "not_behavior"
+    assert rl.classify_verdict(outcome("failed", "TypeError: bad call"), outcome("passed")) == "error_on_base"
+    assert rl.classify_verdict(outcome("failed", "ValueError: boom"), outcome("passed")) == "error_on_base"
+    assert rl.classify_verdict(outcome("failed", "RuntimeError: boom"), outcome("passed")) == "error_on_base"
+    assert rl.classify_verdict(outcome("failed", ""), outcome("passed")) == "error_on_base"  # unnamed: never behaviour
+    assert rl.classify_verdict(outcome("failed", "AssertionError: x", "builtins.AssertionError"),
+                               outcome("passed")) == "behavior"
     assert rl.classify_verdict(outcome("error", "ImportError: no name"), outcome("passed")) == "not_behavior"
     assert rl.classify_verdict(outcome("collection_error", "ModuleNotFoundError"), outcome("passed")) == "not_behavior"
     assert rl.classify_verdict(outcome("passed"), outcome("passed")) == "green_on_base"
@@ -234,3 +285,43 @@ def test_a_refused_conftest_copy_leaves_no_file_comparable(tmp_path):
     assert list(reasons) == ["tests/test_a.py"] and reasons["tests/test_a.py"].startswith(
         "refused to copy tests/conftest.py") and reasons["tests/test_a.py"].endswith("is a symlink")
     assert outside.read_text() == "OUTSIDE\n"
+
+
+def _deletion_trees(tmp_path, conftest_rel):
+    """A head tree holding only ``tests/test_a.py`` and a base tree holding *conftest_rel* as well."""
+    head_tree, base_tree = tmp_path / "head", tmp_path / "base"
+    (head_tree / "tests").mkdir(parents=True)
+    (head_tree / "tests" / "test_a.py").write_text("HEAD\n")
+    (base_tree / conftest_rel).parent.mkdir(parents=True)
+    (base_tree / conftest_rel).write_text("OLD\n")
+    return head_tree, base_tree
+
+
+def test_a_deleted_conftest_is_deleted_from_the_base_copy(tmp_path):
+    head_tree, base_tree = _deletion_trees(tmp_path, "tests/conftest.py")
+    assert rl.copy_head_tests(head_tree, base_tree, ["tests/test_a.py"], ["tests/conftest.py"]) == {}
+    assert not (base_tree / "tests" / "conftest.py").exists()
+    assert (base_tree / "tests" / "test_a.py").read_text() == "HEAD\n"
+
+
+def test_a_deleted_conftest_that_is_a_symlink_leaves_no_file_comparable(tmp_path):
+    head_tree, base_tree = _deletion_trees(tmp_path, "tests/conftest.py")
+    outside = tmp_path / "outside.py"
+    outside.write_text("OUTSIDE\n")
+    (base_tree / "tests" / "conftest.py").unlink()
+    (base_tree / "tests" / "conftest.py").symlink_to(outside)
+    reasons = rl.copy_head_tests(head_tree, base_tree, ["tests/test_a.py"], ["tests/conftest.py"])
+    assert reasons["tests/test_a.py"].startswith("refused to delete tests/conftest.py")
+    assert reasons["tests/test_a.py"].endswith("is a symlink")
+    assert outside.read_text() == "OUTSIDE\n"
+
+
+def test_a_deleted_conftest_under_a_symlinked_dir_is_refused(tmp_path):
+    head_tree, base_tree = _deletion_trees(tmp_path, "tests/sub/conftest.py")
+    outside = tmp_path / "outside"
+    (base_tree / "tests" / "sub").rename(outside)
+    (base_tree / "tests" / "sub").symlink_to(outside)
+    reasons = rl.copy_head_tests(head_tree, base_tree, ["tests/test_a.py"], ["tests/sub/conftest.py"])
+    assert reasons["tests/test_a.py"].startswith("refused to delete tests/sub/conftest.py")
+    assert "outside" in reasons["tests/test_a.py"]
+    assert (outside / "conftest.py").read_text() == "OLD\n"
