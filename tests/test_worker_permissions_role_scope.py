@@ -83,7 +83,7 @@ class TestBackendDeveloperRoleScope:
             "docs/governance/decisions/ADR-001.md",
             "docs/manifesto/HEADLESS_TRANSITION.md",
             "schemas/quality_intelligence.sql",
-            "templates/FEATURE_PLAN_TEMPLATE.md",
+            "templates/unified_report_template.md",
             ".vnx/worker_permissions.yaml",
         ):
             assert match_file_write_scope(path, p, None) is False, path

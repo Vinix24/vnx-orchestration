@@ -8,8 +8,10 @@
 #   3. bootstrap-skills, bootstrap-terminals, bootstrap-hooks
 #   4. regen-settings --merge
 #   5. .venv symlink (if main repo has one)
-#   6. Scaffold plan files (FEATURE_PLAN.md, PR_QUEUE.md)
-#   7. vnx doctor (validation)
+#   6. vnx doctor (validation)
+#
+# No plan file is scaffolded (ADR-047): the tracks DB is the plan source, so a
+# new worktree starts with only what git tracks.
 #
 # This file is sourced by bin/vnx's command loader. All functions and variables
 # from the main script (log, err, PROJECT_ROOT, VNX_HOME, etc.)
@@ -60,8 +62,9 @@ Flow:
   3. Bootstrap skills, terminals, hooks
   4. Merge VNX settings
   5. Link .venv from main repo
-  6. Scaffold plan files if missing
-  7. Validate with vnx doctor
+  6. Validate with vnx doctor
+
+No plan file is written: the tracks DB is the plan source (ADR-047).
 HELP
         return 0
         ;;
@@ -192,55 +195,7 @@ HELP
     log "[new-worktree] WARN: No .venv found in main repo at $main_venv"
   fi
 
-  # ── Step 6: Scaffold plan files ──────────────────────────────────────
-  local tmpl_dir="$VNX_HOME/templates"
-
-  if [ ! -f "$wt_dir/FEATURE_PLAN.md" ]; then
-    if [ -f "$tmpl_dir/FEATURE_PLAN_TEMPLATE.md" ]; then
-      sed -e "s|\[Feature Name\]|${name}|g" \
-          "$tmpl_dir/FEATURE_PLAN_TEMPLATE.md" > "$wt_dir/FEATURE_PLAN.md"
-      log "[new-worktree] Scaffolded FEATURE_PLAN.md (from template)"
-    else
-      cat > "$wt_dir/FEATURE_PLAN.md" <<PLAN
-# Feature: ${name}
-
-**Status**: DRAFT
-**Branch**: $branch
-**Created**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-## Description
-
-_Add feature description here._
-
-## PR Queue
-
-_Define PRs here._
-PLAN
-      log "[new-worktree] Scaffolded FEATURE_PLAN.md (inline)"
-    fi
-  fi
-
-  if [ ! -f "$wt_dir/PR_QUEUE.md" ]; then
-    if [ -f "$tmpl_dir/PR_QUEUE_TEMPLATE.md" ]; then
-      sed -e "s|\[Feature Name\]|${name}|g" \
-          "$tmpl_dir/PR_QUEUE_TEMPLATE.md" > "$wt_dir/PR_QUEUE.md"
-      log "[new-worktree] Scaffolded PR_QUEUE.md (from template)"
-    else
-      cat > "$wt_dir/PR_QUEUE.md" <<QUEUE
-# PR Queue - Feature: ${name}
-
-## Progress Overview
-Total: 0 PRs | Complete: 0 | Active: 0 | Queued: 0
-
-## Status
-
-_No PRs defined yet._
-QUEUE
-      log "[new-worktree] Scaffolded PR_QUEUE.md (inline)"
-    fi
-  fi
-
-  # ── Step 7: Copy startup preset ──────────────────────────────────────
+  # ── Step 6: Copy startup preset ──────────────────────────────────────
   if [ -n "$preset" ]; then
     local main_preset="$_saved_vnx_data_dir/startup_presets/${preset}.env"
     local wt_presets_dir="$VNX_DATA_DIR/startup_presets"
@@ -253,7 +208,7 @@ QUEUE
     fi
   fi
 
-  # ── Step 8: Validate with doctor ─────────────────────────────────────
+  # ── Step 7: Validate with doctor ─────────────────────────────────────
   if [ "$skip_doctor" = true ]; then
     log "[new-worktree] Skipping doctor validation (--skip-doctor)"
   else

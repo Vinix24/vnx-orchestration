@@ -281,7 +281,7 @@ The closest spiritual cousin is [dmux](https://github.com/standardagents/dmux), 
 
 ## Status
 
-The released version is in [`VERSION`](VERSION), tagged with a `v` in front of it. Changes merged to main after the last release are under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) and in `changelog.d/`, and are described above as on main, not yet released. Every release back to 0.1.0 is in the CHANGELOG. Open governance and release items are tracked in [ROADMAP.md](ROADMAP.md) and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
+The released version is in [`VERSION`](VERSION), tagged with a `v` in front of it. Changes merged to main after the last release are under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) and in `changelog.d/`, and are described above as on main, not yet released. Every release back to 0.1.0 is in the CHANGELOG. Open governance and release items are tracked in the tracks database (`vnx horizon`, alias `vnx objective`) and the open-items tooling under [scripts/open_items_manager.py](scripts/open_items_manager.py).
 
 I built this for my own work. Use at your own discretion.
 
