@@ -13,3 +13,12 @@
   (nothing is written into the checkout) and `head` must be a commit whose carried objects
   `rev-list --objects` can walk. Any failure is named `bundle_unpack_failed: <reason>` and keeps the
   salvage from ever reading as safe to remove.
+- Worktree salvage, round 3: `verify` no longer lends the scratch repository the checkout's whole
+  object store through `objects/info/alternates`, which made every object the checkout had count as
+  "carried by the bundle": a bundle with a valid header over a valid zero-object pack verified clean.
+  The scratch repository is now given only the closure of the bundle's prerequisites, fetched from the
+  checkout by SHA (`git fetch --upload-pack='git -c uploadpack.allowAnySHA1InWant=true upload-pack'`,
+  because `-c` on the client does not reach the upload-pack git spawns for a local path; `--no-tags`
+  keeps it to the requested closure), and a bundle without prerequisites starts from an empty one.
+  Reading the header also stopped dropping every prerequisite on the floor: `_bundle_prerequisites`
+  now appends the `-<sha>` line it parses instead of returning an empty list.

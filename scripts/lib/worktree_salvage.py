@@ -300,29 +300,62 @@ def _bundle_prerequisites(path: Path) -> tuple[list[str], str | None]:
         sha = line[1:].split(" ", 1)[0]
         if not _SHA_RE.fullmatch(sha):
             return [], f"unreadable bundle prerequisite {line[:60]!r}"
+        prerequisites.append(sha)
     return [], "bundle header is not terminated inside the file"
+
+
+def _fetch_prerequisites(scratch: Path, repo: Path, prerequisites: list[str]) -> str | None:
+    """Give the bare ``scratch`` the closure of ``prerequisites``, fetched from
+    ``repo`` by SHA — or the reason it could not arrive, never an empty list read
+    as success.
+
+    ``-c`` on the fetch does NOT reach the ``upload-pack`` git spawns to serve a
+    local path (measured: with ``-c uploadpack.hideRefs=refs/heads/main`` the ref
+    still comes back), so ``uploadpack.allowAnySHA1InWant`` rides on the serving
+    command itself through ``--upload-pack``. Without it a prerequisite that no
+    ref of ``repo`` advertises cannot be asked for. ``--no-tags`` keeps the fetch
+    to the requested closure instead of dragging a tag's objects along."""
+    if not prerequisites:
+        return None  # a full bundle starts from an empty repository, nothing fetched
+    source = str(repo.resolve())
+    failure = _git_failure(
+        ["fetch", "--quiet", "--no-tags",
+         "--upload-pack=git -c uploadpack.allowAnySHA1InWant=true upload-pack",
+         source, *prerequisites],
+        scratch,
+    )
+    if failure:
+        return f"cannot fetch the prerequisites from {source}: {failure}"
+    for sha in prerequisites:
+        failure = _git_failure(["cat-file", "-e", f"{sha}^{{commit}}"], scratch)
+        if failure:
+            return f"prerequisite {sha} did not arrive from {source}: {failure}"
+    return None
 
 
 def _unpack_problems(
     scratch: Path, bundle: Path, head: str, prerequisites: list[str], repo: Path
 ) -> list[str]:
-    """Unpack ``bundle`` in the empty ``scratch`` directory as a bare repository
-    that borrows ``repo``'s objects; every problem that surfaces is named."""
-    problem, objects = _git_problem(
-        ["rev-parse", "--path-format=absolute", "--git-path", "objects"], repo
-    )
-    if problem:
-        return [f"bundle_unpack_failed: cannot find {repo}'s objects: {problem}"]
+    """Unpack ``bundle`` in ``scratch``, a bare repository of its own lent nothing,
+    and name every problem. Before the pack goes in, ``scratch`` holds the closure
+    of the bundle's prerequisites, fetched from ``repo`` by SHA; it borrows no
+    object store, so an object the checkout merely happens to have can never stand
+    in for one the bundle failed to carry."""
     # Match the repository's hash algorithm, or a sha256 pack cannot unpack here.
     problem, algorithm = _git_problem(["rev-parse", "--show-object-format"], repo)
-    fmt = ["--object-format=" + algorithm] if not problem and algorithm else []
+    if problem:
+        return [f"bundle_unpack_failed: cannot read the object format of {repo}: {problem}"]
+    fmt = ["--object-format=" + algorithm] if algorithm else []
+    try:
+        scratch.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return [f"bundle_unpack_failed: cannot create the scratch directory: {exc}"]
     failure = _git_failure(["init", "-q", "--bare", *fmt, str(scratch)], scratch)
     if failure:
         return [f"bundle_unpack_failed: cannot create the scratch repository: {failure}"]
-    try:
-        (scratch / "objects" / "info" / "alternates").write_text(objects + "\n", encoding="utf-8")
-    except OSError as exc:
-        return [f"bundle_unpack_failed: cannot lend the repository's objects: {exc}"]
+    failure = _fetch_prerequisites(scratch, repo, prerequisites)
+    if failure:
+        return [f"bundle_unpack_failed: {failure}"]
     failure = _git_failure(["bundle", "unbundle", str(bundle)], scratch)
     if failure:
         return [f"bundle_unpack_failed: {failure}"]
@@ -346,9 +379,9 @@ def _bundle_problems(path: Path, head: str, cwd: Path) -> list[str]:
     ``git bundle verify`` reads the header and the prerequisites and never a
     packed object, so a bundle truncated right after its header still verifies.
     Only an unpack proves the objects are there: into a temporary bare
-    repository whose ``objects/info/alternates`` lends it ``cwd``'s objects (so
-    a thin bundle's prerequisites resolve) and which writes nothing back into
-    ``cwd``."""
+    repository that is given the closure of the bundle's prerequisites, fetched
+    from ``cwd`` by SHA, and that borrows nothing else of ``cwd``'s store — the
+    commands still write nothing back into ``cwd``."""
     bundle = path.resolve()  # the commands below run in another directory
     failure = _git_failure(["bundle", "verify", str(bundle)], cwd)
     if failure:

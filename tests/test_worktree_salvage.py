@@ -75,9 +75,12 @@ class Fixture:
         git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "fetch", "-q", "origin")
 
+    def worktree_path(self, name: str = "worktree-one", parent: str = "one") -> Path:
+        return self.repo / ".vnx-data" / "worktrees" / parent / name
+
     def worktree(self, name: str = "worktree-one", parent: str = "one") -> Path:
         """A dispatch-style worktree on its own branch, cut from origin/main."""
-        wt = self.repo / ".vnx-data" / "worktrees" / parent / name
+        wt = self.worktree_path(name, parent)
         wt.parent.mkdir(parents=True, exist_ok=True)
         branch = f"dispatch/{parent}-{name}"
         git(self.repo, "worktree", "add", "-q", "-b", branch, str(wt), "origin/main")
@@ -452,7 +455,7 @@ def test_verify_refuses_a_bundle_whose_pack_data_was_altered(fx: Fixture) -> Non
 
 
 def test_verify_unpacks_in_a_scratch_store_and_leaves_the_repository_alone(fx: Fixture) -> None:
-    """The unpack borrows the repository's objects; it never writes into it."""
+    """The unpack reads from the repository; it never writes into it."""
     result, bundle = _salvaged_bundle(fx)
     before = git(fx.repo, "count-objects", "-v").stdout
 
@@ -462,3 +465,149 @@ def test_verify_unpacks_in_a_scratch_store_and_leaves_the_repository_alone(fx: F
     bundle.write_bytes(data[:data.index(b"\n\n") + 2])
     assert _bundle_problems(result, fx) != []
     assert git(fx.repo, "count-objects", "-v").stdout == before
+
+
+# ---------------------------------------------------------------------------
+# 8. round 3: the unpack fetches the prerequisites; it borrows no object store
+# ---------------------------------------------------------------------------
+
+
+def _bundle_header(data: bytes) -> tuple[list[str], list[str]]:
+    """``(prerequisites, ref lines)`` of a bundle's header, read here so a test can
+    state which shape the bundle under test has."""
+    header = data[: data.index(b"\n\n") + 2]
+    prerequisites, refs = [], []
+    for line in header.decode("utf-8").splitlines()[1:]:
+        if line.startswith("-"):
+            prerequisites.append(line[1:].split(" ", 1)[0])
+        elif line:
+            refs.append(line)
+    return prerequisites, refs
+
+
+def _present_objects(repo: Path) -> set[str]:
+    """Every object the repository's store holds, borrowed stores included."""
+    listed = git_bytes(repo, "cat-file", "--batch-all-objects", "--batch-check=%(objectname)")
+    return {line.strip() for line in listed.decode("utf-8").splitlines() if line.strip()}
+
+
+def _closure(repo: Path, rev: str) -> set[str]:
+    """Every object reachable from ``rev``, as that repository's store has them."""
+    listed = git_bytes(repo, "rev-list", "--objects", rev).decode("utf-8")
+    return {line.split(" ", 1)[0] for line in listed.splitlines() if line}
+
+
+def _empty_pack(repo: Path) -> bytes:
+    """A valid packfile that carries no object at all (a 32-byte header + trailer)."""
+    proc = subprocess.run(
+        ["git", "pack-objects", "--stdout"], cwd=str(repo), input=b"", capture_output=True,
+        env={**os.environ, **GIT_ENV},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout[:4] == b"PACK" and proc.stdout[8:12] == b"\0\0\0\0", proc.stdout[:16]
+    return proc.stdout
+
+
+def test_verify_refuses_a_bundle_whose_pack_carries_no_objects(fx: Fixture) -> None:
+    """The round-3 codex reproduction: a valid header over a valid zero-object pack.
+
+    Borrowing the checkout's object store made every object the checkout has count
+    as "carried by the bundle", so a bundle that restores nothing verified clean.
+    """
+    result, bundle = _salvaged_bundle(fx)
+    assert _bundle_problems(result, fx) == []
+
+    data = bundle.read_bytes()
+    header = data[: data.index(b"\n\n") + 2]
+    bundle.write_bytes(header + _empty_pack(fx.repo))
+    # The evidence a header-only check accepts: git itself still says this is fine.
+    assert git(fx.repo, "bundle", "verify", str(bundle)).returncode == 0
+
+    problems = _bundle_problems(result, fx)
+    assert len(problems) == 1, problems
+    assert f"worktree-one{ws.BUNDLE_SUFFIX}: bundle_unpack_failed: " in problems[0], problems
+    assert result.head in problems[0], problems
+
+
+def _write_full_bundle(fx: Fixture, bundle: Path) -> None:
+    """Overwrite a salvaged thin bundle with a full one: same head, no prerequisite."""
+    full = fx.tmp / "full.bundle"
+    git(fx.worktree_path(), "bundle", "create", str(full), "HEAD")
+    bundle.write_bytes(full.read_bytes())
+    assert _bundle_header(bundle.read_bytes())[0] == [], "a full bundle lists no prerequisite"
+
+
+@pytest.mark.parametrize("thin", [True, False], ids=["with-prerequisites", "full"])
+def test_a_correct_bundle_verifies_with_and_without_prerequisites(
+    fx: Fixture, thin: bool,
+) -> None:
+    """A thin bundle (its prerequisites fetched) and a full one (an empty store)."""
+    result, bundle = _salvaged_bundle(fx)
+    if thin:
+        assert _bundle_header(bundle.read_bytes())[0], "the salvage writes a thin bundle"
+    else:
+        _write_full_bundle(fx, bundle)
+
+    assert _bundle_problems(result, fx) == []
+
+
+@pytest.mark.parametrize("thin", [True, False], ids=["with-prerequisites", "full"])
+def test_unpack_fetches_the_prerequisite_closure_and_borrows_nothing(
+    fx: Fixture, thin: bool,
+) -> None:
+    """The scratch store holds head's closure and nothing else of the checkout's."""
+    result, bundle = _salvaged_bundle(fx)
+    if thin:
+        prerequisites = _bundle_header(bundle.read_bytes())[0]
+        assert prerequisites, "the salvage writes a thin bundle"
+    else:
+        _write_full_bundle(fx, bundle)
+        prerequisites = []
+    # An unrelated branch's objects are in the checkout and in neither the bundle
+    # nor its prerequisites: a scratch repository that borrows would list them.
+    git(fx.repo, "checkout", "-q", "-b", "unrelated")
+    (fx.repo / "other.txt").write_text("only on an unrelated branch\n", encoding="utf-8")
+    git(fx.repo, "add", "other.txt")
+    git(fx.repo, "commit", "-q", "-m", "unrelated work")
+    unrelated = git(fx.repo, "rev-parse", "HEAD:other.txt").stdout.strip()
+    git(fx.repo, "checkout", "-q", "main")
+    expected = _closure(fx.repo, result.head)
+    assert unrelated not in expected
+
+    scratch = fx.tmp / "scratch-unpack.git"
+    assert ws._unpack_problems(scratch, bundle, result.head, prerequisites, fx.repo) == []
+
+    assert not list((scratch / "objects").glob("info/alternates*"))
+    present = _present_objects(scratch)
+    assert unrelated not in present, "the scratch store borrowed the checkout's objects"
+    assert present == expected, sorted(present ^ expected)
+
+
+def test_unpack_names_a_prerequisite_the_checkout_does_not_have(fx: Fixture) -> None:
+    """A fetch that cannot deliver is a named problem, never a clean unpack."""
+    result, bundle = _salvaged_bundle(fx)
+    absent = "0" * 40
+
+    problems = ws._unpack_problems(fx.tmp / "scratch-missing.git", bundle, result.head,
+                                   [absent], fx.repo)
+
+    assert len(problems) == 1, problems
+    assert problems[0].startswith("bundle_unpack_failed: "), problems
+    assert absent in problems[0], problems
+
+
+def test_the_bundle_prerequisites_come_from_its_own_header(fx: Fixture) -> None:
+    """A thin bundle's ``-<sha>`` lines are the closure the unpack must fetch."""
+    result, bundle = _salvaged_bundle(fx)
+
+    prerequisites, problem = ws._bundle_prerequisites(bundle)
+
+    assert problem is None
+    assert prerequisites == _bundle_header(bundle.read_bytes())[0]
+    assert prerequisites, "a thin bundle lists the commits it leaves out"
+    assert set(prerequisites) <= _closure(fx.repo, result.head)
+    unterminated = fx.tmp / "unterminated.bundle"
+    unterminated.write_bytes(b"# v2 git bundle\n-" + b"0" * 40 + b" base")
+    assert ws._bundle_prerequisites(unterminated) == (
+        [], "bundle header is not terminated inside the file",
+    )
