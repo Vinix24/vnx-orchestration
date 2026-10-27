@@ -4,7 +4,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
+from pathlib import Path
 from typing import Any, Dict, Optional
+
+# ``append_receipt`` is the facade at ``scripts/append_receipt.py``, one level
+# above this package; the internals need its registration (the ``facade``
+# proxy), so importing ``append_receipt_internals`` alone is not equivalent.
+# An entry point that puts only ``scripts/lib`` on sys.path (scripts/analysis/*,
+# a standalone test) would fail the bare import, so make the facade's own
+# directory importable first — the same guard ``context_rotation`` uses.
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
 
 from append_receipt import AppendReceiptError, append_receipt_payload
 from dispatch_identity import validate_receipt_kind
