@@ -35,6 +35,7 @@ from dispatch_identity import (  # single canonical sentinel (dispatch-20260804-
     _IDENTITY_UNRESOLVED,
     normalize_role,
 )
+from dispatch_spec import _validate_skill_slug
 from fail_closed_evidence import (
     FailClosedBlockError,
     with_block_or_raise as _with_block_or_raise,
@@ -366,6 +367,10 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
         pr_id = getattr(args, "pr_id", None)
         if pr_id:
             dispatch_metadata["pr_id"] = pr_id
+        # RS-2 (ADR-048): the skill bound by the spec rides to the one prompt seam.
+        skill = (getattr(args, "skill", None) or "").strip()
+        if skill:
+            dispatch_metadata["skill"] = skill
         enriched = _inject_skill_context(
             getattr(args, "terminal_id", ""),
             enriched,
@@ -2204,8 +2209,7 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--provider",
-        required=True,
+        "--provider", required=True,
         help=(
             "Provider to use for dispatch. "
             "Accepted values: claude, codex, gemini, kimi, litellm:<model>. "
@@ -2268,7 +2272,35 @@ def _build_parser() -> argparse.ArgumentParser:
             "VNX_BENCH_WORKTREE_BASE_REF for the benchmark harness)."
         ),
     )
+    _add_skill_argument(parser)
     return parser
+
+
+def _skill_slug_arg(raw: str) -> str:
+    """argparse ``type=`` for ``--skill``: strip, then refuse a non-slug.
+
+    A standalone provider dispatch never runs ``DispatchSpec.validate()``, so
+    this is the CLI's own guard: argparse exits 2 before any lane work starts
+    instead of carrying an absolute path into the prompt seam. The resolver
+    (``skill_prefix.resolve_skill_dir``) validates again for callers that do
+    not come through this parser.
+    """
+    slug = (raw or "").strip()
+    error = _validate_skill_slug(slug)
+    if error is not None:
+        raise argparse.ArgumentTypeError(f"invalid skill slug {raw!r} ({error})")
+    return slug
+
+
+def _add_skill_argument(parser: argparse.ArgumentParser) -> None:
+    """RS-2: ``--skill`` carries the spec-bound skill into the prompt seam (kept out
+    of _build_parser's body so the parser stays inside the function-size ratchet)."""
+    parser.add_argument(
+        "--skill", default=None, type=_skill_slug_arg,
+        help="Skill slug bound by the dispatch spec (RS-2). Reaches the prompt seam as "
+             "dispatch_metadata['skill']; a value that is not a slug is refused here, "
+             "and an unknown slug is refused at the door.",
+    )
 
 
 def _worker_role_env(
@@ -2562,6 +2594,9 @@ def _dispatch_claude(args: argparse.Namespace) -> int:
             dispatch_paths=dispatch_paths,
             pr_id=args.pr_id,
             total_deadline=float(args.deadline_seconds),
+            # OI-2372: --provider claude is a claude handler too; a spec-bound skill
+            # parsed by --skill must reach the prompt seam here, not be dropped.
+            skill=getattr(args, "skill", None),
         )
         end_time = datetime.now(timezone.utc)
 
@@ -2866,6 +2901,7 @@ def _dispatch_codex_via_envelope(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
         work_ref=getattr(args, "work_ref", None),
+        skill=getattr(args, "skill", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )
@@ -2907,6 +2943,7 @@ def _dispatch_claude_via_envelope(args: argparse.Namespace) -> int:
         role=getattr(args, "role", None),
         pr_id=getattr(args, "pr_id", None),
         work_ref=getattr(args, "work_ref", None),
+        skill=getattr(args, "skill", None),
         state_dir=state_dir,
         data_dir=data_dir,
     )

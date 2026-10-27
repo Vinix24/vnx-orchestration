@@ -12,7 +12,7 @@ Layers:
   - _inject_permission_profile   — permission-profile preamble
   - _build_intelligence_section  — intelligence items (delegates to
                                    intelligence_injection.fetch_intelligence_section)
-  - legacy 3-tier CLAUDE.md resolution + PromptAssembler path
+  - legacy CLAUDE.md resolution (agents/, then terminal) + PromptAssembler path
 
 Project-root and state-dir lookups resolve via the ``subprocess_dispatch``
 facade namespace (deferred imports inside the functions) so test monkeypatches
@@ -145,17 +145,25 @@ def _inject_skill_context(
     """Compose layered user message context for headless dispatch.
 
     Uses PromptAssembler (3-layer architecture) when available, with fallback
-    to the legacy 3-tier CLAUDE.md resolution for backward compatibility.
+    to the legacy CLAUDE.md resolution for backward compatibility.
 
     Layer architecture (PromptAssembler path):
       Layer 1 — Base worker context (universal rules, report format)
       Layer 2 — Role context (capabilities, permissions for the role)
       Layer 3 — Dispatch payload (passed through as instruction)
 
-    Legacy fallback (3-tier CLAUDE.md resolution):
+    Legacy fallback (2-tier CLAUDE.md resolution):
       1. agents/{role}/CLAUDE.md        — project-level agent override
-      2. .claude/skills/{role}/CLAUDE.md — skill definition
-      3. .claude/terminals/{terminal}/CLAUDE.md — terminal fallback
+      2. .claude/terminals/{terminal}/CLAUDE.md — terminal fallback
+
+    The old middle tier, ``.claude/skills/{role}/CLAUDE.md``, is gone (RS-4,
+    ADR-048): a skill folder holds ``SKILL.md``, so that tier resolved 0 of 38,380
+    receipts. A skill now arrives through the spec's ``skill`` field (below).
+
+    RS-2 (ADR-048): when ``dispatch_metadata["skill"]`` names a skill the spec
+    bound, its body is prepended to the assembled prompt (before the role block)
+    by ``_build_skill_prefix_for``. A reviewer role returns before that, so a
+    reviewer never receives the skill.
 
     Args:
         terminal_id:       Terminal identifier (e.g. "T1").
@@ -202,7 +210,42 @@ def _inject_skill_context(
         assembled = _legacy_claude_md_resolution(
             terminal_id, instruction, role, intelligence_section,
         )
+    # RS-2 (ADR-048): a skill the spec bound is prepended BEFORE the assembled
+    # role/instruction body — one seam for every lane. No skill key = unchanged.
+    skill_prefix = _build_skill_prefix_for(dispatch_metadata)
+    if skill_prefix:
+        assembled = f"{skill_prefix}{assembled}"
     return _with_report_directive(assembled, dispatch_metadata)
+
+
+def _build_skill_prefix_for(dispatch_metadata: "dict | None") -> str:
+    """Return the skill-content prefix for ``dispatch_metadata["skill"]``, or ''.
+
+    Resolved against the checkout this install runs from — the same
+    ``subprocess_dispatch.__file__`` walk the legacy role resolution uses — via
+    ``skill_prefix.resolve_skill_dir``, the ONE existence resolver staging and the
+    door's compile_plan rule also use. That resolver validates the slug, so a
+    skill reaches here either as an unknown folder or as an invalid slug (an
+    absolute path, ``..``, ``a/b``) — neither is a delivery failure: log one
+    WARNING naming the slug and continue. A reviewer role never reaches this
+    helper.
+    """
+    slug = ((dispatch_metadata or {}).get("skill") or "").strip()
+    if not slug:
+        return ""
+    import subprocess_dispatch as _sd
+    from skill_prefix import build_skill_prefix, resolve_skill_dir  # noqa: PLC0415
+
+    project_root = _sd.Path(_sd.__file__).resolve().parents[2]
+    folder = resolve_skill_dir(project_root, slug)
+    if folder is None:
+        logger.warning(
+            "_inject_skill_context: skill %r is not a valid slug or no longer resolves "
+            "under %s — continuing without it (the refusal belongs to staging and the "
+            "door)", slug, project_root,
+        )
+        return ""
+    return build_skill_prefix([slug], folder.parent)
 
 
 def _with_report_directive(body: str, dispatch_metadata: "dict | None") -> str:
@@ -250,19 +293,18 @@ def _has_prompt_assembler_role(role: str | None) -> bool:
 
 
 def _has_legacy_role_source(role: str | None) -> bool:
-    """True when the legacy 3-tier has a ROLE-SPECIFIC source (agents/ or skills/).
+    """True when the legacy resolution has a ROLE-SPECIFIC source (agents/).
 
     Terminal fallback is deliberately excluded: it is generic per terminal, not
-    role context. Only role-specific sources decide the routing below.
+    role context. Only role-specific sources decide the routing below. The
+    ``.claude/skills/{role}/CLAUDE.md`` probe this used to carry was dead for the
+    same reason the candidate was (RS-4, ADR-048): a skill folder holds SKILL.md.
     """
     if not role:
         return False
     import subprocess_dispatch as _sd
     root = _sd.Path(_sd.__file__).resolve().parents[2]
-    return (
-        (root / "agents" / role / "CLAUDE.md").exists()
-        or (root / ".claude" / "skills" / role / "CLAUDE.md").exists()
-    )
+    return (root / "agents" / role / "CLAUDE.md").exists()
 
 
 def _try_prompt_assembler(
@@ -275,8 +317,8 @@ def _try_prompt_assembler(
     """Attempt PromptAssembler path; return assembled pipe_input or None on failure.
 
     Dispatch-20260801-w10 routing fix: when the role has a project-level
-    agents/skills source but NO PromptAssembler role prompt, return None to route
-    through the legacy 3-tier resolution. PromptAssembler would otherwise
+    agents source but NO PromptAssembler role prompt, return None to route
+    through the legacy resolution. PromptAssembler would otherwise
     silently substitute base_worker.md as L2, so a dispatch with
     ``role=quality-engineer`` got the exact same context as one with
     ``role=system-architect``. Roles WITH a prompt file (backend-developer,
@@ -285,7 +327,7 @@ def _try_prompt_assembler(
     if _has_prompt_assembler_role(role) is False and _has_legacy_role_source(role):
         logger.info(
             "_inject_skill_context: role=%s has no PromptAssembler prompt but has a "
-            "legacy role source — using legacy 3-tier so agents/{role}/CLAUDE.md reaches the worker",
+            "legacy role source — using legacy resolution so agents/{role}/CLAUDE.md reaches the worker",
             role,
         )
         return None
@@ -328,7 +370,7 @@ def _legacy_claude_md_resolution(
     role: str | None,
     intelligence_section: str,
 ) -> str:
-    """3-tier CLAUDE.md resolution fallback.
+    """Legacy CLAUDE.md resolution fallback (agents/, then the terminal file).
 
     Resolves project root via the facade's ``__file__`` (same pattern as
     ``_resolve_agent_cwd``) so tests that patch ``subprocess_dispatch.__file__``
@@ -338,9 +380,11 @@ def _legacy_claude_md_resolution(
     project_root = _sd.Path(_sd.__file__).resolve().parents[2]
 
     candidates: list[Path] = []
+    # RS-4 (ADR-048): the ``.claude/skills/{role}/CLAUDE.md`` candidate used to sit
+    # between these two — a skill folder holds SKILL.md, so it never matched (0 of
+    # 38,380 receipts). A skill arrives through the spec's ``skill`` field.
     if role:
         candidates.append(project_root / "agents" / role / "CLAUDE.md")
-        candidates.append(project_root / ".claude" / "skills" / role / "CLAUDE.md")
     candidates.append(project_root / ".claude" / "terminals" / terminal_id / "CLAUDE.md")
 
     body: str | None = None

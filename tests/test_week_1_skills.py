@@ -13,7 +13,6 @@ import subprocess
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
 SKILLS_DIR = PROJECT_ROOT / ".claude" / "skills"
 TEMPLATES_DIR = PROJECT_ROOT / ".claude" / "terminals" / "library" / "templates" / "agents"
-FEATURE_PLAN_TEMPLATE = PROJECT_ROOT / ".claude" / "vnx-system" / "templates" / "FEATURE_PLAN_TEMPLATE.md"
 
 class Colors:
     GREEN = '\033[92m'
@@ -91,18 +90,18 @@ def test_skill_loading():
     return all(results)
 
 def test_planning_mode():
-    """Test that planning mode generates valid FEATURE_PLAN.md"""
-    print_info("Test 2: Planning Mode - FEATURE_PLAN.md Generation")
+    """Test that the planner skill and the dispatcher's planning mode are wired
+
+    The FEATURE_PLAN.md template this used to check is retired (ADR-047 B5):
+    the tracks DB is the plan source, so there is no scaffold document to
+    validate here.
+    """
+    print_info("Test 2: Planning Mode - planner skill and dispatcher wiring")
 
     # Check if planner skill exists
     planner_path = SKILLS_DIR / "@planner.md"
     if not planner_path.exists():
         print_error("@planner.md not found")
-        return False
-
-    # Check if FEATURE_PLAN_TEMPLATE exists
-    if not FEATURE_PLAN_TEMPLATE.exists():
-        print_error(f"FEATURE_PLAN_TEMPLATE.md not found at {FEATURE_PLAN_TEMPLATE}")
         return False
 
     # Check dispatcher has planning mode support

@@ -67,25 +67,6 @@ def test_build_current_state_fetch_prs_tolerates_missing_gh(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. build_feature_plan
-# ---------------------------------------------------------------------------
-
-def test_build_feature_plan_read_register_events_missing_file(tmp_path):
-    """read_register_events returns [] gracefully when file does not exist."""
-    import build_feature_plan as m
-    result = m.read_register_events(state_dir=tmp_path)
-    assert result == []
-
-
-def test_build_feature_plan_read_register_events_corrupt_file(tmp_path):
-    """read_register_events skips corrupt JSON lines but returns valid ones."""
-    (tmp_path / "dispatch_register.ndjson").write_text('{"a":1}\nnot-json\n{"b":2}\n')
-    import build_feature_plan as m
-    result = m.read_register_events(state_dir=tmp_path)
-    assert len(result) == 2
-
-
-# ---------------------------------------------------------------------------
 # 4. code_snippet_extractor
 # ---------------------------------------------------------------------------
 

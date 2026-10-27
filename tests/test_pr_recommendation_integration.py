@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Test PR Queue Recommendation Engine Integration (PR 2.3)
-Tests: State loading, dependency recommendations, blocked PR detection
+Tests: State loading, dependency recommendations
 """
 
 import os
@@ -154,43 +154,6 @@ def test_dependency_recommendations():
     print("\n✅ Test 2 passed!")
 
 
-def test_blocked_pr_scenario():
-    """Test 3: Blocked PR detection"""
-    print("\n" + "="*60)
-    print("[Test 3] Blocked PR Detection")
-    print("="*60)
-
-    # Setup: Start PR with unmet dependencies (manual override scenario)
-    manager = PRQueueManager()
-    manager.clear_queue()
-    manager.set_feature("Blocked Test")
-
-    prs = [
-        {'id': 'PR-1', 'title': 'Base', 'dependencies': [], 'skill': '@backend-developer', 'size': 100},
-        {'id': 'PR-2', 'title': 'Needs PR-1', 'dependencies': ['PR-1'], 'skill': '@backend-developer', 'size': 100}
-    ]
-
-    for pr in prs:
-        manager.add_pr(pr)
-
-    # Scenario: Force PR-2 to in_progress without completing PR-1 (shouldn't happen, but test detection)
-    manager.update_pr_status('PR-2', 'in_progress')
-
-    # Load and check for blocked recommendation
-    engine = RecommendationEngine()
-    engine.load_pr_queue_state()
-    engine.add_pr_dependency_recommendation()
-
-    blocked_recs = [r for r in engine.recommendations if r['trigger'] == 'pr_blocked']
-    assert len(blocked_recs) >= 1, "Should detect blocked PR"
-    blocked_pr_ids = [r['pr_id'] for r in blocked_recs]
-    assert 'PR-2' in blocked_pr_ids
-    assert 'PR-1' in blocked_recs[0]['reason']
-    print(f"  ✓ Detected blocked PR: {blocked_recs[0]['reason']}")
-
-    print("\n✅ Test 3 passed!")
-
-
 def test_empty_queue():
     """Test 4: Empty PR queue (no false positives)"""
     print("\n" + "="*60)
@@ -222,7 +185,6 @@ def main():
     try:
         test_pr_queue_state_loading()
         test_dependency_recommendations()
-        test_blocked_pr_scenario()
         test_empty_queue()
 
         print("\n" + "="*60)
@@ -232,7 +194,7 @@ def main():
         print("\nIntegration complete:")
         print("  • PR queue state written to pr_queue_state.yaml")
         print("  • Recommendation engine loads queue state")
-        print("  • PR ready/blocked recommendations generated")
+        print("  • PR ready recommendations generated")
         print("  • Dependency tracking integrated")
 
     except AssertionError as e:

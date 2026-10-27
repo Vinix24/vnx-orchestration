@@ -28,14 +28,18 @@ What the line carries:
 - ``billing``: ``subscription`` on the native ``claude`` lane, ``metered`` on
   the two harness lanes that run on an own API key.
 
-Only builder runs move here. A gate seat, a plan-gate seat or a panel leg on
-the same lanes (:data:`NOT_BUILDER_ROLES`) keeps the old ``emit_provider_cost``
-event until K3/K4a move it. A line that lands in the ledger's spool is a
-written line (ADR-043 §6, ``record.landed``). The ledger's errors are never
-caught here: ``CostLedgerWriteError`` (neither the ledger nor the spool took
-the line, the outcome is unknown) and a ``CostLedgerRefusal`` reach the
-caller, which must not write its receipt with a cost it does not have and books
-no new attempt for it (ADR-005, ADR-043).
+Builder runs come here through :func:`record_builder_run` (K2a). Since K4b-1 a
+classifier call on the ``deepseek`` and ``haiku`` providers also books its one
+line, through :func:`record_classifier_run`: ``role`` ``intelligence``, producer
+``classifier``, the call's session id as its ref. A gate seat, a plan-gate seat
+or a panel leg on the same lanes (:data:`NOT_BUILDER_ROLES`) keeps the old
+``emit_provider_cost`` event until K3/K4a move it. A line in the ledger's spool
+is a written line (ADR-043 §6, ``record.landed``). :func:`record_builder_run`
+never catches the ledger's errors (``CostLedgerWriteError``, ``CostLedgerRefusal``):
+they reach its caller, which must not write its receipt with a cost it does not
+have (ADR-005, ADR-043). :func:`record_classifier_run` is the one caller that
+catches them, because a classifier call returns its classification whatever the
+ledger did, with no amount and the reason in the result.
 """
 
 from __future__ import annotations
@@ -60,6 +64,9 @@ from token_harvest import (
 logger = logging.getLogger(__name__)
 
 BUILDER_ROLE = "builder"
+# A classifier call on a harness lane (K4b-1): role ``intelligence``, no dispatch, the session id as ref.
+INTELLIGENCE_ROLE = "intelligence"
+CLASSIFIER_PRODUCER = "classifier"
 
 # The native claude lane runs on the Max subscription (marginal cost 0, list
 # price in api_equivalent_usd); the deepseek and glm harness lanes run on an
@@ -283,18 +290,27 @@ def record_builder_run(
     project_id: str,
     producer: str,
     dispatch_id: str,
+    role: str = BUILDER_ROLE,
     ledger_path: Optional[Path] = None,
     claude_projects_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Write the ledger line of one builder attempt; return the record as written.
+    """Write the ledger line of one run on a harness lane; return the record as written.
 
     The ``run_id`` is ``<project_id>:<producer>:<dispatch_id>:<attempt>``, the
     attempt the next one the ledger holds for that producer and dispatch
-    (``cost_ledger.record_next_attempt``), so a refire is a new run. Raises
-    what the ledger raises; nothing here catches it.
+    (``cost_ledger.record_next_attempt``), so a refire is a new run. ``role``
+    defaults to :data:`BUILDER_ROLE`, so every K2a call site books a builder
+    run; K4b-1 passes :data:`INTELLIGENCE_ROLE` for a classifier call. It must
+    be one of ``cost_ledger.ROLES``: an unknown role is refused here, before
+    anything is written. Raises what the ledger raises; nothing here catches
+    it.
     """
     if run.provider not in BILLING_BY_PROVIDER:
         raise cost_ledger.InvalidRecord(f"provider {run.provider!r} is not a claude harness lane")
+    if role not in cost_ledger.ROLES:
+        raise cost_ledger.InvalidRecord(
+            f"role {role!r} is not a ledger role ({', '.join(sorted(cost_ledger.ROLES))})"
+        )
     fields = run_fields(run, claude_projects_dir=claude_projects_dir)
     if fields.get("cost_source") is not None:
         logger.info(
@@ -304,11 +320,39 @@ def record_builder_run(
 
     def make_run(run_id: str) -> cost_ledger.RunCost:
         return cost_ledger.RunCost(
-            run_id=run_id, project_id=project_id, role=BUILDER_ROLE, provider=run.provider,
+            run_id=run_id, project_id=project_id, role=role, provider=run.provider,
             model=run.model, billing=BILLING_BY_PROVIDER[run.provider], **fields,
         )
 
     return cost_ledger.record_next_attempt(project_id, producer, dispatch_id, make_run, ledger_path=ledger_path)
+
+
+def record_classifier_run(
+    *, provider: str, model: str, session_id: str, started: datetime, ended: datetime,
+    project_id: Optional[str] = None, spawn_refused: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Book one classifier call on ``provider`` as an ``intelligence`` run.
+
+    ``(record, None)`` when the line landed, in the ledger or its spool, and
+    ``(None, reason)`` when the ledger refused the record or could not write it
+    (a WARNING names the session id and the reason). A classifier call always
+    returns its classification, so the ledger's errors never reach it and no
+    amount is invented. The run has no dispatch: the session id is its ref.
+    """
+    run = BuilderRun(
+        provider=provider, model=model, started=started, ended=ended,
+        session_id=session_id, spawn_refused=spawn_refused,
+    )
+    try:
+        record = record_builder_run(
+            run, project_id=project_id or ledger_project_id(None),
+            producer=CLASSIFIER_PRODUCER, dispatch_id=session_id, role=INTELLIGENCE_ROLE,
+        )
+    except (cost_ledger.CostLedgerRefusal, cost_ledger.CostLedgerWriteError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.warning("harness_run_cost: classifier session %s not booked: %s", session_id, reason)
+        return None, reason
+    return record, None
 
 
 def receipt_cost(
@@ -337,7 +381,8 @@ def receipt_cost(
 
 
 __all__ = [
-    "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE",
-    "lane_model", "ledger_project_id", "price_segments", "receipt_cost", "record_builder_run", "run_fields",
-    "run_tokens", "usage_completeness", "writes_builder_run",
+    "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER", "INTELLIGENCE_ROLE",
+    "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE", "lane_model", "ledger_project_id", "price_segments",
+    "receipt_cost", "record_builder_run", "record_classifier_run", "run_fields", "run_tokens",
+    "usage_completeness", "writes_builder_run",
 ]

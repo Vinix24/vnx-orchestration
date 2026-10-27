@@ -53,8 +53,8 @@ Each headless dispatch gets its own isolated git worktree under
 `scripts/lib/dispatch_worktree_isolation.py` and torn down when the dispatch ends.
 For operator-driven feature work, `vnx new-worktree <name>` creates a git worktree
 and bootstraps it in one step: an isolated `.vnx-data/` with an intelligence
-snapshot, skills, terminals, hooks, settings and the plan files
-(`scripts/commands/new_worktree.sh`).
+snapshot, skills, terminals, hooks and settings. It writes no plan file — the
+tracks DB is the plan source (ADR-047) (`scripts/commands/new_worktree.sh`).
 
 **Commands**:
 - `vnx new-worktree <name>` -- creates git worktree + full bootstrap in one step

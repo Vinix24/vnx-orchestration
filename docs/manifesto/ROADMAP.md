@@ -1,6 +1,6 @@
 # VNX Roadmap
 
-> **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in the maintainer's tracks database (the `vnx objective` CLI); the repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan. Some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust [`ROADMAP.md`](../../ROADMAP.md) and the README for what is actually shipped.
+> **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in the maintainer's tracks database (the `vnx objective` CLI); the repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan. Some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust the README and the tracks database (`vnx horizon queue`) for what is actually shipped.
 
 **Status**: Public roadmap, statuses checked against `main` on 2026-10-18  
 **Planning Horizon**: 2026 (rolling)  
@@ -448,7 +448,7 @@ It wakes a headless T0 only. An interactive T0 is not woken by it (`docs/manifes
 
 ## Living Roadmap (tracks database)
 
-The active feature roadmap is the tracks database, operated through the `vnx objective` CLI (tracks, horizons, plan gates, deliverables). The repo-root `ROADMAP.yaml` is a generic example of the machine-readable roadmap format; `FEATURE_PLAN.md` and `PR_QUEUE.md` are views generated from it by `scripts/build_feature_plan.py` / `scripts/build_pr_queue.py`. The document you are reading captures the architecture principles and wave history; the public per-release summary is [`ROADMAP.md`](../../ROADMAP.md).
+The active feature roadmap is the tracks database, operated through the `vnx horizon` CLI (alias `vnx objective`): tracks, horizons, plan gates and deliverables. `vnx horizon queue` is the read-only queue view over it. The repo-root `ROADMAP.yaml` is a generic example of the machine-readable roadmap format, not a source. No plan file is generated: `FEATURE_PLAN.md`, `PR_QUEUE.md` and the root `ROADMAP.md` were retired as inputs by ADR-047. The document you are reading captures the architecture principles and wave history.
 
 Review seats, the takeover chain, the plan-gate with one seat, open outcomes and the merge door are summarised in `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §10. The per-milestone forward plan (what ships in the next point release) lives in the tracks database, not in this document — it moves too often to keep in sync here. Check `vnx objective` for the current state.
 

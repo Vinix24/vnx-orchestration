@@ -4,8 +4,8 @@ description: >
   VNX feature-execution kickoff preflight. USE THIS when starting or resuming a feature or
   track from its plan: checking worktree/queue/staging health, finding the first promoteable
   dispatch, and handing off to @t0-orchestrator. Reads the feature's track + plan doc from
-  Horizon's tracks DB (`vnx horizon`, alias `vnx objective`); the repo FEATURE_PLAN.md/PR_QUEUE.md
-  are generic examples, not the source.
+  Horizon's tracks DB (`vnx horizon`, alias `vnx objective`); the repo FEATURE_PLAN.md is a
+  generic example, not the source, and PR_QUEUE.md is gone (ADR-047).
 user-invocable: true
 allowed-tools: [Read, Grep, Glob, Bash]
 paths: ["FEATURE_PLAN.md", ".vnx-data/**"]
@@ -21,7 +21,7 @@ You do not run the full orchestration lifecycle. When kickoff is complete, hand 
 
 You are responsible for:
 1. reading the active root `FEATURE_PLAN.md`
-2. reading the active root `PR_QUEUE.md`
+2. reading the queue from the dispatch register and `vnx horizon queue`
 3. validating kickoff prerequisites
 4. initializing or rehydrating the queue state
 5. inspecting staging and filtering stale or foreign dispatches
@@ -42,7 +42,8 @@ You are not responsible for:
 ## 2. Runtime Rules
 
 1. Use root `FEATURE_PLAN.md` as the active feature source of truth.
-2. Use root `PR_QUEUE.md` as the active queue surface.
+2. Use `vnx horizon queue` (alias `vnx objective queue`) as the queue surface and the dispatch
+   register as the truth behind it. No root `PR_QUEUE.md` is read or written (ADR-047).
 3. Use CLI and state verification; do not guess queue or dispatch state.
 4. Do not promote more than one new dispatch during kickoff.
 5. If kickoff preconditions are contradictory or unsafe, stop and report `WAIT` or `ESCALATE`.
@@ -103,7 +104,7 @@ Run these steps in order.
 
 Read:
 - `FEATURE_PLAN.md`
-- `PR_QUEUE.md`
+- `vnx horizon queue` (alias `vnx objective queue`) — deliverables, state, delivering PR
 
 Confirm:
 1. feature title exists
@@ -133,21 +134,7 @@ Classify:
 
 If the worktree or queue is clearly unsafe, stop and explain exactly why.
 
-### 3.3 Initialize or refresh the queue
-
-Before queue init, treat the active root `FEATURE_PLAN.md` as a materialized artifact that must match canonical expectations.
-Use the reference plan below to sanity-check structure and metadata quality.
-
-Run:
-
-```bash
-python3 scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
-python3 scripts/pr_queue_manager.py staging-list
-```
-
-If the command fails, stop and report the failure instead of improvising.
-
-### 3.4 Find the first promoteable dispatch
+### 3.3 Find the first promoteable dispatch
 
 Rules:
 1. prefer the earliest PR with no unmet dependencies
@@ -171,7 +158,7 @@ Validate:
 - correct `Merge-Policy`
 - correct `Review-Stack`
 
-### 3.5 Promote exactly one dispatch
+### 3.4 Promote exactly one dispatch
 
 Only if validation passes:
 
@@ -201,7 +188,7 @@ Then explicitly hand off:
 ## 5. Failure Modes
 
 Do not continue silently if:
-- `FEATURE_PLAN.md` and `PR_QUEUE.md` refer to different features
+- `FEATURE_PLAN.md` and the track in `vnx horizon queue` refer to different features
 - no PR sections can be found
 - any `**Skill**:` value is invalid or resolves only at runtime
 - PR metadata shape differs materially from the canonical feature-plan example

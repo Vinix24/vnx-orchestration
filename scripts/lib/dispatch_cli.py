@@ -2817,7 +2817,9 @@ def build_runtime_snapshot(
         tier_from=chain_tier_from,
         tier_to=chain_tier_to,
         worker_claude_override_reason=worker_claude_override_reason,
-        claude_api_metered=claude_api_metered,
+        # RS-2: the same root the role registry above came from, so a declared
+        # skill is resolved against the checkout the dispatch will run in.
+        claude_api_metered=claude_api_metered, repo_root=_resolve_repo_root(),
     )
 
 

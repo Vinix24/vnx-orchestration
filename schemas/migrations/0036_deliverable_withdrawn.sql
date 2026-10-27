@@ -1,0 +1,20 @@
+-- 0036_deliverable_withdrawn.sql — the terminal state withdrawn (ADR-049, track
+-- deliverable-retarget-withdraw PR-2). DROP VIEW plus CREATE VIEW for
+-- deliverables, no data: withdrawn is its own derived_status and withdrawn_count
+-- and counts in no other tally. Order: done, in_progress, withdrawn, failed,
+-- ready, proposed. Not executed as-is: the runner builds the view from the v36
+-- manifest (schema_manifest._DELIVERABLES_VIEW_V36), the only copy of its SQL.
+--
+-- Not touched: a dispatches table with the state CHECK of 0022 (a store built by
+-- `vnx init`; none of the six live stores, measured read-only 2026-10-27).
+-- `vnx deliverable withdraw` refuses such a store.
+--
+-- Down: apply_0036.revert_migration(db_path): with withdrawn rows, one state_mutation
+-- receipt (trigger migration_0036_revert, the rows named) lands in the t0_receipts.ndjson
+-- beside the database first, and an append that is not `appended` refuses the revert with
+-- nothing changed; then withdrawn rows become expired with one deliverable_withdrawn_reverted
+-- event each, the v35 view, user_version 35, and a transaction that fails after the intent
+-- line books a migration_0036_revert_aborted receipt before it raises.
+--
+-- Target DB: runtime_coordination.db · Applied by: scripts/lib/migrations/apply_0036.py
+-- Tested by: tests/test_migration_0036_deliverable_withdrawn.py

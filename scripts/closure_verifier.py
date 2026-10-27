@@ -2279,6 +2279,27 @@ def _check_stale_staging(paths: Dict[str, str], active_pr_ids: Iterable[str]) ->
     return CheckResult("stale_staging", "PASS", "no stale staging dispatches")
 
 
+def _pr_dispatch_checks(pr_id: str, pr_reconciled: Any) -> List[CheckResult]:
+    """``pr_has_dispatch`` PASS for a reconciled PR, then ``pr_completed`` (ADR-047 §2).
+
+    Completed means the dispatch is in ``completed/`` AND has a terminal
+    receipt. Only an exact ``receipt_confirmed is True`` counts: a missing,
+    ``None`` or malformed flag is no receipt, so the PR is not completed.
+    """
+    provenance = pr_reconciled.provenance
+    has_dispatch = CheckResult(
+        "pr_has_dispatch", "PASS",
+        f"dispatch {provenance.get('dispatch_id') or '?'} names {pr_id}",
+    )
+    if pr_reconciled.state != "completed":
+        detail, status = f"{pr_id} state is {pr_reconciled.state}, not completed", "FAIL"
+    elif provenance.get("receipt_confirmed") is True:
+        detail, status = f"{pr_id} is completed via {provenance.get('source', '?')} with a terminal receipt", "PASS"
+    else:
+        detail, status = f"{pr_id} dispatch is in completed/ but has no terminal receipt, so it is not completed", "FAIL"
+    return [has_dispatch, CheckResult("pr_completed", status, detail)]
+
+
 def verify_pr_closure(
     *,
     pr_id: str,
@@ -2296,6 +2317,12 @@ def verify_pr_closure(
     This runs queue reconciliation to derive the PR's current state,
     validates gate evidence for that PR, and detects contradictions
     between structured gate results and normalized reports.
+
+    No plan file is read (ADR-047 §2). The PR exists when a dispatch names it
+    (``pr_has_dispatch``); the ``pr_queue_state.json`` projection only feeds
+    drift detection and never adds or removes a PR. ``pr_completed`` needs the
+    dispatch in ``completed/`` AND a terminal receipt for it: a completed
+    dispatch without that receipt is not a closed PR.
 
     When ``branch`` is provided and ``require_github_pr`` is True, also verifies
     that a real GitHub PR exists for the branch and that required CI checks are
@@ -2319,7 +2346,7 @@ def verify_pr_closure(
     pr_reconciled = next((p for p in result.prs if p.pr_id == pr_id), None)
     if pr_reconciled is None:
         checks.append(CheckResult(
-            "pr_exists_in_plan", "FAIL",
+            "pr_has_dispatch", "FAIL",
             f"no dispatch names {pr_id}, so it is not in the queue",
         ))
         return {
@@ -2330,21 +2357,8 @@ def verify_pr_closure(
             "reconciled_state": None,
             "review_evidence": None,
         }
-
-    # 2. PR must be completed per reconciliation
-    if pr_reconciled.state == "completed":
-        receipt_note = ""
-        if not pr_reconciled.provenance.get("receipt_confirmed"):
-            receipt_note = " (unconfirmed — no terminal receipt)"
-        checks.append(CheckResult(
-            "pr_completed", "PASS",
-            f"{pr_id} is completed via {pr_reconciled.provenance.get('source', '?')}{receipt_note}",
-        ))
-    else:
-        checks.append(CheckResult(
-            "pr_completed", "FAIL",
-            f"{pr_id} state is {pr_reconciled.state}, not completed",
-        ))
+    # 2. The dispatch names the PR, and the PR is completed with a terminal receipt
+    checks.extend(_pr_dispatch_checks(pr_id, pr_reconciled))
 
     # 3. Check for blocking drift affecting this PR
     pr_drift = [w for w in result.drift_warnings if w.pr_id == pr_id and w.severity == "blocking"]

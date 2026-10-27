@@ -58,6 +58,7 @@ def prepare(
     pr_id: "str | None" = None,
     model: str = "kimi-k3",
     repo_map: "str | None" = None,
+    skill: "str | None" = None,
 ) -> str:
     """Compose the shared enriched instruction body for both Claude lanes.
 
@@ -90,6 +91,8 @@ def prepare(
             "pr_id": pr_id,
             "pr": pr_id,
             "report_directive": False,
+            # OI-2372: None reads as "no skill asked for" in the seam.
+            "skill": skill,
         },
     )
 

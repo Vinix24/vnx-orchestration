@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Routing preflight — validate provider and model readiness before dispatch.
-# Sourced by kickoff_preflight or usable standalone.
+# Usable standalone or sourced by the routing preflight test harness.
 # Implements PR-3 §: Kickoff, Preset, and Preflight Provider Readiness
 # Contract: docs/core/100_VERIFIED_PROVIDER_MODEL_ROUTING_CONTRACT.md
 #

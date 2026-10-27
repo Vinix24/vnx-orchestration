@@ -32,12 +32,12 @@ Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orc
 
 ## Governance Model: Quality Gates as Deliverables
 
-**Quality gate items become open items** when `init-feature` runs. Each checklist item is tracked individually with a severity level. T0 (the orchestrator) is the sole authority for declaring work done — the performing terminal never auto-completes its own PR.
+**Quality gate items become open items** once the track is imported. Each checklist item is tracked individually with a severity level. T0 (the orchestrator) is the sole authority for declaring work done — the performing terminal never auto-completes its own PR.
 
 **Flow**:
 ```
 FEATURE_PLAN.md quality gates
-    → init-feature parses checklist items
+    → the open-items import carries the checklist items
     → creates open items (OI-PRx-001, OI-PRx-002, ...)
     → terminal executes work, receipt records evidence
     → T0 reviews evidence, closes satisfied items
@@ -51,7 +51,7 @@ FEATURE_PLAN.md quality gates
 
 ### Quality Gate Severity Classification
 
-Items are auto-classified by `init-feature` based on keywords:
+Items are classified by keywords:
 
 | Severity | Keywords | Example |
 |----------|----------|---------|
@@ -63,7 +63,7 @@ Items are auto-classified by `init-feature` based on keywords:
 
 ## FEATURE_PLAN.md Format (Required)
 
-Every FEATURE_PLAN.md MUST follow this structure for `init-feature` to parse correctly:
+Every FEATURE_PLAN.md MUST follow this structure:
 
 ```markdown
 # Feature: [Feature Name]
@@ -108,13 +108,6 @@ Every FEATURE_PLAN.md MUST follow this structure for `init-feature` to parse cor
 5. **Checklist items**: Must use `- [ ]` format (markdown checkboxes)
 6. **PR separator**: Use `---` between PRs
 7. **Gate name**: Use backtick format `` `gate_prX_descriptive_name` ``
-
-### What init-feature Does
-When T0 runs `python3 pr_queue_manager.py init-feature FEATURE_PLAN.md`:
-1. Parses ALL PR sections from the plan
-2. Creates staging dispatches (one per PR) in `.vnx-data/dispatches/staging/`
-3. Creates open items from quality gate checklist items (one OI per item)
-4. T0 reviews staging dispatches and promotes when ready
 
 ## Examples
 - `/planner Create authentication system plan`

@@ -648,17 +648,20 @@ def init_chain_state(
     state_dir: str | Path,
     *,
     chain_id: str,
-    feature_plan: str,
     feature_sequence: List[str],
     chain_origin_sha: str,
     initiated_by: str = "T0",
 ) -> Dict[str, Any]:
-    """Create or overwrite chain_state.json with INITIALIZED state."""
+    """Create or overwrite chain_state.json with INITIALIZED state.
+
+    ADR-047: a chain is identified by its id and feature sequence, not by a
+    plan file, so there is no ``feature_plan`` argument (and no
+    ``feature_plan`` field) any more.
+    """
     state_root = Path(state_dir)
     now = _now_iso()
     record: Dict[str, Any] = {
         "chain_id": chain_id,
-        "feature_plan": feature_plan,
         "feature_sequence": feature_sequence,
         "chain_origin_sha": chain_origin_sha,
         "initiated_by": initiated_by,
@@ -773,7 +776,6 @@ def _build_parser() -> argparse.ArgumentParser:
 
     init_p = sub.add_parser("init", help="Initialize chain state")
     init_p.add_argument("--chain-id", required=True)
-    init_p.add_argument("--feature-plan", default="FEATURE_PLAN.md")
     init_p.add_argument("--feature-sequence", nargs="+", required=True)
     init_p.add_argument("--origin-sha", default="")
     init_p.add_argument("--initiated-by", default="T0")
@@ -796,9 +798,9 @@ def main() -> int:
     state_root = Path(state_dir)
 
     if args.command == "init":
-        record = init_chain_state(state_root, chain_id=args.chain_id, feature_plan=args.feature_plan,
-                                   feature_sequence=args.feature_sequence, chain_origin_sha=args.origin_sha,
-                                   initiated_by=args.initiated_by)
+        record = init_chain_state(state_root, chain_id=args.chain_id,
+                                  feature_sequence=args.feature_sequence, chain_origin_sha=args.origin_sha,
+                                  initiated_by=args.initiated_by)
         print(json.dumps(record, separators=(",", ":")))
     elif args.command == "transition":
         record = record_state_transition(state_root, to_state=args.to_state, feature_id=args.feature_id,

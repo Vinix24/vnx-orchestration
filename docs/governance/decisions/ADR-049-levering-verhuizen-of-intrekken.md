@@ -61,7 +61,7 @@ De volgorde binnen de view is vast: `done` (alles `completed`), dan `in_progress
 
 ### 4. Terugdraaien
 
-De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per rij het event `deliverable_withdrawn_reverted` in `coordination_events`, met de oude staat en de reden in de metadata. Zo ziet een oude lezer na een rollback een eindstatus die hij kent, en blijft de omzetting in het grootboek staan. `completed` blijft ongemoeid; de down-migratie raakt alleen `withdrawn`. De voorkant (0036) maakt de view opnieuw en werkt de schema-manifest bij in dezelfde PR, zodat manifest en store niet uiteenlopen.
+De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per rij het event `deliverable_withdrawn_reverted` in `coordination_events`, met de oude staat en de reden in de metadata. Zo ziet een oude lezer na een rollback een eindstatus die hij kent, en blijft de omzetting in het grootboek staan. Eerst boekt `apply_0036.revert_migration` één `state_mutation`-receipt (trigger `migration_0036_revert`, met de lijst `(dispatch_id, project_id)`) in de `t0_receipts.ndjson` naast de database; is het resultaat niet `appended`, dan weigert de revert en verandert er niets. Faalt de transactie daarna alsnog, dan boekt hij best-effort een `migration_0036_revert_aborted`-receipt voordat hij de fout doorgeeft. `completed` blijft ongemoeid; de down-migratie raakt alleen `withdrawn`. De voorkant (0036) maakt de view opnieuw en werkt de schema-manifest bij in dezelfde PR, zodat manifest en store niet uiteenlopen.
 
 ### 5. Gevolgen
 
@@ -70,6 +70,16 @@ De down-migratie van 0036 zet elke `withdrawn`-rij op `expired` en schrijft per 
 - **Twee verben, één regel.** `retarget` en `withdraw` zijn elkaars spiegel: de eerste verplaatst de verantwoordelijkheid, de tweede beëindigt haar. Geen van beide schrijft `completed` en geen van beide raakt `pr_ref`.
 - **`close` blijft scherp.** De bestaande eis `--evidence <pr>` wordt niet verzwakt. De regel staat in de docstring en in de weigering; PR-2 voegt alleen de twee ontbrekende uitkomsten toe.
 - **Een ingetrokken levering blijft zichtbaar.** Ze verdwijnt niet uit de view en niet uit `vnx deliverable list`; ze leest alleen als `withdrawn`, zodat een operator ziet dat het besluit genomen is en niet dat de rij vergeten is.
+
+### Amendement bij PR-2 (dlv-c61cf36113cc, 2026-10-27)
+
+Drie punten wijken af van de tekst hierboven. De opdracht van PR-2 en een meting gingen voor.
+
+- **De CHECK op `dispatches.state` bestaat wel, alleen niet live.** De zes live stores dragen hem niet (read-only gemeten). Een store die `vnx init` bouwt loopt 0022 en draagt hem wel, zonder `withdrawn`. Migratie 0036 rebuildt die tabel niet: `withdraw` weigert zo'n store met exit 2 en noemt de CHECK. Een migratie die de CHECK verbreedt is een vervolgstap.
+- **`deliverable list` verbergt `withdrawn` zonder `--all`**, net als `horizon queue`, en meldt hoeveel rijen verborgen zijn. Met `--all` blijft de levering zichtbaar.
+- **Een al ingetrokken levering is een weigering (exit 2), geen no-op.** De opdracht noemt alleen `proposed` en `ready` als toegestaan.
+
+Een eerdere manifestversie accepteert voortaan de view van een latere versie, zoals ze extra kolommen al accepteerde. Zonder dat faalt een v36-store op elke manifestversie van 27 tot 35, en zet de reconciler hem na één verloren index terug naar 24 in plaats van naar 33.
 
 ### Wat deterministisch is en wat een model vraagt
 

@@ -1219,6 +1219,38 @@ def remove_dependency(
     }
 
 
+def list_dependencies(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """Return this track's outgoing dependency edges, with the target's phase.
+
+    Read-only. Scoped on the full ``(from_track_id, from_project_id)`` key and
+    joined on ``(to_track_id, to_project_id)`` per ADR-007, so an edge of a
+    second project that reuses the same track ids never leaks in.
+
+    Each row carries ``to_track_id``, ``to_project_id``, ``kind`` and the
+    target's declared ``phase``; callers decide which kinds block.
+    """
+    conn = _get_conn(state_dir)
+    try:
+        rows = conn.execute(
+            """
+            SELECT td.to_track_id, td.to_project_id, td.kind, t.phase
+            FROM track_dependencies td
+            JOIN tracks t
+              ON t.track_id = td.to_track_id AND t.project_id = td.to_project_id
+            WHERE td.from_track_id = ? AND td.from_project_id = ?
+            ORDER BY td.to_project_id ASC, td.to_track_id ASC
+            """,
+            (track_id, project_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Dispatch link queries (used by `vnx track show`)
 # ---------------------------------------------------------------------------

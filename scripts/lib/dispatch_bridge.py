@@ -55,6 +55,7 @@ from dispatch_spec import (  # noqa: E402
     REGISTERED_GATE_NAMES,
     retired_gate_hint,
 )
+from skill_prefix import resolve_skill_dir, skill_search_paths  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -237,11 +238,6 @@ class UnknownSkillError(ValueError):
     """
 
 
-# The two skill trees a named skill may live in, relative to the project root
-# (canonical first, then the claude-compatible mirror).
-_SKILL_TREES = ("skills", ".claude/skills")
-
-
 def _project_root() -> Path:
     """Checkout whose skill trees a staged skill must exist in.
 
@@ -266,10 +262,9 @@ def _require_known_skill(raw: Optional[str]) -> Optional[str]:
     """Normalize a staged skill name and require it to exist; return the slug or None.
 
     Format first (the slug rule lives beside ``_ID_RE`` in dispatch_spec, and the
-    door applies the identical rule at validate() Rule 17), then existence. A skill
-    exists when ``<project_root>/skills/<name>/SKILL.md`` or
-    ``<project_root>/.claude/skills/<name>/SKILL.md`` is a regular file. The slug is
-    checked BEFORE any path join, so a name can never pick the file it is tested against.
+    door applies the identical rule at validate() Rule 17), then existence via
+    ``skill_prefix.resolve_skill_dir`` — the ONE resolver staging and the door's
+    compile_plan rule (RS-2) share. The slug is checked BEFORE any path join.
     """
     slug = (raw or "").strip()
     if not slug:
@@ -281,12 +276,9 @@ def _require_known_skill(raw: Optional[str]) -> Optional[str]:
             "folder under skills/ or .claude/skills/"
         )
     root = _project_root()
-    searched = [root / tree / slug / "SKILL.md" for tree in _SKILL_TREES]
-    if not any(candidate.is_file() for candidate in searched):
-        raise UnknownSkillError(
-            f"skill {slug!r} not found; looked for "
-            + " and ".join(str(candidate) for candidate in searched)
-        )
+    if resolve_skill_dir(root, slug) is None:
+        searched = " and ".join(str(c) for c in skill_search_paths(root, slug))
+        raise UnknownSkillError(f"skill {slug!r} not found; looked for {searched}")
     return slug
 
 
@@ -656,6 +648,7 @@ def deliver_via_door(
     base_ref: Optional[str] = None,
     project_id: Optional[str] = None,
     deadline_seconds: Optional[int] = None,
+    skill: Optional[str] = None,
     allow_headless: bool = False,
     headless_reason: Optional[str] = None,
 ) -> bool:
@@ -693,6 +686,13 @@ def deliver_via_door(
     omitted kwarg (``base_ref`` -> "origin/main", ``pr_id``/``work_ref`` ->
     None) — byte-identical prior behavior for a caller that never passes them.
 
+    ``skill`` (OI-2372): the spec-bound skill the caller already knows (the pool
+    worker reads it back from the claimed dispatch's ``dispatch-spec.json``). It is
+    threaded to ``bridge_dispatch`` -> ``stage_spec_bundle`` unchanged, so the
+    restaged spec carries the same skill the original staging carried and the
+    lane's prompt seam injects it. Default None keeps every other caller's staged
+    spec byte-identical (no skill key value), and staging re-validates the slug.
+
     Routing uses the single-source predicate (dispatch_flags.single_entry_enabled) so the default
     and the VNX_DISPATCH_LEGACY rollback are honored identically here and in the bash readers.
     """
@@ -713,6 +713,7 @@ def deliver_via_door(
             base_ref=base_ref if base_ref is not None else "origin/main",
             project_id=project_id,
             deadline_seconds=deadline_seconds if deadline_seconds is not None else 3600,
+            skill=skill,
             allow_headless=allow_headless,
             headless_reason=headless_reason,
         ) == 0

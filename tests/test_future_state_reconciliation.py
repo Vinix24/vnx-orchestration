@@ -386,6 +386,11 @@ class TestFeaturePlanIsolation:
 
         # Inject fake module so a lingering `from build_feature_plan import ...` would record a call
         monkeypatch.setitem(sys.modules, "build_feature_plan", fake_bfp)
+        # ADR-047 / B3: the generator itself is gone, so the injection above is
+        # the only thing that could make such an import resolve at all.
+        assert list(_SCRIPTS_DIR.glob("build_feature_plan*")) == [], (
+            "the generator was retired (ADR-047, B3) and must not come back"
+        )
 
         isolated_root = tmp_path / "isolated_project"
         isolated_root.mkdir()

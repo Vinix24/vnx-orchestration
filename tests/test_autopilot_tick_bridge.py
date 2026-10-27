@@ -37,6 +37,7 @@ for _p in (_LIB, _SCRIPTS):
 
 import roadmap_manager as rm
 import schema_migration
+from migrations.apply_0027 import ensure_dispatches_output_columns
 import tracks as tracks_lib
 import track_reconciler
 
@@ -131,6 +132,15 @@ def _build_tracks_db(state_dir: Path) -> None:
         (30, "0030_track_oi_resolved_at.sql"),
     ]:
         sql = (_MIGRATIONS / filename).read_text(encoding="utf-8")
+        if version == 27:
+            # Same ordering as production (scripts/lib/migrations/apply_0027.py):
+            # the 0022 rebuild recreates dispatches WITHOUT output_ref/output_kind,
+            # while 0027's deliverables view and the reconciler's deliverable
+            # queries read them (SQLite accepts the view at DDL time and fails
+            # only on read). Ensuring them first keeps this module's DB
+            # self-contained rather than dependent on another test module
+            # importing migrate_future_system to register the v27 preflight.
+            ensure_dispatches_output_columns(conn)
         schema_migration.apply_script_if_below(conn, version, sql)
         conn.commit()
     conn.close()
@@ -182,6 +192,25 @@ def _seed_blocking_oi(state_dir: Path) -> None:
             {"id": "OI-1", "severity": "blocker", "status": "open",
              "title": "blocking item", "pr_id": "#100"},
         ]}),
+        encoding="utf-8",
+    )
+
+
+def _seed_legacy_queued_pr(state_dir: Path) -> None:
+    """One PR left behind in the legacy queue state (ADR-047).
+
+    Nothing repopulates this queue any more: A6 retired ``load_feature_plan``
+    and the init-feature batch path, so the tracks DB + the dispatch door are
+    the only ways work is staged. A queued row can therefore only be legacy
+    state — the input of ``run_feature_step``'s fail-closed branch.
+    """
+    (state_dir / "pr_queue_state.json").write_text(
+        json.dumps({
+            "feature": "feature-a",
+            "feature_metadata": {},
+            "prs": [{"id": "PR-0", "status": "queued", "dependencies": []}],
+            "completed": [], "active": [], "blocked": [],
+        }),
         encoding="utf-8",
     )
 
@@ -374,24 +403,38 @@ def test_autopilot_tick_gates_advance_on_reconcile_failure(env, monkeypatch):
     assert _pending_dispatches(env["state_dir"]) == []
 
 
-def test_autopilot_tick_happy_path_returns_ok_and_advances(env):
-    """Happy path: a clean track-sync (bridge.ok AND reconcile ok) leaves the
-    gate OPEN — the tick is NOT degraded, the sync is 'ok', track_open_items +
-    derived_status are updated, and the feature step runs (PR dispatched)."""
+def test_autopilot_tick_happy_path_syncs_then_feature_step_fails_closed(env):
+    """Clean track-sync reaches the feature step, which now fails closed (A6/ADR-047).
+
+    The track-sync leg is still the happy path: bridge.ok AND reconcile ok leave
+    the D-N1/D4 gate OPEN, track_open_items + derived_status are updated, and
+    the tick proceeds to ``run_feature_step``. What the step then does changed
+    with A6: ADR-047 retired plan-based dispatch creation, so a PR queued from a
+    legacy feature plan can no longer be staged. The step fails closed and
+    ``autopilot_tick`` mirrors that failure verbatim — it neither reports
+    "stepped" nor promotes a dispatch."""
     _seed_blocking_oi(env["state_dir"])
+    _seed_legacy_queued_pr(env["state_dir"])
     manager = rm.RoadmapManager()
     manager.init_roadmap(env["roadmap_file"])
     manager.load_feature("feature-a", no_worktree=True)
 
     result = manager.autopilot_tick()
 
-    # The gate did NOT fire: the tick proceeded to the feature step.
-    assert result["status"] == "stepped"
+    # The gate did NOT fire: the sync is clean and its state is current.
     assert result["track_sync"]["status"] == "ok"
     assert result["track_sync"]["bridge"]["ok"] is True
     assert result["track_sync"]["reconcile"]["status"] == "ok"
     # State updated: the blocking link is live and derived_status flipped.
     assert _rows(env["state_dir"], "OI-1")[0]["track_id"] == "feat-a"
     assert _derived_status(env["state_dir"], "feat-a") == "blocked"
-    # Advance ran: a PR dispatch was created + promoted.
-    assert len(_pending_dispatches(env["state_dir"])) == 1
+    # The tick mirrored the step's own status (roadmap_manager.autopilot_tick
+    # returns {"status": step_result["status"], ...} for a failed step).
+    assert result["status"] == "failed"
+    # The fail-closed reason surfaces where autopilot_tick carries it: the
+    # nested step result — naming ADR-047 and the replacement staging route.
+    assert "ADR-047" in result["step"]["reason"]
+    assert "vnx dispatch" in result["step"]["reason"]
+    assert result["step"]["pr_id"] == "PR-0"
+    # Nothing was created or promoted for the retired plan path.
+    assert _pending_dispatches(env["state_dir"]) == []

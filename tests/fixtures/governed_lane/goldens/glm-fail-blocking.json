@@ -1,0 +1,10 @@
+{
+  "findings": [
+    {
+      "message": "tests/test_price_provenance.py: the three zai models are added to _PINNED_PRICES and removed from _UNVERIFIED, but NOT added to _VERIFIED. test_the_split_covers_every_model (line 356) asserts _UNVERIFIED | _VERIFIED == set(_PINNED_PRICES), which breaks: glm-5.2/glm-5.3/glm-5.3-flash are in _PINNED_PRICES but in neither _UNVERIFIED nor _VERIFIED. The wave7_models.yaml entries now carry price_source 'OpenRouter /api/v1/models endpoint, verified by operator' (not 'unverified'), so they belong in _VERIFIED \u2014 add the three ('zai','glm-5.2'), ('zai','glm-5.3'), ('zai','glm-5.3-flash') tuples to _VERIFIED to keep the split invariant and test_verified_prices_did_not_quietly_become_guesses consistent.",
+      "severity": "error"
+    }
+  ],
+  "residual_risk": "If the three zai tuples are added to _VERIFIED in the same PR, the invariant is restored; the gate's own model pin (glm_gate.py ALLOWED_MODELS=frozenset({DEFAULT_MODEL})) is unchanged and stays deterministic, so no residual risk there.",
+  "verdict": "fail"
+}

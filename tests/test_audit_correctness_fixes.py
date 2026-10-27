@@ -345,7 +345,8 @@ class TestC7InWindowKeyNotEvicted:
 
 def _review_gate_result_receipt(status: str, **extra: object) -> dict:
     """Mirrors the exact shape GateResultParserMixin._emit_result_receipt
-    builds for emit_governance_receipt("review_gate_result", ...) — no
+    built (until GE-4c-1 folded it into commit_gate_outcome's receipt) for
+    emit_governance_receipt("review_gate_result", ...) — no
     dispatch_id, no commit_sha (governance_receipts.emit_governance_receipt
     prepends timestamp/event_type/receipt_kind/status/terminal/source, then
     `receipt.update(fields)` from the call site's kwargs)."""

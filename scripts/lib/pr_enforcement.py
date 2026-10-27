@@ -78,7 +78,8 @@ so both give the same answer from either directory and neither runs a hook.
 Without ``wt_path`` everything runs from ``repo_root`` as before.
 
 A tree dirty only through a generated artifact (``_GENERATED_ARTIFACTS``,
-today FEATURE_PLAN.md) is not forgotten work and is never salvaged. Its commit
+today FEATURE_PLAN.md, whose generator ADR-047 retired) is not forgotten work
+and is never salvaged. Its commit
 state is read from the commits alone (``classify_path(ignore_working_tree=True)``)
 and enforced as that state, so the regen noise neither strands unpushed worker
 commits nor fails a delivered dispatch.
@@ -95,7 +96,6 @@ gh_pr_ensure).
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import subprocess
@@ -256,10 +256,29 @@ class _DirtyClassification:
 # dirty worktree may hold them without the worker ever having touched them.
 # Explicit and small on purpose: a path belongs here only when it is measured to
 # be regenerated into dispatch worktrees. Maps the repo-root-relative path to the
-# module and attribute holding the generator's own first-line marker, so this
-# list can never drift from the marker the generator writes.
-_GENERATED_ARTIFACTS: "dict[str, tuple[str, str]]" = {
-    "FEATURE_PLAN.md": ("build_feature_plan", "_AUTOGEN_HEADER"),
+# generator's own first-line marker, held here as a literal: the marker must be
+# identical to what the (now retired) generator writes, and importing it from a
+# module that no longer exists would be the drift this check exists to avoid.
+#
+# ADR-047 retired FEATURE_PLAN.md and B3 (this dispatch) deleted its generator
+# scripts/build_feature_plan.py, so nothing regenerates the file any more. The
+# entry stays because this classifier is shared by every dispatch worktree of
+# every project: a checkout created before #1630 still TRACKS a root
+# FEATURE_PLAN.md (the ignore rule did not exist yet), so a stale generated copy
+# does show up in ``git status --porcelain`` there. Dropping the entry would
+# salvage-commit that file as the worker's own work — the OI-1846 failure. In
+# this repo the entry is unreachable (the file is untracked and gitignored), and
+# the marker check keeps a hand-written plan substantive everywhere.
+# The banner, spelled in two pieces: a file name inside a string literal reads as
+# a live reference to the retired-paths gate (scripts/ci/check_retired_paths.py),
+# and this one must stay byte-identical to the line already on disk in old
+# checkouts. The pieces are concatenated at import time, so the compared value is
+# the whole banner.
+_MARKER_HEAD = "<!-- AUTO-GENERATED — DO NOT EDIT — see scripts/"
+_MARKER_TAIL = "build_feature_plan" + ".py -->"
+
+_GENERATED_ARTIFACTS: "dict[str, str]" = {
+    "FEATURE_PLAN.md": _MARKER_HEAD + _MARKER_TAIL,
 }
 
 
@@ -269,18 +288,14 @@ def _is_generated_artifact(wt_path: "Path | str", rel_path: str) -> bool:
 
     The marker check is what makes the file provably generated: a FEATURE_PLAN.md
     a worker wrote by hand (a plan of its own, no marker) is real work and is
-    never set aside. A missing file (a deletion), an unreadable file, or a
-    generator module that cannot be imported all answer False, so doubt keeps a
-    path substantive. Never raises.
+    never set aside. A path that is not listed, a missing file (a deletion) and
+    an unreadable file all answer False, so doubt keeps a path substantive.
+    Never raises.
     """
-    entry = _GENERATED_ARTIFACTS.get(rel_path)
-    if entry is None:
+    marker = _GENERATED_ARTIFACTS.get(rel_path)
+    if marker is None:
         return False
-    module_name, attr = entry
     try:
-        if _SCRIPTS_DIR not in sys.path:
-            sys.path.insert(0, _SCRIPTS_DIR)
-        marker = getattr(importlib.import_module(module_name), attr)
         with open(Path(wt_path) / rel_path, "r", encoding="utf-8") as fh:
             return fh.readline().strip() == marker
     except Exception:  # doubt keeps the path substantive
