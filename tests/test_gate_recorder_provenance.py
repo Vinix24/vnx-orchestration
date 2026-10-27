@@ -77,9 +77,11 @@ def test_terminal_result_with_dispatch_id_writes_unchanged(tmp_path):
 
 
 def test_non_terminal_result_without_dispatch_id_is_not_held_to_identity(tmp_path):
-    """A non-terminal status (e.g. pending) is not gate evidence yet, so it is
-    not required to carry producer identity."""
-    payload = {"gate": "kimi_gate", "pr_id": "1", "status": "pending"}
+    """A non-terminal outcome (unavailable) is no verdict, so it is not
+    required to carry producer identity. An in-flight status such as pending
+    is no outcome at all since GE-4a and is refused before the write
+    (tests/test_commit_gate_outcome.py)."""
+    payload = {"gate": "kimi_gate", "pr_id": "1", "status": "unavailable"}
     out = tmp_path / "pr-1-kimi_gate.json"
     record_terminal_result(
         gate="kimi_gate", pr_id="1", result_path=out, payload=payload,
