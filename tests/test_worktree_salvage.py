@@ -521,6 +521,75 @@ def test_verify_without_a_usable_repo_root_stays_blocking(fx: Fixture) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7. an artifact inside the worktree removal would delete is refused (OI-2414)
+# ---------------------------------------------------------------------------
+
+
+def test_a_dest_dir_inside_the_worktree_is_refused(fx: Fixture) -> None:
+    """The codex repro on #2291: the ignored directory hides the bundle from
+    ``git status``, yet removal deletes it together with the tree."""
+    wt = fx.worktree()
+    head = fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    dest = wt / ".vnx-data" / "salvage"
+
+    result = ws.salvage(wt, dest, repo_root=fx.repo, dry_run=False)
+
+    assert result.unpushed == 1
+    assert bundle_of(result).is_file(), "the bundle really lands inside the tree"
+    problems = ws.verify(result, dest, repo_root=fx.repo)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(result.artifacts[0]), problems
+    assert "resolves inside the worktree" in problems[0], problems
+    assert head_of(wt) == head and wt.is_dir(), "nothing authorized a removal"
+
+
+def test_a_symlink_outside_the_worktree_that_points_inside_is_refused(fx: Fixture) -> None:
+    """``dest_dir`` is spelled outside the tree; it lands inside it."""
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    inside = wt / ".vnx-data" / "salvage"
+    inside.mkdir(parents=True)
+    dest = fx.tmp / "salvage-link"
+    dest.symlink_to(inside, target_is_directory=True)
+
+    result = ws.salvage(wt, dest, repo_root=fx.repo, dry_run=False)
+
+    assert bundle_of(result).is_file(), "written through the link, inside the tree"
+    problems = ws.verify(result, dest, repo_root=fx.repo)
+    assert len(problems) == 1, problems
+    assert "resolves inside the worktree" in problems[0], problems
+    assert wt.is_dir(), "nothing authorized a removal"
+
+
+def test_an_artifact_symlinked_into_the_worktree_is_refused(fx: Fixture) -> None:
+    """The artifact file itself is the link; the path's spelling is outside."""
+    result, bundle = _salvaged_bundle(fx)
+    assert verify(fx, result) == []
+
+    inside = result.worktree / ".vnx-data" / "salvage"
+    inside.mkdir(parents=True)
+    hidden = inside / bundle.name
+    hidden.write_bytes(bundle.read_bytes())
+    bundle.unlink()
+    bundle.symlink_to(hidden)
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert "resolves inside the worktree" in problems[0], problems
+
+
+def test_a_dest_dir_beside_the_worktree_is_outside(fx: Fixture) -> None:
+    """A path that merely shares the worktree's name prefix is not inside it."""
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    dest = fx.tmp / f"{wt.name}-salvage"
+
+    result = ws.salvage(wt, dest, repo_root=fx.repo, dry_run=False)
+
+    assert ws.verify(result, dest, repo_root=fx.repo) == []
+
+
+# ---------------------------------------------------------------------------
 # Fail-closed: a git failure is a SalvageError, never a clean salvage
 # ---------------------------------------------------------------------------
 

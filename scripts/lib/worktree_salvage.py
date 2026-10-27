@@ -6,7 +6,9 @@ of the tree's state is that kind, positively checked. Any other status entry
 (tracked or staged change, submodule, unmerged path, untracked file), a populated
 submodule (its commits ride in no bundle), a tree without a readable HEAD, and
 every artifact whose evidence is unproven is a named problem: a dirty tree never
-verifies clean.
+verifies clean. An artifact that resolves inside the tree is refused as well —
+removal would delete the very evidence the verify rests on, and following
+``Path.resolve()`` on both sides means a symlink cannot smuggle it back in.
 
 Each real run writes a directory of its own,
 ``dest_dir/<name>-<UTC %Y%m%dT%H%M%SZ>-<head[:8]>/``, created with ``os.mkdir``,
@@ -390,7 +392,9 @@ def verify(
     """Every problem that keeps this salvage from being complete; only ``[]`` lets
     a removal act. The tree may hold no state beyond the commits it salvaged (see
     the module docstring), the result must record the bundle its head needs, and
-    every artifact must still be evidence this verify checks."""
+    every artifact must still be evidence this verify checks that removal will
+    not delete — an artifact whose resolved location lies inside the worktree is
+    refused, symlinks followed on both sides."""
     dest, repo = Path(dest_dir), Path(repo_root)
     problems = _tree_problems(result)
     repo_ok = _git_failure(["rev-parse", "--git-dir"], repo) is None
@@ -400,11 +404,29 @@ def verify(
         problems.append(
             f"head={result.head} has {result.unpushed} commit(s) off origin "
             "but no bundle is listed")
+    tree: Path | None = None
+    if result.worktree is not None:
+        try:
+            tree = Path(result.worktree).resolve()
+        except OSError as exc:  # cannot place the tree: no artifact can be proven outside
+            problems.append(f"cannot resolve the worktree {result.worktree!r} ({exc})")
     for artifact in result.artifacts:
+        path = dest / artifact
+        try:
+            resolved = path.resolve()
+        except OSError as exc:
+            problems.append(f"{artifact}: cannot resolve its location ({exc})")
+            continue
+        # Removal deletes the whole tree, so evidence that would be deleted with
+        # it proves nothing: where the path lands decides, not how it is spelled.
+        if tree is not None and (resolved == tree or tree in resolved.parents):
+            problems.append(
+                f"{artifact}: resolves inside the worktree {tree}, "
+                "so removing the tree would delete this artifact")
+            continue
         if not artifact.endswith(BUNDLE_SUFFIX):
             problems.append(f"{artifact}: not an artifact kind this verify can check")
             continue
-        path = dest / artifact
         try:
             size = path.stat().st_size if path.is_file() else None
         except OSError as exc:
