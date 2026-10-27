@@ -21,15 +21,17 @@ def _git(*args, cwd):
 
 
 def _source_repo(path: Path) -> Path:
-    """VERSION, the tracked tenant marker, one tracked script, tag v1.0.0."""
+    """VERSION, the tenant marker, a script, a symlink, a .gitignore, tag v1.0.0."""
     path.mkdir(parents=True)
     _git("init", "-q", "-b", "main", cwd=path)
     _git("config", "user.email", "t@example.com", cwd=path)
     _git("config", "user.name", "tester", cwd=path)
     (path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
     (path / ".vnx-project-id").write_text("vnx-dev\n", encoding="utf-8")
+    (path / ".gitignore").write_text("*.log\n", encoding="utf-8")
     (path / "scripts").mkdir()
     (path / "scripts" / "run.py").write_text("print('v1')\n", encoding="utf-8")
+    (path / "scripts" / "latest.py").symlink_to("run.py")
     _git("add", "-A", cwd=path)
     _git("commit", "-q", "-m", "release 1.0.0", cwd=path)
     _git("tag", "v1.0.0", cwd=path)
@@ -117,7 +119,84 @@ def test_verify_fails_on_a_third_deviation(root, source, released):
     (released / "notes.txt").write_text("stray\n", encoding="utf-8")
     result = _verify(root, source)
     assert result.returncode == 1
-    assert "notes.txt" in result.stderr
+    assert "extra notes.txt" in result.stderr
+
+
+def test_verify_names_a_skip_worktree_file_changed_on_disk(root, source, released):
+    """git status hides a skip-worktree file; the bytes on disk do not.
+
+    The index flag is what the tag's blobs are compared without: the file is
+    modified, the flag is set, and the only thing that can tell is the content.
+    """
+    (released / "scripts" / "run.py").write_text("print('edited')\n", encoding="utf-8")
+    _git("update-index", "--skip-worktree", "scripts/run.py", cwd=released)
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                            cwd=str(released), capture_output=True, text=True)
+    assert "scripts/run.py" not in status.stdout, "the index flag must hide the change"
+    result = _verify(root, source)
+    assert result.returncode == 1, result.stdout
+    assert "changed scripts/run.py" in result.stderr
+
+
+def test_verify_names_an_ignored_extra_file(root, source, released):
+    """An extra file covered by .gitignore is a file in the release all the same."""
+    (released / "debug.log").write_text("ignored\n", encoding="utf-8")
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                            cwd=str(released), capture_output=True, text=True)
+    assert "debug.log" not in status.stdout, ".gitignore must hide the file from git"
+    result = _verify(root, source)
+    assert result.returncode == 1
+    assert "extra debug.log" in result.stderr
+
+
+def test_verify_names_a_changed_exec_bit_then_a_missing_file(root, source, released):
+    """The exec bit is a difference, and an absent tag file is named, not ignored."""
+    os.chmod(released / "scripts" / "run.py", 0o755)
+    mode = _verify(root, source)
+    assert mode.returncode == 1
+    assert "mode scripts/run.py" in mode.stderr
+    assert "changed scripts/run.py" not in mode.stderr
+    os.chmod(released / "scripts" / "run.py", 0o644)
+    (released / "scripts" / "run.py").unlink()
+    missing = _verify(root, source)
+    assert missing.returncode == 1
+    assert "missing scripts/run.py" in missing.stderr
+
+
+def test_verify_names_a_symlink_whose_target_moved(root, source, released):
+    """A symlink is compared by its target bytes, never by what it resolves to."""
+    link = released / "scripts" / "latest.py"
+    link.unlink()
+    link.symlink_to("VERSION")
+    result = _verify(root, source)
+    assert result.returncode == 1
+    assert "changed scripts/latest.py" in result.stderr
+
+
+def test_verify_names_a_gitlink_instead_of_skipping_it(root, tmp_path):
+    """A submodule in the tag cannot be compared here, so it is never a pass."""
+    path = _source_repo(tmp_path / "with-sub")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(path),
+                          capture_output=True, text=True, check=True).stdout.strip()
+    _git("update-index", "--add", "--cacheinfo", f"160000,{head},vendor", cwd=path)
+    _git("commit", "-q", "-m", "vendor gitlink", cwd=path)
+    _git("tag", "-f", "v1.0.0", cwd=path)
+    published = _published_dir(root, path)
+    assert published.is_dir()
+    result = _verify(root, path)
+    assert result.returncode == 1
+    assert "submodule vendor: not verified" in result.stderr
+
+
+def test_verify_fails_closed_when_the_tag_tree_is_unreadable(root, source, released):
+    """A tag pointing at a commit the dir does not have is a problem, not a pass."""
+    (source / "later.txt").write_text("later\n", encoding="utf-8")
+    _git("add", "-A", cwd=source)
+    _git("commit", "-q", "-m", "later work", cwd=source)
+    _git("tag", "-f", "v1.0.0", cwd=source)
+    result = _verify(root, source)
+    assert result.returncode == 1
+    assert "cannot read the tree of tag" in result.stderr
 
 
 def test_publish_refuses_a_tag_outside_the_default_branch(root, source):

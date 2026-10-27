@@ -35,12 +35,20 @@ from vnx_cli.commands.update import (
 INSTALL_CENTRAL_SCRIPT = Path(__file__).resolve().parent.parent.parent / "install-central.sh"
 
 # The only deviations a central install is ALLOWED to have against its tag:
-# install-central.sh strips the tracked tenant marker (" D .vnx-project-id") and
-# writes the install-mode marker ("?? .vnx-install-mode"). Measured on all 16
-# published dirs on 2026-10-25; any third deviation is drift and fails.
+# install-central.sh strips the tracked tenant marker (absent on disk) and writes
+# the install-mode marker (present on disk, in no tag). Measured on all 16
+# published dirs on 2026-10-25; any third deviation is drift and fails. These two
+# are the only exceptions: everything else the tag lists must be byte-identical
+# on disk, and nothing else may be there.
 VERIFY_ALLOWED_DELETED = ".vnx-project-id"
 VERIFY_ALLOWED_UNTRACKED = INSTALL_MODE_MARKER
-_VERIFY_ALLOWED_DELETE_CODES = (" D", "D ")
+
+# The only tree modes the comparison knows how to check: a regular file with or
+# without an executable bit, and a symlink (its blob is the link target bytes).
+# A gitlink (160000) is named as unverified, never skipped.
+_REGULAR_MODES = ("100644", "100755")
+_GITLINK_MODE = "160000"
+_SYMLINK_MODE = "120000"
 
 # The default branch a release tag must be reachable from. The remote's own
 # symbolic HEAD wins (that is what "the default branch" means for a hosted
@@ -331,31 +339,214 @@ def _resolve_release_tag(places, version: str) -> "tuple[str | None, str | None]
     return None, None
 
 
+def _git_failure(label: str, result: subprocess.CompletedProcess) -> str:
+    """One fail-closed problem line for a git read that did not succeed."""
+    reason = result.stderr.decode("utf-8", "backslashreplace").strip()
+    return f"cannot read {label}: {reason or f'git exited {result.returncode}'}"
+
+
+def _tag_tree_entries(version_dir: Path, tag_commit: str) -> "tuple[dict | None, list[str]]":
+    """``{path: (mode, type, blob)}`` for every entry of the tag's tree.
+
+    ``-z`` keeps paths byte-exact (a renamed file cannot be split on a guess at
+    quoting) and ``--full-tree`` makes the listing independent of the cwd.
+    """
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "ls-tree",
+           "-r", "-z", "--full-tree", tag_commit]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure(f"the tree of tag {tag_commit[:12]}", result)]
+    entries: "dict[str, tuple[str, str, str]]" = {}
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        meta, separator, raw_path = raw.partition(b"\t")
+        fields = meta.split()
+        if not separator or len(fields) != 3:
+            return None, [f"cannot parse a tree entry of {tag_commit[:12]}: "
+                          f"{raw.decode('utf-8', 'backslashreplace')!r}"]
+        mode, kind, blob = (field.decode("ascii", "backslashreplace") for field in fields)
+        entries[os.fsdecode(raw_path)] = (mode, kind, blob)
+    return entries, []
+
+
+def _disk_entry(full: str) -> "tuple[str, object]":
+    """``(kind, payload)`` for one filesystem entry: exec bit, or link target."""
+    if os.path.islink(full):
+        return "link", os.fsencode(os.readlink(full))
+    if os.path.isfile(full):
+        return "file", bool(os.lstat(full).st_mode & 0o111)
+    return "special", None
+
+
+def _disk_entries(version_dir: Path) -> "tuple[dict | None, list[str]]":
+    """Every entry of the published dir, keyed by its tag-relative path.
+
+    Only the ``.git`` entry at the root is skipped: it is the checkout's own
+    metadata, not a file of the release. Symlinked directories are recorded as
+    links and never followed, so a link out of the dir can neither hide nor
+    invent content.
+    """
+    entries: "dict[str, tuple[str, object]]" = {}
+    problems: "list[str]" = []
+    root = str(version_dir)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        relative = os.path.relpath(dirpath, root)
+        prefix = "" if relative == os.curdir else relative + os.sep
+        files = filenames
+        if not prefix:
+            # The checkout's own metadata, not a file of the release: a clone has
+            # a .git directory, a linked worktree a .git file.
+            dirnames[:] = [name for name in dirnames if name != ".git"]
+            files = [name for name in filenames if name != ".git"]
+        # A plain directory is no file of the release; a symlinked one is a link.
+        names = files + [name for name in dirnames
+                         if os.path.islink(os.path.join(dirpath, name))]
+        for name in names:
+            try:
+                entries[prefix + name] = _disk_entry(os.path.join(dirpath, name))
+            except OSError as exc:
+                problems.append(f"cannot read {prefix}{name}: {exc.strerror or exc}")
+    return entries, problems
+
+
+def _disk_blobs(version_dir: Path, paths: "list[str]") -> "tuple[dict | None, list[str]]":
+    """``{path: blob id}`` for the dir's regular files, in one read-only batch.
+
+    ``git hash-object --no-filters --stdin-paths`` hashes exactly the bytes on
+    disk, without ``-w``: nothing is written and the index is never consulted.
+    """
+    if not paths:
+        return {}, []
+    unhashable = sorted(path for path in paths if "\n" in path or "\r" in path)
+    if unhashable:
+        return None, [f"cannot compare {unhashable[0]!r}: the path contains a newline, "
+                      "which git hash-object --stdin-paths cannot carry"]
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "hash-object",
+           "--no-filters", "--stdin-paths"]
+    stdin = b"".join(os.fsencode(path) + b"\n" for path in paths)
+    result = subprocess.run(cmd, input=stdin, capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure(f"the content of {len(paths)} file(s)", result)]
+    blobs = [line.decode("ascii", "backslashreplace")
+             for line in result.stdout.splitlines()]
+    if len(blobs) != len(paths):
+        return None, [f"cannot compare the file content: git hash-object returned "
+                      f"{len(blobs)} blob id(s) for {len(paths)} file(s)"]
+    return dict(zip(paths, blobs)), []
+
+
+def _tag_blob_contents(version_dir: Path,
+                       blob_ids: "list[str]") -> "tuple[dict | None, list[str]]":
+    """``{blob id: content bytes}`` for the tag's symlink blobs, in one batch."""
+    if not blob_ids:
+        return {}, []
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "cat-file", "--batch"]
+    result = subprocess.run(cmd, input="\n".join(blob_ids).encode("ascii") + b"\n",
+                            capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure("the symlink targets in the tag", result)]
+    contents: "dict[str, bytes]" = {}
+    rest = result.stdout
+    for blob in blob_ids:
+        header, separator, rest = rest.partition(b"\n")
+        fields = header.split()
+        size = _blob_size(fields)
+        if not separator or size is None:
+            return None, [f"cannot read tag blob {blob}: git cat-file answered "
+                          f"{header.decode('utf-8', 'backslashreplace') or 'nothing'}"]
+        contents[blob] = rest[:size]
+        rest = rest[size + 1:]
+    return contents, []
+
+
+def _blob_size(fields: "list[bytes]") -> "int | None":
+    """The byte size from a ``git cat-file --batch`` header, or None if unusable."""
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None
+    try:
+        return int(fields[2])
+    except ValueError:
+        return None
+
+
+def _compare_entries(tag_entries: dict, disk_entries: dict, blobs: dict,
+                     contents: dict) -> "list[str]":
+    """One problem line per differing path, in path order.
+
+    ``changed`` is a different blob, ``missing`` is a tag file absent on disk,
+    ``extra`` is a disk file absent from the tag (ignored or not), ``mode`` is a
+    different executable bit. Only the two generated files may be missing/extra.
+    """
+    problems: "list[str]" = []
+    for path in sorted(set(tag_entries) | set(disk_entries)):
+        entry, disk = tag_entries.get(path), disk_entries.get(path)
+        if disk is not None and disk[0] == "special":
+            problems.append(f"unsupported {path}: not a regular file or a symlink")
+            continue
+        if entry is None:
+            if path != VERIFY_ALLOWED_UNTRACKED:
+                problems.append(f"extra {path}")
+            continue
+        mode, kind, blob = entry
+        if mode == _GITLINK_MODE or kind == "commit":
+            problems.append(f"submodule {path}: not verified")
+            continue
+        if mode not in _REGULAR_MODES and mode != _SYMLINK_MODE:
+            problems.append(f"unsupported {path}: the tag's mode {mode}")
+            continue
+        if disk is None:
+            if path != VERIFY_ALLOWED_DELETED:
+                problems.append(f"missing {path}")
+            continue
+        if mode == _SYMLINK_MODE:
+            if disk[0] != "link" or contents.get(blob) != disk[1]:
+                problems.append(f"changed {path}")
+            continue
+        if disk[0] != "file":
+            problems.append(f"changed {path}")
+            continue
+        if blobs.get(path) != blob:
+            problems.append(f"changed {path}")
+        if disk[1] != (mode == "100755"):
+            problems.append(f"mode {path}")
+    return problems
+
+
 def _verify_differences(version_dir: Path, tag: str, tag_commit: str) -> "list[str]":
     """Every difference between ``version_dir`` and its tag, one line each.
 
-    HEAD must be the tag's commit and the tree clean against it except the two
-    generated files; ``--no-optional-locks`` leaves a read-only index alone.
+    The tag's tree is the reference and the files on disk are the evidence: each
+    regular file is compared by blob id (one ``git hash-object`` batch that never
+    writes), each symlink by its target bytes, each executable bit against the
+    tag's mode. Nothing reads the index, ``.gitignore`` or a skip-worktree flag,
+    so a flagged file cannot hide a change and an ignored extra file is still
+    named. HEAD must be the tag's commit; a git read that fails is a problem line
+    and never a pass. ``--no-optional-locks`` keeps the whole check read-only.
     """
     head = _rev_parse(version_dir, "HEAD")
     problems: "list[str]" = []
     if head != tag_commit:
         problems.append(f"HEAD {head or '?'} is not tag '{tag}' ({tag_commit})")
-    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "status",
-           "--porcelain", "--untracked-files=all"]
-    status = subprocess.run(cmd, capture_output=True, text=True)
-    if status.returncode != 0:
-        reason = status.stderr.strip() or f"git status exit {status.returncode}"
-        problems.append(f"cannot read the working tree: {reason}")
+    tag_entries, tag_problems = _tag_tree_entries(version_dir, tag_commit)
+    problems.extend(tag_problems)
+    disk_entries, disk_problems = _disk_entries(version_dir)
+    problems.extend(disk_problems)
+    if tag_entries is None or disk_entries is None:
         return problems
-    for line in status.stdout.splitlines():
-        if not line.strip():
-            continue
-        code, path = line[:2], line[3:]
-        generated = (code == "??" and path == VERIFY_ALLOWED_UNTRACKED) or (
-            code in _VERIFY_ALLOWED_DELETE_CODES and path == VERIFY_ALLOWED_DELETED)
-        if not generated:
-            problems.append(f"{code.strip()} {path}")
+    files = sorted(path for path, entry in disk_entries.items() if entry[0] == "file")
+    blobs, blob_problems = _disk_blobs(version_dir, files)
+    problems.extend(blob_problems)
+    if blobs is None:
+        return problems
+    link_blobs = sorted({entry[2] for path, entry in tag_entries.items()
+                         if entry[0] == _SYMLINK_MODE
+                         and disk_entries.get(path, ("",))[0] == "link"})
+    contents, content_problems = _tag_blob_contents(version_dir, link_blobs)
+    problems.extend(content_problems)
+    if contents is None:
+        return problems
+    problems.extend(_compare_entries(tag_entries, disk_entries, blobs, contents))
     return problems
 
 
@@ -390,9 +581,10 @@ def vnx_release_verify(args) -> int:
         print(f"FAIL: {version_dir} is not the tree of tag '{tag}' ({tag_commit[:12]}):\n"
               f"{report}", file=sys.stderr)
         return 1
-    print(f"OK: {version_dir} matches tag '{tag}' ({tag_commit[:12]}): every tracked file "
-          f"is byte-identical; only the generated {VERIFY_ALLOWED_DELETED} (stripped) and "
-          f"{VERIFY_ALLOWED_UNTRACKED} (written) differ.")
+    print(f"OK: {version_dir} matches tag '{tag}' ({tag_commit[:12]}): every file in the "
+          f"tag is byte-identical on disk, and no extra file exists there — apart from the "
+          f"generated {VERIFY_ALLOWED_DELETED} (stripped) and {VERIFY_ALLOWED_UNTRACKED} "
+          "(written).")
     return 0
 
 
