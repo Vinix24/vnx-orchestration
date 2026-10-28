@@ -104,6 +104,32 @@ def _preflight(monkeypatch, status: str) -> None:
                         classmethod(lambda cls, key: LLMOutcome(status)))
 
 
+def _session_jsonl(tmp_path: Path) -> Path:
+    path = tmp_path / "session.jsonl"
+    path.write_text('{"type":"user","message":{"role":"user","content":"test"}}\n',
+                    encoding="utf-8")
+    return path
+
+
+def _analyze_one_session(store, tmp_path, monkeypatch, project: str | None) -> dict:
+    """Drive the real analyzer (deepseek-harness strategy) for one session of ``project``.
+
+    The session's origin carries ``project``; the provider switch and everything else
+    are the production code. ``store`` pins ``VNX_PROJECT_ID`` in its caller's test.
+    """
+    _preflight(monkeypatch, "ok")
+    monkeypatch.setattr(da_module, "LLM_STRATEGY", "deepseek-harness")
+    monkeypatch.setattr(DeepAnalyzer, "_routes_restricted", lambda self, *_a, **_kw: False)
+    metrics = da_module.SessionMetrics(session_id=f"{project or 'unprojected'}-session",
+                                       total_output_tokens=5000, tool_calls_total=20)
+    result = DeepAnalyzer().analyze_session(
+        _session_jsonl(tmp_path), metrics, da_module.SessionFlags(),
+        origin=SimpleNamespace(project_id=project),
+    )
+    assert result is not None and "suggestions" in result
+    return result
+
+
 def test_analyzer_claude_lane_books_a_subscription_line(store):
     outcome = DeepAnalyzer._try_claude_max("analyse this")
     assert outcome.status == "ok" and json.loads(outcome.text) == json.loads(RESULT)
@@ -162,6 +188,38 @@ def test_analyzer_timeout_without_a_transcript_books_unknown_never_zero(store, m
     assert record["usage_completeness"] == "unknown:no_transcript"
     assert record["cost_source"] == "unavailable:no_transcript"
     assert record["tokens"] == {name: None for name in cost_ledger.TOKEN_FIELDS}
+
+
+def test_analyzer_books_the_sessions_project_not_the_process_project(store, monkeypatch, tmp_path):
+    """A session of ``other-proj`` processed by a ``vnx-dev`` process books on ``other-proj``.
+
+    Regression for the codex finding on f3ca3bc4: ``_book_analysis_call`` dropped the
+    session's project, so ``record_classifier_run`` fell back to ``VNX_PROJECT_ID`` and
+    another project's metered usage was attributed to this process's project for good.
+    """
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    _analyze_one_session(store, tmp_path, monkeypatch, "other-proj")
+    record, = _records(store)
+    assert record["provider"] == "deepseek-harness"
+    assert record["project_id"] == "other-proj"
+    assert cost_ledger.split_run_id(record["run_id"])[0] == "other-proj"
+
+
+def test_session_without_a_project_books_no_line_and_warns_once(store, monkeypatch, tmp_path):
+    """A session that names no project is not filed under ``VNX_PROJECT_ID``.
+
+    The ledger has no unknown-project value (ADR-043: ``project_id`` is the run_id's
+    project part; ADR-007 makes it the tenant), so the call refuses to book and says so
+    with one WARNING instead of inventing a project.
+    """
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+    logs = []
+    monkeypatch.setattr(da_module, "log", lambda level, message: logs.append((level, message)))
+    _analyze_one_session(store, tmp_path, monkeypatch, None)
+    assert _records(store) == []
+    warnings = [message for level, message in logs if level == "WARNING"]
+    assert len(warnings) == 1
+    assert "names no project" in warnings[0] and "not booked" in warnings[0]
 
 
 def test_dream_kimi_call_books_one_intelligence_line(store, monkeypatch):

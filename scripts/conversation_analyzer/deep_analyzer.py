@@ -1,11 +1,11 @@
 """Phase 3: LLM-powered deep analysis of flagged sessions.
 
 Every call the ``claude`` and ``deepseek-harness`` lanes make books one cost-ledger
-line (K4b, ADR-043): role ``intelligence``, producer ``conversation_analyzer``, from
-the transcript of the ``--session-id`` the call was started with. The ``ollama`` lane
-books nothing — a local model is neither metered nor subscribed (see
-``harness_run_cost``). A ledger refusal is never the analysis's to fail: the outcome
-stands and the refusal is logged.
+line (K4b, ADR-043): role ``intelligence``, producer ``conversation_analyzer``, on the
+project of the session being analysed, from the transcript of the ``--session-id`` the
+call was started with. The ``ollama`` lane books nothing — a local model is neither
+metered nor subscribed (see ``harness_run_cost``). A ledger refusal is never the
+analysis's to fail: the outcome stands and the refusal is logged.
 """
 
 import json
@@ -117,16 +117,32 @@ def _reported_model(payload: Optional[dict], default: str) -> str:
 
 def _book_analysis_call(
     *, provider: str, model: str, session_id: str, started: datetime,
-    spawn_refused: Optional[str] = None,
+    project_id: Optional[str] = None, spawn_refused: Optional[str] = None,
 ) -> None:
     """Book one analyzer call on the cost ledger (K4b), fail-open.
+
+    ``project_id`` is the project of the session being analysed, and it reaches
+    ``record_classifier_run(..., project_id=...)`` so a session of another project is
+    never attributed to this process's ``VNX_PROJECT_ID``. ``provider_switch.SCOPE_GLOBAL``
+    is the analyzer's value for "the session names no project"; the ledger has no unknown
+    project (ADR-043: ``project_id`` is the run_id's project part, ADR-007 makes it the
+    tenant, and ``cost_ledger._check_identity`` refuses an empty one — ``UNKNOWN_GROUP``
+    is only a read-side grouping label), so such a call is not booked at all rather than
+    filed under a project that is not its own. One WARNING names the session. ``None`` is
+    a caller without a session context (a direct lane call): the booker's own project
+    resolution applies, as before.
 
     The booker logs its own WARNING and returns ``(None, reason)`` on a refusal:
     a ledger that cannot write is never the analysis's to fail.
     """
+    if project_id == provider_switch.SCOPE_GLOBAL:
+        log("WARNING", f"Analyzer call {session_id} not booked: the session names no project, "
+                       f"and the ledger has no unknown-project field (not attributing it to "
+                       f"VNX_PROJECT_ID)")
+        return
     harness_run_cost.record_classifier_run(
         provider=provider, model=model, session_id=session_id, started=started,
-        ended=datetime.now(timezone.utc), spawn_refused=spawn_refused,
+        ended=datetime.now(timezone.utc), project_id=project_id, spawn_refused=spawn_refused,
         producer=harness_run_cost.CONVERSATION_ANALYZER_PRODUCER,
     )
 
@@ -369,7 +385,8 @@ Respond with valid JSON:
     def _switch_project(origin: Optional[content_class.Origin]) -> str:
         """Project whose provider switch decides: the session's own, else the global section.
 
-        Never the project of this process.
+        Never the project of this process. The same value names the project the
+        session's ledger line is booked on (``SCOPE_GLOBAL``: none — not booked).
         """
         if origin is not None and origin.project_id:
             return origin.project_id
@@ -382,12 +399,12 @@ Respond with valid JSON:
         self.last_defer_reason = None
         summary = self._build_session_summary(jsonl_path, metrics, flags)
         prompt = f"{self.SYSTEM_PROMPT}\n\n## Session Summary\n\n{summary}"
+        project_id = self._switch_project(origin)
 
         if self._routes_restricted(jsonl_path, summary, origin):
-            return self._analyze_restricted(prompt)
+            return self._analyze_restricted(prompt, project_id)
 
         self.deep_open_sessions += 1
-        project_id = self._switch_project(origin)
         result_text, lane, any_attempted, last_status, last_cause, disabled_lanes = \
             self._run_lanes(prompt, project_id)
 
@@ -414,6 +431,8 @@ Respond with valid JSON:
     def _run_lanes(self, prompt: str, project_id: str):
         """Try the lanes the strategy allows, in order, until one yields text.
 
+        ``project_id`` is the session's project (``_switch_project``): it scopes the
+        provider switch and names the project each call's ledger line is booked on.
         Returns ``(result_text, lane, any_attempted, last_status, last_cause,
         disabled_lanes)``. ``any_attempted`` is derived from each candidate's own
         LLMOutcome.attempted, not from which branch was merely tried: a config gap
@@ -447,10 +466,10 @@ Respond with valid JSON:
         # session backlog exceeds the threshold. "claude-only" bypasses
         # the guard: the operator explicitly opted in to metered spend.
         elif LLM_STRATEGY == "claude-only":
-            absorb(self._try_claude_max(prompt), "claude-max")
+            absorb(self._try_claude_max(prompt, project_id=project_id), "claude-max")
         elif LLM_STRATEGY == "auto":
             if self._session_backlog <= AUTO_CLAUSE_MAX_SESSIONS:
-                absorb(self._try_claude_max(prompt), "claude-max")
+                absorb(self._try_claude_max(prompt, project_id=project_id), "claude-max")
             elif self._session_backlog > 0:
                 log("WARNING",
                     f"auto: skipping claude path — {self._session_backlog} "
@@ -495,9 +514,12 @@ Respond with valid JSON:
         log("WARNING", f"Restricted session deferred to the next night ({reason}); "
                        f"no other provider is tried")
 
-    def _analyze_restricted(self, prompt: str) -> Optional[dict]:
+    def _analyze_restricted(self, prompt: str,
+                            project_id: Optional[str] = None) -> Optional[dict]:
         """Deep analysis of restricted content: Claude only, capped, deferred instead of lost.
 
+        ``project_id`` is the project of the session being analysed, forwarded to the
+        booking helper so the call's line is filed on it (``SCOPE_GLOBAL``: not booked).
         Never deepseek, glm, kimi or ollama. Over the cap, or with Claude unavailable before a call
         (quota, auth, timeout, missing CLI), the session is deferred: not analysed, not an
         attempt, not a failure. A call that ran and returned empty output is an attempt and a
@@ -514,7 +536,7 @@ Respond with valid JSON:
 
         self.restricted_claude_calls += 1
         try:
-            outcome = self._try_claude_max(prompt)
+            outcome = self._try_claude_max(prompt, project_id=project_id)
         except Exception as exc:
             self._restricted_claude_down = True
             self._defer_restricted(f"claude raised {type(exc).__name__}")
@@ -705,9 +727,12 @@ Respond with valid JSON:
         return "\n".join(lines)
 
     @staticmethod
-    def _try_claude_max(prompt: str) -> LLMOutcome:
+    def _try_claude_max(prompt: str, project_id: Optional[str] = None) -> LLMOutcome:
         """Run the subscription lane under a fresh session id and book the call (K4b).
 
+        ``project_id`` is the project of the session being analysed and lands on the
+        ledger line (``None``: no session context, the booker's own resolution applies;
+        ``SCOPE_GLOBAL``: the session names no project, the call is not booked).
         ``spawn_refused`` names a child that never started (only a missing CLI
         here); a timeout or a non-zero exit after the spawn is a normal run
         whose transcript decides the tokens.
@@ -744,7 +769,8 @@ Respond with valid JSON:
 
         _book_analysis_call(
             provider="claude", model=_reported_model(payload, CLAUDE_MAX_MODEL),
-            session_id=session_id, started=started, spawn_refused=spawn_refused,
+            session_id=session_id, started=started, project_id=project_id,
+            spawn_refused=spawn_refused,
         )
         return outcome
 
@@ -853,6 +879,11 @@ Respond with valid JSON:
         Layer 1 of the provider switch: raises ``provider_switch.ProviderDisabledError`` before
         any balance check or launch when the deepseek family is switched off for ``project_id``.
 
+        ``project_id`` is also the project the call's ledger line is booked on: the
+        session's own, never this process's ``VNX_PROJECT_ID``. ``SCOPE_GLOBAL`` (the
+        session names no project) is not booked at all; ``None`` (a direct call with no
+        session context) keeps the booker's own resolution.
+
         The call books one cost-ledger line (K4b) whatever its outcome: a preflight
         that refused before the spawn is ``spawn_refused=<status>`` (five zeros), a
         timeout or a failed child is a run whose transcript decides the tokens.
@@ -898,7 +929,8 @@ Respond with valid JSON:
             _book_analysis_call(
                 provider="deepseek-harness",
                 model=harness_run_cost.lane_model("deepseek-harness", DEEPSEEK_HARNESS_MODEL),
-                session_id=session_id, started=started, spawn_refused=spawn_refused,
+                session_id=session_id, started=started, project_id=project_id,
+                spawn_refused=spawn_refused,
             )
 
     @classmethod

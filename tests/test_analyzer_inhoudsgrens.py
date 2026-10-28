@@ -153,7 +153,10 @@ class Spies:
     """The three provider lanes, patched on DeepAnalyzer. Prompts show which session each saw."""
 
     def __init__(self, claude=None, deepseek=None):
-        self.claude = MagicMock(side_effect=claude or (lambda prompt: _ok()))
+        # ``_try_claude_max`` now takes the session's project as a keyword (K4b r2);
+        # the spies stay one-argument callables and drop it.
+        claude_fn = claude or (lambda prompt: _ok())
+        self.claude = MagicMock(side_effect=lambda prompt, **_kwargs: claude_fn(prompt))
         self.deepseek = MagicMock(side_effect=deepseek or (lambda prompt, **_: _ok()))
         self.ollama = MagicMock(return_value=LLMOutcome("config_skip"))
 

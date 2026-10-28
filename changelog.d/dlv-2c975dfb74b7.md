@@ -13,5 +13,10 @@
   zero. dream's kimi stream carries no usage accounting, so it books `unknown:kimi_cli_no_usage`.
 - Cost ledger (K4b): ollama is not booked. A local model is neither `metered` nor `subscription`, and a
   third billing class is out of scope here; the analyzer's local lane writes no line.
+- Cost ledger (K4b): the analyzer's line follows the session, not the process. `_book_analysis_call`
+  forwards the project of the session being analysed to `record_classifier_run`, so a session of
+  another project is never attributed to this process's `VNX_PROJECT_ID`/`vnx-dev`. A session that
+  names no project is not booked at all — the ledger has no unknown-project field under ADR-007 —
+  and one WARNING names it.
 - Cost ledger (K4b): a refused ledger write never changes the analysis or the consolidation result —
   the booker logs its WARNING and the caller continues with the outcome it already has.
