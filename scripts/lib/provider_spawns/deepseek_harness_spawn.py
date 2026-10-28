@@ -162,16 +162,21 @@ def build_harness_argv(
     output_format: str,
     print_flags: Optional[List[str]] = None,
     cwd: Optional[Any] = None,
+    session_id: Optional[str] = None,
 ) -> List[str]:
     """Complete ``claude -p`` argv for a direct call against the DeepSeek endpoint.
 
     The single place where a caller that runs ``subprocess.run`` itself (the analyzer)
     gets the same model flag and the same ``--bare`` / MCP-off tail as
-    ``spawn_deepseek_harness``, so the two launches cannot drift apart.
+    ``spawn_deepseek_harness``, so the two launches cannot drift apart. A caller that
+    books a cost-ledger line passes the session id it generated, so the transcript
+    of that call is findable under exactly that id (K4b); the spawn itself learns
+    the id from the CLI's own report.
     """
     return [
         claude_bin, "-p", "--output-format", output_format,
         *(print_flags or []),
+        *(["--session-id", session_id] if session_id else []),
         "--model", model,
         *build_harness_cli_args(cwd),
     ]

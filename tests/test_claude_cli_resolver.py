@@ -43,6 +43,12 @@ def launchd_env(tmp_path):
         "HOME": str(home),
         "PATH": LAUNCHD_PATH.format(repo=str(tmp_path / "repo")),
         "DEEPSEEK_API_KEY": "test-value-not-a-real-key",
+        # K4b: every analyzer call books a ledger line, so the store must be pinned to tmp —
+        # without it the ledger resolves under the fake HOME and the test-isolation guard
+        # refuses the write.
+        "VNX_DATA_DIR": str(tmp_path / "data"),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_STATE_DIR": str(tmp_path / "data" / "state"),
     }
     with patch.dict(os.environ, env, clear=True):
         yield home

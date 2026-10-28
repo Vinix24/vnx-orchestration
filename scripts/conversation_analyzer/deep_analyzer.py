@@ -1,23 +1,34 @@
-"""Phase 3: LLM-powered deep analysis of flagged sessions."""
+"""Phase 3: LLM-powered deep analysis of flagged sessions.
+
+Every call the ``claude`` and ``deepseek-harness`` lanes make books one cost-ledger
+line (K4b, ADR-043): role ``intelligence``, producer ``conversation_analyzer``, from
+the transcript of the ``--session-id`` the call was started with. The ``ollama`` lane
+books nothing — a local model is neither metered nor subscribed (see
+``harness_run_cost``). A ledger refusal is never the analysis's to fail: the outcome
+stands and the refusal is logged.
+"""
 
 import json
 import os
 import re
 import subprocess
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from .models import (
     SessionMetrics, SessionFlags,
     LLM_STRATEGY, OLLAMA_MODEL, DEEPSEEK_HARNESS_MODEL, DEEPSEEK_MIN_BALANCE_USD,
-    DEEPSEEK_MIN_BALANCE_CNY,
+    DEEPSEEK_MIN_BALANCE_CNY, CLAUDE_MAX_MODEL,
     AUTO_CLAUSE_MAX_SESSIONS,
     DEEP_THRESHOLD_TOKENS, DEEP_THRESHOLD_TOOLS,
     restricted_claude_cap,
     log,
 )
 import content_class
+import harness_run_cost
 import provider_switch
 from .detector import HeuristicDetector
 from claude_cli import resolve_claude_cli
@@ -75,6 +86,51 @@ def describe_cli_failure(returncode: int, stdout: str, stderr: str) -> "tuple[st
     return "; ".join(parts), cause
 
 
+def _json_payload(stdout: str) -> Optional[dict]:
+    """The child's stdout as a JSON object, or ``None`` when it is not one."""
+    try:
+        payload = json.loads(stdout or "")
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _reported_model(payload: Optional[dict], default: str) -> str:
+    """The model the child's JSON reports — a top-level ``model``, else a ``modelUsage`` key.
+
+    ``claude -p --output-format json`` names the model it ran in ``modelUsage``; a
+    child that failed before answering names none, and the lane's configured
+    default (``CLAUDE_MAX_MODEL``) stands in. Nothing is guessed beyond that.
+    """
+    if not isinstance(payload, dict):
+        return default
+    named = payload.get("model")
+    if isinstance(named, str) and named.strip():
+        return named.strip()
+    usage = payload.get("modelUsage")
+    if isinstance(usage, dict):
+        keys = sorted(key.strip() for key in usage if isinstance(key, str) and key.strip())
+        if keys:
+            return keys[0]
+    return default
+
+
+def _book_analysis_call(
+    *, provider: str, model: str, session_id: str, started: datetime,
+    spawn_refused: Optional[str] = None,
+) -> None:
+    """Book one analyzer call on the cost ledger (K4b), fail-open.
+
+    The booker logs its own WARNING and returns ``(None, reason)`` on a refusal:
+    a ledger that cannot write is never the analysis's to fail.
+    """
+    harness_run_cost.record_classifier_run(
+        provider=provider, model=model, session_id=session_id, started=started,
+        ended=datetime.now(timezone.utc), spawn_refused=spawn_refused,
+        producer=harness_run_cost.CONVERSATION_ANALYZER_PRODUCER,
+    )
+
+
 @dataclass(frozen=True)
 class LLMOutcome:
     """Result of one LLM-invocation attempt, with the failure mode explicit.
@@ -125,6 +181,26 @@ class LLMOutcome:
     @property
     def attempted(self) -> bool:
         return self.status not in ("config_skip", STATUS_SWITCHED_OFF)
+
+
+def _child_outcome(result, label: str) -> "tuple[LLMOutcome, Optional[dict]]":
+    """Read a finished claude child: its parsed JSON and the outcome it names.
+
+    One reader for both claude lanes, so they never drift on what a non-zero
+    exit, an unparsable stdout or an empty answer means. ``label`` names the
+    lane in the ERROR line (``Claude CLI`` / ``DeepSeek harness``).
+    """
+    payload = _json_payload(result.stdout)
+    if result.returncode != 0:
+        detail, cause = describe_cli_failure(result.returncode, result.stdout, result.stderr)
+        log("ERROR", f"{label} failed (rc={result.returncode}): {detail}")
+        return LLMOutcome("cli_failed", returncode=result.returncode,
+                          stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
+                          cause=cause), payload
+    text = payload.get("result", result.stdout) if payload is not None else result.stdout
+    if not (text or "").strip():
+        return LLMOutcome("empty", text=result.stdout), payload
+    return LLMOutcome("ok", text=text), payload
 
 
 class DeepAnalyzer:
@@ -630,10 +706,19 @@ Respond with valid JSON:
 
     @staticmethod
     def _try_claude_max(prompt: str) -> LLMOutcome:
+        """Run the subscription lane under a fresh session id and book the call (K4b).
+
+        ``spawn_refused`` names a child that never started (only a missing CLI
+        here); a timeout or a non-zero exit after the spawn is a normal run
+        whose transcript decides the tokens.
+        """
         claude_bin = resolve_claude_cli() or "claude"
+        session_id = str(uuid.uuid4())
+        started = datetime.now(timezone.utc)
         try:
             result = subprocess.run(
-                [claude_bin, "-p", "--output-format", "json", "--max-turns", "1"],
+                [claude_bin, "-p", "--output-format", "json", "--max-turns", "1",
+                 "--session-id", session_id],
                 input=prompt,
                 capture_output=True,
                 text=True,
@@ -644,32 +729,24 @@ Respond with valid JSON:
             # profile, so this is a distinct failure from a binary that runs
             # and then errors out (OI-1258).
             log("ERROR", "Claude CLI not found on PATH or in the native install locations")
-            return LLMOutcome("missing_cli")
+            outcome, payload, spawn_refused = LLMOutcome("missing_cli"), None, "missing_cli"
         except subprocess.TimeoutExpired:
             log("ERROR", "Claude CLI timed out after 90s")
-            return LLMOutcome("timeout")
+            outcome, payload, spawn_refused = LLMOutcome("timeout"), None, None
         except Exception as e:
             log("ERROR", f"Claude CLI error: {e}")
-            return LLMOutcome("error", stderr=str(e))
+            outcome, payload, spawn_refused = LLMOutcome("error", stderr=str(e)), None, None
+        else:
+            outcome, payload = _child_outcome(result, "Claude CLI")
+            if outcome.status == "empty":
+                log("ERROR", "Claude CLI succeeded (rc=0) but produced no usable text")
+            spawn_refused = None
 
-        if result.returncode != 0:
-            detail, cause = describe_cli_failure(result.returncode, result.stdout, result.stderr)
-            log("ERROR", f"Claude CLI failed (rc={result.returncode}): {detail}")
-            return LLMOutcome("cli_failed", returncode=result.returncode,
-                              stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
-                              cause=cause)
-
-        try:
-            output = json.loads(result.stdout)
-            text = output.get("result", result.stdout)
-        except json.JSONDecodeError:
-            text = result.stdout
-
-        if not (text or "").strip():
-            log("ERROR", "Claude CLI succeeded (rc=0) but produced no usable text")
-            return LLMOutcome("empty", text=result.stdout)
-
-        return LLMOutcome("ok", text=text)
+        _book_analysis_call(
+            provider="claude", model=_reported_model(payload, CLAUDE_MAX_MODEL),
+            session_id=session_id, started=started, spawn_refused=spawn_refused,
+        )
+        return outcome
 
     @staticmethod
     def _fetch_deepseek_balance(api_key: str) -> dict:
@@ -775,57 +852,67 @@ Respond with valid JSON:
 
         Layer 1 of the provider switch: raises ``provider_switch.ProviderDisabledError`` before
         any balance check or launch when the deepseek family is switched off for ``project_id``.
+
+        The call books one cost-ledger line (K4b) whatever its outcome: a preflight
+        that refused before the spawn is ``spawn_refused=<status>`` (five zeros), a
+        timeout or a failed child is a run whose transcript decides the tokens.
         """
         provider_switch.require("deepseek-harness", consumer="deep_analyzer.deepseek_harness",
                                 project_id=project_id)
         api_key = os.environ.get(DEEPSEEK_API_KEY_ENV, "")
-        preflight = cls._deepseek_preflight(api_key)
-        if preflight.status != "ok":
-            return preflight
-
-        claude_bin = resolve_claude_cli() or "claude"
-        cli_args = build_harness_argv(claude_bin, DEEPSEEK_HARNESS_MODEL,
-                                      output_format="json", print_flags=["--max-turns", "1"])
-
+        session_id = str(uuid.uuid4())
+        started = datetime.now(timezone.utc)
+        spawn_refused: Optional[str] = None
         try:
-            child_env = build_harness_child_env(api_key)
-        except HarnessConfigDirError as exc:
-            log("ERROR", f"DeepSeek harness config dir unsafe, not spawning: {exc}")
-            return LLMOutcome("error", stderr=str(exc)[:200])
-
-        try:
-            result = subprocess.run(
-                cli_args,
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                env=child_env,
-            )
-            if result.returncode != 0:
-                detail, cause = describe_cli_failure(
-                    result.returncode, result.stdout, result.stderr)
-                log("ERROR", f"DeepSeek harness failed (rc={result.returncode}): {detail}")
-                return LLMOutcome("cli_failed", returncode=result.returncode,
-                                  stderr=(result.stderr or "").strip()[:CLI_STDERR_LOG_LIMIT],
-                                  cause=cause)
+            refused = cls._deepseek_spawn_refusal(api_key)
+            if refused is not None:
+                spawn_refused = refused[2]
+                return refused[0]
+            # The launch stays in this method's body on purpose: a helper that opened the
+            # process would be a launch function the provider-switch census cannot see.
+            claude_bin = resolve_claude_cli() or "claude"
+            cli_args = build_harness_argv(
+                claude_bin, DEEPSEEK_HARNESS_MODEL, output_format="json",
+                print_flags=["--max-turns", "1"], session_id=session_id)
             try:
-                output = json.loads(result.stdout)
-                text = output.get("result", result.stdout)
-            except json.JSONDecodeError:
-                text = result.stdout
-            if not (text or "").strip():
-                return LLMOutcome("empty", text=result.stdout)
-            return LLMOutcome("ok", text=text)
-        except FileNotFoundError:
-            log("ERROR", "Claude CLI not found for deepseek-harness")
-            return LLMOutcome("missing_cli")
-        except subprocess.TimeoutExpired:
-            log("ERROR", "DeepSeek harness timed out (120s)")
-            return LLMOutcome("timeout")
-        except Exception as e:
-            log("ERROR", f"DeepSeek harness error: {e}")
-            return LLMOutcome("error", stderr=str(e))
+                child_env = build_harness_child_env(api_key)
+            except HarnessConfigDirError as exc:
+                log("ERROR", f"DeepSeek harness config dir unsafe, not spawning: {exc}")
+                spawn_refused = "harness_config_dir"
+                return LLMOutcome("error", stderr=str(exc)[:200])
+            try:
+                result = subprocess.run(cli_args, input=prompt, capture_output=True,
+                                        text=True, timeout=120, env=child_env)
+            except FileNotFoundError:
+                log("ERROR", "Claude CLI not found for deepseek-harness")
+                spawn_refused = "missing_cli"
+                return LLMOutcome("missing_cli")
+            except subprocess.TimeoutExpired:
+                log("ERROR", "DeepSeek harness timed out (120s)")
+                return LLMOutcome("timeout")
+            except Exception as e:
+                log("ERROR", f"DeepSeek harness error: {e}")
+                return LLMOutcome("error", stderr=str(e))
+            return _child_outcome(result, "DeepSeek harness")[0]
+        finally:
+            _book_analysis_call(
+                provider="deepseek-harness",
+                model=harness_run_cost.lane_model("deepseek-harness", DEEPSEEK_HARNESS_MODEL),
+                session_id=session_id, started=started, spawn_refused=spawn_refused,
+            )
+
+    @classmethod
+    def _deepseek_spawn_refusal(cls, api_key: str) -> "Optional[tuple[LLMOutcome, None, str]]":
+        """The pre-spawn refusal that books ``spawn_refused``, or ``None`` when the call may start.
+
+        The own key and the ``/user/balance`` are checked once per process. A
+        refusal here starts no subprocess, so its ledger line carries five zeros
+        and the status that refused it, never unknown tokens.
+        """
+        preflight = cls._deepseek_preflight(api_key)
+        if preflight.status == "ok":
+            return None
+        return preflight, None, preflight.status
 
     @classmethod
     def _try_ollama(cls, prompt: str, project_id: Optional[str] = None) -> LLMOutcome:

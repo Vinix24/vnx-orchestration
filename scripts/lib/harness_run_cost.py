@@ -41,6 +41,15 @@ have (ADR-005, ADR-043). :func:`record_classifier_run` is the one caller that
 catches them, because a classifier call returns its classification whatever the
 ledger did, with no amount and the reason in the result.
 
+K4b adds the rest of the intelligence calls: the conversation analyzer's ``claude``
+and ``deepseek-harness`` lanes book through :func:`record_classifier_run` with producer
+``conversation_analyzer``, and the dream cycle's kimi call books through the K2b-a kimi
+booker (:func:`record_kimi_run`) with producer ``dream`` — both as ``intelligence``.
+The analyzer's ``ollama`` lane books nothing and never will: a local model is neither
+``metered`` nor ``subscription`` (``cost_ledger.BILLINGS``), so booking it would need a
+third billing class, a schema change outside K4b. Its tokens cost no money and no line
+claims otherwise.
+
 K2b-a adds the two lanes that report their own usage instead of leaving a claude
 transcript: ``codex`` and ``kimi``, as BUILDER. They book through
 :func:`record_codex_run` / :func:`record_kimi_run` (one function per provider
@@ -84,6 +93,9 @@ BUILDER_ROLE = "builder"
 # A classifier call on a harness lane (K4b-1): role ``intelligence``, no dispatch, the session id as ref.
 INTELLIGENCE_ROLE = "intelligence"
 CLASSIFIER_PRODUCER = "classifier"
+# K4b: the producers of the other intelligence calls (the analyzer's lanes, the dream cycle's kimi call).
+CONVERSATION_ANALYZER_PRODUCER = "conversation_analyzer"
+DREAM_PRODUCER = "dream"
 
 # The native claude lane runs on the Max subscription (marginal cost 0, list
 # price in api_equivalent_usd); the deepseek and glm harness lanes run on an
@@ -409,14 +421,21 @@ def record_builder_run(
 def record_classifier_run(
     *, provider: str, model: str, session_id: str, started: datetime, ended: datetime,
     project_id: Optional[str] = None, spawn_refused: Optional[str] = None,
+    producer: str = CLASSIFIER_PRODUCER,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Book one classifier call on ``provider`` as an ``intelligence`` run.
+    """Book one intelligence call on ``provider`` — a classifier call by default — fail-open.
 
     ``(record, None)`` when the line landed, in the ledger or its spool, and
     ``(None, reason)`` when the ledger refused the record or could not write it
-    (a WARNING names the session id and the reason). A classifier call always
-    returns its classification, so the ledger's errors never reach it and no
-    amount is invented. The run has no dispatch: the session id is its ref.
+    (a WARNING names the session id and the reason). The caller always returns
+    its own result whatever the ledger did, and no amount is invented. The run
+    has no dispatch: the session id is its ref. ``producer`` names who made the
+    call in the ``run_id`` — ``classifier`` (K4b-1) or the analyzer's
+    ``conversation_analyzer`` (K4b).
+
+    ``OSError`` is caught beside the ledger's own errors for the same reason
+    :func:`_book_cli_run` catches it: ``record_next_attempt`` propagates a store
+    it cannot read unchanged, and an escaping one would cost the call its result.
     """
     run = BuilderRun(
         provider=provider, model=model, started=started, ended=ended,
@@ -425,11 +444,13 @@ def record_classifier_run(
     try:
         record = record_builder_run(
             run, project_id=project_id or ledger_project_id(None),
-            producer=CLASSIFIER_PRODUCER, dispatch_id=session_id, role=INTELLIGENCE_ROLE,
+            producer=producer, dispatch_id=session_id, role=INTELLIGENCE_ROLE,
         )
-    except (cost_ledger.CostLedgerRefusal, cost_ledger.CostLedgerWriteError) as exc:
+    except (cost_ledger.CostLedgerRefusal, cost_ledger.CostLedgerWriteError, OSError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
-        logger.warning("harness_run_cost: classifier session %s not booked: %s", session_id, reason)
+        logger.warning(
+            "harness_run_cost: %s session %s not booked: %s", producer, session_id, reason,
+        )
         return None, reason
     return record, None
 
@@ -752,7 +773,8 @@ def receipt_cost(
 
 __all__ = [
     "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER", "CLI_BILLING", "CliRun",
-    "CODEX_PROVIDER", "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
+    "CODEX_PROVIDER", "CONVERSATION_ANALYZER_PRODUCER", "DREAM_PRODUCER",
+    "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
     "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER",
     "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE", "book_cli_builder", "books_cli_run", "cli_run",
     "lane_model", "ledger_project_id", "price_segments",

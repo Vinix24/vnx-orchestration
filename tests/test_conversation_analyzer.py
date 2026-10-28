@@ -58,6 +58,17 @@ with patch.dict(os.environ, {
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _store_pins() -> dict:
+    """The conftest's store-isolation env pins, for tests that clear os.environ.
+
+    K4b: the analyzer books one cost-ledger line per deepseek-harness call, even for a
+    refused spawn. A cleared env loses these pins, the ledger path resolves to the real
+    central store, and the test-isolation guard refuses that write.
+    """
+    return {key: os.environ[key] for key in
+            ("VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR") if key in os.environ}
+
+
 def _create_schema(conn: sqlite3.Connection):
     """Create session_analytics and related tables in memory."""
     conn.executescript("""
@@ -582,7 +593,7 @@ class TestDeepAnalyzerCounter:
                               return_value='test summary'), \
                  patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
                  patch.object(DeepAnalyzer, '_deepseek_preflight_cache', None), \
-                 patch.dict(da_module.os.environ, {}, clear=True):
+                 patch.dict(da_module.os.environ, _store_pins(), clear=True):
                 result = analyzer.analyze_session(jsonl_path, metrics, flags)
         finally:
             os.unlink(jsonl_path)
@@ -652,7 +663,7 @@ class TestDeepAnalyzerCounter:
                               return_value='test summary'), \
                  patch.object(da_module, 'LLM_STRATEGY', 'deepseek-harness'), \
                  patch.object(DeepAnalyzer, '_deepseek_preflight_cache', None), \
-                 patch.dict(da_module.os.environ, {}, clear=True):
+                 patch.dict(da_module.os.environ, _store_pins(), clear=True):
                 analyzer.analyze_session(jsonl_path, metrics, flags)
         finally:
             os.unlink(jsonl_path)
@@ -722,7 +733,7 @@ class TestDeepAnalyzerStrategy:
 
         # The cleared environment keeps the test's own switch file: the provider switch must
         # never fall back to the operator's real file.
-        kept = {"VNX_PROVIDER_SWITCH_FILE": os.environ["VNX_PROVIDER_SWITCH_FILE"]}
+        kept = {"VNX_PROVIDER_SWITCH_FILE": os.environ["VNX_PROVIDER_SWITCH_FILE"], **_store_pins()}
         with patch.dict(da_module.os.environ, kept, clear=True), \
              patch.object(DeepAnalyzer, "_deepseek_preflight_cache", None), \
              patch("subprocess.run") as run:
