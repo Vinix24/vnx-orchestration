@@ -28,6 +28,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+from completion_reading import completion_matches_outcome, is_completion
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
 
@@ -117,7 +118,11 @@ class MemoryConsolidator:
     # ── Extract phase ──────────────────────────────────────────────────────────
 
     def _read_receipts(self, since: datetime) -> List[Dict]:
-        """Read task_complete events from t0_receipts.ndjson since a cutoff."""
+        """Read completion events from t0_receipts.ndjson since a cutoff.
+
+        A completion is any ADR-045 completion type: ``task_complete`` in a
+        legacy ledger, ``dispatch_finished`` in a v3 one (K-2c).
+        """
         results: List[Dict] = []
         if not self.receipts_path.exists():
             return results
@@ -130,7 +135,7 @@ class MemoryConsolidator:
                     record = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if record.get("event_type") != "task_complete":
+                if not is_completion(record):
                     continue
                 ts_raw = record.get("timestamp", "")
                 if ts_raw:
@@ -308,8 +313,9 @@ class MemoryConsolidator:
         """Failure patterns from receipt events."""
         failure_groups: Dict[str, List[str]] = defaultdict(list)
         for receipt in receipts:
-            status = receipt.get("status", "")
-            if status not in ("error", "failure", "failed"):
+            # K-2c: the legacy literals stay this reader's vocabulary; a v3 end
+            # line is judged on its end_state instead.
+            if not completion_matches_outcome(receipt, "failure", ("error", "failure", "failed")):
                 continue
             dispatch_id = receipt.get("dispatch_id", receipt.get("cmd_id", ""))
             # Classify failure by gate or terminal

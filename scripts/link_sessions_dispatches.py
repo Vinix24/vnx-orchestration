@@ -23,6 +23,13 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths, report_findings_migration, or token_harvest: {exc}")
 
+from completion_reading import completion_status, is_v3_end_line  # noqa: E402
+
+# ADR-045 K-2c: the completion types this pass links, both shapes — a start line
+# and a report line never end a dispatch.
+LINKED_COMPLETION_EVENTS = frozenset({"task_complete", "task_failed", "task_timeout",
+                                      "dispatch_finished"})
+
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
 DB_PATH = STATE_DIR / "quality_intelligence.db"
@@ -69,14 +76,18 @@ def link_receipts_to_dispatches(conn: sqlite3.Connection) -> int:
                 continue
 
             event_type = receipt.get("event_type") or receipt.get("event", "")
-            if event_type not in ("task_complete", "task_failed", "task_timeout"):
+            if event_type not in LINKED_COMPLETION_EVENTS:
                 continue
 
             dispatch_id = receipt.get("dispatch_id", "")
             if not dispatch_id:
                 continue
 
+            # A v3 end line's status is its end_state's projection, not the
+            # line's own field (ADR-045 §4); a legacy receipt keeps its value.
             status = receipt.get("status", "unknown")
+            if is_v3_end_line(receipt):
+                status = completion_status(receipt) or "unknown"
             report_path = receipt.get("report_path", "")
             timestamp = receipt.get("timestamp", "")
 

@@ -24,6 +24,8 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from completion_reading import completion_matches_outcome, is_completion  # noqa: E402
+
 _PATHS = ensure_env()
 VNX_ROOT = Path(_PATHS["VNX_HOME"]).expanduser().resolve()
 STATE_DIR = Path(_PATHS["VNX_STATE_DIR"]).expanduser().resolve()
@@ -220,12 +222,15 @@ class RecommendationEngine:
         return metadata
 
     def analyze_task_completion(self, receipt: Dict):
-        """Analyze a task completion and generate recommendations"""
-        if receipt.get('event_type') != 'task_complete':
+        """Analyze a task completion and generate recommendations.
+
+        A completion is either shape ADR-045 names: ``task_complete`` in a
+        legacy ledger, ``dispatch_finished`` in a v3 one (K-2c).
+        """
+        if not is_completion(receipt):
             return
 
         dispatch_id = receipt.get('dispatch_id', '')
-        status = receipt.get('status', '')
         terminal = receipt.get('terminal', '')
         gate = receipt.get('gate', '')
         receipt_timestamp = receipt.get('timestamp')
@@ -252,9 +257,11 @@ class RecommendationEngine:
         # Extract v2 metadata
         metadata = self.extract_v2_metadata(dispatch_file)
 
-        status_normalized = str(status).lower()
-        is_success = status_normalized == 'success'
-        is_failure = status_normalized in ['fail', 'failed', 'error', 'blocked']
+        # K-2c: a v3 end line's outcome is its end_state's, classified; the
+        # legacy literals stay this reader's vocabulary.
+        is_success = completion_matches_outcome(receipt, "success", ("success",))
+        is_failure = completion_matches_outcome(
+            receipt, "failure", ("fail", "failed", "error", "blocked"))
 
         # Generate recommendations based on explicit v2 metadata
         if is_success and 'on_success' in metadata:

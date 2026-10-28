@@ -20,6 +20,14 @@ from pathlib import Path
 from typing import Dict, Iterator, Optional
 
 from scripts.control_centre.receipt_tail import MergedEvent, ReceiptTail
+from scripts.lib.completion_reading import (
+    COMPLETION_TYPES,
+    DISPATCH_FINISHED_EVENT_TYPE,
+    completion_outcome,
+    event_type_of,
+    is_non_outcome_lifecycle,
+    is_v3_end_line,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,12 +77,14 @@ _RUNNING_EVENT_TYPES = frozenset({
     "running",
 })
 
+# ADR-045 K-2c: the canonical completion family next to this tracker's own
+# literals. ``dispatch_finished`` is not part of it — an end line can be a
+# failure, so _classify_receipt_status reads its end_state and returns first.
 _COMPLETED_EVENT_TYPES = frozenset({
-    "task_complete",
     "dispatch_completed",
     "quality_gate_verification",
     "receipt_written",
-})
+}) | (COMPLETION_TYPES - {DISPATCH_FINISHED_EVENT_TYPE})
 
 _FAILED_EVENT_TYPES = frozenset({
     "task_failed",
@@ -85,6 +95,23 @@ _FAILED_EVENT_TYPES = frozenset({
 
 
 def _classify_receipt_status(raw: Dict) -> Optional[DispatchStatus]:
+    # ADR-045 §4: a v3 end line's outcome is its end_state, classified — a
+    # dispatch that ended `failed` must not read as completed. No governed
+    # outcome is no terminal status: never a success.
+    if is_v3_end_line(raw):
+        outcome = completion_outcome(raw)
+        if outcome == "success":
+            return DispatchStatus.COMPLETED
+        if outcome == "failure":
+            return DispatchStatus.FAILED
+        return None
+
+    # ADR-045 §2: a start line is RUNNING; a report line is never an outcome.
+    if is_non_outcome_lifecycle(raw):
+        if event_type_of(raw) == "dispatch_started":
+            return DispatchStatus.RUNNING
+        return None
+
     status_field = (raw.get("status") or "").lower()
     if status_field in ("success", "completed", "ok"):
         return DispatchStatus.COMPLETED

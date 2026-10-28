@@ -29,6 +29,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
+from completion_reading import completion_outcome, completion_status, is_v3_end_line
 from quality_advisory import RISK_WEIGHT_BLOCKING, RISK_WEIGHT_WARNING
 
 # Normalize the ~166 unique status values into 5 categories
@@ -68,6 +69,23 @@ def normalize_status(raw_status: str | None) -> str:
         return "unknown"
     key = raw_status.strip().lower().replace(" ", "_").replace("-", "_")
     return STATUS_MAP.get(key, "unknown")
+
+
+def normalize_receipt_status(receipt: Dict[str, Any]) -> str:
+    """The CQS status category for a receipt (ADR-045 §4, audit-spoor-kern K-2c).
+
+    A v3 ``dispatch_finished`` line carries its outcome in ``end_state``, so its
+    category is ``classify_event_outcome``'s answer over it — a ``failed`` end
+    line is a failure here, never a fixed literal. An end line with no governed
+    outcome reads as its projected category (``timeout``) or ``unknown``, both
+    excluded by CQS. Every other receipt keeps the raw-status mapping.
+    """
+    if is_v3_end_line(receipt):
+        outcome = completion_outcome(receipt)
+        if outcome is not None:
+            return outcome  # "success"/"failure": the CQS categories, one to one
+        return normalize_status(completion_status(receipt))
+    return normalize_status(receipt.get("status") or receipt.get("outcome_status") or "")
 
 
 def _score_status(normalized: str) -> float | None:
@@ -305,8 +323,7 @@ def calculate_cqs(
         {cqs: float|None, normalized_status: str, components: dict}
         cqs is None when status is timeout/unknown (excluded from metrics).
     """
-    raw_status = receipt.get("status") or receipt.get("outcome_status") or ""
-    normalized = normalize_status(raw_status)
+    normalized = normalize_receipt_status(receipt)
 
     status_score = _score_status(normalized)
     if status_score is None:
