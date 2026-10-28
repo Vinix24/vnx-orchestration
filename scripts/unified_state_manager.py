@@ -49,6 +49,7 @@ try:
     from python_singleton import enforce_python_singleton
 except Exception as exc:
     raise SystemExit(f"Failed to load python_singleton helper: {exc}")
+from event_outcome_semantics import COMPLETION_EVENT_TYPES
 
 PATHS = ensure_env()
 
@@ -336,7 +337,8 @@ class UnifiedStateManagerV2:
         for receipt in receipts:
             event_type = receipt.get('event_type') or receipt.get('event')
 
-            if event_type == 'task_complete':
+            # ADR-045 §2: the completion family, dispatch_finished included.
+            if event_type in COMPLETION_EVENT_TYPES:
                 completed_count += 1
             elif event_type in ['task_failed', 'task_timeout']:
                 failed_count += 1
