@@ -465,7 +465,29 @@ def test_child_outliving_its_recorded_parent_keeps_the_group_alive(tmp_path, pin
 # 7. round-2 finding — revalidation under the repository lock, no pause_hook
 # ---------------------------------------------------------------------------
 
-def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+def _inject_when_the_repository_lock_is_taken(monkeypatch, action) -> None:
+    """Run *action* at the moment the guard acquires the repository lock.
+
+    That is the window the under-lock revalidation exists for: the tree can be
+    written into or committed to while the guard waits for the lock, after the
+    first evidence sample has already passed.
+    """
+    import contextlib
+
+    import worktree_removal_guard as guard
+
+    real_lock = guard._worktree_lock
+
+    @contextlib.contextmanager
+    def lock_then_inject(root):
+        with real_lock(root):
+            action()
+            yield
+
+    monkeypatch.setattr(guard, "_worktree_lock", lock_then_inject)
+
+
+def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state, monkeypatch):
     """A change made while the guard waits for the repository lock is refused.
 
     Old code re-checked only when ``pause_hook`` was supplied, so a normal
@@ -478,13 +500,13 @@ def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, p
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     injected = wt / "injected-after-lock.txt"
 
-    def hook(label: str) -> None:
-        assert label == "before_remove"
+    def late_write() -> None:
         injected.write_text("late write\n", encoding="utf-8")
 
+    _inject_when_the_repository_lock_is_taken(monkeypatch, late_write)
+
     result = guarded_remove(
-        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root,
-        dry_run=False, before_remove=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False,
     )
     assert result.removed is False
     assert result.reason == REASON_DIRTY, result.detail
@@ -492,21 +514,21 @@ def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, p
     assert injected.exists()
 
 
-def test_head_moved_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+def test_head_moved_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state, monkeypatch):
     from worktree_removal_guard import REASON_HEAD_MOVED, guarded_remove
 
     dispatch_id = "dlv-guard-late-head"
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     moved: "list[bool]" = []
 
-    def hook(label: str) -> None:
-        assert label == "before_remove"
+    def late_commit() -> None:
         _git(["commit", "--allow-empty", "-m", "HEAD moved under the lock"], wt)
         moved.append(True)
 
+    _inject_when_the_repository_lock_is_taken(monkeypatch, late_commit)
+
     result = guarded_remove(
-        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root,
-        dry_run=False, before_remove=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False,
     )
     assert moved == [True]
     assert result.removed is False

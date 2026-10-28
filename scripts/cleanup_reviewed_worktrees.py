@@ -20,8 +20,8 @@ Two evidence regimes, and then one gate:
   liveness, occupancy or HEAD. The guard is handed the HEAD sha the evidence
   evaluated and refuses when the tree moved off it, so a commit made between
   evaluation and removal is never removed unexamined. A lock is dropped only
-  inside that guard, right before its removal, so a tree the guard keeps stays
-  locked.
+  inside that guard, after its under-lock revalidation and its decision write,
+  right before the removal — so a tree the guard keeps stays locked.
 * ``orphan_sweep``'s worktree kind keeps its own removal: it is driven by the
   tmux/register liveness model, not by this evidence, and rewiring it is not a
   small change.
@@ -492,9 +492,11 @@ def evaluate_candidate(
 def _unlock_for_removal(repo_root: Path, path: Path):
     """``before_remove`` hook: drop the lock only once the guard removes.
 
-    The guard calls it inside the repository lock, after every refusal that
-    does not end in a removal — so a tree the guard keeps stays locked. A
-    failed unlock aborts the removal instead of force-removing a locked tree.
+    The guard calls it inside the repository lock, after the under-lock
+    revalidation AND after the removal decision is persisted, immediately
+    before ``git worktree remove`` — every refusal that keeps the tree lies
+    behind it, so a tree the guard keeps stays locked. A failed unlock aborts
+    the removal instead of force-removing a locked tree.
     """
 
     def hook(_label: str) -> None:
@@ -519,10 +521,19 @@ def remove_candidate(
     evidence evaluated; the guard decides nothing less than liveness,
     occupancy and HEAD. The branch is deleted only after a removal that
     passed, so a ``head_moved`` refusal leaves both the tree and its branch.
+    The lock is dropped by the guard as its last step before the removal; if
+    the removal itself then fails, the lock is put back so a tree that stays
+    also stays locked.
     """
     from worktree_removal_guard import guarded_remove
 
-    before_remove = _unlock_for_removal(repo_root, wt.path) if wt.lock_reason is not None else None
+    unlocked = False
+
+    def before_remove(label: str) -> None:
+        nonlocal unlocked
+        _unlock_for_removal(repo_root, wt.path)(label)
+        unlocked = True
+
     try:
         result = guarded_remove(
             wt.path,
@@ -530,11 +541,15 @@ def remove_candidate(
             dispatch_id=wt.dispatch_dir_id or "",
             repo_root=repo_root,
             dry_run=dry_run,
-            before_remove=before_remove,
+            before_remove=before_remove if wt.lock_reason is not None else None,
         )
     except OSError as exc:  # an unlock the guard could not do never removes
         return ReleaseResult(False, REASON_UNLOCK_FAILED, str(exc), [str(exc)])
     errors: list[str] = []
+    if unlocked and not result.removed and wt.path.exists():
+        relock = run_git(["worktree", "lock", "--reason", wt.lock_reason or "", str(wt.path)], cwd=repo_root)
+        if relock.returncode != 0:
+            errors.append(f"re-lock failed (tree kept, lock dropped): {(relock.stderr or '').strip()}")
     if result.removed and delete_branch and wt.branch:
         branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
         if branch_delete.returncode != 0:

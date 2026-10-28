@@ -432,3 +432,140 @@ class TestSafety:
         assert candidate["guard_reason"] == "liveness_unknown", candidate
         assert wt.path.exists()
         assert "locked" in git(fx.repo, "worktree", "list", "--porcelain")
+
+
+def _lock_line(repo: Path, path: Path) -> str:
+    """The ``locked`` line ``git worktree list --porcelain`` prints for *path*."""
+    for block in git(repo, "worktree", "list", "--porcelain").split("\n\n"):
+        lines = block.splitlines()
+        if lines and lines[0] == f"worktree {path}":
+            for line in lines[1:]:
+                if line == "locked" or line.startswith("locked "):
+                    return line
+    return ""
+
+
+def _inject_when_the_repository_lock_is_taken(monkeypatch, action) -> None:
+    """Run *action* the moment the guard acquires the repository lock.
+
+    That is the window the guard's under-lock revalidation exists for: the
+    tree gets written into or committed to while the guard waits for the lock,
+    after its first evidence sample has already passed. The public
+    ``before_remove`` hook cannot be used for this any more: it now runs only
+    after that revalidation, immediately before the removal.
+    """
+    import contextlib
+
+    import worktree_removal_guard as guard
+
+    real_lock = guard._worktree_lock
+
+    @contextlib.contextmanager
+    def lock_then_inject(root):
+        with real_lock(root):
+            action()
+            yield
+
+    monkeypatch.setattr(guard, "_worktree_lock", lock_then_inject)
+
+
+class TestAGuardedRefusalKeepsTheLock:
+    """OI-2418 / PR-4b round 3: a tree the guard keeps keeps its lock.
+
+    The preserve lock may be dropped only for a removal that happens: the
+    guard calls the unlock hook after the under-lock revalidation and after
+    the removal decision is written, immediately before ``git worktree
+    remove``. Every refusal below fires under that lock, so no lock may be
+    gone with the tree still standing.
+    """
+
+    def test_dirty_under_the_repository_lock_keeps_the_preserve_lock(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+        injected = wt.path / "late-write.txt"
+        _inject_when_the_repository_lock_is_taken(
+            monkeypatch, lambda: injected.write_text("late write\n", encoding="utf-8"),
+        )
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "dirty", result.detail
+        assert wt.path.exists() and injected.exists(), "a tree made dirty under the lock must survive"
+        assert _lock_line(fx.repo, wt.path), "a kept tree must keep its preserve lock"
+
+    def test_head_moved_under_the_repository_lock_keeps_the_preserve_lock(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+
+        def late_commit() -> None:
+            git(wt.path, "commit", "--allow-empty", "-q", "-m", "late commit under the lock")
+
+        _inject_when_the_repository_lock_is_taken(monkeypatch, late_commit)
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "head_moved", result.detail
+        assert wt.path.exists(), "a tree that moved under the lock must survive"
+        assert _lock_line(fx.repo, wt.path), "a kept tree must keep its preserve lock"
+        assert fx.branch_exists("dispatch/x"), "the branch must stay"
+
+    def test_an_unrecorded_removal_decision_keeps_the_preserve_lock(self, fx, monkeypatch):
+        import types
+
+        import state_mutation
+
+        wt = fx.worktree("x")
+        monkeypatch.setattr(
+            state_mutation, "emit_state_mutation",
+            lambda *a, **kw: types.SimpleNamespace(status="skipped"),
+        )
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "decision_unrecorded", result.detail
+        assert wt.path.exists()
+        assert _lock_line(fx.repo, wt.path), "a tree with no recorded decision must keep its preserve lock"
+
+    def test_a_failed_removal_puts_the_preserve_lock_back(self, fx, monkeypatch):
+        """Even after the unlock, a removal that does not happen is re-locked."""
+        import worktree_removal_guard as guard
+
+        wt = fx.worktree("x")
+        real_git = guard._git
+
+        def failing_remove(cwd, args):
+            if list(args)[:2] == ["worktree", "remove"]:
+                return False, "simulated removal failure"
+            return real_git(cwd, args)
+
+        monkeypatch.setattr(guard, "_git", failing_remove)
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "remove_failed", result.detail
+        assert wt.path.exists()
+        assert _lock_line(fx.repo, wt.path), "a kept tree must be locked again"
+        assert result.errors == [], result.errors
+
+    def test_a_passed_removal_unlocks_and_removes(self, fx, monkeypatch):
+        """The hook still runs for the removal it was made for."""
+        wt = fx.worktree("x")
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is True, result.detail
+        assert result.reason == "removed"
+        assert not wt.path.exists()
+        assert not fx.branch_exists("dispatch/x")
