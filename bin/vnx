@@ -321,6 +321,8 @@ Commands:
   update --check         Dry-run: show current vs available version
   update --latest        Update ignoring version.lock
   release publish|verify  Publish a tag as an immutable version / verify it against its tag
+  preflight [--project <id>] [--json]  Measure rollout readiness against the pinned
+                     release (read-only; exit 1 blocking, 2 unmeasurable)
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
@@ -2510,6 +2512,13 @@ main() {
       # $VNX_HOME comes first so the tree's own code runs, not a pip-installed
       # vnx_cli of another version.
       PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main release "$@"
+      ;;
+    preflight)
+      # `vnx preflight` lives in the pip CLI too (vnx_cli/commands/preflight.py,
+      # delegating to scripts/rollout_preflight.py). Same delegation as release:
+      # $VNX_HOME first, so the release tree measures itself, not a pip-installed
+      # vnx_cli of another version. Read-only — it installs and writes nothing.
+      PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main preflight "$@"
       ;;
     intelligence-export)
       cmd_intelligence_export
