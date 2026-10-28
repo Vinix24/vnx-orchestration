@@ -264,14 +264,31 @@ def _mark_abandoned(conn, intent: Mapping[str, Any]) -> None:
 
 def _project(intent: Mapping[str, Any], state_dir: Path) -> Dict[str, Any]:
     end_state = str(intent["end_state"])
+    # No coercion on either side of the comparison: a malformed attempt is not
+    # evidence that it is the one running, so it stays a conflict (fail-closed).
+    attempt = intent["attempt"]
     with get_connection(state_dir) as conn:
-        row = conn.execute("SELECT state FROM dispatches WHERE dispatch_id = ? "
-                           "AND project_id = ?",
+        # ``attempt_count`` is the attempt that is running now. The check and the
+        # transitions it guards are one write transaction: BEGIN IMMEDIATE takes
+        # the reservation before the row is read, so a concurrent attempt bump
+        # lands either before this read (and this intent is stale) or after the
+        # commit — never between the check and the transition it decided.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT state, attempt_count FROM dispatches "
+                           "WHERE dispatch_id = ? AND project_id = ?",
                            (intent["dispatch_id"], intent["project_id"])).fetchone()
         from_state = row["state"] if row is not None else None
-        path = PROJECTION_PATHS[end_state].get(from_state or "")
+        attempt_count = row["attempt_count"] if row is not None else None
         out: Dict[str, Any] = {"from_state": from_state, "steps": [],
                                "target": PROJECTION_TARGET[end_state]}
+        if row is not None and attempt != attempt_count:
+            # The ledger line stays (it is that attempt's end); only the
+            # projection is refused, and the abandoned mark is not touched: the
+            # row belongs to newer work.
+            conn.rollback()
+            return dict(out, status=PROJECTION_CONFLICT, reason="stale_attempt",
+                        attempt=attempt, attempt_count=attempt_count)
+        path = PROJECTION_PATHS[end_state].get(from_state or "")
         if path is None and from_state == out["target"]:
             # The row is already where the end_state projects to, but
             # ``abandoned`` also carries metadata_json.end_state — a mark the
@@ -279,9 +296,10 @@ def _project(intent: Mapping[str, Any], state_dir: Path) -> Dict[str, Any]:
             # or recovery (which skips a published intent) leaves it absent.
             if end_state == "abandoned":
                 _mark_abandoned(conn, intent)
-                conn.commit()
+            conn.commit()
             return dict(out, status=PROJECTION_ALREADY_AT_TARGET)
         if path is None:
+            conn.rollback()
             reason = ("no_row" if from_state is None else
                       "terminal_state" if from_state in TERMINAL_DISPATCH_STATES else "no_path")
             return dict(out, status=PROJECTION_CONFLICT, reason=reason)

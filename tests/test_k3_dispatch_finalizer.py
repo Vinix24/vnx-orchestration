@@ -18,6 +18,11 @@ What this file pins, deterministically:
     own event;
   - attempt 2 gets its own intent and its own end line; attempt 1's intent is
     byte-unchanged;
+  - the projection reads the row's ``attempt_count`` and only the intent of the
+    attempt that is running may project: a delayed finalize or recover of an
+    older attempt keeps its ledger line but leaves the row (and the
+    ``abandoned`` mark) untouched with ``stale_attempt`` — the attempt check and
+    the transition are one ``BEGIN IMMEDIATE`` transaction;
   - the append rule: a ``dispatch_finished`` is accepted only when a winner's
     intent exists for the key AND its canonical form is byte-equal to the
     intent's line. Another ``end_state`` with the same ``outcome_id`` is
@@ -39,7 +44,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import multiprocessing
+import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -57,7 +64,11 @@ from append_receipt_internals.lifecycle import (  # noqa: E402
     load_end_intent,
 )
 from append_receipt_internals.outcome_identity import compute_outcome_id  # noqa: E402
-from coordination_db import get_connection, init_schema  # noqa: E402
+from coordination_db import (  # noqa: E402
+    db_path_from_state_dir,
+    get_connection,
+    init_schema,
+)
 from project_id_migration import (  # noqa: E402
     RUNTIME_COORDINATION_TABLES,
     apply_project_id_migration,
@@ -414,6 +425,153 @@ def test_attempt_two_gets_its_own_intent_and_line(state_dir: Path):
     assert attempt_one_intent.read_bytes() == attempt_one_bytes
     assert [line["attempt"] for line in _end_lines(state_dir)] == [1, 2]
     assert [line["end_state"] for line in _end_lines(state_dir)] == ["completed", "failed"]
+
+
+# ---------------------------------------------------------------------------
+# 5b. the intent's attempt decides (round 3, OI-2443)
+#
+# ``dispatches.attempt_count`` is the attempt that is running now. A finalize or
+# recover for an older attempt keeps its ledger line — that line is the record
+# of that attempt's end — but must not project onto the row: the row belongs to
+# another attempt. The read of ``attempt_count`` and the transition are one
+# ``BEGIN IMMEDIATE`` transaction, so an attempt bump cannot land between them.
+# ---------------------------------------------------------------------------
+
+def _running_attempts(state_dir: Path, attempt_count: int) -> None:
+    """A running row at ``attempt_count`` with this attempt's start line."""
+    _insert_dispatch(state_dir, "running", attempt_count=attempt_count)
+    for attempt in range(1, attempt_count + 1):
+        assert _append(state_dir, _start_line(attempt=attempt)).status == "appended"
+
+
+def test_a_stale_attempt_never_terminates_the_running_one(state_dir: Path):
+    _running_attempts(state_dir, attempt_count=2)
+
+    result = dl.finalize(PROJECT, DISPATCH, 1, _end_line("completed"), state_dir=state_dir)
+
+    assert result.status == dl.PUBLISHED
+    assert result.ledger_written is True
+    assert result.projection["status"] == dl.PROJECTION_CONFLICT
+    assert result.projection["reason"] == "stale_attempt"
+    assert result.projection["attempt"] == 1
+    assert result.projection["attempt_count"] == 2
+    row = _row(state_dir)
+    assert row["state"] == "running"
+    assert row["attempt_count"] == 2
+    # The end line of attempt 1 stays: it is the record of that attempt's end.
+    assert [(line["attempt"], line["end_state"]) for line in _end_lines(state_dir)] == [
+        (1, "completed")]
+    assert [e for e in _events(state_dir) if e["event_type"] != "dispatch_noop"] == []
+
+
+def test_the_running_attempt_still_projects_to_the_target(state_dir: Path):
+    _running_attempts(state_dir, attempt_count=2)
+
+    result = dl.finalize(PROJECT, DISPATCH, 2,
+                         _end_line("completed", attempt=2), state_dir=state_dir)
+
+    assert result.status == dl.PUBLISHED
+    assert result.projection["status"] == dl.PROJECTION_APPLIED
+    assert result.projection["steps"] == ["completed"]
+    assert _row(state_dir)["state"] == "completed"
+
+
+def test_a_malformed_attempt_count_never_passes_the_attempt_check(state_dir: Path):
+    """Fail-closed: only "the intent's attempt equals the running one" may project.
+
+    The schema's ``attempt_count`` is NOT NULL, so the missing case cannot be
+    built; a malformed value (the INTEGER affinity leaves ``"two"`` as text) is
+    not evidence that the intent's attempt is the one running, so it stays a
+    conflict.
+    """
+    _running_attempts(state_dir, attempt_count=1)
+    with get_connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE dispatches SET attempt_count = ? WHERE dispatch_id = ? AND project_id = ?",
+            ("two", DISPATCH, PROJECT))
+        conn.commit()
+
+    result = dl.finalize(PROJECT, DISPATCH, 1, _end_line("completed"), state_dir=state_dir)
+
+    assert result.projection["status"] == dl.PROJECTION_CONFLICT
+    assert result.projection["reason"] == "stale_attempt"
+    assert _row(state_dir)["state"] == "running"
+    assert len(_end_lines(state_dir)) == 1
+
+
+def test_a_stale_attempt_does_not_apply_the_abandoned_mark(state_dir: Path):
+    _running_attempts(state_dir, attempt_count=2)
+
+    result = dl.finalize(PROJECT, DISPATCH, 1, _end_line("abandoned"), state_dir=state_dir)
+
+    assert result.projection["reason"] == "stale_attempt"
+    row = _row(state_dir)
+    assert row["state"] == "running"
+    assert "end_state" not in json.loads(row["metadata_json"] or "{}")
+
+
+def test_recover_of_a_stale_attempt_is_refused_the_same_way(state_dir: Path):
+    _running_attempts(state_dir, attempt_count=2)
+    _write_intent(state_dir, _end_line("completed"))
+
+    recovered = dl.recover(PROJECT, DISPATCH, 1, state_dir=state_dir)
+
+    assert recovered.status == dl.PUBLISHED
+    assert recovered.ledger_written is True
+    assert recovered.projection["status"] == dl.PROJECTION_CONFLICT
+    assert recovered.projection["reason"] == "stale_attempt"
+    assert recovered.projection["attempt"] == 1
+    assert recovered.projection["attempt_count"] == 2
+    assert _row(state_dir)["state"] == "running"
+    assert [line["attempt"] for line in _end_lines(state_dir)] == [1]
+
+
+def test_the_attempt_check_and_the_transition_are_one_transaction(
+    state_dir: Path, monkeypatch,
+):
+    _running_attempts(state_dir, attempt_count=1)
+    checked = threading.Event()
+    release = threading.Event()
+    real_transition = dl.transition_dispatch
+
+    def paused_transition(*args, **kwargs):
+        checked.set()
+        if not release.wait(timeout=20):
+            raise RuntimeError("the test never released the paused transition")
+        return real_transition(*args, **kwargs)
+
+    monkeypatch.setattr(dl, "transition_dispatch", paused_transition)
+    outcome: dict = {}
+
+    def finalize_in_thread() -> None:
+        try:
+            outcome["result"] = dl.finalize(
+                PROJECT, DISPATCH, 1, _end_line("completed"), state_dir=state_dir)
+        except BaseException as exc:  # vnx-silent-except: asserted below
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=finalize_in_thread)
+    worker.start()
+    second = sqlite3.connect(str(db_path_from_state_dir(state_dir)), timeout=0.1)
+    try:
+        assert checked.wait(timeout=20)
+        # The projection holds the write reservation: a concurrent attempt bump
+        # fails on the lock instead of landing between check and transition.
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            second.execute(
+                "UPDATE dispatches SET attempt_count = attempt_count + 1 "
+                "WHERE dispatch_id = ? AND project_id = ?", (DISPATCH, PROJECT))
+    finally:
+        release.set()
+        worker.join(timeout=30)
+        second.close()
+
+    assert not worker.is_alive()
+    assert "error" not in outcome, outcome
+    assert outcome["result"].projection["status"] == dl.PROJECTION_APPLIED
+    row = _row(state_dir)
+    assert row["state"] == "completed"
+    assert row["attempt_count"] == 1
 
 
 # ---------------------------------------------------------------------------
