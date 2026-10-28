@@ -22,7 +22,9 @@ The real append layer runs against ``tmp_path``; only paths are patched, as in
 from __future__ import annotations
 
 import copy
+import inspect
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -34,14 +36,22 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 
 import append_receipt  # noqa: E402
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from append_receipt_internals.idempotency import (  # noqa: E402
+    _cache_file_for,
+    _write_receipt_under_lock,
+)
 from append_receipt_internals.lifecycle import (  # noqa: E402
     DERIVED_STAMP_FIELDS,
+    DERIVED_WARNING_FIELDS,
     build_end_intent,
     end_intent_path,
+    end_line_matches_intent,
     load_end_intent,
     prepare_end_line,
+    project_end_line,
     write_end_intent,
 )
+from append_receipt_internals.warning_destination import commit_destination  # noqa: E402
 
 FINISH = "dispatch_finished"
 
@@ -394,3 +404,98 @@ def test_an_extra_caller_no_push_that_the_intent_lacks_is_a_mismatch(tmp_path, l
 
     assert _append(ledger, _line()).status == "appended"
     assert len(_lines(ledger)) == 1
+
+
+# ---------------------------------------------------------------------------
+# 6. a frozen line stays frozen through the final write (codex round 2, blocker)
+# ---------------------------------------------------------------------------
+
+CODEX_WARNING = {"code": "review_probe", "severity": "warn", "message": "probe"}
+
+
+def test_a_warning_bearing_end_line_is_accepted_and_still_matches_its_intent(
+    tmp_path, lifecycle_on,
+):
+    """The round-2 reproduction: the commit hook rewrites ``reason`` after the freeze."""
+    ledger = _ledger(tmp_path)
+    line = _line(warnings=[dict(CODEX_WARNING)])
+
+    prepared, intent_path = _freeze(ledger, line)
+    assert "reason" not in prepared["warnings"][0]
+    assert "destination" not in prepared["warnings"][0]
+
+    assert _append(ledger, line).status == "appended"
+
+    written = _lines(ledger)[0]
+    assert written["warnings"][0]["destination"] == "counted"
+    assert written["warnings"][0]["reason"] is None
+    assert end_line_matches_intent(written, load_end_intent(intent_path)) is True
+
+
+def test_the_projection_drops_only_the_lock_time_warning_keys(tmp_path):
+    """A frozen ``counted`` entry matches the committed ``oi`` entry it becomes."""
+    frozen_entry = {
+        "code": "review_probe", "severity": "warn", "message": "probe",
+        "requires_tracking": True, "destination": "counted", "oi_id": None,
+        "reason": "__pending_append_commit__",
+    }
+    expected_entry = {
+        "code": "review_probe", "severity": "warn", "message": "probe",
+        "requires_tracking": True,
+    }
+    assert project_end_line({"warnings": [frozen_entry]})["warnings"] == [expected_entry]
+
+    document = build_end_intent(
+        project_id="vnx-dev", dispatch_id="d-k3b", attempt=1, end_state="completed",
+        end_line=_line(warnings=[expected_entry]), ledger_path=_ledger(tmp_path),
+        ledger_offset=0,
+    )
+    committed = _line(warnings=[
+        dict(frozen_entry, destination="oi", oi_id="OI-1", reason=None)])
+    assert end_line_matches_intent(committed, document) is True
+
+
+@pytest.mark.parametrize("field,value", [
+    ("message", "another message"),
+    ("severity", "info"),
+])
+def test_a_changed_warning_message_or_severity_is_still_a_mismatch(
+    tmp_path, lifecycle_on, field, value,
+):
+    ledger = _ledger(tmp_path)
+    prepared, intent_path = _freeze(ledger, _line(warnings=[dict(CODEX_WARNING)]))
+    changed = copy.deepcopy(prepared)
+    changed["warnings"][0][field] = value
+    assert end_line_matches_intent(changed, load_end_intent(intent_path)) is False
+
+    with pytest.raises(AppendReceiptError) as excinfo:
+        _append(ledger, _line(warnings=[dict(CODEX_WARNING, **{field: value})]))
+    assert excinfo.value.code == "end_line_mismatch"
+    assert _lines(ledger) == []
+
+
+def test_the_derived_warning_set_is_exactly_what_commit_destination_can_change():
+    """The same pin as the stamp set: only what ``commit_destination`` writes."""
+    source = inspect.getsource(commit_destination)
+    assigned = set(re.findall(r'result\["([a-z_]+)"\]\s*=', source))
+    assert assigned == DERIVED_WARNING_FIELDS
+
+
+def test_a_pre_write_hook_that_changes_a_frozen_field_writes_nothing(
+    tmp_path, lifecycle_on,
+):
+    """The post-hook guard: a non-derived change is refused before the write."""
+    ledger = _ledger(tmp_path)
+    prepared, _intent_path = _freeze(ledger, _line(warnings=[dict(CODEX_WARNING)]))
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+
+    def rewrite_the_message(receipt: dict) -> None:
+        receipt["warnings"][0]["message"] = "changed after the freeze"
+
+    with pytest.raises(AppendReceiptError) as excinfo:
+        _write_receipt_under_lock(
+            copy.deepcopy(prepared), ledger, _cache_file_for(ledger),
+            "k3b-post-hook-guard", 300, pre_write_hook=rewrite_the_message,
+        )
+    assert excinfo.value.code == "end_line_mismatch"
+    assert _lines(ledger) == []

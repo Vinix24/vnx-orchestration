@@ -19,7 +19,8 @@ Three jobs, all in the ONE place the append path can do them deterministically:
 3. **Decide.** A ``dispatch_finished`` is accepted only when the winner's
    intent exists for its ``(project_id, dispatch_id, attempt)``, is well-formed,
    and is byte-equal (sha256 included) to the receipt on every field apart from
-   :data:`DERIVED_STAMP_FIELDS`. K-3c's finalizer writes the intent, never here.
+   :data:`DERIVED_STAMP_FIELDS` and, per warning, :data:`DERIVED_WARNING_FIELDS`;
+   it is re-checked after the pre-write hook. K-3c's finalizer writes it, never here.
 """
 
 from __future__ import annotations
@@ -376,6 +377,26 @@ DERIVED_STAMP_FIELDS = frozenset({
     "verdict",                                      # commit_receipt_v2_fields
 })
 
+# The warning keys ``warning_destination.commit_destination`` (the pre-write
+# hook) rewrites on each ``warnings[]`` entry from lock-time state the freeze
+# cannot see; derived like the stamps above, on both the freeze and the compare.
+DERIVED_WARNING_FIELDS = frozenset({"destination", "oi_id", "reason"})
+
+
+def project_end_line(line: Mapping[str, Any]) -> Dict[str, Any]:
+    """The canonical form the freeze and the comparison share: every field, each
+    warning's derived keys removed. Every other warning key stays compared; a
+    non-mapping entry is left as it stands.
+    """
+    projected = dict(line)
+    entries = projected.get("warnings")
+    if isinstance(entries, list):
+        projected["warnings"] = [
+            {k: v for k, v in entry.items() if k not in DERIVED_WARNING_FIELDS}
+            if isinstance(entry, Mapping) else entry for entry in entries
+        ]
+    return projected
+
 
 def prepare_end_line(line: Mapping[str, Any], *, ledger_path: str | Path) -> Dict[str, Any]:
     """The canonical end line an intent may freeze (ADR-045 §3, K-3b).
@@ -401,14 +422,16 @@ def prepare_end_line(line: Mapping[str, Any], *, ledger_path: str | Path) -> Dic
 
     prepared, _event_name, _receipt_path = _prepare_receipt(
         prepared, receipt_path, receipts_file=str(receipt_path))
-    return {key: value for key, value in prepared.items() if key not in DERIVED_STAMP_FIELDS}
+    projected = project_end_line(prepared)
+    return {key: value for key, value in projected.items() if key not in DERIVED_STAMP_FIELDS}
 
 
 def end_line_matches_intent(receipt: Mapping[str, Any], intent: Mapping[str, Any]) -> bool:
     """True when the receipt's canonical line is byte-equal to the intent's.
 
     Every field is compared: the receipt may carry only the intent's fields plus
-    :data:`DERIVED_STAMP_FIELDS`. Discarding unknown fields would let an added
+    :data:`DERIVED_STAMP_FIELDS`, and a warning only the intent's keys plus
+    :data:`DERIVED_WARNING_FIELDS`. Discarding unknown fields would let an added
     ``no_push`` amend the frozen decision (codex round 1 finding 4).
     """
     expected = json.loads(intent["line"])
@@ -418,7 +441,8 @@ def end_line_matches_intent(receipt: Mapping[str, Any], intent: Mapping[str, Any
         return False
     if set(receipt) - set(expected) - DERIVED_STAMP_FIELDS:
         return False
-    canonical = canonical_end_line({key: receipt.get(key) for key in expected})
+    canonical = canonical_end_line(
+        project_end_line({key: receipt.get(key) for key in expected}))
     return canonical == intent["line"] and end_line_sha256(canonical) == intent["sha256"]
 
 
@@ -481,6 +505,27 @@ def check_end_line(
     return decide_end_line(receipt, prior, ledger_path=ledger_path)
 
 
+def verify_final_end_line(receipt: Mapping[str, Any], *, ledger_path: Path) -> str:
+    """Re-check the line against its intent after the pre-write hook rewrote the
+    derived fields, so what is persisted is what was frozen; a no-op otherwise.
+    """
+    if str(receipt.get("event_type") or "").strip() != DISPATCH_FINISHED_EVENT_TYPE:
+        return END_LINE_ACCEPTED
+    intent_path = end_intent_path_for_ledger(ledger_path, receipt)
+    try:
+        intent = load_end_intent(intent_path)
+    except EndIntentMalformed as exc:
+        raise _refuse_end_line(receipt, f"the intent is malformed after the hook: {exc}",
+                               "invalid_end_intent") from exc
+    if intent is None:
+        raise _refuse_end_line(receipt, f"no intent exists at {intent_path} after the hook",
+                               "missing_end_intent")
+    if not end_line_matches_intent(receipt, intent):
+        raise _refuse_end_line(receipt, "the pre-write hook changed a frozen field",
+                               "end_line_mismatch")
+    return END_LINE_ACCEPTED
+
+
 def record_lifecycle_end(
     receipt: Dict[str, Any], index_data: Dict[str, Any], outcome_id: str,
 ) -> None:
@@ -497,10 +542,10 @@ def record_lifecycle_end(
 
 __all__ = [
     "LIFECYCLE_SETTING_KEY", "LIFECYCLE_TAIL_BYTES", "END_LINE_ACCEPTED",
-    "DERIVED_STAMP_FIELDS", "END_INTENT_DIRNAME", "END_INTENT_VERSION",
+    "DERIVED_STAMP_FIELDS", "DERIVED_WARNING_FIELDS", "END_INTENT_DIRNAME", "END_INTENT_VERSION",
     "EndIntentMalformed", "build_end_intent", "canonical_end_line", "check_end_line",
     "decide_end_line", "end_intent_path", "end_intent_path_for_ledger",
     "end_line_matches_intent", "end_line_sha256", "find_prior_end_line",
-    "lifecycle_enabled", "load_end_intent", "parse_end_intent", "prepare_end_line",
-    "record_lifecycle_end", "stamp_lifecycle", "write_end_intent", "writer_sha",
+    "lifecycle_enabled", "load_end_intent", "parse_end_intent", "prepare_end_line", "project_end_line",
+    "record_lifecycle_end", "stamp_lifecycle", "verify_final_end_line", "write_end_intent", "writer_sha",
 ]
