@@ -27,6 +27,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 import review_stack_support
 import wiring_gate
 from atomic_io import slot_lock
+from gate_executor import GateExecutorMixin
 from gate_request_handler import GateRequestHandlerMixin
 
 PR, BRANCH = 1591, "dispatch/ge-7-fixture"
@@ -37,6 +38,10 @@ class _Requests(GateRequestHandlerMixin):
     def __init__(self, store):
         self.requests_dir, self.results_dir = store["requests_dir"], store["results_dir"]
         self.state_dir = store["state_dir"]
+
+
+class _Driven(_Requests, GateExecutorMixin):
+    """The request writer plus the executor that reads back what it returned."""
 
 
 def _slot(store, kind: str) -> Path:
@@ -132,6 +137,125 @@ def test_the_record_and_its_request_end_land_under_the_result_slot_lock(tmp_path
     assert not thread.is_alive() and "error" not in outcome, outcome.get("error")
     assert json.loads(_slot(store, "results").read_text())["attempt_seq"] == 1
     assert json.loads(_slot(store, "requests").read_text())["status"] == "completed"
+
+
+# ---------------------------------------------------------------------------
+# A refused write is a failure, never the record it did not replace (GE-7 round 2, B3)
+# ---------------------------------------------------------------------------
+
+
+def _seed_a_stored_pass_owing_its_receipt(store) -> None:
+    """The slot a process that died between record and receipt leaves (ADR-046 §3)."""
+    _slot(store, "results").write_text(json.dumps({
+        "gate": "wiring_gate",
+        "status": "pass",
+        "provider": "ast_grep",
+        "kind": "deterministic",
+        "required": True,
+        "branch": BRANCH,
+        "pr_number": PR,
+        "requested_at": "2026-10-27T09:00:00Z",
+        "completed_at": "2026-10-27T09:00:01Z",
+        "commit_sha": HEAD_SHA,
+        "summary": "7 checked, all wired",
+        "blocking_findings": [],
+        "blocking_count": 0,
+        "advisory_count": 0,
+        "total_checked": 7,
+        "skipped_symbols": [],
+        "attempt_seq": 1,
+        "receipt_pending": True,
+    }), encoding="utf-8")
+
+
+def test_a_refused_write_never_answers_with_the_stored_pass(tmp_path, monkeypatch):
+    """codex B3, literally: a stored pass owes its receipt, recovery fails again, then the wiring read fails.
+
+    ``_pay_outstanding_receipt`` raises ``ReceiptPendingRefused`` (a
+    ``ResultOverwriteRefused``), ``commit_gate_outcome`` refuses before writing
+    and returns ``(stored_pass, False)``. Returning that record made
+    ``gate_executor`` count the required gate as PASSED on a run that never
+    landed. A refusal now answers with a structured failure, and the executor
+    blocks.
+    """
+    import gate_recorder
+
+    store = review_stack_support.build_project_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_WIRING_GATE_REQUIRED", "1")  # read at call time
+    _seed_a_stored_pass_owing_its_receipt(store)
+
+    def recovery_fails(*args, **kwargs):
+        raise RuntimeError("receipt appender unavailable")
+
+    monkeypatch.setattr(gate_recorder, "_emit_terminal_result_receipt", recovery_fails)
+
+    def explode(pr_number):
+        raise wiring_gate.WiringGateError("gh pr diff failed")
+
+    monkeypatch.setattr(wiring_gate, "check_pr_wiring", explode)
+
+    payload = _Requests(store)._request_wiring_gate(PR, BRANCH)
+
+    assert payload["status"] == "fail", f"a refused write is a failure, not the stored pass: {payload}"
+    assert (payload["reason"], payload["failure_reason"]) == ("write_refused", "write_refused")
+    assert payload["write_refused"] is True
+    assert payload["commit_sha"] == HEAD_SHA and HEAD_SHA in payload["reason_detail"], "the refusal names the head"
+    assert payload.get("total_checked") == 0, "it is not the stored pass' shape either"
+    on_disk = json.loads(_slot(store, "results").read_text())
+    assert (on_disk["status"], on_disk["receipt_pending"]) == ("pass", True), "the refused write replaced nothing"
+
+    gates, has_required_failure = _Driven(store)._execute_requested_gates(
+        {"requested": [payload]}, pr_number=PR
+    )
+    assert has_required_failure is True, "gate_executor must not count a refused write as a pass"
+    assert gates[0]["passed"] is False
+
+
+def test_a_refused_write_on_a_fresh_head_is_a_failure(tmp_path, monkeypatch):
+    """No stored result, and the attempted record a PASS: the refusal is neither of them.
+
+    Nothing the writer consults can refuse on an EMPTY slot, so the guard
+    itself raises a real ``ResultOverwriteRefused`` through the real
+    ``commit_gate_outcome`` (which then returns the attempted record with
+    ``written=False``) — the shape B3 is about, without a stored verdict.
+    """
+    import gate_recorder
+
+    store = review_stack_support.build_project_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_WIRING_GATE_REQUIRED", "1")
+    passing = wiring_gate.WiringGateResult(status="pass", total_checked=7, summary="7 checked, all wired")
+    monkeypatch.setattr(wiring_gate, "check_pr_wiring", lambda pr_number: passing)
+
+    def refuse(*args, **kwargs):
+        raise gate_recorder.ResultOverwriteRefused("refused for the test")
+
+    monkeypatch.setattr(gate_recorder, "_check_overwrite_guard", refuse)
+
+    payload = _Requests(store)._request_wiring_gate(PR, BRANCH)
+
+    assert payload["status"] == "fail", f"a refusal is a failure even with no stored verdict: {payload}"
+    assert payload["reason"] == "write_refused"
+    assert payload["attempted_status"] == "pass", "the record the writer refused is named, not reported as landed"
+    assert payload["commit_sha"] == HEAD_SHA
+    assert not _slot(store, "results").exists(), "a refused write landed nothing"
+
+    gates, has_required_failure = _Driven(store)._execute_requested_gates(
+        {"requested": [payload]}, pr_number=PR
+    )
+    assert has_required_failure is True
+    assert gates[0]["passed"] is False
+
+
+def test_a_first_booking_still_answers_with_the_new_verdict(tmp_path, monkeypatch):
+    """The happy path is unchanged: an admitted write returns the record it wrote."""
+    store = review_stack_support.build_project_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_WIRING_GATE_REQUIRED", "1")
+
+    payload = _drive("analysis_ran", store, monkeypatch)
+
+    assert (payload["status"], payload["total_checked"]) == ("pass", 7)
+    assert "write_refused" not in payload
+    assert json.loads(_slot(store, "results").read_text())["attempt_seq"] == 1
 
 
 _MUTATION_ANCHOR = "        record = self._wiring_gate_record(context, available)"

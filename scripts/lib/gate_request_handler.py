@@ -2993,6 +2993,17 @@ class GateRequestHandlerMixin:
 
         The request record is a COPY of the record, ended by the same call: its
         status is its own lifecycle word, the record keeps the gate's word.
+
+        **A refused write is a failure, never the record it did not replace.**
+        ``commit_gate_outcome`` returns ``(payload_on_disk, written)`` and
+        ``written`` is ``False`` only for a refused write (ADR-046 §5), where
+        ``payload_on_disk`` is the record that already held the slot. That is
+        an EARLIER attempt's verdict — a pass, if the earlier attempt passed —
+        and returning it as this run's answer made ``gate_executor`` count the
+        required gate as passed on a run that never landed (GE-7 round 2,
+        codex B3: a stored pass carrying ``receipt_pending`` whose receipt
+        recovery fails again, then a wiring error). A refusal therefore answers
+        with :meth:`_wiring_gate_write_refused` and never with that record.
         """
         import config_runtime
         import deterministic_gate
@@ -3010,7 +3021,7 @@ class GateRequestHandlerMixin:
         record = self._wiring_gate_record(context, available)
         if dispatch_id:
             record["dispatch_id"] = dispatch_id
-        payload_on_disk, _written = commit_gate_outcome(
+        payload_on_disk, written = commit_gate_outcome(
             GateOutcome.from_record("wiring_gate", record, pr_id=""),
             results_dir=self.results_dir,
             request=GateRequest(
@@ -3018,7 +3029,68 @@ class GateRequestHandlerMixin:
                 {"completed_at": record.get("completed_at") or _utc_now()},
             ),
         )
+        if not written:
+            return self._wiring_gate_write_refused(context, record)
         return payload_on_disk
+
+    def _wiring_gate_write_refused(
+        self, context: Any, attempted: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """The failure a refused wiring-gate write answers with (GE-7 round 2, B3).
+
+        ``gate_status`` defines no refused status: the recorded statuses are
+        :data:`gate_status.PASS_STATES`, :data:`gate_status.FAIL_STATES`,
+        ``unavailable``, ``partial_review`` and ``not_executable``. So the
+        refusal books ``fail`` — the word a failed run books, and one
+        :func:`gate_status.is_pass` refuses. ``write_refused`` is the engine's
+        own name for it (:data:`gate_outcome.WRITE_REFUSED`, the
+        ``failure_reason`` a refused run's request ends with).
+
+        The head the refused write named stays on ``commit_sha`` and
+        ``attempted_commit_sha``, and the attempted verdict on
+        ``attempted_status``, so the record reads next to the record on the
+        slot it did not replace. It is deliberately NOT the attempted record:
+        that record was refused, so no field of it may read as what landed. It
+        is a fail even when the refused write was a pass.
+        """
+        import deterministic_gate
+        from gate_outcome import WRITE_REFUSED
+        from review_gate_manager import _utc_now
+
+        head = context.head_sha or ""
+        detail = (
+            f"commit_gate_outcome refused the {attempted.get('status', '')!r} wiring_gate record "
+            f"for head {head or 'unknown'}: the record already on the slot was not replaced "
+            f"(ADR-046 §5), so this run has no verdict of its own"
+        )
+        return {
+            "gate": "wiring_gate",
+            "status": "fail",
+            "provider": "ast_grep",
+            "kind": deterministic_gate.DETERMINISTIC_KIND,
+            "required": bool(context.required),
+            "branch": context.branch,
+            "pr_number": context.pr_number,
+            "requested_at": context.requested_at,
+            "completed_at": _utc_now(),
+            "commit_sha": head,
+            "reason": WRITE_REFUSED,
+            "reason_detail": detail,
+            "failure_reason": WRITE_REFUSED,
+            "write_refused": True,
+            "attempted_status": attempted.get("status", ""),
+            "attempted_commit_sha": attempted.get("commit_sha") or head,
+            "summary": f"Wiring gate result not booked: write refused for head {head or 'unknown'}",
+            "blocking_findings": [{
+                "severity": "blocking",
+                "title": "Wiring gate result write refused",
+                "description": detail,
+            }],
+            "blocking_count": 1,
+            "advisory_count": 0,
+            "total_checked": 0,
+            "skipped_symbols": [],
+        }
 
     def _wiring_gate_record(self, context: Any, available: bool) -> Dict[str, Any]:
         """The wiring gate's outcome record: no ``gh``, a failed read, or the adapter's own.
