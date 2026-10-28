@@ -308,14 +308,17 @@ def _patch_manager(
     outcomes.
     """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    # OI-2459: this harness stubs every GitHub lookup itself, so the tick
+    # snapshot must not turn into a real `gh pr list --state all` call.
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
     # raising=False: on unfixed pre-OI-1508 code this attribute does not
     # exist yet — the RED proof for OI-1508 must fail on BEHAVIOR (the gate
     # manager gets called when it must not be), never on this shared test
     # helper's own AttributeError.
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -1126,7 +1129,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_open_still_attempts_the_gate(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "OPEN")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "OPEN")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "attempt_gate"
 
@@ -1134,7 +1137,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_merged_retires_with_pr_merged_reason(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "MERGED")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "MERGED")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "retire"
         assert decision["retire_reason"] == REASON_PR_MERGED
@@ -1143,7 +1146,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_closed_retires_with_pr_closed_reason(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "CLOSED")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "CLOSED")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "retire"
         assert decision["retire_reason"] == REASON_PR_CLOSED
@@ -1152,14 +1155,14 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_state_undetermined_neither_retires_nor_gates(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: None)
         decision = self._decide(state_dir, monkeypatch, attempts=1)
         assert decision["kind"] == "unresolvable"
         assert decision["detail"] is not None and "could not be determined" in decision["detail"]
 
     def test_pr_state_undetermined_escalates_past_threshold(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: None)
         decision = self._decide(
             state_dir, monkeypatch, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS,
         )
@@ -1351,8 +1354,8 @@ class TestEvidenceIndexJoinsOnPrNumber:
         )
         monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
         monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-        monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-        monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+        monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+        monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
         monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
         self._seed_result(
             state_dir, dispatch_id=dispatch_id, gate="codex_gate", pr_number=50200,

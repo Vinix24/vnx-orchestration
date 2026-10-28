@@ -585,8 +585,176 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
         return None
 
 
-def _pr_from_github(dispatch_id: str, owner_repo: str) -> Optional[int]:
-    """Find the open/merged PR whose head branch is dispatch/<dispatch_id>."""
+# ---------------------------------------------------------------------------
+# OI-2459: one PR snapshot + one branch listing per tick, not one gh call per
+# obligation
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-10-28 (OI-2459): one run() of this runner asked GitHub once per
+# obligation — a ``pr list --head dispatch/<id>`` per dispatch, a ``pr view <n>
+# --json state/headRefName/headRefOid`` per PR, and one REST branch-existence
+# call per obligation without a PR. The account's core quota stood at
+# 5000/5000 when that was measured, a second project's gates got 403s, and a
+# codex obligation here was booked not_executable on the rate limit. The
+# per-tick cost must be a constant, so every GitHub fact this module needs is
+# read from ONE snapshot, built lazily and at most once per run() — the same
+# shape :func:`_list_open_prs` already had (OI-1764/OI-1766).
+#
+# ``_PR_SNAPSHOT_LIMIT`` covers every PR an in-scope obligation can name: the
+# oldest obligations in scope predate PR #1469 and the repo carried ~2350 PRs
+# on 2026-10-28, so 3000 newest-first rows cover the whole history with room to
+# grow while staying a single bounded query. A list that reaches the limit is
+# SUSPECT (possibly truncated, exactly like :func:`_list_open_prs`) and a
+# suspect snapshot is trusted only for PRs it actually contains.
+_PR_SNAPSHOT_LIMIT = 3000
+_DISPATCH_REF_PREFIX = "refs/heads/dispatch/"
+
+
+def _snapshot_for(
+    snapshot: Optional["_GithubSnapshot"], owner_repo: Optional[str],
+) -> Optional["_GithubSnapshot"]:
+    """``snapshot`` when it belongs to ``owner_repo``, else None.
+
+    A caller resolves the owner/repo per obligation; a snapshot is only
+    authoritative for the repo it was built from. Passing the wrong one is
+    never an error, it just means "no snapshot" (and today's single call).
+    """
+    if snapshot is None or not owner_repo or snapshot.owner_repo != owner_repo:
+        return None
+    return snapshot
+
+
+class _GithubSnapshot:
+    """One tick's view of the repo's PRs and its ``dispatch/*`` head refs.
+
+    Both halves are fetched lazily, at most once per instance, and an instance
+    never outlives a :func:`run` call (tests run ``run()`` many times in one
+    process, so a module-level cache would go stale between ticks).
+
+    Fail-closed contract: a failed fetch answers ``None``/``known=False``, which
+    every caller turns into today's single call. A failed fetch is NEVER read
+    as "absent" — only a COMPLETE PR list can say "no PR", because a truncated
+    or failed one cannot distinguish "none" from "not fetched".
+    """
+
+    def __init__(self, owner_repo: str) -> None:
+        self.owner_repo = owner_repo
+        self._prs: Optional[List[Dict[str, Any]]] = None
+        self._prs_loaded = False
+        self._prs_suspect = True
+        self._refs: Optional[Set[str]] = None
+        self._refs_loaded = False
+
+    def prs(self) -> Optional[List[Dict[str, Any]]]:
+        """The newest PRs (all states); None when the call itself failed."""
+        if not self._prs_loaded:
+            self._prs_loaded = True
+            data = _gh_json(
+                ["pr", "list", "--state", "all",
+                 "--json", "number,state,headRefName,headRefOid",
+                 "--limit", str(_PR_SNAPSHOT_LIMIT)],
+                owner_repo=self.owner_repo,
+            )
+            if isinstance(data, list):
+                self._prs = data
+                self._prs_suspect = len(data) >= _PR_SNAPSHOT_LIMIT
+        return self._prs
+
+    def pr_by_number(self, pr_number: int) -> Optional[Dict[str, Any]]:
+        """The PR row for ``pr_number`` when the snapshot holds it, else None.
+
+        None means "the snapshot cannot answer" (failed fetch, or a PR older
+        than the newest L) — the caller falls back to today's single call, so
+        absence is never mistaken for the answer.
+        """
+        prs = self.prs()
+        if not isinstance(prs, list):
+            return None
+        for pr in prs:
+            if isinstance(pr, dict) and pr.get("number") == pr_number:
+                return pr
+        return None
+
+    def head_lookup(self, branch: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """``(known, pr)`` for the PR whose head branch is ``branch``.
+
+        ``known`` is False when the snapshot cannot answer (failed fetch, or a
+        list that hit L and does not contain the branch) — the caller must fall
+        back to today's single call. ``known`` True with ``pr`` None is a
+        definite "no PR": only a complete list can say that.
+        """
+        prs = self.prs()
+        if not isinstance(prs, list):
+            return False, None
+        for pr in prs:
+            if isinstance(pr, dict) and pr.get("headRefName") == branch:
+                return True, pr
+        if self._prs_suspect:
+            return False, None
+        return True, None
+
+    def branch_refs(self) -> Optional[Set[str]]:
+        """Every ``refs/heads/dispatch/*`` ref on GitHub; None when the call failed.
+
+        ``gh api --paginate`` follows the Link pages to exhaustion, so a
+        successful listing is complete — there is no truncation state to
+        account for, unlike the PR list's ``--limit``.
+        """
+        if not self._refs_loaded:
+            self._refs_loaded = True
+            data = _gh_json(
+                ["api", "--paginate", "--slurp",
+                 f"repos/{self.owner_repo}/git/matching-refs/heads/dispatch/"],
+                owner_repo=None,
+            )
+            refs: Set[str] = set()
+            if isinstance(data, list):
+                # ``--slurp`` yields an array of pages; a single page may come
+                # back as the bare array. Flatten both shapes.
+                stack: List[Any] = list(data)
+                while stack:
+                    item = stack.pop()
+                    if isinstance(item, list):
+                        stack.extend(item)
+                    elif isinstance(item, dict) and isinstance(item.get("ref"), str):
+                        refs.add(item["ref"])
+                self._refs = refs
+        return self._refs
+
+
+def _new_github_snapshot(owner_repo: Optional[str]) -> Optional[_GithubSnapshot]:
+    """This tick's snapshot, or None when no owner/repo resolves (no gh either)."""
+    return _GithubSnapshot(owner_repo) if owner_repo else None
+
+
+def _tick_github_context(
+    state_dir: Path,
+) -> Tuple[Optional[str], Optional[_GithubSnapshot]]:
+    """The tick's ``(owner/repo, snapshot)``, resolved once (OI-2459).
+
+    ``owner_repo`` is also what the read-only diagnostics at the end of
+    :func:`run` need; the snapshot is None exactly when no GitHub repo
+    resolves, in which case every lookup keeps today's unresolvable path.
+    """
+    owner_repo = _resolve_github_owner_repo(state_dir)
+    return owner_repo, _new_github_snapshot(owner_repo)
+
+
+def _pr_from_github(
+    dispatch_id: str, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Optional[int]:
+    """Find the open/merged PR whose head branch is dispatch/<dispatch_id>.
+
+    OI-2459: reads the tick's snapshot first. A complete snapshot answers
+    definitively (found or genuinely no PR); a failed/suspect one falls back to
+    today's single ``gh pr list --head`` call.
+    """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        known, pr = snap.head_lookup(f"dispatch/{dispatch_id}")
+        if known:
+            number = pr.get("number") if isinstance(pr, dict) else None
+            return number if isinstance(number, int) else None
     data = _gh_json(
         ["pr", "list", "--state", "all", "--head", f"dispatch/{dispatch_id}",
          "--json", "number", "--limit", "1"],
@@ -599,7 +767,16 @@ def _pr_from_github(dispatch_id: str, owner_repo: str) -> Optional[int]:
     return None
 
 
-def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+def _branch_from_github(
+    pr_number: int, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Optional[str]:
+    """The PR's head branch; answered from the snapshot when it holds the PR."""
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        pr = snap.pr_by_number(pr_number)
+        branch = pr.get("headRefName") if isinstance(pr, dict) else None
+        if isinstance(branch, str) and branch.strip():
+            return branch.strip()
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "headRefName"],
         owner_repo=owner_repo,
@@ -611,7 +788,9 @@ def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
     return None
 
 
-def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool]:
+def _branch_exists_on_github(
+    dispatch_id: str, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Optional[bool]:
     """Whether ``dispatch/<dispatch_id>`` still exists as a head ref on GitHub.
 
     Returns ``True``/``False`` on a definite answer, ``None`` when it cannot be
@@ -619,7 +798,17 @@ def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool
     OI-1388: a caller may only treat ``False`` as "the dispatch died without a
     PR" — ``None`` must stay a wait, never a retirement, so a transient gh
     hiccup can never close an obligation on ambiguous evidence.
+
+    OI-2459: a successful per-tick listing (``dispatch/*`` refs, fetched once
+    by :class:`_GithubSnapshot`) answers membership directly. A FAILED listing
+    falls through to today's single REST call, which keeps its 404-versus-other
+    split — so ``None`` still means "unknown, wait" and never retires.
     """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        refs = snap.branch_refs()
+        if refs is not None:
+            return f"{_DISPATCH_REF_PREFIX}{dispatch_id}" in refs
     if shutil.which("gh") is None:
         return None
     branch = f"dispatch/{dispatch_id}"
@@ -762,7 +951,9 @@ def _dispatch_is_live(state_dir: Path, dispatch_id: str) -> Optional[bool]:
             pass
 
 
-def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+def _pr_state_from_github(
+    pr_number: int, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Optional[str]:
     """Whether a resolved PR is ``OPEN``, ``MERGED``, or ``CLOSED`` on GitHub.
 
     OI-1508: the RESOLVED branch of :func:`_pre_execution_decision` knows a
@@ -776,7 +967,16 @@ def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
     response) — mirrors :func:`_branch_exists_on_github`: a caller may only
     retire on a definite ``MERGED``/``CLOSED``, never on ``None`` (OI-1388:
     ambiguous evidence must never close an obligation).
+
+    OI-2459: answered from the tick's snapshot when it holds the PR; a failed
+    or non-covering snapshot keeps today's single ``gh pr view`` call.
     """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        pr = snap.pr_by_number(pr_number)
+        state = pr.get("state") if isinstance(pr, dict) else None
+        if isinstance(state, str) and state.strip():
+            return state.strip().upper()
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "state"],
         owner_repo=owner_repo,
@@ -857,7 +1057,9 @@ def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
     return None
 
 
-def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
+def resolve_pr_number(
+    state_dir: Path, record: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
+) -> PrResolution:
     """Resolve the obligation's PR number from every available source.
 
     Returns a :class:`PrResolution` carrying one of three statuses so the caller
@@ -895,7 +1097,7 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
                 "for a central install is a release-time temp checkout (OI-1253)"
             ),
         )
-    from_github = _pr_from_github(dispatch_id, owner_repo)
+    from_github = _pr_from_github(dispatch_id, owner_repo, snapshot=snapshot)
     if from_github:
         return PrResolution(
             RESOLUTION_RESOLVED, pr_number=from_github, owner_repo=owner_repo,
@@ -903,7 +1105,7 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
     # OI-1388: no PR exists yet, but that reads as "not yet" forever unless we
     # also ask whether the dispatch could still produce one. A dead branch is
     # the one fact that answers that without a timer.
-    branch_exists = _branch_exists_on_github(dispatch_id, owner_repo)
+    branch_exists = _branch_exists_on_github(dispatch_id, owner_repo, snapshot=snapshot)
     # OI-1532: ``branch_exists is False`` folds two states into one. Before
     # retiring on it (the caller's temptation), split it with the occupancy
     # lock: a live holder means the dispatch is still running and has simply
@@ -987,6 +1189,22 @@ def _list_open_prs(owner_repo: str) -> Dict[str, Any]:
     if not isinstance(open_prs, list):
         return {"prs": None, "suspect": True}
     return {"prs": open_prs, "suspect": len(open_prs) >= _OPEN_PR_LIST_LIMIT}
+
+
+def _open_pr_lookup(owner_repo: Optional[str]) -> Dict[str, Any]:
+    """The shared open-PR list, or "coverage undetermined" when no repo resolves.
+
+    PR #1865 review: an unresolvable owner/repo must never read as
+    ``{"prs": [], "suspect": False}`` — that is indistinguishable from
+    "resolved, genuinely zero open PRs", and :func:`_stale_terminal_evidence`
+    would silently read "not checked" as "checked, nothing found". It degrades
+    to the same ``prs is None`` shape :func:`_list_open_prs` returns on an
+    outright gh failure, with an ``owner_repo_unresolvable`` marker so the
+    caller can name the real cause.
+    """
+    if not owner_repo:
+        return {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
+    return _list_open_prs(owner_repo)
 
 
 def _find_prs_without_obligation(
@@ -1098,6 +1316,25 @@ def _get_pr_head_sha_for_gate(pr_number: Optional[int]) -> str:
     from gate_recorder import get_pr_head_sha  # noqa: PLC0415
 
     return get_pr_head_sha(pr_number)
+
+
+def _pr_head_sha_for_gate(
+    pr_number: Optional[int], snapshot: Optional[_GithubSnapshot] = None,
+) -> str:
+    """The PR head sha, from the tick's snapshot when it holds the PR (OI-2459).
+
+    Same answer as :func:`_get_pr_head_sha_for_gate` — that function is the
+    canonical gh path and stays the fallback — but an ordinary tick answers it
+    from the one PR snapshot instead of a ``gh pr view --json headRefOid`` per
+    obligation. An empty snapshot answer (PR outside L, failed fetch) falls
+    straight through to ``gh``, so "unknown" is never fabricated.
+    """
+    if isinstance(pr_number, int) and pr_number > 0 and snapshot is not None:
+        pr = snapshot.pr_by_number(pr_number)
+        sha = pr.get("headRefOid") if isinstance(pr, dict) else None
+        if isinstance(sha, str) and sha.strip():
+            return sha.strip()
+    return _get_pr_head_sha_for_gate(pr_number)
 
 
 def _flag_fast_fulfillment_if_evidence_predates_attempt(
@@ -1540,7 +1777,7 @@ def _fulfilling_result(
     index: GateResultIndex,
     dispatch_id: str,
     gate: str,
-    pr_number: Optional[int] = None,
+    pr_number: Optional[int] = None, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Scan for a complete-evidence, DECIDED, sha-CURRENT result — a gate
     that actually ran, reached a verdict, and is provably about the PR's
@@ -1601,7 +1838,7 @@ def _fulfilling_result(
     for entry, record in candidates:
         candidate_pr = record.get("pr_number")
         head_sha = (
-            _get_pr_head_sha_for_gate(candidate_pr) if isinstance(candidate_pr, int) else ""
+            _pr_head_sha_for_gate(candidate_pr, snapshot) if isinstance(candidate_pr, int) else ""
         )
         kind, detail = _has_decided_evidence(record, head_sha)
         if kind == _EVIDENCE_USABLE:
@@ -1798,7 +2035,7 @@ def _terminal_evidence_contradictions(
 
 def _stale_terminal_evidence(
     obligations: List[Tuple[Path, Dict[str, Any]]],
-    open_pr_lookup: Dict[str, Any],
+    open_pr_lookup: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
 ) -> List[Dict[str, Any]]:
     """Report every TERMINAL obligation, for a currently OPEN PR, whose own
     evidence record no longer binds to the PR's current head.
@@ -1928,8 +2165,8 @@ def _stale_terminal_evidence(
         result_sha = str(evidence_record.get("commit_sha") or "")
 
         if pr_number not in head_sha_cache:
-            head_sha_cache[pr_number] = _get_pr_head_sha_for_gate(
-                pr_number if isinstance(pr_number, int) else None
+            head_sha_cache[pr_number] = _pr_head_sha_for_gate(
+                pr_number if isinstance(pr_number, int) else None, snapshot,
             )
         head_sha = head_sha_cache[pr_number]
 
@@ -2013,7 +2250,7 @@ def _pre_execution_decision(
     gate: str,
     resolution: PrResolution,
     attempts: int,
-    result_index: GateResultIndex,
+    result_index: GateResultIndex, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Decide what happens to an obligation before any gate is actually run.
 
@@ -2140,7 +2377,7 @@ def _pre_execution_decision(
     silently discarding.
     """
     if resolution.status == RESOLUTION_UNRESOLVABLE:
-        lookup = _fulfilling_result(result_index, dispatch_id, gate)
+        lookup = _fulfilling_result(result_index, dispatch_id, gate, snapshot=snapshot)
         if lookup["kind"] == "found":
             return _evidence_decision(lookup["entry"])
         if lookup["kind"] == "unverifiable":
@@ -2154,7 +2391,7 @@ def _pre_execution_decision(
         # with "still running, not pushed yet". Split it with the occupancy
         # lock before any retire decision — see PrResolution.dispatch_live.
         if resolution.branch_exists is False:
-            lookup = _fulfilling_result(result_index, dispatch_id, gate)
+            lookup = _fulfilling_result(result_index, dispatch_id, gate, snapshot=snapshot)
             if lookup["kind"] == "found":
                 # Usable (decided, sha-matching) evidence fulfils REGARDLESS
                 # of liveness — the gate already reviewed this dispatch; the
@@ -2280,7 +2517,7 @@ def _pre_execution_decision(
     # differently-named dispatch_id no longer hides its evidence from this
     # obligation.
     lookup = _fulfilling_result(
-        result_index, dispatch_id, gate, pr_number=resolution.pr_number,
+        result_index, dispatch_id, gate, pr_number=resolution.pr_number, snapshot=snapshot,
     )
     if lookup["kind"] == "found":
         return _evidence_decision(lookup["entry"])
@@ -2290,7 +2527,7 @@ def _pre_execution_decision(
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
     pr_state = (
-        _pr_state_from_github(pr_number, owner_repo)
+        _pr_state_from_github(pr_number, owner_repo, snapshot=snapshot)
         if pr_number and owner_repo else None
     )
     if pr_state == "OPEN":
@@ -2346,7 +2583,7 @@ def _dry_run_outcome(
     state_dir: Path,
     path: Path,
     record: Dict[str, Any],
-    result_index: GateResultIndex,
+    result_index: GateResultIndex, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Report the action a real run would take for one obligation — never writes.
 
@@ -2370,8 +2607,8 @@ def _dry_run_outcome(
         }
 
     attempts = int(record.get("attempts") or 0) + 1
-    resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
+    resolution = resolve_pr_number(state_dir, record, snapshot=snapshot)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index, snapshot=snapshot)
     outcome: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "gate": gate,
@@ -2692,6 +2929,7 @@ def _guard_launch(
     pr_number: int,
     head_sha: str,
     force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> _LaunchGuard:
     """R10: take the run lock of (PR, gate, head), then recheck what may have changed on the way.
 
@@ -2714,7 +2952,7 @@ def _guard_launch(
     fresh = _read_obligation_record(path) or record
     refusal, evidence = _recheck_under_lock(
         state_dir, path, fresh, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
-        head_sha=head_sha, force_rerun=force_rerun,
+        head_sha=head_sha, force_rerun=force_rerun, snapshot=snapshot,
     )
     if refusal is not None or evidence is not None:
         lock.release()
@@ -2742,6 +2980,7 @@ def _recheck_under_lock(
     pr_number: int,
     head_sha: str,
     force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """``(refusal, evidence)`` for a launch that holds the run lock; both ``None``: it runs.
 
@@ -2761,7 +3000,9 @@ def _recheck_under_lock(
         return None, None
     if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
         return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
-    lookup = _fulfilling_result(_index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number)
+    lookup = _fulfilling_result(
+        _index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number, snapshot=snapshot,
+    )
     if lookup["kind"] == "found":
         return None, _evidence_decision(lookup["entry"])
     return None, None
@@ -2813,6 +3054,7 @@ def _book_reviewer_run(
 
 def _apply_force_rerun(
     state_dir: Path, resolution: PrResolution, decision: Dict[str, Any], force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """R10: an operator force-rerun turns a verdict rescue on an OPEN PR into a run; nothing else changes.
 
@@ -2825,7 +3067,7 @@ def _apply_force_rerun(
     if resolution.status != RESOLUTION_RESOLVED or not resolution.pr_number:
         return decision
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
-    if not owner_repo or _pr_state_from_github(resolution.pr_number, owner_repo) != "OPEN":
+    if not owner_repo or _pr_state_from_github(resolution.pr_number, owner_repo, snapshot=snapshot) != "OPEN":
         return decision
     return {"kind": "attempt_gate", "forced_over": decision["kind"]}
 
@@ -2836,7 +3078,7 @@ def fulfill_obligation(
     record: Dict[str, Any],
     *,
     result_index: Optional[GateResultIndex] = None,
-    force_rerun: str = "",
+    force_rerun: str = "", snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
@@ -2872,11 +3114,11 @@ def fulfill_obligation(
     attempts = int(record.get("attempts") or 0) + 1
     now = utc_now_iso()
 
-    resolution = resolve_pr_number(state_dir, record)
+    resolution = resolve_pr_number(state_dir, record, snapshot=snapshot)
     decision = _apply_force_rerun(
         state_dir, resolution,
-        _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index),
-        force_rerun,
+        _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index, snapshot=snapshot),
+        force_rerun, snapshot=snapshot,
     )
 
     if decision["kind"] in ("fulfill_by_evidence", "fulfill_by_failed_evidence"):
@@ -3221,11 +3463,11 @@ def fulfill_obligation(
     # snapshot even after a fix-forward push moved the head, which is exactly
     # how the runner booked a verdict about older code onto a new obligation
     # (defect fixed 2026-09-30).
-    head_sha_before_run = _get_pr_head_sha_for_gate(pr_number)
+    head_sha_before_run = _pr_head_sha_for_gate(pr_number, snapshot)
 
     branch = (
         str(record.get("branch") or "").strip()
-        or (_branch_from_github(pr_number, owner_repo) if owner_repo else "")
+        or (_branch_from_github(pr_number, owner_repo, snapshot=snapshot) if owner_repo else "")
         or f"dispatch/{dispatch_id}"
     )
 
@@ -3243,7 +3485,7 @@ def fulfill_obligation(
     # run (released in ``finally``); see item 14 of the module docstring.
     launch = _guard_launch(
         state_dir, path, record, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
-        head_sha=head_sha_before_run, force_rerun=force_rerun,
+        head_sha=head_sha_before_run, force_rerun=force_rerun, snapshot=snapshot,
     )
     if launch.evidence is not None:
         attempts = int(launch.record.get("attempts") or 0) + 1
@@ -3289,7 +3531,7 @@ def fulfill_obligation(
         # obligation is booked with a verdict about code that no longer exists
         # (defect fixed 2026-09-30). ``_get_pr_head_sha_for_gate`` is the same
         # source the pre-run capture used, never a second implementation.
-        head_sha = _get_pr_head_sha_for_gate(pr_number)
+        head_sha = _pr_head_sha_for_gate(pr_number, snapshot)
         # The commit the result under decision actually records. An empty sha
         # (record has no commit_sha, or no record at all) keeps the existing
         # "binding unverifiable" handling: unknown is never a mismatch.
@@ -3702,6 +3944,13 @@ def run(
     function. Shares its open-PR list with ``prs_without_obligation`` below
     via :func:`_list_open_prs` — a single ``gh pr list --state open`` call
     per :func:`run`, not two.
+
+    OI-2459: every PR and branch fact the per-obligation loop needs comes from
+    ONE lazily built :class:`_GithubSnapshot` — at most one ``gh pr list
+    --state all`` and, only when a branch check is actually needed, one ``gh
+    api --paginate .../git/matching-refs/heads/dispatch/`` — so the tick's gh
+    cost is constant in the obligation count. A failed fetch degrades to the
+    per-call paths unchanged; a failed snapshot is never read as "no PRs".
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
@@ -3740,16 +3989,25 @@ def run(
     # same decision tree (_pre_execution_decision) either way, so the two
     # paths can never diverge.
     result_index = _index_gate_results(state_dir)
+    # OI-2459: the tick's GitHub context — the owner/repo plus the ONE PR
+    # snapshot and branch listing every obligation (and the read-only
+    # diagnostics below) share. Both halves of the snapshot are fetched
+    # lazily on first use, so a tick that needs neither still asks GitHub
+    # only for the open-PR list.
+    owner_repo_for_sweep, snapshot = _tick_github_context(state_dir)
     for path, record in scoped:
         if record.get("status", STATUS_PENDING) in TERMINAL_STATUSES:
             continue
         if not write:
-            outcome = _dry_run_outcome(state_dir, path, record, result_index)
+            outcome = _dry_run_outcome(state_dir, path, record, result_index, snapshot)
             outcomes.append(outcome)
             if outcome["action"] in _DRY_RUN_OPEN_ACTIONS:
                 pending_after += 1
             continue
-        outcome = fulfill_obligation(state_dir, path, record, result_index=result_index, force_rerun=force_rerun)
+        outcome = fulfill_obligation(
+            state_dir, path, record, result_index=result_index, force_rerun=force_rerun,
+            snapshot=snapshot,
+        )
         outcomes.append(outcome)
         # R10: in_flight and retry_capped leave the obligation open as well.
         if outcome["action"] in _OPEN_ACTIONS:
@@ -3780,12 +4038,7 @@ def run(
     # prs_without_obligation (OI-1751) is untouched here: it already guards
     # on owner_repo_for_sweep directly and keeps its own documented
     # silent-empty contract for this case.
-    owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
-    open_pr_lookup = (
-        _list_open_prs(owner_repo_for_sweep)
-        if owner_repo_for_sweep
-        else {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
-    )
+    open_pr_lookup = _open_pr_lookup(owner_repo_for_sweep)
     # OI-1764: a third full-store, read-only diagnostic, scoped to OPEN PRs
     # only — terminal obligations the loop above skips outright (line
     # ~2981) whose own evidence has since gone stale (a later commit landed
@@ -3793,7 +4046,7 @@ def run(
     # evidence is never re-examined: its head is frozen, so it would only
     # ever repeat the same finding forever. Never mutates anything, same
     # discipline as contradictions/prs_without_obligation.
-    stale_terminal_evidence = _stale_terminal_evidence(obligations, open_pr_lookup)
+    stale_terminal_evidence = _stale_terminal_evidence(obligations, open_pr_lookup, snapshot)
     stale_terminal_evidence_mismatch_count = sum(
         1 for finding in stale_terminal_evidence if finding["binding"] == "mismatch"
     )
