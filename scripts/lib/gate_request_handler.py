@@ -2007,6 +2007,14 @@ class GateRequestHandlerMixin:
         what. ``request`` is the whole record when the caller has a
         slot-shaped one, and a takeover request's ``failure_reason`` and
         ``takeover_from`` travel top-level next to it (OI-1415).
+
+        Each of those two fields is copied only when the request carries it
+        (OI-2453): ``request`` is also the STANDING record of a seat whose
+        reviewer already decided on this head, and a decided takeover result
+        carries ``takeover``/``takeover_from`` without a ``failure_reason``.
+        An absent field is neither invented nor stamped as ``None`` -- a
+        receipt carries exactly the fields its request carried, so the
+        append's identity (``contract_hash`` included) stays what it was.
         """
         from review_gate_manager import emit_governance_receipt
 
@@ -2026,8 +2034,11 @@ class GateRequestHandlerMixin:
         if request is not None:
             fields["request"] = request
             if request.get("takeover"):
-                fields["failure_reason"] = request["failure_reason"]
-                fields["takeover_from"] = request["takeover_from"]
+                # A decided standing takeover result has no failure_reason
+                # (OI-2453): copy each field only when the record carries it.
+                for name in ("failure_reason", "takeover_from"):
+                    if name in request:
+                        fields[name] = request[name]
         if optional_gate is not None:
             fields["contributed_evidence"], fields["was_intentionally_absent"] = optional_gate
         emit_governance_receipt(
