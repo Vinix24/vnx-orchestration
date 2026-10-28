@@ -271,6 +271,36 @@ def apply(decisions: list[BranchDecision]) -> list[BranchDecision]:
     return decisions
 
 
+def _module_repo_root() -> Path:
+    """The checkout this module lives in, asked of git, without the project-root resolver.
+
+    ``scripts/lib`` runs in both a dev checkout and a central install, so the root
+    ``plan`` must read is the checkout that holds this file — dev repo, dispatch
+    worktree or ``~/.vnx-system/versions/<v>``. Feeding ``__file__`` to
+    ``project_root.resolve_project_root`` is OI-1145 shape 3a and the central-mode
+    path gate blocks every new site of it
+    (``scripts/check_no_file_derived_data_paths.py``); ADR-045 K-1 r3 fixed
+    ``writer_sha`` the same way. Git walks up from any directory inside a checkout
+    to that checkout's root, so ``git -C <this dir> rev-parse --show-toplevel``
+    needs no anchor at all.
+
+    Fail-closed: an unreadable answer is a :class:`BranchGcError`, so ``main``
+    prints it on one stderr line and exits 2 instead of planning against a guess.
+    """
+    here = Path(__file__).resolve().parent
+    try:
+        proc = subprocess.run(["git", "-C", str(here), "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BranchGcError(f"repo-root niet te bepalen via git in {here}: {exc}") from exc
+    toplevel = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not toplevel:
+        stderr = " ".join((proc.stderr or "").split()) or "geen output"
+        raise BranchGcError(f"git rev-parse --show-toplevel faalde in {here} "
+                            f"(exit {proc.returncode}): {stderr}")
+    return Path(toplevel)
+
+
 def _counts(decisions: list[BranchDecision]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for decision in decisions:
@@ -291,7 +321,8 @@ def _print_report(decisions: list[BranchDecision], *, applied: bool) -> None:
 
 def main(argv: list[str] | None = None, *, gh: GhCallable | None = None) -> int:
     parser = argparse.ArgumentParser(description="Ruim lokale dispatch/*-branches op zonder werk.")
-    parser.add_argument("--repo-root", default=None, help="repo-root (standaard: project-root van dit script)")
+    parser.add_argument("--repo-root", default=None,
+                        help="repo-root (standaard: git-toplevel van de map van dit script)")
     parser.add_argument("--apply", action="store_true", help="verwijder de branches (standaard: dry-run)")
     parser.add_argument("--json", action="store_true", help="print de beslissingen als JSON")
     args = parser.parse_args(argv)
@@ -299,9 +330,7 @@ def main(argv: list[str] | None = None, *, gh: GhCallable | None = None) -> int:
         if args.repo_root:
             root = Path(args.repo_root).resolve()
         else:
-            from project_root import resolve_project_root
-
-            root = resolve_project_root(__file__)
+            root = _module_repo_root()
         decisions = plan(root, gh=gh)
     except Exception as exc:  # vnx-silent-except: reported as a non-zero exit, not a traceback
         print(f"branch_gc: {exc}", file=sys.stderr)

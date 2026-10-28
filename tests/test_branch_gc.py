@@ -277,3 +277,57 @@ def test_json_output_carries_counts_and_decisions(repo, capsys):
     assert {entry["branch"]: entry["rule"] for entry in payload["decisions"]} == {
         "dispatch/merged": bgc.RULE_ANCESTOR, "dispatch/unmerged": bgc.RULE_NOT_MERGED}
     assert exists(repo, "dispatch/merged")
+
+
+def test_main_without_repo_root_asks_git_for_the_toplevel(repo, monkeypatch, capsys):
+    """``main`` derives its default root from git, not from the project-root resolver.
+
+    ``scripts/lib/branch_gc.py`` is anchored inside a real temporary checkout by
+    moving ``__file__`` there (no source is copied), so
+    ``git -C <module dir> rev-parse --show-toplevel`` is the call under test.
+    ``subprocess.run`` is wrapped rather than replaced so the command shape and
+    the resolved root are both observable while git itself still answers.
+    """
+    module_dir = repo / "scripts" / "lib"
+    module_dir.mkdir(parents=True)
+    monkeypatch.setattr(bgc, "__file__", str(module_dir / "branch_gc.py"))
+    calls = []
+    real_run = subprocess.run
+
+    def spy(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(bgc.subprocess, "run", spy)
+    rc = bgc.main(["--json"], gh=gh_of())
+    out, err = capsys.readouterr()
+
+    assert rc == 0, err
+    assert ["git", "-C", str(module_dir), "rev-parse", "--show-toplevel"] in calls
+    assert Path(json.loads(out)["repo_root"]).resolve() == repo.resolve()
+
+
+def test_a_failing_toplevel_probe_exits_2_with_one_stderr_line(tmp_path, monkeypatch, capsys):
+    """A ``rev-parse --show-toplevel`` that fails is exit 2, never a guessed root."""
+    module_dir = tmp_path / "stub" / "scripts" / "lib"
+    module_dir.mkdir(parents=True)
+    monkeypatch.setattr(bgc, "__file__", str(module_dir / "branch_gc.py"))
+
+    class Failed:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: not a git repository (or any of the parent directories): .git\n"
+
+    def failing_run(cmd, *args, **kwargs):
+        return Failed()
+
+    monkeypatch.setattr(bgc.subprocess, "run", failing_run)
+    rc = bgc.main([], gh=gh_of())
+    out, err = capsys.readouterr()
+
+    assert rc == 2
+    assert out == ""
+    lines = err.strip().splitlines()
+    assert len(lines) == 1, err
+    assert lines[0].startswith("branch_gc: ")
+    assert "--show-toplevel" in lines[0]
