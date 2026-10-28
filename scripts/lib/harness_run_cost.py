@@ -218,6 +218,17 @@ class BuilderRun:
     spawn_refused: Optional[str] = None
 
 
+def transcript_identity(provider: str, session_id: str) -> str:
+    """The ledger's transcript identity ``"<provider>:<session_id>"`` (K6a, OI-2419).
+
+    The one definition of the format: a harness run's line names the session
+    transcript it was read from with this string, and a later backfill matches
+    that string before it may supersede the line. Keep the reader on this
+    function rather than re-deriving the shape.
+    """
+    return f"{provider}:{session_id}"
+
+
 def _iso(moment: datetime) -> str:
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
@@ -383,6 +394,14 @@ def record_builder_run(
     be one of ``cost_ledger.ROLES``: an unknown role is refused here, before
     anything is written. Raises what the ledger raises; nothing here catches
     it.
+
+    A run that knows its ``session_id`` names that session on its line as
+    ``cost_ledger.TRANSCRIPT_IDENTITY`` (:func:`transcript_identity`), so the
+    line can be matched to its transcript without a guess (K6a). Existing
+    ledger lines are never rewritten and are not migrated: a line written
+    before this field existed keeps its ``record_id``, because an absent field
+    does not enter the hash, and it receives an identity only through the
+    backfill correction a later K6b-2 supersedes it with.
     """
     if run.provider not in BILLING_BY_PROVIDER:
         raise cost_ledger.InvalidRecord(f"provider {run.provider!r} is not a claude harness lane")
@@ -396,11 +415,16 @@ def record_builder_run(
             "harness_run_cost: dispatch=%s provider=%s booked as %s (%s)",
             dispatch_id, run.provider, fields["cost_source"], run.spawn_refused or "no transcript",
         )
+    # ``_session`` drops a blank id: an identity naming no session would be refused by the
+    # ledger, and the run's usage must still be booked, so a blank id is no identity at all.
+    session = _session(run.session_id)
+    identity = transcript_identity(run.provider, session) if session is not None else None
 
     def make_run(run_id: str) -> cost_ledger.RunCost:
         return cost_ledger.RunCost(
             run_id=run_id, project_id=project_id, role=role, provider=run.provider,
-            model=run.model, billing=BILLING_BY_PROVIDER[run.provider], **fields,
+            model=run.model, billing=BILLING_BY_PROVIDER[run.provider],
+            transcript_identity=identity, **fields,
         )
 
     return cost_ledger.record_next_attempt(project_id, producer, dispatch_id, make_run, ledger_path=ledger_path)
@@ -757,5 +781,6 @@ __all__ = [
     "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE", "book_cli_builder", "books_cli_run", "cli_run",
     "lane_model", "ledger_project_id", "price_segments",
     "receipt_cost", "record_builder_run", "record_classifier_run", "record_cli_run", "record_codex_run",
-    "record_kimi_run", "run_fields", "run_tokens", "usage_completeness", "writes_builder_run",
+    "record_kimi_run", "run_fields", "run_tokens", "transcript_identity", "usage_completeness",
+    "writes_builder_run",
 ]
