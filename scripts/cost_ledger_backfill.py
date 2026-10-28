@@ -45,7 +45,7 @@ reference — the same reference a classifier run books — and is counted, neve
 dropped. Session metadata files exist only for live sessions, so ``cwd`` is the
 durable carrier; the first user message is never read.
 
-**Identity.** The provider is the lane the transcript lives in (its directory name),
+**Provider, model, role.** The provider is the lane the transcript lives in (its directory name),
 never the transcript's self-reported name. The model is the dispatch row's when the
 registry knows it, else the live line's, else the transcript's dominant reported
 model, else the lane default — each resolved through ``wave7_models.yaml``
@@ -388,7 +388,7 @@ def load_live_runs(ledger_path: Path, project_id: str) -> Dict[str, List[Mapping
     return dict(index)
 
 
-def record_identity(record: Mapping[str, Any]) -> Optional[str]:
+def _record_identity(record: Mapping[str, Any]) -> Optional[str]:
     """The transcript identity a live line names, or ``None`` for a line written before it was stored.
 
     A line whose identity is missing, empty or not a string names no session:
@@ -416,7 +416,7 @@ def _claimable(records: Sequence[Mapping[str, Any]], run: TranscriptRun,
     line would remove its spend from the ledger instead of adding this run.
     """
     return [record for record in _candidates(records, run.provider, claimed)
-            if record_identity(record) in (None, run.identity)]
+            if _record_identity(record) in (None, run.identity)]
 
 
 def _distance(record: Mapping[str, Any], run: TranscriptRun) -> float:
@@ -508,8 +508,8 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
 
     Three passes, in this order, over the transcripts of one reference:
 
-    1. a *verified* match — the live line stores this transcript's identity and no
-       other candidate does. This is the only way a booked run is corrected; a
+    1. a *verified* match — the live line stores this transcript's identity. This is
+       the only way a run that already names a session is corrected; a
        session of the same dispatch with another identity (or a ``--since`` that
        leaves the booked transcript out of the scan) never takes its line;
     2. an exact token match on a line without an identity, across all transcripts
@@ -533,7 +533,7 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
     matched: Dict[int, Mapping[str, Any]] = {}
     for index, run in enumerate(ordered):
         candidates = _claimable(live_index.get(run.ref, ()), run, claimed)
-        verified = [record for record in candidates if record_identity(record) == run.identity]
+        verified = [record for record in candidates if _record_identity(record) == run.identity]
         if verified:
             matched[index] = min(verified, key=lambda record: _distance(record, run))
             claimed.add(matched[index]["record_id"])
@@ -541,7 +541,7 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
         if index in matched:
             continue
         matches = [record for record in _claimable(live_index.get(run.ref, ()), run, claimed)
-                   if record_identity(record) is None and record.get("tokens") == dict(tokens[index])]
+                   if _record_identity(record) is None and record.get("tokens") == dict(tokens[index])]
         if matches:
             matched[index] = min(matches, key=lambda record: _distance(record, run))
             claimed.add(matched[index]["record_id"])
@@ -551,7 +551,7 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
         live = matched.get(index)
         if live is None:
             legacy = [record for record in _claimable(live_index.get(run.ref, ()), run, claimed)
-                      if record_identity(record) is None]
+                      if _record_identity(record) is None]
             live = min(legacy, key=lambda record: _distance(record, run)) if legacy else None
         row = rows.get(run.dispatch_id) if run.dispatch_id else None
         planned.append(plan_run(run, row, live, tokens[index], project_id, live_index, reserved))
