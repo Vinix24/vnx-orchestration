@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from event_outcome_semantics import COMPLETION_EVENT_TYPES
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,8 +87,10 @@ class PRDiscovery:
         )
         for m in self._PR_REF_RE.finditer(searchable):
             pr_num = int(m.group(1))
+            # ADR-045 §2: a dispatch ends on dispatch_finished too. The legacy
+            # branch (task_complete, and the "unknown" tolerance) is unchanged.
             is_done = (
-                receipt.get("event_type") == "task_complete"
+                str(receipt.get("event_type") or "") in COMPLETION_EVENT_TYPES
                 and receipt.get("status") in ("success", "unknown")
             )
             if pr_num not in discovered:

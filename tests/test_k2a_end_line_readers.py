@@ -211,3 +211,228 @@ def test_end_status_projects_the_end_state() -> None:
     assert end_status(_finished(1, "abandoned")) == "timeout"
     assert end_status(LEGACY_COMPLETE) == "success"
     assert end_status(REPORT_ONLY) is None
+
+
+# ---------------------------------------------------------------------------
+# The readers: a new-type ledger and a legacy ledger give the same picture
+# ---------------------------------------------------------------------------
+
+from datetime import timedelta  # noqa: E402
+from unittest import mock  # noqa: E402
+
+import build_t0_state  # noqa: E402
+import queue_reconciler  # noqa: E402
+import receipt_classifier  # noqa: E402
+import state_rebuild_trigger  # noqa: E402
+import stop_conditions  # noqa: E402
+import terminal_state_reconciler  # noqa: E402
+import unified_state_manager  # noqa: E402
+from pr_discovery import PRDiscovery  # noqa: E402
+
+
+def _stamp(minutes_ago: int) -> str:
+    moment = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _end_record(kind: str, dispatch_id: str, *, ok: bool, minutes_ago: int,
+                provider: str = "kimi", terminal: str = "T1") -> dict:
+    record = {
+        "project_id": PROJECT,
+        "dispatch_id": dispatch_id,
+        "attempt": 1,
+        "provider": provider,
+        "terminal": terminal,
+        "timestamp": _stamp(minutes_ago),
+        "title": "PR 701 finished",
+    }
+    if kind == "legacy":
+        record["event_type"] = "task_complete"
+        record["status"] = "success" if ok else "failure"
+    else:
+        record["event_type"] = "dispatch_finished"
+        record["end_state"] = "completed" if ok else "failed"
+        record["status"] = "success" if ok else "failure"
+    return record
+
+
+def _ledger(kind: str) -> list[dict]:
+    """Two dispatches, one completed and one failed, in either vocabulary.
+
+    The lifecycle ledger additionally carries the two non-outcome line types
+    (the report arrives after the end; the start precedes it). Neither may
+    change any reader's picture.
+    """
+    records = [
+        _end_record(kind, "d-one", ok=True, minutes_ago=3),
+        _end_record(kind, "d-two", ok=False, minutes_ago=2),
+    ]
+    if kind == "lifecycle":
+        records.extend([
+            {
+                "event_type": "dispatch_started",
+                "project_id": PROJECT,
+                "dispatch_id": "d-one",
+                "attempt": 1,
+                "lifecycle_mode": "v3",
+                "terminal": "T1",
+                "timestamp": _stamp(4),
+            },
+            {
+                "event_type": "report_ingested",
+                "project_id": PROJECT,
+                "dispatch_id": "d-one",
+                "attempt": 1,
+                "end_pending": True,
+                "terminal": "T1",
+                "timestamp": _stamp(1),
+            },
+        ])
+    return records
+
+
+def _write_ledger(path: Path, records: list[dict]) -> None:
+    payload = "".join(json.dumps(record) + "\n" for record in records)
+    path.write_text(payload, encoding="utf-8")
+
+
+# -- build_t0_state._build_queues -------------------------------------------
+
+def test_build_queues_counts_both_vocabularies_alike(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
+    pictures = []
+    for kind in ("legacy", "lifecycle"):
+        state_dir = tmp_path / kind / "state"
+        state_dir.mkdir(parents=True)
+        _write_ledger(state_dir / "t0_receipts.ndjson", _ledger(kind))
+        queues = build_t0_state._build_queues(tmp_path / kind / "dispatches", state_dir)
+        pictures.append(queues["completed_last_hour"])
+    assert pictures == [2, 2]
+
+
+# -- receipt_classifier.should_classify -------------------------------------
+
+def test_receipt_classifier_classifies_both_vocabularies_alike(tmp_path: Path) -> None:
+    legacy = [receipt_classifier.should_classify(r) for r in _ledger("legacy")]
+    lifecycle = [receipt_classifier.should_classify(r) for r in _ledger("lifecycle")]
+    assert legacy == [True, True]
+    assert lifecycle == [True, True, False, False]
+
+
+# -- state_rebuild_trigger --------------------------------------------------
+
+def test_state_rebuild_treats_both_end_vocabularies_as_critical(
+        tmp_path: Path, monkeypatch) -> None:
+    def fires(kind: str, event_type: str) -> bool:
+        (tmp_path / ".last_state_rebuild_ts").write_text(
+            str(int(__import__("time").time())), encoding="utf-8")
+        with mock.patch.object(state_rebuild_trigger, "_resolve_state_dir", return_value=tmp_path), \
+             mock.patch("state_rebuild_trigger.subprocess.Popen") as popen:
+            popen.return_value.wait.return_value = 0
+            return state_rebuild_trigger.maybe_trigger_state_rebuild(event_type=event_type)
+
+    pictures = []
+    for kind in ("legacy", "lifecycle"):
+        end_event = "task_complete" if kind == "legacy" else "dispatch_finished"
+        pictures.append((fires(kind, end_event), fires(kind, "report_ingested")))
+    # Both end vocabularies bypass the throttle; a report line never does.
+    assert pictures == [(True, False), (True, False)]
+
+
+# -- stop_conditions.check_provider_exhausted -------------------------------
+
+def _exhaustion_ledger(kind: str) -> list[dict]:
+    records = []
+    for index in range(3):
+        record = _end_record(kind, f"d-exhausted-{index}", ok=False, minutes_ago=10 - index)
+        record["failure_class"] = "auth_rejected"
+        records.append(record)
+    if kind == "lifecycle":
+        records.append({
+            "event_type": "report_ingested",
+            "project_id": PROJECT,
+            "dispatch_id": "d-exhausted-2",
+            "attempt": 1,
+            "end_pending": True,
+            "provider": "kimi",
+            "failure_class": "auth_rejected",
+            "timestamp": _stamp(1),
+        })
+    return records
+
+
+def test_provider_exhaustion_reads_both_end_vocabularies_alike(tmp_path: Path) -> None:
+    statuses = []
+    for kind in ("legacy", "lifecycle"):
+        ledger_path = tmp_path / f"{kind}.ndjson"
+        _write_ledger(ledger_path, _exhaustion_ledger(kind))
+        result = stop_conditions.check_provider_exhausted(
+            ledger_path, providers=["kimi"], threshold=3)
+        statuses.append(result.status)
+    assert statuses == [stop_conditions.CheckStatus.TRIGGERED] * 2
+
+
+# -- terminal_state_reconciler ----------------------------------------------
+
+def test_terminal_state_normalizes_both_end_vocabularies_alike() -> None:
+    assert terminal_state_reconciler._normalize_receipt_event(
+        _end_record("legacy", "d-one", ok=True, minutes_ago=3)) == "idle"
+    assert terminal_state_reconciler._normalize_receipt_event(
+        _end_record("lifecycle", "d-one", ok=True, minutes_ago=3)) == "idle"
+
+
+def test_a_late_report_does_not_unfinish_the_terminal(tmp_path: Path) -> None:
+    now = datetime.now(timezone.utc)
+    statuses = []
+    for kind in ("legacy", "lifecycle"):
+        state_dir = tmp_path / kind
+        state_dir.mkdir()
+        _write_ledger(state_dir / "t0_receipts.ndjson", _ledger(kind))
+        result = terminal_state_reconciler.reconcile_terminal_state(
+            state_dir,
+            now=now,
+            tmux_probe=lambda *_args: {},
+            process_probe=lambda: {},
+        )
+        statuses.append(result["terminals"]["T1"]["status"])
+    assert statuses == ["idle", "idle"]
+
+
+# -- pr_discovery -----------------------------------------------------------
+
+def test_pr_discovery_marks_done_in_both_vocabularies() -> None:
+    pictures = []
+    for kind in ("legacy", "lifecycle"):
+        discovered: dict = {}
+        discovery = PRDiscovery([])
+        for record in _ledger(kind):
+            discovery._process_receipt_pr_refs(discovered, record)
+        pictures.append(discovered[701]["receipt_done"])
+    assert pictures == [True, True]
+
+
+# -- unified_state_manager --------------------------------------------------
+
+def test_unified_state_counts_both_vocabularies_alike(tmp_path: Path, monkeypatch) -> None:
+    pictures = []
+    for kind in ("legacy", "lifecycle"):
+        manager = unified_state_manager.UnifiedStateManagerV2.__new__(
+            unified_state_manager.UnifiedStateManagerV2)
+        monkeypatch.setattr(manager, "get_recent_receipts", lambda hours=24, k=kind: _ledger(k))
+        monkeypatch.setattr(manager, "get_recent_dispatches", lambda hours=24: [])
+        monkeypatch.setattr(unified_state_manager, "UNIFIED_STATE_PATH",
+                            str(tmp_path / f"{kind}-unified.ndjson"))
+        agg = manager.write_unified_state()
+        pictures.append(agg["completed_today"])
+    assert pictures == [2, 2]
+
+
+# -- queue_reconciler -------------------------------------------------------
+
+def test_queue_reconciler_confirms_both_vocabularies_alike(tmp_path: Path) -> None:
+    pictures = []
+    for kind in ("legacy", "lifecycle"):
+        ledger_path = tmp_path / f"{kind}-queue.ndjson"
+        _write_ledger(ledger_path, _ledger(kind))
+        pictures.append(queue_reconciler.load_receipt_dispatch_ids(ledger_path))
+    assert pictures == [{"d-one", "d-two"}, {"d-one", "d-two"}]

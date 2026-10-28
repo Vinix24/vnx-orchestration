@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from event_outcome_semantics import COMPLETION_EVENT_TYPES
 from terminal_state_core import (
     SCHEMA_VERSION,
     TERMINAL_STATE_FILENAME,
@@ -27,8 +28,20 @@ TERMINALS = ("T1", "T2", "T3")
 RECEIPTS_FILENAME = "t0_receipts.ndjson"
 PANES_FILENAME = "panes.json"
 
-WORKING_EVENTS = {"task_started", "task_ack", "dispatch_sent", "task_claimed"}
-COMPLETE_EVENTS = {"task_complete", "completion", "task_finished", "done"}
+# ADR-045 §2: dispatch_started is the door beginning the hand-off — the same
+# "work started" signal as task_started, under the lifecycle vocabulary.
+WORKING_EVENTS = {
+    "task_started", "task_ack", "dispatch_sent", "task_claimed", "dispatch_started",
+}
+# ADR-045 §2: dispatch_finished reads next to task_complete; the legacy
+# literals below stay for the history that carries them.
+COMPLETE_EVENTS = set(COMPLETION_EVENT_TYPES) | {
+    "completion", "task_finished", "done",
+}
+# A report line says the report arrived, not that the dispatch ended. It
+# carries no terminal-state signal, so it never becomes a terminal's "latest
+# receipt" and turns a finished terminal back to "unknown" (ADR-045 §2).
+NON_STATE_EVENT_TYPES = frozenset({"report_ingested"})
 FAIL_EVENTS = {"task_timeout", "timeout", "task_failed", "failed", "error"}
 AGENT_RUNTIME_COMMANDS = {"claude", "codex", "gemini", "node", "python", "python3", "zsh", "bash", "sh"}
 AGENT_RUNTIME_SUBSTRINGS = ("claude", "codex", "gemini")
@@ -327,6 +340,44 @@ def _atomic_write(path: Path, payload: Dict[str, Any]) -> None:
             os.unlink(tmp_path)
 
 
+def _latest_receipt_by_terminal(receipts: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """The latest state-bearing receipt per terminal.
+
+    ADR-045 §2: a report line says the report arrived, never that the dispatch
+    ended. It carries no terminal-state signal, so it is skipped rather than
+    allowed to become the "latest receipt" and turn a finished terminal back to
+    "unknown".
+    """
+    by_terminal: Dict[str, Dict[str, Any]] = {}
+    for entry in receipts:
+        term = str(entry.get("terminal") or entry.get("from") or "").upper()
+        if term not in TERMINALS:
+            continue
+        if str(entry.get("event_type") or entry.get("event") or "").strip().lower() in NON_STATE_EVENT_TYPES:
+            continue
+        ts = _parse_iso(entry.get("timestamp"))
+        prev = by_terminal.get(term)
+        prev_ts = prev.get("_ts") if isinstance(prev, dict) else None
+        # Prefer latest appended receipt for each terminal.
+        # Prefer receipts with timestamps over those without.
+        # If both have timestamps, use the later one.
+        should_replace = (
+            prev is None
+            or (ts is not None and prev_ts is None)  # Current has timestamp, prev doesn't
+            or (ts is not None and prev_ts is not None and ts >= prev_ts)  # Both have timestamps, current is newer
+            or (ts is None and prev_ts is None)  # Neither has timestamp, use current (order in file)
+        )
+        if should_replace:
+            by_terminal[term] = {
+                "_ts": ts,
+                "status": _normalize_receipt_event(entry),
+                "raw_status": str(entry.get("status") or "").strip().lower(),
+                "dispatch_id": entry.get("dispatch_id"),
+                "task_id": entry.get("task_id"),
+            }
+    return by_terminal
+
+
 def reconcile_terminal_state(
     state_dir: str | Path,
     *,
@@ -353,31 +404,7 @@ def reconcile_terminal_state(
     tmux_info = (tmux_probe or _probe_tmux)(TERMINALS, state_root, cfg.allow_tmux_probe)
     process_health = (process_probe or _probe_process_health)()
 
-    by_terminal_receipt: Dict[str, Dict[str, Any]] = {}
-    for entry in receipts:
-        term = str(entry.get("terminal") or entry.get("from") or "").upper()
-        if term not in TERMINALS:
-            continue
-        ts = _parse_iso(entry.get("timestamp"))
-        prev = by_terminal_receipt.get(term)
-        prev_ts = prev.get("_ts") if isinstance(prev, dict) else None
-        # Prefer latest appended receipt for each terminal.
-        # Prefer receipts with timestamps over those without.
-        # If both have timestamps, use the later one.
-        should_replace = (
-            prev is None
-            or (ts is not None and prev_ts is None)  # Current has timestamp, prev doesn't
-            or (ts is not None and prev_ts is not None and ts >= prev_ts)  # Both have timestamps, current is newer
-            or (ts is None and prev_ts is None)  # Neither has timestamp, use current (order in file)
-        )
-        if should_replace:
-            by_terminal_receipt[term] = {
-                "_ts": ts,
-                "status": _normalize_receipt_event(entry),
-                "raw_status": str(entry.get("status") or "").strip().lower(),
-                "dispatch_id": entry.get("dispatch_id"),
-                "task_id": entry.get("task_id"),
-            }
+    by_terminal_receipt = _latest_receipt_by_terminal(receipts)
 
     records: Dict[str, Dict[str, Any]] = {}
     for term in TERMINALS:

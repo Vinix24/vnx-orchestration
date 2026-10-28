@@ -66,6 +66,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from project_root import resolve_project_root  # noqa: E402
+from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E402
 # Load-bearing, unlike the advisory FAILURE_CLASSES cross-check below: this is
 # the exact reason-string gate_recorder books a quota refusal under, and E6
@@ -397,7 +398,10 @@ def check_gh_auth_dead(*, gh_bin: str = "gh") -> StopConditionResult:
 
 # ── Shared receipt-ledger reading helpers ───────────────────────────────────
 
-_ATTEMPT_EVENT_TYPES = frozenset({"task_complete", "subprocess_completion", "task_failed"})
+# ADR-045 §2: dispatch_finished is an attempt's end line, read next to the
+# legacy completion family (COMPLETION_EVENT_TYPES) and the task_failed lane
+# line. A start or report line is not an attempt.
+_ATTEMPT_EVENT_TYPES = COMPLETION_EVENT_TYPES | {"task_failed"}
 
 # Completion-outcome vocabulary: imported from receipt_verdict.py (ADR-035
 # §3.1), the same source deliberation_panel.py and dispatch_outcome_classifier.py
