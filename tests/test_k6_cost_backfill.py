@@ -107,8 +107,10 @@ class Lab:
             "dispatch_id": dispatch_id, "role": role, "provider": provider, "model": model,
         }), encoding="utf-8")
 
-    def transcript(self, lane: str, session: str, cwd: str, entries: list) -> Path:
-        project_dir = self.lane_root(lane) / "projects" / "-tmp-fixture-project"
+    def transcript(self, lane: str, session: str, cwd: str, entries: list,
+                   root: Path | None = None) -> Path:
+        lane_root = Path(root) if root is not None else self.lane_root(lane)
+        project_dir = lane_root / "projects" / "-tmp-fixture-project"
         project_dir.mkdir(parents=True, exist_ok=True)
         path = project_dir / f"{session}.jsonl"
         path.write_text("\n".join(json.dumps(entry) for entry in entries) + "\n", encoding="utf-8")
@@ -126,8 +128,10 @@ class Lab:
         ), ledger_path=self.ledger)
         return dict(record)
 
-    def apply(self, *lane_roots: Path, apply: bool = True) -> int:
+    def apply(self, *lane_roots: Path, apply: bool = True, since: str | None = None) -> int:
         argv = ["--ledger", str(self.ledger)]
+        if since is not None:
+            argv.extend(["--since", since])
         for root in lane_roots:
             argv.extend(["--harness-root", str(root)])
         if apply:
@@ -454,3 +458,126 @@ def test_attempts_continue_after_a_live_backfill_line(tmp_path, monkeypatch):
     assert set(aggregate.runs) == {
         "vnx-dev:backfill:dlv-b3:1", "vnx-dev:backfill:dlv-b3:2", "vnx-dev:backfill:dlv-b3:3",
     }
+
+
+def test_a_later_session_of_the_same_dispatch_adds_spend_never_replaces_it(tmp_path, monkeypatch):
+    """A booked run is only superseded on a verified identity match (OI-2419).
+
+    Session A is booked first. A later run of the same dispatch with a newer
+    ``--since`` scans only session B, so A's transcript is not in the plan at
+    all: B must become its own run beside A, never a correction that supersedes
+    A (which would remove A's spend from every effective total).
+    """
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-c1")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-c1"
+    lab.transcript("deepseek-harness", "sess-c1-a", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", _usage(input_tokens=100, output_tokens=10), cwd),
+    ])
+    lane = lab.lane_root("deepseek-harness")
+
+    assert lab.apply(lane, since="2026-10-05") == 0
+    booked_a = _lines(lab.ledger)
+    assert len(booked_a) == 1
+    assert booked_a[0]["run_id"] == "vnx-dev:backfill:dlv-c1:1"
+    assert booked_a[0]["transcript_identity"] == "deepseek-harness:sess-c1-a"
+
+    lab.transcript("deepseek-harness", "sess-c1-b", cwd, [
+        _deepseek_entry("m1", "2026-10-06T02:00:00Z", _usage(input_tokens=200, output_tokens=20), cwd),
+    ])
+    assert lab.apply(lane, since="2026-10-06") == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 2
+    assert lines[0] == booked_a[0]
+    assert lines[1]["kind"] == "charge"
+    assert lines[1]["run_id"] == "vnx-dev:backfill:dlv-c1:2"
+    assert lines[1]["transcript_identity"] == "deepseek-harness:sess-c1-b"
+    aggregate = cost_ledger.aggregate_runs(lab.ledger)
+    assert set(aggregate.runs) == {"vnx-dev:backfill:dlv-c1:1", "vnx-dev:backfill:dlv-c1:2"}
+    assert sum(record["tokens"]["input_uncached"] for record in aggregate.runs.values()) == 300
+
+
+def test_a_correction_stamps_the_transcript_identity_on_the_live_run(tmp_path, monkeypatch):
+    """The corrected run now names the session it holds, so no other session can claim it."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-c2")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-c2"
+    lab.transcript("deepseek-harness", "sess-c2", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", dict(FULL_USAGE), cwd),
+    ])
+    live = lab.live("vnx-dev:envelope_govern:dlv-c2:1", "deepseek-harness", "deepseek-flash",
+                    "builder", _tokens(input_uncached=7, output=3))
+    lab.transcript("deepseek-harness", "sess-c2-other", cwd, [
+        _deepseek_entry("m1", "2026-10-07T02:00:00Z", _usage(input_tokens=9, output_tokens=1), cwd),
+    ])
+
+    assert lab.apply(lab.lane_root("deepseek-harness"), since="2026-10-02") == 0
+    # A correction of the live run exists (session c2), and the other session of the
+    # same dispatch books beside it: the live run is claimed by its identity once.
+    lines = _lines(lab.ledger)
+    assert [line["kind"] for line in lines] == ["charge", "correction", "charge"]
+    correction = [line for line in lines if line["kind"] == "correction"][0]
+    assert correction["run_id"] == live["run_id"]
+    assert correction["transcript_identity"] == "deepseek-harness:sess-c2"
+    other = [line for line in lines if line["kind"] == "charge" and line["tokens"]["input_uncached"] == 9][0]
+    assert other["run_id"] == "vnx-dev:backfill:dlv-c2:1"
+
+
+def test_a_parent_dir_and_its_lane_dir_book_one_run(tmp_path, monkeypatch):
+    """Overlapping ``--harness-root`` arguments are one scan, not two (OI-2419)."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-c3")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-c3"
+    lane = lab.lane_root("deepseek-harness")
+    lab.transcript("deepseek-harness", "sess-c3", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", dict(FULL_USAGE), cwd),
+    ])
+
+    assert lab.apply(lane.parent, lane) == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 1
+    assert lines[0]["run_id"] == "vnx-dev:backfill:dlv-c3:1"
+    aggregate = cost_ledger.aggregate_runs(lab.ledger)
+    assert set(aggregate.runs) == {"vnx-dev:backfill:dlv-c3:1"}
+
+
+def test_one_session_reachable_from_two_parents_books_once(tmp_path, monkeypatch):
+    """Two roots that hold the same lane and session are one run, not two charges."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch("dlv-c4")
+    cwd = "/repo/.vnx-data/worktrees/dispatch-dlv-c4"
+    first = lab.tmp_path / "harness-a" / "deepseek-harness"
+    second = lab.tmp_path / "harness-b" / "deepseek-harness"
+    lab.transcript("deepseek-harness", "sess-c4", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", dict(FULL_USAGE), cwd),
+    ], root=first)
+    lab.transcript("deepseek-harness", "sess-c4", cwd, [
+        _deepseek_entry("m1", "2026-10-05T02:00:00Z", dict(FULL_USAGE), cwd),
+    ], root=second)
+
+    assert lab.apply(first, second) == 0
+
+    lines = _lines(lab.ledger)
+    assert len(lines) == 1
+    assert lines[0]["run_id"] == "vnx-dev:backfill:dlv-c4:1"
+    assert lines[0]["transcript_identity"] == "deepseek-harness:sess-c4"
+
+
+def test_a_blank_transcript_identity_is_refused(tmp_path):
+    tokens = _tokens(input_uncached=1)
+    base = cost_ledger.RunCost(
+        run_id="vnx-dev:backfill:ref:1", project_id="vnx-dev", role="builder",
+        provider="deepseek-harness", model="deepseek-flash",
+        occurred_from="2026-10-05T00:00:00+00:00", occurred_to="2026-10-05T00:30:00+00:00",
+        tokens=tokens, usage_completeness=harness_run_cost.usage_completeness(tokens),
+        billing="metered", transcript_identity="deepseek-harness:sess-x",
+    )
+    assert cost_ledger.build_record(base)["transcript_identity"] == "deepseek-harness:sess-x"
+    for bad in ("", "   ", 7, None):
+        if bad is None:
+            assert "transcript_identity" not in cost_ledger.build_record(dataclasses.replace(base, transcript_identity=None))
+            continue
+        with pytest.raises(cost_ledger.InvalidRecord):
+            cost_ledger.build_record(dataclasses.replace(base, transcript_identity=bad))

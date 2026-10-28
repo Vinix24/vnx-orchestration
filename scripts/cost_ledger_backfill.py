@@ -8,13 +8,31 @@ books each transcript from ``--since`` on exactly once:
 
 - a transcript whose dispatch already has a live ledger line becomes a *correction*
   on that line's ``run_id`` (``supersedes`` its ``record_id``, ``backfill: true``),
-  so the ledger keeps one effective line per run;
+  so the ledger keeps one effective line per run — but only after a verified match
+  (see below), so a *different* session of the same dispatch can never take that
+  line away from it;
 - a transcript with no live line becomes a *charge* under the ``backfill`` producer,
   numbered per reference after the attempts the ledger already holds; the plan reserves
   every attempt it hands out, so two unbooked sessions of one dispatch book ``:1`` and
   ``:2`` and never collapse into one run;
 - a line that already says the same thing (tokens, model, role, segments) is
   skipped, so a second ``--apply`` writes nothing.
+
+**Identity of a booked run (OI-2419).** Every line this script writes carries
+``transcript_identity`` — ``<provider>:<session id>``, the lane and the transcript's
+file stem, never its path. A line that names an identity is only ever corrected by a
+transcript of *that* identity: a later run of the same dispatch (a new session, or a
+``--since`` that excludes the booked one) books its own attempt beside it instead of
+superseding it, so its spend is added and never removed. A line without the field was
+written before the field existed (the envelope's own line, which measured the same run
+from the receipt): it can be claimed once, and the correction stamps the identity on it
+so it is verified from then on. Tokens still break ties among those legacy lines, so a
+small follow-up session never takes the big run's line.
+
+**One scan (OI-2419).** ``--harness-root`` arguments may overlap: a parent directory and
+one of its lane dirs, the same lane given twice, or two stores holding one session. The
+transcripts are deduplicated on their resolved path and on ``<provider>:<session id>``
+before anything is planned, so one session is one run however many roots reach it.
 
 **Which field carries the dispatch id (measured 2026-10-27).** The top-level ``cwd``
 of the transcript entries. Of the 1,169 deepseek transcripts then on this machine,
@@ -129,6 +147,11 @@ class TranscriptRun:
         """The live run's reference: the dispatch id, or the session id when there is none."""
         return self.dispatch_id or self.session_id
 
+    @property
+    def identity(self) -> str:
+        """The run's durable identity: its lane and its session id, never its transcript path."""
+        return f"{self.provider}:{self.session_id}"
+
 
 @dataclass(frozen=True)
 class PlannedRun:
@@ -170,15 +193,27 @@ class ProviderSummary:
 
 
 def lane_roots(values: Iterable[str]) -> List[Path]:
-    """The lane dirs for ``--harness-root`` values: a lane dir itself, or a parent of lane dirs."""
-    roots: List[Path] = []
+    """The lane dirs for ``--harness-root`` values: a lane dir itself, or a parent of lane dirs.
+
+    A lane reached twice — given itself and through its parent, or through two
+    parents that resolve to one directory — is scanned once. The list is sorted
+    on the resolved path so the same arguments always scan in the same order.
+    """
+    seen: Dict[str, Path] = {}
     for raw in values:
         path = Path(raw).expanduser()
         if path.name in LANES or (path / "projects").is_dir():
-            roots.append(path)
+            found = [path]
         else:
-            roots.extend(sorted(item.parent for item in path.glob("*/projects") if item.is_dir()))
-    return roots
+            found = sorted(item.parent for item in path.glob("*/projects") if item.is_dir())
+        for root in found:
+            try:
+                key = str(Path(root).resolve())
+            except OSError as exc:
+                logger.warning("cost_ledger_backfill: cannot resolve %s: %s", root, exc)
+                continue
+            seen.setdefault(key, Path(root))
+    return [seen[key] for key in sorted(seen)]
 
 
 def dispatch_id_from_cwd(cwd: Optional[str]) -> Optional[str]:
@@ -239,7 +274,11 @@ def run_window(messages: Sequence[token_harvest.MessageUsage], path: Path) -> Tu
 
 
 def scan_lane(root: Path, since: date) -> List[TranscriptRun]:
-    """Every transcript of one lane whose run ends on or after ``since``."""
+    """Every transcript of one lane whose run ends on or after ``since``.
+
+    ``path`` is the transcript's resolved path, so two roots that reach one file
+    (a parent and its lane dir, a symlinked lane) name the same transcript.
+    """
     found: List[TranscriptRun] = []
     for path in sorted((Path(root) / "projects").glob("*/*.jsonl")):
         messages = token_harvest.read_transcript_messages(path)
@@ -253,13 +292,39 @@ def scan_lane(root: Path, since: date) -> List[TranscriptRun]:
         if ended.date() < since:
             continue
         cwd, reported = transcript_meta(path)
+        try:
+            resolved = str(path.resolve())
+        except OSError as exc:
+            logger.warning("cost_ledger_backfill: cannot resolve %s: %s", path, exc)
+            resolved = str(path.absolute())
         found.append(TranscriptRun(
-            provider=Path(root).name, session_id=path.stem, path=str(path),
+            provider=Path(root).name, session_id=path.stem, path=resolved,
             dispatch_id=dispatch_id_from_cwd(cwd),
             messages=messages, reported_model=reported,
             occurred_from=_iso(started), occurred_to=_iso(ended),
         ))
     return found
+
+
+def dedupe_transcripts(runs: Iterable[TranscriptRun]) -> List[TranscriptRun]:
+    """One entry per resolved transcript path and per ``<provider>:<session id>``, in stable order.
+
+    Overlapping ``--harness-root`` arguments, a copy of a session in a second
+    store and a lane reached through a symlink all name one run; planning it
+    twice would book two charges for one session's spend. The first entry in
+    (provider, session id, path) order wins, so the same roots always book the
+    same run.
+    """
+    kept: List[TranscriptRun] = []
+    paths: set = set()
+    identities: set = set()
+    for run in sorted(runs, key=lambda item: (item.provider, item.session_id, item.path)):
+        if run.path in paths or run.identity in identities:
+            continue
+        paths.add(run.path)
+        identities.add(run.identity)
+        kept.append(run)
+    return kept
 
 
 def load_dispatch_rows(dispatch_dir: Path) -> Dict[str, DispatchRow]:
@@ -323,11 +388,35 @@ def load_live_runs(ledger_path: Path, project_id: str) -> Dict[str, List[Mapping
     return dict(index)
 
 
+def record_identity(record: Mapping[str, Any]) -> Optional[str]:
+    """The transcript identity a live line names, or ``None`` for a line written before it was stored.
+
+    A line whose identity is missing, empty or not a string names no session:
+    it is a legacy line, and :func:`plan_runs` may claim it once (stamping the
+    identity on the correction). Anything else would let one session supersede
+    another's booked run.
+    """
+    value = record.get(cost_ledger.TRANSCRIPT_IDENTITY)
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _candidates(records: Sequence[Mapping[str, Any]], provider: str,
                 claimed: set) -> List[Mapping[str, Any]]:
     """The unclaimed live lines of this lane among a reference's records."""
     return [record for record in records
             if record.get("provider") == provider and record.get("record_id") not in claimed]
+
+
+def _claimable(records: Sequence[Mapping[str, Any]], run: TranscriptRun,
+               claimed: set) -> List[Mapping[str, Any]]:
+    """The unclaimed lines of this lane a transcript may take: its own identity, or a legacy line.
+
+    A line that names another session is never a candidate: that session's run
+    is booked elsewhere (or its transcript is not in this scan), and taking its
+    line would remove its spend from the ledger instead of adding this run.
+    """
+    return [record for record in _candidates(records, run.provider, claimed)
+            if record_identity(record) in (None, run.identity)]
 
 
 def _distance(record: Mapping[str, Any], run: TranscriptRun) -> float:
@@ -397,6 +486,7 @@ def plan_run(run: TranscriptRun, row: Optional[DispatchRow], live: Optional[Mapp
         "tokens": tokens, "usage_completeness": harness_run_cost.usage_completeness(tokens),
         "billing": harness_run_cost.BILLING_BY_PROVIDER[run.provider],
         "segments": harness_run_cost.price_segments(run.provider, model, run.messages, tokens),
+        "transcript_identity": run.identity,
     }
     if live is not None:
         if _already_booked(live, base):
@@ -416,10 +506,21 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
               project_id: str) -> List[PlannedRun]:
     """One planned line per transcript, in deterministic order; each live line is claimed once.
 
-    Exact token matches are assigned first, across all transcripts of a reference, so a
-    small follow-up session in the same worktree can never take the live line of the big
-    run it shares a reference with. Only then does a transcript without an exact match
-    correct a remaining live line, or — when none is left — book a new charge.
+    Three passes, in this order, over the transcripts of one reference:
+
+    1. a *verified* match — the live line stores this transcript's identity and no
+       other candidate does. This is the only way a booked run is corrected; a
+       session of the same dispatch with another identity (or a ``--since`` that
+       leaves the booked transcript out of the scan) never takes its line;
+    2. an exact token match on a line without an identity, across all transcripts
+       of a reference, so a small follow-up session can never take the live line
+       of the big run it shares a reference with;
+    3. the nearest remaining line without an identity. A line written before the
+       identity was stored (the envelope's own line) can be claimed once this way,
+       and the correction stamps the identity on it.
+
+    Anything left over books a charge: the run is added beside the existing ones,
+    never written as a correction that would remove their spend.
 
     Order is the run's end timestamp, then its transcript path: the same transcripts in
     the same store always plan the same run ids. Every charge planned for a reference
@@ -429,20 +530,29 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
     ordered = sorted(runs, key=lambda item: (item.occurred_to, item.path))
     tokens = [harness_run_cost.run_tokens(run.messages) for run in ordered]
     claimed: set = set()
-    exact: Dict[int, Mapping[str, Any]] = {}
+    matched: Dict[int, Mapping[str, Any]] = {}
     for index, run in enumerate(ordered):
-        matches = [record for record in _candidates(live_index.get(run.ref, ()), run.provider, claimed)
-                   if record.get("tokens") == dict(tokens[index])]
+        candidates = _claimable(live_index.get(run.ref, ()), run, claimed)
+        verified = [record for record in candidates if record_identity(record) == run.identity]
+        if verified:
+            matched[index] = min(verified, key=lambda record: _distance(record, run))
+            claimed.add(matched[index]["record_id"])
+    for index, run in enumerate(ordered):
+        if index in matched:
+            continue
+        matches = [record for record in _claimable(live_index.get(run.ref, ()), run, claimed)
+                   if record_identity(record) is None and record.get("tokens") == dict(tokens[index])]
         if matches:
-            exact[index] = min(matches, key=lambda record: _distance(record, run))
-            claimed.add(exact[index]["record_id"])
+            matched[index] = min(matches, key=lambda record: _distance(record, run))
+            claimed.add(matched[index]["record_id"])
     planned: List[PlannedRun] = []
     reserved: Dict[str, int] = {}
     for index, run in enumerate(ordered):
-        live = exact.get(index)
+        live = matched.get(index)
         if live is None:
-            candidates = _candidates(live_index.get(run.ref, ()), run.provider, claimed)
-            live = min(candidates, key=lambda record: _distance(record, run)) if candidates else None
+            legacy = [record for record in _claimable(live_index.get(run.ref, ()), run, claimed)
+                      if record_identity(record) is None]
+            live = min(legacy, key=lambda record: _distance(record, run)) if legacy else None
         row = rows.get(run.dispatch_id) if run.dispatch_id else None
         planned.append(plan_run(run, row, live, tokens[index], project_id, live_index, reserved))
         if live is not None:
@@ -526,7 +636,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"vnx costs backfill: cannot read {ledger_path}: {exc}", file=sys.stderr)
         return 1
     rows = load_dispatch_rows(Path(paths["VNX_DISPATCH_DIR"]))
-    runs = [transcript for root in roots for transcript in scan_lane(root, args.since)]
+    runs = dedupe_transcripts(transcript for root in roots
+                              for transcript in scan_lane(root, args.since))
     if not args.apply:
         print("dry run: no line written; pass --apply to write")
     summaries = apply_runs(plan_runs(runs, rows, live_index, project_id), ledger_path,

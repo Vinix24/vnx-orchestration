@@ -116,6 +116,9 @@ SPOOL_DIR_NAME = "provider_costs.spool"
 QUARANTINE_DIR_NAME = "quarantine"
 # The field of a renumbered line that holds the record_id the record had in the spool (ADR-043 §6, OI-2250).
 RENUMBERED_RECORD_ID = "renumbered_from_record_id"
+# The field naming the session transcript a backfilled run was read from (K6, OI-2419): the
+# durable identity a later backfill matches on before it may supersede this line.
+TRANSCRIPT_IDENTITY = "transcript_identity"
 # The store's receipt ledger, ``<state dir>/<RECEIPTS_NAME>`` (:func:`_receipts_file`): where the replay books what it changed.
 RECEIPTS_NAME = "t0_receipts.ndjson"
 # The bounds of one replay call, each overridable per call: (environment variable, default).
@@ -221,6 +224,9 @@ class RunCost:
     ``api_equivalent_usd`` empty to have the writer price the run from the
     registry; give ``cost_source`` with them when the provider reported the cost
     or none can be known (``unavailable:<reason>``).
+    ``transcript_identity`` names the session transcript the run was read from
+    (a backfill sets it): a later backfill may only supersede a line whose
+    identity it can match, so one dispatch's run is never replaced by another's.
     """
 
     run_id: str
@@ -241,6 +247,7 @@ class RunCost:
     supersedes: Optional[str] = None
     reason: Optional[str] = None
     backfill: bool = False
+    transcript_identity: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +335,18 @@ def _check_identity(run: RunCost) -> None:
     _require_member(run.billing, BILLINGS, "billing")
     if not isinstance(run.backfill, bool):
         raise InvalidRecord(f"backfill {run.backfill!r} is not a bool")
+
+
+def _check_transcript_identity(identity: object) -> str:
+    """A run's transcript identity: a non-empty string, or no line at all (never a blank one).
+
+    A blank identity is refused rather than written: a line that names no
+    session cannot be matched by a later backfill, and an unmatched line must
+    not become the thing a different session is allowed to supersede.
+    """
+    if not isinstance(identity, str) or not identity.strip():
+        raise InvalidRecord(f"transcript_identity {identity!r} is not a non-empty string")
+    return identity
 
 
 def _check_kind(run: RunCost) -> None:
@@ -585,6 +604,8 @@ def build_record(run: RunCost) -> Dict[str, Any]:
         record["api_equivalent_usd"] = api_equivalent
     if run.backfill:
         record["backfill"] = True
+    if run.transcript_identity is not None:
+        record[TRANSCRIPT_IDENTITY] = _check_transcript_identity(run.transcript_identity)
     record["record_id"] = _record_id(record)
     return record
 
