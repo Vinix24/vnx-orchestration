@@ -46,12 +46,10 @@ def validate_dispatch_transition(from_state: str, to_state: str) -> None:
 
 
 def is_terminal_dispatch_state(state: str) -> bool:
-    """Return True if the dispatch state has no outgoing transitions."""
     return state in TERMINAL_DISPATCH_STATES
 
 
 def is_accepted_or_beyond(state: str) -> bool:
-    """Return True if the dispatch has already been accepted or progressed past acceptance."""
     return state in ACCEPTED_OR_BEYOND_STATES
 
 
@@ -81,23 +79,6 @@ def register_dispatch(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Register a new dispatch in the queued state (idempotent).
-
-    ADR-007: project_id is MANDATORY — no silent default. project_id is stamped
-    on the INSERT row for column compliance.
-
-    dispatch_id is GLOBALLY UNIQUE (timestamped slugs by construction). The
-    idempotency check keys on dispatch_id alone so all downstream state-machine
-    operations (transition_dispatch, increment_attempt_count, etc.) remain
-    consistent — they all key on dispatch_id only.
-
-    If a row with the same dispatch_id exists under a DIFFERENT project_id,
-    ValueError is raised — cross-tenant dispatch_id reuse is a bug, not a
-    silent merge.
-
-    Full composite-keying of the entire dispatch state machine is deferred to
-    a post-launch hardening item.
-    """
     has_pid = _has_project_id_col(conn, "dispatches")
 
     # dispatch_id is globally unique — check without project_id filter so
@@ -149,6 +130,19 @@ def register_dispatch(
     )
 
 
+def _dispatch_row(
+    conn: sqlite3.Connection, dispatch_id: str, project_id: Optional[str],
+) -> Optional[sqlite3.Row]:
+    if project_id is None:
+        return conn.execute(
+            "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
+        ).fetchone()
+    return conn.execute(
+        "SELECT * FROM dispatches WHERE dispatch_id = ? AND project_id = ?",
+        (dispatch_id, project_id),
+    ).fetchone()
+
+
 def transition_dispatch(
     conn: sqlite3.Connection,
     *,
@@ -161,32 +155,29 @@ def transition_dispatch(
 ) -> Dict[str, Any]:
     """Transition a dispatch to a new state, validating and emitting an event.
 
-    ``project_id`` stamps the event (ADR-007). None keeps the ambient default every caller
-    before OI-2262 relied on; a caller that knows the project passes it, so the event never
-    lands under whatever project the shell happens to name.
+    ``project_id`` scopes the read, the UPDATE and the returned row, and stamps
+    the event (ADR-007): a row of another project with the same ``dispatch_id``
+    is never read or written. ``None`` keeps the pre-OI-2262 behaviour.
     """
-    row = conn.execute(
-        "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-    ).fetchone()
+    row = _dispatch_row(conn, dispatch_id, project_id)
     if row is None:
-        raise KeyError(f"Dispatch not found: {dispatch_id!r}")
+        raise KeyError(f"Dispatch not found: {dispatch_id!r} (project_id={project_id!r})")
 
     from_state = row["state"]
     validate_dispatch_transition(from_state, to_state)
 
     now = _now_utc()
-    conn.execute(
-        "UPDATE dispatches SET state = ?, updated_at = ? WHERE dispatch_id = ?",
-        (to_state, now, dispatch_id),
-    )
+    sql = "UPDATE dispatches SET state = ?, updated_at = ? WHERE dispatch_id = ?"
+    args: tuple = (to_state, now, dispatch_id)
+    if project_id is not None:
+        sql, args = sql + " AND project_id = ?", args + (project_id,)
+    conn.execute(sql, args)
     _append_event(
         conn, event_type=f"dispatch_{to_state}", entity_type="dispatch",
         entity_id=dispatch_id, from_state=from_state, to_state=to_state,
         actor=actor, reason=reason, metadata=metadata, project_id=project_id,
     )
-    return dict(
-        conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
-    )
+    return dict(_dispatch_row(conn, dispatch_id, project_id))
 
 
 def _check_idempotent_noop(
@@ -199,14 +190,14 @@ def _check_idempotent_noop(
     reason: Optional[str],
     metadata: Optional[Dict[str, Any]],
     row: sqlite3.Row,
+    project_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Return the row dict if this is a no-op transition, else None."""
     if from_state == to_state:
         _append_event(
             conn, event_type="dispatch_noop", entity_type="dispatch",
             entity_id=dispatch_id, from_state=from_state, to_state=to_state,
             actor=actor, reason=reason or f"idempotent no-op: already in {to_state!r}",
-            metadata=metadata,
+            metadata=metadata, project_id=project_id,
         )
         return dict(row)
     if is_terminal_dispatch_state(from_state):
@@ -221,7 +212,7 @@ def _check_idempotent_noop(
             entity_id=dispatch_id, from_state=from_state, to_state=to_state,
             actor=actor,
             reason=reason or f"idempotent no-op: already at {from_state!r} (past {to_state!r})",
-            metadata=metadata,
+            metadata=metadata, project_id=project_id,
         )
         return dict(row)
     return None
@@ -235,29 +226,31 @@ def transition_dispatch_idempotent(
     actor: str = "runtime",
     reason: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    project_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Idempotent dispatch transition: no-op if already at or beyond target state."""
-    row = conn.execute(
-        "SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)
-    ).fetchone()
+    """Idempotent dispatch transition: no-op if already at or beyond target state.
+
+    ``project_id`` scopes every step — read, no-op event, UPDATE, returned row and
+    the event of the real transition. ``None`` keeps the old behaviour.
+    """
+    row = _dispatch_row(conn, dispatch_id, project_id)
     if row is None:
-        raise KeyError(f"Dispatch not found: {dispatch_id!r}")
+        raise KeyError(f"Dispatch not found: {dispatch_id!r} (project_id={project_id!r})")
 
     from_state = row["state"]
     noop = _check_idempotent_noop(
         conn, dispatch_id=dispatch_id, from_state=from_state, to_state=to_state,
-        actor=actor, reason=reason, metadata=metadata, row=row,
+        actor=actor, reason=reason, metadata=metadata, row=row, project_id=project_id,
     )
     if noop is not None:
         return noop
     return transition_dispatch(
         conn, dispatch_id=dispatch_id, to_state=to_state,
-        actor=actor, reason=reason, metadata=metadata,
+        actor=actor, reason=reason, metadata=metadata, project_id=project_id,
     )
 
 
 def increment_attempt_count(conn: sqlite3.Connection, dispatch_id: str) -> int:
-    """Increment attempt_count for a dispatch. Returns new count."""
     conn.execute(
         "UPDATE dispatches SET attempt_count = attempt_count + 1, updated_at = ? WHERE dispatch_id = ?",
         (_now_utc(), dispatch_id),
@@ -278,17 +271,6 @@ def create_attempt(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Create a new dispatch attempt record.
-
-    ADR-007: project_id is MANDATORY — no silent default, mirroring
-    register_dispatch(). Stamped on the INSERT row when the column exists
-    (mirrors register_dispatch's own _has_project_id_col guard); older stores
-    without the column are inserted exactly as before. OI-1625: the live
-    dispatch_attempts.project_id column is NOT NULL with no DEFAULT (post
-    migration 0031's adaptive-repair shape), so every prior INSERT here
-    raised sqlite3.IntegrityError and dispatch_attempts stayed permanently
-    empty despite 801+ rows in dispatches.
-    """
     has_pid = _has_project_id_col(conn, "dispatch_attempts")
     attempt_id = _new_event_id()
     now = _now_utc()
@@ -328,22 +310,6 @@ def claim_next_queued_dispatch(
     project_id: str,
     actor: str = "runtime",
 ) -> Optional[str]:
-    """Atomically claim the next queued dispatch for a project.
-
-    Uses BEGIN IMMEDIATE to serialize concurrent claimers — SQLite has no
-    SKIP LOCKED; this ensures the SELECT→UPDATE is atomic across writers.
-    Losers serialize and re-query; they get the next row or None.
-    Returns the dispatch_id string if a dispatch was claimed, None if the
-    queue is empty for this project.
-
-    ADR-007: scoped to project_id — a claimer for project A NEVER sees
-    project B queued rows. project_id is MANDATORY on every access.
-    See docs/governance/decisions/ADR-007-multitenant-project-id-stamping.md.
-
-    Callers must pass a connection with no uncommitted DML. Setting
-    isolation_level=None (required for explicit BEGIN IMMEDIATE) commits
-    any pending implicit transaction on the connection.
-    """
     prev_isolation_level = conn.isolation_level
     conn.isolation_level = None  # autocommit mode for manual BEGIN IMMEDIATE control
     try:
@@ -430,7 +396,6 @@ def update_attempt(
     metadata: Optional[Dict[str, Any]] = None,
     actor: str = "runtime",
 ) -> Dict[str, Any]:
-    """Update a dispatch attempt state and optionally record failure reason."""
     row = conn.execute(
         "SELECT * FROM dispatch_attempts WHERE attempt_id = ?", (attempt_id,)
     ).fetchone()

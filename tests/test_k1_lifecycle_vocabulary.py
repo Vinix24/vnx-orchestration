@@ -46,6 +46,11 @@ from append_receipt_internals.outcome_identity import (  # noqa: E402
     compute_outcome_id,
 )
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from append_receipt_internals.lifecycle import (  # noqa: E402
+    build_end_intent,
+    end_intent_path,
+)
+from dispatch_lifecycle import create_intent  # noqa: E402
 
 START = "dispatch_started"
 FINISH = "dispatch_finished"
@@ -89,7 +94,36 @@ def _ledger(tmp_path: Path) -> Path:
     return tmp_path / "state" / "t0_receipts.ndjson"
 
 
+def _ensure_end_intent(ledger: Path, receipt: dict) -> None:
+    """Write the winner's end intent for the line about to be appended (K-3 rule).
+
+    ADR-045 §3, as K-3 filled it: a ``dispatch_finished`` is accepted only when
+    the winner's intent exists for its ``(project_id, dispatch_id, attempt)`` and
+    its canonical form is byte-equal to the intent's line. These cases exercise
+    the line (its stamp, its status projection, its refusal), not the intent, so
+    the intent is the line itself. Cases that deliberately omit a field the
+    intent needs skip this and are refused by the field contract.
+    """
+    needed = ("project_id", "dispatch_id", "attempt", "end_state")
+    if any(receipt.get(field) in (None, "") for field in needed):
+        return
+    if not isinstance(receipt.get("attempt"), int):
+        return
+    intent_path = end_intent_path(
+        ledger.parent, receipt["project_id"], receipt["dispatch_id"], receipt["attempt"])
+    if intent_path.exists():
+        return  # the first line's intent stands; a second line must match it
+    offset = ledger.stat().st_size if ledger.exists() else 0
+    create_intent(intent_path, build_end_intent(
+        project_id=receipt["project_id"], dispatch_id=receipt["dispatch_id"],
+        attempt=receipt["attempt"], end_state=str(receipt["end_state"]),
+        end_line=receipt, ledger_path=ledger, ledger_offset=offset,
+    ))
+
+
 def _append(ledger: Path, receipt: dict):
+    if str(receipt.get("event_type") or "") == FINISH:
+        _ensure_end_intent(ledger, receipt)
     return append_receipt.append_receipt_payload(
         dict(receipt), receipts_file=str(ledger), skip_enrichment=True,
     )
