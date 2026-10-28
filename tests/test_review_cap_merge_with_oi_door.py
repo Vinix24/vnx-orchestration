@@ -386,7 +386,7 @@ class TestTheCheckIsRefreshedBeforeTheMerge:
 
         def record(pr_number, head_sha, *, b3_override, **kwargs):
             seen.append(b3_override)
-            return True
+            return {"conclusion": forge_gate_publisher.CONCLUSION_SUCCESS}
 
         monkeypatch.setattr(forge_gate_publisher, "refresh_review_summary", record)
         gate, _pr_data = pr_merge._run_review_gate(PR)
@@ -394,3 +394,78 @@ class TestTheCheckIsRefreshedBeforeTheMerge:
         assert gate["verdict"] == "GO", gate["message"]
         (reason,) = seen
         assert verdict.verdict_id in reason and HEAD[:12] in reason
+
+
+# ---------------------------------------------------------------------------
+# RG-4 round 2 (codex findings on 571d75c3): the door only clears on a fresh
+# verdict and on a green published check
+# ---------------------------------------------------------------------------
+
+
+class TestTheLedgerBoundaryBoundsTheVerdict:
+    def test_a_verdict_before_a_later_attested_opening_never_counts(self, env, monkeypatch):
+        """Finding 1: the database row is filtered by ``since`` exactly as a receipt-only verdict is."""
+        _capped_world(env)
+        _book(env)
+        lines = [json.loads(raw) for raw in env["ledger"].read_text(encoding="utf-8").splitlines()]
+        reopened = {
+            "kind": "opened", "project_id": PID, "pr_number": PR, "basis": "attested", "evidence": 0,
+            "recorded_at": "2026-10-28T10:00:00Z", "source": "operator",
+            "actor": "Vincent", "reason": "the PR was reopened for a new count",
+        }
+        codex, kimi = (
+            json.loads((env["results_dir"] / f"pr-{PR}-{gate}.json").read_text(encoding="utf-8"))
+            for gate in ("codex_gate", "kimi_gate")
+        )
+        fresh = [
+            dict(_line("codex_gate", head, "fail", 2, at=at, report=codex["report_path"] if head == HEAD else ""),
+                 recorded_at=f"2026-10-28T10:0{at}:00Z")
+            for at, head in ((6, HEAD), (7, OLD_HEADS[0]), (8, OLD_HEADS[1]))
+        ]
+        fresh.append(dict(
+            _line("kimi_gate", HEAD, "pass", 0, at=9, report=kimi["report_path"]),
+            recorded_at="2026-10-28T10:09:00Z",
+        ))
+        _write_ledger(env["ledger"], [*lines, reopened, *fresh])
+
+        evaluation = _evaluation(env)
+
+        assert evaluation.rounds.cap.capped is True, "the reopened count fell on the cap again"
+        assert evaluation.go is False
+        assert evaluation.rounds.merge_with_oi is None, "a verdict from before the attested opening is stale"
+        gate = _review_gate(env, monkeypatch)
+        assert gate["verdict"] == "NO-GO", gate["message"]
+        assert "merge_with_oi" not in gate["review_seats"]["round_ledger"]
+
+
+class TestThePublishedConclusionMustBeGreen:
+    def test_a_published_failure_keeps_the_door_no_go(self, env, monkeypatch):
+        """Finding 2: the real publisher emits ``failure`` for a reprocessed record; the door stays NO-GO."""
+        import forge_gate_publisher as fgp
+        import pr_merge
+
+        _capped_world(env)
+        _book(env)
+        record_path = env["results_dir"] / f"pr-{PR}-kimi_gate.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record_path.write_text(json.dumps({**record, "evidence_source": "reprocessed"}), encoding="utf-8")
+        # The real mapping runs; the network edges around it stay stubbed.
+        monkeypatch.setattr(fgp, "publish_review_summary", env["publish_review_summary"])
+        published: List[str] = []
+
+        def check_run(head_sha, name, conclusion, summary, **kwargs):
+            published.append(conclusion)
+            return {"id": 7}
+
+        monkeypatch.setattr(fgp, "publish_check_run", check_run)
+        monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda *a, **k: False)
+        monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
+        _door_edges(monkeypatch, env)
+
+        gate, _pr_data = pr_merge._run_review_gate(PR)
+
+        assert published == [fgp.CONCLUSION_FAILURE], "the real publisher refused the reprocessed record"
+        assert gate["verdict"] == "NO-GO", gate["message"]
+        assert fgp.REVIEW_SUMMARY_CHECK_NAME in gate["message"]
+        assert "failure" in gate["message"]

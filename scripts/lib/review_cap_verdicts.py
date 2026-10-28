@@ -383,11 +383,17 @@ def standing_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tu
     is the canonical record and the row its projection (ADR-005): a booking
     whose receipt landed and whose row commit did not still decided the PR, and
     an interrupted projection never erases that. Where both stand, the row is
-    returned (it carries the aftermath's ``oi_ids``). Oldest first. Raises
-    :class:`CapVerdictError` as :func:`read_verdicts` and
+    returned (it carries the aftermath's ``oi_ids``). Oldest first.
+
+    ``since`` is the PR's current count (its last attested ``opened`` line): a
+    verdict created before it belongs to a count that no longer stands, for a
+    database row exactly as for a receipt-only verdict (OI-2207). A row is not
+    privileged by having landed; an attested reopening resets it too.
+
+    Raises :class:`CapVerdictError` as :func:`read_verdicts` and
     :func:`receipted_verdicts` do.
     """
-    rows = read_verdicts(state_dir, pr_number)
+    rows = tuple(verdict for verdict in read_verdicts(state_dir, pr_number) if verdict.created_at >= since)
     booked = {verdict.verdict_id for verdict in rows}
     landed = [verdict for verdict in receipted_verdicts(state_dir, pr_number, since=since) if verdict.verdict_id not in booked]
     return tuple(sorted((*rows, *landed), key=lambda verdict: (verdict.created_at, verdict.verdict_id)))

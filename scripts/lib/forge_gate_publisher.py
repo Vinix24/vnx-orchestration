@@ -1270,19 +1270,26 @@ def refresh_review_summary(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     base_branch: Optional[str] = None,
-) -> bool:
+) -> Optional[Dict[str, Any]]:
     """Republish ``vnx-gate/review`` for one head with an explicit override reason (RG-2).
 
     The entry point the merge door uses (RG-4) when it merges under
-    ``--override-b3``: that override writes no gate record, so the required check
-    would stay red on a head the door is about to merge. This republishes from
-    the records already on disk, and returns whether the check-run went out.
+    ``--override-b3`` or the verdict allowed a merge with too few PASSes: that
+    path writes no gate record, so the required check would stay red on a head
+    the door is about to merge. This republishes from the records already on
+    disk and returns the payload that went out — including its ``conclusion``,
+    which is not necessarily ``success`` (RG-4 round 2: publishing a red
+    summary is still a publication). ``None`` when nothing went out at all.
+
+    The caller must read ``conclusion``: a check-run that went out red is not a
+    green door. Treating "published" as "passed" is exactly the hole this
+    return value closes.
 
     **A head that moved publishes nothing.** The check is bound to one commit;
     the PR's current head is read first (:func:`_resolve_head_sha`) and when it
     cannot be read, or differs from ``head_sha``, nothing is published and the
     reason is logged. The reason is required: an override without one is not an
-    override. Every way the publication can fail is a logged ``False``, never an
+    override. Every way the publication can fail is a logged ``None``, never an
     exception — the caller is mid-merge and needs an answer.
     """
     reason = (b3_override or "").strip()
@@ -1302,19 +1309,19 @@ def refresh_review_summary(
                 "niets gepubliceerd voor %s en de check blijft zoals hij staat",
                 pr_number, resolved_head[:12],
             )
-            return False
+            return None
         if current_head != resolved_head:
             logger.warning(
                 "forge_gate_publisher: de kop van PR #%s is verschoven (%s -> %s); er wordt "
                 "niets gepubliceerd voor de gevraagde kop — ververs de check voor de nieuwe kop",
                 pr_number, resolved_head[:12], current_head[:12],
             )
-            return False
-        publish_review_summary(
+            return None
+        payload = publish_review_summary(
             pr_number, resolved_head, results_dir=results_dir, branch=branch,
             project_id=project_id, base_branch=base_branch, b3_override=reason,
         )
-    # vnx-silent-except: the caller is mid-merge and needs true/false, not a
+    # vnx-silent-except: the caller is mid-merge and needs an answer, not a
     # traceback; the failure is logged loudly and every one of them leaves the
     # check unpublished, which the caller must treat as a refusal.
     except Exception as exc:  # noqa: BLE001
@@ -1324,8 +1331,8 @@ def refresh_review_summary(
             REVIEW_SUMMARY_CHECK_NAME, pr_number, resolved_head[:12], type(exc).__name__, exc,
             REVIEW_RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number),
         )
-        return False
-    return True
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 # ---------------------------------------------------------------------------

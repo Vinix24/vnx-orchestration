@@ -884,34 +884,46 @@ def _refreshed_review_gate(
     verdict writes no gate record, so the required check would stay red on a head
     the door just cleared and branch protection would block the merge. The door
     calls RG-2's ``refresh_review_summary`` with the override reason or the
-    verdict as evidence and refuses, naming the check, when it returns ``False``.
+    verdict as evidence and refuses, naming the check, when nothing went out or
+    what went out is not green.
+
+    A publication that went out is not a pass (RG-4 round 2): the required check
+    can be republished red (``conclusion`` ``failure``/``action_required`` — the
+    publisher and this door read the same records by different rules, and only a
+    green check lets the merge through branch protection). The conclusion the
+    publisher wrote is read from the payload ``refresh_review_summary`` returns;
+    anything that is not ``success`` — including a missing or malformed
+    conclusion — keeps the door NO-GO.
     """
     if gate.get("verdict") != "GO":
         return gate
     reason = (b3_override or "").strip() or _merge_evidence_reason(gate)
     if not reason:
         return gate
-    from forge_gate_publisher import REVIEW_SUMMARY_CHECK_NAME, refresh_review_summary
+    from forge_gate_publisher import CONCLUSION_SUCCESS, REVIEW_SUMMARY_CHECK_NAME, refresh_review_summary
 
     why = "de publicatie ging niet uit"
     try:
-        published = refresh_review_summary(
+        publication = refresh_review_summary(
             pr_number, head_sha, b3_override=reason, results_dir=results_dir, branch=branch,
             base_branch=base_branch,
         )
     # vnx-silent-except: a forge failure mid-merge is a refusal that names the
     # check, never a traceback that leaves the door without a verdict.
     except Exception as exc:
-        published, why = False, f"{type(exc).__name__}: {exc}"
-    if published:
+        publication, why = None, f"{type(exc).__name__}: {exc}"
+    conclusion = str(publication.get("conclusion") or "") if isinstance(publication, dict) else ""
+    if conclusion == CONCLUSION_SUCCESS:
         return gate
+    if isinstance(publication, dict):
+        why = f"de gepubliceerde check kreeg conclusie {conclusion or 'onbekend'!r}, niet success"
     return {
         **gate,
         "verdict": "NO-GO",
         "message": (
             f"de review-seats gaven GO, maar het verversen van de verplichte check {REVIEW_SUMMARY_CHECK_NAME} "
-            f"voor kop {head_sha[:12]} mislukte ({why}): de merge gaat niet door zolang die check niet groen "
-            f"voor deze kop staat"
+            f"voor kop {head_sha[:12]} leverde geen groene check op ({why}): de merge gaat niet door zolang "
+            f"die check niet groen voor deze kop staat"
         ),
     }
 

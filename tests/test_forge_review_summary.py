@@ -584,7 +584,7 @@ class TestTheRefreshEntryPoint:
             results_dir=results, branch=BRANCH,
         )
 
-        assert published is True
+        assert published["conclusion"] == fgp.CONCLUSION_SUCCESS
         assert [call["head_sha"] for call in recorder.calls] == [HEAD]
         assert recorder.calls[0]["conclusion"] == fgp.CONCLUSION_SUCCESS
         assert "B3 override" in recorder.calls[0]["summary"]
@@ -601,12 +601,12 @@ class TestTheRefreshEntryPoint:
                 PR_NUMBER, HEAD, b3_override="door override", results_dir=results, branch=BRANCH
             )
 
-        assert published is False and recorder.calls == []
+        assert published is None and recorder.calls == []
         logged = "\n".join(record.getMessage() for record in caplog.records)
         assert HEAD[:12] in logged and OTHER_HEAD[:12] in logged and "verschoven" in logged
 
-    def test_a_failing_forge_call_returns_false(self, tmp_path, monkeypatch):
-        """Acceptance 4: the door gets a refusal, not a traceback."""
+    def test_a_failing_forge_call_returns_nothing_published(self, tmp_path, monkeypatch):
+        """Acceptance 4: the door gets a refusal, not a traceback (``None`` in RG-4 round 2)."""
         results = _capped_store(tmp_path, monkeypatch)
         _stub_publication(monkeypatch)
 
@@ -617,7 +617,7 @@ class TestTheRefreshEntryPoint:
 
         assert fgp.refresh_review_summary(
             PR_NUMBER, HEAD, b3_override="door override", results_dir=results, branch=BRANCH
-        ) is False
+        ) is None
 
     def test_an_override_without_a_reason_is_refused(self, tmp_path, monkeypatch):
         results = _capped_store(tmp_path, monkeypatch)
