@@ -181,6 +181,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Env-only: read from the process environment at launch.",
         writable=False,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # RG-1 (track review-rondegrens-met-tiebreaker, ADR-041 amendment R1e): the
+    # codex review-round cap. B3.2 also caps a PR once this many codex FAIL
+    # rounds fell on distinct heads since the PR's last `opened` line. Read-site
+    # is ``review_rounds.round_cap`` through ``config_runtime.get`` (the
+    # per-project chain); the value is a string holding a positive integer and
+    # a malformed one fails loud there instead of falling back to the default.
+    "VNX_REVIEW_ROUND_CAP": _e(
+        "VNX_REVIEW_ROUND_CAP", "string", "3", "gate",
+        "Codex review-round cap: how many codex FAIL rounds on distinct heads, counted since "
+        "the PR's last opened line in the round ledger, put the PR at the B3.2 cap. Default 3. "
+        "Resolved per project through config_runtime (VNX_OVERRIDE_REVIEW_ROUND_CAP > "
+        "project_config row > VNX_REVIEW_ROUND_CAP > default); review_rounds.round_cap parses it "
+        "as a positive integer and fails loud on an empty, zero, negative or non-integer value. "
+        "There is no vnx config verb: a non-default goes through dashboard/api_config.py or a "
+        "project_config row. Setting it high is the rollback without code.",
+        subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
@@ -520,6 +536,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "project may lower it.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE", cockpit_canonical=True),
+
+    # ADR-045 (track audit-spoor-kern, group 1 — K-1): the dispatch lifecycle in
+    # the ledger — one dispatch_started, one dispatch_finished per attempt and a
+    # report_ingested that is never an outcome. Its own block, deliberately away
+    # from the gate entries above: this flag gates a WRITE path (the append layer
+    # refuses the three new line types while it is off), not a review decision.
+    # Default off is the shipped state and the emergency brake — turning it off
+    # is the first step back (ADR-045 §9/§10). Until the activation delivery
+    # (K-act) no writer in the fabric emits a lifecycle line.
+    "VNX_LEDGER_LIFECYCLE": _e(
+        "VNX_LEDGER_LIFECYCLE", "bool", "0", "dispatch",
+        "ADR-045 dispatch lifecycle in the receipt ledger: dispatch_started, "
+        "one dispatch_finished per (project_id, dispatch_id, attempt) and a "
+        "report_ingested that never counts as an outcome. Off = no lifecycle "
+        "line is written at all (the append layer refuses the three types). "
+        "Purely deterministic: no model call sits in the write path.",
+        subsystem="ledger-lifecycle", status="ACTIVATE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
@@ -602,19 +635,23 @@ def _bare(key: str) -> str:
     return key[len("VNX_"):] if key.startswith("VNX_") else key
 
 
-def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
-    """Resolve a config value via the precedence chain. Returns the registry default (or None for
-    an unknown key) when nothing overrides it. Never raises."""
+def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
+    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+
+    ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
+    world. Shared by :func:`get` (the process's wired store) and
+    :func:`get_for_project` (a store the caller names), so the order of the
+    four sources cannot drift between them.
+    """
     entry = CONFIG_REGISTRY.get(key)
     # 1. operator emergency-brake override (always wins, even for unknown keys)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
     if override is not None:
         return override
-    # 2. per-project DB value. Resolve the project: explicit arg wins, else the process default.
-    if _db_resolver is not None:
-        pid = project_id if project_id is not None else _default_project_id
+    # 2. per-project DB value through the resolver in play
+    if resolver is not None:
         try:
-            db_val = _db_resolver(pid, key)
+            db_val = resolver(project_id, key)
         except Exception:
             db_val = None
         if db_val is not None:
@@ -625,6 +662,29 @@ def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
         return env_val
     # 4. registry default
     return entry.default if entry is not None else None
+
+
+def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
+    """Resolve a config value via the precedence chain. Returns the registry default (or None for
+    an unknown key) when nothing overrides it. Never raises."""
+    # The explicit project wins, else the process default (wired by config_runtime.autowire).
+    pid = project_id if project_id is not None else _default_project_id
+    return _resolve(key, pid, _db_resolver)
+
+
+def get_for_project(key: str, project_id: str, state_dir: "Path | str") -> Optional[str]:
+    """Resolve ``key`` for a project store the caller names, not for this process's project.
+
+    Step 2 is read from ``state_dir``'s ``runtime_coordination.db`` for
+    ``project_id``, so a caller working on another project's data (a ledger
+    read from a state dir, ``--data-dir``) gets that project's value even when
+    this process is wired to a different one. The operator override and the
+    process-start env value keep the precedence :func:`get` gives them; only
+    the DB source is redirected. Never raises.
+    """
+    import config_store_db
+
+    return _resolve(key, project_id, config_store_db.make_db_resolver(lambda _pid: state_dir))
 
 
 _TRUTHY = frozenset(("1", "true", "yes", "on"))

@@ -2209,7 +2209,12 @@ def _capped_prs_on_branch(state_dir: Path, branch: str, dispatch_id: str = "") -
     ledger = review_rounds.read_ledger(review_rounds.ledger_path(review_gates))
     project_id = review_rounds.store_project_id(review_gates)
     prs = sorted({line.pr_number for line in ledger.lines if line.branch == branch and line.project_id == project_id})
-    caps = [review_rounds.cap_state(ledger.for_pr(project_id, pr), pr) for pr in prs]
+    caps = [
+        review_rounds.cap_state(
+            ledger.for_pr(project_id, pr), pr, project_id=project_id, state_dir=state_dir,
+        )
+        for pr in prs
+    ]
     return [
         cap for cap in caps if cap.capped and not review_cap_verdicts.round_open_for(
             state_dir, cap, dispatch_id, since=ledger.since(project_id, cap.pr_number),

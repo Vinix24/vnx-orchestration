@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 sys.path.insert(0, str(REPO / "scripts" / "lib"))
 
 import cleanup_reviewed_worktrees as crw  # noqa: E402
+import dispatch_worktree_isolation as dwi  # noqa: E402
 
 GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -36,6 +37,11 @@ def git(cwd: Path, *args: str) -> str:
 class Fixture:
     def __init__(self, tmp_path: Path, project_id: str = "alpha") -> None:
         self.tmp = tmp_path
+        # The project's central store exists before the first claim is written, so
+        # the claim/occupancy registry (resolved through vnx_paths) and the sweep
+        # resolve to ONE place for the whole test instead of following whichever
+        # directory happens to exist at the moment of each call.
+        (Path.home() / ".vnx-data" / project_id / "state").mkdir(parents=True, exist_ok=True)
         self.origin = tmp_path / "origin.git"
         self.repo = tmp_path / "repo"
         git(tmp_path, "init", "-q", "--bare", "-b", "main", str(self.origin))
@@ -49,7 +55,7 @@ class Fixture:
         git(self.repo, "push", "-q", "origin", "main")
         git(self.repo, "fetch", "-q", "origin")
 
-    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.LockedWorktree:
+    def worktree(self, dispatch_id: str, *, commit: bool = True, push: bool = False) -> crw.Candidate:
         path = self.repo / ".vnx-data" / "worktrees" / f"dispatch-{dispatch_id}"
         branch = f"dispatch/{dispatch_id}"
         git(self.repo, "worktree", "add", "-q", "-b", branch, str(path), "main")
@@ -59,8 +65,13 @@ class Fixture:
             git(path, "commit", "-q", "-m", "work")
         if push:
             git(path, "push", "-q", "origin", branch)
+        # What create_dispatch_worktree leaves behind: a claim naming this path and an
+        # existing (unheld) occupancy slot. Without them the guard refuses the removal.
+        dwi._write_claim_atomic(dispatch_id, worktree_path=path, project_root=self.repo)
+        dwi._acquire_occupancy(dispatch_id, path, self.repo)
+        dwi._release_occupancy(path)
         git(self.repo, "worktree", "lock", "--reason", "vnx preserve 2026", str(path))
-        found = [w for w in crw.discover_locked_dispatch_worktrees(self.repo) if w.dispatch_dir_id == dispatch_id]
+        found = [w for w in crw.discover_candidates(self.repo) if w.dispatch_dir_id == dispatch_id]
         assert len(found) == 1
         return found[0]
 
@@ -313,6 +324,54 @@ class TestT0Reject:
         assert wt.path.exists()
 
 
+class TestRemovalBindsTheEvaluatedHead:
+    """PR-4b round 2: the removal is bound to the HEAD ``evaluate_candidate``
+    judged. A clean commit made between evaluation and the guard must not be
+    removed, and its branch must not be deleted."""
+
+    @staticmethod
+    def _merged(fx, monkeypatch):
+        wt = fx.worktree("x")
+        stub_prs(monkeypatch, [{"number": 7, "state": "MERGED", "headRefOid": wt.head_sha}])
+        return wt
+
+    def test_a_commit_after_evaluation_keeps_the_worktree_and_its_branch(self, fx, monkeypatch):
+        wt = self._merged(fx, monkeypatch)
+        verdict = crw.evaluate_candidate(fx.repo, wt, "o/r")
+        assert verdict.safe and verdict.evaluated_head == wt.head_sha
+
+        git(wt.path, "commit", "--allow-empty", "-q", "-m", "commit after evaluation")
+        moved = git(wt.path, "rev-parse", "HEAD")
+        assert moved != verdict.evaluated_head
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=verdict.evaluated_head,
+            delete_branch=verdict.delete_branch, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "head_moved", result.detail
+        assert verdict.evaluated_head[:12] in result.detail, result.detail
+        assert moved[:12] in result.detail, result.detail
+        assert wt.path.exists(), "the worktree must stay"
+        assert fx.branch_exists("dispatch/x"), "the branch must stay"
+
+    def test_an_unchanged_head_still_removes_and_deletes_the_branch(self, fx, monkeypatch):
+        wt = self._merged(fx, monkeypatch)
+        verdict = crw.evaluate_candidate(fx.repo, wt, "o/r")
+        assert verdict.safe and verdict.evaluated_head == wt.head_sha
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=verdict.evaluated_head,
+            delete_branch=verdict.delete_branch, dry_run=False,
+        )
+
+        assert result.released is True, result.detail
+        assert result.reason == "removed"
+        assert not wt.path.exists()
+        assert not fx.branch_exists("dispatch/x")
+
+
 class TestSafety:
     """W6."""
 
@@ -322,7 +381,7 @@ class TestSafety:
         rc = crw.main(["--repo-root", str(fx.repo), "--json"])
         assert rc == 0
         assert wt.path.exists() and fx.branch_exists("dispatch/x")
-        assert any(w.dispatch_dir_id == "x" for w in crw.discover_locked_dispatch_worktrees(fx.repo))
+        assert any(w.dispatch_dir_id == "x" for w in crw.discover_candidates(fx.repo))
 
     def test_current_worktree_stays(self, fx, monkeypatch):
         wt = fx.worktree("x")
@@ -342,7 +401,171 @@ class TestSafety:
         with pytest.raises(SystemExit):
             crw.main([])
 
-    def test_unlocked_worktree_is_never_a_candidate(self, fx, monkeypatch):
+    def test_an_unlocked_worktree_is_a_candidate_too(self, fx, monkeypatch):
+        """PR-4b: the sweep's candidates come from the inventory, so dropping the
+        preserve lock no longer hides a tree from it. The guard, not the sweep,
+        then decides whether it may go."""
         wt = fx.worktree("x")
         git(fx.repo, "worktree", "unlock", str(wt.path))
-        assert crw.discover_locked_dispatch_worktrees(fx.repo) == []
+        candidates = [c for c in crw.discover_candidates(fx.repo) if c.dispatch_dir_id == "x"]
+        assert len(candidates) == 1 and candidates[0].lock_reason is None
+        assert candidates[0].kind == "dispatch"
+
+    def test_a_guarded_refusal_leaves_the_preserve_lock_in_place(self, fx, monkeypatch):
+        """A locked tree the guard keeps must stay LOCKED: the sweep drops the
+        lock only inside the guard's removal, never while it is still judging."""
+        import dispatch_process_registry as registry
+
+        wt = fx.worktree("x")
+        git(fx.repo, "merge", "-q", "--no-ff", "-m", "merge", "dispatch/x")
+        git(fx.repo, "push", "-q", "origin", "main")
+        git(fx.repo, "fetch", "-q", "origin")
+        registry.record_dispatch_pgids("x", [os.getpgid(0)], repo_root=fx.repo)
+
+        def _denied(pid):
+            raise PermissionError(f"not allowed to inspect {pid}")
+
+        monkeypatch.setattr(os, "getpgid", _denied)
+        report = run_main(fx)
+        candidate = report["candidates"][0]
+        assert candidate["released"] is False
+        assert candidate["guard_reason"] == "liveness_unknown", candidate
+        assert wt.path.exists()
+        assert "locked" in git(fx.repo, "worktree", "list", "--porcelain")
+
+
+def _lock_line(repo: Path, path: Path) -> str:
+    """The ``locked`` line ``git worktree list --porcelain`` prints for *path*."""
+    for block in git(repo, "worktree", "list", "--porcelain").split("\n\n"):
+        lines = block.splitlines()
+        if lines and lines[0] == f"worktree {path}":
+            for line in lines[1:]:
+                if line == "locked" or line.startswith("locked "):
+                    return line
+    return ""
+
+
+def _inject_when_the_repository_lock_is_taken(monkeypatch, action) -> None:
+    """Run *action* the moment the guard acquires the repository lock.
+
+    That is the window the guard's under-lock revalidation exists for: the
+    tree gets written into or committed to while the guard waits for the lock,
+    after its first evidence sample has already passed. The public
+    ``before_remove`` hook cannot be used for this any more: it now runs only
+    after that revalidation, immediately before the removal.
+    """
+    import contextlib
+
+    import worktree_removal_guard as guard
+
+    real_lock = guard._worktree_lock
+
+    @contextlib.contextmanager
+    def lock_then_inject(root):
+        with real_lock(root):
+            action()
+            yield
+
+    monkeypatch.setattr(guard, "_worktree_lock", lock_then_inject)
+
+
+class TestAGuardedRefusalKeepsTheLock:
+    """OI-2418 / PR-4b round 3: a tree the guard keeps keeps its lock.
+
+    The preserve lock may be dropped only for a removal that happens: the
+    guard calls the unlock hook after the under-lock revalidation and after
+    the removal decision is written, immediately before ``git worktree
+    remove``. Every refusal below fires under that lock, so no lock may be
+    gone with the tree still standing.
+    """
+
+    def test_dirty_under_the_repository_lock_keeps_the_preserve_lock(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+        injected = wt.path / "late-write.txt"
+        _inject_when_the_repository_lock_is_taken(
+            monkeypatch, lambda: injected.write_text("late write\n", encoding="utf-8"),
+        )
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "dirty", result.detail
+        assert wt.path.exists() and injected.exists(), "a tree made dirty under the lock must survive"
+        assert _lock_line(fx.repo, wt.path), "a kept tree must keep its preserve lock"
+
+    def test_head_moved_under_the_repository_lock_keeps_the_preserve_lock(self, fx, monkeypatch):
+        wt = fx.worktree("x")
+
+        def late_commit() -> None:
+            git(wt.path, "commit", "--allow-empty", "-q", "-m", "late commit under the lock")
+
+        _inject_when_the_repository_lock_is_taken(monkeypatch, late_commit)
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "head_moved", result.detail
+        assert wt.path.exists(), "a tree that moved under the lock must survive"
+        assert _lock_line(fx.repo, wt.path), "a kept tree must keep its preserve lock"
+        assert fx.branch_exists("dispatch/x"), "the branch must stay"
+
+    def test_an_unrecorded_removal_decision_keeps_the_preserve_lock(self, fx, monkeypatch):
+        import types
+
+        import state_mutation
+
+        wt = fx.worktree("x")
+        monkeypatch.setattr(
+            state_mutation, "emit_state_mutation",
+            lambda *a, **kw: types.SimpleNamespace(status="skipped"),
+        )
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "decision_unrecorded", result.detail
+        assert wt.path.exists()
+        assert _lock_line(fx.repo, wt.path), "a tree with no recorded decision must keep its preserve lock"
+
+    def test_a_failed_removal_puts_the_preserve_lock_back(self, fx, monkeypatch):
+        """Even after the unlock, a removal that does not happen is re-locked."""
+        import worktree_removal_guard as guard
+
+        wt = fx.worktree("x")
+        real_git = guard._git
+
+        def failing_remove(cwd, args):
+            if list(args)[:2] == ["worktree", "remove"]:
+                return False, "simulated removal failure"
+            return real_git(cwd, args)
+
+        monkeypatch.setattr(guard, "_git", failing_remove)
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is False
+        assert result.reason == "remove_failed", result.detail
+        assert wt.path.exists()
+        assert _lock_line(fx.repo, wt.path), "a kept tree must be locked again"
+        assert result.errors == [], result.errors
+
+    def test_a_passed_removal_unlocks_and_removes(self, fx, monkeypatch):
+        """The hook still runs for the removal it was made for."""
+        wt = fx.worktree("x")
+
+        result = crw.remove_candidate(
+            fx.repo, wt, expected_head=wt.head_sha, delete_branch=True, dry_run=False,
+        )
+
+        assert result.released is True, result.detail
+        assert result.reason == "removed"
+        assert not wt.path.exists()
+        assert not fx.branch_exists("dispatch/x")

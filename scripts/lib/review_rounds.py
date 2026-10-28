@@ -21,9 +21,11 @@ enforceable:
   seat counts, not the vendor: a takeover in the codex seat counts as codex. A
   blocker of the second seat does not count (plan, open question 2), and a
   re-anchored line is no round: its verdict was counted on the head it came
-  from. B3.1 (three
-  or more blockers in one round) is checked first, then B3.2 (the latest round
-  has a blocker and the sum over all rounds is six or more). The cap is sticky:
+  from. B3.1 (three or more blockers in one round) is checked first, then B3.2
+  (the latest round has a blocker and the sum over all rounds is six or more,
+  or -- since RG-1 -- the number of FAIL rounds on distinct heads reaches the
+  project's round cap, ``VNX_REVIEW_ROUND_CAP``, default 3). The cap state
+  names which threshold fired (``blockers`` or ``rounds``). The cap is sticky:
   it falls at the first round where either rule holds, and only R2's tiebreaker
   (:func:`round_granted_past_cap`) or ``--override-b3`` gets a codex-seat round
   past it. No fingerprint: a returning blocker counts again.
@@ -95,6 +97,15 @@ B3_2 = "B3.2"
 B3_1_ROUND_BLOCKERS = 3
 B3_2_TOTAL_BLOCKERS = 6
 
+# The round cap (RG-1, ADR-041 amendment R1e): B3.2 also caps a PR once this
+# many codex FAIL rounds fell on distinct heads since the PR's last `opened`
+# line. Per project: `VNX_REVIEW_ROUND_CAP` through config_runtime, default 3.
+ROUND_CAP_KEY = "VNX_REVIEW_ROUND_CAP"
+ROUND_CAP_DEFAULT = 3
+# Which of B3.2's two thresholds fired: the blocker sum, or the round count.
+THRESHOLD_BLOCKERS = "blockers"
+THRESHOLD_ROUNDS = "rounds"
+
 OVERRIDE_FLAG = "--override-b3"
 OVERRIDE_USAGE = '--override-b3 --reason "..."'
 # What carried the reason: the documented flag, or the env carrier RG-5 adds
@@ -129,7 +140,8 @@ REFUSED_REANCHOR_UNCOUNTED = "reanchor_origin_uncounted"
 
 EVIDENCE_REANCHORED = "reanchored"
 
-_VERDICTS = ("pass", "fail")
+VERDICT_FAIL = "fail"
+_VERDICTS = ("pass", VERDICT_FAIL)
 _STRING_FIELDS = (
     "project_id", "head_sha", "seat", "reviewer", "takeover_from", "verdict",
     "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from", "granted_by",
@@ -154,6 +166,14 @@ class RoundRefusal(ValueError):
 
 class StoreConflict(ValueError):
     """``--data-dir`` and ``VNX_STATE_DIR`` name two different round ledgers: the command cannot tell which one is meant."""
+
+
+class RoundCapError(ValueError):
+    """``VNX_REVIEW_ROUND_CAP`` is not a positive integer: the round cap cannot be read.
+
+    The cap never falls back to the default on a malformed value: a silent 3
+    would cap (or not cap) on a number nobody chose.
+    """
 
 
 def open_command(pr_number: Any) -> str:
@@ -186,6 +206,19 @@ def ledger_path_for_results(results_dir: Path) -> Optional[Path]:
     if results_dir.name != "results" or results_dir.parent.name != "review_gates":
         return None
     return ledger_path(results_dir.parent)
+
+
+def ledger_state_dir(path: Path) -> Optional[Path]:
+    """The state dir a ledger path lives in (``<state>/review_gates/rounds.ndjson``), else ``None``.
+
+    The writer's cap decision resolves the project's round cap from this store
+    (RG-1 round 2), so it is the same state dir the result store's layout names,
+    never the environment's. A path outside that layout names no store.
+    """
+    path = Path(path)
+    if path.name != LEDGER_NAME or path.parent.name != "review_gates":
+        return None
+    return path.parent.parent
 
 
 def store_state_dir(data_dir: Optional[Path] = None) -> Path:
@@ -674,14 +707,83 @@ def unreadable_text(ledger: Ledger, pr_number: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _cap_error(value: Optional[str]) -> RoundCapError:
+    return RoundCapError(
+        f"{ROUND_CAP_KEY} must be a positive integer, got {value!r}; "
+        f"unset it for the default {ROUND_CAP_DEFAULT}"
+    )
+
+
+def parse_round_cap(value: Optional[str]) -> int:
+    """The round cap as a positive integer; a malformed value raises :class:`RoundCapError`.
+
+    No silent default: an empty, zero, negative or non-integer value is a
+    setting nobody chose. The same contract the plan gate's ``max_rounds`` has.
+    """
+    text = (value or "").strip()
+    try:
+        cap = int(text)
+    except ValueError:
+        raise _cap_error(value) from None
+    if not text or cap < 1:
+        raise _cap_error(value)
+    return cap
+
+
+def round_cap(project_id: Optional[str] = None, state_dir: Optional[Path] = None) -> int:
+    """The configured round cap for the project store the caller names.
+
+    ``state_dir`` and ``project_id`` are the round ledger's own store and
+    project (:func:`store_project_id`): a ledger read from another project's
+    state dir (``cap-verdict --data-dir``, a merge door on another store) is
+    judged against THAT project's threshold, never the launching process's.
+    With a state dir named, the DB source is read from its
+    ``runtime_coordination.db`` (``config_registry.get_for_project``), so the
+    process's own wiring does not leak in. Without either, the process's
+    configuration resolves, the behaviour for a caller with no ledger in hand.
+
+    The chain: ``VNX_OVERRIDE_REVIEW_ROUND_CAP`` (the rollback brake) > the
+    project's ``project_config`` row > ``VNX_REVIEW_ROUND_CAP`` > default ``3``.
+    A malformed value raises; it never falls back to the default. The imports
+    are local so this module needs no config layer to be imported.
+    """
+    if state_dir is not None:
+        import config_registry
+
+        pid = project_id or _state_dir_project_id(state_dir)
+        raw = config_registry.get_for_project(ROUND_CAP_KEY, pid, state_dir)
+    elif project_id is not None:
+        import config_registry
+
+        raw = config_registry.get(ROUND_CAP_KEY, project_id)
+    else:
+        import config_runtime
+
+        raw = config_runtime.get(ROUND_CAP_KEY)
+    return parse_round_cap(raw)
+
+
+def _state_dir_project_id(state_dir: Path) -> str:
+    """The project a state dir names itself as (ADR-007), ``""`` when it names none."""
+    import vnx_paths
+
+    return vnx_paths.project_id_from_state_dir(Path(state_dir)) or ""
+
+
 @dataclass(frozen=True)
 class CapState:
-    """The codex-seat rounds of one PR and whether, and where, B3 put it at the cap."""
+    """The codex-seat rounds of one PR and whether, and where, B3 put it at the cap.
+
+    ``threshold`` is which threshold fired: ``blockers`` (B3.1 or B3.2's six-blocker
+    sum) or ``rounds`` (the round cap, RG-1); ``round_limit`` is that cap.
+    """
 
     pr_number: int
     rounds: Tuple[RoundLine, ...] = ()
     rule: str = ""
     cap_round: int = 0
+    threshold: str = ""
+    round_limit: int = 0
 
     @property
     def capped(self) -> bool:
@@ -703,7 +805,7 @@ class CapState:
         return self.rounds[self.cap_round - 1].head_sha
 
     def summary(self) -> str:
-        """The rule, the round it fell in and the counts it fell on."""
+        """The rule, which threshold fired, the round it fell in and the counts it fell on."""
         if not self.capped:
             return (
                 f"PR #{self.pr_number} is below the cap: {len(self.rounds)} codex-seat round(s), "
@@ -712,11 +814,21 @@ class CapState:
         at_cap = self.blockers[: self.cap_round]
         line = self.rounds[self.cap_round - 1]
         if self.rule == B3_1:
-            why = f"round {self.cap_round} had {at_cap[-1]} blockers (B3.1: three or more in one round)"
+            why = (
+                f"round {self.cap_round} had {at_cap[-1]} blockers (B3.1: three or more in one round; "
+                f"threshold: {self.threshold})"
+            )
+        elif self.threshold == THRESHOLD_ROUNDS:
+            failed = sum(1 for item in self.rounds[: self.cap_round] if item.verdict == VERDICT_FAIL)
+            why = (
+                f"round {self.cap_round} is codex FAIL round {failed} and the round cap is "
+                f"{self.round_limit} (B3.2: the round cap; threshold: {self.threshold})"
+            )
         else:
             why = (
                 f"round {self.cap_round} had {at_cap[-1]} blocker(s) and the sum over "
-                f"{self.cap_round} rounds is {sum(at_cap)} (B3.2: six or more, latest round blocking)"
+                f"{self.cap_round} rounds is {sum(at_cap)} (B3.2: six or more, latest round blocking; "
+                f"threshold: {self.threshold})"
             )
         return (
             f"PR #{self.pr_number} is at the cap under {self.rule}: {why}; codex-seat blockers per "
@@ -728,6 +840,7 @@ class CapState:
         return {
             "rule": self.rule, "cap_round": self.cap_round, "rounds": len(self.rounds),
             "blockers": list(self.blockers), "total": self.total,
+            "threshold": self.threshold, "round_cap": self.round_limit,
         }
 
 
@@ -751,20 +864,38 @@ def codex_rounds(lines: Iterable[RoundLine]) -> Tuple[RoundLine, ...]:
     return tuple(rounds)
 
 
-def cap_state(lines: Iterable[RoundLine], pr_number: int) -> CapState:
+def cap_state(
+    lines: Iterable[RoundLine], pr_number: int, *, project_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
+) -> CapState:
     """Walk the rounds in order; the first round where B3.1, else B3.2, holds is the cap.
 
-    ``lines`` are one PR's lines in verdict order (:meth:`Ledger.for_pr`).
+    ``lines`` are one PR's lines in verdict order (:meth:`Ledger.for_pr`), so the
+    last attested ``opened`` line already reset the count. B3.2 has two thresholds
+    and either caps: the six-blocker sum, and since RG-1 the codex FAIL rounds on
+    distinct heads reaching :func:`round_cap`. The blocker thresholds are checked
+    first, so a round satisfying both is named ``blockers``. A malformed cap
+    raises :class:`RoundCapError`; it never quietly counts against 3.
+
+    ``project_id`` and ``state_dir`` are the ledger's project and store: every
+    caller that read a ledger passes them, so the round cap is that project's
+    threshold, not the launching process's (RG-1 round 2).
     """
     rounds = codex_rounds(lines)
+    limit = round_cap(project_id=project_id, state_dir=state_dir)
     total = 0
+    failed = 0
     for index, line in enumerate(rounds, start=1):
         total += line.blocking_count
+        if line.verdict == VERDICT_FAIL:
+            failed += 1
         if line.blocking_count >= B3_1_ROUND_BLOCKERS:
-            return CapState(pr_number, rounds, B3_1, index)
+            return CapState(pr_number, rounds, B3_1, index, THRESHOLD_BLOCKERS, limit)
         if line.blocking_count >= 1 and total >= B3_2_TOTAL_BLOCKERS:
-            return CapState(pr_number, rounds, B3_2, index)
-    return CapState(pr_number, rounds)
+            return CapState(pr_number, rounds, B3_2, index, THRESHOLD_BLOCKERS, limit)
+        if failed >= limit:
+            return CapState(pr_number, rounds, B3_2, index, THRESHOLD_ROUNDS, limit)
+    return CapState(pr_number, rounds, round_limit=limit)
 
 
 @dataclass(frozen=True)
@@ -818,10 +949,11 @@ CAP_VERDICT_COMMAND = "vnx review cap-verdict --pr {pr} --for-dispatch <dispatch
 
 
 def cap_refusal_text(cap: CapState, *, where: str) -> str:
-    """The refusal a capped PR gets, naming the rule, the counts, the tiebreaker and the override."""
+    """The refusal a capped PR gets, naming the rule, the threshold, the counts, the tiebreaker and the override."""
     return (
-        f"{where}: {cap.summary()}. Every codex-seat run on this PR is refused on every head, except the "
-        f"one round a tiebreaker verdict grants: `{CAP_VERDICT_COMMAND.format(pr=cap.pr_number)}`. To go on "
+        f"{where}: {cap.summary()}. The cap fired on the `{cap.threshold}` threshold; every codex-seat run "
+        f"on this PR is refused on every head, except the one round a tiebreaker verdict grants: "
+        f"`{CAP_VERDICT_COMMAND.format(pr=cap.pr_number)}`. To go on "
         f"anyway, pass {OVERRIDE_USAGE}: the override wins over the cap and is recorded with its reason"
     )
 
@@ -935,7 +1067,9 @@ def _check_append(ledger: Ledger, line: RoundLine, grant_for: Optional[GrantReso
     if line.seat != CODEX_SEAT or line.override:
         return line
     lines = ledger.for_pr(line.project_id, line.pr_number)
-    cap = cap_state(lines, line.pr_number)
+    cap = cap_state(
+        lines, line.pr_number, project_id=line.project_id, state_dir=ledger_state_dir(ledger.path),
+    )
     if not cap.capped:
         return line
     # A re-anchor carries a verdict given on another head; it never uses the granted round.

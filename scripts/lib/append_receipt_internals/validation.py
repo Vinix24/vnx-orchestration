@@ -17,6 +17,16 @@ from .warning_destination import (
     LEGAL_SEVERITIES,
 )
 
+# ADR-045 §2/§8 (audit-spoor-kern K-1): the closed lifecycle vocabulary and its
+# required-field contract live in receipt_schema (the module that already owns
+# the codified receipt-shape contracts). This module only wires the refusal into
+# the one validation entry point every append passes.
+from receipt_schema import (
+    DISPATCH_FINISHED_EVENT_TYPE,
+    LifecycleReceiptError,
+    validate_lifecycle_receipt,
+)
+
 DISPATCH_REQUIRED_EVENTS = {
     "task_started",
     "task_complete",
@@ -286,6 +296,14 @@ def _validate_receipt(receipt: Dict[str, Any]) -> str:
                 "Missing required key: dispatch_id",
             )
 
+    # ADR-045 §2 (audit-spoor-kern K-1): a lifecycle line missing a required
+    # field is refused with the field's name, before any model/kind contract.
+    # The vocabulary is additive: every other event_type passes straight through.
+    try:
+        validate_lifecycle_receipt(receipt)
+    except LifecycleReceiptError as exc:
+        raise AppendReceiptError(exc.code, EXIT_VALIDATION_ERROR, str(exc)) from exc
+
     # dispatch-20260802-model-ssot-en-ketenlink: fail-closed model check —
     # a worker dispatch-terminal receipt must name the model that ran.
     _validate_model_present(receipt)
@@ -454,6 +472,10 @@ _STATUS_BEARING_EVENT_TYPES = frozenset({
     "task_timeout",
     "task_blocked",
     "report_contract_invalid",
+    # ADR-045 §4: an end line claims an outcome; the append layer derives its
+    # status from end_state before this contract runs, so an absent status here
+    # means the end_state was outside the closed set (already refused above).
+    DISPATCH_FINISHED_EVENT_TYPE,
 })
 
 
