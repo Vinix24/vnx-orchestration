@@ -854,10 +854,66 @@ def _review_seats_verdict(
     # R3b: the risk class is read in the checkout being merged into. Outside
     # main() no target is active and the evaluation reads the store's own checkout.
     checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
-    return check_review_gate_for_merge(
+    gate = check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
         base_branch=base_branch, **override_b3, **checkout,
     )
+    return _refreshed_review_gate(
+        gate, pr_number, head_sha, b3_override=b3_override or "", branch=branch, base_branch=base_branch,
+        results_dir=state_dir / "review_gates" / "results",
+    )
+
+
+def _merge_evidence_reason(gate: Dict[str, Any]) -> str:
+    """The evidence a GO under a standing ``mergen-met-OI`` verdict gives the refreshed check; ``""`` without one."""
+    standing = ((gate.get("review_seats") or {}).get("round_ledger") or {}).get("merge_with_oi") or {}
+    verdict_id = str(standing.get("verdict_id") or "")
+    if not verdict_id:
+        return ""
+    return (f"mergen-met-OI {verdict_id} op kop {str(standing.get('head_sha') or '')[:12]}, goedgekeurd door de "
+            f"operator op verdict, PR en kop, met de nasleep als geboekte open items")
+
+
+def _refreshed_review_gate(
+    gate: Dict[str, Any], pr_number: int, head_sha: str, *, b3_override: str, branch: str, base_branch: Any,
+    results_dir: Path,
+) -> Dict[str, Any]:
+    """``gate`` GO with ``vnx-gate/review`` republished for this head first; NO-GO when that did not go out (RG-4).
+
+    A merge under ``--override-b3`` or under a standing ``mergen-met-OI``
+    verdict writes no gate record, so the required check would stay red on a head
+    the door just cleared and branch protection would block the merge. The door
+    calls RG-2's ``refresh_review_summary`` with the override reason or the
+    verdict as evidence and refuses, naming the check, when it returns ``False``.
+    """
+    if gate.get("verdict") != "GO":
+        return gate
+    reason = (b3_override or "").strip() or _merge_evidence_reason(gate)
+    if not reason:
+        return gate
+    from forge_gate_publisher import REVIEW_SUMMARY_CHECK_NAME, refresh_review_summary
+
+    why = "de publicatie ging niet uit"
+    try:
+        published = refresh_review_summary(
+            pr_number, head_sha, b3_override=reason, results_dir=results_dir, branch=branch,
+            base_branch=base_branch,
+        )
+    # vnx-silent-except: a forge failure mid-merge is a refusal that names the
+    # check, never a traceback that leaves the door without a verdict.
+    except Exception as exc:
+        published, why = False, f"{type(exc).__name__}: {exc}"
+    if published:
+        return gate
+    return {
+        **gate,
+        "verdict": "NO-GO",
+        "message": (
+            f"de review-seats gaven GO, maar het verversen van de verplichte check {REVIEW_SUMMARY_CHECK_NAME} "
+            f"voor kop {head_sha[:12]} mislukte ({why}): de merge gaat niet door zolang die check niet groen "
+            f"voor deze kop staat"
+        ),
+    }
 
 
 def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

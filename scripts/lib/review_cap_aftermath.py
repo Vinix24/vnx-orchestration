@@ -246,6 +246,53 @@ def _merge_ready(verdict: rcv.CapVerdict) -> StepResult:
     )
 
 
+def merge_aftermath_complete(state_dir: Path, verdict: rcv.CapVerdict) -> str:
+    """Why the ``mergen-met-OI`` aftermath of ``verdict`` is not booked complete; ``""`` when it is (RG-4).
+
+    Complete means the ``merge_ready`` receipt's ``open_items_written`` is the
+    number of blocking findings of the counted codex round on the verdict's head
+    (a number, never a bool), and every one of those findings has an open item
+    under its dedup key in the store's own ``open_items.json``. Revision 1b
+    point 5: a half-written aftermath counts nothing at the door. Every read is
+    fail-closed — a missing or unreadable ledger, record or store is a reason.
+    """
+    if verdict.outcome != rcv.MERGEN_MET_OI:
+        return f"{verdict.verdict_id} is {verdict.outcome}, geen mergen-met-OI"
+    try:
+        receipts = step_receipts(state_dir, verdict)
+    except rcv.CapVerdictError as exc:
+        return f"de nasleep-receipts zijn onleesbaar ({exc})"
+    ready = next((receipt for receipt in receipts if receipt.get("step") == STEP_MERGE_READY), None)
+    if ready is None:
+        return f"geen {STEP_MERGE_READY}-record voor {verdict.verdict_id}"
+    written = ready.get("open_items_written")
+    if not isinstance(written, int) or isinstance(written, bool):
+        return f"het {STEP_MERGE_READY}-record noemt geen aantal open items ({written!r})"
+    try:
+        findings = _blocking_findings(state_dir, verdict, _counted_round(state_dir, verdict))
+    except AftermathError as exc:
+        return str(exc)
+    if written != len(findings):
+        return (f"het {STEP_MERGE_READY}-record zegt {written} open item(s), de getelde kop "
+                f"{verdict.head_sha[:12]} draagt {len(findings)} blokkerende bevinding(en)")
+    try:
+        stored = _stored_dedup_keys(state_dir)
+    except (OSError, ValueError) as exc:
+        return f"de open-items-store is niet leesbaar ({exc})"
+    missing = [key for key in (dedup_key(verdict, n) for n in range(1, len(findings) + 1)) if key not in stored]
+    return f"geen open item met dedup_key {', '.join(missing)}" if missing else ""
+
+
+def _stored_dedup_keys(state_dir: Path) -> set:
+    """Every ``dedup_key`` in the store's own ``open_items.json``; raises when it is not a store."""
+    import open_items_manager as oim
+
+    items = (oim.read_items(Path(state_dir)) or {}).get("items")
+    if not isinstance(items, list):
+        raise ValueError("de store heeft geen items-lijst")
+    return {str(item.get("dedup_key") or "") for item in items if isinstance(item, dict)}
+
+
 # ---------------------------------------------------------------------------
 # The counted verdict the aftermath reads from
 # ---------------------------------------------------------------------------

@@ -795,6 +795,53 @@ def door_grant(state_dir: Path, cap: review_rounds.CapState, *, since: str = "")
         return None
 
 
+@dataclass(frozen=True)
+class StandingMerge:
+    """The standing ``mergen-met-OI`` verdict that lifts the codex seat on one head, or ``refusal`` saying why none does."""
+
+    verdict: Optional[CapVerdict] = None
+    refusal: str = ""
+
+
+def standing_merge(
+    state_dir: Path, cap: review_rounds.CapState, head_sha: str, *, since: str = "",
+) -> StandingMerge:
+    """The ``mergen-met-OI`` verdict that lets the codex seat count on ``head_sha`` (R2c, RG-4).
+
+    Three conditions, each read fresh at the door (revision 1b points 3-5): the
+    verdict stands on this head; an ``operator_approval`` names this verdict id,
+    this PR and this head; the aftermath is booked complete. A store that cannot
+    be read raises :class:`CapVerdictError`: whether a verdict stands cannot be
+    told, so nothing counts.
+    """
+    if not cap.capped or not head_sha:
+        return StandingMerge()
+    verdict = next(
+        (
+            standing for standing in standing_verdicts(state_dir, cap.pr_number, since=since)
+            if standing.head_sha == head_sha and standing.outcome == MERGEN_MET_OI
+        ),
+        None,
+    )
+    if verdict is None:
+        return StandingMerge()
+    if merge_approval(state_dir, verdict) is None:
+        return StandingMerge(refusal=(
+            f"PR #{cap.pr_number} op kop {head_sha[:12]}: de tiebreaker koos mergen-met-OI ({verdict.verdict_id}), "
+            f"maar geen operator_approval noemt verdict {verdict.verdict_id}, PR #{cap.pr_number} én deze kop "
+            f"(één akkoord per gebruik)"
+        ))
+    from review_cap_aftermath import merge_aftermath_complete
+
+    incomplete = merge_aftermath_complete(state_dir, verdict)
+    if incomplete:
+        return StandingMerge(refusal=(
+            f"PR #{cap.pr_number} op kop {head_sha[:12]}: het mergen-met-OI-oordeel {verdict.verdict_id} heeft een "
+            f"akkoord, maar de nasleep is niet als voltooid geboekt: {incomplete}"
+        ))
+    return StandingMerge(verdict=verdict)
+
+
 def round_open_for(state_dir: Path, cap: review_rounds.CapState, dispatch_id: str, *, since: str = "") -> bool:
     """Is the extra round on this cap granted to ``dispatch_id`` and not yet used? (the dispatch door)."""
     grant = door_grant(state_dir, cap, since=since)

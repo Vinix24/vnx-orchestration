@@ -596,10 +596,20 @@ def _unproven_fills(evaluation, head_sha: str) -> List[str]:
     pointed at. The door accepts it, this layer does not. Never silent: the two
     disagreeing is exactly the state an operator has to see, because the merge
     would go through while the check stays red.
+
+    The codex seat filled by a standing ``mergen-met-OI`` verdict (RG-4) has no
+    pass to prove: its evidence is the verdict, the operator's per-use approval
+    and a complete aftermath, all of which ``evaluate_review_seats`` re-read for
+    this head above. The record beside it is the FAIL round the OIs came from,
+    which the per-gate predicate rightly refuses — so it is not asked.
     """
+    from review_seat_evaluation import ROUTE_MERGE_WITH_OI
+
     reasons: List[str] = []
     for fill in evaluation.fills:
         if not fill.filled:
+            continue
+        if fill.route == ROUTE_MERGE_WITH_OI:
             continue
         proven, why = _proven_pass_on_head(fill.record, head_sha)
         if proven:
