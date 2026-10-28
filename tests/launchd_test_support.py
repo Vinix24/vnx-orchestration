@@ -16,7 +16,7 @@ import os
 import shutil
 import stat
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 def register_engine(home: Path, engine: Path, project_id: str) -> Path:
@@ -74,3 +74,27 @@ def recording_launchctl(bin_dir: Path, monkeypatch, loaded_labels: Optional[list
     monkeypatch.setenv("VNX_TEST_LAUNCHCTL_SHIM", str(stub))
     assert shutil.which("launchctl") == str(stub), "the recording stub must be the launchctl on PATH"
     return log
+
+def pinned_store(
+    home: Path,
+    releases: Sequence[str],
+    script: Optional[str] = None,
+    current: Optional[str] = None,
+) -> Path:
+    """A central store at ``<home>/.vnx-system``: one dir per release, ``current`` link.
+
+    ``script`` (when given) is written to ``<release>/scripts/gate_obligation_runner.py``
+    of every release, so a test can tell from the output which tree a start picked.
+    Returns the ``versions/`` dir.
+    """
+    versions = home / ".vnx-system" / "versions"
+    for name in releases:
+        release = versions / name
+        release.mkdir(parents=True, exist_ok=True)
+        if script is not None:
+            stub = release / "scripts" / "gate_obligation_runner.py"
+            stub.parent.mkdir(parents=True, exist_ok=True)
+            stub.write_text(script, encoding="utf-8")
+    if current is not None:
+        os.symlink(versions / current, home / ".vnx-system" / "current")
+    return versions
