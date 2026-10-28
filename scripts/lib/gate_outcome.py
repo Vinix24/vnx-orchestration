@@ -91,6 +91,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -360,6 +361,12 @@ def commit_gate_outcome(
             if isinstance(request_end, RequestWriteFailed):
                 request_failure = request_end
     gate_recorder._archive_finished_gate_bundle(record, gate=gate, result_path=path)
+    if refusal is None and repeated is None:
+        # K3: the run ended here. Booked AFTER the slot lock and after the
+        # record, its receipt, its request end and its obligation landed, so a
+        # ledger that is slow or broken can neither delay nor undo a verdict.
+        _book_gate_attempt(gate=gate, status=outcome.status, record=record,
+                           result_path=path, pr_ref=pr_ref)
     if request_failure is not None:
         raise request_failure
     if refusal is not None:
@@ -371,6 +378,143 @@ def commit_gate_outcome(
     gate_recorder.publish_forge_check_run(record, gate=gate, result_path=path)
     gate_recorder._feed_provider_reachability(record, gate=gate, result_path=path)
     return record, True
+
+
+# K3: the two gates whose runs K2b already books at the run's own measured end —
+# codex `exec --json` in gate_runner and kimi's wire harvest in governed_lane.
+# K3 never books them a second time; their line belongs to that path.
+GATES_BOOKED_BY_K2B = frozenset({"codex_gate", "kimi_gate"})
+
+# The execution-failure reasons that name a run which provably never started.
+# Its line is a confirmed zero (ADR-043), not an unknown.
+_NEVER_STARTED_REASONS = frozenset({
+    "spawn_refused", "lane_exhausted", "provider_switched_off",
+    "gate_runner_missing", "gate_not_subprocess_routable", "unsupported_gate_type",
+    "provider_not_installed", "provider_disabled", "binary_not_found",
+})
+
+
+def _gate_attempt_identity(
+    record: Mapping[str, Any], gate: str,
+) -> Optional[tuple]:
+    """``(provider, model)`` as the runner stamped them, or from the registry for a harness gate.
+
+    The identity a run is booked with is the one the RUNNER held: ``provider`` and
+    ``model`` land on the record when the harness lane dispatched it
+    (``gate_artifacts._stamp_run_settings``, ``governed_lane._build_record``, and
+    ``gate_recorder._failure_payload``). A record that carries none — a
+    ``not_executable`` gate, a record written before the stamp existed — falls
+    back to the registry row and the gate's registered model, which is the
+    identity the runner WOULD have launched (ADR-036). ``model`` is never read
+    from the model's own report text, and a gate with no model call at all
+    (``ci_gate``, ``wiring_gate``, a ``gh`` read) names no run: no line.
+    """
+    harness_run_cost, gate_lane_contract = _cost_modules()
+    provider_row = gate_recorder.resolve_gate_provider(gate)
+    is_harness = provider_row is not None and provider_row[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE
+    provider = str(record.get("provider") or "").strip()
+    model = str(record.get("model") or "").strip()
+    if not provider:
+        if not is_harness:
+            return None
+        provider = provider_row[1]
+    if provider not in harness_run_cost.LANE_BILLING:
+        return None
+    if not model:
+        if not is_harness:
+            return None
+        model = (gate_lane_contract.gate_model(gate) or "").strip()
+    if not model:
+        return None
+    return provider, model
+
+
+def _cost_modules() -> "tuple":
+    """``(harness_run_cost, gate_lane_contract)`` imported here, keeping this module's import graph flat."""
+    import gate_lane_contract  # noqa: PLC0415 — sibling module
+    import harness_run_cost  # noqa: PLC0415 — sibling module
+
+    return harness_run_cost, gate_lane_contract
+
+
+def _attempt_window(record: Mapping[str, Any]) -> "tuple":
+    """``(started, ended)`` of the run this record ends, from its own timestamps and duration."""
+    ended = datetime.now(timezone.utc)
+    recorded = str(record.get("recorded_at") or record.get("completed_at") or "").strip()
+    if recorded:
+        try:
+            moment = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+            ended = moment if moment.tzinfo is not None else ended
+        except ValueError:
+            ended = datetime.now(timezone.utc)
+    started = ended
+    duration = record.get("duration_seconds")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+        started = ended - timedelta(seconds=float(duration))
+    return started, ended
+
+
+def _gate_attempt_ref(record: Mapping[str, Any], pr_ref: str) -> str:
+    """The ref the line is numbered under: the run's dispatch id, else the PR it reviewed."""
+    dispatch_id = str(record.get("dispatch_id") or "").strip()
+    if dispatch_id:
+        return dispatch_id
+    number = record.get("pr_number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return f"pr-{number}"
+    return pr_ref or "pr-unknown"
+
+
+def _attempt_outcome(status: str, reason: Optional[str]) -> "tuple":
+    """``(outcome, reason)`` for the ledger: did this attempt run, refuse, or never exist (K3)?"""
+    harness_run_cost, _gate_lane_contract = _cost_modules()
+    if status == "not_executable":
+        return harness_run_cost.ATTEMPT_NOT_EXECUTABLE, ""
+    named = str(reason or "").strip()
+    if named in _NEVER_STARTED_REASONS:
+        # The reason is the runner's own statement that nothing started, and it
+        # outranks the status the failure was filed under.
+        return harness_run_cost.ATTEMPT_REFUSED, named
+    return harness_run_cost.ATTEMPT_RAN, named
+
+
+def _book_gate_attempt(
+    *, gate: str, status: str, record: Mapping[str, Any], result_path: Path, pr_ref: str,
+) -> None:
+    """Book one line for the attempt this gate outcome ends (K3), or none when it names no model run.
+
+    Fail-open by construction: :func:`harness_run_cost.record_attempt_run` returns
+    the refusal and logs one WARNING, so a broken ledger leaves the verdict, its
+    receipt, its request end and this function's caller exactly as they were.
+    """
+    if gate in GATES_BOOKED_BY_K2B:
+        return
+    state_dir = gate_recorder._state_dir_from_result_path(result_path)
+    if state_dir is None:
+        # An ad-hoc fixture (or a caller writing straight into a tmp dir) has no
+        # store to book into. Production result paths always do.
+        logger.debug("gate_outcome: %s at %s has no store; no cost line", gate, result_path)
+        return
+    identity = _gate_attempt_identity(record, gate)
+    if identity is None:
+        logger.debug("gate_outcome: %s at %s names no model run; no cost line", gate, result_path)
+        return
+    import provider_costs  # noqa: PLC0415 — sibling module
+
+    harness_run_cost, _gate_lane_contract = _cost_modules()
+    provider, model = identity
+    started, ended = _attempt_window(record)
+    outcome, reason = _attempt_outcome(status, record.get("reason"))
+    harness_run_cost.record_attempt_run(
+        harness_run_cost.AttemptRun(
+            provider=provider, model=model, started=started, ended=ended,
+            outcome=outcome, reason=reason,
+        ),
+        project_id=harness_run_cost.ledger_project_id(state_dir),
+        producer=gate, ref=_gate_attempt_ref(record, pr_ref), role=harness_run_cost.GATE_ROLE,
+        # The store this record landed in, never the ambient env.
+        ledger_path=provider_costs.costs_path_in(state_dir.parent),
+    )
 
 
 def _pay_outstanding_receipt(path: Path, existing: Any, *, gate: str, pr_ref: str) -> None:

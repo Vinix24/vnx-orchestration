@@ -568,11 +568,10 @@ def _stamp_run_settings(
     A gate that is not a harness lane gets none of these three fields.
     """
     gate_recorder.stamp_codex_launch(result_payload, request_payload)
+    gate_recorder.stamp_harness_identity(result_payload, request_payload, gate)
     provider_info = gate_recorder.resolve_gate_provider(gate)
     if provider_info is None or provider_info[0] != gate_recorder.GATE_PROVIDER_HARNESS_LANE:
         return
-    result_payload["provider"] = request_payload.get("provider") or provider_info[1]
-    result_payload["model"] = request_payload.get("model", "")
     if "timeout_seconds" in request_payload:
         result_payload["timeout_seconds"] = request_payload["timeout_seconds"]
 

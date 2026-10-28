@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -127,9 +128,35 @@ INPUT_CACHE_SPLIT_INVALID = "input_cache_split_invalid"
 # and plan-gate seats (K3) and deliberation-panel legs (K4a).
 NOT_BUILDER_ROLES = frozenset(REVIEWER_ROLES | {"deliberation-panelist"})
 
-SPAWN_REFUSED_SOURCE = "unavailable:spawn_refused"
+SPAWN_REFUSED_REASON = "spawn_refused"
+SPAWN_REFUSED_SOURCE = f"unavailable:{SPAWN_REFUSED_REASON}"
 NO_TRANSCRIPT_REASON = "no_transcript"
 NO_USAGE_FIELDS_REASON = "no_usage_fields"
+
+# K3: the three ends an attempt that is NOT booked at its lane's measured end can
+# have. ``refused`` is an attempt the door provably did not start (zero tokens,
+# ``complete``, as ADR-043 defines a refused spawn); ``ran`` is an attempt that
+# started but whose usage nobody reported (unknown, never zero); and
+# ``not_executable`` is a gate that could not run at all.
+ATTEMPT_REFUSED = "refused"
+ATTEMPT_RAN = "ran"
+ATTEMPT_NOT_EXECUTABLE = "not_executable"
+ATTEMPT_OUTCOMES = frozenset({ATTEMPT_REFUSED, ATTEMPT_RAN, ATTEMPT_NOT_EXECUTABLE})
+
+# The lane billing of every provider K3 books an attempt for: the claude harness
+# lanes, the two own-key harness lanes, and the two flat CLI lanes K2b measures.
+LANE_BILLING: Mapping[str, str] = {**BILLING_BY_PROVIDER, **CLI_BILLING}
+
+# The door's own refusal markers, in the order the reason is preferred: the
+# specific budget refusal outranks the generic delivery refusal it is carried in.
+_DOOR_REFUSAL_MARKERS: Tuple[Tuple[str, str], ...] = (
+    ("paid_lane_daily_budget_exceeded", "paid_lane_daily_budget_exceeded"),
+    ("delivery_refused", "delivery_refused"),
+    ("spawn_refused", SPAWN_REFUSED_REASON),
+    ("lane_exhausted", "lane_exhausted"),
+)
+_REJECT_CODE_RE = re.compile(r"REJECT \[([A-Za-z0-9][A-Za-z0-9._-]{0,63})\]")
+_REASON_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 def writes_builder_run(provider: Optional[str], role: Optional[str]) -> bool:
@@ -328,11 +355,13 @@ def _window_fields(started: datetime, ended: datetime) -> Dict[str, Any]:
     return {"occurred_from": _iso(started), "occurred_to": _iso(ended)}
 
 
-def _refused_fields(started: datetime, ended: datetime) -> Dict[str, Any]:
+def _refused_fields(
+    started: datetime, ended: datetime, reason: str = SPAWN_REFUSED_REASON,
+) -> Dict[str, Any]:
     """A spawn the lane refused: five confirmed zeros, ``complete``, no cost, and the reason."""
     return {
         "tokens": dict.fromkeys(LEDGER_TOKEN_FIELDS, 0), "usage_completeness": "complete",
-        "cost_usd": 0.0, "cost_source": SPAWN_REFUSED_SOURCE, **_window_fields(started, ended),
+        "cost_usd": 0.0, "cost_source": f"unavailable:{reason}", **_window_fields(started, ended),
     }
 
 
@@ -676,6 +705,135 @@ def _cli_fields(run: CliRun) -> Tuple[Dict[str, Any], Optional[str]]:
             **_window_fields(run.started, run.ended)}, split_reason
 
 
+@dataclass(frozen=True)
+class AttemptRun:
+    """One attempt whose END knows that it ended: a gate outcome, a plan-gate seat, a tiebreaker (K3).
+
+    K2b books a codex/kimi run where the lane reports its own usage. Every other
+    attempt ends somewhere else — the gate's record, the seat's dispatcher call,
+    the tiebreaker's answer — and only that place knows the run is over. This is
+    the smallest thing it has to say: WHO ran (provider and model from the
+    runner, never parsed from the model's report text), WHEN, and WHETHER it ran.
+    ``reason`` names why a refused run was refused or why a started run has no
+    usage; an outcome of ``not_executable`` needs none.
+    """
+
+    provider: str
+    model: str
+    started: datetime
+    ended: datetime
+    outcome: str = ATTEMPT_RAN
+    reason: str = ""
+    token_usage: Optional[Mapping[str, Any]] = None
+
+
+def attempt_reason(value: object, fallback: str) -> str:
+    """A reason that can ride ``unknown:<reason>``: a bounded token, or *fallback*.
+
+    The ledger writes the reason into ``usage_completeness``/``cost_source``; a
+    door's free-text error message is not a reason but a paragraph, so it is
+    never pasted in. An unrecognisable value becomes the caller's own fallback.
+    """
+    text = str(value or "").strip()
+    return text if _REASON_TOKEN_RE.match(text) else fallback
+
+
+def door_refusal_reason(text: object) -> Optional[str]:
+    """The door's refusal code when *text* says a spawn provably never started, else ``None``.
+
+    A refusal at the door (``delivery_refused``, the daily budget, an exhausted
+    takeover lane) raises out of the dispatcher with the door's own words in the
+    message. That attempt never started, so its line is a confirmed zero. Any
+    other raised dispatch is an attempt that DID start and lost its answer: the
+    caller books it unknown, never zero.
+    """
+    message = str(text or "")
+    for marker, reason in _DOOR_REFUSAL_MARKERS:
+        if marker in message:
+            return reason
+    refused = _REJECT_CODE_RE.search(message)
+    return refused.group(1) if refused else None
+
+
+def _attempt_fields(run: AttemptRun) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The usage part of an attempt's :class:`cost_ledger.RunCost`, and its split reason when there is one."""
+    if run.outcome == ATTEMPT_NOT_EXECUTABLE:
+        return _refused_fields(run.started, run.ended, ATTEMPT_NOT_EXECUTABLE), None
+    if run.outcome == ATTEMPT_REFUSED:
+        return _refused_fields(
+            run.started, run.ended, attempt_reason(run.reason, SPAWN_REFUSED_REASON),
+        ), None
+    tokens, split_reason = _cli_tokens(run.token_usage, run.provider)
+    if all(tokens[name] is None for name in LEDGER_TOKEN_FIELDS):
+        return _unknown_fields(
+            run.started, run.ended, attempt_reason(run.reason, NO_USAGE_FIELDS_REASON),
+        ), None
+    return {"tokens": tokens, "usage_completeness": usage_completeness(tokens),
+            **_window_fields(run.started, run.ended)}, split_reason
+
+
+def record_attempt_run(
+    run: AttemptRun, *, project_id: str, producer: str, ref: str, role: str,
+    ledger_path: Optional[Path] = None,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Write one attempt's line, and never let the ledger fail the run that ended (K3).
+
+    Same fail-open contract as K2b's :func:`_book_cli_run` — ``(record, None)``
+    when the line landed (in the ledger or its spool), ``(None, reason)`` when it
+    was refused, and never an exception that could cost the caller its gate
+    verdict, receipt or request. Every refusal is one WARNING naming the
+    producer, the ref, the provider and the reason.
+
+    ``OSError`` is caught beside the ledger's refusals because
+    :func:`cost_ledger.record_next_attempt` propagates a registry/ledger read
+    error unchanged. ``BaseException`` stays uncaught.
+    """
+    if run.outcome not in ATTEMPT_OUTCOMES:
+        logger.warning(
+            "harness_run_cost: %s attempt %s (%s) not booked: outcome %r is not one of %s",
+            producer, ref, role, run.outcome, ", ".join(sorted(ATTEMPT_OUTCOMES)),
+        )
+        return None, f"invalid_outcome:{run.outcome}"
+    if role not in cost_ledger.ROLES:
+        logger.warning(
+            "harness_run_cost: %s attempt %s not booked: role %r is not a ledger role",
+            producer, ref, role,
+        )
+        return None, f"invalid_role:{role}"
+    billing = LANE_BILLING.get(run.provider)
+    if billing is None:
+        # Never guess a billing class: a provider this module cannot place
+        # (e.g. a path binary or a deterministic gate) is not a model run.
+        logger.warning(
+            "harness_run_cost: %s attempt %s not booked: provider %r is not a model lane",
+            producer, ref, run.provider,
+        )
+        return None, f"unknown_provider:{run.provider}"
+    fields, split_reason = _attempt_fields(run)
+    if split_reason:
+        logger.warning(
+            "harness_run_cost: %s %s attempt %s books input_uncached as unknown (%s)",
+            run.provider, role, ref, split_reason,
+        )
+
+    def make_run(run_id: str) -> cost_ledger.RunCost:
+        return cost_ledger.RunCost(
+            run_id=run_id, project_id=project_id, role=role, provider=run.provider,
+            model=run.model, billing=billing, **fields,
+        )
+
+    try:
+        record = cost_ledger.record_next_attempt(project_id, producer, ref, make_run, ledger_path=ledger_path)
+    except (cost_ledger.CostLedgerRefusal, OSError) as exc:
+        reason = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "harness_run_cost: %s %s attempt %s not booked (%s): %s",
+            run.provider, role, ref, fields.get("cost_source") or fields["usage_completeness"], reason,
+        )
+        return None, reason
+    return record, None
+
+
 def _book_cli_run(
     run: CliRun, provider: str, *, project_id: str, producer: str, ref: str,
     role: str, ledger_path: Optional[Path],
@@ -816,11 +974,14 @@ def receipt_cost(
 
 
 __all__ = [
+    "ATTEMPT_NOT_EXECUTABLE", "ATTEMPT_OUTCOMES", "ATTEMPT_RAN", "ATTEMPT_REFUSED", "AttemptRun",
     "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER", "CLI_BILLING", "CliRun",
     "CODEX_PROVIDER", "GATE_ROLE", "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
-    "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER",
-    "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE", "book_cli_builder", "books_cli_run", "cli_run",
+    "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER", "LANE_BILLING",
+    "NOT_BUILDER_ROLES", "SPAWN_REFUSED_REASON", "SPAWN_REFUSED_SOURCE", "attempt_reason",
+    "book_cli_builder", "books_cli_run", "cli_run", "door_refusal_reason",
     "lane_model", "ledger_project_id", "price_segments",
-    "receipt_cost", "record_builder_run", "record_classifier_run", "record_cli_run", "record_codex_run",
-    "record_kimi_run", "run_fields", "run_tokens", "usage_completeness", "writes_builder_run",
+    "receipt_cost", "record_attempt_run", "record_builder_run", "record_classifier_run", "record_cli_run",
+    "record_codex_run", "record_kimi_run", "run_fields", "run_tokens", "usage_completeness",
+    "writes_builder_run",
 ]

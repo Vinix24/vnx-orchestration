@@ -925,6 +925,28 @@ def stamp_request_identity(
     return result_payload
 
 
+def stamp_harness_identity(
+    record: Dict[str, Any], request_payload: Dict[str, Any], gate: str,
+) -> None:
+    """Copy the provider/model a harness-lane gate was launched with onto its record (OI-1725, K3).
+
+    ``gate_runner._run_harness_lane_path`` stamps both on the request before it
+    dispatches. Every writer that books a record from that request reads them
+    through here — the success record (``gate_artifacts``), the failure record
+    (:func:`record_failure`) and the not-executable record
+    (:func:`record_not_executable`) — so one run's identity can never differ
+    between its own outcomes. The provider falls back to the registry row (the
+    lane is known even when the request predates the stamp); the model falls
+    back to nothing rather than to a guess. A non-harness gate gets neither
+    field: it calls no model, or its identity is not a lane identity.
+    """
+    provider_info = resolve_gate_provider(gate)
+    if provider_info is None or provider_info[0] != GATE_PROVIDER_HARNESS_LANE:
+        return
+    record["provider"] = request_payload.get("provider") or provider_info[1]
+    record["model"] = request_payload.get("model", "")
+
+
 def stamp_codex_launch(record: Dict[str, Any], request_payload: Dict[str, Any]) -> None:
     """Copy the model and reasoning effort codex was launched with onto a record (OI-2288).
 
@@ -2499,6 +2521,10 @@ def _failure_payload(
     # OI-2288: the model and effort a codex run was launched with, exactly as
     # the success record carries them.
     stamp_codex_launch(failure_payload, request_payload)
+    # K3: a harness-lane failure is still an attempt with an identity. Before
+    # this, only the success record carried provider/model (OI-1725), so a
+    # timed-out or refused harness run could not be booked to the model it ran.
+    stamp_harness_identity(failure_payload, request_payload, gate)
     if extra:
         # Identity and verdict are the record's own. So is the evidence trio:
         # `report_path`, `contract_hash` and `required_reruns` are what
