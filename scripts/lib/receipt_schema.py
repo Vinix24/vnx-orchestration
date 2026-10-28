@@ -79,6 +79,7 @@ _STAMPED_WHEN_SET = (
     "tool_call_count", "tool_call_failures", "tool_call_retries", "deadline_seconds",
     "failure_reason", "failure_class", "delivery_state",
     "role_applied", "role_tier", "role_not_applied_reason", "role_source_path",
+    "skill_applied", "skill_source_path", "skill_unapplied_reason",
     "parent_dispatch", "task_class", "tier_from", "tier_to",
     "permission_posture", "permission_profile", "permission_allow_pattern_count",
     "model_resolved", "cost_ledger_run_ids",
@@ -177,6 +178,15 @@ class ReceiptV2:
     role_tier: Optional[str] = None
     role_not_applied_reason: Optional[str] = None
     role_source_path: Optional[str] = None
+    # RS-3 (ADR-048 §3): the skill the spec bound, proven on the final prompt by
+    # skill_application.verify_skill_applied. All three are absent when the spec
+    # carries no skill (an absent field reads as "no skill requested"), and are
+    # stamped together otherwise. skill_source_path is the absolute path of the
+    # resolved SKILL.md; skill_unapplied_reason is "reviewer_bound" or
+    # "resolution_failed: <reason>". Optional fields, no schema-version bump.
+    skill_applied: Optional[bool] = None
+    skill_source_path: Optional[str] = None
+    skill_unapplied_reason: Optional[str] = None
     # dispatch-20260802-model-ssot-en-ketenlink (chain-link): the receipt says
     # WHICH dispatch this one continues. parent_dispatch is the id of the
     # retried/fix-forward/escalated predecessor; tier_from/tier_to record an
