@@ -6,8 +6,8 @@
 **Role**: quality-engineer · **Model**: deepseek-flash · **Provider**: deepseek-harness
 **Goal**: `vnx objective show deterministische-testverificatie` (four points, measured one per section below)
 **Plan**: `claudedocs/2026-10-24-nachtrun-golf-1-3/plannen/deterministische-testverificatie.md`,
-section "Doel". That directory is gitignored, so the plan is a planning artifact; the goal
-text is quoted from the objective store instead.
+section "Doel". That directory is gitignored, so the plan is a planning artifact, not a
+tracked source; the four points measured here are the objective store's.
 
 Every command below is read-only: CI runs are downloaded, never re-run or cancelled; the
 receipts are read from the append-only `t0_receipts.ndjson`; branch protection is read, not
@@ -69,7 +69,7 @@ assertion), `not_behavior` = a base collection error or error (no assertion prov
 | Point | Command (abbreviated) | Counted output | Verdict | Delivered by |
 |---|---|---|---|---|
 | 1. verdict per test | `gh run download …`; `python3 -c "Counter(t['verdict'] …)"`; `gh pr diff <pr> --name-only` | `#2323` 48× `not_behavior`; `#2317` 1× `incomplete`; `#2330` 5× `behavior`, 71× `green_on_base`, 1× `fails_on_head`; files 1/1, 1/1, 6/6; `test_dispatch_daemon.py` (excluded, `scripts/ci/test_exclusions.txt:131`) ran: 10 verdicts | **met** | PR-1 `dlv-4fe84750f36d`, PR-2 `dlv-24861a262132`, PR-3b `dlv-c940205cdb53` (#2310) |
-| 2. false claim → red | `gh run view 40611781755 --log-failed \| grep red_on_base:`; same for 40619858595; `gh api …/branches/main/protection`; `gh api …/rulesets` | `incomplete=1 false_claims=0`; `behavior=5 green_on_base=71 fails_on_head=1 false_claims=0`; 0 of 3 PRs claimed a red run; 15 required contexts, `Red on base …` absent; rulesets `[]` | **met** (mechanism; not exercised on a real PR) | PR-3b `dlv-c940205cdb53` (#2310) |
+| 2. false claim → red | `gh run view 40611781755 --log-failed \| grep red_on_base:`; same for 40619858595; `gh api …/branches/main/protection`; `gh api …/rulesets` | `incomplete=1 false_claims=0`; `behavior=5 green_on_base=71 fails_on_head=1 false_claims=0`; `red_run_claims.py` on each PR body: 0 claims; 15 required contexts, `Red on base …` absent; rulesets `[]` | **met** (mechanism; not exercised on a real PR) | PR-3b `dlv-c940205cdb53` (#2310) |
 | 3. receipt counts from JUnit | `python3 scripts/receipt_query.py by-dispatch <id> --state-dir ~/.vnx-data/vnx-dev/state`; XML parsed with `xml.etree` | `dlv-279f054c2d3b-r2` `junit_worker` 366/362/4 = XML 366/362/4; `dlv-1d3eb036086c` `junit_worker` 166/166/0 = XML 166/166/0; `dlv-0caf1cccbcc4` `junit_worker` 5107/2514/2593 ≠ XML 2593 tests / 2514 passed / 76 failed | **not met** (2 of 3; fixed here) | PR-4 `dlv-59e664ef5a12`, PR-5 `dlv-18913ab203e1` |
 | 4. second seat in the door | read `pr_merge.py`, `closure_verifier.py`, `review_seat_evaluation.py`; `sed -n '5,6p' …/bin/m-2319.log` | `STOP #2319: dry-run zonder OK` + `NO-GO: … vereiste seats codex_gate, kimi_gate … seat kimi_gate: kimi_gate is afwezig voor 2319` | **met** | #2074 + R3b #2193 (no PR in this track) |
 
@@ -117,10 +117,10 @@ Per run:
 
 ## Point 2 — what made each red run red
 
-`false_claims` is empty in both failure artifacts, and neither PR body carries a claim
-label (`Red run`, `Rode run`, `Before the fix`, `Voor de fix`): the runs were parsed by
-`scripts/ci/red_run_claims.py` and claimed nothing. So neither red is the intended
-false-claim red. The causes:
+`false_claims` is empty in both failure artifacts. `gh pr view <pr> --json body` piped into
+`python3 scripts/ci/red_run_claims.py` returns an empty claims file for #2317 and for #2330
+(exit 0, 0 claims): neither body carries a claim label (`Red run`, `Rode run`, `Before the
+fix`, `Voor de fix`). So neither red is the intended false-claim red. The causes:
 
 ### #2317 — red on `incomplete=1` (a base run that did not complete)
 
