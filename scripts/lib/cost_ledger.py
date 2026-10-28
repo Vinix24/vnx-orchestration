@@ -107,6 +107,14 @@ logger = logging.getLogger(__name__)
 RUN_SCHEMA = "provider_cost_run/1"
 TOKEN_FIELDS = ("input_uncached", "cache_hit", "cache_write_5m", "cache_write_1h", "output")
 ROLES = frozenset({"builder", "review", "plan_gate", "tiebreaker", "panel", "intelligence"})
+# A run whose purpose no dispatch row names is still booked (K6b-3, ADR-049): its role says
+# why the purpose is unknown. The set is closed — ``unknown:<anything else>`` is refused, so a
+# free-form reason can never stand in for a purpose role.
+UNKNOWN_ROLE_PREFIX = "unknown:"
+UNKNOWN_ROLES = frozenset({
+    UNKNOWN_ROLE_PREFIX + "no_dispatch_row",
+    UNKNOWN_ROLE_PREFIX + "no_ledger_role",
+})
 KINDS = frozenset({"charge", "correction"})
 BILLINGS = frozenset({"metered", "subscription"})
 SPOOL_DIR_NAME = "provider_costs.spool"
@@ -310,6 +318,21 @@ def _require_member(value: object, allowed: frozenset, name: str) -> None:
         raise InvalidRecord(f"{name} {value!r} is not one of {sorted(allowed)}")
 
 
+def _check_role(role: object) -> None:
+    """A purpose role, or one of the closed set of ``unknown:<reason>`` roles (:data:`UNKNOWN_ROLES`).
+
+    The reason is machine-readable and the set is closed: a role outside both
+    sets is refused here, before anything is priced or written.
+    """
+    if not isinstance(role, str):
+        raise InvalidRecord(f"role {role!r} is not a ledger role")
+    if role in ROLES or role in UNKNOWN_ROLES:
+        return
+    raise InvalidRecord(
+        f"role {role!r} is not one of {sorted(ROLES)} or {sorted(UNKNOWN_ROLES)}"
+    )
+
+
 def _check_identity(run: RunCost) -> None:
     project, _producer, _ref, _attempt = split_run_id(run.run_id)
     if not isinstance(run.project_id, str) or not run.project_id:
@@ -318,7 +341,7 @@ def _check_identity(run: RunCost) -> None:
         raise RunIdProjectMismatch(
             f"run_id {run.run_id!r} belongs to project {project!r}, the record to {run.project_id!r}"
         )
-    _require_member(run.role, ROLES, "role")
+    _check_role(run.role)
     _require_member(run.kind, KINDS, "kind")
     _require_member(run.billing, BILLINGS, "billing")
     if not isinstance(run.backfill, bool):
@@ -2638,7 +2661,8 @@ def ledger_files(ledger_path: Optional[Path] = None) -> LedgerFiles:
 
 
 __all__ = [
-    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
+    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "UNKNOWN_ROLE_PREFIX", "UNKNOWN_ROLES",
+    "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
     "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "TRANSCRIPT_IDENTITY",
     "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
