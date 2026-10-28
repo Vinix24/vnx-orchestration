@@ -142,6 +142,13 @@ def _pytest_clauses(line: str) -> List[Dict[str, Any]]:
     clauses: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
     for m in _TERM.finditer(line):
+        if m.start() > 0 and line[m.start() - 1] == "=":
+            # `tests=2593 failures=76` is the JUnit attribute listing a report
+            # echoes, not a runner's summary: a runner never writes `=N failed`.
+            # Reading `2593` as a failure count let the highest-failure rule
+            # promote the suite's test count into tests_failed (dlv-0caf1cccbcc4:
+            # 5107/2514/2593 for an XML saying 2593 tests / 76 failed).
+            continue
         word = m.group(2).lower()
         count = int(m.group(1))
         if current is not None and _TERM_GAP.match(line[current["end"]:m.start()]):

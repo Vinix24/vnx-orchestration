@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
-# Tests for T2/T3 subprocess-default adapter selection logic (F32 Wave D PR-1)
-# Verifies that T1/T2/T3 default to subprocess and T0 defaults to tmux,
-# and that VNX_ADAPTER_Tx=tmux opts out correctly.
+# Tests for the T1-T3 adapter rule (F32 Wave D PR-1, T-G1).
+# T-G1 removed the worker selector: T1/T2/T3 are always subprocess whatever
+# VNX_ADAPTER_Tx says. The contract test for the real function is
+# tests/test_dispatch_deliver_contract.py.
 
 set -euo pipefail
 
 PASS=0
 FAIL=0
 
-# Inline the adapter selection logic from dispatch_deliver.sh lines 516-520
+# Mirror of the dispatch_deliver.sh rule (T-G1); keep in step with that function.
 resolve_adapter() {
     local terminal_id="$1"
-    local adapter_var="VNX_ADAPTER_${terminal_id}"
-    local adapter_type="${!adapter_var:-tmux}"
-    if [[ "$terminal_id" =~ ^T[123]$ && "$adapter_type" == "tmux" && -z "${!adapter_var:-}" ]]; then
-        adapter_type="subprocess"
+    if [[ "$terminal_id" =~ ^T[123]$ ]]; then
+        echo "subprocess"
+        return
     fi
-    echo "$adapter_type"
+    local adapter_var="VNX_ADAPTER_${terminal_id}"
+    echo "${!adapter_var:-tmux}"
 }
 
 assert_eq() {
@@ -49,7 +50,7 @@ unset VNX_ADAPTER_T1
 assert_eq "T1 unset -> subprocess" "subprocess" "$(resolve_adapter T1)"
 
 VNX_ADAPTER_T1=tmux
-assert_eq "T1 explicit tmux opt-out -> tmux" "tmux" "$(resolve_adapter T1)"
+assert_eq "T1 ignores the tmux value -> subprocess" "subprocess" "$(resolve_adapter T1)"
 unset VNX_ADAPTER_T1
 
 VNX_ADAPTER_T1=subprocess
@@ -61,7 +62,7 @@ unset VNX_ADAPTER_T2
 assert_eq "T2 unset -> subprocess" "subprocess" "$(resolve_adapter T2)"
 
 VNX_ADAPTER_T2=tmux
-assert_eq "T2 explicit tmux opt-out -> tmux" "tmux" "$(resolve_adapter T2)"
+assert_eq "T2 ignores the tmux value -> subprocess" "subprocess" "$(resolve_adapter T2)"
 unset VNX_ADAPTER_T2
 
 VNX_ADAPTER_T2=subprocess
@@ -73,7 +74,7 @@ unset VNX_ADAPTER_T3
 assert_eq "T3 unset -> subprocess" "subprocess" "$(resolve_adapter T3)"
 
 VNX_ADAPTER_T3=tmux
-assert_eq "T3 explicit tmux opt-out -> tmux" "tmux" "$(resolve_adapter T3)"
+assert_eq "T3 ignores the tmux value -> subprocess" "subprocess" "$(resolve_adapter T3)"
 unset VNX_ADAPTER_T3
 
 VNX_ADAPTER_T3=subprocess

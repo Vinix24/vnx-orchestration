@@ -158,10 +158,24 @@ If the project has never been initialized with the new version, or if `.vnx/` is
 ```bash
 cd /path/to/your-project
 vnx init
-vnx regen-settings --full
+vnx regen-settings --merge --dry-run   # review what changes, nothing written yet
+vnx regen-settings --merge
 vnx bootstrap-hooks
 vnx doctor  # re-verify
 ```
+
+`regen-settings` and `bootstrap-hooks` are fabric commands: the central shim
+`~/.vnx-system/bin/vnx` and `./bin/vnx` from a checkout both carry them, while the pip
+`vnx` at v1.7.6 answers `invalid choice: 'regen-settings'`. Check which binary answers
+before you run them: `command -v vnx` prints the path, and `vnx --help` lists
+`regen-settings` only when the fabric CLI is the one running (call the shim by its path
+if it does not).
+
+`vnx regen-settings --merge` refreshes the VNX-owned keys and keeps the project's own
+hooks. `--full` renders the whole `settings.json` from the template and stays for the
+first-init case only: a project that has no `.claude/settings.json` yet. On an existing
+project it drops every project hook. `--replace-hooks` (with `--merge`) is the explicit
+way to get that replace-everything behaviour and drop the project hooks on purpose.
 
 ### Step 5: Confirm runtime isolation
 
@@ -184,6 +198,78 @@ echo '<version>' > /path/to/project/.vnx-version
 ```
 
 The `current` symlink points to the newly installed version after each successful run.
+
+## Before a rollout
+
+`preflight` is a verb of the pip `vnx` (`vnx_cli`) that is on main but not in the
+deployed release: measured 28-10, the pip CLI at v1.7.6 answers `invalid choice:
+'preflight'`, and the central shim `~/.vnx-system/bin/vnx` refuses the same name
+(`Error: 'preflight' requires a different mode`). Run this section from a checkout at
+main with its pip CLI installed (`pip install -e .` from the repository root);
+`vnx release verify` is main-only too, and `./bin/vnx` reaches it from that same
+checkout. Confirm which binary answers with `command -v vnx` and `vnx --help` —
+`preflight` appears in that list only on an install that carries it.
+
+Measure first. `vnx preflight` is read-only: it installs nothing, reloads no launchd job
+and writes no settings file. Run it from the project, or scope it with `--project <id>`
+(repeatable; an unknown id exits `2`). Add `--json` for a machine-readable report.
+
+```bash
+vnx preflight
+vnx preflight --project <project-id> --json
+```
+
+Exit codes: `0` no blocking finding, `1` at least one blocking finding, `2` a measurement
+itself failed (an unreadable store, a raising check). Exit `2` is never a pass.
+
+It measures four blocking classes per project:
+
+| Class | What a finding means |
+|---|---|
+| `pin` | The project's `.vnx-version` names no installed release dir (a dead pin, or an engine link that dangles), or the pinned dir fails `vnx release verify`. |
+| `launchd` | An installed plist violates the pin alignment check. The healthy state is `pin_followed`; every other state is a violation: `pin_ignored_current` (the job follows the rolling `current` while the project pins a version), `pin_ignored_other_version` (another release, a missing dir or no release), `pin_dead` (the pinned release dir does not exist) and `pin_unmeasurable` (the command line assigns `VNX_HOME` through a variable, so no release can be measured). |
+| `hooks` | A `vnx regen-settings --merge --dry-run` render would change a hook command. Both the old and the new command are named. A dry-run that fails is itself a finding. |
+| `main_drift` | The doctor check `release:main-drift` fails: the running release lacks commits the local main ref already has. |
+
+A blocking finding in any class exits `1`. A class reported as `unmeasured` was never
+measured — a project without a pin reports `pin` and `launchd` as unmeasured — so it is
+never a pass. Treat it as a stop and measure the class before rolling out. The exit code
+alone stays `0` for that case, so read the report, not only the exit code.
+
+Then verify the release dir itself:
+
+```bash
+vnx release verify <version>
+```
+
+Every file in the tag must be byte-identical on disk and no extra file may exist, apart
+from the stripped `.vnx-project-id` and the written install-mode marker. It exits `1` and
+names every differing path. A missing dir, a dir that is not a git checkout, an
+unresolvable tag and an unreadable tag tree all fail closed.
+
+Then the doctor check on the running release:
+
+```bash
+vnx doctor
+```
+
+`release:main-drift` is `FAIL` while the running release lags the local main ref; it names
+the commits it is missing and fails closed when it cannot measure. Only a release that
+cannot be compared at all — no release, not a git checkout, no local main ref — reports
+`skipped: <reason>` and leaves doctor green.
+
+Three steps stay operator actions. VNX does not do them for you:
+
+1. **The release itself.** `vnx release publish --tag <tag>` materializes the tag into
+   `~/.vnx-system/versions/<tag>/`. Publishing is refused for a tag outside the default
+   branch unless `--allow-unmerged-tag "<reason>"` names a non-empty reason.
+2. **The `current` flip.** Publishing does not flip `current` by default. The flip is
+   `--set-current` on publish, or `vnx update`. Consumers with a tracked `.vnx-version`
+   pin do not follow `current`; they need their pin updated.
+3. **Reloading the launchd jobs.** `bash scripts/launchd/reload_plist.sh <template>
+   [project_id]` per family and per project. A running job keeps the tree it started
+   from; only the next start resolves the pin again, through
+   `scripts/launchd/vnx_pinned_launcher.sh`.
 
 ## Rollback procedure
 
@@ -314,6 +400,10 @@ bash install-central.sh --version <version>
         Fix: Run: vnx regen-settings --full
 ```
 
+The `--full` in that line is the first-init case: it applies only when there is no
+`.claude/settings.json` at all. The fix below uses `--merge`, which also creates the file
+when it is absent and keeps any project hooks that are present.
+
 **Cause:** Either the project was never initialized, or a previous run wrote settings to VNX_HOME (contamination).
 
 **Fix:**
@@ -328,7 +418,8 @@ ls ~/.vnx-system/versions/<version>/.claude/settings.json 2>/dev/null && echo "C
 rm -rf ~/.vnx-system/versions/<version>/.claude
 
 # Generate settings in correct location
-vnx regen-settings --full
+vnx regen-settings --merge --dry-run
+vnx regen-settings --merge
 ls .claude/settings.json  # should now exist
 ```
 
@@ -365,6 +456,42 @@ cd /path/to/your-project && vnx bootstrap-hooks && vnx doctor
 ```bash
 cd /path/to/your-project && vnx regen-settings --merge
 ```
+
+### Dead pin: the launchd job refuses to start, or regen-settings refuses to render
+
+**Symptom:** A launchd job exits `78` (EX_CONFIG) with ONE stderr line, and nothing else:
+
+```
+project 'my-project' pins '1.0.9', but nothing under /Users/you/.vnx-system/versions answers it (not installed, or it escapes the versions root)
+```
+
+`vnx regen-settings` makes the same resolution and prints the same line through `ERROR:`,
+then exits `1`:
+
+```
+ERROR: checkout '/path/to/your-project' pins '1.0.9', but nothing under /Users/you/.vnx-system/versions answers it (not installed, or it escapes the versions root)
+```
+
+An unregistered project, a pin that is malformed or escapes the versions root, and a
+pinned tree without the script the job needs also exit `78` from the launcher, each with
+one line naming what was missing. There is no fallback to another tree.
+
+**Cause:** `.vnx-version` names a version that is not installed under
+`~/.vnx-system/versions/`, or the pin is not usable.
+
+**Fix:** install the pinned version, or change the pin to an installed one:
+
+```bash
+# Install the pinned version
+bash install-central.sh --version <pin>
+
+# Or change the pin to an installed version
+ls ~/.vnx-system/versions/
+echo '<installed-version>' > /path/to/your-project/.vnx-version
+```
+
+The next start (launchd) or render (`regen-settings`) resolves again; a run already in
+progress is not switched.
 
 ### PROJECT_ROOT mis-detection after shell env contamination
 
