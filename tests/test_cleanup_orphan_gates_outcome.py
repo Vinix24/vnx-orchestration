@@ -76,6 +76,12 @@ def _main(m, env, *args: str) -> int:
     ])
 
 
+def _scan(m, env):
+    """The scan alone, on this fixture's store (``main``'s CLI overrides, without ``main``)."""
+    m._REQUESTS_DIR, m._RESULTS_DIR = env["requests_dir"], env["results_dir"]
+    return m._find_orphans(max_age_hours=24.0)
+
+
 def test_one_orphan_becomes_one_unavailable_record_receipt_and_request_end(env):
     """The Goal: one writer call, one record, one receipt, one terminal request."""
     import cleanup_orphan_gates as m
@@ -163,7 +169,8 @@ def test_an_existing_terminal_record_is_left_alone_and_reported(env, capsys):
     }
     ok = m._write_abandoned_result(orphan, dry_run=False, requests_dir=env["requests_dir"])
 
-    assert ok is True, "an already-resolved slot is not a write failure"
+    assert ok.status == m.ALREADY_RESOLVED, "an already-resolved slot is not a write failure"
+    assert ok, "and it is not counted as a failure either"
     assert slot.read_bytes() == before, "the decided verdict survives byte for byte"
     assert "already resolved" in capsys.readouterr().out
     assert _receipts(env) == [], "a refused write books no receipt"
@@ -180,6 +187,114 @@ def test_dry_run_writes_nothing(env):
     assert not (env["results_dir"] / f"{STEM}.json").exists(), "dry run writes no record"
     assert request_path.read_bytes() == before, "dry run leaves the request alone"
     assert _receipts(env) == [], "dry run books no receipt"
+
+
+def test_a_request_replaced_between_the_scan_and_the_commit_is_left_alone(env, capsys):
+    """GE-8 round 2: the commit revalidates the request under its lock.
+
+    A retry can land in the same ``(gate, PR)`` slot between the scan and the
+    commit. The scan-time payload must never overwrite that newer request, and
+    no ``unavailable`` record may be booked for a request this run did not find.
+    """
+    import cleanup_orphan_gates as m
+
+    _write_request(env, _request_payload(
+        commit_sha="a" * 40, requested_at="2026-09-30T10:00:00Z", dispatch_id="ge8-scan-attempt",
+    ))
+    [orphan] = _scan(m, env)
+
+    retry = _request_payload(
+        commit_sha="b" * 40,
+        requested_at="2026-10-27T09:15:00Z",
+        dispatch_id="ge8-retry-attempt",
+        metadata={"requested_by": "retry", "attempt": 2},
+    )
+    request_path = _write_request(env, retry)
+    retry_bytes = request_path.read_bytes()
+
+    resolution = m._write_abandoned_result(orphan, dry_run=False, requests_dir=env["requests_dir"])
+
+    assert resolution.status == m.SKIPPED_REPLACED, "a replaced request is not this run's orphan"
+    assert "skipped_replaced" in capsys.readouterr().out
+    assert not (env["results_dir"] / f"{STEM}.json").exists(), "no result for a request this run does not hold"
+    on_disk = json.loads(request_path.read_text(encoding="utf-8"))
+    assert request_path.read_bytes() == retry_bytes, "the newer request survives byte for byte"
+    assert on_disk["commit_sha"] == "b" * 40, "the retry's head is not the scan's"
+    assert on_disk["requested_at"] == "2026-10-27T09:15:00Z"
+    assert on_disk["metadata"] == {"requested_by": "retry", "attempt": 2}
+    assert on_disk["status"] == "executing", "the retry is still in flight"
+    assert _receipts(env) == [], "nothing was booked, so nothing is on the ledger"
+
+
+def test_a_failed_request_write_is_finished_by_the_next_run(env, monkeypatch):
+    """GE-8 round 2 recovery: a record that landed without its request end is finishable.
+
+    ``persist_request`` fails once, after the record and its receipt landed. The
+    next run finds the request still ``executing`` next to the cleanup's own
+    record and finishes THAT request — no second record, no second receipt.
+    """
+    import cleanup_orphan_gates as m
+    import gate_recorder
+
+    request_path = _write_request(env, _request_payload())
+    real_persist = gate_recorder.persist_request
+    calls = {"n": 0}
+
+    def flaky_persist(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("no space left on device")
+        return real_persist(*args, **kwargs)
+
+    monkeypatch.setattr(gate_recorder, "persist_request", flaky_persist)
+
+    assert _main(m, env) == 1, "the first run reports the failed request write"
+    slot = env["results_dir"] / f"{STEM}.json"
+    record_after_first = slot.read_bytes()
+    assert json.loads(record_after_first)["status"] == "unavailable"
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "executing"
+    receipts_after_first = len(_receipts(env))
+    assert receipts_after_first == 1, "the record's one receipt landed before the request write failed"
+
+    assert _main(m, env) == 0, "the second run finishes the request the first one left behind"
+
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "unavailable"
+    assert slot.read_bytes() == record_after_first, "the record on the slot is handed back unchanged"
+    assert json.loads(slot.read_text(encoding="utf-8"))["attempt_seq"] == 1, "no second result was written"
+    assert len(_receipts(env)) == receipts_after_first, "no second receipt"
+    assert calls["n"] == 2, "one failed write, one write that ended the request"
+
+
+def test_a_retry_that_replaced_a_half_ended_request_is_not_finished(env, monkeypatch):
+    """GE-8 round 2: the recovery is identity-checked too — a retry's request stays executing."""
+    import cleanup_orphan_gates as m
+    import gate_recorder
+
+    request_path = _write_request(env, _request_payload(
+        commit_sha="c" * 40, requested_at="2026-09-30T10:00:00Z", dispatch_id="ge8-first-attempt",
+    ))
+    real_persist = gate_recorder.persist_request
+    calls = {"n": 0}
+
+    def flaky_persist(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("no space left on device")
+        return real_persist(*args, **kwargs)
+
+    monkeypatch.setattr(gate_recorder, "persist_request", flaky_persist)
+    assert _main(m, env) == 1
+
+    retry = _request_payload(
+        commit_sha="d" * 40, requested_at="2026-10-27T11:30:00Z", dispatch_id="ge8-second-attempt",
+    )
+    _write_request(env, retry)
+    retry_bytes = request_path.read_bytes()
+
+    assert _main(m, env) == 0, "a request the recovery did not run is not a failure"
+
+    assert request_path.read_bytes() == retry_bytes, "the retry's request is left exactly as it is"
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "executing"
 
 
 def test_the_store_comes_from_the_resolver_not_the_repo(env, monkeypatch):

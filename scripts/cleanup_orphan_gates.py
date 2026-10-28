@@ -15,6 +15,27 @@ age in hours and the source request stem. The request ends ``unavailable``
 through ``gate_outcome.REQUEST_STATUS_OF``, so ``execute_gate`` short-circuits
 on it and a real retry is a new request.
 
+**The scan is not the commit** (GE-8 round 2). A scan reads a request, and a
+retry can replace it in the same ``(gate, PR)`` slot before the commit lands.
+The commit therefore holds the result slot's lock AND the request's lock
+(:func:`atomic_io.slot_lock` is reentrant inside one process, so the request
+lock the writer's step 7 takes again is the same critical section), re-reads
+the request there and compares its identity — ``dispatch_id``, ``commit_sha``,
+``requested_at``, ``pr_number``, ``pr_id`` — and its age with what the scan
+saw. Anything different is no longer the orphan this run found: no record, no
+request end, and the orphan is reported as ``skipped_replaced``. The request
+written is the one read under the lock, so nothing the scan saw can overwrite
+fresher metadata.
+
+**A half-ended request is finished, not re-resolved** (GE-8 round 2). Step 7's
+write can fail after the record and its receipt landed, which leaves a request
+still ``executing`` while its slot holds the cleanup's ``unavailable`` record;
+the next scan used to skip it (the slot has a result) and the request stayed in
+flight for ever. The scan now also finds that state and finishes the SAME
+request through the same writer: the record on the slot is handed back
+unchanged, which step 6 reads as a repeat, so no second record and no second
+receipt is written and only the request's end lands.
+
 The store is resolved through ``project_root.resolve_data_dir`` (ADR-026,
 issue #225): ``$VNX_DATA_DIR`` needs ``VNX_DATA_DIR_EXPLICIT=1``; never a
 repo-relative ``.vnx-data`` fallback.
@@ -30,24 +51,64 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import gate_recorder  # noqa: E402
+from atomic_io import slot_lock  # noqa: E402
 from gate_outcome import (  # noqa: E402
     GateOutcome, GateRequest, RequestWriteFailed, commit_gate_outcome,
 )
+from gate_status import REQUEST_TERMINAL_STATUSES, canonical_status  # noqa: E402
 from project_root import resolve_data_dir  # noqa: E402
 
 ABANDONED_ORPHAN_REQUEST = "abandoned_orphan_request"
 ABANDONED_BY = "cleanup_orphan_gates"
 
+# What one request's resolution did. ``skipped_replaced`` is not a write
+# failure: the slot changed under the scan and this run must leave it alone.
+RESOLVED = "resolved"
+ALREADY_RESOLVED = "already_resolved"
+SKIPPED_REPLACED = "skipped_replaced"
+DRY_RUN = "dry_run"
+FAILED = "failed"
+
+# The fields that identify ONE request, compared between the scan's copy and the
+# one read under the lock: what a retry in the same slot changes first. A field
+# only one side names identifies nothing and cannot be evidence of a match.
+_REQUEST_IDENTITY_FIELDS: Tuple[str, ...] = (
+    "dispatch_id", "commit_sha", "requested_at", "pr_number", "pr_id",
+)
+
 # ``main`` points these at the CLI overrides; otherwise the resolver decides.
 _REQUESTS_DIR: Optional[Path] = None
 _RESULTS_DIR: Optional[Path] = None
 
+
+class OrphanResolution(NamedTuple):
+    """What one resolution did; ``detail`` says why.
+
+    ``status`` is the name the cleanup summary counts. Truthiness is "the run
+    must not report a write failure": a resolved orphan, one another writer
+    already resolved, one skipped because its slot was replaced, and a dry run
+    are all answers; only :data:`FAILED` is not.
+    """
+
+    status: str
+    detail: str = ""
+
+    @property
+    def failed(self) -> bool:
+        return self.status == FAILED
+
+    def __bool__(self) -> bool:
+        return not self.failed
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 
 def _gate_dirs() -> Tuple[Path, Path]:
@@ -145,25 +206,72 @@ def _find_orphans(max_age_hours: float = 24.0) -> List[Dict[str, Any]]:
     return orphans
 
 
-def _write_abandoned_result(
-    orphan: Dict[str, Any], dry_run: bool, requests_dir: Optional[Path] = None,
-) -> bool:
-    """Book the orphan's ``unavailable`` outcome through the one gate writer.
+def _named(value: Any) -> bool:
+    """Positive evidence: a value that names something — not ``None``, not an empty or blank string."""
+    if value is None:
+        return False
+    return not (isinstance(value, str) and not value.strip())
 
-    True when resolved (written, dry run, or already resolved by another
-    writer); False only on a write failure. A refusal is not an error here.
+
+def _identity_mismatch(scan_payload: Dict[str, Any], on_disk: Dict[str, Any]) -> Optional[str]:
+    """The first :data:`_REQUEST_IDENTITY_FIELDS` the scan and the slot disagree on, or ``None``.
+
+    Positive evidence only, the way ``gate_outcome`` decides a foreign request:
+    a field neither side names identifies nothing and decides nothing; a field
+    only ONE side names, or two different values, means the slot no longer
+    holds the request this run scanned.
     """
-    if dry_run:
-        return True
+    for name in _REQUEST_IDENTITY_FIELDS:
+        mine, theirs = scan_payload.get(name), on_disk.get(name)
+        if not (_named(mine) or _named(theirs)):
+            continue
+        if not (_named(mine) and _named(theirs)) or mine != theirs:
+            return f"{name!r} differs ({theirs!r} on the slot, {mine!r} at the scan)"
+    return None
 
-    request_data = orphan.get("request_data") if isinstance(orphan.get("request_data"), dict) else {}
-    if "pr_number" in orphan or "pr_id" in orphan:
-        pr_number, pr_id = orphan.get("pr_number"), orphan.get("pr_id") or ""
-    else:
-        _gate, pr_number, pr_id = _slot_identity(orphan["stem"], request_data)
+
+def _stale_reason(orphan: Dict[str, Any], on_disk: gate_recorder.RequestOnDisk, max_age_hours: float) -> Optional[str]:
+    """Why the request on the slot is no longer the orphan the scan found, or ``None``.
+
+    Called under the request's lock, so the answer is about the state the commit
+    is about to write into. Absent and unreadable are NOT "nothing to overwrite"
+    but "cannot be shown to be the scan's request", and they skip like a
+    mismatch: this run must never end a request it cannot identify.
+    """
+    if not on_disk.present:
+        return f"no request at {on_disk.path} any more"
+    if on_disk.record is None:
+        return f"the request at {on_disk.path} cannot be read"
+    scan_payload = orphan.get("request_data") if isinstance(orphan.get("request_data"), dict) else {}
+    mismatch = _identity_mismatch(scan_payload, on_disk.record)
+    if mismatch:
+        return mismatch
+    age_hours = _file_age_hours(on_disk.path)
+    if age_hours < max_age_hours:
+        return f"age {age_hours:.1f}h is under the {max_age_hours:.1f}h threshold"
+    return None
+
+
+def _preview(orphan: Dict[str, Any], request_path: Optional[Path], max_age_hours: float) -> OrphanResolution:
+    """A dry run's answer: what the commit WOULD do, from an unlocked read (it writes nothing)."""
+    if request_path is None:
+        return OrphanResolution(DRY_RUN)
+    stale = _stale_reason(orphan, gate_recorder.read_request_record(request_path), max_age_hours)
+    return OrphanResolution(SKIPPED_REPLACED, stale) if stale else OrphanResolution(DRY_RUN)
+
+
+def _commit_orphan(
+    orphan: Dict[str, Any], request_data: Dict[str, Any], requests_dir: Path, request_path: Optional[Path],
+) -> OrphanResolution:
+    """Book the orphan's ``unavailable`` outcome; the caller holds the result and request locks.
+
+    ``request_data`` is the request as read UNDER the lock, so the ended request
+    carries the slot's own payload and never a scan-time copy.
+    """
+    gate_name, pr_number, pr_id = _slot_identity(orphan["stem"], request_data)
     record = {
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "gate": orphan["gate_name"],
+        "gate": gate_name,
         "pr_id": pr_id,
         "pr_number": pr_number,
         "status": "unavailable",
@@ -176,15 +284,14 @@ def _write_abandoned_result(
     # ``pr_id`` stays what the filename names: a filled-in ``str(pr_number)``
     # makes ``persist_request`` end a contract slot, not this orphan's own file.
     outcome = GateOutcome(
-        gate=orphan["gate_name"], status="unavailable", pr_id=pr_id,
-        pr_number=pr_number, record=record,
+        gate=gate_name, status="unavailable", pr_id=pr_id, pr_number=pr_number, record=record,
     )
     # A slot that already holds a record is not ours to end twice: the writer
     # refuses the record, and ending the request is that slot's writer's job.
     request = None
-    if not orphan["result_path"].exists():
+    if request_path is not None and not orphan["result_path"].exists():
         request = GateRequest(
-            requests_dir=requests_dir or _current_dirs()[0],
+            requests_dir=requests_dir,
             payload=dict(request_data),
             fields={"reason": ABANDONED_ORPHAN_REQUEST, "abandoned_by": ABANDONED_BY},
         )
@@ -198,11 +305,166 @@ def _write_abandoned_result(
         )
     except (OSError, RequestWriteFailed) as exc:
         print(f"  [ERROR] Failed to write result for {orphan['stem']}: {exc}", file=sys.stderr)
-        return False
-
+        return OrphanResolution(FAILED, f"{type(exc).__name__}: {exc}")
     if not written:
         print(f"  {orphan['stem']}  already resolved: {orphan['result_path'].name} exists")
-    return True
+        return OrphanResolution(ALREADY_RESOLVED, f"{orphan['result_path'].name} exists")
+    return OrphanResolution(RESOLVED)
+
+
+def _write_abandoned_result(
+    orphan: Dict[str, Any], dry_run: bool = False, requests_dir: Optional[Path] = None,
+    *, max_age_hours: float = 24.0,
+) -> OrphanResolution:
+    """Book the orphan's ``unavailable`` outcome through the one gate writer.
+
+    The request is re-read and re-checked UNDER its own lock, inside the result
+    slot's lock, so the identity check and the write are one critical section
+    against a retry landing in the same slot. A request that changed (or is no
+    longer old enough to be an orphan) is reported as ``skipped_replaced`` and
+    nothing is written for it — no record, no request end.
+    """
+    request_data = orphan.get("request_data") if isinstance(orphan.get("request_data"), dict) else {}
+    # The file name is authoritative: the request must be ENDED at the path the
+    # orphan was found at, and ``persist_request`` re-derives that path from these.
+    gate_name, pr_number, pr_id = _slot_identity(orphan["stem"], request_data)
+    requests_dir = requests_dir or _current_dirs()[0]
+    request_path = gate_recorder.result_file_path(requests_dir, gate_name, pr_number, pr_id)
+
+    if dry_run:
+        return _preview(orphan, request_path, max_age_hours)
+    if request_path is None:
+        # No request path to end: the record is all this slot can be given, as before.
+        return _commit_orphan(orphan, request_data, requests_dir, request_path=None)
+    try:
+        with slot_lock(orphan["result_path"]), slot_lock(request_path):
+            on_disk = gate_recorder.read_request_record(request_path)
+            stale = _stale_reason(orphan, on_disk, max_age_hours)
+            if stale:
+                print(f"  {orphan['stem']}  skipped_replaced: {stale}")
+                return OrphanResolution(SKIPPED_REPLACED, stale)
+            return _commit_orphan(orphan, dict(on_disk.record or {}), requests_dir, request_path)
+    except OSError as exc:
+        print(f"  [ERROR] Failed to take the slot lock for {orphan['stem']}: {exc}", file=sys.stderr)
+        return OrphanResolution(FAILED, f"{type(exc).__name__}: {exc}")
+
+
+def _is_cleanup_record(record: Dict[str, Any]) -> bool:
+    """Is this result record the cleanup's own ``unavailable`` booking?"""
+    return (
+        canonical_status(record) == "unavailable"
+        and record.get("reason") == ABANDONED_ORPHAN_REQUEST
+        and record.get("abandoned_by") == ABANDONED_BY
+    )
+
+
+def _find_unfinished() -> List[Dict[str, Any]]:
+    """Requests a previous run left ``executing`` although the cleanup's record landed (dicts).
+
+    Step 7's write can fail after the record and its receipt landed. The slot
+    then holds a result, so :func:`_find_orphans` skips it and the request stays
+    in flight for ever. This scan finds exactly that state: a cleanup record,
+    and a request that has not ended.
+    """
+    requests_dir, results_dir = _current_dirs()
+    if not requests_dir.exists():
+        return []
+
+    unfinished: List[Dict[str, Any]] = []
+    for req_path in sorted(requests_dir.glob("*.json")):
+        result_path = results_dir / req_path.name
+        if not result_path.exists():
+            continue
+        record = _read_request(result_path)
+        if not _is_cleanup_record(record):
+            continue
+        stem = req_path.stem
+        request_data = _read_request(req_path)
+        if canonical_status(request_data) in REQUEST_TERMINAL_STATUSES:
+            continue  # already ended: nothing left to finish
+        gate_name, pr_number, pr_id = _slot_identity(stem, request_data)
+        unfinished.append({
+            "request_path": req_path,
+            "result_path": result_path,
+            "gate_name": gate_name,
+            "pr_number": pr_number,
+            "pr_id": pr_id,
+            "stem": stem,
+            "age_hours": round(_file_age_hours(req_path), 1),
+            "request_data": request_data,
+            "record": record,
+            "recovery": True,
+        })
+    return unfinished
+
+
+def _finish_unfinished(candidate: Dict[str, Any], requests_dir: Path) -> OrphanResolution:
+    """Finish the ONE request a half-ended cleanup left ``executing`` (GE-8 round 2).
+
+    The record on the slot is handed back to the writer unchanged: step 6 reads
+    it as a repeat, so no second record and no second receipt is written and
+    only the request's end lands. The identity check is the same one the
+    cleanup does — a request a retry replaced is somebody else's, and it is
+    left alone.
+    """
+    gate_name, pr_number, pr_id = candidate["gate_name"], candidate["pr_number"], candidate["pr_id"]
+    request_path = gate_recorder.result_file_path(requests_dir, gate_name, pr_number, pr_id)
+    if request_path is None:
+        return OrphanResolution(SKIPPED_REPLACED, "no request path can be derived for this slot")
+    try:
+        with slot_lock(candidate["result_path"]), slot_lock(request_path):
+            return _finish_unfinished_locked(candidate, requests_dir, request_path)
+    except OSError as exc:
+        print(f"  [ERROR] Failed to take the slot lock for {candidate['stem']}: {exc}", file=sys.stderr)
+        return OrphanResolution(FAILED, f"{type(exc).__name__}: {exc}")
+
+
+def _finish_unfinished_locked(
+    candidate: Dict[str, Any], requests_dir: Path, request_path: Path,
+) -> OrphanResolution:
+    """The recovery's critical section; the caller holds the result and request locks."""
+    stem = candidate["stem"]
+    on_disk = gate_recorder.read_request_record(request_path)
+    if not on_disk.present or on_disk.record is None:
+        return OrphanResolution(SKIPPED_REPLACED, f"the request at {request_path} cannot be read any more")
+    stored = _read_request(candidate["result_path"])
+    if not _is_cleanup_record(stored):
+        print(f"  {stem}  already resolved: the slot no longer holds the cleanup's record")
+        return OrphanResolution(ALREADY_RESOLVED, "the slot no longer holds the cleanup's record")
+    original = stored.get("original_request") if isinstance(stored.get("original_request"), dict) else {}
+    if not original:
+        # Without the payload the record was booked for there is nothing to
+        # match the request against: finishing it would be a guess.
+        return OrphanResolution(SKIPPED_REPLACED, "the record names no original_request to match the request against")
+    mismatch = _identity_mismatch(original, on_disk.record)
+    if mismatch:
+        print(f"  {stem}  skipped_replaced: {mismatch}")
+        return OrphanResolution(SKIPPED_REPLACED, mismatch)
+
+    outcome = GateOutcome(
+        gate=candidate["gate_name"], status="unavailable", pr_id=candidate["pr_id"],
+        pr_number=candidate["pr_number"], record=dict(stored),
+    )
+    request = GateRequest(
+        requests_dir=requests_dir,
+        payload=dict(on_disk.record),
+        fields={"reason": ABANDONED_ORPHAN_REQUEST, "abandoned_by": ABANDONED_BY},
+    )
+    try:
+        _payload, written = commit_gate_outcome(
+            outcome,
+            results_dir=candidate["result_path"].parent,
+            result_path=candidate["result_path"],
+            request=request,
+            book_undecided_receipt=True,
+        )
+    except (OSError, RequestWriteFailed) as exc:
+        print(f"  [ERROR] Failed to finish the request for {stem}: {exc}", file=sys.stderr)
+        return OrphanResolution(FAILED, f"{type(exc).__name__}: {exc}")
+    if not written:
+        print(f"  [ERROR] The writer refused the recovery commit for {stem}", file=sys.stderr)
+        return OrphanResolution(FAILED, "the writer refused the recovery commit")
+    return OrphanResolution(RESOLVED)
 
 
 def _log_to_audit(orphans: List[Dict[str, Any]]) -> None:
@@ -213,24 +475,29 @@ def _log_to_audit(orphans: List[Dict[str, Any]]) -> None:
         for orphan in orphans:
             pr_number = _extract_pr_number_from_stem(orphan["stem"])
             dispatch_id = orphan.get("request_data", {}).get("dispatch_id") or None
+            recovered = bool(orphan.get("recovery"))
             context: dict = {
                 "stem": orphan["stem"],
                 "age_hours": orphan["age_hours"],
                 "gate_name": orphan["gate_name"],
+                "recovered": recovered,
             }
             if pr_number is not None:
                 context["pr_number"] = pr_number
             if dispatch_id is not None:
                 context["dispatch_id"] = dispatch_id
+            message = (
+                f"Orphan gate {orphan['stem']} request finished after a failed write: its "
+                f"unavailable record was already booked"
+                if recovered else
+                f"Orphan gate {orphan['stem']} abandoned after {orphan['age_hours']:.1f}h with no result"
+            )
             log_enforcement(
                 check_name="orphan_gate_cleanup",
                 level=1,
                 result=True,
                 context=context,
-                message=(
-                    f"Orphan gate {orphan['stem']} abandoned after "
-                    f"{orphan['age_hours']:.1f}h with no result"
-                ),
+                message=message,
                 dispatch_id=dispatch_id,
             )
     except Exception as exc:  # vnx-broad-except: audit write is best-effort; the cleanup already landed
@@ -262,32 +529,59 @@ def main(argv: Optional[List[str]] = None) -> int:
         _RESULTS_DIR = Path(args.results_dir)
 
     orphans = _find_orphans(max_age_hours=args.max_age_hours)
+    unfinished = _find_unfinished()
 
-    if not orphans:
+    if not orphans and not unfinished:
         print(f"No orphan gate requests found (threshold: {args.max_age_hours:.0f}h).")
         return 0
 
     mode_label = "[DRY RUN] " if args.dry_run else ""
-    print(f"{mode_label}Found {len(orphans)} orphan gate request(s):\n")
+    if orphans:
+        print(f"{mode_label}Found {len(orphans)} orphan gate request(s):\n")
 
     resolved_orphans: List[Dict[str, Any]] = []
-    failed = 0
+    counts: Dict[str, int] = {}
     for orphan in orphans:
         status = "would book" if args.dry_run else "booking"
         print(
             f"  {orphan['stem']}  age={orphan['age_hours']:.1f}h  "
             f"gate={orphan['gate_name']}  → {status} unavailable outcome"
         )
-        ok = _write_abandoned_result(orphan, dry_run=args.dry_run)
-        if ok:
+        resolution = _write_abandoned_result(orphan, dry_run=args.dry_run, max_age_hours=args.max_age_hours)
+        counts[resolution.status] = counts.get(resolution.status, 0) + 1
+        if resolution.status == RESOLVED:
             resolved_orphans.append(orphan)
+
+    if unfinished:
+        print(f"\n{mode_label}Found {len(unfinished)} half-ended request(s) to finish:\n")
+    requests_dir = _current_dirs()[0]
+    for candidate in unfinished:
+        status = "would finish" if args.dry_run else "finishing"
+        print(
+            f"  {candidate['stem']}  gate={candidate['gate_name']}  → {status} the request "
+            f"(its unavailable record is already booked)"
+        )
+        if args.dry_run:
+            resolution = OrphanResolution(DRY_RUN)
         else:
-            failed += 1
+            resolution = _finish_unfinished(candidate, requests_dir)
+        counts[resolution.status] = counts.get(resolution.status, 0) + 1
+        if resolution.status == RESOLVED:
+            resolved_orphans.append(candidate)
 
     if not args.dry_run and resolved_orphans:
         _log_to_audit(resolved_orphans)
         print(f"\nResolved {len(resolved_orphans)} orphan(s). Logged to governance_audit.ndjson.")
 
+    print(
+        f"\nCleanup summary: {counts.get(RESOLVED, 0)} resolved, "
+        f"{counts.get(ALREADY_RESOLVED, 0)} already_resolved, "
+        f"{counts.get(SKIPPED_REPLACED, 0)} skipped_replaced, "
+        f"{counts.get(FAILED, 0)} failed"
+        + (f", {counts[DRY_RUN]} would resolve (dry run)" if DRY_RUN in counts else "")
+    )
+
+    failed = counts.get(FAILED, 0)
     if failed:
         print(f"\n[WARN] {failed} write failure(s) — check stderr.")
         return 1
