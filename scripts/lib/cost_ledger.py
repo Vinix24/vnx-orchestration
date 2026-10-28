@@ -187,6 +187,18 @@ class InvalidExecutionId(CostLedgerRefusal):
     """A booking with no execution identity (K3-1a): nothing is written and nothing is guessed."""
 
 
+class BackfillRunIdTaken(CostLedgerRefusal):
+    """A backfill charge whose ``run_id`` a line already holds (K6b-3 round 2): nothing is written.
+
+    A backfill numbers a charge from the ledger it read before planning, so two
+    backfills of the same reference can reserve one attempt. The reservation is
+    only real once it is written, so the check runs inside the writer's lock
+    (:func:`record_run`); the caller renumbers the charge and writes again
+    (``cost_ledger_backfill.apply_runs``). Only a backfill charge is checked:
+    a live producer and a correction keep their own behaviour.
+    """
+
+
 class CostLedgerWriteError(OSError):
     """Neither the ledger nor the spool confirmed the line: the outcome is unknown (ADR-043 §6).
 
@@ -1170,11 +1182,23 @@ def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> WrittenRe
     :class:`CostLedgerWriteError` when the spool failed too or the lock file
     could not be taken: the outcome is unknown, so the caller fails its call,
     mutates no state and books no new attempt (ADR-005).
+
+    A backfill charge (``backfill=True``, ``kind="charge"``) whose ``run_id`` a
+    line already holds is refused with :class:`BackfillRunIdTaken`, nothing
+    written: the check runs inside the writer's lock, on the ledger as it is
+    when the line would land, so a reservation made from an older snapshot
+    never writes over the line that took it (K6b-3 round 2). A correction and a
+    live producer's charge are not checked: they keep their own behaviour.
     """
     record = build_record(run)
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
     refuse_real_central_store_write_under_test_runner(path)
-    return _write(path, lambda _fh: record, f"cost record {record['record_id']} of run {record['run_id']}")
+
+    def record_for(fh) -> Dict[str, Any]:
+        _refuse_a_taken_backfill_run_id(path, fh, run)
+        return record
+
+    return _write(path, record_for, f"cost record {record['record_id']} of run {record['run_id']}")
 
 
 def _read_under_the_lock(fh) -> str:
@@ -1325,6 +1349,27 @@ def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
     except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(exc, f"the runs already booked could not be read ({exc}): nothing was written") from exc
     return [*_parse_lines(text)[0], *(record for run in spooled for record in run)]
+
+
+def _refuse_a_taken_backfill_run_id(ledger_path: Path, fh, run: RunCost) -> None:
+    """Refuse a backfill charge whose ``run_id`` already has a line, under the caller's lock.
+
+    A backfill numbers its charge from the ledger it read before planning, so two
+    backfills of one reference can reserve one attempt (K6b-3 round 2); the count
+    is only evidence of what was written at the moment it was taken. Here, under
+    the lock the line would land under, the ledger (and the spool that waits for
+    the replay) says whether that attempt is taken after all. It is checked for a
+    backfill charge only: a correction names the record it supersedes, and a live
+    producer's ``run_id`` decides its own attempt.
+    """
+    if not (run.backfill and run.kind == "charge"):
+        return
+    for line in _booked_lines(ledger_path, fh):
+        if line.get("run_id") == run.run_id:
+            raise BackfillRunIdTaken(
+                f"run_id {run.run_id} is booked already as record {line.get('record_id')}: "
+                "a backfill charge is never written over an existing line",
+            )
 
 
 def record_once(
@@ -2763,7 +2808,7 @@ __all__ = [
     "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "InvalidExecutionId",
+    "InvalidExecutionId", "BackfillRunIdTaken",
     "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "GroupedTotals", "ReplayResult",
     "LedgerFiles", "GROUP_KEYS", "UNKNOWN_GROUP",
     "split_run_id", "run_id_for", "execution_run_id", "build_record", "record_run", "record_next_attempt",

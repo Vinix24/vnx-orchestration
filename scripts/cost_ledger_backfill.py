@@ -20,6 +20,16 @@ the command exits non-zero naming the reason. An unclear write outcome
 (:class:`cost_ledger.CostLedgerWriteError`) stops the run instead: nothing further is
 written on top of an uncertain line (ADR-005).
 
+**A reservation is real only once it is written.** Charges are numbered from the
+ledger read before planning, so two backfills of one dispatch — two transcripts, two
+processes — can reserve the same attempt. The ledger refuses a backfill charge whose
+``run_id`` already has a line, checked under the writer's own lock
+(:class:`cost_ledger.BackfillRunIdTaken`, nothing written); this module re-reads the
+ledger, renumbers the charge to the next free attempt (the plan's own reservations
+included) and writes again, at most :data:`BACKFILL_RETRY_LIMIT` times. Past the bound
+the charge counts as a failure. A correction is never renumbered: it names the record
+it supersedes, so its ``run_id`` is that record's.
+
 **What makes a line claimable (K6b-2, OI-2419).** A live line is corrected only on
 evidence that it measures *this* transcript:
 
@@ -68,6 +78,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import logging
 import math
@@ -75,7 +86,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
@@ -102,6 +113,8 @@ UNKNOWN_ROLE_NO_PURPOSE = "unknown:no_ledger_role"
 CORRECTION_REASON = "backfill: the harness transcript's tokens replace the live line"
 LANES = ("deepseek-harness", "glm-harness")
 DISPATCH_PREFIX = "dispatch-"
+# How often a backfill charge whose attempt was taken meanwhile is renumbered and written again.
+BACKFILL_RETRY_LIMIT = 5
 
 # Every worker role the fabric dispatches books as the ledger's ``builder`` purpose.
 _ROLE_PURPOSE: Dict[str, str] = {
@@ -640,6 +653,88 @@ def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
 # ---------------------------------------------------------------------------
 
 
+class _Unrenumberable(Exception):
+    """A backfill charge that stayed refused past the retry bound: nothing was written for it.
+
+    ``str`` names the charge's ``run_id`` — the reference included — and why, so the
+    caller's stderr line says which run was not booked.
+    """
+
+
+def _plan_reservations(plans: Sequence[PlannedRun]) -> Dict[str, Set[int]]:
+    """``ref -> attempts`` this plan's own backfill charges hold, written or not.
+
+    Renumbering a refused charge must not land on an attempt a later charge of the
+    same plan already holds: the two would collide again and one line would replace
+    the other in the aggregate. So the plan's reservations are part of "free".
+    """
+    reserved: Dict[str, Set[int]] = collections.defaultdict(set)
+    for planned in plans:
+        run = planned.run
+        if planned.skipped or run is None or run.kind != "charge":
+            continue
+        try:
+            _project, producer, ref, attempt = cost_ledger.split_run_id(run.run_id)
+        except cost_ledger.InvalidRecord:
+            continue
+        if producer == BACKFILL_PRODUCER:
+            reserved[ref].add(attempt)
+    return reserved
+
+
+def _renumbered(run: cost_ledger.RunCost, ledger_path: Path,
+                reserved: MutableMapping[str, Set[int]]) -> cost_ledger.RunCost:
+    """The same backfill charge under the next attempt neither the ledger nor this plan holds.
+
+    The ledger is re-read here: the attempt that was taken is only knowable from what
+    is written now, not from the snapshot the plan was numbered on (K6b-3 round 2).
+    A ledger that cannot be re-read raises :class:`_Unrenumberable`: a guessed attempt
+    would make a second run of an existing one. Only a charge is ever renumbered —
+    :func:`apply_runs` keeps a correction on the ``run_id`` and ``supersedes`` it was
+    planned with.
+    """
+    project_id, _producer, ref, taken = cost_ledger.split_run_id(run.run_id)
+    reserved.setdefault(ref, set()).discard(taken)
+    try:
+        records = load_live_runs(ledger_path, project_id).get(ref, ())
+    except (OSError, ValueError) as exc:
+        raise _Unrenumberable(f"{run.run_id}: the ledger could not be re-read to renumber it ({exc})") from exc
+    attempt = _next_attempt(records)
+    while attempt in reserved[ref]:
+        attempt += 1
+    reserved[ref].add(attempt)
+    return dataclasses.replace(run, run_id=cost_ledger.run_id_for(project_id, BACKFILL_PRODUCER, ref, attempt))
+
+
+def _write_planned(planned: PlannedRun, ledger_path: Path, reserved: MutableMapping[str, Set[int]],
+                   *, dry_run: bool) -> Mapping[str, Any]:
+    """Write one planned line; a backfill charge whose ``run_id`` was taken is renumbered and retried.
+
+    :class:`cost_ledger.BackfillRunIdTaken` is the one refusal that says something new
+    about the plan — another backfill wrote this reference's next attempt from a
+    snapshot that did not have our line — so the charge is renumbered and written
+    again, at most :data:`BACKFILL_RETRY_LIMIT` times. Past that bound it is
+    :class:`_Unrenumberable`. Every other refusal propagates as it is.
+    """
+    run = planned.run
+    if dry_run:
+        return cost_ledger.build_record(run)
+    retries = 0
+    while True:
+        try:
+            return cost_ledger.record_run(run, ledger_path=ledger_path)
+        except cost_ledger.BackfillRunIdTaken as taken:
+            if run.kind != "charge":
+                raise
+            if retries >= BACKFILL_RETRY_LIMIT:
+                raise _Unrenumberable(
+                    f"{planned.run.run_id}: its run id stayed taken after "
+                    f"{BACKFILL_RETRY_LIMIT} renumberings ({taken})",
+                ) from taken
+            run = _renumbered(run, ledger_path, reserved)
+            retries += 1
+
+
 def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
                *, dry_run: bool) -> Dict[str, ProviderSummary]:
     """Book every planned line (in a dry run: price it) and count it per provider.
@@ -647,11 +742,16 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
     A charge and a correction each go through :func:`cost_ledger.record_run`, the
     ledger's one writer: a charge is a new line, a correction a line naming the record
     it supersedes (ADR-038), and no existing line is ever rewritten. A skip writes
-    nothing. A line the ledger refuses wrote nothing, so it is counted as a failure and
-    the next line is still attempted; :class:`cost_ledger.CostLedgerWriteError` — the
-    write's outcome is unknown — propagates instead, and the caller stops (ADR-005).
+    nothing. A backfill charge whose attempt another backfill took meanwhile is
+    renumbered under the writer's lock and written again (:func:`_write_planned`), so
+    two backfills of one dispatch keep both transcripts' spend in the aggregate; a
+    correction is never renumbered. A line the ledger refuses wrote nothing, so it is
+    counted as a failure and the next line is still attempted;
+    :class:`cost_ledger.CostLedgerWriteError` — the write's outcome is unknown —
+    propagates instead, and the caller stops (ADR-005).
     """
     summaries: Dict[str, ProviderSummary] = {}
+    reserved = _plan_reservations(plans)
     for planned in plans:
         summary = summaries.setdefault(planned.provider, ProviderSummary(planned.provider))
         summary.runs += 1
@@ -659,8 +759,11 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
             summary.skips += 1
             continue
         try:
-            record = (cost_ledger.build_record(planned.run) if dry_run
-                      else cost_ledger.record_run(planned.run, ledger_path=ledger_path))
+            record = _write_planned(planned, ledger_path, reserved, dry_run=dry_run)
+        except _Unrenumberable as exc:
+            summary.failures += 1
+            print(f"{planned.provider}: {exc}", file=sys.stderr)
+            continue
         except cost_ledger.CostLedgerRefusal as exc:
             summary.failures += 1
             print(f"{planned.provider}: {planned.run.run_id}: {exc}", file=sys.stderr)
