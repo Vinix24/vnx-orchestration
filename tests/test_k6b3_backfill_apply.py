@@ -432,16 +432,36 @@ def test_two_processes_backfilling_one_dispatch_keep_both_spends(tmp_path, monke
 
 
 def test_a_backfill_charge_on_an_existing_run_id_is_refused_and_writes_nothing(tmp_path):
-    """The ledger's own guard, without the planner: a taken attempt is never written over."""
+    """Another transcript holds the attempt: the ledger refuses the charge, nothing written."""
     ledger = tmp_path / "events" / "provider_costs.ndjson"
     ledger.parent.mkdir(parents=True)
-    live = _cost("builder", f"{PROJECT}:backfill:{DISPATCH}:1")
+    live = dataclasses.replace(_cost("builder", f"{PROJECT}:backfill:{DISPATCH}:1"),
+                               transcript_identity=f"{LANE}:another-session")
     cost_ledger.record_run(live, ledger_path=ledger)
 
     with pytest.raises(cost_ledger.BackfillRunIdTaken):
-        cost_ledger.record_run(dataclasses.replace(live, backfill=True), ledger_path=ledger)
+        cost_ledger.record_run(dataclasses.replace(live, backfill=True,
+                                                   transcript_identity=f"{LANE}:sess-a"),
+                               ledger_path=ledger)
 
     assert [line["run_id"] for line in _lines(ledger)] == [live.run_id]
+
+
+def test_the_ledger_refuses_a_backfill_charge_whose_transcript_is_booked(tmp_path):
+    """The same transcript is booked already: the refusal carries that line, nothing written."""
+    ledger = tmp_path / "events" / "provider_costs.ndjson"
+    ledger.parent.mkdir(parents=True)
+    live = _cost("builder", f"{PROJECT}:backfill:{DISPATCH}:1")
+    booked = cost_ledger.record_run(live, ledger_path=ledger)
+
+    with pytest.raises(cost_ledger.BackfillTranscriptBooked) as refused:
+        cost_ledger.record_run(dataclasses.replace(live, backfill=True,
+                                                   run_id=f"{PROJECT}:backfill:{DISPATCH}:2"),
+                               ledger_path=ledger)
+
+    assert refused.value.record["record_id"] == booked["record_id"]
+    assert refused.value.record["transcript_identity"] == f"{LANE}:sess-a"
+    assert [line["record_id"] for line in _lines(ledger)] == [booked["record_id"]]
 
 
 def test_a_correction_on_an_existing_line_is_still_written_as_before(tmp_path, monkeypatch):
@@ -522,3 +542,136 @@ def test_a_lock_file_that_cannot_be_created_stops_the_run_with_nothing_written(
     assert not lab.ledger.exists(), "nothing landed"
     assert not cost_ledger.spool_dir_for(lab.ledger).exists(), "nothing went to the spool either"
     assert "the outcome of a write is unknown, stopping" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# The same transcript is booked once: identity comes before the run id under the
+# writer's lock (K6b-3 round 3)
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_charge_plan_applied_twice_books_the_spend_once(tmp_path, monkeypatch, capsys):
+    """Codex's reproduction: a second apply of one plan must not book the same transcript twice."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    lab.transcript("sess-a", window=WINDOW_A, tokens=TOKENS_A)
+    planned, = _plans_from_one_snapshot(lab, "sess-a")
+    assert backfill.apply_runs([planned], lab.ledger, dry_run=False)[LANE].new_lines == 1
+    capsys.readouterr()
+
+    summaries = backfill.apply_runs([planned], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].skips == 1, "the second apply is already booked, not a new line"
+    assert summaries[LANE].new_lines == 0 and summaries[LANE].corrections == 0
+    assert summaries[LANE].failures == 0
+    assert backfill._exit_code(summaries) == 0, "already booked is not a failure"
+    written = lab.lines()
+    assert len(written) == 1, written
+    totals = cost_ledger.aggregate_runs(lab.ledger)
+    assert len(totals.runs) == 1, "one transcript is one run, however many times it is applied"
+    assert totals.cost_usd == pytest.approx(written[0]["cost_usd"])
+
+
+def test_the_same_transcript_with_changed_usage_is_corrected_once(tmp_path, monkeypatch, capsys):
+    """A second plan of one transcript with other usage writes one correction, not a second charge."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    snapshot = backfill.load_live_runs(lab.ledger, PROJECT)
+    first = backfill.plan_runs([_run_of(lab, "sess-a")], {}, snapshot, PROJECT)
+    backfill.apply_runs(first, lab.ledger, dry_run=False)
+    lab.transcript("sess-a", tokens=TOKENS_HEAVY)
+    second = backfill.plan_runs([_run_of(lab, "sess-a")], {}, snapshot, PROJECT)
+    assert second[0].run.kind == "charge", "both plans were numbered on the same, empty snapshot"
+    assert second[0].run.run_id == first[0].run.run_id
+    capsys.readouterr()
+
+    summaries = backfill.apply_runs(second, lab.ledger, dry_run=False)
+
+    charge, correction = lab.lines()
+    assert len(lab.lines()) == 2
+    assert correction["kind"] == "correction"
+    assert correction["run_id"] == charge["run_id"], "the correction keeps the booked run's id"
+    assert correction["supersedes"] == charge["record_id"]
+    assert correction["reason"] == backfill.CORRECTION_REASON
+    assert correction["transcript_identity"] == f"{LANE}:sess-a"
+    assert summaries[LANE].corrections == 1 and summaries[LANE].new_lines == 0
+    assert summaries[LANE].failures == 0
+    totals = cost_ledger.aggregate_runs(lab.ledger)
+    assert len(totals.runs) == 1
+    effective, = totals.runs.values()
+    assert effective["tokens"] == correction["tokens"], "the aggregate shows the new usage once"
+    assert totals.cost_usd == pytest.approx(correction["cost_usd"])
+    assert totals.cost_usd != pytest.approx(charge["cost_usd"]), "not the usage it replaced"
+
+
+def test_two_processes_backfilling_the_same_transcript_book_it_once(tmp_path, monkeypatch):
+    """Two real processes, one transcript, one ledger: the transcript's spend counts once."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.ledger.parent.mkdir(parents=True, exist_ok=True)
+    lab.transcript("sess-a", window=WINDOW_A, tokens=TOKENS_A)
+    first, = _plans_from_one_snapshot(lab, "sess-a")
+    second, = _plans_from_one_snapshot(lab, "sess-a")
+    assert first.run.run_id == second.run.run_id, "both children start from the same attempt"
+
+    context = multiprocessing.get_context("spawn")
+    gate = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(target=_apply_in_a_child,
+                        args=((str(lab.ledger), [planned], gate, results),))
+        for planned in (first, second)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=60)
+        assert process.exitcode == 0, f"child exited with {process.exitcode}"
+
+    assert [results.get(timeout=10) for _ in processes] == [{LANE: 0}, {LANE: 0}]
+    written = lab.lines()
+    assert len(written) == 1, written
+    totals = cost_ledger.aggregate_runs(lab.ledger)
+    assert len(totals.runs) == 1
+    assert totals.cost_usd == pytest.approx(written[0]["cost_usd"])
+
+
+def test_every_planned_charge_names_its_transcript_identity(tmp_path, monkeypatch):
+    """Point 3's measurement: the planner cannot produce an identity-less charge.
+
+    Both references are covered: a transcript whose ``cwd`` names a dispatch (its ref is
+    the dispatch id) and one whose ``cwd`` names none (its ref is the session id).
+    """
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    lab.transcript("sess-a", cwd=WORKTREE_CWD)
+    lab.transcript("sess-b", window=WINDOW_B, tokens=TOKENS_B, cwd="/")
+
+    planned = backfill.plan_runs(backfill.scan([lab.lane], date(2026, 10, 1)), {}, {}, PROJECT)
+
+    assert len(planned) == 2, planned
+    assert {planned_item.run.transcript_identity for planned_item in planned} == {
+        f"{LANE}:sess-a", f"{LANE}:sess-b",
+    }
+
+
+def test_an_identityless_charge_on_a_taken_run_id_fails_and_writes_nothing(
+    tmp_path, monkeypatch, capsys,
+):
+    """A charge that cannot name its transcript is never renumbered onto another one's line."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.transcript("sess-a")
+    planned, = backfill.plan_runs([_run_of(lab, "sess-a")], {}, {}, PROJECT)
+    blind = dataclasses.replace(planned.run, transcript_identity=None)
+    lab.book(blind.run_id, tokens=TOKENS_HEAVY, identity=f"{LANE}:another-session")
+
+    summaries = backfill.apply_runs(
+        [backfill.PlannedRun(LANE, blind, None, False)], lab.ledger, dry_run=False,
+    )
+
+    assert summaries[LANE].failures == 1 and summaries[LANE].new_lines == 0
+    assert backfill._exit_code(summaries) == backfill.EXIT_FAILED
+    assert [line["transcript_identity"] for line in lab.lines()] == [f"{LANE}:another-session"]
+    error = capsys.readouterr().err
+    assert blind.run_id in error
+    assert "no transcript identity" in error

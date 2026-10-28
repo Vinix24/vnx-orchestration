@@ -30,6 +30,18 @@ included) and writes again, at most :data:`BACKFILL_RETRY_LIMIT` times. Past the
 the charge counts as a failure. A correction is never renumbered: it names the record
 it supersedes, so its ``run_id`` is that record's.
 
+**The same transcript is booked once (K6b-3 round 3).** A taken ``run_id`` has two
+causes, and only one of them is a renumbering. Another transcript of the reference took
+the attempt: renumber (above). The *same* transcript was booked already by a backfill
+that planned from the same snapshot: renumbering would book its spend a second time, and
+the aggregate would count it twice. So the identity is checked first, under the writer's
+lock, in the ledger and in the spool that waits for the replay
+(:class:`cost_ledger.BackfillTranscriptBooked`, which carries the line). Equal usage and
+amount is a skip, counted as already booked; changed usage is written as a correction on
+that line's ``run_id``, so the aggregate shows the new usage once. A charge with no
+``transcript_identity`` is never renumbered: it cannot show it is not that transcript, so
+on a taken ``run_id`` it is a failure with one stderr line and nothing written.
+
 **What makes a line claimable (K6b-2, OI-2419).** A live line is corrected only on
 evidence that it measures *this* transcript:
 
@@ -706,15 +718,73 @@ def _renumbered(run: cost_ledger.RunCost, ledger_path: Path,
     return dataclasses.replace(run, run_id=cost_ledger.run_id_for(project_id, BACKFILL_PRODUCER, ref, attempt))
 
 
+class _AlreadyBooked(Exception):
+    """A backfill charge whose transcript is booked already with the same usage: nothing more is written."""
+
+    def __init__(self, record: Mapping[str, Any]):
+        super().__init__(record.get("run_id"))
+        self.record = dict(record)
+
+
+# What a second booking of one transcript must agree on to be the same booking:
+# its usage (the token counts per field and the priced segments they add up to)
+# and its amount (``cost_usd``, ``api_equivalent_usd`` and the ``cost_source``
+# both are evidence of). ``usage_completeness`` is how much of the usage is
+# known, so a change there is a change of usage too.
+_AGREED_FIELDS = ("tokens", "segments", "usage_completeness", "billing",
+                  "cost_usd", "api_equivalent_usd", "cost_source")
+
+
+def _agrees_with(run: cost_ledger.RunCost, booked: Mapping[str, Any]) -> bool:
+    """Whether ``booked`` says the same about usage and amount as ``run`` would now.
+
+    The planned charge is built the way the writer would build it, so the
+    comparison is between two ledger records' fields, never between a run and a
+    line's shape. A field the booked line does not carry reads ``None``, and
+    ``None`` equals ``None`` only: a missing amount never reads as equal to a
+    real one.
+    """
+    planned = cost_ledger.build_record(run)
+    return all(planned.get(field) == booked.get(field) for field in _AGREED_FIELDS)
+
+
+def _correction_of(run: cost_ledger.RunCost, booked: Mapping[str, Any]) -> cost_ledger.RunCost:
+    """The planned charge as a correction on the booked line, so the ledger shows the new usage once.
+
+    The correction keeps the booked line's ``run_id`` (the aggregate counts one run per
+    id) and names its ``record_id`` in ``supersedes`` — the ledger's existing correction
+    path (ADR-038). A booked line that names no ``run_id`` or ``record_id`` cannot be
+    corrected: that is a failure with nothing written, never a guess.
+    """
+    run_id, record_id = booked.get("run_id"), booked.get("record_id")
+    if not (isinstance(run_id, str) and run_id and isinstance(record_id, str) and record_id):
+        raise _Unrenumberable(
+            f"{run.run_id}: the line that booked its transcript names no run and record to correct "
+            f"(run_id {run_id!r}, record_id {record_id!r}): nothing was written",
+        )
+    return dataclasses.replace(run, kind="correction", run_id=run_id, supersedes=record_id,
+                               reason=CORRECTION_REASON)
+
+
 def _write_planned(planned: PlannedRun, ledger_path: Path, reserved: MutableMapping[str, Set[int]],
                    *, dry_run: bool) -> Mapping[str, Any]:
-    """Write one planned line; a backfill charge whose ``run_id`` was taken is renumbered and retried.
+    """Write one planned line; a backfill charge is renumbered or corrected, never double-booked.
 
-    :class:`cost_ledger.BackfillRunIdTaken` is the one refusal that says something new
-    about the plan — another backfill wrote this reference's next attempt from a
-    snapshot that did not have our line — so the charge is renumbered and written
-    again, at most :data:`BACKFILL_RETRY_LIMIT` times. Past that bound it is
-    :class:`_Unrenumberable`. Every other refusal propagates as it is.
+    The ledger tells two refusals apart and so does this writer (K6b-3 round 3):
+
+    * :class:`cost_ledger.BackfillTranscriptBooked` — this transcript has a line
+      already, because a concurrent backfill planned from the same snapshot. Equal
+      usage and amount raise :class:`_AlreadyBooked` (a skip, not a failure);
+      different usage becomes a correction on that line's ``run_id``, written
+      through the ledger's correction path. A correction is never renumbered.
+    * :class:`cost_ledger.BackfillRunIdTaken` — another transcript of this
+      reference took the attempt, so the charge is renumbered and written again,
+      at most :data:`BACKFILL_RETRY_LIMIT` times; past that it is
+      :class:`_Unrenumberable`. A charge with no ``transcript_identity`` is never
+      renumbered: it cannot show it is not the transcript that already holds the
+      line, so it fails with nothing written.
+
+    Every other refusal propagates as it is.
     """
     run = planned.run
     if dry_run:
@@ -723,9 +793,20 @@ def _write_planned(planned: PlannedRun, ledger_path: Path, reserved: MutableMapp
     while True:
         try:
             return cost_ledger.record_run(run, ledger_path=ledger_path)
+        except cost_ledger.BackfillTranscriptBooked as booked:
+            if run.kind != "charge":
+                raise
+            if _agrees_with(run, booked.record):
+                raise _AlreadyBooked(booked.record) from booked
+            run = _correction_of(run, booked.record)
         except cost_ledger.BackfillRunIdTaken as taken:
             if run.kind != "charge":
                 raise
+            if run.transcript_identity is None:
+                raise _Unrenumberable(
+                    f"{run.run_id}: the charge names no transcript identity, so a taken run id is "
+                    "never renumbered; nothing was written",
+                ) from taken
             if retries >= BACKFILL_RETRY_LIMIT:
                 raise _Unrenumberable(
                     f"{planned.run.run_id}: its run id stayed taken after "
@@ -745,8 +826,11 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
     nothing. A backfill charge whose attempt another backfill took meanwhile is
     renumbered under the writer's lock and written again (:func:`_write_planned`), so
     two backfills of one dispatch keep both transcripts' spend in the aggregate; a
-    correction is never renumbered. A line the ledger refuses wrote nothing, so it is
-    counted as a failure and the next line is still attempted;
+    correction is never renumbered. A charge whose *transcript* a concurrent backfill
+    booked already is not a failure and not a second line: equal usage is counted as
+    a skip, changed usage is written as a correction on that line's ``run_id``, so the
+    transcript's spend counts once (K6b-3 round 3). A line the ledger refuses wrote
+    nothing, so it is counted as a failure and the next line is still attempted;
     :class:`cost_ledger.CostLedgerWriteError` — the write's outcome is unknown —
     propagates instead, and the caller stops (ADR-005).
     """
@@ -760,6 +844,9 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
             continue
         try:
             record = _write_planned(planned, ledger_path, reserved, dry_run=dry_run)
+        except _AlreadyBooked:
+            summary.skips += 1
+            continue
         except _Unrenumberable as exc:
             summary.failures += 1
             print(f"{planned.provider}: {exc}", file=sys.stderr)
@@ -768,7 +855,7 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
             summary.failures += 1
             print(f"{planned.provider}: {planned.run.run_id}: {exc}", file=sys.stderr)
             continue
-        if planned.run.kind == "correction":
+        if record["kind"] == "correction":
             summary.corrections += 1
         else:
             summary.new_lines += 1
