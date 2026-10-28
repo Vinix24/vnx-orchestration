@@ -26,11 +26,15 @@ this file is the broader, whole-directory sweep plus the XML check.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from launchd_test_support import register_engine
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -244,20 +248,17 @@ def test_real_repo_launchd_templates_clear_the_guard(monkeypatch) -> None:
 # regardless of whether codex is actually installed.
 #
 # A literal ``~`` is never expanded inside a launchd EnvironmentVariables
-# string value (no shell runs over it), so this test executes the plist's
-# own ProgramArguments command through the SAME /bin/bash -c launchd itself
-# invokes it with — the one place in the template that already does real,
-# runtime shell expansion (of ${VNX_HOME} pre-substitution, then of any
-# shell variable at execution time) — with a fake HOME carrying a
-# ``.local/bin/codex`` stub and the declared static PATH, and asserts the
-# spawned process can resolve it. This is GEDRAG, not string matching: it
-# proves what a real launchd-launched process would see.
+# string value (no shell runs over it), so this test runs the plist's own
+# ProgramArguments argv — /bin/bash, the pinned launcher, the project id and
+# the relative script — with a fake HOME carrying a ``.local/bin/codex`` stub
+# and the declared static PATH, and asserts the spawned process can resolve
+# it. The launcher appends $HOME/.local/bin at run time; this is GEDRAG, not
+# string matching: it proves what a real launchd-launched process would see.
 # ─────────────────────────────────────────────────────────────────────────
 
 
-def _extract_program_arguments_last_string(plist_path: Path) -> str:
-    """Return the final ``<string>`` in a launchd plist's ProgramArguments
-    array — the bash -c payload for every template in this directory."""
+def _program_arguments(plist_path: Path) -> list:
+    """Every ``<string>`` in a launchd plist's ProgramArguments array, in order."""
     tree = ET.parse(plist_path)
     top_dict = tree.getroot().find("dict")
     assert top_dict is not None, f"{plist_path} has no top-level <dict>"
@@ -268,12 +269,13 @@ def _extract_program_arguments_last_string(plist_path: Path) -> str:
             assert array.tag == "array", f"ProgramArguments in {plist_path} is not an array"
             strings = [child.text for child in array if child.tag == "string"]
             assert strings, f"ProgramArguments in {plist_path} has no <string> entries"
-            return strings[-1]
+            return strings
     raise AssertionError(f"no ProgramArguments key found in {plist_path}")
 
 
 def test_gate_obligation_runner_plist_resolves_local_bin_codex_on_path(tmp_path: Path) -> None:
-    script = _extract_program_arguments_last_string(GATE_OBLIGATION_RUNNER_PLIST)
+    project_id = "path-fixture"
+    argv = [arg.replace("${VNX_PROJECT_ID}", project_id) for arg in _program_arguments(GATE_OBLIGATION_RUNNER_PLIST)]
 
     fake_home = tmp_path / "home"
     local_bin = fake_home / ".local" / "bin"
@@ -282,26 +284,49 @@ def test_gate_obligation_runner_plist_resolves_local_bin_codex_on_path(tmp_path:
     codex_stub.write_text("#!/bin/bash\necho fake-codex\n")
     codex_stub.chmod(0o755)
 
+    # The launcher and its resolver come from this repo (symlinked, so the real
+    # scripts run); the job they start is a stub, and the engine is registered in
+    # the fake HOME so the resolver has a checkout to read a pin from — none here,
+    # so the declared engine is what runs.
     fake_vnx_home = tmp_path / "repo"
     scripts_dir = fake_vnx_home / "scripts"
     scripts_dir.mkdir(parents=True)
+    os.symlink(REPO_ROOT / "scripts" / "launchd", scripts_dir / "launchd", target_is_directory=True)
+    os.symlink(REPO_ROOT / "scripts" / "lib", scripts_dir / "lib", target_is_directory=True)
     (scripts_dir / "gate_obligation_runner.py").write_text(
-        "import shutil, sys\nsys.stdout.write(shutil.which('codex') or '')\n"
+        "import os, shutil, sys\n"
+        "sys.stdout.write(os.environ.get('PATH', '') + '\\n')\n"
+        "sys.stdout.write(shutil.which('codex') or '')\n"
     )
+    register_engine(fake_home, fake_vnx_home, project_id)
 
-    resolved_script = script.replace("${VNX_HOME}", str(fake_vnx_home))
+    resolved_argv = [arg.replace("${VNX_HOME}", str(fake_vnx_home)) for arg in argv]
     static_path = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
     env = {"HOME": str(fake_home), "PATH": static_path}
 
     proc = subprocess.run(
-        ["/bin/bash", "-c", resolved_script],
+        resolved_argv,
         capture_output=True, text=True, env=env, timeout=10, check=False,
     )
 
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    assert proc.stdout.strip() == str(codex_stub), (
+    job_path, found = proc.stdout.splitlines()
+    composed = job_path.split(os.pathsep)
+    assert composed[:-1] == static_path.split(os.pathsep), (
+        "the launcher must append, never prepend: every declared static entry "
+        f"stays ahead of the local bin -- job PATH={job_path!r}"
+    )
+    assert composed[-1] == str(local_bin), (
+        "the job's own process PATH must end in the user's real ~/.local/bin "
+        f"-- job PATH={job_path!r}"
+    )
+    # A host that already has a codex earlier on the declared PATH shadows the
+    # fixture (measured: /opt/homebrew/bin/codex); the append above is still what
+    # makes ~/.local/bin visible to the job. Where nothing shadows it, the
+    # fixture is what the job resolves.
+    assert found == (shutil.which("codex", path=static_path) or str(codex_stub)), (
         "the runner process, launched exactly as launchd would launch it "
-        "(bash -c over the plist's own ProgramArguments string, with only "
+        "(the plist's own ProgramArguments: the pinned launcher, with only "
         "HOME and the declared static PATH set), could not resolve codex "
-        f"on PATH -- stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        f"on the job's PATH -- PATH={job_path!r} found={found!r}"
     )

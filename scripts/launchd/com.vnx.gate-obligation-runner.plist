@@ -68,9 +68,9 @@
     over them to expand a tilde — and there is no existing ${...}
     install-time substitution for a per-user home directory (only
     ${VNX_HOME}/${VNX_PROJECT_ID}, both project-scoped, are substituted by
-    vnx_cli/commands/init_cmd.py::_install_launchd_agent). The
-    ProgramArguments command IS run through /bin/bash -c, which performs
-    real shell expansion at RUN time — "$PATH:$HOME/.local/bin" above
+    vnx_cli/commands/init_cmd.py::_install_launchd_agent). The launcher the
+    ProgramArguments name below now runs IS a shell script, which performs
+    real shell expansion at RUN time — "$PATH:$HOME/.local/bin" there
     appends the user's actual local bin directory to the declared PATH
     using $HOME, which launchd sets for every user LaunchAgent regardless of
     what EnvironmentVariables declares (only PATH is overridden here).
@@ -81,16 +81,28 @@
     executable name that also exists in ~/.local/bin shadow the system
     version of the same name for every OTHER tool this job invokes (e.g. a
     ~/.local/bin/python3 silently taking over from the system python3 that
-    "exec python3 scripts/gate_obligation_runner.py" below actually depends
-    on). codex itself does not exist anywhere in the static PATH above, so
-    appending finds it exactly as reliably as prepending would, with zero
-    shadowing risk for every other binary on the declared static PATH.
+    the launcher's own "exec python3" actually depends on). codex itself
+    does not exist anywhere in the static PATH above, so appending finds it
+    exactly as reliably as prepending would, with zero shadowing risk for
+    every other binary on the declared static PATH.
+
+    Pinned start (fleet-release-and-rollout PR-3): this job no longer starts
+    from the tree the plist was rendered in. Each start runs
+    scripts/launchd/vnx_pinned_launcher.sh from ${VNX_HOME}; that launcher
+    resolves the project's .vnx-version (via ~/.vnx/projects.json) and
+    starts the runner from the pinned release instead — only a project with
+    no pin keeps running ${VNX_HOME}. A run in progress is never switched:
+    the next start resolves again. A pin that is not installed exits 78 with
+    one stderr line naming project, pin and the directory searched; there is
+    no silent fallback. Undo: revert the commit and run
+    `bash scripts/launchd/reload_plist.sh com.vnx.gate-obligation-runner`.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; PATH="$PATH:$HOME/.local/bin" exec python3 scripts/gate_obligation_runner.py</string>
+    <string>${VNX_HOME}/scripts/launchd/vnx_pinned_launcher.sh</string>
+    <string>${VNX_PROJECT_ID}</string>
+    <string>scripts/gate_obligation_runner.py</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
