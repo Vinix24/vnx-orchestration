@@ -4,8 +4,9 @@ Every test builds a real bare ``origin``, a real main checkout and real ``git
 worktree`` trees under ``tmp_path``, then runs the real functions: the bundle is
 proved by cloning it, and every allowlist case by dirtying a real tree. The
 allowlist excuses one thing only (WT-2a1b): an IGNORED entry inside a throwaway
-cache directory named by ``THROWAWAY_IGNORED_DIRS``, and never one below
-``.vnx-data/`` or ``.git/``. Every other status entry — tracked, staged,
+cache DIRECTORY named by ``THROWAWAY_IGNORED_DIRS``, and never one below
+``.vnx-data/`` or ``.git/``; a regular file that only shares a cache directory's
+name is not inside one and stays named. Every other status entry — tracked, staged,
 untracked or unmerged, whatever its path — is a named problem, and so is a
 populated submodule, which carries commits no superproject bundle can hold.
 """
@@ -313,6 +314,57 @@ def test_an_ignored_node_modules_directory_is_throwaway(fx: Fixture) -> None:
     assert ws._status_entries(wt) == [("!", "node_modules/")]
 
 
+def test_an_ignored_file_named_like_a_cache_directory_still_blocks(
+        ignored_otherwise) -> None:
+    """A regular file sharing the directory's name is not that directory.
+
+    The ignore rule ``node_modules`` (no trailing slash) also catches a FILE
+    called ``node_modules``, and git prints it without the ``/`` that marks a
+    directory entry. Nothing bundles an ignored file, so excusing it would
+    approve losing it (codex round 2 on the WT-2a1b allowlist).
+    """
+    fx = ignored_otherwise("node_modules\n")
+    wt = fx.worktree()
+    (wt / "node_modules").write_text("a file, not a tree of modules\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "node_modules")], ws._status_entries(wt)
+    assert result.uncovered == ["node_modules"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "node_modules"]
+
+
+def test_an_ignored_file_named_like_a_nested_cache_directory_still_blocks(
+        ignored_otherwise) -> None:
+    """The same for ``pkg/__pycache__`` as a file: the leaf is not a directory."""
+    fx = ignored_otherwise("__pycache__\n")
+    wt = fx.worktree()
+    (wt / "pkg").mkdir()
+    (wt / "pkg" / "__pycache__").write_text("a file, not bytecode\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "pkg/__pycache__")], ws._status_entries(wt)
+    assert result.uncovered == ["pkg/__pycache__"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__"]
+
+
+def test_a_file_inside_an_ignored_node_modules_directory_is_throwaway(
+        ignored_otherwise) -> None:
+    """The file entry inside the ignored directory, named on its own, is excused."""
+    fx = ignored_otherwise("node_modules/*\n")
+    wt = fx.worktree()
+    (wt / "node_modules").mkdir()
+    (wt / "node_modules" / "index.js").write_text(
+        "module.exports = 1\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "node_modules/index.js")], ws._status_entries(wt)
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+
+
 def test_an_ignored_file_inside_an_allowlisted_directory_is_throwaway(
         ignored_otherwise) -> None:
     """A file entry, not a directory entry: the ignore rule names the file."""
@@ -364,6 +416,21 @@ def test_a_cache_directory_below_dot_git_is_never_throwaway() -> None:
     """git never prints ``.git`` in a status entry; the rule holds anyway."""
     assert ws._is_throwaway_ignored("!", ".git/__pycache__/x.pyc") is False
     assert ws._is_throwaway_ignored("!", "pkg/__pycache__/x.pyc") is True
+
+
+def test_a_leaf_that_is_no_directory_is_never_throwaway() -> None:
+    """Only DIRECTORY components match the allowlist (codex round 2, WT-2a1b).
+
+    A trailing ``/`` is git's marker for a directory entry; a leaf without it is
+    a regular file, whatever its name.
+    """
+    assert ws._is_throwaway_ignored("!", "node_modules") is False
+    assert ws._is_throwaway_ignored("!", "pkg/__pycache__") is False
+    assert ws._is_throwaway_ignored("!", "x/node_modules") is False
+    assert ws._is_throwaway_ignored("!", "node_modules/") is True
+    assert ws._is_throwaway_ignored("!", "pkg/__pycache__/") is True
+    assert ws._is_throwaway_ignored("!", ".vnx-data/node_modules") is False
+    assert ws._is_throwaway_ignored("!", ".vnx-data/node_modules/") is False
 
 
 def test_an_ignored_build_directory_still_blocks(fx: Fixture) -> None:

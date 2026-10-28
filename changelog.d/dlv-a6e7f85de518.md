@@ -7,3 +7,8 @@
   staged, untracked or unmerged entry blocks whatever its path, an ignored `.vnx-data/` entry blocks
   (its own note file or a cache directory inside it), and so does an ignored `build/`. No caller, CLI
   flag or removal is added; submodule bundling (OI-2411) is still open.
+- Worktree salvage (WT-2a1b, round 2): `verify()` now matches `THROWAWAY_IGNORED_DIRS` only against
+  DIRECTORY components of an ignored status entry — every component but the last, plus the last only
+  when git marks it a directory with a trailing `/`. An ignored regular FILE that merely shares a cache
+  directory name (`node_modules`, `pkg/__pycache__`) stays uncovered and is named, because no bundle
+  carries an ignored file and approving its loss would lose unpreserved data.

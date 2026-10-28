@@ -5,9 +5,10 @@
 nothing else — ``git status --porcelain=v2 -z --untracked-files=all
 --ignored=matching --ignore-submodules=none`` names no entry this salvage does
 not cover (tracked, staged, untracked, submodule or unmerged; an IGNORED entry
-is covered only inside a throwaway cache directory from
+is covered only inside a throwaway cache DIRECTORY from
 :data:`THROWAWAY_IGNORED_DIRS` and never below ``.vnx-data/`` or ``.git/`` —
-WT-2a1b, OI-2417), every gitlink whose checkout exists is named even when it is
+WT-2a1b, OI-2417; a regular file that only shares a cache directory's name is
+never covered), every gitlink whose checkout exists is named even when it is
 clean (a submodule keeps its commits in its own object store, so no
 superproject bundle can carry them; nothing here classifies or excuses one —
 submodule bundling is OI-2411), a gitlink whose checkout was never made is not
@@ -41,7 +42,8 @@ _PATH_FIELD = {"1": 8, "2": 9, "u": 10, "?": 1, "!": 1}  # spaces before the pat
 _HEADER_LIMIT = 1 << 20  # a bundle header may never end; bound the read
 # Directory names whose IGNORED content is throwaway (WT-2a1b, OI-2417): caches
 # a worker's tree fills on its own and nobody writes by hand. A status entry on
-# this list is the only entry a removal may ignore.
+# this list is the only entry a removal may ignore, and only as a DIRECTORY
+# component: a regular file named ``node_modules`` is not one.
 THROWAWAY_IGNORED_DIRS = (
     "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules",
 )
@@ -113,22 +115,40 @@ def _status_entries(worktree_path: Path) -> list[tuple[str, str]]:
     return entries
 
 
+def _directory_components(path: str) -> list[str]:
+    """The path's DIRECTORY components; a leaf that is a plain file is not one.
+
+    Git marks a directory entry with a trailing ``/`` in porcelain v2, and only
+    then is the last name a directory: ``node_modules/`` has one directory
+    component, ``node_modules`` (a regular file that merely shares the name)
+    has none.
+    """
+    # ``pkg/x`` -> ["pkg"] and ``pkg/`` -> ["pkg"] (its empty last field is git's
+    # directory marker, not a name); ``x`` -> [] (a leaf without the marker is a
+    # regular file, so no component of it is a directory).
+    return path.split("/")[:-1]
+
+
 def _is_throwaway_ignored(kind: str, path: str) -> bool:
     """Whether one status entry is a throwaway cache this salvage may ignore.
 
-    Only an IGNORED entry qualifies, and only when a component of its path is a
-    name from :data:`THROWAWAY_IGNORED_DIRS` that is not itself below a
-    protected root: ``pkg/__pycache__/x.pyc`` is throwaway, the same path below
-    ``.vnx-data/`` or ``.git/`` is not. A tracked, untracked or unmerged entry
-    never qualifies, whatever its path (WT-2a1b, OI-2417).
+    Only an IGNORED entry qualifies, and only when a DIRECTORY component of its
+    path is a name from :data:`THROWAWAY_IGNORED_DIRS` that is not itself below
+    a protected root: ``pkg/__pycache__/x.pyc`` is throwaway, the same path
+    below ``.vnx-data/`` or ``.git/`` is not. A regular file that only shares
+    an allowlisted directory's name — ``node_modules`` the file, not the
+    directory, which git prints without a trailing ``/`` — is never throwaway:
+    nothing bundles an ignored file, so excusing it would approve losing it. A
+    tracked, untracked or unmerged entry never qualifies, whatever its path
+    (WT-2a1b, OI-2417).
     """
     if kind != "!":
         return False
-    components = path.split("/")
-    for index, component in enumerate(components):
+    directories = _directory_components(path)
+    for index, component in enumerate(directories):
         if component not in THROWAWAY_IGNORED_DIRS:
             continue
-        if _PROTECTED_IGNORE_ROOTS.intersection(components[:index]):
+        if _PROTECTED_IGNORE_ROOTS.intersection(directories[:index]):
             continue  # a throwaway name inside evidence is not throwaway itself
         return True
     return False
