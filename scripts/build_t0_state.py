@@ -121,6 +121,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from health_status import worst_status  # noqa: E402
+from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from vnx_paths import ensure_env, project_id_from_state_dir  # noqa: E402
 from contract_invalid_ledger import build_contract_invalid_summary as _build_contract_invalid_summary_counts  # noqa: E402
 from receipt_outcome import (  # noqa: E402
@@ -744,7 +745,7 @@ def _build_queues(dispatch_dir: Path, state_dir: Path) -> Dict[str, Any]:
                     if receipt_pid and receipt_pid != _receipts_project_id:
                         continue
                 event = e.get("event_type") or e.get("event", "")
-                if event not in ("task_complete", "quality_gate_verification"):
+                if event not in COMPLETION_EVENT_TYPES and event != "quality_gate_verification":
                     continue
                 ts_raw = e.get("timestamp")
                 if not ts_raw:

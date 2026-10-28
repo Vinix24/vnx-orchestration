@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+from event_outcome_semantics import COMPLETION_EVENT_TYPES
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -33,9 +35,10 @@ from typing import Any, Dict, List, Optional, Set
 
 DISPATCH_STATE_DIRS = ("active", "completed", "pending", "staging", "rejected")
 
-# Terminal receipt event types that confirm a dispatch finished
-RECEIPT_TERMINAL_EVENTS = frozenset({
-    "task_complete",
+# Terminal receipt event types that confirm a dispatch finished. ADR-045 §2:
+# the completion family (dispatch_finished next to task_complete) plus the
+# legacy literals the history carries.
+RECEIPT_TERMINAL_EVENTS = COMPLETION_EVENT_TYPES | frozenset({
     "task_finished",
     "done",
     "completed",
