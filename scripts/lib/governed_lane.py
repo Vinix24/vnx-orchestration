@@ -84,6 +84,7 @@ from gate_lane_contract import (
     lane_deadline_detail,
     reviews_with_tools,
 )
+from gate_status import EVIDENCE_SOURCE_LIVE, EVIDENCE_SOURCE_REPROCESSED
 from gate_artifacts import _compute_contract_hash
 from gate_prompt import build_review_prompt, merge_scan_findings, scan_diff_for_instructions
 from gate_report_recovery import (
@@ -1035,7 +1036,7 @@ def _evidence_pair(state: GateRunState, facts: VerdictFacts) -> "Tuple[str, str]
 
 def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, report_path: str) -> dict:
     """Phase 4c: the result record — one shape for both gates, names taken from the register row."""
-    return {
+    record = {
         "gate": state.row.gate,
         "pr_id": str(state.args.pr),
         "pr_number": state.pr_number,
@@ -1059,8 +1060,16 @@ def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, 
         "residual_risk": facts.residual,
         "failure_reason": facts.lifted_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "evidence_source": "reprocessed" if state.args.reprocess else "live",
+        "evidence_source": (
+            EVIDENCE_SOURCE_REPROCESSED if state.args.reprocess else EVIDENCE_SOURCE_LIVE
+        ),
     }
+    if _k2b_books_gate_run(state):
+        # K2b booked this attempt's line before the record was built (it holds the
+        # lane's own usage report). The record names that owner so K3, at the
+        # outcome commit, never books the same attempt a second time.
+        record[harness_run_cost.COST_BOOKED_FIELD] = harness_run_cost.COST_BOOKED_BY_K2B
+    return record
 
 
 def _stamp_and_persist(state: GateRunState, record: dict) -> "Optional[int]":
@@ -1120,6 +1129,18 @@ def _emit_outcome(state: GateRunState, record: dict) -> int:
     return 2 if status == "fail" else 1
 
 
+def _k2b_books_gate_run(state: GateRunState) -> bool:
+    """True when this run's line is K2b's: a lane that reports its own usage, live.
+
+    One rule, read by the BOOKING (:func:`_book_gate_cost`) and by the RECORD
+    (:func:`_build_record`, which stamps the owner on it), so the two writers can
+    never disagree about which one owns this attempt. A ``--reprocess`` run calls
+    no model at all, and a row with no ``cost_provider`` (glm, until K3) has no
+    CLI line to book.
+    """
+    return state.row.cost_provider is not None and not getattr(state.args, "reprocess", None)
+
+
 def _book_gate_cost(state: GateRunState) -> None:
     """Book this gate run's own cost-ledger line (K2b) for a lane that reports its own usage.
 
@@ -1128,11 +1149,13 @@ def _book_gate_cost(state: GateRunState) -> None:
     ``unavailable:kimi_cli_no_usage``, never a zero. Booking is fail-open
     (``record_cli_run`` logs the refusal) and this function never raises: a
     verdict is never the ledger's to fail. A ``--reprocess`` run calls no model
-    and a row with no ``cost_provider`` (glm, until K3) books nothing either.
+    and a row with no ``cost_provider`` (glm, until K3) books nothing either —
+    exactly the predicate the record's own owner marker reads
+    (:func:`_k2b_books_gate_run`).
     """
-    provider = state.row.cost_provider
-    if provider is None or getattr(state.args, "reprocess", None):
+    if not _k2b_books_gate_run(state):
         return
+    provider = state.row.cost_provider
     ended = datetime.fromtimestamp(state.window_end, tz=timezone.utc)
     started = datetime.fromtimestamp(state.window_start, tz=timezone.utc) if state.window_start else ended
     run = harness_run_cost.cli_run(

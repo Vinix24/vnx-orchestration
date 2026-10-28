@@ -147,6 +147,16 @@ ATTEMPT_OUTCOMES = frozenset({ATTEMPT_REFUSED, ATTEMPT_RAN, ATTEMPT_NOT_EXECUTAB
 # lanes, the two own-key harness lanes, and the two flat CLI lanes K2b measures.
 LANE_BILLING: Mapping[str, str] = {**BILLING_BY_PROVIDER, **CLI_BILLING}
 
+# The record field a K2b booking stamps and K3 reads (K3 r2). K2b books a
+# codex/kimi attempt where the RUN ended, holding the only usage report the lane
+# gives; the record that outcome is written into says so, because K3 otherwise
+# has no way to tell an attempt K2b covered from one that ended before K2b's
+# booking path ran. The marker names the OWNER of the attempt's line, not the
+# success of the write: a K2b booking that the ledger refused is still K2b's
+# attempt, and K3 booking it again would only double a line if the retry landed.
+COST_BOOKED_FIELD = "cost_ledger_booked_by"
+COST_BOOKED_BY_K2B = "k2b"
+
 # The door's own refusal markers, in the order the reason is preferred: the
 # specific budget refusal outranks the generic delivery refusal it is carried in.
 _DOOR_REFUSAL_MARKERS: Tuple[Tuple[str, str], ...] = (

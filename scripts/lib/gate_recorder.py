@@ -2684,8 +2684,13 @@ def record_failure_simple(
     request_payload: Dict[str, Any],
     requests_dir: Path,
     results_dir: Path,
+    extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Record a simple failure (artifact materialization errors)."""
+    """Record a simple failure (artifact materialization errors).
+
+    ``extra`` is :func:`record_failure`'s: record fields the caller measured
+    beside the failure (K3's cost-booking owner marker is the one today).
+    """
     return record_failure(
         gate=gate, pr_number=pr_number, pr_id=pr_id,
         result={
@@ -2698,4 +2703,5 @@ def record_failure_simple(
         request_payload=request_payload,
         requests_dir=requests_dir,
         results_dir=results_dir,
+        extra=extra,
     )

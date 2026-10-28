@@ -17,8 +17,10 @@ from governance_receipts import utc_now_iso
 import final_answer_verdict
 import gate_depth
 import gate_recorder
+import harness_run_cost
 from gate_lane_contract import canonical_review_verdict
 from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
+from gate_status import EVIDENCE_SOURCE_LIVE
 from final_prompt_integrity import final_prompt_sha_for_dispatch
 from codex_parser import (
     VERDICT_READABLE_BINARIES,
@@ -342,6 +344,7 @@ def _refuse_without_verdict(
     duration_seconds: float, request_payload: Dict[str, Any],
     requests_dir: Path, results_dir: Path,
     recovery: Optional[final_answer_verdict.FinalAnswerVerdict],
+    cost_extra: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Book a run that wrote no verdict as ``unavailable`` (OI-1767, OI-1770).
 
@@ -355,6 +358,9 @@ def _refuse_without_verdict(
     R6: when the final answer was consulted and gave no verdict, the detail
     says why after the original text, so an operator sees whether the run was
     refused, carried none, or left nothing to read.
+
+    ``cost_extra`` is the record's own cost-booking owner marker, when the
+    attempt this refusal ends was already booked (K3 r2).
     """
     logger.warning(
         "gate_artifacts: REFUSING a %s run with no parseable verdict block "
@@ -382,6 +388,7 @@ def _refuse_without_verdict(
         request_payload=request_payload,
         requests_dir=requests_dir,
         results_dir=results_dir,
+        extra=cost_extra,
     )
 
 
@@ -397,7 +404,7 @@ def _stamp_verdict_source(
     """
     if recovery is not None and recovery.recovered:
         result_payload["verdict_source"] = final_answer_verdict.VERDICT_SOURCE_FINAL_ANSWER
-        result_payload["evidence_source"] = "live"
+        result_payload["evidence_source"] = EVIDENCE_SOURCE_LIVE
     elif raw_verdict is not None:
         result_payload["verdict_source"] = final_answer_verdict.VERDICT_SOURCE_REPORT
 
@@ -576,6 +583,33 @@ def _stamp_run_settings(
         result_payload["timeout_seconds"] = request_payload["timeout_seconds"]
 
 
+def _record_run_failure(
+    *, gate: str, pr_number: Optional[int], pr_id: str, reason: str, reason_detail: str,
+    stdout: str, duration_seconds: float, request_payload: Dict[str, Any],
+    requests_dir: Path, results_dir: Path, extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Book this run's execution failure with the output it produced, and return the record.
+
+    One shape for the guards that refuse a run before it can be booked as a
+    verdict (a foreign dispatch id, a degenerate run): the failure record plus
+    the caller's ``extra`` (K3's cost-booking owner marker rides there).
+    """
+    return gate_recorder.record_failure(
+        gate=gate, pr_number=pr_number, pr_id=pr_id,
+        result={
+            "reason": reason,
+            "reason_detail": reason_detail,
+            "duration_seconds": duration_seconds,
+            "partial_output_lines": len(stdout.splitlines()),
+            "runner_pid": os.getpid(),
+        },
+        request_payload=request_payload,
+        requests_dir=requests_dir,
+        results_dir=results_dir,
+        extra=extra,
+    )
+
+
 def materialize_artifacts(
     *,
     gate: str,
@@ -588,6 +622,7 @@ def materialize_artifacts(
     results_dir: Path,
     reports_dir: Path,
     final_answer_dir: Optional[Path] = None,
+    cost_booked_by: str = "",
 ) -> Dict[str, Any]:
     """Atomic artifact materialization (GATE-11/12).
 
@@ -601,12 +636,20 @@ def materialize_artifacts(
     verdict of the run's final answer is booked instead, appended to the report
     at ``report_path`` and marked ``verdict_source: final_answer``. The vertex
     and subprocess strategies pass nothing and keep their behaviour.
+
+    ``cost_booked_by`` (K3 r2): the producer that ALREADY booked this attempt's
+    cost-ledger line (K2b for the codex gate), or "" when nobody has. Every
+    record this function writes — the success record and each failure record on
+    the way — carries it, so the outcome commit's K3 booking skips the attempt
+    instead of booking a second line for the same run.
     """
     _fail = dict(
         gate=gate, pr_number=pr_number, pr_id=pr_id,
         request_payload=request_payload,
         requests_dir=requests_dir, results_dir=results_dir,
     )
+    _cost_extra = {harness_run_cost.COST_BOOKED_FIELD: cost_booked_by} if cost_booked_by else None
+    _fail["extra"] = _cost_extra
 
     # OI-1725 guard, before ANY artifact is written: a harness-lane gate whose
     # dispatch-id is not gate-eigen would book the builder's own report as its
@@ -615,18 +658,11 @@ def materialize_artifacts(
         gate, request_payload.get("dispatch_id"),
     )
     if identity_error:
-        return gate_recorder.record_failure(
+        return _record_run_failure(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
-            result={
-                "reason": "gate_dispatch_identity_invalid",
-                "reason_detail": identity_error,
-                "duration_seconds": duration_seconds,
-                "partial_output_lines": len(stdout.splitlines()),
-                "runner_pid": os.getpid(),
-            },
-            request_payload=request_payload,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
+            reason="gate_dispatch_identity_invalid", reason_detail=identity_error,
+            stdout=stdout, duration_seconds=duration_seconds, request_payload=request_payload,
+            requests_dir=requests_dir, results_dir=results_dir, extra=_cost_extra,
         )
 
     report_path = request_payload.get("report_path", "")
@@ -714,21 +750,14 @@ def materialize_artifacts(
             "gate_artifacts: REFUSING a degenerate %s run pr=%s — %s",
             gate, pr_id or pr_number, gate_depth.degenerate_detail(depth),
         )
-        return gate_recorder.record_failure(
+        return _record_run_failure(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
-            result={
-                "reason": "gate_execution_degenerate",
-                "reason_detail": gate_depth.degenerate_detail(depth),
-                "duration_seconds": duration_seconds,
-                "partial_output_lines": len(stdout.splitlines()),
-                "runner_pid": os.getpid(),
-            },
-            request_payload=request_payload,
-            requests_dir=requests_dir,
-            results_dir=results_dir,
+            reason="gate_execution_degenerate", reason_detail=gate_depth.degenerate_detail(depth),
+            stdout=stdout, duration_seconds=duration_seconds, request_payload=request_payload,
+            requests_dir=requests_dir, results_dir=results_dir,
             extra={
-                "execution_depth": depth.to_dict(),
-                "degenerate_report_path": str(report_file),
+                "execution_depth": depth.to_dict(), "degenerate_report_path": str(report_file),
+                **(_cost_extra or {}),
             },
         )
 
@@ -771,7 +800,7 @@ def materialize_artifacts(
     if _verdict_is_required(gate) and not extract_verdict_block(stdout) and not recovered:
         return _refuse_without_verdict(
             gate, pr_number, pr_id, stdout, duration_seconds, request_payload,
-            requests_dir, results_dir, recovery,
+            requests_dir, results_dir, recovery, cost_extra=_cost_extra,
         )
 
     contract_hash = _compute_contract_hash(request_payload, gate)
@@ -820,6 +849,7 @@ def materialize_artifacts(
         "execution_depth": depth.to_dict(),
         "recorded_at": now,
     }
+    result_payload.update(_cost_extra or {})
     if partial:
         result_payload["reason"] = "diff_truncated"
         result_payload["reason_detail"] = coverage_gap

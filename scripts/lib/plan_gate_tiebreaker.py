@@ -964,12 +964,24 @@ def _default_tiebreaker_dispatcher(
 
 
 def _lane_identity(provider: str, model: Optional[str]) -> str:
-    """The registry key the lane runs for *model* (ADR-036), or *model* when no resolver names one."""
+    """The registry key the lane runs for *model* (ADR-036), or *model* when no resolver names one.
+
+    A resolver that raises never fails the tiebreaker — a decision is not the
+    ledger's to lose — but it is never silent either: one WARNING names the
+    provider, the requested model and the exception, so a broken registry is
+    observable instead of looking like a lane that simply ran the requested
+    model.
+    """
     try:
         import harness_run_cost  # noqa: PLC0415 — sibling module
 
         return harness_run_cost.lane_model(provider, model)
-    except Exception:  # vnx-silent-except: an unnameable identity never fails the tiebreaker
+    except Exception as exc:  # vnx-silent-except: logged, fail-open — an unnameable identity never fails the tiebreaker
+        logging.getLogger(__name__).warning(
+            "plan_gate_tiebreaker: lane identity for provider=%s model=%r fell back to the "
+            "requested model: %s: %s",
+            provider, model, type(exc).__name__, exc, exc_info=True,
+        )
         return (model or "").strip()
 
 

@@ -152,6 +152,16 @@ def canonical_status(result: Dict[str, Any]) -> str:
 # check lets these straight through; they must count as "no evidence" too.
 _EVIDENCE_SENTINEL_VALUES = frozenset({"unknown", "none", "null"})
 
+# Provenance of a review record (ADR-046): where its verdict came from. A
+# ``live`` record is a run against this head; a ``reprocessed`` one was rebuilt
+# from a report an EARLIER run wrote, with no model call (``--reprocess`` in
+# ``governed_lane``). One vocabulary, read by the writers and by the cost
+# ledger, so ``reprocessed`` never books a second attempt for a run that
+# already ended (K3).
+EVIDENCE_SOURCE_FIELD = "evidence_source"
+EVIDENCE_SOURCE_LIVE = "live"
+EVIDENCE_SOURCE_REPROCESSED = "reprocessed"
+
 
 def _is_populated_evidence_field(value: Any) -> bool:
     """True when ``value`` is a real, populated evidence-field string.

@@ -99,6 +99,7 @@ import gate_obligations
 import gate_recorder
 from atomic_io import slot_lock
 from gate_status import (
+    EVIDENCE_SOURCE_FIELD, EVIDENCE_SOURCE_REPROCESSED,
     FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, REQUEST_TERMINAL_STATUSES, UNAVAILABLE_STATES,
     canonical_status, is_pass,
 )
@@ -380,10 +381,16 @@ def commit_gate_outcome(
     return record, True
 
 
-# K3: the two gates whose runs K2b already books at the run's own measured end —
-# codex `exec --json` in gate_runner and kimi's wire harvest in governed_lane.
-# K3 never books them a second time; their line belongs to that path.
-GATES_BOOKED_BY_K2B = frozenset({"codex_gate", "kimi_gate"})
+# K3: the record field K2b stamps on an attempt whose line it booked at the run's
+# own measured end — codex `exec --json` in gate_runner, kimi's wire harvest in
+# governed_lane. Decided PER ATTEMPT, never per gate: codex/kimi attempts that end
+# before that path runs (a missing binary, a refused provider switch, an
+# unreachable worktree) carry no marker and get their own line from K3, which is
+# the only line they ever get.
+def _k2b_booked_this_attempt(record: Mapping[str, Any]) -> bool:
+    """True when K2b's path owns this attempt's ledger line (positive marker only)."""
+    harness_run_cost, _gate_lane_contract = _cost_modules()
+    return record.get(harness_run_cost.COST_BOOKED_FIELD) == harness_run_cost.COST_BOOKED_BY_K2B
 
 # The execution-failure reasons that name a run which provably never started.
 # Its line is a confirmed zero (ADR-043), not an unknown.
@@ -397,32 +404,37 @@ _NEVER_STARTED_REASONS = frozenset({
 def _gate_attempt_identity(
     record: Mapping[str, Any], gate: str,
 ) -> Optional[tuple]:
-    """``(provider, model)`` as the runner stamped them, or from the registry for a harness gate.
+    """``(provider, model)`` as the runner stamped them, or from the registry for a model lane.
 
     The identity a run is booked with is the one the RUNNER held: ``provider`` and
     ``model`` land on the record when the harness lane dispatched it
     (``gate_artifacts._stamp_run_settings``, ``governed_lane._build_record``, and
     ``gate_recorder._failure_payload``). A record that carries none — a
     ``not_executable`` gate, a record written before the stamp existed — falls
-    back to the registry row and the gate's registered model, which is the
-    identity the runner WOULD have launched (ADR-036). ``model`` is never read
-    from the model's own report text, and a gate with no model call at all
-    (``ci_gate``, ``wiring_gate``, a ``gh`` read) names no run: no line.
+    back to the registered provider and the gate's own model resolution
+    (``gate_lane_contract.gate_model``), which is the identity the runner WOULD
+    have launched (ADR-036): a harness-lane row's registered model, or codex's
+    launch model. ``model`` is never read from the model's own report text, and a
+    provider outside the model lanes (``ci_gate``, ``wiring_gate``, a ``gh``
+    read, a gemini PATH binary) names no run: no line.
     """
     harness_run_cost, gate_lane_contract = _cost_modules()
     provider_row = gate_recorder.resolve_gate_provider(gate)
-    is_harness = provider_row is not None and provider_row[0] == gate_recorder.GATE_PROVIDER_HARNESS_LANE
     provider = str(record.get("provider") or "").strip()
     model = str(record.get("model") or "").strip()
     if not provider:
-        if not is_harness:
+        if provider_row is None:
             return None
         provider = provider_row[1]
     if provider not in harness_run_cost.LANE_BILLING:
         return None
     if not model:
-        if not is_harness:
-            return None
+        # The registry's answer for this gate, which is the identity the runner
+        # WOULD have launched: a harness-lane row's registered model, or codex's
+        # launch model (env override, else ``openai.default_model``). This is
+        # what lets an attempt that ended BEFORE its run booked — ``codex_gate``
+        # ``not_executable`` on a missing binary, say — still book its one
+        # confirmed-zero line.
         model = (gate_lane_contract.gate_model(gate) or "").strip()
     if not model:
         return None
@@ -483,11 +495,26 @@ def _book_gate_attempt(
 ) -> None:
     """Book one line for the attempt this gate outcome ends (K3), or none when it names no model run.
 
+    Three records are not this function's to book, each for its own reason: a
+    ``--reprocess`` record ends no run at all; an attempt K2b's own path already
+    booked carries K2b's owner marker; and a record that names no model run
+    (``ci_gate``, a ``gh`` read) has no line to write. The K2b skip is per
+    ATTEMPT, read off the record, never per gate name — an attempt that ended
+    before K2b's booking path ran carries no marker and gets its one line here.
+
     Fail-open by construction: :func:`harness_run_cost.record_attempt_run` returns
     the refusal and logs one WARNING, so a broken ledger leaves the verdict, its
     receipt, its request end and this function's caller exactly as they were.
     """
-    if gate in GATES_BOOKED_BY_K2B:
+    if record.get(EVIDENCE_SOURCE_FIELD) == EVIDENCE_SOURCE_REPROCESSED:
+        # `--reprocess` rebuilds a record from a report an EARLIER run wrote and
+        # calls no model at all: this commit ends no run, and the original
+        # attempt's line stays the only one.
+        logger.debug("gate_outcome: %s at %s is reprocessed evidence; no cost line", gate, result_path)
+        return
+    if _k2b_booked_this_attempt(record):
+        # K2b booked this attempt where the run ended, holding the lane's own
+        # usage report. Booking it again here would make it the next attempt.
         return
     state_dir = gate_recorder._state_dir_from_result_path(result_path)
     if state_dir is None:

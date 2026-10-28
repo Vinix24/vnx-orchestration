@@ -661,6 +661,12 @@ def _book_gate_run_cost(
     producer = _COST_PRODUCERS_BY_GATE.get(gate)
     if producer is None:
         return
+    # K3 r2: from here on this attempt's line is K2b's, so the record that
+    # carries the outcome says so and the outcome commit never books it again.
+    # Marked even where K2b's own booking is refused (no resolvable model):
+    # K2b's path owns the attempt either way, and a second writer would produce
+    # a duplicate the moment its own retry landed.
+    result[harness_run_cost.COST_BOOKED_FIELD] = harness_run_cost.COST_BOOKED_BY_K2B
     run_ref = pr_id or (f"pr-{pr_number}" if pr_number is not None else "pr-unknown")
     try:
         model = _codex_gate_model(request_payload)
@@ -1046,19 +1052,24 @@ class GateRunner:
             gate=gate, request_payload=request_payload, result=result,
             pr_number=pr_number, pr_id=pr_id, state_dir=self._state_dir,
         )
+        cost_booked_by = str(result.get(harness_run_cost.COST_BOOKED_FIELD) or "")
 
         if result["status"] == "failed":
+            cost_extra = (
+                {harness_run_cost.COST_BOOKED_FIELD: cost_booked_by} if cost_booked_by else None
+            )
             return _rec.record_failure(
                 gate=gate, pr_number=pr_number, pr_id=pr_id,
                 result=result, request_payload=request_payload,
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
+                extra=cost_extra,
             )
         return _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             stdout=result["stdout"], request_payload=request_payload,
             duration_seconds=result["duration_seconds"],
             requests_dir=self._requests_dir, results_dir=self._results_dir,
-            reports_dir=self._reports_dir,
+            reports_dir=self._reports_dir, cost_booked_by=cost_booked_by,
         )
 
     def _run_vertex_path(

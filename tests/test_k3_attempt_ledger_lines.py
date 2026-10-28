@@ -41,6 +41,9 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
 import cost_ledger  # noqa: E402
 import gate_outcome  # noqa: E402
 import gate_recorder  # noqa: E402
+import gate_runner  # noqa: E402
+import gate_status  # noqa: E402
+import harness_run_cost  # noqa: E402
 import plan_gate_panel as pgp  # noqa: E402
 import plan_gate_tiebreaker as pgt  # noqa: E402
 import review_cap_tiebreaker as rct  # noqa: E402
@@ -339,8 +342,6 @@ def test_review_cap_tiebreaker_books_one_line(env):
 
 
 def test_codex_gate_run_k2b_books_yields_one_line_not_two(env):
-    import harness_run_cost
-
     harness_run_cost.record_codex_run(
         harness_run_cost.cli_run(
             provider="codex", model="gpt-6-astra",
@@ -359,11 +360,158 @@ def test_codex_gate_run_k2b_books_yields_one_line_not_two(env):
         "report_path": "/tmp/x.md", "dispatch_id": f"pr-{PR + 8}",
         "blocking_findings": [], "provider": "codex", "model": "gpt-6-astra",
         "duration_seconds": 12.0, "recorded_at": RECORDED_AT,
+        # The field gate_runner's K2b path stamps on the record it writes.
+        harness_run_cost.COST_BOOKED_FIELD: harness_run_cost.COST_BOOKED_BY_K2B,
     }
     _commit(env, gate="codex_gate", record=record)
     lines = _lines(env)
     assert len(lines) == 1, f"K2b's line was booked twice: {[line['run_id'] for line in lines]}"
     assert lines[0]["provider"] == "codex"
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 5 (K3 round 2) — the three codex reproductions
+# ---------------------------------------------------------------------------
+
+
+def test_a_reprocessed_outcome_books_no_second_attempt_line(env):
+    """Codex r2 finding 1: committing a timed-out dispatch and then its reprocessed
+    outcome booked attempts ``:1`` AND ``:2`` for one execution. ``--reprocess``
+    reads a report an earlier run wrote and calls no model, so the first line stays
+    the only line."""
+    dispatch_id = f"glm-gate-pr{PR + 10}-1"
+    _commit(env, status="unavailable", record=_record(
+        "unavailable", pr_number=PR + 10, reason="timeout", dispatch_id=dispatch_id,
+    ))
+    first = _lines(env)
+    assert [line["run_id"] for line in first] == [f"vnx-dev:{GATE}:{dispatch_id}:1"]
+
+    _commit(env, record=_record(
+        pr_number=PR + 10, dispatch_id=dispatch_id,
+        evidence_source=gate_status.EVIDENCE_SOURCE_REPROCESSED,
+    ))
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [
+        f"vnx-dev:{GATE}:{dispatch_id}:1"
+    ], f"reprocessing booked another run: {[line['run_id'] for line in lines]}"
+
+
+def _codex_payload(pr_number: int) -> dict:
+    return {
+        "gate": "codex_gate", "status": "requested", "branch": BRANCH,
+        "pr_number": pr_number, "review_mode": "per_pr", "risk_class": "medium",
+        "changed_files": ["scripts/lib/gate_outcome.py"], "prompt": "Review this diff",
+        "report_path": "",
+    }
+
+
+def test_codex_attempt_ending_before_k2b_books_one_confirmed_zero(env, monkeypatch):
+    """Codex r2 finding 3a: a codex gate that returns ``not_executable`` before
+    ``_book_gate_run_cost`` (a missing binary) booked ZERO lines. It must book
+    exactly one confirmed zero — and only one: K2b never ran for it."""
+    monkeypatch.setattr("shutil.which", lambda binary: None)
+    runner = gate_runner.GateRunner(state_dir=env["state_dir"], reports_dir=env["reports_dir"])
+    pr_number = PR + 11
+    result = runner.run(
+        gate="codex_gate", request_payload=_codex_payload(pr_number),
+        pr_number=pr_number, pr_id=f"pr-{pr_number}",
+    )
+
+    assert (result["status"], result["reason"]) == ("not_executable", "provider_not_installed")
+    lines = _lines(env)
+    assert len(lines) == 1, f"expected one confirmed zero, got {[line['run_id'] for line in lines]}"
+    line = lines[0]
+    assert (line["provider"], line["model"], line["role"]) == ("codex", "gpt-6-astra", "review")
+    assert line["cost_source"] == "unavailable:not_executable"
+    assert list(line["tokens"].values()) == [0] * 5
+
+
+def test_codex_attempt_that_reaches_k2b_books_no_k3_line(env, monkeypatch, tmp_path):
+    """Codex r2 finding 3b: a codex attempt that DOES reach K2b's booking path gets
+    K2b's line only. K3 must not add a second line for the same run."""
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/bin/codex")
+    monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kwargs: tmp_path)
+    monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        gate_runner.GateRunner, "_run_with_stall_detection",
+        lambda self, **kwargs: {
+            "status": "failed", "reason": "timeout", "reason_detail": "deadline exceeded",
+            "stdout": "", "stderr": "", "duration_seconds": 30.0,
+            "partial_output_lines": 0, "runner_pid": 4242,
+        },
+    )
+    runner = gate_runner.GateRunner(state_dir=env["state_dir"], reports_dir=env["reports_dir"])
+    pr_number = PR + 12
+    runner.run(
+        gate="codex_gate", request_payload=_codex_payload(pr_number),
+        pr_number=pr_number, pr_id=f"pr-{pr_number}",
+    )
+
+    lines = _lines(env)
+    assert len(lines) == 1, f"K2b's line was booked twice: {[line['run_id'] for line in lines]}"
+    assert lines[0]["provider"] == "codex"
+    assert lines[0]["run_id"].endswith(":1")
+
+
+def test_codex_completed_run_keeps_k2b_line_through_the_artifact_writer(env, monkeypatch, tmp_path):
+    """The success writer (``materialize_artifacts``) must carry K2b's owner marker
+    onto the record it commits. If it did not, every completed codex run would
+    book its second line at the outcome commit."""
+    monkeypatch.setattr("shutil.which", lambda binary: "/usr/bin/codex")
+    monkeypatch.setenv("VNX_CODEX_HEADLESS_ENABLED", "1")
+    monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kwargs: tmp_path)
+    monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *args, **kwargs: None)
+    stream = (
+        Path(__file__).resolve().parent / "fixtures" / "gate_verdict"
+        / "pr-1869-codex_gate-bare-verdict.ndjson"
+    ).read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        gate_runner.GateRunner, "_run_with_stall_detection",
+        lambda self, **kwargs: {
+            "status": "completed", "stdout": stream, "stderr": "",
+            "duration_seconds": 12.0, "partial_output_lines": len(stream.splitlines()),
+            "exit_code": 0,
+        },
+    )
+    runner = gate_runner.GateRunner(state_dir=env["state_dir"], reports_dir=env["reports_dir"])
+    pr_number = PR + 13
+    payload = _codex_payload(pr_number)
+    payload["prompt"] = "Review this diff for correctness"
+    payload["report_path"] = str(env["reports_dir"] / "codex-k3-report.md")
+
+    result = runner.run(
+        gate="codex_gate", request_payload=payload, pr_number=pr_number, pr_id=f"pr-{pr_number}",
+    )
+
+    assert result["status"] == "completed"
+    assert result[harness_run_cost.COST_BOOKED_FIELD] == harness_run_cost.COST_BOOKED_BY_K2B
+    lines = _lines(env)
+    assert len(lines) == 1, f"a completed codex run booked {[line['run_id'] for line in lines]}"
+    assert lines[0]["provider"] == "codex"
+
+
+def test_lane_identity_logs_the_resolver_failure_and_falls_back(env, monkeypatch, caplog):
+    """Codex r2 finding 2: a resolver that raises inside ``_lane_identity`` was
+    swallowed silently. The fallback stays (fail-open), and it is now observable."""
+
+    def broken_resolver(provider, model):
+        raise OSError("model registry unreadable")
+
+    monkeypatch.setattr(harness_run_cost, "lane_model", broken_resolver)
+    with caplog.at_level(logging.WARNING, logger="plan_gate_tiebreaker"):
+        identity = pgt._lane_identity("deepseek-harness", "deepseek-v4-pro")
+
+    assert identity == "deepseek-v4-pro"
+    warnings = [
+        record for record in caplog.records
+        if record.levelno == logging.WARNING and "lane identity" in record.getMessage()
+    ]
+    assert len(warnings) == 1, [record.getMessage() for record in caplog.records]
+    message = warnings[0].getMessage()
+    assert "deepseek-harness" in message
+    assert "deepseek-v4-pro" in message
+    assert "model registry unreadable" in message
+    assert warnings[0].exc_info is not None
 
 
 # ---------------------------------------------------------------------------
