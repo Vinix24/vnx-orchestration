@@ -63,23 +63,27 @@ def _git(cwd: Path, args: "list[str]") -> "tuple[bool, str]":
 def _evidence(
     wt: Path, dirty_proof: "Optional[Callable[[], str]]" = None,
 ) -> "tuple[Optional[str], str, str]":
-    """HEAD plus, for a dirty tree, the proof that its dirty state is preserved.
+    """HEAD plus, when a salvage proof is supplied, that proof's verdict.
 
     ``dirty_proof`` is only set by a caller that wrote and verified a salvage
-    (``--include-dirty``); it is re-run here, under the repository lock right
-    before the removal. Without one a change is ``dirty``, never a pass."""
+    (``--include-dirty``); it is re-run here on every sample, including the one
+    under the repository lock right before the removal. It runs whether or not
+    the ordinary status is clean: ``git status --porcelain`` does not list
+    ignored files, yet the salvage archives them, so a clean status is no
+    evidence that the archived ignored content is still the content on disk.
+    Without a proof nothing changes: a change is ``dirty``, never a pass."""
     ok, head = _git(wt, ["rev-parse", "HEAD"])
     if not ok or not head.strip():
         return None, REASON_GIT_UNMEASURABLE, f"HEAD: {head}"
     ok, status = _git(wt, ["status", "--porcelain"])
     if not ok:
         return None, REASON_GIT_UNMEASURABLE, f"status: {status}"
-    if status.strip():
-        if dirty_proof is None:
-            return None, REASON_DIRTY, "uncommitted or untracked changes"
+    if dirty_proof is not None:
         problem = dirty_proof()
         if problem:
             return None, REASON_SALVAGE_UNPROVEN, problem
+    elif status.strip():
+        return None, REASON_DIRTY, "uncommitted or untracked changes"
     return head.strip(), "", ""
 
 
@@ -208,9 +212,11 @@ def _assess(
     persisted, immediately before ``git worktree remove``. A result that keeps
     the tree therefore never had its lock dropped.
 
-    ``dirty_proof`` (``--include-dirty``) lets a dirty tree through only while
-    it keeps returning "": it runs on every evidence sample, including the one
-    under the repository lock, so later work keeps the tree."""
+    ``dirty_proof`` (``--include-dirty``) lets a tree through only while it
+    keeps returning "": it runs on every evidence sample, including the one
+    under the repository lock, and also when the ordinary status is clean (a
+    changed ignored file is invisible to ``git status --porcelain`` but not to
+    the salvage's ``verify``), so later work keeps the tree."""
     reason, detail = liveness_refusal(dispatch_id, root)
     if not reason:
         head, reason, detail = _evidence(wt, dirty_proof)
@@ -281,8 +287,10 @@ def guarded_remove(
     ``git worktree remove``; if that write does not land, nothing is removed.
     *dirty_proof* is only passed by a caller that has written and verified a
     salvage (the sweep's ``--include-dirty``): it re-proves that state on every
-    evidence sample, including the one under the repository lock, and any
-    problem it returns refuses the removal with ``salvage_unproven``.
+    evidence sample, including the one under the repository lock and also when
+    the ordinary status is clean (ignored files are archived too, and status
+    does not list them), and any problem it returns refuses the removal with
+    ``salvage_unproven``.
     """
     wt, root = Path(worktree_path), Path(repo_root)
     if not wt.exists():

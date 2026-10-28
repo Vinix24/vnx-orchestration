@@ -286,3 +286,118 @@ def test_the_launchd_template_carries_neither_flag():
     text = template.read_text(encoding="utf-8")
     assert "--max-age-days" not in text
     assert "--include-dirty" not in text
+
+
+# ---------------------------------------------------------------------------
+# 10. round-2 codex finding on #2354: a supplied proof runs on every sample,
+#     also when the ordinary status is clean. `git status --porcelain` does
+#     not list ignored files, yet the salvage archives them — an ignored file
+#     changed after the first verify left the status clean and the proof went
+#     unasked, so the removal deleted content the salvage did not hold.
+# ---------------------------------------------------------------------------
+
+IGNORED_FILE = "ignored.log"
+
+
+def _ignore_log_file(fx: Fixture) -> None:
+    """Name *IGNORED_FILE* in the base .gitignore so a later tree can carry it."""
+    (fx.repo / ".gitignore").write_text(f".vnx-data/\n{IGNORED_FILE}\n", encoding="utf-8")
+    git(fx.repo, "add", ".gitignore")
+    git(fx.repo, "commit", "-q", "-m", "ignore the local log")
+    git(fx.repo, "push", "-q", "origin", "main")
+
+
+def _candidate(fx: Fixture, tree: Path, dispatch_id: str) -> crw.Candidate:
+    return crw.Candidate(
+        path=tree,
+        dispatch_dir_id=dispatch_id,
+        branch=f"dispatch/{dispatch_id}",
+        head_sha=git(tree, "rev-parse", "HEAD"),
+        lock_reason=None,
+    )
+
+
+def test_an_ignored_file_changed_after_the_salvage_keeps_the_tree(fx):
+    """The unpushed-only route: a clean status is no proof the ignored content survived."""
+    from worktree_removal_guard import REASON_SALVAGE_UNPROVEN, guarded_remove
+
+    _ignore_log_file(fx)
+    tree = fx.tree("ignored-changed", dirty=False, unpushed=True, lock=False)
+    (tree / IGNORED_FILE).write_text("before the salvage\n", encoding="utf-8")
+    assert git(tree, "status", "--porcelain") == "", (
+        "an ignored file leaves the ordinary status clean — that is the finding"
+    )
+    candidate = _candidate(fx, tree, "ignored-changed")
+
+    outcome = crw.salvage_for_removal(fx.repo, candidate, apply=True)
+    assert outcome.verified is True, outcome.refusal
+    assert outcome.proof is not None, "a verified salvage hands the guard its proof"
+    assert outcome.proof() == "", "the untouched tree verifies right after the salvage"
+
+    def change_the_ignored_file(label: str) -> None:
+        assert label == "before_revalidation"
+        (tree / IGNORED_FILE).write_text("changed after the salvage\n", encoding="utf-8")
+
+    result = guarded_remove(
+        tree, expected_head=candidate.head_sha, dispatch_id="ignored-changed",
+        repo_root=fx.repo, dry_run=False,
+        pause_hook=change_the_ignored_file, dirty_proof=outcome.proof,
+    )
+    assert result.removed is False, "content the salvage does not hold must never be deleted"
+    assert result.reason == REASON_SALVAGE_UNPROVEN, result.detail
+    assert "differs from the untracked list" in result.detail, result.detail
+    assert tree.exists(), "the tree with the changed ignored file stays"
+    assert (tree / IGNORED_FILE).read_text(encoding="utf-8") == "changed after the salvage\n"
+
+
+def test_the_proof_runs_on_every_sample_including_under_the_lock(fx):
+    """With a proof, every sample — first, after the pause_hook, under the lock — is proved."""
+    from worktree_removal_guard import REASON_REMOVED, guarded_remove
+
+    _ignore_log_file(fx)
+    for name, use_hook, expected in (("proof-count-hook", True, 3), ("proof-count-plain", False, 2)):
+        tree = fx.tree(name, dirty=False, unpushed=True, lock=False)
+        (tree / IGNORED_FILE).write_text("kept\n", encoding="utf-8")
+        assert git(tree, "status", "--porcelain") == "", "the counting proof runs on a clean status"
+        samples: list[str] = []
+
+        def proof() -> str:
+            samples.append("sample")
+            return ""
+
+        def hook(label: str) -> None:
+            assert label == "before_revalidation"
+
+        result = guarded_remove(
+            tree, expected_head=git(tree, "rev-parse", "HEAD"), dispatch_id=name,
+            repo_root=fx.repo, dry_run=False,
+            pause_hook=hook if use_hook else None, dirty_proof=proof,
+        )
+        assert result.removed is True, result.detail
+        assert result.reason == REASON_REMOVED
+        assert len(samples) == expected, (
+            f"{name}: first sample, {'the one after the pause_hook, ' if use_hook else ''}"
+            f"and the one under the repository lock must each be proved; got {len(samples)}"
+        )
+
+
+def test_the_default_route_judges_a_clean_ignored_tree_as_origin_main_does(fx):
+    """Without a proof nothing changes: an ignored file is not evidence of dirty work."""
+    from worktree_removal_guard import REASON_DRY_RUN, REASON_REMOVED, guarded_remove
+
+    _ignore_log_file(fx)
+    outcomes: dict[str, tuple[bool, str]] = {}
+    for name, with_ignored in (("default-plain", False), ("default-ignored", True)):
+        tree = fx.tree(name, dirty=False, unpushed=True, lock=False)
+        if with_ignored:
+            (tree / IGNORED_FILE).write_text("just a local log\n", encoding="utf-8")
+        head = git(tree, "rev-parse", "HEAD")
+        dry = guarded_remove(tree, expected_head=head, dispatch_id=name, repo_root=fx.repo)
+        assert dry.removed is False and dry.reason == REASON_DRY_RUN, dry.detail
+        assert dry.would_remove is True
+        result = guarded_remove(
+            tree, expected_head=head, dispatch_id=name, repo_root=fx.repo, dry_run=False,
+        )
+        outcomes[name] = (result.removed, result.reason)
+        assert not tree.exists(), f"{name} must be removed exactly like on origin/main"
+    assert outcomes["default-plain"] == outcomes["default-ignored"] == (True, REASON_REMOVED)
