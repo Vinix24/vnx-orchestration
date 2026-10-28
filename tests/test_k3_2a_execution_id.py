@@ -184,9 +184,16 @@ def _harness_runner(store, monkeypatch, report: str) -> GateRunner:
 
 
 def _codex_runner(store, monkeypatch, result: dict) -> GateRunner:
-    """A GateRunner whose codex subprocess boundary returns ``result``; no worktree, no binary."""
+    """A GateRunner whose codex subprocess boundary returns ``result``; no worktree, no real binary.
+
+    The provider-installed check sits on the path under test, so the binary
+    lookup is answered here too: on a runner without codex on PATH that check
+    books ``not_executable``/``provider_not_installed`` before the run ever
+    reaches the patched subprocess boundary.
+    """
     monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: store.data / "_wt")
     monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr(gate_runner.shutil, "which", lambda binary: f"/usr/local/bin/{binary}")
     monkeypatch.setattr(GateRunner, "_run_with_stall_detection", lambda self, **kw: result)
     return GateRunner(state_dir=store.state, reports_dir=store.reports)
 
