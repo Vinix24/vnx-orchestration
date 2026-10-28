@@ -201,14 +201,19 @@ The `current` symlink points to the newly installed version after each successfu
 
 ## Before a rollout
 
-`preflight` is a verb of the pip `vnx` (`vnx_cli`) that is on main but not in the
-deployed release: measured 28-10, the pip CLI at v1.7.6 answers `invalid choice:
-'preflight'`, and the central shim `~/.vnx-system/bin/vnx` refuses the same name
-(`Error: 'preflight' requires a different mode`). Run this section from a checkout at
-main with its pip CLI installed (`pip install -e .` from the repository root);
-`vnx release verify` is main-only too, and `./bin/vnx` reaches it from that same
-checkout. Confirm which binary answers with `command -v vnx` and `vnx --help` —
-`preflight` appears in that list only on an install that carries it.
+`preflight` is a verb of the pip `vnx` (`vnx_cli`), and the central shim
+`~/.vnx-system/bin/vnx` delegates it to that same parser from the release that
+carries this runbook: `bin/vnx preflight` runs the release tree's own `vnx_cli`,
+exactly as `bin/vnx release` does, and the shim's mode gate lists `preflight`
+with the other read-only commands (`regen-settings`, `providers`). An install
+from before that release carries neither: measured 28-10, the pip CLI at v1.7.6
+answers `invalid choice: 'preflight'`, and its shim refuses the same name
+(`Error: 'preflight' requires a different mode`). On such an install run this
+section from a checkout at main with its pip CLI installed (`pip install -e .`
+from the repository root); `vnx release verify` is main-only there too, and
+`./bin/vnx` reaches it from that same checkout. Confirm which binary answers with
+`command -v vnx` and `vnx --help` — `preflight` appears in that list only on an
+install that carries it.
 
 Measure first. `vnx preflight` is read-only: it installs nothing, reloads no launchd job
 and writes no settings file. Run it from the project, or scope it with `--project <id>`

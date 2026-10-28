@@ -10,8 +10,11 @@ could only look for worktree-release.sh or worktree_release.sh.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import shlex
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -213,3 +216,75 @@ def test_every_bin_vnx_case_branch_has_invocable_implementation():
         )
 
     assert not failures, "Broken bin/vnx command branches:\n" + "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# `preflight` delegation to the pip CLI (OI-2456)
+# ---------------------------------------------------------------------------
+
+def _temporary_vnx_home(tmp_path: Path) -> Path:
+    """A throwaway VNX_HOME carrying this tree's shim, mode gate and pip CLI.
+
+    ``bin/vnx`` derives VNX_HOME from its own location, so the shim is copied
+    into the temporary tree instead of being run from the checkout: a real
+    copy (never a symlink back into the repo) proves the delegation loads
+    ``vnx_cli`` from ``$VNX_HOME`` and not from whatever the test process
+    happened to import. Only what the ``preflight --help`` path needs is
+    copied: the shim, the two scripts/lib modules the mode gate imports
+    (``vnx_paths.sh`` for path resolution, ``vnx_mode.py`` for the tier
+    check) and the whole ``vnx_cli`` package.
+    """
+    home = tmp_path / "vnx-home"
+    (home / "bin").mkdir(parents=True)
+    (home / "scripts" / "lib").mkdir(parents=True)
+    shutil.copy2(BIN_VNX, home / "bin" / "vnx")
+    for name in ("vnx_paths.sh", "vnx_mode.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / "lib" / name, home / "scripts" / "lib" / name)
+    shutil.copytree(
+        REPO_ROOT / "vnx_cli",
+        home / "vnx_cli",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    shutil.copy2(REPO_ROOT / "VERSION", home / "VERSION")
+    return home
+
+
+def test_bin_vnx_preflight_delegates_to_vnx_cli(tmp_path):
+    """`bin/vnx preflight --help` must reach the pip CLI's preflight parser.
+
+    On origin/main the name is in no mode tier, so the shim's own gate
+    refuses it with `Error: 'preflight' requires a different mode` before any
+    case branch (OI-2456). With `preflight` in the shared tier and a
+    delegating case branch, the same invocation prints the parser's usage and
+    exits 0 — from a temporary VNX_HOME, so the tree under test cannot be
+    confused with the operator's install.
+    """
+    home = _temporary_vnx_home(tmp_path)
+    data_dir = tmp_path / "project" / ".vnx-data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "mode.json").write_text(
+        json.dumps({"mode": "starter", "schema_version": 1}) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "home").mkdir()
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("VNX_")}
+    env.pop("PYTHONPATH", None)
+    env["HOME"] = str(tmp_path / "home")
+    # VNX_DATA_DIR_EXPLICIT keeps vnx_mode reading this scratch store instead
+    # of resolving the operator's central ~/.vnx-data.
+    env["VNX_DATA_DIR"] = str(data_dir)
+    env["VNX_DATA_DIR_EXPLICIT"] = "1"
+
+    result = subprocess.run(
+        [str(home / "bin" / "vnx"), "preflight", "--help"],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    combined = result.stdout + result.stderr
+    assert "requires a different mode" not in combined, combined
+    assert result.returncode == 0, combined
+    assert "usage: vnx preflight" in result.stdout, combined

@@ -256,6 +256,28 @@ class TestCommandGating:
         for cmd in TIER_STARTER_OPERATOR:
             check_command_allowed(cmd, VNXMode.STARTER)  # Should not raise
 
+    def test_preflight_allowed_in_starter_and_operator(self, data_dir):
+        """OI-2456: the central shim refused `vnx preflight` before any
+        dispatch, because the name was in no tier. It is read-only, like
+        `regen-settings` and `providers` from the same rollout, so it belongs
+        in the shared starter/operator tier and both modes must allow it."""
+        assert "preflight" in TIER_STARTER_OPERATOR
+        for mode in VNXMode:
+            check_command_allowed("preflight", mode)  # Should not raise
+
+    def test_preflight_answers_like_a_starter_operator_command(self, data_dir):
+        """Every mode must give `preflight` the same answer it gives the two
+        read-only commands the rollout already runs, in either mode."""
+        for mode in VNXMode:
+            for cmd in ("preflight", "regen-settings", "providers"):
+                check_command_allowed(cmd, mode)  # Should not raise
+
+    def test_preflight_allowed_when_mode_read_from_file(self, data_dir):
+        """The gate reads mode.json when no mode argument is passed; a
+        starter-mode store must let `preflight` through that path too."""
+        write_mode(VNXMode.STARTER, str(data_dir))
+        check_command_allowed("preflight")  # Should not raise
+
     def test_starter_blocks_operator_commands(self, data_dir):
         for cmd in TIER_OPERATOR_ONLY:
             with pytest.raises(ModeGateError) as exc:
