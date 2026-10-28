@@ -296,3 +296,27 @@ def test_ledger_refusal_leaves_the_analysis_result_unchanged(store, monkeypatch)
     outcome = DeepAnalyzer._try_claude_max("analyse this")
     assert outcome.status == "ok" and json.loads(outcome.text) == json.loads(RESULT)
     assert _records(store) == []
+
+
+def test_all_exports_every_booked_name():
+    """A merge that keeps only one side's ``__all__`` fails here, not silently (K4b round 4).
+
+    ``harness_run_cost`` is the module every lane in this file books through, and two
+    concurrent changes appended to the same list: K4b added the analyzer's and the dream
+    cycle's producers, K3-1a added the lane billing table, the spawn-refusal reason and
+    its two helpers. ``__all__`` is the module's published surface, so every one of the
+    six must be listed AND be a real attribute — a name listed but never defined breaks
+    ``from harness_run_cost import *`` just as badly as a name that is missing. The list
+    must also stay duplicate-free: a union merge that keeps both sides verbatim would
+    otherwise re-export a name twice without anyone noticing.
+    """
+    expected = {
+        "CONVERSATION_ANALYZER_PRODUCER", "DREAM_PRODUCER", "LANE_BILLING",
+        "SPAWN_REFUSED_REASON", "attempt_reason", "door_refusal_reason",
+    }
+    exported = list(harness_run_cost.__all__)
+    missing = sorted(expected - set(exported))
+    assert not missing, f"__all__ no longer exports {missing}"
+    undefined = sorted(name for name in expected if not hasattr(harness_run_cost, name))
+    assert not undefined, f"__all__ names {undefined} that the module does not define"
+    assert sorted(set(exported)) == sorted(exported), "duplicate name in __all__"

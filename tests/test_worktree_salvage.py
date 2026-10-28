@@ -1,10 +1,13 @@
-"""Salvage of a worktree's commits into a directory of its own (WT-2a1a).
+"""Salvage of a worktree's commits into a directory of its own (WT-2a1a, WT-2a1b).
 
 Every test builds a real bare ``origin``, a real main checkout and real ``git
 worktree`` trees under ``tmp_path``, then runs the real functions: the bundle is
 proved by cloning it, and every allowlist case by dirtying a real tree. The
-allowlist of this PR is the empty one: any status entry at all — tracked, staged,
-untracked, IGNORED (OI-2417) or unmerged — is a named problem, and so is a
+allowlist excuses one thing only (WT-2a1b): an IGNORED entry inside a throwaway
+cache DIRECTORY named by ``THROWAWAY_IGNORED_DIRS``, and never one below
+``.vnx-data/`` or ``.git/``; a regular file that only shares a cache directory's
+name is not inside one and stays named. Every other status entry — tracked, staged,
+untracked or unmerged, whatever its path — is a named problem, and so is a
 populated submodule, which carries commits no superproject bundle can hold.
 """
 from __future__ import annotations
@@ -30,6 +33,10 @@ GIT_ENV = {
     "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
     "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
 }
+# Ignore rules of the base commit. ``.vnx-data/`` and ``__pycache__/`` are the
+# WT-2a1a set; the rest give the allowlist cases a directory entry to match and
+# one ignored source file (``*.log``) that is on no allowlist.
+DEFAULT_IGNORES = ".vnx-data/\n__pycache__/\nnode_modules/\nbuild/\n*.log\n"
 
 
 def git(cwd: Path, *args: str) -> subprocess.CompletedProcess:
@@ -52,7 +59,7 @@ def head_of(tree: Path) -> str:
 class Fixture:
     """A bare origin, a main checkout that can hold worktrees, and a dest dir."""
 
-    def __init__(self, tmp_path: Path) -> None:
+    def __init__(self, tmp_path: Path, ignores: str = DEFAULT_IGNORES) -> None:
         self.tmp = tmp_path
         self.origin = tmp_path / "origin.git"
         self.repo = tmp_path / "repo"
@@ -61,8 +68,7 @@ class Fixture:
         git(tmp_path, "init", "-q", "-b", "main", str(self.repo))
         self.repo_config()
         git(self.repo, "remote", "add", "origin", str(self.origin))
-        (self.repo / ".gitignore").write_text(
-            ".vnx-data/\n__pycache__/\n", encoding="utf-8")
+        (self.repo / ".gitignore").write_text(ignores, encoding="utf-8")
         (self.repo / "a.txt").write_text("a\n", encoding="utf-8")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "base")
@@ -93,6 +99,27 @@ class Fixture:
 def fx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Fixture:
     monkeypatch.setattr(ws, "_utc_stamp", lambda: STAMP)
     return Fixture(tmp_path)
+
+
+@pytest.fixture()
+def ignored_otherwise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A fixture factory for ignore rules the default fixture does not model.
+
+    Ignore rules decide which path git prints for a file — the whole directory
+    (``! .vnx-data/``) or the file inside it (``! .vnx-data/x``) — so a case
+    about the path's own components needs its own rules.
+    """
+    monkeypatch.setattr(ws, "_utc_stamp", lambda: STAMP)
+    built: list[Fixture] = []
+
+    def build(ignores: str) -> Fixture:
+        base = tmp_path / f"fixture-{len(built)}"
+        base.mkdir()
+        fixture = Fixture(base, ignores)
+        built.append(fixture)
+        return fixture
+
+    return build
 
 
 def salvage(fx: Fixture, wt: Path, **kwargs) -> "ws.SalvageResult":
@@ -230,8 +257,9 @@ def test_an_ignored_file_is_not_covered(fx: Fixture) -> None:
     assert verify(fx, result) == [UNCOVERED + ".vnx-data/"]
 
 
-def test_an_ignored_pycache_file_blocks_too(fx: Fixture) -> None:
-    """There is no allowlist in this PR: a disposable-looking file blocks."""
+def test_an_ignored_top_level_pycache_is_throwaway(fx: Fixture) -> None:
+    """WT-2a1a pinned the empty allowlist here; WT-2a1b excuses this directory
+    and nothing else, so every other case in this section stays blocking."""
     wt = fx.worktree()
     cache = wt / "__pycache__"
     cache.mkdir()
@@ -239,8 +267,9 @@ def test_an_ignored_pycache_file_blocks_too(fx: Fixture) -> None:
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["__pycache__/"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "__pycache__/"]
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+    assert ws._status_entries(wt) == [("!", "__pycache__/")]
 
 
 def test_the_problem_names_the_first_path_and_counts_the_rest(fx: Fixture) -> None:
@@ -251,6 +280,216 @@ def test_the_problem_names_the_first_path_and_counts_the_rest(fx: Fixture) -> No
     problems = verify(fx, salvage(fx, wt))
 
     assert problems == [UNCOVERED + "a.txt (+1 more)"], problems
+
+
+# ---------------------------------------------------------------------------
+# 3b. the throwaway ignored caches, and nothing else (WT-2a1b, OI-2417)
+# ---------------------------------------------------------------------------
+
+
+def test_an_ignored_pycache_directory_is_throwaway(fx: Fixture) -> None:
+    """``__pycache__/`` comes back as one ignored directory entry."""
+    wt = fx.worktree()
+    cache = wt / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.cpython-312.pyc").write_bytes(b"cache\n")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+    assert ws._status_entries(wt) == [("!", "pkg/__pycache__/")]
+
+
+def test_an_ignored_node_modules_directory_is_throwaway(fx: Fixture) -> None:
+    wt = fx.worktree()
+    installed = wt / "node_modules" / "x"
+    installed.mkdir(parents=True)
+    (installed / "index.js").write_text("module.exports = 1\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+    assert ws._status_entries(wt) == [("!", "node_modules/")]
+
+
+def test_an_ignored_file_named_like_a_cache_directory_still_blocks(
+        ignored_otherwise) -> None:
+    """A regular file sharing the directory's name is not that directory.
+
+    The ignore rule ``node_modules`` (no trailing slash) also catches a FILE
+    called ``node_modules``, and git prints it without the ``/`` that marks a
+    directory entry. Nothing bundles an ignored file, so excusing it would
+    approve losing it (codex round 2 on the WT-2a1b allowlist).
+    """
+    fx = ignored_otherwise("node_modules\n")
+    wt = fx.worktree()
+    (wt / "node_modules").write_text("a file, not a tree of modules\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "node_modules")], ws._status_entries(wt)
+    assert result.uncovered == ["node_modules"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "node_modules"]
+
+
+def test_an_ignored_file_named_like_a_nested_cache_directory_still_blocks(
+        ignored_otherwise) -> None:
+    """The same for ``pkg/__pycache__`` as a file: the leaf is not a directory."""
+    fx = ignored_otherwise("__pycache__\n")
+    wt = fx.worktree()
+    (wt / "pkg").mkdir()
+    (wt / "pkg" / "__pycache__").write_text("a file, not bytecode\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "pkg/__pycache__")], ws._status_entries(wt)
+    assert result.uncovered == ["pkg/__pycache__"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__"]
+
+
+def test_a_file_inside_an_ignored_node_modules_directory_is_throwaway(
+        ignored_otherwise) -> None:
+    """The file entry inside the ignored directory, named on its own, is excused."""
+    fx = ignored_otherwise("node_modules/*\n")
+    wt = fx.worktree()
+    (wt / "node_modules").mkdir()
+    (wt / "node_modules" / "index.js").write_text(
+        "module.exports = 1\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert ws._status_entries(wt) == [("!", "node_modules/index.js")], ws._status_entries(wt)
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+
+
+def test_an_ignored_file_inside_an_allowlisted_directory_is_throwaway(
+        ignored_otherwise) -> None:
+    """A file entry, not a directory entry: the ignore rule names the file."""
+    fx = ignored_otherwise(".vnx-data/\n*.ruff\n")
+    wt = fx.worktree()
+    (wt / ".ruff_cache").mkdir()
+    (wt / ".ruff_cache" / "cache.ruff").write_bytes(b"cache\n")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+    assert ws._status_entries(wt) == [("!", ".ruff_cache/cache.ruff")]
+
+
+def test_an_ignored_file_below_vnx_data_still_blocks(fx: Fixture) -> None:
+    """OI-2417 point 3, restated next to the allowlist it must not widen."""
+    wt = fx.worktree()
+    notes = wt / ".vnx-data" / "unique-worker-notes.txt"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("notes\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == [".vnx-data/"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + ".vnx-data/"]
+
+
+def test_an_ignored_cache_entry_below_vnx_data_still_blocks(ignored_otherwise) -> None:
+    """The allowlist name is in the path, yet a protected root precedes it.
+
+    The ignore rules name the directory's contents, so the entry git prints is
+    ``.vnx-data/__pycache__/`` — an allowlisted component below ``.vnx-data/``.
+    """
+    fx = ignored_otherwise(".vnx-data/*\n__pycache__/\n")
+    wt = fx.worktree()
+    cache = wt / ".vnx-data" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "x.pyc").write_bytes(b"cache\n")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == [".vnx-data/__pycache__/"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + ".vnx-data/__pycache__/"]
+    assert ws._status_entries(wt) == [("!", ".vnx-data/__pycache__/")]
+
+
+def test_a_cache_directory_below_dot_git_is_never_throwaway() -> None:
+    """git never prints ``.git`` in a status entry; the rule holds anyway."""
+    assert ws._is_throwaway_ignored("!", ".git/__pycache__/x.pyc") is False
+    assert ws._is_throwaway_ignored("!", "pkg/__pycache__/x.pyc") is True
+
+
+def test_a_leaf_that_is_no_directory_is_never_throwaway() -> None:
+    """Only DIRECTORY components match the allowlist (codex round 2, WT-2a1b).
+
+    A trailing ``/`` is git's marker for a directory entry; a leaf without it is
+    a regular file, whatever its name.
+    """
+    assert ws._is_throwaway_ignored("!", "node_modules") is False
+    assert ws._is_throwaway_ignored("!", "pkg/__pycache__") is False
+    assert ws._is_throwaway_ignored("!", "x/node_modules") is False
+    assert ws._is_throwaway_ignored("!", "node_modules/") is True
+    assert ws._is_throwaway_ignored("!", "pkg/__pycache__/") is True
+    assert ws._is_throwaway_ignored("!", ".vnx-data/node_modules") is False
+    assert ws._is_throwaway_ignored("!", ".vnx-data/node_modules/") is False
+
+
+def test_an_ignored_build_directory_still_blocks(fx: Fixture) -> None:
+    """A directory on no allowlist is not excused by looking disposable."""
+    wt = fx.worktree()
+    (wt / "build").mkdir()
+    (wt / "build" / "out.bin").write_bytes(b"artifact\n")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["build/"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "build/"]
+
+
+def test_an_untracked_file_under_an_allowlisted_directory_still_blocks(
+        ignored_otherwise) -> None:
+    """Only an IGNORED entry can be throwaway; a ``?`` entry blocks either way."""
+    fx = ignored_otherwise(".vnx-data/\n")
+    wt = fx.worktree()
+    cache = wt / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.py").write_text("source\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["pkg/__pycache__/m.py"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__/m.py"]
+    assert ws._status_entries(wt) == [("?", "pkg/__pycache__/m.py")]
+
+
+def test_a_tracked_pyc_under_an_allowlisted_directory_still_blocks(fx: Fixture) -> None:
+    """A committed ``.pyc`` that is modified is a tracked entry, not an ignored one."""
+    wt = fx.worktree()
+    cache = wt / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "m.pyc").write_bytes(b"committed\n")
+    git(wt, "add", "-f", "pkg/__pycache__/m.pyc")
+    git(wt, "commit", "-q", "-m", "worker: a committed .pyc")
+    (cache / "m.pyc").write_bytes(b"edited\n")
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == ["pkg/__pycache__/m.pyc"], result.uncovered
+    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__/m.pyc"]
+
+
+def test_an_allowlisted_cache_beside_one_blocking_file_gives_one_problem(
+        fx: Fixture) -> None:
+    wt = fx.worktree()
+    cache = wt / "pkg" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "x.pyc").write_bytes(b"cache\n")
+    (wt / "debug.log").write_text("worker log\n", encoding="utf-8")
+
+    problems = verify(fx, salvage(fx, wt))
+
+    assert problems == [UNCOVERED + "debug.log"], problems
+    assert sorted(ws._status_entries(wt)) == [
+        ("!", "debug.log"), ("!", "pkg/__pycache__/")]
 
 
 def add_submodule(fx: Fixture, wt: Path, name: str = "sub") -> Path:

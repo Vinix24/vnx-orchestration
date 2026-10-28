@@ -84,6 +84,23 @@ def _pid_from_db_path(db_path: Path) -> Optional[str]:
     return pid_dir.name or None
 
 
+def project_id_from_store_path(db_path: Path) -> Optional[str]:
+    """The project_id the store path ITSELF names — ``<root>/.vnx-data/<project_id>/state/<db>`` — or ``None``.
+
+    Path layout only: the ``.vnx-project-id`` marker and ``VNX_PROJECT_ID`` are
+    deliberately not consulted, because this answers "which project IS this
+    store", not "which project is this process in". A caller that writes into a
+    store needs the first answer even when the ambient env disagrees with it
+    (ADR-007: the store decides), where :func:`resolve_init_project_id` reads
+    the disagreement as a fail-closed conflict. A directory name that is not a
+    valid project id names nothing.
+    """
+    found = _pid_from_db_path(Path(db_path))
+    if found is None or not _INIT_PID_RE.match(found):
+        return None
+    return found
+
+
 def _read_marker_from_path(db_path: Path) -> Optional[str]:
     """Walk UP from db_path's directory, return the first-line pid from .vnx-project-id."""
     start = db_path.resolve().parent

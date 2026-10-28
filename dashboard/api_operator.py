@@ -63,12 +63,14 @@ try:
     from vnx_paths import resolve_central_data_dir as _op_resolve_central  # type: ignore[import]
     from vnx_paths import project_id_from_state_dir as _op_project_id_from_state_dir  # type: ignore[import]
     from scout_prepass import scout_sidecar_path as _op_scout_sidecar_path  # type: ignore[import]
+    from terminal_lane import is_worker_terminal as _op_is_worker_terminal  # type: ignore[import]
 except Exception:
     _op_shadow_verifier = None   # type: ignore[assignment]
     _op_shadow_logger = None     # type: ignore[assignment]
     _op_resolve_central = None   # type: ignore[assignment]
     _op_project_id_from_state_dir = None  # type: ignore[assignment]
     _op_scout_sidecar_path = None  # type: ignore[assignment]
+    _op_is_worker_terminal = None  # type: ignore[assignment]
 
 
 def _is_scout_enriched(dispatch_id: str) -> bool:
@@ -1581,9 +1583,15 @@ def _operator_get_agents() -> dict:
     for terminal_id in ("T0", "T1", "T2", "T3"):
         defaults = _TERMINAL_AGENT_DEFAULTS[terminal_id]
 
-        # Resolve adapter from environment (VNX_ADAPTER_T1, etc.)
-        adapter_env_key = f"VNX_ADAPTER_{terminal_id}"
-        adapter = os.environ.get(adapter_env_key, "tmux")
+        # A worker terminal (T1-T3) is always headless and its selector is gone (T-G1);
+        # only other terminals (T0) still resolve from VNX_ADAPTER_{terminal}. The
+        # fallback below keeps the pre-T-G1 display when scripts/lib is not importable —
+        # a display field on a dashboard, not a routing decision.
+        if _op_is_worker_terminal is not None and _op_is_worker_terminal(terminal_id):
+            adapter = "subprocess"
+        else:
+            adapter_env_key = f"VNX_ADAPTER_{terminal_id}"
+            adapter = os.environ.get(adapter_env_key, "tmux")
 
         # Attempt to infer actual role from the most recent active dispatch for this terminal
         role = defaults["role"]
