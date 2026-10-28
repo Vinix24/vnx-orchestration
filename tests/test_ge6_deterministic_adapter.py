@@ -15,6 +15,10 @@ What this pins, one block per acceptance point:
    branch base (03eb9d61) by driving the UNMOVED writers
    (``_request_wiring_gate`` / ``_execute_ci_gate``) with the same inputs.
 
+GE-7 (dlv-20e9ed688893) moved ONE field of the wiring golden on purpose: a
+shadow-mode finding books ``status: fail``, not ``advisory`` (ADR-046 §1's four
+statuses; non-blocking travels on ``required: false``). Rest unchanged.
+
 Nothing here mocks the adapter under test.
 """
 
@@ -159,8 +163,8 @@ def test_the_wiring_gate_produces_its_outcome_without_a_gh_subprocess(tmp_path, 
 
     assert run.outcome is not None
     assert run.record["kind"] == deterministic_gate.DETERMINISTIC_KIND
-    assert run.record["status"] == "advisory", "one unwired symbol in shadow mode, as before"
-    assert run.outcome.status == "pass", "advisory is the wiring gate's shadow-mode pass on the outcome axis"
+    assert run.record["status"] == "fail", "GE-7: a shadow-mode finding books `fail` (non-blocking travels on required=False)"
+    assert run.outcome.status == "fail", "GE-7: the record status is one of ADR-046's four, so the outcome axis agrees"
     assert seen, "the local check must actually run: git for the diff, grep for the callers"
     assert [argv[0] for argv in seen if argv[0] == "gh"] == [], f"a gh subprocess ran: {seen}"
     assert {"git", "grep"} <= {argv[0] for argv in seen}
