@@ -49,6 +49,11 @@ def _git(args: "list[str]", cwd: Path) -> str:
     return result.stdout
 
 
+def _head(wt: Path) -> str:
+    """The sha the caller's evidence evaluated — the removal is bound to it."""
+    return _git(["rev-parse", "HEAD"], wt).strip()
+
+
 def _init_repo(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     _git(["init", "-b", "main"], path)
@@ -197,7 +202,7 @@ def test_permission_error_is_unknown_and_keeps_the_tree(tmp_path, pinned_state, 
         f"alive={report.alive} dead={report.dead} unknown={report.unknown}"
     )
 
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
     assert result.removed is False
     assert result.reason == REASON_LIVENESS_UNKNOWN, result.detail
     assert wt.exists(), "an unmeasurable process group always keeps the worktree"
@@ -214,7 +219,7 @@ def test_second_process_holding_the_slot_makes_the_guard_skip(tmp_path, pinned_s
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     holder = _start_slot_holder(dispatch_id, wt, root)
     try:
-        result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+        result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
         assert result.removed is False
         assert result.reason == REASON_OCCUPIED, result.detail
         assert wt.exists()
@@ -235,7 +240,8 @@ def test_writer_cannot_take_the_slot_while_the_guard_holds_it(tmp_path, pinned_s
         attempts.append(_run_writer_attempt(dispatch_id, wt, root, payload))
 
     result = guarded_remove(
-        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, pause_hook=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root,
+        dry_run=False, pause_hook=hook,
     )
     assert attempts == ["occupied"], (
         f"the writer must be refused the slot the guard holds, got {attempts}"
@@ -258,13 +264,13 @@ def test_gate_seat_lifetime_lock_blocks_until_its_teardown(gate_repo):
         branch="feature/guard", gate="codex_gate", identifier="seat", project_root=local,
     )
     try:
-        result = guarded_remove(wt, dispatch_id="", repo_root=local, dry_run=False)
+        result = guarded_remove(wt, expected_head=_head(wt), dispatch_id="", repo_root=local, dry_run=False)
         assert result.removed is False
         assert result.reason == REASON_GATE_SEAT_LIVE, result.detail
         assert wt.exists(), "a live gate seat's checkout must never be removed"
 
         _release_lifetime_lock(wt)  # the seat's own teardown; the checkout stays
-        result = guarded_remove(wt, dispatch_id="", repo_root=local, dry_run=False)
+        result = guarded_remove(wt, expected_head=_head(wt), dispatch_id="", repo_root=local, dry_run=False)
         assert result.removed is True, result.detail
         assert result.reason == REASON_REMOVED
         assert not wt.exists()
@@ -290,12 +296,38 @@ def test_head_moved_between_assessment_and_removal_is_refused(tmp_path, pinned_s
         moved.append(True)
 
     result = guarded_remove(
-        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, pause_hook=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root,
+        dry_run=False, pause_hook=hook,
     )
     assert moved == [True]
     assert result.removed is False
     assert result.reason == REASON_HEAD_MOVED, result.detail
     assert wt.exists()
+
+
+def test_stale_evaluated_head_is_refused_and_names_both_shas(tmp_path, pinned_state):
+    """PR-4b round 2: removal is bound to the HEAD the evidence evaluated.
+
+    A clean commit made after ``evaluate_candidate`` moved HEAD. The guard
+    must not sample HEAD afresh and compare only its own samples: it gets the
+    evaluated sha, sees the tree is no longer on it, and refuses.
+    """
+    from worktree_removal_guard import REASON_HEAD_MOVED, guarded_remove
+
+    dispatch_id = "dlv-guard-stale-head"
+    root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
+    evaluated = _head(wt)
+    _git(["commit", "--allow-empty", "-m", "clean commit after evaluation"], wt)
+    moved = _head(wt)
+    assert moved != evaluated
+
+    result = guarded_remove(
+        wt, expected_head=evaluated, dispatch_id=dispatch_id, repo_root=root, dry_run=False,
+    )
+    assert result.removed is False
+    assert result.reason == REASON_HEAD_MOVED, result.detail
+    assert evaluated[:12] in result.detail and moved[:12] in result.detail, result.detail
+    assert wt.exists(), "a tree that moved off the evaluated HEAD must survive"
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +339,7 @@ def test_dry_run_removes_nothing(tmp_path, pinned_state):
 
     dispatch_id = "dlv-guard-dry"
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root)
     assert result.removed is False
     assert result.reason == REASON_DRY_RUN
     assert result.dry_run is True
@@ -327,7 +359,7 @@ def test_uncommitted_file_is_refused_and_kept(tmp_path, pinned_state):
     kept = wt / "uncommitted.txt"
     kept.write_text("must survive\n", encoding="utf-8")
 
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
     assert result.removed is False
     assert result.reason == REASON_DIRTY, result.detail
     assert kept.read_text(encoding="utf-8") == "must survive\n"
@@ -408,7 +440,7 @@ def test_child_outliving_its_recorded_parent_keeps_the_group_alive(tmp_path, pin
             f"the child still carries PGID {parent_pid}: {probe.detail}"
         )
 
-        result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+        result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
         assert result.removed is False
         assert result.reason == REASON_LIVENESS_ALIVE, result.detail
         assert wt.exists(), "a surviving process in the group must keep the worktree"
@@ -433,7 +465,29 @@ def test_child_outliving_its_recorded_parent_keeps_the_group_alive(tmp_path, pin
 # 7. round-2 finding — revalidation under the repository lock, no pause_hook
 # ---------------------------------------------------------------------------
 
-def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+def _inject_when_the_repository_lock_is_taken(monkeypatch, action) -> None:
+    """Run *action* at the moment the guard acquires the repository lock.
+
+    That is the window the under-lock revalidation exists for: the tree can be
+    written into or committed to while the guard waits for the lock, after the
+    first evidence sample has already passed.
+    """
+    import contextlib
+
+    import worktree_removal_guard as guard
+
+    real_lock = guard._worktree_lock
+
+    @contextlib.contextmanager
+    def lock_then_inject(root):
+        with real_lock(root):
+            action()
+            yield
+
+    monkeypatch.setattr(guard, "_worktree_lock", lock_then_inject)
+
+
+def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state, monkeypatch):
     """A change made while the guard waits for the repository lock is refused.
 
     Old code re-checked only when ``pause_hook`` was supplied, so a normal
@@ -446,12 +500,13 @@ def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, p
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     injected = wt / "injected-after-lock.txt"
 
-    def hook(label: str) -> None:
-        assert label == "before_remove"
+    def late_write() -> None:
         injected.write_text("late write\n", encoding="utf-8")
 
+    _inject_when_the_repository_lock_is_taken(monkeypatch, late_write)
+
     result = guarded_remove(
-        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, before_remove=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False,
     )
     assert result.removed is False
     assert result.reason == REASON_DIRTY, result.detail
@@ -459,20 +514,21 @@ def test_dirty_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, p
     assert injected.exists()
 
 
-def test_head_moved_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state):
+def test_head_moved_after_the_lock_is_taken_is_refused_without_pause_hook(tmp_path, pinned_state, monkeypatch):
     from worktree_removal_guard import REASON_HEAD_MOVED, guarded_remove
 
     dispatch_id = "dlv-guard-late-head"
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     moved: "list[bool]" = []
 
-    def hook(label: str) -> None:
-        assert label == "before_remove"
+    def late_commit() -> None:
         _git(["commit", "--allow-empty", "-m", "HEAD moved under the lock"], wt)
         moved.append(True)
 
+    _inject_when_the_repository_lock_is_taken(monkeypatch, late_commit)
+
     result = guarded_remove(
-        wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False, before_remove=hook,
+        wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False,
     )
     assert moved == [True]
     assert result.removed is False
@@ -509,7 +565,9 @@ def test_removal_decision_is_recorded_before_git_remove(tmp_path, pinned_state, 
     monkeypatch.setattr(state_mutation, "emit_state_mutation", _record_emit)
     monkeypatch.setattr(guard, "_git", _record_git)
 
-    result = guard.guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guard.guarded_remove(
+        wt, expected_head=head, dispatch_id=dispatch_id, repo_root=root, dry_run=False,
+    )
 
     assert result.removed is True, result.detail
     emits = [event for event in events if event[0] == "emit"]
@@ -541,7 +599,7 @@ def test_recording_failure_refuses_the_removal(tmp_path, pinned_state, monkeypat
 
     monkeypatch.setattr(state_mutation, "emit_state_mutation", _boom)
 
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
     assert result.removed is False
     assert result.reason == REASON_DECISION_UNRECORDED, result.detail
     assert wt.exists(), "no removal without a recorded decision"
@@ -556,7 +614,7 @@ def test_no_recorded_write_refuses_the_removal(tmp_path, pinned_state, monkeypat
     root, wt = _make_dispatch_worktree(tmp_path, dispatch_id)
     monkeypatch.setattr(state_mutation, "emit_state_mutation", lambda *a, **k: None)
 
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
     assert result.removed is False
     assert result.reason == REASON_DECISION_UNRECORDED, result.detail
     assert wt.exists()
@@ -583,7 +641,7 @@ def test_unknown_group_probe_never_clears_a_removal(tmp_path, pinned_state, monk
     monkeypatch.setattr(os, "getpgid", _gone)
     monkeypatch.setattr(os, "killpg", _unmeasurable)
 
-    result = guarded_remove(wt, dispatch_id=dispatch_id, repo_root=root, dry_run=False)
+    result = guarded_remove(wt, expected_head=_head(wt), dispatch_id=dispatch_id, repo_root=root, dry_run=False)
     assert result.removed is False
     assert result.reason == REASON_LIVENESS_UNKNOWN, result.detail
     assert wt.exists(), "an unmeasurable group is never evidence that nothing is alive"
