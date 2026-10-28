@@ -54,7 +54,7 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "patch-agent-files", "register", "list-projects", "unregister",
     "roadmap", "insights", "objective", "horizon", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
-    "init-db", "providers", "guard",
+    "init-db", "providers", "guard", "preflight",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({

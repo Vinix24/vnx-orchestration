@@ -156,6 +156,34 @@ def test_agreeing_text_and_xml_is_no_mismatch(tmp_path: Path, monkeypatch) -> No
     assert "count_mismatch" not in verification
 
 
+JUINT_LISTING_LINE = ("sweep: 76 failed, 2514 passed, 3 skipped, 6 warnings in 728.97s "
+                      "(junit `tests=2593 failures=76 errors=0 skipped=3`)")
+
+
+def test_a_junit_attribute_listing_echoed_in_the_text_is_not_a_failing_run(
+        tmp_path: Path, monkeypatch) -> None:
+    """dlv-0caf1cccbcc4: `tests=2593 failures=76` is an attribute listing, not a run.
+
+    The sweep clause and the XML agree on 2514 passed / 76 failed. Reading the
+    suite's test count as a failure count made the receipt carry
+    ``tests_run=5107, tests_passed=2514, tests_failed=2593``.
+    """
+    monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")
+    verification = _parse(tmp_path, JUINT_LISTING_LINE, tests=2593, failures=76,
+                          errors=0, skipped=3)["verification"]
+    assert (verification["tests_passed"], verification["tests_failed"]) == (2514, 76)
+    assert verification["tests_run"] == 2590
+    assert verification["count_source"] == "junit_worker"
+    assert "count_mismatch" not in verification
+
+
+def test_a_run_clause_beside_an_attribute_listing_is_still_counted() -> None:
+    """Only the `=`-prefixed terms drop out; the real clause on the same line stays."""
+    from verification_runs import counted_run, extract_runs
+    assert counted_run(extract_runs(JUINT_LISTING_LINE)) == {
+        "passed": 2514, "failed": 76, "method": "pytest", "color": None}
+
+
 def test_a_refused_sidecar_keeps_the_text_counts_and_names_the_reason(
         tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("VNX_JUNIT_COUNTS", "1")

@@ -4,9 +4,73 @@
 A run on a harness lane (``deepseek-harness``, ``glm-harness``) leaves a Claude Code
 session transcript under ``<lane>/projects/<encoded-cwd>/<session-id>.jsonl``; that
 transcript is the complete per-message record of what the run spent. This module turns
-those files into one :class:`TranscriptRun` per session. It only reads: it writes
-nothing to any ledger and has no CLI. K6b-2 plans and writes the backfill on top of
-:func:`scan`.
+those files into one :class:`TranscriptRun` per session and then executes the plan K6b-2
+built from them: :func:`plan_runs` decides, per transcript and without writing, what a
+backfill would book — a correction on a live line, a charge beside it, or nothing — and
+:func:`apply_runs` writes exactly that through the ledger's own writer, which is also
+what ``vnx costs backfill`` runs.
+
+**The writer decides nothing.** Each planned line is booked as planned: a charge is one
+new ledger line, a correction goes through the ledger's correction path (``supersedes``
+plus :data:`CORRECTION_REASON`, ADR-038), a skip writes nothing. There is no matching and
+no identity decision here — that is :func:`plan_runs`' — so a second ``--apply`` over the
+same transcripts finds every line booked and writes nothing at all. A line the ledger
+refuses wrote nothing: it is counted as a failure, the rest of the plan still runs, and
+the command exits non-zero naming the reason. An unclear write outcome
+(:class:`cost_ledger.CostLedgerWriteError`) stops the run instead: nothing further is
+written on top of an uncertain line (ADR-005).
+
+**A reservation is real only once it is written.** Charges are numbered from the
+ledger read before planning, so two backfills of one dispatch — two transcripts, two
+processes — can reserve the same attempt. The ledger refuses a backfill charge whose
+``run_id`` already has a line, checked under the writer's own lock
+(:class:`cost_ledger.BackfillRunIdTaken`, nothing written); this module re-reads the
+ledger, renumbers the charge to the next free attempt (the plan's own reservations
+included) and writes again, at most :data:`BACKFILL_RETRY_LIMIT` times. Past the bound
+the charge counts as a failure. A correction is never renumbered: it names the record
+it supersedes, so its ``run_id`` is that record's.
+
+**The same transcript is booked once (K6b-3 round 3).** A taken ``run_id`` has two
+causes, and only one of them is a renumbering. Another transcript of the reference took
+the attempt: renumber (above). The *same* transcript was booked already by a backfill
+that planned from the same snapshot: renumbering would book its spend a second time, and
+the aggregate would count it twice. So the identity is checked first, under the writer's
+lock, in the ledger and in the spool that waits for the replay
+(:class:`cost_ledger.BackfillTranscriptBooked`, which carries the line). Equal usage and
+amount is a skip, counted as already booked; changed usage is written as a correction on
+that line's ``run_id``, so the aggregate shows the new usage once. A charge with no
+``transcript_identity`` is never renumbered: it cannot show it is not that transcript, so
+on a taken ``run_id`` it is a failure with one stderr line and nothing written.
+
+**The check compares with the effective line (K6b-3b, OI-2455).** A correction keeps its
+target's ``run_id`` and names it in ``supersedes`` (ADR-038), so a transcript that was
+corrected once has a chain, and only the newest line of it that no other line supersedes
+measures the transcript now. That is the line the ledger's refusal carries and the line a
+plan is compared with: equal is a skip, so a repeated backfill of a grown transcript adds
+no second correction, and different writes exactly one correction superseding the
+effective line — never the original it replaced. A transcript whose usage went back to an
+earlier value is corrected back to it, not reported as booked. A correction that waits in
+the spool for the replay is the effective line too: the check reads the waiting records,
+not only the ledger file.
+
+**What makes a line claimable (K6b-2, OI-2419).** A live line is corrected only on
+evidence that it measures *this* transcript:
+
+1. it names this run's ``transcript_identity`` — a verified match;
+2. it names no identity and its tokens equal the run's exactly — the token evidence a
+   legacy line can still offer;
+3. it names no identity and its window overlaps the run's window.
+
+A legacy line that matches on neither (2) nor (3) is left alone and the run books its
+own charge: a line whose window is unrelated to this session is not this session's
+spend, and superseding it would remove another session's run from every total. A line
+that names *another* identity is never claimed at all.
+
+**A skip needs the identity.** A line is skipped only when it carries this run's
+identity and says the same thing (provider, model, role, tokens, segments). A matched
+line without an identity is always written as a correction that stamps the identity on
+it, even when every other field is equal — that write is how the match is persisted,
+so a later ``--since`` that leaves this transcript out can no longer claim the line.
 
 **Which field carries the dispatch id (measured 2026-10-27).** The top-level ``cwd``
 of the transcript entries. Of the 1,169 deepseek transcripts then on this machine,
@@ -26,30 +90,76 @@ session is one run however many roots reach it.
 **Provider and privacy.** The provider is the lane the transcript lives in (its
 directory name), never the transcript's self-reported name. Only token counts and
 timestamps leave a transcript: no message text is copied into a run or printed.
+
+Exit codes: 0 clean (a dry run too), 1 a refused or failed write or an unreadable ledger,
+2 usage (a root that does not exist, holds no harness lane or is not one, a bad ``--since``).
+
+Usage: python3 scripts/cost_ledger_backfill.py [--since YYYY-MM-DD]
+       [--harness-root PATH ...] [--dry-run | --apply] [--ledger PATH]
 """
 from __future__ import annotations
 
+import argparse
 import collections
+import dataclasses
 import json
 import logging
+import math
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Set, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 try:
+    import cost_ledger
+    import harness_run_cost
+    import provider_costs
     import token_harvest
+    import vnx_paths
+    from project_root import resolve_project_id
+    from provider_spawns import deepseek_harness_spawn, glm_harness_spawn, harness_config_dir
+    from providers import provider_registry
 except Exception as exc:
-    raise SystemExit(f"Failed to load token_harvest: {exc}")
+    raise SystemExit(f"Failed to load the cost ledger modules: {exc}")
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SINCE = "2026-10-02"
+EXIT_FAILED = 1
+EXIT_USAGE = 2
+BACKFILL_PRODUCER = "backfill"
+UNKNOWN_ROLE = "unknown:no_dispatch_row"
+UNKNOWN_ROLE_NO_PURPOSE = "unknown:no_ledger_role"
+CORRECTION_REASON = "backfill: the harness transcript's tokens replace the live line"
 LANES = ("deepseek-harness", "glm-harness")
 DISPATCH_PREFIX = "dispatch-"
+# How often a backfill charge whose attempt was taken meanwhile is renumbered and written again.
+BACKFILL_RETRY_LIMIT = 5
+
+# Every worker role the fabric dispatches books as the ledger's ``builder`` purpose.
+_ROLE_PURPOSE: Dict[str, str] = {
+    **{role: "builder" for role in (
+        "builder", "backend-developer", "frontend-developer", "quality-engineer",
+        "system-architect", "backend-architect", "security-engineer", "database-engineer",
+        "research-analyst", "technical-writer", "root-cause-analyst", "implementer",
+        "test-engineer", "debugger", "intelligence-engineer")},
+    **{role: "review" for role in (
+        "review-gate", "code-reviewer", "quality-reviewer", "security-reviewer",
+        "architecture-reviewer")},
+    "plan-reviewer": "plan_gate",
+    "deliberation-panelist": "panel",
+    "panelist": "panel",
+    "tiebreaker": "tiebreaker",
+}
+_LANE_DEFAULT = {
+    "deepseek-harness": deepseek_harness_spawn.resolve_harness_model,
+    "glm-harness": glm_harness_spawn.resolve_harness_model,
+}
+# What a live line must already say, identity included, for a run to be skipped.
+_BOOKED_FIELDS = ("provider", "model", "role", "tokens", "segments", "transcript_identity")
 
 
 @dataclass(frozen=True)
@@ -82,10 +192,51 @@ class TranscriptRun:
     def identity(self) -> str:
         """The run's durable identity: its lane and its session id, never its transcript path.
 
-        K6a (``harness_run_cost.transcript_identity``) owns the same shape; K6b-2
-        switches this property to that function.
+        The shape is K6a's (``harness_run_cost.transcript_identity``), the one the
+        booked line stores, so the reader and the writer cannot drift apart.
         """
-        return f"{self.provider}:{self.session_id}"
+        return harness_run_cost.transcript_identity(self.provider, self.session_id)
+
+
+@dataclass(frozen=True)
+class PlannedRun:
+    """One transcript's outcome: the line to write, or a skip with the line it already matches."""
+
+    provider: str
+    run: Optional[cost_ledger.RunCost]
+    live: Optional[Mapping[str, Any]]
+    skipped: bool
+
+
+@dataclass
+class ProviderSummary:
+    """One lane's counts for a dry run or an apply: what was found, planned or written, and its size.
+
+    ``tokens`` is what the written (in a dry run: the priced) lines carry — a skip
+    writes nothing and adds none — summed over the fields the run does know, so an
+    unknown field adds nothing rather than poisoning the total. ``unavailable`` counts
+    lines whose cost could not be known (``cost_source`` ``unavailable:<reason>``),
+    which are booked and never summed as 0.
+    """
+
+    provider: str
+    runs: int = 0
+    new_lines: int = 0
+    corrections: int = 0
+    skips: int = 0
+    unavailable: int = 0
+    failures: int = 0
+    tokens: int = 0
+    total_usd: float = 0.0
+
+    def line(self) -> str:
+        """One line: the counts, the tokens booked and what they are worth."""
+        return (
+            f"{self.provider}: runs={self.runs} new_lines={self.new_lines} "
+            f"corrections={self.corrections} skips={self.skips} tokens={self.tokens} "
+            f"total_usd={self.total_usd:.6f} unavailable={self.unavailable} "
+            f"failures={self.failures}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -254,3 +405,572 @@ def scan(roots: Sequence[Path], since: date) -> List[TranscriptRun]:
     for root in lane_roots(str(path) for path in roots):
         found.extend(scan_lane(root, since))
     return sorted(dedupe_transcripts(found), key=lambda run: (run.occurred_to, run.path))
+
+
+# ---------------------------------------------------------------------------
+# The live ledger
+# ---------------------------------------------------------------------------
+
+
+def ledger_role(row: Optional[DispatchRow], live: Optional[Mapping[str, Any]]) -> str:
+    """The ledger purpose role: the dispatch row's when it maps, the live line's, else unknown."""
+    mapped = _ROLE_PURPOSE.get((row.role if row is not None else "") or "")
+    if mapped:
+        return mapped
+    live_role = (live or {}).get("role")
+    if live_role in cost_ledger.ROLES:
+        return live_role
+    return UNKNOWN_ROLE if row is None else UNKNOWN_ROLE_NO_PURPOSE
+
+
+def lane_model(provider: str, *candidates: Optional[str]) -> Optional[str]:
+    """The first candidate the lane's registry section knows, as its registry model key."""
+    registry_key = provider_costs.registry_key_for_provider(provider)
+    if registry_key is None:
+        return None
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        try:
+            return provider_registry.resolve_model_identity(registry_key, candidate)
+        except provider_registry.RegistryLookupError:
+            continue
+    return None
+
+
+def load_live_runs(ledger_path: Path, project_id: str) -> Dict[str, List[Mapping[str, Any]]]:
+    """``ref -> effective live records`` of this project, oldest window first. Reads, writes nothing."""
+    index: Dict[str, List[Mapping[str, Any]]] = collections.defaultdict(list)
+    for record in cost_ledger.aggregate_runs(ledger_path).runs.values():
+        try:
+            project, _producer, ref, _attempt = cost_ledger.split_run_id(record.get("run_id"))
+        except cost_ledger.InvalidRecord:
+            continue
+        if project == project_id:
+            index[ref].append(record)
+    for records in index.values():
+        records.sort(key=lambda record: (record.get("occurred_from") or "", record.get("run_id") or ""))
+    return dict(index)
+
+
+def _record_identity(record: Mapping[str, Any]) -> Optional[str]:
+    """The transcript identity a live line names, or ``None`` for a line written before it was stored.
+
+    A line whose identity is missing, empty or not a string names no session: it
+    is a legacy line, and :func:`_claimable` may claim it only on the token or
+    window evidence of :func:`_match_pass`. Anything else would let one session
+    supersede another's booked run.
+    """
+    value = record.get(cost_ledger.TRANSCRIPT_IDENTITY)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _candidates(records: Sequence[Mapping[str, Any]], provider: str,
+                claimed: set) -> List[Mapping[str, Any]]:
+    """The unclaimed live lines of this lane among a reference's records."""
+    return [record for record in records
+            if record.get("provider") == provider and record.get("record_id") not in claimed]
+
+
+def _claimable(records: Sequence[Mapping[str, Any]], run: TranscriptRun,
+               claimed: set) -> List[Mapping[str, Any]]:
+    """The unclaimed lines of this lane a transcript may take: its own identity, or a legacy line.
+
+    A line that names another session is never a candidate: that session's run
+    is booked elsewhere (or its transcript is not in this scan), and taking its
+    line would remove its spend from the ledger instead of adding this run.
+    """
+    return [record for record in _candidates(records, run.provider, claimed)
+            if _record_identity(record) in (None, run.identity)]
+
+
+def _distance(record: Mapping[str, Any], run: TranscriptRun) -> float:
+    """How far apart two runs' windows are, in seconds; an unreadable window is never the nearest.
+
+    Only ever breaks a tie between lines that already have evidence, so an
+    unreadable timestamp can neither create a match nor win one: it sorts last.
+    """
+    live_from, live_to = _parse(record.get("occurred_from")), _parse(record.get("occurred_to"))
+    run_from, run_to = _parse(run.occurred_from), _parse(run.occurred_to)
+    if None in (live_from, live_to, run_from, run_to):
+        return math.inf
+    return abs((live_to - run_to).total_seconds()) + abs((live_from - run_from).total_seconds())
+
+
+def _overlaps(record: Mapping[str, Any], run: TranscriptRun) -> bool:
+    """True only when the line's window and the run's window intersect, both read in full.
+
+    An unreadable window on either side is no evidence, so it claims nothing and
+    the line stays as it is (fail-closed, OI-2419).
+    """
+    live_from, live_to = _parse(record.get("occurred_from")), _parse(record.get("occurred_to"))
+    run_from, run_to = _parse(run.occurred_from), _parse(run.occurred_to)
+    if None in (live_from, live_to, run_from, run_to):
+        return False
+    return live_from <= run_to and run_from <= live_to
+
+
+def _pick(records: Sequence[Mapping[str, Any]], run: TranscriptRun) -> Mapping[str, Any]:
+    """The nearest of some equally evidenced lines, the ``run_id`` breaking an exact tie."""
+    return min(records, key=lambda record: (_distance(record, run), str(record.get("run_id") or "")))
+
+
+def _already_booked(live: Mapping[str, Any], base: Mapping[str, Any]) -> bool:
+    """True when the live line names this session and says exactly what the transcript says.
+
+    The identity is part of the comparison: a line that matches on every other
+    field but carries no identity is a legacy line, and it is written as a
+    correction carrying the identity rather than skipped — the write is what
+    persists the match.
+    """
+    return all(live.get(field) == base[field] for field in _BOOKED_FIELDS)
+
+
+def _next_attempt(records: Sequence[Mapping[str, Any]]) -> int:
+    """The first attempt number no recorded ``backfill`` run of this reference holds."""
+    used = 0
+    for record in records:
+        try:
+            _project, producer, _ref, attempt = cost_ledger.split_run_id(record.get("run_id"))
+        except cost_ledger.InvalidRecord:
+            continue
+        if producer == BACKFILL_PRODUCER:
+            used = max(used, attempt)
+    return used + 1
+
+
+def _reserve_attempt(records: Sequence[Mapping[str, Any]], ref: str,
+                     reserved: MutableMapping[str, int]) -> int:
+    """The next free attempt of this reference, held for this plan from now on.
+
+    ``reserved`` is the plan-wide ledger of charges already planned but not yet
+    written: the first charge of a reference starts after the attempts the
+    ledger holds (``_next_attempt``), and every later charge of the same
+    reference takes the number after it. Without this, two unbooked sessions of
+    one dispatch would both be planned as ``:1`` and collapse in the aggregate.
+    """
+    attempt = reserved.get(ref)
+    if attempt is None:
+        attempt = _next_attempt(records)
+    reserved[ref] = attempt + 1
+    return attempt
+
+
+# ---------------------------------------------------------------------------
+# The plan: what one transcript would write
+# ---------------------------------------------------------------------------
+
+
+def _verified(record: Mapping[str, Any], run: TranscriptRun, _index: int) -> bool:
+    """Pass 1: the line names this transcript's identity."""
+    return _record_identity(record) == run.identity
+
+
+def _exact_tokens(tokens: Sequence[Mapping[str, Optional[int]]]):
+    """Pass 2: a line without an identity whose tokens are exactly this run's."""
+    def evidence(record: Mapping[str, Any], _run: TranscriptRun, index: int) -> bool:
+        return _record_identity(record) is None and record.get("tokens") == dict(tokens[index])
+    return evidence
+
+
+def _overlapping(record: Mapping[str, Any], run: TranscriptRun, _index: int) -> bool:
+    """Pass 3: a line without an identity whose window overlaps this run's."""
+    return _record_identity(record) is None and _overlaps(record, run)
+
+
+def _match_pass(ordered: Sequence[TranscriptRun], live_index: Mapping[str, Sequence[Mapping[str, Any]]],
+                claimed: set, matched: MutableMapping[int, Mapping[str, Any]], evidence) -> None:
+    """Claim, per run in order, the nearest unclaimed line ``evidence`` accepts.
+
+    ``matched`` is filled in place, and a run it already holds is left alone, so
+    the passes after the first never take a second line for one transcript.
+    """
+    for index, run in enumerate(ordered):
+        if index in matched:
+            continue
+        near = [record for record in _claimable(live_index.get(run.ref, ()), run, claimed)
+                if evidence(record, run, index)]
+        if not near:
+            continue
+        matched[index] = _pick(near, run)
+        claimed.add(matched[index]["record_id"])
+
+
+def plan_run(run: TranscriptRun, row: Optional[DispatchRow], live: Optional[Mapping[str, Any]],
+             tokens: Mapping[str, Optional[int]], project_id: str,
+             live_index: Mapping[str, Sequence[Mapping[str, Any]]],
+             reserved: MutableMapping[str, int]) -> PlannedRun:
+    """The planned line for one transcript: a correction on its live run, a charge, or a skip.
+
+    A charge's attempt number comes from ``reserved`` — the plan-wide reservations
+    ``plan_runs`` keeps — so it never reuses a number another charge already holds.
+    """
+    model = lane_model(run.provider, row.model if row is not None else None,
+                       (live or {}).get("model"), run.reported_model) or _LANE_DEFAULT[run.provider]()
+    base = {
+        "project_id": project_id, "role": ledger_role(row, live), "provider": run.provider,
+        "model": model, "occurred_from": run.occurred_from, "occurred_to": run.occurred_to,
+        "tokens": tokens, "usage_completeness": harness_run_cost.usage_completeness(tokens),
+        "billing": harness_run_cost.BILLING_BY_PROVIDER[run.provider],
+        "segments": harness_run_cost.price_segments(run.provider, model, run.messages, tokens),
+        "transcript_identity": run.identity,
+    }
+    if live is None:
+        attempt = _reserve_attempt(live_index.get(run.ref, ()), run.ref, reserved)
+        run_id = cost_ledger.run_id_for(project_id, BACKFILL_PRODUCER, run.ref, attempt)
+        return PlannedRun(run.provider, cost_ledger.RunCost(run_id=run_id, backfill=True, **base),
+                          None, skipped=False)
+    if _already_booked(live, base):
+        return PlannedRun(run.provider, None, live, skipped=True)
+    planned = cost_ledger.RunCost(run_id=live["run_id"], kind="correction",
+                                  supersedes=live["record_id"], reason=CORRECTION_REASON,
+                                  backfill=True, **base)
+    return PlannedRun(run.provider, planned, live, skipped=False)
+
+
+def plan_runs(runs: Sequence[TranscriptRun], rows: Mapping[str, DispatchRow],
+              live_index: Mapping[str, Sequence[Mapping[str, Any]]],
+              project_id: str) -> List[PlannedRun]:
+    """One planned line per transcript, in deterministic order; each live line is claimed once.
+
+    Three passes, in this order, over the transcripts of one reference:
+
+    1. a *verified* match — the live line stores this transcript's identity. This is
+       the only way a run that already names a session is corrected; a session of
+       the same dispatch with another identity (or a ``--since`` that leaves the
+       booked transcript out of the scan) never takes its line;
+    2. an exact token match on a line without an identity, across all transcripts
+       of a reference, so a small follow-up session can never take the live line
+       of the big run it shares a reference with;
+    3. a line without an identity whose window overlaps the run's. A line written
+       before the identity was stored (the envelope's own line) can be claimed
+       once this way, and the correction stamps the identity on it. A line whose
+       window does not overlap stays untouched: no evidence it measures this
+       session.
+
+    Anything left over books a charge: the run is added beside the existing ones,
+    never written as a correction that would remove their spend.
+
+    Order is the run's end timestamp, then its transcript path: the same transcripts in
+    the same store always plan the same run ids. Every charge planned for a reference
+    reserves its attempt in ``reserved`` before the next one is numbered, so the second
+    unbooked session of a dispatch gets the next free attempt instead of a duplicate.
+    """
+    ordered = sorted(runs, key=lambda item: (item.occurred_to, item.path))
+    tokens = [harness_run_cost.run_tokens(run.messages) for run in ordered]
+    claimed: set = set()
+    matched: Dict[int, Mapping[str, Any]] = {}
+    _match_pass(ordered, live_index, claimed, matched, _verified)
+    _match_pass(ordered, live_index, claimed, matched, _exact_tokens(tokens))
+    _match_pass(ordered, live_index, claimed, matched, _overlapping)
+    reserved: Dict[str, int] = {}
+    return [
+        plan_run(run, rows.get(run.dispatch_id) if run.dispatch_id else None, matched.get(index),
+                 tokens[index], project_id, live_index, reserved)
+        for index, run in enumerate(ordered)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# The writer: the plan, booked
+# ---------------------------------------------------------------------------
+
+
+class _Unrenumberable(Exception):
+    """A backfill charge that stayed refused past the retry bound: nothing was written for it.
+
+    ``str`` names the charge's ``run_id`` — the reference included — and why, so the
+    caller's stderr line says which run was not booked.
+    """
+
+
+def _plan_reservations(plans: Sequence[PlannedRun]) -> Dict[str, Set[int]]:
+    """``ref -> attempts`` this plan's own backfill charges hold, written or not.
+
+    Renumbering a refused charge must not land on an attempt a later charge of the
+    same plan already holds: the two would collide again and one line would replace
+    the other in the aggregate. So the plan's reservations are part of "free".
+    """
+    reserved: Dict[str, Set[int]] = collections.defaultdict(set)
+    for planned in plans:
+        run = planned.run
+        if planned.skipped or run is None or run.kind != "charge":
+            continue
+        try:
+            _project, producer, ref, attempt = cost_ledger.split_run_id(run.run_id)
+        except cost_ledger.InvalidRecord:
+            continue
+        if producer == BACKFILL_PRODUCER:
+            reserved[ref].add(attempt)
+    return reserved
+
+
+def _renumbered(run: cost_ledger.RunCost, ledger_path: Path,
+                reserved: MutableMapping[str, Set[int]]) -> cost_ledger.RunCost:
+    """The same backfill charge under the next attempt neither the ledger nor this plan holds.
+
+    The ledger is re-read here: the attempt that was taken is only knowable from what
+    is written now, not from the snapshot the plan was numbered on (K6b-3 round 2).
+    A ledger that cannot be re-read raises :class:`_Unrenumberable`: a guessed attempt
+    would make a second run of an existing one. Only a charge is ever renumbered —
+    :func:`apply_runs` keeps a correction on the ``run_id`` and ``supersedes`` it was
+    planned with.
+    """
+    project_id, _producer, ref, taken = cost_ledger.split_run_id(run.run_id)
+    reserved.setdefault(ref, set()).discard(taken)
+    try:
+        records = load_live_runs(ledger_path, project_id).get(ref, ())
+    except (OSError, ValueError) as exc:
+        raise _Unrenumberable(f"{run.run_id}: the ledger could not be re-read to renumber it ({exc})") from exc
+    attempt = _next_attempt(records)
+    while attempt in reserved[ref]:
+        attempt += 1
+    reserved[ref].add(attempt)
+    return dataclasses.replace(run, run_id=cost_ledger.run_id_for(project_id, BACKFILL_PRODUCER, ref, attempt))
+
+
+class _AlreadyBooked(Exception):
+    """A backfill charge whose transcript is booked already with the same usage: nothing more is written."""
+
+    def __init__(self, record: Mapping[str, Any]):
+        super().__init__(record.get("run_id"))
+        self.record = dict(record)
+
+
+# What a second booking of one transcript must agree on to be the same booking:
+# its usage (the token counts per field and the priced segments they add up to)
+# and its amount (``cost_usd``, ``api_equivalent_usd`` and the ``cost_source``
+# both are evidence of). ``usage_completeness`` is how much of the usage is
+# known, so a change there is a change of usage too.
+_AGREED_FIELDS = ("tokens", "segments", "usage_completeness", "billing",
+                  "cost_usd", "api_equivalent_usd", "cost_source")
+
+
+def _agrees_with(run: cost_ledger.RunCost, booked: Mapping[str, Any]) -> bool:
+    """Whether ``booked`` says the same about usage and amount as ``run`` would now.
+
+    The planned charge is built the way the writer would build it, so the
+    comparison is between two ledger records' fields, never between a run and a
+    line's shape. A field the booked line does not carry reads ``None``, and
+    ``None`` equals ``None`` only: a missing amount never reads as equal to a
+    real one.
+    """
+    planned = cost_ledger.build_record(run)
+    return all(planned.get(field) == booked.get(field) for field in _AGREED_FIELDS)
+
+
+def _correction_of(run: cost_ledger.RunCost, booked: Mapping[str, Any]) -> cost_ledger.RunCost:
+    """The planned charge as a correction on the booked line, so the ledger shows the new usage once.
+
+    The correction keeps the booked line's ``run_id`` (the aggregate counts one run per
+    id) and names its ``record_id`` in ``supersedes`` — the ledger's existing correction
+    path (ADR-038). A booked line that names no ``run_id`` or ``record_id`` cannot be
+    corrected: that is a failure with nothing written, never a guess.
+    """
+    run_id, record_id = booked.get("run_id"), booked.get("record_id")
+    if not (isinstance(run_id, str) and run_id and isinstance(record_id, str) and record_id):
+        raise _Unrenumberable(
+            f"{run.run_id}: the line that booked its transcript names no run and record to correct "
+            f"(run_id {run_id!r}, record_id {record_id!r}): nothing was written",
+        )
+    return dataclasses.replace(run, kind="correction", run_id=run_id, supersedes=record_id,
+                               reason=CORRECTION_REASON)
+
+
+def _write_planned(planned: PlannedRun, ledger_path: Path, reserved: MutableMapping[str, Set[int]],
+                   *, dry_run: bool) -> Mapping[str, Any]:
+    """Write one planned line; a backfill charge is renumbered or corrected, never double-booked.
+
+    The ledger tells two refusals apart and so does this writer (K6b-3 round 3):
+
+    * :class:`cost_ledger.BackfillTranscriptBooked` — this transcript has a line
+      already, because a concurrent backfill planned from the same snapshot. The
+      refusal carries the *effective* line of the ``supersedes`` chain, so a
+      transcript that was corrected before is compared with what the ledger says
+      now, not with the line that correction replaced (K6b-3b, OI-2455). Equal
+      usage and amount raise :class:`_AlreadyBooked` (a skip, not a failure);
+      different usage becomes one correction superseding the effective line, on
+      its ``run_id``, written through the ledger's correction path. A correction
+      is never renumbered.
+    * :class:`cost_ledger.BackfillRunIdTaken` — another transcript of this
+      reference took the attempt, so the charge is renumbered and written again,
+      at most :data:`BACKFILL_RETRY_LIMIT` times; past that it is
+      :class:`_Unrenumberable`. A charge with no ``transcript_identity`` is never
+      renumbered: it cannot show it is not the transcript that already holds the
+      line, so it fails with nothing written.
+
+    Every other refusal propagates as it is.
+    """
+    run = planned.run
+    if dry_run:
+        return cost_ledger.build_record(run)
+    retries = 0
+    while True:
+        try:
+            return cost_ledger.record_run(run, ledger_path=ledger_path)
+        except cost_ledger.BackfillTranscriptBooked as booked:
+            if run.kind != "charge":
+                raise
+            if _agrees_with(run, booked.record):
+                raise _AlreadyBooked(booked.record) from booked
+            run = _correction_of(run, booked.record)
+        except cost_ledger.BackfillRunIdTaken as taken:
+            if run.kind != "charge":
+                raise
+            if run.transcript_identity is None:
+                raise _Unrenumberable(
+                    f"{run.run_id}: the charge names no transcript identity, so a taken run id is "
+                    "never renumbered; nothing was written",
+                ) from taken
+            if retries >= BACKFILL_RETRY_LIMIT:
+                raise _Unrenumberable(
+                    f"{planned.run.run_id}: its run id stayed taken after "
+                    f"{BACKFILL_RETRY_LIMIT} renumberings ({taken})",
+                ) from taken
+            run = _renumbered(run, ledger_path, reserved)
+            retries += 1
+
+
+def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
+               *, dry_run: bool) -> Dict[str, ProviderSummary]:
+    """Book every planned line (in a dry run: price it) and count it per provider.
+
+    A charge and a correction each go through :func:`cost_ledger.record_run`, the
+    ledger's one writer: a charge is a new line, a correction a line naming the record
+    it supersedes (ADR-038), and no existing line is ever rewritten. A skip writes
+    nothing. A backfill charge whose attempt another backfill took meanwhile is
+    renumbered under the writer's lock and written again (:func:`_write_planned`), so
+    two backfills of one dispatch keep both transcripts' spend in the aggregate; a
+    correction is never renumbered. A charge whose *transcript* a concurrent backfill
+    booked already is not a failure and not a second line: equal usage is counted as
+    a skip, changed usage is written as one correction superseding the effective line of
+    the ``supersedes`` chain, so the transcript's spend counts once and no correction is
+    added for what a later line already says (K6b-3 round 3, K6b-3b). A line the ledger refuses wrote
+    nothing, so it is counted as a failure and the next line is still attempted;
+    :class:`cost_ledger.CostLedgerWriteError` — the write's outcome is unknown —
+    propagates instead, and the caller stops (ADR-005).
+    """
+    summaries: Dict[str, ProviderSummary] = {}
+    reserved = _plan_reservations(plans)
+    for planned in plans:
+        summary = summaries.setdefault(planned.provider, ProviderSummary(planned.provider))
+        summary.runs += 1
+        if planned.skipped:
+            summary.skips += 1
+            continue
+        try:
+            record = _write_planned(planned, ledger_path, reserved, dry_run=dry_run)
+        except _AlreadyBooked:
+            summary.skips += 1
+            continue
+        except _Unrenumberable as exc:
+            summary.failures += 1
+            print(f"{planned.provider}: {exc}", file=sys.stderr)
+            continue
+        except cost_ledger.CostLedgerRefusal as exc:
+            summary.failures += 1
+            print(f"{planned.provider}: {planned.run.run_id}: {exc}", file=sys.stderr)
+            continue
+        if record["kind"] == "correction":
+            summary.corrections += 1
+        else:
+            summary.new_lines += 1
+        summary.tokens += sum(value for value in record["tokens"].values() if value is not None)
+        if record.get("cost_usd") is None:
+            summary.unavailable += 1
+        else:
+            summary.total_usd += record["cost_usd"]
+    return summaries
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def _parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="vnx costs backfill",
+        description="Book the harness transcript runs the ledger misses (ADR-049 K6b-3).",
+    )
+    parser.add_argument("--since", type=date.fromisoformat, default=date.fromisoformat(DEFAULT_SINCE),
+                        metavar="YYYY-MM-DD", help=f"first day of runs to book (default {DEFAULT_SINCE})")
+    parser.add_argument("--harness-root", action="append", metavar="PATH",
+                        help="a harness lane dir or a parent of lane dirs (repeatable; default: "
+                             "the harness transcript lanes under <VNX_DATA_DIR>/harness-config)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="print the plan, write nothing (default)")
+    mode.add_argument("--apply", action="store_true", help="write the planned lines")
+    parser.add_argument("--ledger", metavar="PATH",
+                        help="the ledger to read and write (default: this project's store)")
+    return parser.parse_args(argv)
+
+
+def _roots(values: Optional[Sequence[str]]) -> Tuple[List[Path], Optional[str]]:
+    """The lane dirs to scan, or why a named ``--harness-root`` is refused.
+
+    Without ``--harness-root`` the lanes under ``<VNX_DATA_DIR>/harness-config`` are
+    scanned. A root that does not exist, or that holds no harness lane, is refused
+    rather than scanned into an empty result: "nothing found" must never be the way a
+    mistyped path reports success.
+    """
+    if not values:
+        return sorted({item.parent for item in harness_config_dir.harness_projects_dirs()
+                       if item.parent.name in LANES}), None
+    missing = [value for value in values if not Path(value).expanduser().is_dir()]
+    if missing:
+        return [], f"no such harness root: {', '.join(missing)}"
+    roots = lane_roots(values)
+    if not roots:
+        return [], f"no harness lane under: {', '.join(values)}"
+    not_lane = sorted({root.name for root in roots if root.name not in LANES})
+    if not_lane:
+        return [], f"not a harness lane: {', '.join(not_lane)}"
+    return roots, None
+
+
+def _exit_code(summaries: Mapping[str, ProviderSummary]) -> int:
+    """0 when every planned line was booked or skipped cleanly, 1 when one was refused."""
+    return EXIT_FAILED if any(summary.failures for summary in summaries.values()) else 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    """Plan, and with ``--apply`` write, one line per harness transcript from ``--since`` on."""
+    args = _parse_args(argv)
+    try:
+        project_id = resolve_project_id()
+        paths = vnx_paths.resolve_paths()
+    except (RuntimeError, OSError) as exc:
+        print(f"vnx costs backfill: cannot resolve the project store: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    roots, refusal = _roots(args.harness_root)
+    if refusal is not None:
+        print(f"vnx costs backfill: {refusal}", file=sys.stderr)
+        return EXIT_USAGE
+    ledger_path = Path(args.ledger) if args.ledger else provider_costs.costs_path_in(Path(paths["VNX_DATA_DIR"]))
+    try:
+        live_index = load_live_runs(ledger_path, project_id)
+    except (OSError, ValueError) as exc:
+        print(f"vnx costs backfill: cannot read {ledger_path}: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    rows = load_dispatch_rows(Path(paths["VNX_DISPATCH_DIR"]))
+    runs = scan(roots, args.since)
+    if not runs:
+        where = ", ".join(str(root) for root in roots) or "no harness lane"
+        print(f"no transcript on or after {args.since} under {where}")
+        return 0
+    if not args.apply:
+        print("dry run: no line written; pass --apply to write")
+    try:
+        summaries = apply_runs(plan_runs(runs, rows, live_index, project_id), ledger_path,
+                               dry_run=not args.apply)
+    except cost_ledger.CostLedgerWriteError as exc:
+        print(f"vnx costs backfill: the outcome of a write is unknown, stopping: {exc}", file=sys.stderr)
+        return EXIT_FAILED
+    for provider in sorted(summaries):
+        print(summaries[provider].line())
+    return _exit_code(summaries)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
