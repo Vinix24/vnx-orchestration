@@ -45,9 +45,16 @@ def test_pool_worker_command_names_the_legacy_entrypoint(monkeypatch, flags):
                                    [str(LIB / "subprocess_dispatch.py")]],
                          ids=["module", "path"])
 def test_legacy_entrypoint_still_runs(entry):
-    """The entry point the rollback route names still starts and prints its usage."""
+    """The entry point the rollback route names still starts and prints its usage.
+
+    PYTHONPATH is dropped: the pool route starts the module with no path help
+    (``-m`` does not put the script's directory on ``sys.path``), so a builder's or
+    CI's PYTHONPATH must not be able to hide a broken import here.
+    """
+    env = dict(os.environ)
+    env.pop("PYTHONPATH", None)
     result = subprocess.run([sys.executable, *entry, "--help"], cwd=str(ROOT),
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=120, env=env)
 
     assert result.returncode == 0, result.stderr
     assert "Deliver dispatch via SubprocessAdapter" in result.stdout
