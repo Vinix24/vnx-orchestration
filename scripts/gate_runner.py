@@ -31,6 +31,7 @@ from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
+import gate_status
 from failure_classification import find_codex_model_refusal
 from providers import provider_registry
 import gate_artifacts as _art
@@ -674,6 +675,10 @@ def _book_gate_run_cost(
     run = harness_run_cost.cli_run(
         provider=harness_run_cost.CODEX_PROVIDER, model=model, started=started, ended=ended,
         depth=depth, spawn_refused=refused,
+        # K3-2a: the run's own id, so the ledger line says which execution it
+        # books and a later commit of the same run finds it instead of booking
+        # a second line.
+        execution_id=request_payload.get(gate_status.EXECUTION_ID_FIELD),
     )
     harness_run_cost.record_codex_run(
         run, project_id=harness_run_cost.ledger_project_id(state_dir), producer=producer, ref=run_ref,
@@ -972,8 +977,16 @@ class GateRunner:
         A request booked ``unavailable`` can run again. The codex launch record
         of the run before (OI-2288) is dropped here, so a run that never
         launches codex does not carry that model and effort as its own.
+
+        K3-2a: the run's ``execution_id`` is minted HERE, at the transition to
+        ``executing`` — after every "this gate will not run" refusal, and
+        before the first model call of any of the three paths below. It is
+        persisted on the request so every record of this run carries it, and a
+        request payload left over from an earlier run can never hand its id to
+        this one.
         """
         request_payload.pop("codex_launch", None)
+        request_payload[gate_status.EXECUTION_ID_FIELD] = gate_status.new_execution_id()
         request_payload["status"] = "executing"
         request_payload["started_at"] = utc_now_iso()
         request_payload["runner_pid"] = os.getpid()

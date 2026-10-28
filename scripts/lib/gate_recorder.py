@@ -34,6 +34,7 @@ from gate_billing_table import (
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
+import gate_status
 import provider_reachability
 import provider_switch
 
@@ -860,6 +861,10 @@ def stamp_request_identity(
 ) -> Dict[str, Any]:
     """Stamp ``branch`` + ``commit_sha`` from the request onto a result record.
 
+    Also carries the run's ``execution_id`` (K3-2a) when the request has a
+    minted one, so every record of a run — not just the success record — names
+    the execution it describes.
+
     OI-1307 (dispatch-20260816-fix1588-poort-b): the merge door's closure check
     matches a review-gate result on BOTH branch (ADR-005) and head sha. Before
     this, no writer stamped either field, so a result never carried the branch
@@ -922,6 +927,14 @@ def stamp_request_identity(
     for field in _ROUND_FIELDS + _OPERATOR_FIELDS:
         if request_payload.get(field):
             result_payload[field] = request_payload[field]
+    # K3-2a: the run's execution_id travels with the rest of the request's
+    # identity, so EVERY record of the run (the success record, a failure
+    # record, a not-executable one) carries the id the run was started with.
+    # Only a minted id is copied — a request without one (a run that never
+    # started) leaves the field absent rather than stamping a placeholder.
+    execution_id = request_payload.get(gate_status.EXECUTION_ID_FIELD)
+    if gate_status.is_execution_id(execution_id):
+        result_payload[gate_status.EXECUTION_ID_FIELD] = execution_id
     return result_payload
 
 

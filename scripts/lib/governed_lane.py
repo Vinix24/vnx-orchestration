@@ -73,6 +73,7 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import gate_depth  # after the scripts/lib path guard
+import gate_status  # K3-2a: the run's execution_id, minted once per run
 import harness_run_cost  # K2b: the gate run's own cost-ledger line
 import provider_costs  # K2b: the ledger of the store the gate itself resolved
 from gate_lane_contract import (
@@ -541,6 +542,34 @@ def reprocess_original_commit_sha(provider: str, base_data_dir: Path, pr: str, d
     return record.get("commit_sha") or None
 
 
+def reprocess_original_execution_id(provider: str, base_data_dir: Path, pr: str, dispatch_id: str) -> str:
+    """The execution id the ORIGINAL run of ``dispatch_id`` recorded next to its report, or ``""`` (K3-2a).
+
+    ``--reprocess`` calls no model, so it is not a run and mints no id: the
+    record it rebuilds describes the run whose report it read, and carries
+    THAT run's id. The id is recorded with the report the run wrote — its own
+    result record in the slot names that report (``report_path``) and carries
+    the id — so the lookup is the same address
+    :func:`reprocess_original_commit_sha` uses, and refuses on the same
+    condition: a slot that now reflects a LATER dispatch for this PR names a
+    different run, and its id is not this one's.
+
+    ``""`` when there is no such record, when it belongs to another dispatch,
+    or when it carries no minted id — never a fresh id, and never a guess.
+    """
+    path = base_data_dir / "state" / "review_gates" / "results" / f"pr-{pr}-{_row(provider).gate}.json"
+    if not path.is_file():
+        return ""
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ""
+    if not isinstance(record, dict) or record.get("dispatch_id") != dispatch_id:
+        return ""
+    execution_id = record.get(gate_status.EXECUTION_ID_FIELD)
+    return execution_id if gate_status.is_execution_id(execution_id) else ""
+
+
 def verdict_to_status(provider: str, verdict: dict, report_text: str = "", *, provider_failed_detail: "Optional[str]" = None) -> "Tuple[str, list, str]":
     """``(status, blocking_findings, residual_risk)`` for one extracted verdict. OI-1142: only a REAL
     parsed verdict may produce ``fail``. ``provider_failed_detail`` (from ``frontmatter_run_outcome``)
@@ -650,6 +679,11 @@ class GateRunState:
     scan_findings: list
     execution_depth: object
     seams: GateSeams
+    # K3-2a: the id of the ONE run this record describes, minted before the
+    # model call. "" for ``--reprocess`` of a run whose id is not on disk: that
+    # run is not this invocation, and minting one here would name an execution
+    # that never happened.
+    execution_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -718,7 +752,7 @@ def _parse_gate_args(row: ProviderRow, argv: "Optional[list]") -> "Optional[argp
 def _write_gate_request(
     row: ProviderRow, args: argparse.Namespace, *, requests_dir: Path, report_path: str,
     pr_number: "Optional[int]", dispatch_id: str, branch: str, commit_sha: str, test_run: bool,
-    seams: GateSeams,
+    seams: GateSeams, execution_id: str,
 ) -> "Optional[int]":
     """OI-1435 defect 4: the request record exists BEFORE the gate ever dispatches.
 
@@ -739,6 +773,8 @@ def _write_gate_request(
         "dispatch_id": dispatch_id,
         "test_run": test_run,
     }
+    if execution_id:
+        payload[gate_status.EXECUTION_ID_FIELD] = execution_id
     try:
         requests_dir.mkdir(parents=True, exist_ok=True)
         seams.persist_request(requests_dir, row.gate, payload, pr_number=pr_number, pr_id="")
@@ -866,6 +902,13 @@ def run_gate_head(
     base_data_dir = seams.resolve_data_dir(args.data_dir or None)
     pr_number = int(args.pr) if str(args.pr).isdigit() else None
     dispatch_id = args.reprocess if args.reprocess else f"{row.dispatch_id_prefix}{args.pr}-{int(time.time())}"
+    # K3-2a: the run's identity, settled BEFORE the request record is written and before any model
+    # call. A live run mints its own; ``--reprocess`` calls no model and is no run, so it carries the
+    # id the run whose report it rebuilds recorded with that report ("" when it recorded none).
+    execution_id = (
+        reprocess_original_execution_id(provider, base_data_dir, args.pr, dispatch_id)
+        if args.reprocess else gate_status.new_execution_id()
+    )
     # Offline runs read the diff from a file and are NOT tied to a live GitHub PR — the branch and
     # commit_sha are resolved once here and reused for the request record and the result record.
     test_run = bool(args.diff_file)
@@ -876,7 +919,7 @@ def run_gate_head(
         row, args, requests_dir=requests_dir,
         report_path=str(base_data_dir / "unified_reports" / f"{dispatch_id}.md"),
         pr_number=pr_number, dispatch_id=dispatch_id, branch=branch, commit_sha=commit_sha,
-        test_run=test_run, seams=seams,
+        test_run=test_run, seams=seams, execution_id=execution_id,
     )
     if rc is not None:
         return rc, None
@@ -891,6 +934,7 @@ def run_gate_head(
         dispatch_error=inputs.dispatch_error, duration=inputs.duration,
         window_start=inputs.window_start, window_end=inputs.window_end, prompt=inputs.prompt,
         scan_findings=inputs.scan_findings, execution_depth=inputs.execution_depth, seams=seams,
+        execution_id=execution_id,
     )
 
 
@@ -1034,8 +1078,14 @@ def _evidence_pair(state: GateRunState, facts: VerdictFacts) -> "Tuple[str, str]
 
 
 def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, report_path: str) -> dict:
-    """Phase 4c: the result record — one shape for both gates, names taken from the register row."""
-    return {
+    """Phase 4c: the result record — one shape for both gates, names taken from the register row.
+
+    ``execution_id`` (K3-2a) is CARRIED from the run's state, never minted here:
+    one id per run, so a record handed back to a caller and committed again keeps
+    it, and a ``--reprocess`` record carries the original run's id (absent when
+    that run recorded none — an empty placeholder would read as an id to match).
+    """
+    record = {
         "gate": state.row.gate,
         "pr_id": str(state.args.pr),
         "pr_number": state.pr_number,
@@ -1059,8 +1109,11 @@ def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, 
         "residual_risk": facts.residual,
         "failure_reason": facts.lifted_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "evidence_source": "reprocessed" if state.args.reprocess else "live",
+        gate_status.EVIDENCE_SOURCE_FIELD: "reprocessed" if state.args.reprocess else "live",
     }
+    if state.execution_id:
+        record[gate_status.EXECUTION_ID_FIELD] = state.execution_id
+    return record
 
 
 def _stamp_and_persist(state: GateRunState, record: dict) -> "Optional[int]":
@@ -1081,6 +1134,13 @@ def _stamp_and_persist(state: GateRunState, record: dict) -> "Optional[int]":
         disk_request_payload = {"gate": record["gate"], "pr_id": record["pr_id"]}
     disk_request_payload["branch"] = state.branch
     disk_request_payload["commit_sha"] = state.commit_sha
+    # K3-2a: the request read from disk is keyed by PR, so it may be a LATER run's request. Its
+    # execution_id must never overwrite this run's — the record's id is the run's own, and a
+    # reprocess that found no original id keeps carrying none.
+    if state.execution_id:
+        disk_request_payload[gate_status.EXECUTION_ID_FIELD] = state.execution_id
+    else:
+        disk_request_payload.pop(gate_status.EXECUTION_ID_FIELD, None)
     state.seams.stamp_request_identity(record, disk_request_payload)
     results_dir = state.base_data_dir / "state" / "review_gates" / "results"
     out = results_dir / f"pr-{state.args.pr}-{state.row.gate}.json"
@@ -1138,6 +1198,9 @@ def _book_gate_cost(state: GateRunState) -> None:
     run = harness_run_cost.cli_run(
         provider=provider, model=getattr(state.args, "model", "") or "", started=started, ended=ended,
         report_text=state.report_text or "",
+        # K3-2a: the line names the execution it books, so the record's commit of
+        # this same run can see that a line already exists (K3-2b).
+        execution_id=state.execution_id,
     )
     harness_run_cost.record_cli_run(
         run, project_id=harness_run_cost.ledger_project_id(state.base_data_dir / "state"),

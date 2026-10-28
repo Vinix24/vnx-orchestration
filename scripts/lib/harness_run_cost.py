@@ -475,7 +475,15 @@ def record_classifier_run(
 
 @dataclass(frozen=True)
 class CliRun:
-    """A codex/kimi run as it reports itself: its ``token_usage`` (``None`` = reported nothing), or a refusal."""
+    """A codex/kimi run as it reports itself: its ``token_usage`` (``None`` = reported nothing), or a refusal.
+
+    ``execution_id`` (K3-2a) is the run's identity, minted by the gate that
+    started it (``gate_status.new_execution_id``) before the model call and
+    carried onto its result record. It lands on the ledger line so one
+    execution is one line, whatever the result slot later does with the
+    record (K3-2b). ``None`` books a line without an id, which is what a
+    caller that knows no run identity (a builder leg outside the gate) does.
+    """
 
     provider: str
     model: str
@@ -483,6 +491,7 @@ class CliRun:
     ended: datetime
     token_usage: Optional[Mapping[str, Any]] = None
     spawn_refused: Optional[str] = None
+    execution_id: Optional[str] = None
 
 
 def _token_count(value: object) -> Optional[int]:
@@ -616,6 +625,7 @@ def cli_run(
     *, provider: str, model: str, started: datetime, ended: datetime,
     token_usage: Optional[Mapping[str, Any]] = None, depth: Any = None,
     report_text: Optional[str] = None, spawn_refused: Optional[str] = None,
+    execution_id: Optional[str] = None,
 ) -> CliRun:
     """One codex/kimi run, from whichever usage source its measured end holds (K2b).
 
@@ -626,7 +636,9 @@ def cli_run(
     frontmatter stamped ``token_usage_measured`` (OI-1291; kimi-cli 1.46.0's
     stream carries no usage at all). No source, or one that measured nothing,
     stays ``None`` and books the honest unknown, never a zero. ``spawn_refused``
-    names an attempt the lane refused before anything ran.
+    names an attempt the lane refused before anything ran. ``execution_id``
+    (K3-2a) is the gate run's own identity; it is written on the line as-is,
+    never re-minted here.
     """
     if isinstance(token_usage, Mapping):
         usage: Optional[Mapping[str, Any]] = token_usage
@@ -637,7 +649,7 @@ def cli_run(
     else:
         usage = None
     return CliRun(provider=provider, model=model, started=started, ended=ended,
-                  token_usage=usage, spawn_refused=spawn_refused)
+                  token_usage=usage, spawn_refused=spawn_refused, execution_id=execution_id)
 
 
 def _depth_usage(depth: Any) -> Optional[Dict[str, Any]]:
@@ -736,7 +748,9 @@ def _book_cli_run(
     def make_run(run_id: str) -> cost_ledger.RunCost:
         return cost_ledger.RunCost(
             run_id=run_id, project_id=project_id, role=role, provider=provider,
-            model=run.model, billing=CLI_BILLING[provider], **fields,
+            model=run.model, billing=CLI_BILLING[provider],
+            # K3-2a: the gate run's own id travels onto the line verbatim.
+            execution_id=run.execution_id, **fields,
         )
 
     try:
