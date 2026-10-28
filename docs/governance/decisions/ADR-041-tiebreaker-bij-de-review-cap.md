@@ -20,7 +20,7 @@ De plan-gate van 18-10 liet R2 door met twee bindende voorwaarden. Eén: zonder 
 | Cap | Betekenis (DISPATCH_RULES §3) | Uitkomsten |
 |---|---|---|
 | B3.1 | Een ontwerpprobleem: drie of meer blockers in één ronde | `verkleinen` of `terug-naar-plan` |
-| B3.2 | Geen convergentie: de laatste ronde heeft een blocker en de som is zes of meer | `verkleinen` of `mergen-met-OI` |
+| B3.2 | Geen convergentie: (a) de laatste ronde heeft een blocker en de som is zes of meer, of (b) het aantal codex-FAIL-rondes op verschillende koppen sinds de laatste `opened`-regel bereikt de rondegrens (R1e: standaard 3, per project) | `verkleinen` of `mergen-met-OI` |
 
 R2a voert `verkleinen` uit, R2b `terug-naar-plan`. `mergen-met-OI` komt met R2c: kiest het model die, dan wordt hij vastgelegd als `outcome_unavailable_in_r2a`, met de keuze van het model in `chosen_outcome`. De cap blijft dan dicht en de T0 handelt het af zoals nu: uitstellen met een OI.
 
@@ -107,3 +107,16 @@ De tabel `review_cap_approvals` uit sectie 4 komt er niet. Het akkoord is het be
 Het akkoord geldt voor precies één gebruik. `review_cap_verdicts.merge_approval` geeft het alleen terug als alle drie matchen: hetzelfde verdict-id, dezelfde PR en dezelfde kop. Een akkoord voor een andere uitspraak, een andere PR of een andere kop telt als geen akkoord, en een ontbrekend of onleesbaar akkoordgrootboek geeft er ook geen. Een tweede uitspraak of een nieuwe kop vraagt dus een nieuw akkoord van de operator — dat is de "één regel per geval" uit punt 1, nu als binding in plaats van als tabel.
 
 Dit amendement bouwt het record en de opzoeking; de deur die het leest is RG-4 (`scripts/lib/review_seat_evaluation.py`, `scripts/pr_merge.py`). Het eerste echte gebruik blijft een akkoord van Vincent.
+
+## Amendement R1e - de rondegrens is deel van B3.2
+
+**Toegevoegd:** 2026-10-27, RG-1 (dispatch `dlv-5c8bb4e59ead`, track `review-rondegrens-met-tiebreaker`).
+
+Op 27-10 werden vier PR's met de hand gesloten "volgens B3: na ronde 3" (#2214, #2221, #2276, #2277), terwijl `review_rounds.cap_state` alleen op blockers capte: de praktijk telde rondes, de code telde blockers, en de rol zei iets anders. R1e maakt de ronde de tweede drempel van B3.2, zodat de drie regels één worden.
+
+- **De drempel.** `review_rounds.cap_state` capt onder B3.2 ook zodra het aantal codex-rondes met `verdict == "fail"` op verschillende koppen sinds de laatste geattesteerde `opened`-regel `review_rounds.round_cap()` bereikt. B3.1 en de blockerdrempel van B3.2 blijven onveranderd en worden eerst getoetst. De regelnaam blijft B3.2: de `CHECK (cap_rule IN ('B3.1','B3.2'))` van migratie 0035 blijft, en er komt geen migratie.
+- **De instelling.** `VNX_REVIEW_ROUND_CAP` in `config_registry` (categorie `gate`), default `"3"`, per project. De keten is `VNX_OVERRIDE_REVIEW_ROUND_CAP` (env) > de `project_config`-rij van het project > `VNX_REVIEW_ROUND_CAP` (env) > default. Een misvormde waarde (leeg, nul, negatief, geen geheel getal) weigert luid (`RoundCapError`) en valt nooit stil terug op 3 — hetzelfde contract als de `max_rounds` van de plan-gate.
+- **Het record.** `CapState.threshold` is `blockers` of `rounds` en staat in `summary()`, `to_record()` en `cap_refusal_text`, zodat het grootboekrecord, het merge-record en de receipt zeggen welke drempel afging. `CapState.round_limit` draagt de effectieve grens.
+- **Terugdraaien.** Zet `VNX_OVERRIDE_REVIEW_ROUND_CAP` hoog. Geen code, geen migratie, geen nieuwe regel in het grootboek.
+- **Niets met terugwerkende kracht.** Het grootboek wordt gelezen, niet herschreven. De cap van een PR die al dicht of gemerged is verandert niet; #2141 en #2170 blijven zoals ze zijn.
+- **Een FAIL-ronde is `verdict == "fail"`.** In alle gemeten codex-rondes droeg elke FAIL minstens één blocker. Een test legt die equivalentie in de fixtures vast, zodat een FAIL zonder blocker een ontwerpkeuze wordt en geen ongeluk.
