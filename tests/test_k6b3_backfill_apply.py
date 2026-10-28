@@ -706,7 +706,7 @@ def _spooled_records(lab):
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
 
 
-def _apply_abc(tmp_path, monkeypatch):
+def _apply_a_then_b(tmp_path, monkeypatch):
     """A, then B: one charge and one correction on it, both planned on the empty snapshot."""
     lab = Lab(tmp_path, monkeypatch)
     lab.dispatch()
@@ -725,7 +725,7 @@ def _apply_abc(tmp_path, monkeypatch):
 
 def test_a_repeated_backfill_after_a_correction_writes_no_second_correction(tmp_path, monkeypatch):
     """A, then B, then B: the correction already says B, so the third apply is a skip."""
-    lab, snapshot, _first, charge, correction = _apply_abc(tmp_path, monkeypatch)
+    lab, snapshot, _first, charge, correction = _apply_a_then_b(tmp_path, monkeypatch)
     third = _plan_on(lab, snapshot)
 
     summaries = backfill.apply_runs([third], lab.ledger, dry_run=False)
@@ -744,7 +744,7 @@ def test_a_repeated_backfill_after_a_correction_writes_no_second_correction(tmp_
 
 def test_a_transcript_back_at_its_older_usage_is_corrected_back_not_skipped(tmp_path, monkeypatch):
     """A, then B, then A: the newest plan wins, so the effective line is corrected back to A."""
-    lab, snapshot, _first, charge, correction = _apply_abc(tmp_path, monkeypatch)
+    lab, snapshot, _first, charge, correction = _apply_a_then_b(tmp_path, monkeypatch)
     lab.transcript("sess-a", tokens=TOKENS_A)
     third = _plan_on(lab, snapshot)
 
