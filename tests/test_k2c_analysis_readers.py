@@ -120,6 +120,30 @@ def test_completion_reading_lifecycle_lines_are_never_completions():
         assert completion_outcome(line) is None
 
 
+def test_completion_reading_counts_one_completion_per_dispatch_attempt():
+    from completion_reading import count_completions, dedupe_completions
+
+    lane_line = {"event_type": "subprocess_completion", "status": "done",
+                 "dispatch_id": DISPATCH_ID}
+    pair = [_legacy_line(), lane_line]
+    assert count_completions(pair) == 1
+    # The carrying line is the witness for the attempt, not the lane duplicate.
+    assert dedupe_completions(pair) == [_legacy_line()]
+
+    # A legacy line and the v3 end line of the same attempt are one completion.
+    assert count_completions([_legacy_line(attempt=1), _end_line("completed", attempt=1)]) == 1
+
+    # Two attempts of one dispatch are two completions.
+    assert count_completions([_legacy_line(attempt=1), _legacy_line(attempt=2)]) == 2
+
+    # A line without a dispatch id keeps counting on its own, one per line.
+    anonymous = [{"event_type": "task_complete", "status": "success"} for _ in range(2)]
+    assert count_completions(anonymous) == 2
+
+    # A non-completion line is not counted at all.
+    assert count_completions([{"event_type": "dispatch_started", "status": "success"}]) == 0
+
+
 # ---------------------------------------------------------------------------
 # scripts/cost_tracker.py — cost lines
 # ---------------------------------------------------------------------------
@@ -250,7 +274,7 @@ def test_cqs_end_line_without_end_state_is_never_a_success(garbage):
 # scripts/control_centre/dispatch_lifecycle_tracker.py — the tracked status
 # ---------------------------------------------------------------------------
 
-def _track_one(tmp_path: Path, event: dict, dispatch_id: str = DISPATCH_ID):
+def _track(tmp_path: Path, events: list[dict], dispatch_id: str = DISPATCH_ID):
     from scripts.control_centre.dispatch_lifecycle_tracker import (
         DispatchLifecycleTracker,
     )
@@ -269,12 +293,17 @@ def _track_one(tmp_path: Path, event: dict, dispatch_id: str = DISPATCH_ID):
 
     def _emit() -> None:
         time.sleep(0.05)
-        _write_ledger(receipt_path, [{**event, "dispatch_id": dispatch_id}])
+        _write_ledger(receipt_path, [{**event, "dispatch_id": dispatch_id}
+                                     for event in events])
 
     threading.Thread(target=_emit, daemon=True).start()
     outcome = tracker.track(dispatch_id, project_id, timeout_seconds=0.8)
     tail.stop()
     return outcome
+
+
+def _track_one(tmp_path: Path, event: dict, dispatch_id: str = DISPATCH_ID):
+    return _track(tmp_path, [event], dispatch_id)
 
 
 def test_lifecycle_tracker_legacy_and_end_line_complete_the_same(tmp_path):
@@ -307,6 +336,35 @@ def test_lifecycle_tracker_start_line_does_not_complete(tmp_path):
     from scripts.control_centre.dispatch_lifecycle_tracker import DispatchStatus
 
     outcome = _track_one(tmp_path, {"event_type": "dispatch_started", "status": "success"})
+    assert outcome.status != DispatchStatus.COMPLETED
+
+
+def test_lifecycle_tracker_blocked_completion_is_a_failure(tmp_path):
+    """``blocked`` is canonically a governed failure, also on a completion line."""
+    from scripts.control_centre.dispatch_lifecycle_tracker import DispatchStatus
+
+    outcome = _track_one(tmp_path, {"event_type": "subprocess_completion",
+                                    "status": "blocked"})
+    assert outcome.status == DispatchStatus.FAILED
+    assert outcome.status != DispatchStatus.COMPLETED
+
+
+@pytest.mark.parametrize("status", ["blocked", "timeout", "half_done"])
+def test_lifecycle_tracker_classifies_a_completion_before_it_counts(tmp_path, status):
+    """No completion-family line completes a dispatch on its own say-so.
+
+    ``blocked`` is a failure, ``timeout`` and an unknown literal carry no
+    governed outcome. In every case the following terminal receipt for the same
+    dispatch is still applied: the tracker must not have swallowed it behind a
+    false COMPLETED.
+    """
+    from scripts.control_centre.dispatch_lifecycle_tracker import DispatchStatus
+
+    outcome = _track(tmp_path, [
+        {"event_type": "subprocess_completion", "status": status},
+        {"event_type": "task_failed", "status": "failure"},
+    ])
+    assert outcome.status == DispatchStatus.FAILED
     assert outcome.status != DispatchStatus.COMPLETED
 
 
@@ -344,6 +402,21 @@ def test_aggregator_start_and_report_lines_are_not_completions(aggregator):
         {"event_type": "report_ingested", "status": "success", "timestamp": NOW_Z},
     ])
     assert summary["tasks_completed_1hr"] == 0
+
+
+def test_aggregator_counts_a_legacy_pair_once(aggregator):
+    """A ``task_complete`` next to its lane line is one completed dispatch."""
+    pair = [
+        _legacy_line(),
+        {"event_type": "subprocess_completion", "status": "done",
+         "dispatch_id": DISPATCH_ID, "terminal": "T1", "timestamp": NOW_Z},
+    ]
+    assert aggregator._compute_summary(pair)["tasks_completed_1hr"] == 1
+
+
+def test_aggregator_counts_two_dispatches_twice(aggregator):
+    two = [_legacy_line(), _legacy_line(dispatch_id="20260101-other-dispatch")]
+    assert aggregator._compute_summary(two)["tasks_completed_1hr"] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +496,17 @@ def test_memory_consolidator_legacy_and_end_line_extract_the_same_pattern(tmp_pa
     assert len(legacy_receipts) == len(v3_receipts) == 2
     assert v3 == legacy
     assert legacy and legacy[0].evidence_count == 2
+
+
+def test_memory_consolidator_reads_a_legacy_pair_once(tmp_path, consolidator):
+    """The lane line next to its carrying line is not a second completion."""
+    ledger = _write_ledger(tmp_path / "pair.ndjson", [
+        _legacy_line(status="error", gate="codex_gate", dispatch_id="D-1"),
+        {"event_type": "subprocess_completion", "status": "failed", "gate": "codex_gate",
+         "dispatch_id": "D-1", "timestamp": NOW_Z},
+    ])
+    receipts, _patterns = _failure_patterns(consolidator, ledger)
+    assert len(receipts) == 1
 
 
 def test_memory_consolidator_start_and_report_lines_are_not_read(tmp_path, consolidator):

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 # Importable as ``completion_reading`` (scripts/lib on sys.path) and as
 # ``scripts.lib.completion_reading`` (repo-root package form): event_outcome_semantics
@@ -98,6 +98,74 @@ def completion_outcome(record: Mapping[str, Any]) -> Optional[str]:
     return classify_event_outcome(event_type, completion_status(record))
 
 
+# The synthesized lane line (``dispatch_govern.ensure_receipt``) a dispatch may
+# write next to its carrying completion line: the same attempt reported twice,
+# not a second completion (cost_tracker excludes it for the same reason).
+_LANE_COMPLETION_EVENT_TYPE = "subprocess_completion"
+
+# Which line witnesses one attempt best when a ledger carries more than one.
+# The v3 end line is the ledger fact (ADR-045), a legacy carrying line next, and
+# the synthesized lane line last -- so a failure read off the lane line cannot
+# outvote the carrying line of the same attempt.
+_COMPLETION_WITNESS_RANK = {
+    DISPATCH_FINISHED_EVENT_TYPE: 3,
+    "task_complete": 2,
+    "task_completed": 2,
+    _LANE_COMPLETION_EVENT_TYPE: 1,
+}
+
+
+def completion_attempt_key(record: Mapping[str, Any]) -> Optional[Tuple[str, str]]:
+    """The ``(dispatch_id, attempt)`` one completion is counted under.
+
+    None for a line without a dispatch id: such a line cannot be tied to an
+    attempt and keeps counting on its own, one per line, as before. A line
+    without an ``attempt`` -- every line of a legacy ledger -- is the dispatch's
+    first attempt, the only one that ledger could name.
+    """
+    dispatch_id = str(record.get("dispatch_id") or "").strip()
+    if not dispatch_id:
+        return None
+    attempt = record.get("attempt")
+    attempt_text = "1" if attempt is None else str(attempt).strip()
+    return (dispatch_id, attempt_text or "1")
+
+
+def _completion_witness_rank(record: Mapping[str, Any]) -> int:
+    return _COMPLETION_WITNESS_RANK.get(event_type_of(record), 0)
+
+
+def dedupe_completions(
+    events: Iterable[Mapping[str, Any]],
+) -> List[Mapping[str, Any]]:
+    """The completion lines of ``events``, one per dispatch attempt.
+
+    One dispatch attempt can leave several completion lines -- a legacy
+    ``task_complete`` next to the synthesized ``subprocess_completion`` lane
+    line, or a legacy carrying line next to the v3 ``dispatch_finished`` -- and
+    counting each of them would count one dispatch twice. The witness for an
+    attempt is the strongest line present (see ``_COMPLETION_WITNESS_RANK``);
+    among equals the first line wins, and a line without a dispatch id is never
+    merged with another. Order follows the input.
+    """
+    chosen: Dict[Tuple[str, str], Mapping[str, Any]] = {}
+    for index, record in enumerate(events):
+        if not is_completion(record):
+            continue
+        key = completion_attempt_key(record)
+        # A line without a dispatch id gets a unique slot so it is kept once.
+        slot = key if key is not None else ("", f"line:{index}")
+        current = chosen.get(slot)
+        if current is None or _completion_witness_rank(record) > _completion_witness_rank(current):
+            chosen[slot] = record
+    return list(chosen.values())
+
+
+def count_completions(events: Iterable[Mapping[str, Any]]) -> int:
+    """How many dispatch attempts the completion lines in ``events`` describe."""
+    return len(dedupe_completions(events))
+
+
 def completion_matches_outcome(
     record: Mapping[str, Any],
     outcome: str,
@@ -118,6 +186,7 @@ def completion_matches_outcome(
 
 __all__ = (
     "COMPLETION_TYPES", "DISPATCH_FINISHED_EVENT_TYPE", "NON_OUTCOME_EVENT_TYPES",
-    "completion_matches_outcome", "completion_outcome", "completion_status",
-    "event_type_of", "is_completion", "is_non_outcome_lifecycle", "is_v3_end_line",
+    "completion_attempt_key", "completion_matches_outcome", "completion_outcome",
+    "completion_status", "count_completions", "dedupe_completions", "event_type_of",
+    "is_completion", "is_non_outcome_lifecycle", "is_v3_end_line",
 )

@@ -22,7 +22,6 @@ from typing import Dict, Iterator, Optional
 from scripts.control_centre.receipt_tail import MergedEvent, ReceiptTail
 from scripts.lib.completion_reading import (
     COMPLETION_TYPES,
-    DISPATCH_FINISHED_EVENT_TYPE,
     completion_outcome,
     event_type_of,
     is_non_outcome_lifecycle,
@@ -77,14 +76,17 @@ _RUNNING_EVENT_TYPES = frozenset({
     "running",
 })
 
-# ADR-045 K-2c: the canonical completion family next to this tracker's own
-# literals. ``dispatch_finished`` is not part of it — an end line can be a
-# failure, so _classify_receipt_status reads its end_state and returns first.
+# The tracker's own three literals are the only unconditional completions: they
+# carry no governed outcome of their own. Every member of the canonical
+# completion family (``COMPLETION_TYPES``) is classified through
+# ``completion_outcome`` in _classify_receipt_status instead — a
+# ``subprocess_completion`` that was ``blocked`` is a failure, and one with no
+# status is no success at all (ADR-045 §4, audit-spoor-kern K-2c).
 _COMPLETED_EVENT_TYPES = frozenset({
     "dispatch_completed",
     "quality_gate_verification",
     "receipt_written",
-}) | (COMPLETION_TYPES - {DISPATCH_FINISHED_EVENT_TYPE})
+})
 
 _FAILED_EVENT_TYPES = frozenset({
     "task_failed",
@@ -107,9 +109,22 @@ def _classify_receipt_status(raw: Dict) -> Optional[DispatchStatus]:
         return None
 
     # ADR-045 §2: a start line is RUNNING; a report line is never an outcome.
+    event_type = event_type_of(raw)
     if is_non_outcome_lifecycle(raw):
-        if event_type_of(raw) == "dispatch_started":
+        if event_type == "dispatch_started":
             return DispatchStatus.RUNNING
+        return None
+
+    # ADR-045 §4, K-2c: every canonical completion type is classified before it
+    # counts. ``blocked``/``failure`` is a failure, ``timeout`` or an unknown or
+    # missing status is no governed outcome at all — never COMPLETED. Returning
+    # None leaves the entry open, so the next terminal receipt still lands.
+    if event_type in COMPLETION_TYPES:
+        outcome = completion_outcome(raw)
+        if outcome == "success":
+            return DispatchStatus.COMPLETED
+        if outcome == "failure":
+            return DispatchStatus.FAILED
         return None
 
     status_field = (raw.get("status") or "").lower()
@@ -118,7 +133,6 @@ def _classify_receipt_status(raw: Dict) -> Optional[DispatchStatus]:
     if status_field in ("failure", "failed", "error"):
         return DispatchStatus.FAILED
 
-    event_type = (raw.get("event_type") or raw.get("event", "")).lower()
     if event_type in _COMPLETED_EVENT_TYPES:
         return DispatchStatus.COMPLETED
     if event_type in _FAILED_EVENT_TYPES:

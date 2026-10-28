@@ -28,7 +28,7 @@ try:
     from vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
-from completion_reading import completion_matches_outcome, is_completion
+from completion_reading import completion_matches_outcome, dedupe_completions, is_completion
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
 
@@ -121,7 +121,11 @@ class MemoryConsolidator:
         """Read completion events from t0_receipts.ndjson since a cutoff.
 
         A completion is any ADR-045 completion type: ``task_complete`` in a
-        legacy ledger, ``dispatch_finished`` in a v3 one (K-2c).
+        legacy ledger, ``dispatch_finished`` in a v3 one (K-2c). One dispatch
+        attempt is read once, not once per line: a ``task_complete`` next to its
+        ``subprocess_completion`` lane line is one completion
+        (``completion_reading.dedupe_completions``), so the pattern counts stay
+        the numbers they were.
         """
         results: List[Dict] = []
         if not self.receipts_path.exists():
@@ -149,7 +153,7 @@ class MemoryConsolidator:
                     except ValueError:
                         pass
                 results.append(record)
-        return results
+        return dedupe_completions(results)
 
     def _read_dispatch_metadata(self, conn: sqlite3.Connection, since: datetime) -> List[sqlite3.Row]:
         try:

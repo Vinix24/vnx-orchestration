@@ -28,15 +28,19 @@ from collections import defaultdict, deque, Counter
 import hashlib
 
 def _count_completions(events: List[Dict[str, Any]]) -> int:
-    """How many of ``events`` complete a dispatch, in either ledger shape (K-2c).
+    """How many dispatches ``events`` complete, in either ledger shape (K-2c).
 
     ``dispatch_finished`` in a v3 ledger, ``task_complete`` in a legacy one; a
-    start line and a report line are not a completion. scripts/lib joins
-    sys.path in ``T0IntelligenceAggregator.__init__``, hence the import here.
+    start line and a report line are not a completion. One dispatch attempt
+    that leaves both a ``task_complete`` and a ``subprocess_completion`` line
+    counts once (``completion_reading.count_completions`` keys it by
+    ``(dispatch_id, attempt)``): the legacy pair must read the same number it
+    read before. scripts/lib joins sys.path in
+    ``T0IntelligenceAggregator.__init__``, hence the import here.
     """
-    from completion_reading import is_completion
+    from completion_reading import count_completions
 
-    return sum(1 for event in events if is_completion(event))
+    return count_completions(events)
 
 
 class T0IntelligenceAggregator:
