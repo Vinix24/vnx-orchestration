@@ -452,18 +452,21 @@ def test_an_unreadable_worktree_diff_is_a_named_problem(
 
 
 # ---------------------------------------------------------------------------
-# 3a. every other status entry is still a named problem
+# 3a. untracked and non-throwaway ignored work is archived (WT-2b)
 # ---------------------------------------------------------------------------
 
 
-def test_an_untracked_file_is_not_covered(fx: Fixture) -> None:
+def test_an_untracked_file_is_archived(fx: Fixture) -> None:
+    """WT-2b lifts the block OI-2361 measured: the work rides in the archive."""
     wt = fx.worktree()
     (wt / "notes.txt").write_text("notes\n", encoding="utf-8")
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["notes.txt"]
-    assert verify(fx, result) == [UNCOVERED + "notes.txt"]
+    assert result.uncovered == []
+    assert [Path(a).name for a in result.artifacts] == [
+        "worktree-one.untracked.tgz", "worktree-one.untracked.list"]
+    assert verify(fx, result) == []
 
 
 def test_an_ignored_file_is_not_covered(fx: Fixture) -> None:
@@ -494,14 +497,20 @@ def test_an_ignored_top_level_pycache_is_throwaway(fx: Fixture) -> None:
     assert ws._status_entries(wt) == [("!", "__pycache__/")]
 
 
-def test_the_problem_names_the_first_path_and_counts_the_rest(fx: Fixture) -> None:
+def test_the_problem_names_the_first_path_and_counts_the_rest(ignored_otherwise) -> None:
+    """Evidence below ``.vnx-data/`` is not work to pack (WT-2b), so it keeps
+    blocking — and the problem still names the first path and counts the rest."""
+    fx = ignored_otherwise(".vnx-data/*\n")
     wt = fx.worktree()
-    (wt / "notes.txt").write_text("notes\n", encoding="utf-8")
-    (wt / "other.txt").write_text("other\n", encoding="utf-8")
+    notes = wt / ".vnx-data" / "a-notes.txt"
+    notes.parent.mkdir(parents=True)
+    notes.write_text("notes\n", encoding="utf-8")
+    other = wt / ".vnx-data" / "b-notes.txt"
+    other.write_text("other\n", encoding="utf-8")
 
     problems = verify(fx, salvage(fx, wt))
 
-    assert problems == [UNCOVERED + "notes.txt (+1 more)"], problems
+    assert problems == [UNCOVERED + ".vnx-data/a-notes.txt (+1 more)"], problems
 
 
 # ---------------------------------------------------------------------------
@@ -536,14 +545,14 @@ def test_an_ignored_node_modules_directory_is_throwaway(fx: Fixture) -> None:
     assert ws._status_entries(wt) == [("!", "node_modules/")]
 
 
-def test_an_ignored_file_named_like_a_cache_directory_still_blocks(
+def test_an_ignored_file_named_like_a_cache_directory_is_archived(
         ignored_otherwise) -> None:
     """A regular file sharing the directory's name is not that directory.
 
     The ignore rule ``node_modules`` (no trailing slash) also catches a FILE
     called ``node_modules``, and git prints it without the ``/`` that marks a
-    directory entry. Nothing bundles an ignored file, so excusing it would
-    approve losing it (codex round 2 on the WT-2a1b allowlist).
+    directory entry. It is not throwaway (WT-2a1b), so it is work the untracked
+    archive carries (WT-2b) — never silently lost.
     """
     fx = ignored_otherwise("node_modules\n")
     wt = fx.worktree()
@@ -552,11 +561,13 @@ def test_an_ignored_file_named_like_a_cache_directory_still_blocks(
     result = salvage(fx, wt)
 
     assert ws._status_entries(wt) == [("!", "node_modules")], ws._status_entries(wt)
-    assert result.uncovered == ["node_modules"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "node_modules"]
+    assert result.uncovered == [], result.uncovered
+    assert [Path(a).name for a in result.artifacts] == [
+        "worktree-one.untracked.tgz", "worktree-one.untracked.list"]
+    assert verify(fx, result) == []
 
 
-def test_an_ignored_file_named_like_a_nested_cache_directory_still_blocks(
+def test_an_ignored_file_named_like_a_nested_cache_directory_is_archived(
         ignored_otherwise) -> None:
     """The same for ``pkg/__pycache__`` as a file: the leaf is not a directory."""
     fx = ignored_otherwise("__pycache__\n")
@@ -567,8 +578,8 @@ def test_an_ignored_file_named_like_a_nested_cache_directory_still_blocks(
     result = salvage(fx, wt)
 
     assert ws._status_entries(wt) == [("!", "pkg/__pycache__")], ws._status_entries(wt)
-    assert result.uncovered == ["pkg/__pycache__"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__"]
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
 
 
 def test_a_file_inside_an_ignored_node_modules_directory_is_throwaway(
@@ -655,21 +666,24 @@ def test_a_leaf_that_is_no_directory_is_never_throwaway() -> None:
     assert ws._is_throwaway_ignored("!", ".vnx-data/node_modules/") is False
 
 
-def test_an_ignored_build_directory_still_blocks(fx: Fixture) -> None:
-    """A directory on no allowlist is not excused by looking disposable."""
+def test_an_ignored_build_directory_is_archived(fx: Fixture) -> None:
+    """A directory on no allowlist is not excused by looking disposable: the
+    throwaway list excuses nothing here, so the archive carries it (WT-2b)."""
     wt = fx.worktree()
     (wt / "build").mkdir()
     (wt / "build" / "out.bin").write_bytes(b"artifact\n")
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["build/"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "build/"]
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
+    assert ws._status_entries(wt) == [("!", "build/")]
 
 
-def test_an_untracked_file_under_an_allowlisted_directory_still_blocks(
+def test_an_untracked_file_under_an_allowlisted_directory_is_archived(
         ignored_otherwise) -> None:
-    """Only an IGNORED entry can be throwaway; a ``?`` entry blocks either way."""
+    """Only an IGNORED entry can be throwaway; a ``?`` entry is untracked work,
+    which the archive carries wherever it sits."""
     fx = ignored_otherwise(".vnx-data/\n")
     wt = fx.worktree()
     cache = wt / "pkg" / "__pycache__"
@@ -678,8 +692,8 @@ def test_an_untracked_file_under_an_allowlisted_directory_still_blocks(
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["pkg/__pycache__/m.py"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__/m.py"]
+    assert result.uncovered == [], result.uncovered
+    assert verify(fx, result) == []
     assert ws._status_entries(wt) == [("?", "pkg/__pycache__/m.py")]
 
 
@@ -702,19 +716,21 @@ def test_a_tracked_pyc_under_an_allowlisted_directory_is_carried_by_a_patch(
     assert verify(fx, result) == []
 
 
-def test_an_allowlisted_cache_beside_one_blocking_file_gives_one_problem(
-        fx: Fixture) -> None:
+def test_an_allowlisted_cache_beside_one_archived_file_is_no_problem(fx: Fixture) -> None:
+    """The cache is excused and the log is archived; neither blocks removal."""
     wt = fx.worktree()
     cache = wt / "pkg" / "__pycache__"
     cache.mkdir(parents=True)
     (cache / "x.pyc").write_bytes(b"cache\n")
     (wt / "debug.log").write_text("worker log\n", encoding="utf-8")
 
-    problems = verify(fx, salvage(fx, wt))
+    result = salvage(fx, wt)
 
-    assert problems == [UNCOVERED + "debug.log"], problems
+    assert verify(fx, result) == []
     assert sorted(ws._status_entries(wt)) == [
         ("!", "debug.log"), ("!", "pkg/__pycache__/")]
+    records = ws._list_records(result.salvage_dir / "worktree-one.untracked.list")
+    assert list(records) == ["debug.log"], records
 
 
 def add_submodule(fx: Fixture, wt: Path, name: str = "sub") -> Path:

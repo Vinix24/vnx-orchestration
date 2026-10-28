@@ -1,32 +1,63 @@
-"""worktree_salvage.py — preserve a worktree's unpushed commits and tracked
-changes (WT-2a1a/2a1b/2a2).
+"""worktree_salvage.py — preserve a worktree's unpushed commits, its tracked
+changes and the work outside the index (WT-2a1a/2a1b/2a2/2b).
 
-:func:`salvage` preserves three kinds of tree state: the commits no ``origin``
+:func:`salvage` preserves four kinds of tree state: the commits no ``origin``
 ref reaches (``<name>.bundle``), the staged changes to tracked files
-(``<name>.staged.patch``, ``git diff --cached --binary --full-index <head>``)
-and the unstaged changes to tracked files (``<name>.unstaged.patch``,
-``git diff --binary --full-index``). :func:`verify` returns ``[]`` only when
-the tree holds nothing else — ``git status --porcelain=v2 -z
---untracked-files=all --ignored=matching --ignore-submodules=none`` names no
-entry this salvage does not cover (a tracked entry with a staged or unstaged
-change is carried by a patch; untracked and unmerged entries are not; an
-IGNORED entry is covered only inside a throwaway cache DIRECTORY from
+(``<name>.staged.patch``, ``git diff --cached --binary --full-index <head>``),
+the unstaged changes to tracked files (``<name>.unstaged.patch``,
+``git diff --binary --full-index``) and every entry git reports outside the
+index that is not throwaway — ``<name>.untracked.tgz`` and its
+``<name>.untracked.list``.
+
+The untracked archive carries each ``?`` (untracked) and each ``!`` (ignored,
+not throwaway) entry, except those below ``.vnx-data/`` or ``.git/``: that is
+evidence, not work to pack, and it keeps blocking removal. An untracked symlink
+:func:`worktree_inventory.is_internal_symlink` calls a convenience link into the
+checkout (``.venv`` -> the checkout's venv) is covered without being carried. A
+directory entry — git's ``path/`` record, which is how a nested repository is
+reported — is walked, so every regular file and symlink below it is archived
+(those inside a nested ``.git`` included), and a symlink is archived as a
+symlink, never followed. ``d`` marks an EMPTY directory, the one member no file
+implies, so an empty nested repository is never passed silently.
+
+``<name>.untracked.list`` holds one NUL-terminated record per archived member,
+sorted by path; the separator is NUL, so a filename may hold any byte but NUL::
+
+    <kind> <size> <sha256> <path>\\0
+
+``kind`` is ``f`` (file), ``l`` (symlink) or ``d`` (directory); ``size`` is the
+byte count of the file or of the symlink's target, ``0`` for a directory;
+``sha256`` is the hex digest of those bytes, a single ``-`` for a directory;
+``path`` is relative to the tree, POSIX-separated, and runs to the closing NUL.
+Kind, size and digest hold no space, so the first three fields parse whatever
+the filename holds.
+
+:func:`verify` returns ``[]`` only when the tree holds nothing else — ``git
+status --porcelain=v2 -z --untracked-files=all --ignored=matching
+--ignore-submodules=none`` names no entry this salvage does not cover (a tracked
+entry with a staged or unstaged change is carried by a patch; an untracked or
+non-throwaway ignored entry is carried by the untracked archive; an IGNORED
+entry is excused only inside a throwaway cache DIRECTORY from
 :data:`THROWAWAY_IGNORED_DIRS` and never below ``.vnx-data/`` or ``.git/`` —
 WT-2a1b, OI-2417; a regular file that only shares a cache directory's name is
-never covered), every gitlink whose checkout exists is named even when it is
-clean (a submodule keeps its commits in its own object store, so no
-superproject bundle can carry them; nothing here classifies or excuses one —
-submodule bundling is OI-2411), a gitlink whose checkout was never made is not
-named, HEAD is readable and still the salvaged commit, every bundle is a
-non-empty bundle that unpacks to that head in a scratch repository borrowing no
-object store of the checkout, and every patch is proved by applying it in such
-a checkout: the staged patch must reproduce the tree's own index tree
-(``git write-tree``, read through a temporary ``GIT_INDEX_FILE`` so the
-worktree's index is never written) and the unstaged patch must reproduce every
-changed file's bytes, both for the paths its apply changes and for the paths the
-worktree itself changed against its index — a tracked change the tree makes
-after the salvage, and that no patch mentions, is a named problem too. A failed
-apply or a mismatch is a named problem. An
+never excused), the untracked list parses, the archive opens with ``tarfile``,
+every listed member is in the archive and every archive member in the list with
+the same kind, size and sha256, every listed path is still in the tree as the
+list records it (a file edited or deleted after the salvage is named, as are
+members the tree gained and the list never carried), every gitlink whose
+checkout exists is named even when it is clean (a submodule keeps its commits in
+its own object store, so no superproject bundle can carry them; nothing here
+classifies or excuses one — submodule bundling is OI-2411), a gitlink whose
+checkout was never made is not named, HEAD is readable and still the salvaged
+commit, every bundle is a non-empty bundle that unpacks to that head in a
+scratch repository borrowing no object store of the checkout, and every patch is
+proved by applying it in such a checkout: the staged patch must reproduce the
+tree's own index tree (``git write-tree``, read through a temporary
+``GIT_INDEX_FILE`` so the worktree's index is never written) and the unstaged
+patch must reproduce every changed file's bytes, both for the paths its apply
+changes and for the paths the worktree itself changed against its index — a
+tracked change the tree makes after the salvage, and that no patch mentions, is
+a named problem too. A failed apply or a mismatch is a named problem. An
 artifact or ``dest_dir`` inside the tree is refused: removal would delete the
 evidence. A real run writes ``dest_dir/<name>-<UTC>-<head[:8]>/*`` and appends
 the MANIFEST line.
@@ -34,24 +65,31 @@ the MANIFEST line.
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import io
 import itertools
 import os
 import re
 import shutil
 import stat
 import subprocess
+import tarfile
 import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import NamedTuple
 
 MANIFEST_NAME = "MANIFEST.txt"
 BUNDLE_SUFFIX = ".bundle"
 STAGED_SUFFIX = ".staged.patch"
 UNSTAGED_SUFFIX = ".unstaged.patch"
+UNTRACKED_ARCHIVE_SUFFIX = ".untracked.tgz"
+UNTRACKED_LIST_SUFFIX = ".untracked.list"
 _PATCH_SUFFIXES = (STAGED_SUFFIX, UNSTAGED_SUFFIX)
+_ARCHIVE_SUFFIXES = (UNTRACKED_ARCHIVE_SUFFIX, UNTRACKED_LIST_SUFFIX)
 # Every artifact kind this verify knows how to check; any other kind is named.
-_ARTIFACT_SUFFIXES = (BUNDLE_SUFFIX, *_PATCH_SUFFIXES)
+_ARTIFACT_SUFFIXES = (BUNDLE_SUFFIX, *_PATCH_SUFFIXES, *_ARCHIVE_SUFFIXES)
 # Optional locks let a read-only command (status, diff) write the index's cached
 # stat data back; a salvage and its verify must leave the worktree's index
 # byte-identical, so every git call takes no optional lock.
@@ -91,6 +129,30 @@ class SalvageResult:
     written: bool = False
     uncovered: list[str] = field(default_factory=list)  # paths whose state is unpreserved
     worktree: Path | None = None  # where the tree was measured; verify re-reads it
+
+
+class _Record(NamedTuple):
+    """One archived member: kind (``f``/``l``/``d``), size, sha256 and path."""
+    kind: str
+    size: int
+    digest: str
+    path: str
+
+
+@dataclass(frozen=True)
+class _Member:
+    """Content the untracked archive carries for one path: a file's bytes, a
+    symlink's target string, or nothing for an empty directory."""
+    kind: str
+    path: str
+    data: bytes | None = None
+
+    def record(self) -> _Record:
+        """The list record of this member; a directory has no bytes to hash."""
+        if self.data is None:
+            return _Record(self.kind, 0, "-", self.path)
+        return _Record(self.kind, len(self.data),
+                       hashlib.sha256(self.data).hexdigest(), self.path)
 
 
 def _utc_stamp() -> str:
@@ -191,12 +253,206 @@ def _is_patch_covered(kind: str, path: str, populated: set[str]) -> bool:
     return kind in ("1", "2") and path not in populated
 
 
-def _uncovered_paths(entries: list[tuple[str, str]], populated: set[str]) -> list[str]:
+def _is_archive_covered(kind: str, path: str) -> bool:
+    """Whether one status entry is work the untracked archive carries: an
+    untracked (``?``) or non-throwaway ignored (``!``) entry.
+
+    An entry below ``.vnx-data/`` or ``.git/`` never qualifies, whatever its
+    kind: that is evidence, not work to pack, and removal must keep blocking.
+    """
+    if kind not in ("?", "!") or _is_throwaway_ignored(kind, path):
+        return False
+    return not _PROTECTED_IGNORE_ROOTS.intersection(_directory_components(path))
+
+
+def _is_internal_link(kind: str, path: str, tree: Path, repo_root: Path) -> bool:
+    """Whether one entry is an untracked convenience symlink into the checkout —
+    ``.venv -> <checkout>/.venv`` holds no work, so it is covered without being
+    carried. An ignored link is archived like any other ignored content."""
+    if kind != "?" or path.endswith("/"):
+        return False
+    from worktree_inventory import is_internal_symlink  # the one shared rule
+    return is_internal_symlink(tree / path, repo_root)
+
+
+def _member_of(entry: Path, rel: str) -> _Member:
+    """One member for a path git names as a file: a symlink by the bytes of its
+    target, a regular file by its bytes. A device, socket or fifo raises."""
+    try:
+        mode = os.lstat(entry).st_mode
+        if stat.S_ISLNK(mode):
+            return _Member("l", rel, os.fsencode(os.readlink(entry)))
+        if stat.S_ISREG(mode):
+            return _Member("f", rel, entry.read_bytes())
+    except OSError as exc:
+        raise SalvageError(f"read {rel}: {exc}") from exc
+    raise SalvageError(f"read {rel}: not a regular file or symlink")
+
+
+def _walk_members(base: Path, rel: str, out: list[_Member]) -> None:
+    """Every regular file and symlink below ``base``, appended to ``out``.
+
+    A symlink is archived as the link it is, never followed. An empty directory
+    is a ``d`` member of its own — the one member no file implies, so without it
+    an empty nested repository would vanish silently. An unreadable entry raises.
+    """
+    try:
+        names = sorted(os.listdir(base))
+    except OSError as exc:
+        raise SalvageError(f"read {rel}: {exc}") from exc
+    if not names:
+        if rel:
+            out.append(_Member("d", rel))
+        return
+    for name in names:
+        child, child_rel = base / name, f"{rel}/{name}"
+        try:
+            mode = os.lstat(child).st_mode
+        except OSError as exc:
+            raise SalvageError(f"read {child_rel}: {exc}") from exc
+        if stat.S_ISDIR(mode):
+            _walk_members(child, child_rel, out)
+        else:
+            out.append(_member_of(child, child_rel))
+
+
+def _archive_members(entries: list[tuple[str, str]], tree: Path,
+                     repo_root: Path) -> list[_Member]:
+    """Every member the untracked archive carries for ``entries``, sorted by path.
+
+    A covered directory entry — git's ``path/`` record, how a nested repository
+    is reported — is walked, so the files inside it are archived, not its name.
+    """
+    members: list[_Member] = []
+    for kind, path in entries:
+        if not _is_archive_covered(kind, path) or _is_internal_link(
+                kind, path, tree, repo_root):
+            continue
+        rel = path[:-1] if path.endswith("/") else path
+        if not rel or os.path.isabs(rel):
+            raise SalvageError(f"read status: {path!r} is no relative path inside the tree")
+        if path.endswith("/"):
+            _walk_members(tree / rel, rel, members)
+        else:
+            members.append(_member_of(tree / rel, rel))
+    members.sort(key=lambda member: member.path)
+    if len({member.path for member in members}) != len(members):
+        raise SalvageError("read status: two entries name one archived path")
+    return members
+
+
+def _uncovered_paths(entries: list[tuple[str, str]], populated: set[str], *,
+                     tree: Path, repo_root: Path) -> list[str]:
     """The status entries this salvage does not cover; an ignored throwaway cache
-    directory and a tracked change carried by a patch are excused, and every
-    other entry is named."""
+    directory, a tracked change carried by a patch and work the untracked archive
+    carries are excused, and every other entry is named."""
     return [path for kind, path in entries
-            if not (_is_throwaway_ignored(kind, path) or _is_patch_covered(kind, path, populated))]
+            if not (_is_throwaway_ignored(kind, path)
+                    or _is_patch_covered(kind, path, populated)
+                    or _is_archive_covered(kind, path))]
+
+
+def _tar_bytes(members: list[_Member]) -> bytes:
+    """The members as one gzip'd tar named by their relative paths. Owner, mode
+    and mtime are fixed; content, kind and link target are the evidence."""
+    buffer = io.BytesIO()
+    try:
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for member in members:
+                info = tarfile.TarInfo(member.path)
+                info.mtime, info.uid, info.gid, info.uname, info.gname = 0, 0, 0, "", ""
+                data = member.data or b""
+                if member.kind == "d":
+                    info.type, info.mode = tarfile.DIRTYPE, 0o755
+                    tar.addfile(info)
+                elif member.kind == "l":
+                    info.type, info.mode, info.linkname = tarfile.SYMTYPE, 0o777, os.fsdecode(data)
+                    tar.addfile(info)
+                elif member.kind == "f":
+                    info.type, info.mode, info.size = tarfile.REGTYPE, 0o644, len(data)
+                    tar.addfile(info, io.BytesIO(data))
+                else:  # a member kind this module never builds is not written
+                    raise SalvageError(f"build the untracked archive: no member kind {member.kind!r}")
+    except (OSError, tarfile.TarError) as exc:
+        raise SalvageError(f"build the untracked archive: {exc}") from exc
+    return buffer.getvalue()
+
+
+def _list_bytes(members: list[_Member]) -> bytes:
+    """The list artifact: one NUL-terminated record per member, in archive order."""
+    return b"".join(
+        (f"{record.kind} {record.size} {record.digest} {record.path}"
+         .encode("utf-8", "surrogateescape") + b"\0")
+        for record in (member.record() for member in members))
+
+
+def _list_records(path: Path) -> dict[str, _Record]:
+    """The records of one ``.untracked.list`` artifact, keyed by path. A record
+    that does not parse, an empty one and a path listed twice are each a
+    SalvageError: an unreadable list proves nothing about its archive."""
+    try:
+        body = path.read_bytes()
+    except OSError as exc:
+        raise SalvageError(f"cannot read the list ({exc})") from exc
+    records: dict[str, _Record] = {}
+    chunks = body.split(b"\0")
+    for index, chunk in enumerate(chunks):
+        if not chunk:
+            if index < len(chunks) - 1:  # only the last NUL closes the final record
+                raise SalvageError("the list holds an empty record")
+            continue
+        fields = os.fsdecode(chunk).split(" ", 3)
+        if len(fields) != 4 or not fields[3]:
+            raise SalvageError(f"unparseable record {chunk[:60]!r}")
+        kind, size, digest, rel = fields
+        if (kind not in ("f", "l", "d") or not size.isdigit()
+                or (digest != "-" if kind == "d" else not _SHA_RE.fullmatch(digest))):
+            raise SalvageError(f"unparseable record {chunk[:60]!r}")
+        if rel in records:
+            raise SalvageError(f"path {rel} is listed twice")
+        records[rel] = _Record(kind, int(size), digest, rel)
+    return records
+
+
+def _archive_record(tar: tarfile.TarFile, info: tarfile.TarInfo) -> _Record:
+    """One archive member as a record, hashed from the archive's own bytes."""
+    if info.isdir():
+        return _Record("d", 0, "-", info.name)
+    if info.issym():
+        target = os.fsencode(info.linkname)
+        return _Record("l", len(target), hashlib.sha256(target).hexdigest(), info.name)
+    handle = tar.extractfile(info) if info.isfile() else None
+    data = handle.read() if handle is not None else None
+    if data is None:
+        raise SalvageError(f"member {info.name} is of no kind this list records")
+    return _Record("f", len(data), hashlib.sha256(data).hexdigest(), info.name)
+
+
+def _archive_records(path: Path) -> dict[str, _Record]:
+    """The members of one ``.untracked.tgz``, keyed by path. An archive that
+    will not open, or a member archived twice, is a SalvageError, never a pass."""
+    records: dict[str, _Record] = {}
+    try:
+        with tarfile.open(path, "r:gz") as tar:
+            for info in tar.getmembers():
+                if info.name in records:
+                    raise SalvageError(f"member {info.name} is archived twice")
+                records[info.name] = _archive_record(tar, info)
+    except (OSError, tarfile.TarError) as exc:
+        raise SalvageError(f"cannot read the archive ({exc})") from exc
+    return records
+
+
+def _archive_artifacts(entries: list[tuple[str, str]], tree: Path, repo_root: Path,
+                       name: str) -> list[tuple[str, bytes]]:
+    """The untracked archive and its list as ``(artifact, body)`` pairs, or
+    nothing when the tree has no member to carry (a clean tree keeps salvaging to
+    its MANIFEST line alone). Both join the same run, so no list rides alone."""
+    members = _archive_members(entries, tree, repo_root)
+    if not members:
+        return []
+    return [(f"{name}{UNTRACKED_ARCHIVE_SUFFIX}", _tar_bytes(members)),
+            (f"{name}{UNTRACKED_LIST_SUFFIX}", _list_bytes(members))]
 
 
 def _gitlinks(worktree_path: Path) -> list[str]:
@@ -337,6 +593,7 @@ def _append_manifest(dest_dir: Path, line: str) -> None:
 def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path | str,
             base_ref: str = "origin/main", dry_run: bool = True) -> SalvageResult:
     worktree_path, dest_dir = Path(worktree_path), Path(dest_dir)
+    repo_root = Path(repo_root)
     name, remote = worktree_path.name, base_ref.split("/", 1)[0]
     if not name:
         raise SalvageError(f"{worktree_path}: worktree path names no directory")
@@ -344,7 +601,7 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
         raise SalvageError(f"base_ref {base_ref!r} names no remote")
     # A salvage measured against another repository says nothing about this tree.
     common = ["rev-parse", "--path-format=absolute", "--git-common-dir"]
-    if _run_git(common, Path(repo_root), "resolve repo_root") != _run_git(
+    if _run_git(common, repo_root, "resolve repo_root") != _run_git(
             common, worktree_path, "resolve worktree"):
         raise SalvageError(f"{worktree_path} is not a worktree of {repo_root}")
     out = _run_git(["rev-parse", "HEAD", "--abbrev-ref", "HEAD"],
@@ -361,7 +618,8 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
     # A populated submodule's commits ride in no bundle this salvage writes; record
     # it uncovered while the tree is still readable, before anything is written.
     populated = _populated_submodules(worktree_path)
-    uncovered = _uncovered_paths(entries, set(populated))
+    uncovered = _uncovered_paths(entries, set(populated),
+                                 tree=worktree_path, repo_root=repo_root)
     for path in populated:
         if path not in uncovered:
             uncovered.append(path)
@@ -369,6 +627,8 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
     artifacts = [f"{name}{BUNDLE_SUFFIX}"] if unpushed > 0 else []
     patches = [(f"{name}{STAGED_SUFFIX}", staged), (f"{name}{UNSTAGED_SUFFIX}", unstaged)]
     artifacts.extend(artifact for artifact, body in patches if body)
+    archive = _archive_artifacts(entries, worktree_path, repo_root, name)
+    artifacts.extend(artifact for artifact, body in archive)
     if not dry_run:
         dest_dir.mkdir(parents=True, exist_ok=True)
     salvage_dir = _claim_dir(dest_dir, f"{name}-{_utc_stamp()}-{head[:8]}", create=not dry_run)
@@ -383,7 +643,7 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
     for artifact in artifacts:
         if artifact.endswith(BUNDLE_SUFFIX):
             _write_bundle(salvage_dir, artifact, worktree_path, remote)
-    for artifact, body in patches:
+    for artifact, body in [*patches, *archive]:
         if artifact in artifacts:
             _write_bytes(salvage_dir, artifact, body)
     _append_manifest(dest_dir, result.manifest_line)
@@ -458,7 +718,7 @@ def _missing_patch_problems(result: SalvageResult, staged: bytes,
     return problems
 
 
-def _tree_problems(tree: Path, result: SalvageResult) -> list[str]:
+def _tree_problems(tree: Path, result: SalvageResult, repo_root: Path) -> list[str]:
     """The tree's own state, read fail-closed: no readable HEAD, a HEAD that moved
     past the salvaged commit, any state this salvage does not cover, or a patch
     the state needs and the result does not list."""
@@ -477,7 +737,7 @@ def _tree_problems(tree: Path, result: SalvageResult) -> list[str]:
         populated = _populated_submodules(tree)
     except SalvageError as exc:
         return problems + [f"tree {result.name}: state unreadable: {exc}"]
-    uncovered = _uncovered_paths(entries, set(populated))
+    uncovered = _uncovered_paths(entries, set(populated), tree=tree, repo_root=repo_root)
     if uncovered:
         rest = f" (+{len(uncovered) - 1} more)" if len(uncovered) > 1 else ""
         problems.append(f"tree has state this salvage does not cover: {uncovered[0]}{rest}")
@@ -629,6 +889,83 @@ def _apply_problems(result: SalvageResult, dest: Path, tree: Path,
     return problems
 
 
+def _archive_vs_list(packed: dict[str, _Record], records: dict[str, _Record],
+                     artifact: str) -> list[str]:
+    """Every member one of the two lacks, and every one they disagree on: an
+    archive that holds less than its list restores a tree nobody described."""
+    problems = [f"{artifact}: member {path} is in the list but not in the archive"
+                for path in sorted(records) if path not in packed]
+    problems.extend(f"{artifact}: member {path} is in the archive but not in the list"
+                    for path in sorted(packed) if path not in records)
+    problems.extend(f"{artifact}: member {path} differs from the list"
+                    for path in sorted(packed)
+                    if path in records and packed[path] != records[path])
+    return problems
+
+
+def _list_vs_tree(records: dict[str, _Record], fresh: dict[str, _Record],
+                  name: str) -> list[str]:
+    """Every listed path that left or changed in the tree since the salvage, and
+    every member the tree gained that the list never carried.
+
+    A file edited, deleted or added after the salvage is state the archive does
+    not hold, so it blocks removal as a moved HEAD does. Comparing the whole
+    member set — not only the listed paths — keeps a NEW untracked file from
+    riding along on the coverage of the ones already archived.
+    """
+    problems = []
+    for path, record in sorted(records.items()):
+        current = fresh.get(path)
+        if current is None:
+            problems.append(f"tree {name}: {path} is not in the tree as the untracked "
+                            "list records it")
+        elif current != record:
+            problems.append(f"tree {name}: {path} differs from the untracked list")
+    problems.extend(f"tree {name}: {path} is in the tree but not in the untracked list"
+                    for path in sorted(fresh) if path not in records)
+    return problems
+
+
+def _archive_problems(result: SalvageResult, dest: Path, tree: Path, repo_root: Path,
+                      archives: list[str], lists: list[str]) -> list[str]:
+    """Prove the untracked archive: one archive and one list, the list parsing,
+    the archive opening, the two holding the same members with the same kind,
+    size and sha256, and every listed path still in the tree as recorded.
+
+    ``archives`` and ``lists`` passed their existence checks. The tree is measured
+    whether or not an archive is listed: untracked content with no archive to
+    carry it leaves the work unchecked.
+    """
+    problems = [f"{extra}: a second {label} is listed"
+                for label, listed in (("untracked archive", archives),
+                                      ("untracked list", lists))
+                for extra in listed[1:]]
+    try:
+        fresh = {member.path: member.record() for member in _archive_members(
+            _status_entries(tree), tree, repo_root)}
+    except SalvageError as exc:
+        return problems + [f"tree {result.name}: state unreadable: {exc}"]
+    if not archives:
+        if not lists and not fresh:
+            return problems
+        return problems + [f"tree {result.name}: untracked content is not archived "
+                           f"(no {result.name}{UNTRACKED_ARCHIVE_SUFFIX} is listed)"]
+    if not lists:
+        return problems + [f"{archives[0]}: no {result.name}{UNTRACKED_LIST_SUFFIX} "
+                           "is listed for this archive"]
+    try:
+        records = _list_records(dest / lists[0])
+    except SalvageError as exc:
+        return problems + [f"{lists[0]}: {exc}"]
+    try:
+        packed = _archive_records(dest / archives[0])
+    except SalvageError as exc:
+        return problems + [f"{archives[0]}: {exc}"]
+    problems.extend(_archive_vs_list(packed, records, archives[0]))
+    problems.extend(_list_vs_tree(records, fresh, result.name))
+    return problems
+
+
 def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str) -> list[str]:
     """Every problem keeping this salvage from being complete; only ``[]`` lets a removal act."""
     dest, repo, problems = Path(dest_dir), Path(repo_root), []
@@ -641,7 +978,7 @@ def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str
     if tree is None or not tree.is_dir():
         problems.append(f"tree {result.name}: no directory to re-read its state from")
     else:
-        problems.extend(_tree_problems(tree, result))
+        problems.extend(_tree_problems(tree, result, repo))
     if _git_failure(["rev-parse", "--git-dir"], repo, "resolve repo_root") is not None:
         problems.append(f"no usable repo_root: {repo_root!r} is not a git checkout")
     if result.unpushed > 0 and not any(a.endswith(BUNDLE_SUFFIX) for a in result.artifacts):
@@ -657,6 +994,8 @@ def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str
             problems.append(f"dest_dir {dest}: resolves inside the worktree {tree}, "
                             "so removing the tree would delete this salvage")
     patches: list[str] = []  # patch artifacts that passed their existence checks
+    archives: list[str] = []  # untracked archives that passed theirs
+    lists: list[str] = []  # untracked lists that passed theirs
     for artifact in result.artifacts:
         path = dest / artifact
         if tree is not None and not dest_inside:
@@ -680,14 +1019,19 @@ def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str
             problems.append(f"{artifact}: missing")
         elif size == 0:
             problems.append(f"{artifact}: empty")
-        elif not artifact.endswith(BUNDLE_SUFFIX):
-            patches.append(artifact)  # proved by applying it, after this loop
-        else:
+        elif artifact.endswith(BUNDLE_SUFFIX):
             try:
                 problems.extend(f"{artifact}: {p}" for p in
                                 _bundle_problems(path, result.head, repo))
             except SalvageError as exc:  # a git failure is a problem, never a pass
                 problems.append(f"{artifact}: {exc}")
+        elif artifact.endswith(_PATCH_SUFFIXES):
+            patches.append(artifact)  # proved by applying it, after this loop
+        elif artifact.endswith(UNTRACKED_ARCHIVE_SUFFIX):
+            archives.append(artifact)
+        else:  # UNTRACKED_LIST_SUFFIX
+            lists.append(artifact)
     if tree is not None and tree.is_dir():
         problems.extend(_apply_problems(result, dest, tree, patches))
+        problems.extend(_archive_problems(result, dest, tree, repo, archives, lists))
     return problems
