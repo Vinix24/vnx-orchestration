@@ -41,12 +41,17 @@ have (ADR-005, ADR-043). :func:`record_classifier_run` is the one caller that
 catches them, because a classifier call returns its classification whatever the
 ledger did, with no amount and the reason in the result.
 
-K2b-a adds the two lanes that report their own usage instead of leaving a claude
-transcript: ``codex`` and ``kimi``, as BUILDER. They book through
+K2b adds the two lanes that report their own usage instead of leaving a claude
+transcript: ``codex`` and ``kimi``, as builder AND as gate. They book through
 :func:`record_codex_run` / :func:`record_kimi_run` (one function per provider
 kind, both behind :func:`record_cli_run`), from a :class:`CliRun` that
-:func:`cli_run` builds from the usage the CLI itself reported (a builder's own
-``token_usage`` dict). The usage is normalised per provider (``_codex_tokens``,
+:func:`cli_run` builds from whichever usage source the measured end holds: a
+builder's own ``token_usage`` dict, a codex gate's ``execution_depth`` (input,
+output and — when the stream carried it — the cached part of the input), or a
+governed seat's report, whose frontmatter usage counts only when the lane
+stamped ``token_usage_measured: true`` — a lane that reports nothing (kimi-cli)
+books ``unknown:kimi_cli_no_usage`` / ``unavailable:kimi_cli_no_usage``. The
+usage is then normalised per provider (``_codex_tokens``,
 ``_kimi_tokens``) before it is mapped onto the ledger fields: codex's input
 count includes the cached part and kimi's does not, so one shared mapping would
 double-count every cached codex token (OI-2407). A provider whose split was
@@ -55,8 +60,10 @@ never measured, or a report that carries no cached count, books
 never a negative. Both providers bill flat (ChatGPT login, CLI OAuth), so the
 registry price is the API-equivalent list price (``billing: subscription``,
 ``api_equivalent_usd``). The bookers are fail-open: a refusal is logged with
-the ref, the provider and the reason and the run goes on — a build is never the
-ledger's to fail. A gate seat on either lane is K2b-b's to book.
+the ref, the provider and the reason and the run goes on — a gate verdict or a
+build is never the ledger's to fail. A gate seat on either lane is booked by
+the gate that ends it (``gate_runner`` for codex, ``governed_lane`` for kimi),
+under role ``review``; that seat books no builder line, so one run is one line.
 """
 
 from __future__ import annotations
@@ -77,6 +84,7 @@ from token_harvest import (
     MessageUsage,
     harvest_session_messages,
 )
+from unified_report_schema import SchemaViolation, parse_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +92,8 @@ BUILDER_ROLE = "builder"
 # A classifier call on a harness lane (K4b-1): role ``intelligence``, no dispatch, the session id as ref.
 INTELLIGENCE_ROLE = "intelligence"
 CLASSIFIER_PRODUCER = "classifier"
+# A gate run (K2b): the review seat's own model call, booked by the gate that ends it.
+GATE_ROLE = "review"
 
 # The native claude lane runs on the Max subscription (marginal cost 0, list
 # price in api_equivalent_usd); the deepseek and glm harness lanes run on an
@@ -216,6 +226,17 @@ class BuilderRun:
     ended: datetime
     session_id: Optional[str] = None
     spawn_refused: Optional[str] = None
+
+
+def transcript_identity(provider: str, session_id: str) -> str:
+    """The ledger's transcript identity ``"<provider>:<session_id>"`` (K6a, OI-2419).
+
+    The one definition of the format: a harness run's line names the session
+    transcript it was read from with this string, and a later backfill matches
+    that string before it may supersede the line. Keep the reader on this
+    function rather than re-deriving the shape.
+    """
+    return f"{provider}:{session_id}"
 
 
 def _iso(moment: datetime) -> str:
@@ -383,6 +404,14 @@ def record_builder_run(
     be one of ``cost_ledger.ROLES``: an unknown role is refused here, before
     anything is written. Raises what the ledger raises; nothing here catches
     it.
+
+    A run that knows its ``session_id`` names that session on its line as
+    ``cost_ledger.TRANSCRIPT_IDENTITY`` (:func:`transcript_identity`), so the
+    line can be matched to its transcript without a guess (K6a). Existing
+    ledger lines are never rewritten and are not migrated: a line written
+    before this field existed keeps its ``record_id``, because an absent field
+    does not enter the hash, and it receives an identity only through the
+    backfill correction a later K6b-2 supersedes it with.
     """
     if run.provider not in BILLING_BY_PROVIDER:
         raise cost_ledger.InvalidRecord(f"provider {run.provider!r} is not a claude harness lane")
@@ -396,11 +425,16 @@ def record_builder_run(
             "harness_run_cost: dispatch=%s provider=%s booked as %s (%s)",
             dispatch_id, run.provider, fields["cost_source"], run.spawn_refused or "no transcript",
         )
+    # ``_session`` drops a blank id: an identity naming no session would be refused by the
+    # ledger, and the run's usage must still be booked, so a blank id is no identity at all.
+    session = _session(run.session_id)
+    identity = transcript_identity(run.provider, session) if session is not None else None
 
     def make_run(run_id: str) -> cost_ledger.RunCost:
         return cost_ledger.RunCost(
             run_id=run_id, project_id=project_id, role=role, provider=run.provider,
-            model=run.model, billing=BILLING_BY_PROVIDER[run.provider], **fields,
+            model=run.model, billing=BILLING_BY_PROVIDER[run.provider],
+            transcript_identity=identity, **fields,
         )
 
     return cost_ledger.record_next_attempt(project_id, producer, dispatch_id, make_run, ledger_path=ledger_path)
@@ -580,19 +614,74 @@ def _cli_tokens(
 
 def cli_run(
     *, provider: str, model: str, started: datetime, ended: datetime,
-    token_usage: Optional[Mapping[str, Any]] = None, spawn_refused: Optional[str] = None,
+    token_usage: Optional[Mapping[str, Any]] = None, depth: Any = None,
+    report_text: Optional[str] = None, spawn_refused: Optional[str] = None,
 ) -> CliRun:
-    """One codex/kimi builder run, from the usage its own CLI reported (K2b-a).
+    """One codex/kimi run, from whichever usage source its measured end holds (K2b).
 
     ``token_usage`` is a builder's own dict (codex's final ``token_count``,
-    kimi's ``wire.jsonl`` harvest). No source, or one that measured nothing,
+    kimi's ``wire.jsonl`` harvest); ``depth`` the codex gate's
+    ``ExecutionDepth`` — input and output only, hence ``partial:`` on the cache
+    fields; ``report_text`` a governed-lane seat's report, read only when its
+    frontmatter stamped ``token_usage_measured`` (OI-1291; kimi-cli 1.46.0's
+    stream carries no usage at all). No source, or one that measured nothing,
     stays ``None`` and books the honest unknown, never a zero. ``spawn_refused``
-    names an attempt the lane refused before anything ran. The gate's
-    ``execution_depth`` and report-frontmatter sources are K2b-b's to add.
+    names an attempt the lane refused before anything ran.
     """
-    usage = token_usage if isinstance(token_usage, Mapping) else None
+    if isinstance(token_usage, Mapping):
+        usage: Optional[Mapping[str, Any]] = token_usage
+    elif depth is not None:
+        usage = _depth_usage(depth)
+    elif report_text is not None:
+        usage = _report_usage(report_text)
+    else:
+        usage = None
     return CliRun(provider=provider, model=model, started=started, ended=ended,
                   token_usage=usage, spawn_refused=spawn_refused)
+
+
+def _depth_usage(depth: Any) -> Optional[Dict[str, Any]]:
+    """The gate's parsed depth as usage, or ``None``: ``ExecutionDepth`` uses 0 for "nothing" and "not measured" alike.
+
+    The cached part travels only when the gate's stream reported it (OI-2407):
+    ``ExecutionDepth.cache_read_tokens`` is then an int and the codex normaliser
+    subtracts it. Without it the key is absent, which the normaliser reads as an
+    unmeasured split — the gate's total input is never booked as uncached.
+    """
+    if not getattr(depth, "parsed", False):
+        return None
+    counted: Dict[str, Any] = {
+        "input_tokens": _token_count(getattr(depth, "input_tokens", None)) or 0,
+        "output_tokens": _token_count(getattr(depth, "output_tokens", None)) or 0,
+    }
+    cached = _token_count(getattr(depth, "cache_read_tokens", None))
+    if cached is not None:
+        counted["cached_input_tokens"] = cached
+    return counted if counted["input_tokens"] or counted["output_tokens"] else None
+
+
+def _report_usage(report_text: str) -> Optional[Mapping[str, Any]]:
+    """The frontmatter's ``token_usage`` in the lane's own key shape, or ``None`` when it is not a measurement."""
+    try:
+        frontmatter = parse_frontmatter(report_text or "")
+    except SchemaViolation:
+        return None
+    usage = frontmatter.get("token_usage")
+    if not frontmatter.get("token_usage_measured") or not isinstance(usage, Mapping):
+        return None
+    measured: Dict[str, Any] = {
+        "input_tokens": usage.get("input"),
+        "output_tokens": usage.get("output"),
+        "cache_read_tokens": usage.get("cache_read"),
+    }
+    if usage.get("cache_write") is not None:
+        measured["cache_creation_tokens"] = usage.get("cache_write")
+    if not any(_token_count(value) for value in measured.values()):
+        # An UNMEASURED report carries the all-zero shape (kimi stamps zeros
+        # beside ``token_usage_measured: false``); a measured-looking line of
+        # zeros would price a real run at nothing.
+        return None
+    return measured
 
 
 def _no_usage_reason(provider: str) -> str:
@@ -663,10 +752,10 @@ def _book_cli_run(
 
 
 def record_codex_run(
-    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = BUILDER_ROLE,
+    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = GATE_ROLE,
     ledger_path: Optional[Path] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Book one codex run, fail-open (K2b).
+    """Book one codex run, as its gate or its builder, fail-open (K2b).
 
     Codex bills flat on the ChatGPT login, so the line is ``billing: subscription``
     and the registry price lands in ``api_equivalent_usd`` (ADR-043). ``ref`` is
@@ -677,7 +766,7 @@ def record_codex_run(
 
 
 def record_kimi_run(
-    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = BUILDER_ROLE,
+    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = GATE_ROLE,
     ledger_path: Optional[Path] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Book one kimi run, fail-open (K2b).
@@ -715,7 +804,7 @@ def book_cli_builder(
 
 
 def record_cli_run(
-    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = BUILDER_ROLE,
+    run: CliRun, *, project_id: str, producer: str, ref: str, role: str = GATE_ROLE,
     ledger_path: Optional[Path] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """The one door the measured ends call: the provider's own booker, fail-open either way."""
@@ -752,10 +841,11 @@ def receipt_cost(
 
 __all__ = [
     "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER", "CLI_BILLING", "CliRun",
-    "CODEX_PROVIDER", "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
+    "CODEX_PROVIDER", "GATE_ROLE", "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
     "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER",
     "NOT_BUILDER_ROLES", "SPAWN_REFUSED_SOURCE", "book_cli_builder", "books_cli_run", "cli_run",
     "lane_model", "ledger_project_id", "price_segments",
     "receipt_cost", "record_builder_run", "record_classifier_run", "record_cli_run", "record_codex_run",
-    "record_kimi_run", "run_fields", "run_tokens", "usage_completeness", "writes_builder_run",
+    "record_kimi_run", "run_fields", "run_tokens", "transcript_identity", "usage_completeness",
+    "writes_builder_run",
 ]
