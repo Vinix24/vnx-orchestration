@@ -123,6 +123,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Fleet pin audit: a project's .vnx-version pin more than N releases "
         "behind the store's current is a finding (exit 1) instead of a WARN."
     ),
+    "ledger-lifecycle": (
+        "Dispatch lifecycle in the receipt ledger (ADR-045): one start line, "
+        "one end line per attempt, and a report that is never a second outcome."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -177,6 +181,10 @@ _ROW_ORDER: List[str] = [
     # read site but with no effectiveness probe registered yet -- same shape
     # as deterministic-test-verification just above.
     "fleet-pin-audit",
+    # audit-spoor-kern K-1 (ADR-045): the setting is read by the append layer's
+    # lifecycle guard, but no writer emits a lifecycle line until K-act -- so it
+    # is wired-and-dormant, not claimed LIVE.
+    "ledger-lifecycle",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

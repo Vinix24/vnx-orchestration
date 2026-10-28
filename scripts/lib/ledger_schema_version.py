@@ -18,9 +18,12 @@ ladder, no model judgment anywhere:
   - ``schema_version`` <  CURRENT -> convert in memory, read on; the conversion
     is NEVER written back — it only lands on disk when the receipt is
     continued (re-emitted through the writer, which stamps the current version)
-  - ``schema_version`` >  CURRENT -> refuse loudly (``ReceiptSchemaTooNewError``):
-    the reader does not know what it does not know, and silently reading a
-    newer shape produces a wrong interpretation
+  - ``CURRENT`` < ``schema_version`` <= ``LATEST_SCHEMA_VERSION`` -> read as-is.
+    This is the v3 generation (ADR-045 §8, the lifecycle lines): a reader
+    accepts 2 and 3, and never down-converts a v3 line to the older shape.
+  - ``schema_version`` >  ``LATEST_SCHEMA_VERSION`` -> refuse loudly
+    (``ReceiptSchemaTooNewError``): the reader does not know what it does not
+    know, and silently reading a newer shape produces a wrong interpretation
 
 Migration path for the existing ~27k mixed-version lines: none of them is ever
 rewritten (ADR-005 append-only). A backfill that edits history is explicitly
@@ -45,6 +48,14 @@ from typing import Any, Callable, Dict, Iterator, List, Union
 # never at the individual stamp sites — so a future v3 lands monotonically on
 # every new receipt and the reader's ladder walks up to it in one place.
 CURRENT_SCHEMA_VERSION = 2
+
+# ADR-045 §8 (audit-spoor-kern K-1): the three lifecycle line types
+# (dispatch_started / dispatch_finished / report_ingested) are the first
+# receipts stamped 3. The generic write stamp does NOT move: every existing
+# type keeps ``CURRENT_SCHEMA_VERSION`` (2), so a ``task_complete`` append is
+# byte-identical before and after this generation. A reader accepts both.
+LIFECYCLE_SCHEMA_VERSION = 3
+LATEST_SCHEMA_VERSION = LIFECYCLE_SCHEMA_VERSION
 
 # A receipt with no ``schema_version`` key is the oldest generation (version 0),
 # not an error. ``1`` is the legacy v1 stamp (ADR-035: "absent or 1 means the
@@ -140,7 +151,12 @@ def read_receipt(
     """Read one receipt dict, converting it in memory to ``current_version``.
 
     Direction-aware:
-      - newer than ``current_version`` -> ``ReceiptSchemaTooNewError`` (refuse)
+      - newer than ``LATEST_SCHEMA_VERSION`` -> ``ReceiptSchemaTooNewError``
+        (refuse: the reader does not know that shape)
+      - newer than ``current_version`` but known (``<= LATEST_SCHEMA_VERSION``)
+        -> returned as a copy, unchanged. A v3 lifecycle line read by a caller
+        whose ladder target is v2 is accepted as-is; ADR-045 §8: readers accept
+        2 and 3, and a v3 line is never down-converted.
       - older, or absent -> walked through ``SCHEMA_MIGRATIONS`` in memory
       - equal -> returned as a copy (never the caller's dict, never mutated)
 
@@ -152,12 +168,12 @@ def read_receipt(
         raise TypeError(f"receipt must be a dict, got {type(raw).__name__}")
 
     version = receipt_schema_version(raw)
-    if version > current_version:
+    if version > LATEST_SCHEMA_VERSION:
         raise ReceiptSchemaTooNewError(
             f"receipt schema_version={version} is newer than this reader "
-            f"(current_version={current_version}); refusing to read a shape "
-            f"this reader does not know"
-        )
+            f"(latest={LATEST_SCHEMA_VERSION}); refusing a shape it does not know")
+    if version > current_version:  # a known newer generation: read as-is, never down-convert
+        return dict(raw)
 
     migrated: Dict[str, Any] = dict(raw)
     for v in range(version, current_version):
@@ -202,6 +218,8 @@ def read_receipts(
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "LIFECYCLE_SCHEMA_VERSION",
+    "LATEST_SCHEMA_VERSION",
     "ABSENT_SCHEMA_VERSION",
     "SCHEMA_MIGRATIONS",
     "ReceiptSchemaTooNewError",

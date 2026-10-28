@@ -34,11 +34,13 @@ Hard contracts:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Sibling scripts/lib modules must resolve even when a caller imports this
 # module by path without scripts/lib already on sys.path (mirrors
@@ -361,4 +363,164 @@ class SynthesizedLaneReceipt:
         return receipt
 
 
-__all__ = ["ReceiptV2", "SynthesizedLaneReceipt"]
+# ---------------------------------------------------------------------------
+# ADR-045 (audit-spoor-kern K-1): the closed dispatch-lifecycle vocabulary.
+#
+# A dispatch's ledger life is three line types and nothing else. The list is
+# closed on purpose: a reader that meets a fourth type cannot say whether it is
+# an outcome, and the whole point of the track is that the ledger answers "did
+# this dispatch end, and how" without guessing. The required-field contract
+# below is the write-side half — a line missing a field is refused with the
+# name of the missing field, never written half-formed.
+#
+# What each type is NOT is as binding as what it is (ADR-045 §2):
+#   - ``dispatch_started`` happens before the work, so it is never an outcome;
+#   - ``dispatch_finished`` is the ONE end of one attempt and IS an outcome;
+#   - ``report_ingested`` says the report arrived, never that the dispatch
+#     ended — a report is not a second end line.
+# ---------------------------------------------------------------------------
+DISPATCH_STARTED_EVENT_TYPE = "dispatch_started"
+DISPATCH_FINISHED_EVENT_TYPE = "dispatch_finished"
+REPORT_INGESTED_EVENT_TYPE = "report_ingested"
+
+LIFECYCLE_EVENT_TYPES: Tuple[str, ...] = (
+    DISPATCH_STARTED_EVENT_TYPE, DISPATCH_FINISHED_EVENT_TYPE, REPORT_INGESTED_EVENT_TYPE)
+
+# ADR-045 §2: ``end_state`` is a closed set. ``abandoned`` is a ledger fact and
+# projects to a ``timed_out`` row (ADR-045 §4), never to a new DB state.
+LIFECYCLE_END_STATES = frozenset({"completed", "failed", "timed_out", "abandoned"})
+
+# ADR-045 §9: the mode is fixed per dispatch at hand-off and never re-read from
+# the live setting, so a dispatch that started in v3 ends in v3.
+LIFECYCLE_MODES = frozenset({"v3", "legacy"})
+
+# ADR-045 §8: an end line carries ``head_sha`` when the work was pushed, and
+# otherwise an explicit ``no_push:<reason>``. Absence of both is not "no push".
+NO_PUSH_PREFIX = "no_push:"
+
+# The required fields per type (ADR-045 §2 and §8). ``schema_version`` and
+# ``writer_sha`` are stamped by the append layer, not supplied by the caller;
+# ``status`` on a finished line is derived from ``end_state`` (see
+# event_outcome_semantics.end_state_status), never supplied.
+# (A finished line's ``head_sha``/``no_push`` pair is checked below, not here.)
+LIFECYCLE_REQUIRED_FIELDS: Dict[str, Tuple[str, ...]] = {
+    DISPATCH_STARTED_EVENT_TYPE: (
+        "project_id", "dispatch_id", "attempt", "role", "base_sha", "spec_sha256",
+        "requested_by", "lifecycle_mode", "door_pid", "door_started_at", "writer_sha"),
+    DISPATCH_FINISHED_EVENT_TYPE: (
+        "project_id", "dispatch_id", "attempt", "end_state", "writer_sha"),
+    REPORT_INGESTED_EVENT_TYPE: ("project_id", "dispatch_id", "attempt"),
+}
+
+
+class LifecycleReceiptError(ValueError):
+    """A lifecycle line that the write side must refuse, with a named reason.
+
+    ``code`` is the machine-readable refusal (what the receipt processor and a
+    reviewer grep for), ``field`` names the field at fault. The append layer
+    translates this into an ``AppendReceiptError`` carrying the same code, so
+    the refusal is visible in the ledger's own error vocabulary instead of a
+    bare ValueError.
+    """
+
+    def __init__(self, code: str, event_type: str, field: str, detail: str):
+        self.code, self.event_type, self.field, self.detail = code, event_type, field, detail
+        super().__init__(f"{event_type} refused: {detail} (field {field!r})")
+
+
+def is_lifecycle_event_type(value: Any) -> bool:
+    """True for one of the three ADR-045 lifecycle line types."""
+    return str(value or "").strip() in LIFECYCLE_EVENT_TYPES
+
+
+def _is_present(value: Any) -> bool:
+    """Fail-closed presence: absent, None and whitespace-only all read as missing.
+
+    True is not "truthy": ``end_pending: false`` must not pass for a boolean
+    marker, which is why the boolean case is handled by its own exact check.
+    """
+    return value is not None and not (isinstance(value, str) and not value.strip())
+
+
+def validate_lifecycle_receipt(receipt: Dict[str, Any]) -> None:
+    """Enforce ADR-045's required-field contract for the three lifecycle types.
+
+    No-op for every other ``event_type`` (the vocabulary is additive: existing
+    types keep their current contract). Raises ``LifecycleReceiptError`` with a
+    named ``code`` and ``field``; the append layer turns it into a refusal.
+    """
+    event_type = str(receipt.get("event_type") or "").strip()
+    if event_type not in LIFECYCLE_EVENT_TYPES:
+        return
+
+    for field in LIFECYCLE_REQUIRED_FIELDS[event_type]:
+        if not _is_present(receipt.get(field)):
+            raise LifecycleReceiptError(
+                "missing_lifecycle_field", event_type, field,
+                f"required field {field!r} is absent or empty")
+
+    attempt = receipt.get("attempt")
+    if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        raise LifecycleReceiptError("invalid_lifecycle_attempt", event_type, "attempt",
+                                    f"attempt must be a positive integer, got {attempt!r}")
+
+    if event_type == DISPATCH_STARTED_EVENT_TYPE:
+        mode = str(receipt.get("lifecycle_mode") or "").strip()
+        if mode not in LIFECYCLE_MODES:
+            raise LifecycleReceiptError(
+                "invalid_lifecycle_mode", event_type, "lifecycle_mode",
+                f"lifecycle_mode must be one of {sorted(LIFECYCLE_MODES)}, got {mode!r}")
+
+    if event_type == DISPATCH_FINISHED_EVENT_TYPE:
+        end_state = str(receipt.get("end_state") or "").strip()
+        if end_state not in LIFECYCLE_END_STATES:
+            raise LifecycleReceiptError(
+                "invalid_lifecycle_end_state", event_type, "end_state",
+                f"end_state must be one of {sorted(LIFECYCLE_END_STATES)}, got {end_state!r}")
+        if not _is_present(receipt.get("head_sha")):
+            no_push = receipt.get("no_push")
+            if not _is_present(no_push):
+                raise LifecycleReceiptError(
+                    "missing_lifecycle_push_marker", event_type, "head_sha",
+                    "an end line needs head_sha or an explicit no_push:<reason>")
+            if not str(no_push).startswith(NO_PUSH_PREFIX) or not str(no_push)[len(NO_PUSH_PREFIX):].strip():
+                raise LifecycleReceiptError(
+                    "invalid_lifecycle_no_push", event_type, "no_push",
+                    f"no_push must read {NO_PUSH_PREFIX}<reason>, got {no_push!r}")
+
+    if event_type == REPORT_INGESTED_EVENT_TYPE:
+        # Exactly one link: the end line is either already there
+        # (end_outcome_id) or explicitly not yet (end_pending: true). A report
+        # line is never rewritten to add the link later (ADR-045 §2).
+        linked = _is_present(receipt.get("end_outcome_id"))
+        pending = receipt.get("end_pending") is True
+        if not linked and not pending:
+            raise LifecycleReceiptError(
+                "missing_lifecycle_end_link", event_type, "end_pending",
+                "a report line needs end_outcome_id or end_pending: true")
+
+
+def lifecycle_end_key(receipt: Dict[str, Any]) -> str:
+    """The identity of one attempt: sha256 over (project_id, dispatch_id, attempt).
+
+    ADR-045 §3 makes this triple the key of the start line, the end line and
+    the intent. It is a hash, not a dotted string, for the same reason
+    ``outcome_identity.compute_outcome_id`` is: the value is only ever compared
+    and stored, never parsed. ``attempt`` is stringified so an int from the DB
+    and its JSON round-trip hash identically.
+    """
+    attempt = receipt.get("attempt")
+    parts = (str(receipt.get("project_id") or "").strip(),
+             str(receipt.get("dispatch_id") or "").strip(),
+             "" if attempt is None else str(attempt).strip())
+    payload = json.dumps(parts, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+__all__ = [
+    "ReceiptV2", "SynthesizedLaneReceipt",
+    "DISPATCH_STARTED_EVENT_TYPE", "DISPATCH_FINISHED_EVENT_TYPE", "REPORT_INGESTED_EVENT_TYPE",
+    "LIFECYCLE_EVENT_TYPES", "LIFECYCLE_END_STATES", "LIFECYCLE_MODES",
+    "LIFECYCLE_REQUIRED_FIELDS", "NO_PUSH_PREFIX", "LifecycleReceiptError",
+    "is_lifecycle_event_type", "validate_lifecycle_receipt", "lifecycle_end_key",
+]
