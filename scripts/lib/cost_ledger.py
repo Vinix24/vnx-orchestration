@@ -209,9 +209,13 @@ class BackfillTranscriptBooked(CostLedgerRefusal):
     (:class:`BackfillRunIdTaken`). The same transcript was booked already by a
     backfill that planned from the same snapshot: renumbering books its spend a
     second time. So the identity is checked first, inside the writer's lock, in
-    the ledger and in the spool that waits for the replay; ``record`` is the line
-    that holds it. The caller compares usage and amount with that line — equal is
-    a skip, different is a correction on its ``run_id`` — and never renumbers it
+    the ledger and in the spool that waits for the replay; ``record`` is the
+    *effective* line of the ``supersedes`` chain: the newest line that measures
+    the transcript and that no other line supersedes (K6b-3b, OI-2455). A line a
+    correction replaced is history, and comparing with it adds a correction for
+    what a later line already says. The caller compares usage and amount with the
+    effective line — equal is a skip, different is one correction superseding
+    *it*, on its ``run_id`` — and never renumbers it
     (``cost_ledger_backfill.apply_runs``).
     """
 
@@ -1213,7 +1217,8 @@ def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> WrittenRe
 
     * a line that already measures this charge's ``transcript_identity``, in the
       ledger or in the spool that waits for the replay, refuses it with
-      :class:`BackfillTranscriptBooked`, carrying that line (round 3). The same
+      :class:`BackfillTranscriptBooked`, carrying the effective line of the
+      ``supersedes`` chain (round 3, K6b-3b). The same
       transcript is booked once; changed usage is a correction, never a second
       charge;
     * otherwise a ``run_id`` that a line already holds refuses it with
@@ -1371,7 +1376,9 @@ def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
     """Every line in the ledger and in the spool that waits for it, under the caller's lock.
 
     The spool is read as :func:`_next_attempt` reads it, by the ``run_id`` of its
-    records: a run waiting there was written. A ledger that cannot be read
+    records: a run waiting there was written. A spooled record that landed already
+    is left out: the ledger line is its place in the order, and one line counts
+    once (:func:`_has_landed`). A ledger that cannot be read
     raises :class:`_Unwritten` with nothing written — an unreadable ledger is
     evidence of nothing, so it must never read as "not booked yet".
     """
@@ -1381,7 +1388,70 @@ def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
         spooled = [_read_spool_file(spool_dir / name) for name in _spool_names(spool_dir)]
     except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(exc, f"the runs already booked could not be read ({exc}): nothing was written") from exc
-    return [*_parse_lines(text)[0], *(record for run in spooled for record in run)]
+    records = _parse_lines(text)[0]
+    by_id, origins = _lines_by_record_id(records), _renumbered_origins(records)
+    return [*records, *(record for run in spooled for record in run if not _has_landed(record, by_id, origins))]
+
+
+def _superseded_record_ids(lines: Sequence[Mapping[str, Any]]) -> Set[str]:
+    """Every ``record_id`` a line in ``lines`` supersedes, the whole chain in one pass."""
+    return {line["supersedes"] for line in lines if isinstance(line.get("supersedes"), str)}
+
+
+def _line_ids(line: Mapping[str, Any]) -> Set[str]:
+    """The ``record_id`` a line answers to: its own, and the one it had in the spool before a replay renumbered it.
+
+    A successor names a renumbered line by the id it had in the spool
+    (:data:`RENUMBERED_RECORD_ID`), so both ids are this line's. Only a string
+    id counts: a line of another shape names nothing and is never linked by
+    one, and a missing id refuses the write when the line is carried as the
+    effective one (``cost_ledger_backfill._correction_of``).
+    """
+    ids = {line["record_id"]} if isinstance(line.get("record_id"), str) else set()
+    if isinstance(line.get(RENUMBERED_RECORD_ID), str):
+        ids.add(line[RENUMBERED_RECORD_ID])
+    return ids
+
+
+def _is_superseded(line: Mapping[str, Any], superseded: Set[str]) -> bool:
+    """True when another line supersedes ``line``, by either of its ids (:func:`_line_ids`)."""
+    return not _line_ids(line).isdisjoint(superseded)
+
+
+def _effective_transcript_line(
+    lines: Sequence[Mapping[str, Any]], identity: str,
+) -> Optional[Mapping[str, Any]]:
+    """The newest line that measures ``identity`` and that no other line supersedes, or ``None``.
+
+    ``lines`` is the ledger in ledger order, then the records that wait in the
+    spool (:func:`_booked_lines`), so the newest line of a chain comes last. A
+    correction keeps its target's ``run_id`` and names the line it replaces in
+    ``supersedes`` (ADR-038), so a chain of them is one run and only its newest
+    line measures the transcript now: the lines before it are history, and
+    comparing a plan with them adds a correction to a line a later one already
+    replaced, or calls a plan that went back to an older usage a booking
+    (OI-2455). ``None`` means no line measures the transcript, never that the
+    newest line is empty.
+
+    The chain is followed by ``supersedes``, not by the identity alone: a
+    correction written without ``transcript_identity`` still supersedes the line
+    that carries it, and it is the line that says what the transcript costs now.
+    Reading the chain as "not booked" there would book the transcript a second
+    time, so the newest line of the chain is the answer whether or not it repeats
+    the identity.
+    """
+    superseded = _superseded_record_ids(lines)
+    chain: Set[str] = set()
+    effective: Optional[Mapping[str, Any]] = None
+    for line in lines:
+        supersedes = line.get("supersedes")
+        follows = isinstance(supersedes, str) and supersedes in chain
+        if line.get(TRANSCRIPT_IDENTITY) != identity and not follows:
+            continue
+        chain |= _line_ids(line)
+        if not _is_superseded(line, superseded):
+            effective = line
+    return effective
 
 
 def _refuse_a_booked_backfill_charge(ledger_path: Path, fh, run: RunCost) -> None:
@@ -1394,7 +1464,10 @@ def _refuse_a_booked_backfill_charge(ledger_path: Path, fh, run: RunCost) -> Non
 
     * this charge's ``transcript_identity`` — the same transcript is booked
       already, so writing the charge again would count its spend twice; refused
-      with :class:`BackfillTranscriptBooked`, which carries that line (round 3);
+      with :class:`BackfillTranscriptBooked`, which carries the *effective* line
+      of the chain: the newest line that measures the transcript and that no
+      other line supersedes (:func:`_effective_transcript_line`), in the ledger
+      or in the spool (round 3, K6b-3b);
     * this charge's ``run_id`` — another transcript of the same reference took
       the attempt; refused with :class:`BackfillRunIdTaken`, which the caller
       answers by renumbering (round 2). Only reached when no line carries the
@@ -1407,14 +1480,14 @@ def _refuse_a_booked_backfill_charge(ledger_path: Path, fh, run: RunCost) -> Non
         return
     lines = _booked_lines(ledger_path, fh)
     if run.transcript_identity is not None:
-        for line in lines:
-            if line.get(TRANSCRIPT_IDENTITY) == run.transcript_identity:
-                raise BackfillTranscriptBooked(
-                    line,
-                    f"transcript {run.transcript_identity} is booked already as record "
-                    f"{line.get('record_id')} of run {line.get('run_id')}: a backfill charge is never "
-                    "written beside the line that already measures this transcript",
-                )
+        line = _effective_transcript_line(lines, run.transcript_identity)
+        if line is not None:
+            raise BackfillTranscriptBooked(
+                line,
+                f"transcript {run.transcript_identity} is booked already as the effective record "
+                f"{line.get('record_id')} of run {line.get('run_id')}: a backfill charge is never "
+                "written beside the line that already measures this transcript",
+            )
     for line in lines:
         if line.get("run_id") == run.run_id:
             raise BackfillRunIdTaken(

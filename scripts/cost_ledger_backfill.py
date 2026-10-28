@@ -42,6 +42,17 @@ that line's ``run_id``, so the aggregate shows the new usage once. A charge with
 ``transcript_identity`` is never renumbered: it cannot show it is not that transcript, so
 on a taken ``run_id`` it is a failure with one stderr line and nothing written.
 
+**The check compares with the effective line (K6b-3b, OI-2455).** A correction keeps its
+target's ``run_id`` and names it in ``supersedes`` (ADR-038), so a transcript that was
+corrected once has a chain, and only the newest line of it that no other line supersedes
+measures the transcript now. That is the line the ledger's refusal carries and the line a
+plan is compared with: equal is a skip, so a repeated backfill of a grown transcript adds
+no second correction, and different writes exactly one correction superseding the
+effective line — never the original it replaced. A transcript whose usage went back to an
+earlier value is corrected back to it, not reported as booked. A correction that waits in
+the spool for the replay is the effective line too: the check reads the waiting records,
+not only the ledger file.
+
 **What makes a line claimable (K6b-2, OI-2419).** A live line is corrected only on
 evidence that it measures *this* transcript:
 
@@ -773,10 +784,14 @@ def _write_planned(planned: PlannedRun, ledger_path: Path, reserved: MutableMapp
     The ledger tells two refusals apart and so does this writer (K6b-3 round 3):
 
     * :class:`cost_ledger.BackfillTranscriptBooked` — this transcript has a line
-      already, because a concurrent backfill planned from the same snapshot. Equal
+      already, because a concurrent backfill planned from the same snapshot. The
+      refusal carries the *effective* line of the ``supersedes`` chain, so a
+      transcript that was corrected before is compared with what the ledger says
+      now, not with the line that correction replaced (K6b-3b, OI-2455). Equal
       usage and amount raise :class:`_AlreadyBooked` (a skip, not a failure);
-      different usage becomes a correction on that line's ``run_id``, written
-      through the ledger's correction path. A correction is never renumbered.
+      different usage becomes one correction superseding the effective line, on
+      its ``run_id``, written through the ledger's correction path. A correction
+      is never renumbered.
     * :class:`cost_ledger.BackfillRunIdTaken` — another transcript of this
       reference took the attempt, so the charge is renumbered and written again,
       at most :data:`BACKFILL_RETRY_LIMIT` times; past that it is
@@ -828,8 +843,9 @@ def apply_runs(plans: Sequence[PlannedRun], ledger_path: Path,
     two backfills of one dispatch keep both transcripts' spend in the aggregate; a
     correction is never renumbered. A charge whose *transcript* a concurrent backfill
     booked already is not a failure and not a second line: equal usage is counted as
-    a skip, changed usage is written as a correction on that line's ``run_id``, so the
-    transcript's spend counts once (K6b-3 round 3). A line the ledger refuses wrote
+    a skip, changed usage is written as one correction superseding the effective line of
+    the ``supersedes`` chain, so the transcript's spend counts once and no correction is
+    added for what a later line already says (K6b-3 round 3, K6b-3b). A line the ledger refuses wrote
     nothing, so it is counted as a failure and the next line is still attempted;
     :class:`cost_ledger.CostLedgerWriteError` — the write's outcome is unknown —
     propagates instead, and the caller stops (ADR-005).
