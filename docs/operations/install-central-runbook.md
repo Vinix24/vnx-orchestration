@@ -164,6 +164,13 @@ vnx bootstrap-hooks
 vnx doctor  # re-verify
 ```
 
+`regen-settings` and `bootstrap-hooks` are fabric commands: the central shim
+`~/.vnx-system/bin/vnx` and `./bin/vnx` from a checkout both carry them, while the pip
+`vnx` at v1.7.6 answers `invalid choice: 'regen-settings'`. Check which binary answers
+before you run them: `command -v vnx` prints the path, and `vnx --help` lists
+`regen-settings` only when the fabric CLI is the one running (call the shim by its path
+if it does not).
+
 `vnx regen-settings --merge` refreshes the VNX-owned keys and keeps the project's own
 hooks. `--full` renders the whole `settings.json` from the template and stays for the
 first-init case only: a project that has no `.claude/settings.json` yet. On an existing
@@ -193,6 +200,15 @@ echo '<version>' > /path/to/project/.vnx-version
 The `current` symlink points to the newly installed version after each successful run.
 
 ## Before a rollout
+
+`preflight` is a verb of the pip `vnx` (`vnx_cli`) that is on main but not in the
+deployed release: measured 28-10, the pip CLI at v1.7.6 answers `invalid choice:
+'preflight'`, and the central shim `~/.vnx-system/bin/vnx` refuses the same name
+(`Error: 'preflight' requires a different mode`). Run this section from a checkout at
+main with its pip CLI installed (`pip install -e .` from the repository root);
+`vnx release verify` is main-only too, and `./bin/vnx` reaches it from that same
+checkout. Confirm which binary answers with `command -v vnx` and `vnx --help` —
+`preflight` appears in that list only on an install that carries it.
 
 Measure first. `vnx preflight` is read-only: it installs nothing, reloads no launchd job
 and writes no settings file. Run it from the project, or scope it with `--project <id>`
