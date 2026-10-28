@@ -38,7 +38,7 @@ import json
 import logging
 import re
 from dataclasses import asdict, dataclass, fields, replace
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +107,14 @@ class ExecutionDepth:
     ``diff_chars``/``diff_truncated``/``diff_limit``/``truncated_files``
     describe the diff the gate was handed, on every mode (OI-1851, see
     :func:`with_diff_coverage`).
+
+    ``cache_read_tokens`` is the cached part of ``input_tokens`` when the
+    stream reported it (codex's ``turn.completed`` ``cached_input_tokens``,
+    OI-2407), and ``None`` when it did not. ``input_tokens`` includes the
+    cached part wherever the lane reports one — codex's accounting counts
+    cached input inside input — so the two are carried separately and never
+    collapsed: a consumer that needs the uncached part subtracts, and a
+    consumer that only has ``input_tokens`` must not assume it is uncached.
     """
 
     parsed: bool = False
@@ -117,6 +125,7 @@ class ExecutionDepth:
     agent_messages: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: Optional[int] = None
     unrecognised_item_types: tuple = ()
     diff_chars: int = 0
     diff_truncated: bool = False
@@ -139,13 +148,26 @@ class ExecutionDepth:
         return data
 
 
+def _token_count(value: Any) -> Optional[int]:
+    """A reported token count, or ``None``: a missing, malformed or negative count is not a zero."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
 def measure_execution_depth(stdout: str) -> ExecutionDepth:
     """Count what the run did, from the event stream it emitted.
 
     Never raises: an unparseable or absent stream is a measurement this
     module could not make, not a gate failure. A malformed line is skipped
     rather than aborting the count, because a truncated stream still carries
-    evidence about the part that did arrive.
+    evidence about the part that did arrive — and a malformed token count
+    counts as unmeasured (0 for the totals, ``None`` for the cached part),
+    never as an invented zero.
     """
     if not stdout:
         return ExecutionDepth()
@@ -154,6 +176,7 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
     investigative = shell = reads = messages = 0
     unrecognised: set = set()
     input_tokens = output_tokens = 0
+    cache_read_tokens: Optional[int] = None
     seen_items: set = set()
 
     for line in stdout.splitlines():
@@ -195,8 +218,15 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
         elif event_type == "turn.completed":
             usage = event.get("usage")
             if isinstance(usage, dict):
-                input_tokens += int(usage.get("input_tokens") or 0)
-                output_tokens += int(usage.get("output_tokens") or 0)
+                input_tokens += _token_count(usage.get("input_tokens")) or 0
+                output_tokens += _token_count(usage.get("output_tokens")) or 0
+                # Codex reports the cached part of that input separately
+                # (``cached_input_tokens``, OI-2407). It is carried as its own
+                # field so a consumer can tell "0 cached" from "not reported":
+                # a missing or malformed count leaves it None, never 0.
+                cached = _token_count(usage.get("cached_input_tokens"))
+                if cached is not None:
+                    cache_read_tokens = (cache_read_tokens or 0) + cached
 
     if not recognised:
         return ExecutionDepth()
@@ -210,6 +240,7 @@ def measure_execution_depth(stdout: str) -> ExecutionDepth:
         agent_messages=messages,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
+        cache_read_tokens=cache_read_tokens,
         unrecognised_item_types=tuple(sorted(unrecognised)),
     )
 

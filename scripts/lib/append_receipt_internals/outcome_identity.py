@@ -21,6 +21,12 @@ every route-identifying field, and a durable on-disk index
 (``receipt_outcome_index.json``, sibling to the ledger file) so the dedup
 check spans the whole ledger rather than a short cache window. See
 ``docs/governance/decisions/ADR-038-receipt-outcome-identity.md``.
+
+ADR-045 adds the attempt triple: for the three lifecycle line types the
+identity (and the correction key derived from it) also carries ``project_id``
+and ``attempt``, so attempt 2 and another project's line of the same
+``dispatch_id`` are their own lines. Every other receipt shape keeps the
+historical fields exactly.
 """
 
 from __future__ import annotations
@@ -34,6 +40,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# The ADR-045 lifecycle vocabulary, from the one vocabulary module (never a
+# second copy of the type names).
+from receipt_schema import is_lifecycle_event_type
+
 log = logging.getLogger(__name__)
 
 # Fields that identify the OUTCOME. Deliberately NOT source/report_path/
@@ -41,6 +51,16 @@ log = logging.getLogger(__name__)
 # outcome, and are exactly the fields that differ between the two routes for
 # one real-world event (see module docstring).
 OUTCOME_ID_FIELDS = ("dispatch_id", "event_type", "status", "commit_sha", "gate", "pr_number")
+
+# ADR-045 §3 (audit-spoor-kern K-1): the identity of a lifecycle line is the
+# attempt triple (project_id, dispatch_id, attempt), not the dispatch alone. The
+# same dispatch_id in another project, or attempt 2 of one dispatch, is a
+# different line and must never be swallowed as the first one's duplicate.
+# These are the two fields that triple adds to the base identity; every existing
+# shape keeps OUTCOME_ID_FIELDS exactly, because its outcome_ids are already
+# recorded in every project's index and shifting them would silently re-key
+# history.
+LIFECYCLE_IDENTITY_EXTRA_FIELDS = ("project_id", "attempt")
 
 # Same identity, minus status: the "family" of outcomes for one
 # dispatch/event/gate/pr/commit. A new status within the same family is a
@@ -79,20 +99,60 @@ def _canonical_payload(receipt: Dict[str, Any], fields: tuple) -> str:
     return json.dumps(values, sort_keys=True, separators=(",", ":"))
 
 
+def lifecycle_identity_fields(
+    receipt: Dict[str, Any], event_name: Optional[str] = None,
+) -> tuple:
+    """The extra identity fields a lifecycle line carries; ``()`` for every other shape.
+
+    The ONE decision behind both identity calculations: ``compute_outcome_id``
+    and ``compute_correction_key`` here, and the short-window idempotency key in
+    ``idempotency._compute_idempotency_key``. It keys on the ADR-045 lifecycle
+    vocabulary as a whole, not on one type — the per-type copy this replaces let
+    ``dispatch_started`` and ``report_ingested`` of attempt 2 (or of the same
+    dispatch_id in another project) keep attempt 1's keys and be discarded as
+    its duplicate.
+
+    ``event_name`` lets a caller that resolved the name separately (the
+    idempotency key does, because a receipt may carry the legacy ``event``
+    alias) pass it in instead of resolving it twice.
+    """
+    resolved = _normalize_field(event_name) or _resolve_event_name(receipt)
+    if is_lifecycle_event_type(resolved):
+        return LIFECYCLE_IDENTITY_EXTRA_FIELDS
+    return ()
+
+
+def _outcome_id_fields(receipt: Dict[str, Any]) -> tuple:
+    """The identity field tuple for this receipt's shape."""
+    return OUTCOME_ID_FIELDS + lifecycle_identity_fields(receipt)
+
+
+def _correction_key_fields(receipt: Dict[str, Any]) -> tuple:
+    """The correction-key field tuple for this receipt's shape.
+
+    Scoped exactly like the outcome identity: a lifecycle line only supersedes
+    an earlier line of the same project, dispatch, event, commit, gate, PR AND
+    attempt. Without the attempt triple here, attempt 2's end line and another
+    project's end line would carry a ``supersedes`` pointing at attempt 1's
+    outcome — inventing a correction relation neither of them has.
+    """
+    return CORRECTION_KEY_FIELDS + lifecycle_identity_fields(receipt)
+
+
 def compute_outcome_id(receipt: Dict[str, Any]) -> str:
-    """Deterministic identity hash over ``OUTCOME_ID_FIELDS``.
+    """Deterministic identity hash over the receipt's outcome fields.
 
     Two receipts for the same outcome booked via different routes (different
     source/report_path/terminal/task_id) collapse to the same outcome_id.
     """
-    payload = _canonical_payload(receipt, OUTCOME_ID_FIELDS)
+    payload = _canonical_payload(receipt, _outcome_id_fields(receipt))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def compute_correction_key(receipt: Dict[str, Any]) -> str:
-    """Deterministic hash over ``CORRECTION_KEY_FIELDS`` (outcome identity
+    """Deterministic hash over the correction-key fields (outcome identity
     minus status) — the family a correction is scoped to."""
-    payload = _canonical_payload(receipt, CORRECTION_KEY_FIELDS)
+    payload = _canonical_payload(receipt, _correction_key_fields(receipt))
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -116,7 +176,16 @@ def _outcome_index_path_for(receipts_path: Path) -> Path:
 
 
 def _empty_index() -> Dict[str, Any]:
-    return {"version": OUTCOME_INDEX_VERSION, "outcomes": {}, "correction_index": {}}
+    # ``lifecycle_index`` (ADR-045 §3, audit-spoor-kern K-1) projects the single
+    # end line of an attempt: lifecycle_end_key -> outcome_id. It lives in this
+    # same durable index so a duplicate ``dispatch_finished`` is found without a
+    # ledger scan; ``rebuild_outcome_index`` re-derives it with the rest.
+    return {
+        "version": OUTCOME_INDEX_VERSION,
+        "outcomes": {},
+        "correction_index": {},
+        "lifecycle_index": {},
+    }
 
 
 def load_outcome_index(index_path: Path) -> Dict[str, Any]:
@@ -187,6 +256,13 @@ def record_outcome(receipt: Dict[str, Any], index_data: Dict[str, Any], booking:
     correction_key = compute_correction_key(receipt)
     index_data["outcomes"][booking.outcome_id] = int(time.time())
     index_data["correction_index"][correction_key] = booking.outcome_id
+    # ADR-045 §3: the per-attempt end-line projection, so the one-end-per-attempt
+    # refusal does not need a ledger scan. Lazy import: ``lifecycle`` imports
+    # this package's ``common`` and the top-level vocabulary modules, and this
+    # keeps the import order one-directional at module scope.
+    from .lifecycle import record_lifecycle_end
+
+    record_lifecycle_end(receipt, index_data, booking.outcome_id)
 
 
 @dataclass

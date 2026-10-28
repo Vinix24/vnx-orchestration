@@ -64,6 +64,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
@@ -72,6 +73,8 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import gate_depth  # after the scripts/lib path guard
+import harness_run_cost  # K2b: the gate run's own cost-ledger line
+import provider_costs  # K2b: the ledger of the store the gate itself resolved
 from gate_lane_contract import (
     MODEL_DEFAULTS,
     VERDICT_CONTRACT,
@@ -166,7 +169,10 @@ class ProviderRow:
     (glm) or ``None`` for a provider whose lane admits whatever it is handed
     (kimi); ``report_failure_lift`` is the optional report-frontmatter
     failure-reason reader (glm's OI-1710 diagnosis, ``None`` for kimi) and
-    ``lift_detail_label`` names it. No provider branch in the head or the tail.
+    ``lift_detail_label`` names it. ``cost_provider`` is the provider
+    :func:`harness_run_cost.record_cli_run` books this gate's run under (K2b:
+    kimi), ``None`` for a lane not written from here yet (glm, until K3). No
+    provider branch in the head or the tail.
     """
 
     parser: Callable[[str], dict]
@@ -178,6 +184,7 @@ class ProviderRow:
     report_failure_lift: Optional[Callable[[str], Optional[str]]] = None
     lift_detail_label: str = "lane log"
     model_pin: Optional[ModelPin] = None
+    cost_provider: Optional[str] = None
 
 
 def lift_report_failure_reason(report_text: str) -> "Optional[str]":
@@ -232,6 +239,8 @@ GOVERNED_LANE_PROVIDERS: Dict[str, ProviderRow] = {
         parser=_last_json_verdict, gate="kimi_gate", origin="scripts/kimi_gate.py:153 (pre-GE-5a)",
         lane_provider="kimi", dispatch_id_prefix="kimi-gate-pr",
         cli_description="Temporary GOVERNED kimi review gate.",
+        # K2b: kimi's gate books its own run, from the seat's report.
+        cost_provider="kimi",
     ),
 }
 
@@ -1111,8 +1120,37 @@ def _emit_outcome(state: GateRunState, record: dict) -> int:
     return 2 if status == "fail" else 1
 
 
+def _book_gate_cost(state: GateRunState) -> None:
+    """Book this gate run's own cost-ledger line (K2b) for a lane that reports its own usage.
+
+    kimi's gate ends here; the seat's report is the only usage report the lane
+    gives, and one not stamped ``token_usage_measured: true`` books
+    ``unavailable:kimi_cli_no_usage``, never a zero. Booking is fail-open
+    (``record_cli_run`` logs the refusal) and this function never raises: a
+    verdict is never the ledger's to fail. A ``--reprocess`` run calls no model
+    and a row with no ``cost_provider`` (glm, until K3) books nothing either.
+    """
+    provider = state.row.cost_provider
+    if provider is None or getattr(state.args, "reprocess", None):
+        return
+    ended = datetime.fromtimestamp(state.window_end, tz=timezone.utc)
+    started = datetime.fromtimestamp(state.window_start, tz=timezone.utc) if state.window_start else ended
+    run = harness_run_cost.cli_run(
+        provider=provider, model=getattr(state.args, "model", "") or "", started=started, ended=ended,
+        report_text=state.report_text or "",
+    )
+    harness_run_cost.record_cli_run(
+        run, project_id=harness_run_cost.ledger_project_id(state.base_data_dir / "state"),
+        producer=state.row.gate, ref=state.dispatch_id,
+        # The store THIS gate resolved, not whatever the ambient env names: an
+        # offline run (--data-dir) books into the store whose report it read.
+        ledger_path=provider_costs.costs_path_in(state.base_data_dir),
+    )
+
+
 def run_gate_tail(state: GateRunState) -> int:
     """Phases 3-6 of a review gate: verdict, reprocess identity, evidence pair, record, output."""
+    _book_gate_cost(state)
     facts = _reprocess_identity_facts(state, _unread_or_verdict(state))
     contract_hash, report_path = _evidence_pair(state, facts)
     record = _build_record(state, facts, contract_hash, report_path)

@@ -536,6 +536,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "project may lower it.",
         approval=True,
         subsystem="harness-lane-review-gates", status="ACTIVATE", cockpit_canonical=True),
+
+    # ADR-045 (track audit-spoor-kern, group 1 — K-1): the dispatch lifecycle in
+    # the ledger — one dispatch_started, one dispatch_finished per attempt and a
+    # report_ingested that is never an outcome. Its own block, deliberately away
+    # from the gate entries above: this flag gates a WRITE path (the append layer
+    # refuses the three new line types while it is off), not a review decision.
+    # Default off is the shipped state and the emergency brake — turning it off
+    # is the first step back (ADR-045 §9/§10). Until the activation delivery
+    # (K-act) no writer in the fabric emits a lifecycle line.
+    "VNX_LEDGER_LIFECYCLE": _e(
+        "VNX_LEDGER_LIFECYCLE", "bool", "0", "dispatch",
+        "ADR-045 dispatch lifecycle in the receipt ledger: dispatch_started, "
+        "one dispatch_finished per (project_id, dispatch_id, attempt) and a "
+        "report_ingested that never counts as an outcome. Off = no lifecycle "
+        "line is written at all (the append layer refuses the three types). "
+        "Purely deterministic: no model call sits in the write path.",
+        subsystem="ledger-lifecycle", status="ACTIVATE"),
 }
 
 # Flag-LESS subsystems from the cockpit ledger (docs/core/SUBSYSTEMS.md) — kernel/meta subsystems
