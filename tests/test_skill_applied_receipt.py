@@ -325,3 +325,37 @@ def test_every_delivery_route_passes_the_skill_seam():
 
     provider_source = inspect.getsource(provider_dispatch._enrich_instruction)
     assert '"skill"' in provider_source and "_inject_skill_context" in provider_source
+
+
+# ---------------------------------------------------------------------------
+# Receipt schema: the three fields are optional AND a False verdict is stamped
+# (None omits; False must never be dropped — fail-closed)
+# ---------------------------------------------------------------------------
+
+
+def test_receipt_schema_omits_all_three_when_none_but_stamps_a_false_verdict():
+    from receipt_schema import ReceiptV2
+
+    base = dict(
+        dispatch_id="d",
+        terminal_id="T1",
+        provider="claude",
+        model="sonnet",
+        status="success",
+        completion_pct=100,
+        risk=0.0,
+        findings=[],
+        duration_seconds=0.1,
+        token_usage={},
+        receipt_kind="dispatch",
+    )
+
+    absent = ReceiptV2(**base).to_dict()
+    assert not set(_SKILL_KEYS) & set(absent), "no skill: none of the three keys may be serialized"
+
+    stamped = ReceiptV2(
+        **base, skill_applied=False, skill_unapplied_reason="reviewer_bound",
+    ).to_dict()
+    assert stamped["skill_applied"] is False, "a False verdict must be stamped, not omitted"
+    assert stamped["skill_unapplied_reason"] == "reviewer_bound"
+    assert "skill_source_path" not in stamped
