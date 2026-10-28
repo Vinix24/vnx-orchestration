@@ -18,11 +18,20 @@ last line). The tests below drive that in one process and in two, past the retry
 bound, and pin what the guard leaves alone (a correction, a live charge). The last
 one makes the lock file impossible to create, which is how ``main`` reaches its
 ``CostLedgerWriteError`` branch: the unknown write outcome stops the run.
+
+K6b-3b (OI-2455) makes the identity check compare with the *effective* line: the
+newest line of the ``supersedes`` chain, in the ledger and in the spool that waits
+for the replay, that no other line supersedes. A repeated backfill of a grown
+transcript therefore skips against the correction already written instead of adding
+another one, and a transcript whose usage went back to an earlier value is corrected
+back to it instead of being reported as booked. The tests at the end of the file pin
+both, and pin a correction waiting in the spool as the effective line.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import errno
 import json
 import multiprocessing
 import os
@@ -675,3 +684,171 @@ def test_an_identityless_charge_on_a_taken_run_id_fails_and_writes_nothing(
     error = capsys.readouterr().err
     assert blind.run_id in error
     assert "no transcript identity" in error
+
+
+# ---------------------------------------------------------------------------
+# The identity check compares with the effective line of the supersedes chain
+# (K6b-3b, OI-2455)
+# ---------------------------------------------------------------------------
+
+
+def _plan_on(lab, snapshot, session="sess-a"):
+    """One session's plan, numbered on ``snapshot``: the ledger as an earlier backfill read it."""
+    planned = backfill.plan_runs([_run_of(lab, session)], {}, snapshot, PROJECT)
+    assert len(planned) == 1, planned
+    return planned[0]
+
+
+def _spooled_records(lab):
+    """The records waiting in the spool for this lab's backfill run, in order."""
+    run_id = f"{PROJECT}:backfill:{DISPATCH}:1"
+    path = cost_ledger.spool_file_for(cost_ledger.spool_dir_for(lab.ledger), run_id)
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+
+
+def _apply_a_then_b(tmp_path, monkeypatch):
+    """A, then B: one charge and one correction on it, both planned on the empty snapshot."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    snapshot = backfill.load_live_runs(lab.ledger, PROJECT)
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    first = _plan_on(lab, snapshot)
+    backfill.apply_runs([first], lab.ledger, dry_run=False)
+    lab.transcript("sess-a", tokens=TOKENS_B)
+    second = _plan_on(lab, snapshot)
+    backfill.apply_runs([second], lab.ledger, dry_run=False)
+    charge, correction = lab.lines()
+    assert (charge["kind"], correction["kind"]) == ("charge", "correction")
+    assert correction["supersedes"] == charge["record_id"]
+    return lab, snapshot, first, charge, correction
+
+
+def test_a_repeated_backfill_after_a_correction_writes_no_second_correction(tmp_path, monkeypatch):
+    """A, then B, then B: the correction already says B, so the third apply is a skip."""
+    lab, snapshot, _first, charge, correction = _apply_a_then_b(tmp_path, monkeypatch)
+    third = _plan_on(lab, snapshot)
+
+    summaries = backfill.apply_runs([third], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].skips == 1, "the correction that is the effective line already says B"
+    assert summaries[LANE].corrections == 0 and summaries[LANE].new_lines == 0
+    assert summaries[LANE].failures == 0
+    written = lab.lines()
+    assert [line["kind"] for line in written] == ["charge", "correction"], written
+    assert written[-1]["supersedes"] == charge["record_id"]
+    assert written[-1]["record_id"] == correction["record_id"], "no second correction beside the first"
+    totals = cost_ledger.aggregate_runs(lab.ledger)
+    effective, = totals.runs.values()
+    assert effective["tokens"] == dict(TOKENS_B), "the aggregate stays B"
+
+
+def test_a_transcript_back_at_its_older_usage_is_corrected_back_not_skipped(tmp_path, monkeypatch):
+    """A, then B, then A: the newest plan wins, so the effective line is corrected back to A."""
+    lab, snapshot, _first, charge, correction = _apply_a_then_b(tmp_path, monkeypatch)
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    third = _plan_on(lab, snapshot)
+
+    summaries = backfill.apply_runs([third], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].corrections == 1, "A differs from the effective B line: one correction"
+    assert summaries[LANE].skips == 0, "a superseded line that happens to say A is not a booking"
+    assert summaries[LANE].new_lines == 0 and summaries[LANE].failures == 0
+    written = lab.lines()
+    assert [line["kind"] for line in written] == ["charge", "correction", "correction"], written
+    back_to_a = written[-1]
+    assert back_to_a["supersedes"] == correction["record_id"], "the effective line, never the original"
+    assert back_to_a["run_id"] == charge["run_id"], "a correction keeps the run it corrects"
+    assert back_to_a["tokens"] == dict(TOKENS_A)
+    totals = cost_ledger.aggregate_runs(lab.ledger)
+    effective, = totals.runs.values()
+    assert effective["tokens"] == dict(TOKENS_A)
+    assert totals.cost_usd == pytest.approx(back_to_a["cost_usd"])
+
+
+def test_a_correction_waiting_in_the_spool_is_the_effective_line(tmp_path, monkeypatch):
+    """B's correction waits for the replay: the check must read that line, not the superseded charge."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    snapshot = backfill.load_live_runs(lab.ledger, PROJECT)
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    first = _plan_on(lab, snapshot)
+    backfill.apply_runs([first], lab.ledger, dry_run=False)
+    charge, = lab.lines()
+    lab.transcript("sess-a", tokens=TOKENS_B)
+    second = _plan_on(lab, snapshot)
+    real_append, failed = cost_ledger._append_record, []
+
+    def append_failing_once(fh, record):
+        if not failed:
+            failed.append(record)
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+        return real_append(fh, record)
+
+    monkeypatch.setattr(cost_ledger, "_append_record", append_failing_once)
+    assert backfill.apply_runs([second], lab.ledger, dry_run=False)[LANE].corrections == 1
+    spooled = _spooled_records(lab)
+    assert [record["kind"] for record in spooled] == ["correction"], "the correction waits in the spool"
+    assert len(lab.lines()) == 1, "the ledger still holds only the charge"
+    monkeypatch.setattr(cost_ledger, "_append_record", real_append)
+    before = lab.ledger.read_bytes()
+
+    summaries = backfill.apply_runs([second], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].skips == 1, "the spooled correction already says B"
+    assert summaries[LANE].corrections == 0 and summaries[LANE].failures == 0
+    assert lab.ledger.read_bytes() == before
+    assert [record["record_id"] for record in _spooled_records(lab)] == [spooled[0]["record_id"]]
+
+    summaries = backfill.apply_runs([first], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].corrections == 1, "A differs from the spooled effective line"
+    assert summaries[LANE].skips == 0
+    back_to_a, = _spooled_records(lab)[1:]
+    assert back_to_a["supersedes"] == spooled[0]["record_id"], "superseding the waiting correction, not the charge"
+    assert back_to_a["run_id"] == charge["run_id"]
+    assert len(lab.lines()) == 1, "both corrections wait behind the charge in the spool"
+
+
+def test_a_correction_without_an_identity_still_holds_the_transcript(tmp_path, monkeypatch):
+    """The chain is followed by ``supersedes``: a correction that repeats no identity is still effective.
+
+    Reading only identity-carrying lines would find the superseded charge replaced and
+    take the transcript for unbooked, booking its spend a second time.
+    """
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    planned, = backfill.plan_runs([_run_of(lab, "sess-a")], {}, {}, PROJECT)
+    assert backfill.apply_runs([planned], lab.ledger, dry_run=False)[LANE].new_lines == 1
+    charge, = lab.lines()
+    correction = cost_ledger.record_run(dataclasses.replace(
+        planned.run, kind="correction", supersedes=charge["record_id"],
+        reason="a manual correction", transcript_identity=None,
+    ), ledger_path=lab.ledger)
+    assert "transcript_identity" not in correction
+
+    summaries = backfill.apply_runs([planned], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].skips == 1, "the identity-less correction is the effective line, not 'not booked'"
+    assert summaries[LANE].new_lines == 0 and summaries[LANE].corrections == 0
+    assert len(lab.lines()) == 2
+    assert len(cost_ledger.aggregate_runs(lab.ledger).runs) == 1, "one transcript stays one run"
+
+
+def test_a_line_with_a_malformed_supersedes_does_not_break_the_check(tmp_path, monkeypatch):
+    """A hand-edited line that names no record in ``supersedes`` is not part of a chain, and never raises."""
+    lab = Lab(tmp_path, monkeypatch)
+    lab.dispatch()
+    lab.transcript("sess-a", tokens=TOKENS_A)
+    planned, = backfill.plan_runs([_run_of(lab, "sess-a")], {}, {}, PROJECT)
+    assert backfill.apply_runs([planned], lab.ledger, dry_run=False)[LANE].new_lines == 1
+    charge, = lab.lines()
+    corrupt = dict(charge, kind="correction", supersedes=[], reason="hand-edited", record_id="0" * 32)
+    with lab.ledger.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(corrupt) + "\n")
+
+    summaries = backfill.apply_runs([planned], lab.ledger, dry_run=False)
+
+    assert summaries[LANE].skips == 1, "the charge still holds its transcript"
+    assert summaries[LANE].new_lines == 0 and summaries[LANE].corrections == 0
+    assert summaries[LANE].failures == 0
