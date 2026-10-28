@@ -351,6 +351,107 @@ def test_a_missing_patch_file_is_named(fx: Fixture) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 3b. every path the worktree changed is verified, not only the patch's paths
+# ---------------------------------------------------------------------------
+
+
+def test_a_tracked_change_after_the_salvage_is_named(fx: Fixture) -> None:
+    """Codex reproduction: the saved patch never touches .gitignore, so only a
+    comparison with the worktree's own changed paths can name it."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    (wt / ".gitignore").write_text(DEFAULT_IGNORES + "dist/\n", encoding="utf-8")
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "
+        ".gitignore differs from the worktree"], problems
+
+
+def test_a_tracked_file_deleted_after_the_salvage_is_named(fx: Fixture) -> None:
+    """A deletion is also a difference: the patch kept bytes the tree no longer has."""
+    wt = fx.worktree()
+    fx.commit(wt, "b.txt", "b\n", "add b")
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    (wt / "b.txt").unlink()
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "
+        "b.txt differs from the worktree"], problems
+
+
+def test_a_patched_file_changed_further_after_the_salvage_is_named(fx: Fixture) -> None:
+    """The paths the applied patch itself names stay compared (pinned)."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    (wt / "a.txt").write_text("a\nedited again\n", encoding="utf-8")
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "
+        "a.txt differs from the worktree"], problems
+
+
+def test_a_staged_change_modified_further_after_the_salvage_is_named(fx: Fixture) -> None:
+    """A path with no entry in the unstaged patch is still compared: the patch
+    carries the staged state only, and the worktree has moved past it."""
+    wt = fx.worktree()
+    (wt / ".gitignore").write_text(DEFAULT_IGNORES + "dist/\n", encoding="utf-8")
+    git(wt, "add", ".gitignore")
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")  # keeps a patch to apply
+    result = salvage(fx, wt)
+    assert [Path(a).name for a in result.artifacts] == [
+        "worktree-one.staged.patch", "worktree-one.unstaged.patch"]
+    assert verify(fx, result) == []
+
+    (wt / ".gitignore").write_text(DEFAULT_IGNORES + "dist/\ncoverage/\n", encoding="utf-8")
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "
+        ".gitignore differs from the worktree"], problems
+
+
+def test_an_unreadable_worktree_diff_is_a_named_problem(
+        fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tree whose changed paths cannot be read is never a pass."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    real = ws._diff_paths
+
+    def failing(cwd: Path, args: list[str], what: str) -> list[str]:
+        if Path(cwd).resolve() == wt.resolve():
+            raise ws.SalvageError(f"{what}: git diff failed (128): boom")
+        return real(cwd, args, what)
+
+    monkeypatch.setattr(ws, "_diff_paths", failing)
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "), problems
+    assert "boom" in problems[0], problems
+
+
+# ---------------------------------------------------------------------------
 # 3a. every other status entry is still a named problem
 # ---------------------------------------------------------------------------
 

@@ -23,7 +23,10 @@ object store of the checkout, and every patch is proved by applying it in such
 a checkout: the staged patch must reproduce the tree's own index tree
 (``git write-tree``, read through a temporary ``GIT_INDEX_FILE`` so the
 worktree's index is never written) and the unstaged patch must reproduce every
-changed file's bytes. A failed apply or a mismatch is a named problem. An
+changed file's bytes, both for the paths its apply changes and for the paths the
+worktree itself changed against its index — a tracked change the tree makes
+after the salvage, and that no patch mentions, is a named problem too. A failed
+apply or a mismatch is a named problem. An
 artifact or ``dest_dir`` inside the tree is refused: removal would delete the
 evidence. A real run writes ``dest_dir/<name>-<UTC>-<head[:8]>/*`` and appends
 the MANIFEST line.
@@ -562,18 +565,27 @@ def _staged_apply(scratch: Path, patch: Path, index_tree: str, artifact: str) ->
 
 
 def _unstaged_apply(scratch: Path, patch: Path, tree: Path, artifact: str) -> list[str]:
-    """Apply the unstaged patch to the scratch worktree; every file it changes
-    must match the worktree byte for byte (types and exec bit included)."""
+    """Apply the unstaged patch to the scratch worktree; every file the apply
+    changes — and every file the worktree itself changed — must match the tree
+    byte for byte (types and exec bit included).
+
+    The tree's own changed paths are read against its index: a tracked change
+    the tree made after the salvage, and that the saved patch therefore never
+    mentions, is state the patch does not preserve. Measuring only the applied
+    diff would leave it unverified."""
     failure = _git_failure(["apply", str(patch.resolve())], scratch, "apply unstaged patch")
     if failure:
         return [f"{artifact}: does not apply: {failure}"]
     try:
-        changed = _diff_paths(scratch, ["diff", "--name-status", "-z"],
+        applied = _diff_paths(scratch, ["diff", "--name-status", "-z"],
                               "read the applied diff")
-    except SalvageError as exc:
+        if not applied:  # an apply that moves no file proves nothing
+            return [f"{artifact}: applies but changes no file"]
+        live = _diff_paths(tree, ["diff", "--name-status", "-z"],
+                           "read the worktree diff")
+    except SalvageError as exc:  # an unreadable diff is a problem, never a pass
         return [f"{artifact}: {exc}"]
-    if not changed:  # an apply that moves no file proves nothing
-        return [f"{artifact}: applies but changes no file"]
+    changed = list(dict.fromkeys(applied + live))  # both sides of a rename, in order
     return [f"{artifact}: {path} differs from the worktree"
             for path in changed if not _same_file(scratch / path, tree / path)]
 
