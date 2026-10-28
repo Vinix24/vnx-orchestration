@@ -1,18 +1,20 @@
-"""worktree_salvage.py — preserve a worktree's unpushed commits (WT-2a1a).
+"""worktree_salvage.py — preserve a worktree's unpushed commits (WT-2a1a/2a1b).
 
 :func:`salvage` preserves exactly one kind of tree state: the commits no
 ``origin`` ref reaches. :func:`verify` returns ``[]`` only when the tree holds
 nothing else — ``git status --porcelain=v2 -z --untracked-files=all
---ignored=matching --ignore-submodules=none`` names no entry at all (tracked,
-staged, untracked, ignored (OI-2417), submodule or unmerged; no allowlist yet,
-so a ``__pycache__`` blocks too), every gitlink whose checkout exists is named
-even when it is clean (a submodule keeps its commits in its own object store, so
-no superproject bundle can carry them; nothing here classifies or excuses one —
-that is WT-2a1b), a gitlink whose checkout was never made is not named, HEAD is
-readable and still the salvaged commit, and every artifact is a non-empty bundle
-that unpacks to that head in a scratch repository borrowing no object store of
-the checkout. An artifact or ``dest_dir`` inside the tree is refused: removal
-would delete the evidence. A real run writes
+--ignored=matching --ignore-submodules=none`` names no entry this salvage does
+not cover (tracked, staged, untracked, submodule or unmerged; an IGNORED entry
+is covered only inside a throwaway cache directory from
+:data:`THROWAWAY_IGNORED_DIRS` and never below ``.vnx-data/`` or ``.git/`` —
+WT-2a1b, OI-2417), every gitlink whose checkout exists is named even when it is
+clean (a submodule keeps its commits in its own object store, so no
+superproject bundle can carry them; nothing here classifies or excuses one —
+submodule bundling is OI-2411), a gitlink whose checkout was never made is not
+named, HEAD is readable and still the salvaged commit, and every artifact is a
+non-empty bundle that unpacks to that head in a scratch repository borrowing no
+object store of the checkout. An artifact or ``dest_dir`` inside the tree is
+refused: removal would delete the evidence. A real run writes
 ``dest_dir/<name>-<UTC>-<head[:8]>/*`` and appends the MANIFEST line.
 """
 from __future__ import annotations
@@ -37,6 +39,15 @@ _STATUS = ["status", "--porcelain=v2", "-z", "--untracked-files=all",
            "--ignored=matching", "--ignore-submodules=none"]
 _PATH_FIELD = {"1": 8, "2": 9, "u": 10, "?": 1, "!": 1}  # spaces before the path
 _HEADER_LIMIT = 1 << 20  # a bundle header may never end; bound the read
+# Directory names whose IGNORED content is throwaway (WT-2a1b, OI-2417): caches
+# a worker's tree fills on its own and nobody writes by hand. A status entry on
+# this list is the only entry a removal may ignore.
+THROWAWAY_IGNORED_DIRS = (
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules",
+)
+# Below these roots nothing is throwaway, whatever its name: the evidence a
+# removal may not lose lives there. Matched as a path component, not a prefix.
+_PROTECTED_IGNORE_ROOTS = frozenset({".vnx-data", ".git"})
 
 
 class SalvageError(RuntimeError):
@@ -82,9 +93,12 @@ def _git_failure(args: list[str], cwd: Path, what: str) -> str | None:
     return None
 
 
-def _status_paths(worktree_path: Path) -> list[str]:
+def _status_entries(worktree_path: Path) -> list[tuple[str, str]]:
+    """Every status entry as ``(kind, path)``, kind being the porcelain v2 entry
+    type character (``1`` tracked, ``2`` rename/copy, ``u`` unmerged, ``?``
+    untracked, ``!`` ignored)."""
     fields = iter(_run_git(_STATUS, worktree_path, "read status").split(b"\0"))
-    paths: list[str] = []
+    entries: list[tuple[str, str]] = []
     for chunk in fields:
         entry = os.fsdecode(chunk)
         if not entry:
@@ -93,10 +107,37 @@ def _status_paths(worktree_path: Path) -> list[str]:
         parts = entry.split(" ", spaces) if spaces else []
         if len(parts) != spaces + 1 or not parts[spaces]:
             raise SalvageError(f"read status: unparseable porcelain v2 entry {entry[:60]!r}")
-        paths.append(parts[spaces])
+        entries.append((entry[0], parts[spaces]))
         if entry[0] == "2":
             next(fields, None)  # a rename or copy names its source path too
-    return paths
+    return entries
+
+
+def _is_throwaway_ignored(kind: str, path: str) -> bool:
+    """Whether one status entry is a throwaway cache this salvage may ignore.
+
+    Only an IGNORED entry qualifies, and only when a component of its path is a
+    name from :data:`THROWAWAY_IGNORED_DIRS` that is not itself below a
+    protected root: ``pkg/__pycache__/x.pyc`` is throwaway, the same path below
+    ``.vnx-data/`` or ``.git/`` is not. A tracked, untracked or unmerged entry
+    never qualifies, whatever its path (WT-2a1b, OI-2417).
+    """
+    if kind != "!":
+        return False
+    components = path.split("/")
+    for index, component in enumerate(components):
+        if component not in THROWAWAY_IGNORED_DIRS:
+            continue
+        if _PROTECTED_IGNORE_ROOTS.intersection(components[:index]):
+            continue  # a throwaway name inside evidence is not throwaway itself
+        return True
+    return False
+
+
+def _uncovered_paths(entries: list[tuple[str, str]]) -> list[str]:
+    """The status entries this salvage does not cover; only an ignored throwaway
+    cache directory is excused, and every other entry is named."""
+    return [path for kind, path in entries if not _is_throwaway_ignored(kind, path)]
 
 
 def _populated_submodules(worktree_path: Path) -> list[str]:
@@ -211,7 +252,7 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
     if not raw.isdigit():  # a missing count is no zero read as clean
         raise SalvageError(f"count unpushed commits: git returned {raw!r}, not a count")
     # Read the state first: a dest_dir inside the worktree must not show up in it.
-    uncovered, unpushed = _status_paths(worktree_path), int(raw)
+    uncovered, unpushed = _uncovered_paths(_status_entries(worktree_path)), int(raw)
     # A populated submodule's commits ride in no bundle this salvage writes; record
     # it uncovered while the tree is still readable, before anything is written.
     for path in _populated_submodules(worktree_path):
@@ -303,21 +344,21 @@ def _tree_problems(tree: Path, result: SalvageResult) -> list[str]:
         problems.append(
             f"tree {result.name}: HEAD moved to {head} after the salvage of {result.head}")
     try:
-        entries = _status_paths(tree)
+        uncovered = _uncovered_paths(_status_entries(tree))
     except SalvageError as exc:
         return problems + [f"tree {result.name}: state unreadable: {exc}"]
-    if entries:
-        rest = f" (+{len(entries) - 1} more)" if len(entries) > 1 else ""
-        problems.append(f"tree has state this salvage does not cover: {entries[0]}{rest}")
+    if uncovered:
+        rest = f" (+{len(uncovered) - 1} more)" if len(uncovered) > 1 else ""
+        problems.append(f"tree has state this salvage does not cover: {uncovered[0]}{rest}")
     try:
         gitlinks = _populated_submodules(tree)
     except SalvageError as exc:
         return problems + [f"tree {result.name}: state unreadable: {exc}"]
     # Dirty or clean, a populated submodule holds commits no bundle carried. One
-    # already named above as a status entry needs no second line.
+    # already named above as an uncovered status entry needs no second line.
     problems.extend(
         f"tree has state this salvage does not cover: {path}"
-        for path in gitlinks if path not in entries)
+        for path in gitlinks if path not in uncovered)
     return problems
 
 
