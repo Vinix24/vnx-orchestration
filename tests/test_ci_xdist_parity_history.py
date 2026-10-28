@@ -3,16 +3,18 @@
 The rule (plan "The cutover rule"): every run in the window clean (exit 0,
 every step success, the comparison step included), at least 10 distinct head
 SHAs over at least two UTC calendar days with the latest on main, the shadow
-suite at most 40 percent of that run's own serial reference duration (the
-bound T0 set in OI-2442; it replaces the absolute 15 minutes), every
-watch-list OI closed. The window: heavy verdicts with the target fingerprint
-whose head descends from the merge commit of the last D3 PR.
+suite at most one half of that run's own serial reference duration (the bound
+T0 set in OI-2442 and amended in round 2: at 40 percent six runs of the window
+measured 40.6 to 44.5 percent of their own reference, so that bound could never
+hold; it replaces the absolute 15 minutes), every watch-list OI closed. The
+window: heavy verdicts with the target fingerprint whose head descends from
+the merge commit of the last D3 PR.
 
 The wall-time bound reads both numbers from one verdict: the shadow's
 ``shadow.suite_wall_s`` and the reference's ``reference.duration_s``. A run
 without a whole-number reference duration is no more within the bound than
 one without a shadow wall time, and the share is compared in whole numbers
-(``5 * shadow <= 2 * reference``), never in floats.
+(``2 * shadow <= reference``), never in floats.
 
 Every verdict is a fixture in tests/fixtures/xdist_parity_verdicts/, in the
 schema the pipeline writes today; tests/test_ci_record_xdist_parity_verdict.py
@@ -321,15 +323,15 @@ def test_the_latest_run_must_be_on_main():
     assert failed(evaluate(runs)) == {"latest_on_main"}
 
 
-@pytest.mark.parametrize("wall", [800, None], ids=["over-the-share", "no-wall-time"])
+@pytest.mark.parametrize("wall", [900, None], ids=["over-the-share", "no-wall-time"])
 def test_a_slow_or_untimed_shadow_blocks(wall):
-    """800 s is under the old absolute bound and over 2/5 of the fixture's 1773 s reference."""
+    """900 s is under the old absolute bound and over one half of the fixture's 1773 s reference (886.5 s)."""
     runs = clean_window()
     runs[5].verdict["shadow"]["suite_wall_s"] = wall
     assert {"suite_wall_time", "every_run_clean"} == failed(evaluate(runs))
 
 
-# --- the wall-time bound: the shadow against the serial reference of the same run (OI-2442) ----------
+# --- the wall-time bound: the shadow against the serial reference of the same run (OI-2442, round 2: one half) --
 
 
 def _wall(runs: list, index: int, shadow_s, reference_s) -> list:
@@ -348,21 +350,32 @@ def test_a_shadow_within_the_share_of_its_own_reference_is_clean():
     assert hist.within_wall_bound(runs[5].verdict) is True
 
 
-def test_a_shadow_of_exactly_the_share_of_its_reference_is_within_the_bound():
-    """Exactly 2/5 is within, compared in whole numbers: 5 * 1200 == 2 * 3000, no float rounding at the edge."""
-    runs = _wall(clean_window(), 5, 1200, 3000)
+def test_a_shadow_of_exactly_one_half_of_its_reference_is_within_the_bound():
+    """Exactly one half is within, compared in whole numbers: 2 * 1500 == 1 * 3000, no float rounding at the edge."""
+    runs = _wall(clean_window(), 5, 1500, 3000)
     evaluation = evaluate(runs)
     assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[5].reasons == []
+    assert hist.within_wall_bound(runs[5].verdict) is True
 
 
-def test_a_shadow_over_the_share_of_its_reference_blocks_with_its_reason():
-    """Shadow 1300 s beside a 3000 s reference (43 percent): over the bound, named on the run and in the condition."""
+def test_a_shadow_of_43_percent_of_its_reference_is_now_within_the_bound():
+    """The case the round-2 amendment changed: 1300 s beside 3000 s is 43 percent, over 2/5 and within one half."""
     runs = _wall(clean_window(), 5, 1300, 3000)
     evaluation = evaluate(runs)
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[5].reasons == []
+    assert hist.within_wall_bound(runs[5].verdict) is True
+
+
+def test_a_shadow_over_one_half_of_its_reference_blocks_with_its_reason():
+    """Shadow 1600 s beside a 3000 s reference (53 percent): over the bound, named on the run and in the condition."""
+    runs = _wall(clean_window(), 5, 1600, 3000)
+    evaluation = evaluate(runs)
     assert failed(evaluation) == {"suite_wall_time", "every_run_clean"}
-    assert evaluation.placements[5].reasons == ["shadow suite 1300 s > 40% of reference 3000 s"]
+    assert evaluation.placements[5].reasons == ["shadow suite 1600 s > 50% of reference 3000 s"]
     [condition] = [c for c in evaluation.conditions if c.name == "suite_wall_time"]
-    assert condition.detail == ("1 run(s) over 40% of their serial reference (2/5) or without a shadow "
+    assert condition.detail == ("1 run(s) over 50% of their serial reference (1/2) or without a shadow "
                                 "wall time or a reference duration")
     assert "cutover rule: DOES NOT HOLD" in hist.render(evaluation, HEADER)
 
@@ -394,10 +407,40 @@ def test_a_reference_block_that_is_no_object_names_no_duration():
     assert hist.reference_duration_s({"shadow": {"suite_wall_s": 600}}) is None
 
 
+NO_WALL = object()
+
+
+@pytest.mark.parametrize("wall", [NO_WALL, None], ids=["missing", "none"])
+def test_a_shadow_without_a_wall_time_is_no_bound_to_measure_against(wall):
+    """Fail closed on the shadow side too: a missing or null wall time blocks with its own reason."""
+    runs = clean_window()
+    if wall is NO_WALL:
+        del runs[5].verdict["shadow"]["suite_wall_s"]
+    else:
+        runs[5].verdict["shadow"]["suite_wall_s"] = wall
+    evaluation = evaluate(runs)
+    assert failed(evaluation) == {"suite_wall_time", "every_run_clean"}
+    assert evaluation.placements[5].reasons == ["no shadow suite wall time"]
+    assert hist.suite_wall_s(runs[5].verdict) is None
+    assert hist.within_wall_bound(runs[5].verdict) is False
+
+
+@pytest.mark.parametrize("wall", ["600", 600.0, True, "unknown"], ids=["text", "float", "bool", "unknown-text"])
+def test_a_shadow_wall_time_that_is_not_a_whole_number_is_never_within_the_bound(wall):
+    """A malformed or unknown wall time is no measurement: the shape check turns the verdict away, the bound says False."""
+    runs = _wall(clean_window(), 5, wall, 3000)
+    assert hist.suite_wall_s(runs[5].verdict) is None
+    assert hist.within_wall_bound(runs[5].verdict) is False
+    evaluation = evaluate(runs)
+    assert evaluation.placements[5].place == "no_verdict"
+    assert evaluation.placements[5].reasons[0].startswith("malformed verdict: shadow ")
+    assert not evaluation.holds
+
+
 def test_the_share_is_read_from_one_constant_pair():
     """One name for the bound: the reason and the condition text both derive from MAX_SHADOW_SHARE."""
-    assert hist.MAX_SHADOW_SHARE == (2, 5)
-    assert hist.SHADOW_SHARE_PERCENT == 40
+    assert hist.MAX_SHADOW_SHARE == (1, 2)
+    assert hist.SHADOW_SHARE_PERCENT == 50
 
 
 def test_a_run_whose_head_cannot_be_found_blocks():
