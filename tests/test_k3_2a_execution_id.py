@@ -336,6 +336,62 @@ def test_a_run_that_never_started_carries_no_id(store, monkeypatch):
     assert FIELD not in record
 
 
+def _request_on_disk(store, gate: str, pr: int) -> dict:
+    """The request record as the last writer left it — the payload a retry is handed."""
+    path = store.state / "review_gates" / "requests" / f"pr-{pr}-{gate}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a_refused_retry_carries_no_id_inherited_from_the_earlier_run(store, monkeypatch):
+    """A retry refused before execution must not stamp the id the OUTAGE left on its request.
+
+    Reproduced (codex, round 2): run codex into a timeout (``unavailable``), reuse
+    the request record that run left behind for a retry, and take the provider
+    binary away. The retry never reaches ``_mark_executing``, so it is no run and
+    names no execution. The cost ledger is keyed by this id, so an inherited one
+    would book this refusal as the earlier execution.
+    """
+    timeout = {
+        "status": "failed", "reason": "timeout", "reason_detail": "the run exceeded 900 s",
+        "stdout": "", "stderr": "", "duration_seconds": 900.0,
+        "partial_output_lines": 0, "runner_pid": 4242,
+    }
+    runner = _codex_runner(store, monkeypatch, timeout)
+    outage = runner.run(
+        gate="codex_gate", pr_number=4242, pr_id="",
+        request_payload=_gate_request(store, "codex_gate", 4242),
+    )
+    assert outage["status"] == "unavailable"
+    _assert_minted(outage[FIELD])
+    retry_payload = _request_on_disk(store, "codex_gate", 4242)
+    assert retry_payload[FIELD] == outage[FIELD], "the request the retry is handed names the outage"
+
+    monkeypatch.setattr(gate_runner.shutil, "which", lambda _binary: None)
+    refused = runner.run(
+        gate="codex_gate", pr_number=4242, pr_id="", request_payload=retry_payload,
+    )
+
+    assert refused["status"] == "not_executable" and refused["reason"] == "provider_not_installed"
+    assert FIELD not in refused
+    assert FIELD not in _request_on_disk(store, "codex_gate", 4242)
+
+
+def test_a_retry_that_reaches_execution_mints_a_new_id(store, monkeypatch):
+    """The same inherited payload, a run that DOES start: the new run gets its own id."""
+    inherited = gate_status.new_execution_id()
+    runner = _harness_runner(store, monkeypatch, _PASS_BODY)
+
+    record = runner.run(
+        gate="kimi_gate", pr_number=4242, pr_id="",
+        request_payload=_gate_request(store, "kimi_gate", 4242, **{FIELD: inherited}),
+    )
+
+    assert record["status"] == "completed"
+    _assert_minted(record[FIELD])
+    assert record[FIELD] != inherited
+    assert _request_on_disk(store, "kimi_gate", 4242)[FIELD] == record[FIELD]
+
+
 # ---------------------------------------------------------------------------
 # (3) --reprocess: no new id, the original run's id or none
 # ---------------------------------------------------------------------------
