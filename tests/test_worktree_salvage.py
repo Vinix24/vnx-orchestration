@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1196,3 +1197,56 @@ def test_a_worktree_of_another_repository_is_a_salvage_error(fx: Fixture) -> Non
 
     with pytest.raises(ws.SalvageError, match="not a worktree of"):
         ws.salvage(wt, fx.dest, repo_root=other, dry_run=False)
+
+
+# ---------------------------------------------------------------------------
+# PR-5: private artifacts, and a truncated list record is a named problem
+# ---------------------------------------------------------------------------
+
+
+def test_every_artifact_and_its_directory_are_owner_only_under_a_permissive_umask(
+    fx: Fixture,
+) -> None:
+    """From PR-5 on, the salvage may be the only copy left: the tree is removed.
+
+    The umask is set permissively (0o022) for the whole run, so anything that
+    relies on it would land 0o644/0o755; every artifact must still be 0o600 and
+    the directory holding them 0o700.
+    """
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")   # bundle
+    (wt / "a.txt").write_text("changed\n", encoding="utf-8")       # unstaged patch
+    (wt / "scratch.txt").write_text("scratch\n", encoding="utf-8")  # tarball + list
+
+    previous = os.umask(0o022)
+    try:
+        result = salvage(fx, wt)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(result.salvage_dir.stat().st_mode) == 0o700, result.salvage_dir
+    for suffix in (ws.BUNDLE_SUFFIX, ws.UNSTAGED_SUFFIX,
+                   ws.UNTRACKED_ARCHIVE_SUFFIX, ws.UNTRACKED_LIST_SUFFIX):
+        artifact = result.salvage_dir / f"{result.name}{suffix}"
+        assert artifact.is_file(), artifact
+        assert stat.S_IMODE(artifact.stat().st_mode) == 0o600, artifact
+    manifest = fx.dest / ws.MANIFEST_NAME
+    assert stat.S_IMODE(manifest.stat().st_mode) == 0o600, manifest
+
+
+def test_a_truncated_list_record_is_a_named_problem_not_a_crash(fx: Fixture) -> None:
+    """``kind, size, digest = fields[:3]`` raised ValueError for ``b'f 6'``.
+
+    ``verify`` catches ``SalvageError``; once the sweep calls verify before a
+    removal, an unpacking error would stop the whole sweep. A short record is
+    a named problem.
+    """
+    wt = fx.worktree()
+    (wt / "scratch.txt").write_text("scratch\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    listed = result.salvage_dir / f"{result.name}{ws.UNTRACKED_LIST_SUFFIX}"
+    listed.write_bytes(b"f 6")
+
+    problems = verify(fx, result)
+
+    assert any("unparseable record" in problem for problem in problems), problems

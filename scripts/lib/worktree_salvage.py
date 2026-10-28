@@ -63,6 +63,10 @@ a named problem too. A failed apply or a mismatch is a named problem. An
 artifact or ``dest_dir`` inside the tree is refused: removal would delete the
 evidence. A real run writes ``dest_dir/<name>-<UTC>-<head[:8]>/*`` and appends
 the MANIFEST line.
+
+Every artifact, the MANIFEST and their directory are created owner-only
+(``0600``/``0700``), explicitly and independently of the umask: the untracked
+archive can hold an ignored ``.env``, and the sweep removes the tree after.
 """
 from __future__ import annotations
 
@@ -104,6 +108,9 @@ _SHA_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 # restores work, not a privilege); a four-field record predates modes.
 _MODE_MASK = 0o777
 _MODE_RE = re.compile(r"[0-7]{3,4}")
+# Owner-only, independent of the umask: the salvage may be the only copy left.
+_PRIVATE_FILE_MODE = 0o600
+_PRIVATE_DIR_MODE = 0o700
 _OLD_LIST = "list without modes: the list records no mode for its members"
 _STATUS = ["status", "--porcelain=v2", "-z", "--untracked-files=all",
            "--ignored=matching", "--ignore-submodules=none"]
@@ -413,13 +420,19 @@ def _list_bytes(members: list[_Member]) -> bytes:
 
 
 def _parse_record(chunk: bytes) -> _Record:
-    """One list record; a four-field record predates modes and is named, not passed."""
+    """One list record; a four-field record predates modes and is named, not passed.
+
+    The field count is checked BEFORE anything is unpacked: ``b'f 6'`` used to
+    raise ``ValueError`` out of ``verify`` (which catches only ``SalvageError``);
+    a short record is a named problem."""
     text = os.fsdecode(chunk)
     for fields, legacy in ((text.split(" ", 4), False), (text.split(" ", 3), True)):
-        kind, size, digest = fields[:3]
+        if len(fields) != (4 if legacy else 5):
+            continue
+        kind, size, digest = fields[0], fields[1], fields[2]
         head_ok = (kind in ("f", "l", "d") and size.isdigit()
                    and (digest == "-" if kind == "d" else bool(_SHA_RE.fullmatch(digest))))
-        if head_ok and len(fields) == (4 if legacy else 5) and fields[-1]:
+        if head_ok and fields[-1]:
             if legacy:
                 raise SalvageError(_OLD_LIST)
             mode_text = fields[3]
@@ -552,7 +565,8 @@ def _claim_dir(dest_dir: Path, base: str, *, create: bool) -> Path:
                 return candidate
             continue
         try:
-            os.mkdir(candidate)
+            os.mkdir(candidate, _PRIVATE_DIR_MODE)
+            os.chmod(candidate, _PRIVATE_DIR_MODE)  # explicit: never the umask's bits
             return candidate
         except FileExistsError:
             continue
@@ -590,6 +604,7 @@ def _write_bundle(dir_path: Path, artifact: str, worktree_path: Path, remote: st
         staged = scratch / artifact
         _run_git(["bundle", "create", str(staged), "HEAD", "--not", f"--remotes={remote}"],
                  worktree_path, "create bundle")
+        os.chmod(staged, _PRIVATE_FILE_MODE)
         os.link(staged, dir_path / artifact)
     except OSError as exc:
         raise SalvageError(f"write {artifact}: {exc}") from exc
@@ -612,6 +627,7 @@ def _write_bytes(dir_path: Path, artifact: str, body: bytes) -> None:
     try:
         staged = scratch / artifact
         staged.write_bytes(body)
+        os.chmod(staged, _PRIVATE_FILE_MODE)
         os.link(staged, dir_path / artifact)
     except OSError as exc:
         raise SalvageError(f"write {artifact}: {exc}") from exc
@@ -620,13 +636,23 @@ def _write_bytes(dir_path: Path, artifact: str, body: bytes) -> None:
 
 
 def _append_manifest(dest_dir: Path, line: str) -> None:
+    """Append one line, creating (or narrowing) the MANIFEST owner-only, locked."""
     try:
-        with open(dest_dir / MANIFEST_NAME, "a", encoding="utf-8") as fh:
+        fd = os.open(dest_dir / MANIFEST_NAME, os.O_WRONLY | os.O_CREAT | os.O_APPEND, _PRIVATE_FILE_MODE)
+    except OSError as exc:
+        raise SalvageError(f"append {MANIFEST_NAME}: {exc}") from exc
+    try:
+        os.fchmod(fd, _PRIVATE_FILE_MODE)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fd = -1  # the file object owns the descriptor now
             fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
             fh.write(line + "\n")
             os.fsync(fh.fileno())
     except OSError as exc:
         raise SalvageError(f"append {MANIFEST_NAME}: {exc}") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path | str,
@@ -669,7 +695,8 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
     archive = _archive_artifacts(entries, worktree_path, repo_root, name)
     artifacts.extend(artifact for artifact, body in archive)
     if not dry_run:
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest_dir.mkdir(parents=True, exist_ok=True, mode=_PRIVATE_DIR_MODE)
+        os.chmod(dest_dir, _PRIVATE_DIR_MODE)  # an existing dir is narrowed too
     salvage_dir = _claim_dir(dest_dir, f"{name}-{_utc_stamp()}-{head[:8]}", create=not dry_run)
     relative = [f"{salvage_dir.name}/{artifact}" for artifact in artifacts]
     result = SalvageResult(
