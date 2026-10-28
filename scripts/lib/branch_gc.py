@@ -12,8 +12,11 @@ exactly the local head (3b); (4) no ``OPEN`` PR has it as head.
 Unknown evidence keeps the branch: ``CLOSED`` proves no merge, a ``MERGED``
 PR on an older head proves later work, and without a usable ``gh`` rules 3b
 and 4 are unmeasurable, so only 3a deletes and the rest stays as
-``gh_unavailable``. :func:`apply` re-reads each head right before
-``git branch -D``. Remotes are never touched; the CLI is dry-run unless
+``gh_unavailable``. :func:`apply` deletes with ``git update-ref -d
+refs/heads/<branch> <verified head>``, so a ref that moved after the plan is
+refused instead of carried away, and re-reads the checked-out set right before
+each delete because ``update-ref`` does not check worktrees the way
+``git branch -D`` does. Remotes are never touched; the CLI is dry-run unless
 ``--apply``.
 
 BILLING SAFETY: no Anthropic SDK, CLI-only git/gh via subprocess.
@@ -107,10 +110,17 @@ def _dispatch_heads(repo_root: Path) -> dict[str, str]:
 
 
 def _checked_out(repo_root: Path) -> dict[str, str]:
-    """Branch -> the worktree path that checks it out, from the one inventory."""
-    from worktree_inventory import inventory
+    """Branch -> the worktree path that checks it out, from the one inventory.
 
-    return {entry.branch: str(entry.path) for entry in inventory(repo_root) if entry.branch}
+    An unreadable inventory raises: an empty set would read as "free to
+    delete", so the failure stays loud as :class:`BranchGcError`."""
+    from worktree_inventory import WorktreeInventoryError, inventory
+
+    try:
+        entries = inventory(repo_root)
+    except WorktreeInventoryError as exc:
+        raise BranchGcError(f"worktree-inventaris niet leesbaar: {exc}") from exc
+    return {entry.branch: str(entry.path) for entry in entries if entry.branch}
 
 
 def _ancestor(repo_root: Path, head: str, base_head: str | None) -> bool | None:
@@ -212,25 +222,52 @@ def plan(repo_root: Path, *, gh: GhCallable | None = None) -> list[BranchDecisio
             for branch, head in sorted(_dispatch_heads(root).items())]
 
 
-def apply(decisions: list[BranchDecision]) -> list[BranchDecision]:
-    """Delete every planned branch whose head still is what the plan judged.
+def _delete_at_head(decision: BranchDecision) -> None:
+    """Compare-and-delete one ref at the head the plan verified.
 
-    A head that moved (or became unreadable) is kept; a refused
-    ``git branch -D`` is kept with the git message. Returns the same list."""
+    ``update-ref -d`` refuses when the ref no longer points at that head; a
+    refusal keeps the branch (``head_moved``) and is never retried, so the
+    other deletions carry on."""
+    expected = decision.head
+    if not expected:  # fail closed: a delete needs a head to compare against
+        decision.keep(RULE_HEAD_UNREADABLE, "geen geverifieerde kop om op te deleten")
+        return
+    proc = _git(decision.repo_root, "update-ref", "-d", f"refs/heads/{decision.branch}", expected)
+    if proc.returncode == 0:
+        decision.deleted = True
+        return
+    after = _rev_verify(decision.repo_root, f"refs/heads/{decision.branch}")
+    if after != expected:
+        decision.keep(RULE_HEAD_MOVED,
+                      f"update-ref weigerde: kop verschoof van {expected} naar {after or 'weg'}")
+    else:
+        decision.keep(RULE_DELETE_FAILED,
+                      (proc.stderr or "").strip()[:300] or "git update-ref -d faalde")
+
+
+def apply(decisions: list[BranchDecision]) -> list[BranchDecision]:
+    """Delete every planned branch at the head the plan verified.
+
+    A head that moved (or became unreadable) is kept. The checked-out set is
+    re-read right before each delete because ``update-ref`` — unlike
+    ``git branch -D`` — does not check worktrees; a branch that a worktree now
+    checks out is kept as ``checked_out``. Returns the same list."""
     for decision in decisions:
         if not decision.delete:
             continue
         current = _rev_verify(decision.repo_root, f"refs/heads/{decision.branch}")
         if current is None:
             decision.keep(RULE_HEAD_UNREADABLE, "kop niet leesbaar vlak voor de delete")
-        elif current != decision.head:
+            continue
+        if current != decision.head:
             decision.keep(RULE_HEAD_MOVED, f"kop verschoof van {decision.head} naar {current}")
-        else:
-            proc = _git(decision.repo_root, "branch", "-D", decision.branch)
-            if proc.returncode != 0:
-                decision.keep(RULE_DELETE_FAILED, (proc.stderr or "").strip()[:300] or "git branch -D faalde")
-            else:
-                decision.deleted = True
+            continue
+        checked_out = _checked_out(decision.repo_root)
+        if decision.branch in checked_out:
+            decision.keep(RULE_CHECKED_OUT,
+                          f"worktree {checked_out[decision.branch]} checkt deze branch nu uit")
+            continue
+        _delete_at_head(decision)
     return decisions
 
 

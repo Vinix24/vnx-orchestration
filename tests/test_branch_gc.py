@@ -208,6 +208,64 @@ def test_a_head_that_moves_between_plan_and_apply_is_kept(repo):
     assert exists(repo, "dispatch/moved") and git(repo, "rev-parse", "dispatch/moved") == moved
 
 
+def test_a_head_that_moves_between_verification_and_deletion_is_kept(repo, monkeypatch):
+    """The codex reproduction: the ref is re-pointed after ``apply`` verified the
+    head but before the delete runs. The forced delete must not carry the new,
+    possibly unmerged, commit away with it."""
+    head = branch(repo, "dispatch/race")
+    decision = one(repo, "dispatch/race", gh_of({"dispatch/race": [pr(9, "MERGED", head)]}))
+    assert (decision.delete, decision.rule) == (True, bgc.RULE_MERGED_PR)
+    new_head = git(repo, "commit-tree", git(repo, "rev-parse", "HEAD^{tree}"),
+                   "-p", head, "-m", "unmerged work")
+    real_rev_verify, raced = bgc._rev_verify, []
+
+    def rev_verify_then_move(root, ref):
+        current = real_rev_verify(root, ref)
+        if ref == "refs/heads/dispatch/race" and not raced:
+            git(repo, "update-ref", ref, new_head)
+            raced.append(current)
+        return current
+
+    monkeypatch.setattr(bgc, "_rev_verify", rev_verify_then_move)
+    bgc.apply([decision])
+    assert (decision.delete, decision.deleted, decision.rule) == (False, False, bgc.RULE_HEAD_MOVED)
+    assert raced == [head], "the race must have happened between verification and deletion"
+    assert exists(repo, "dispatch/race") and git(repo, "rev-parse", "dispatch/race") == new_head
+    git(repo, "cat-file", "-e", new_head)
+
+
+def test_a_branch_checked_out_after_the_plan_is_kept(repo, tmp_path):
+    """``update-ref`` does not know about worktrees, so the checked-out set is
+    re-read right before the delete: a branch a worktree took since the plan
+    stays."""
+    head = branch(repo, "dispatch/late-checkout")
+    merge_main(repo, "dispatch/late-checkout")
+    decision = one(repo, "dispatch/late-checkout", gh_of())
+    assert (decision.delete, decision.rule, decision.head) == (True, bgc.RULE_ANCESTOR, head)
+    git(repo, "worktree", "add", "-q", str(tmp_path / "late-wt"), "dispatch/late-checkout")
+    bgc.apply([decision])
+    assert (decision.delete, decision.deleted, decision.rule) == (False, False, bgc.RULE_CHECKED_OUT)
+    assert str(tmp_path / "late-wt") in decision.reason
+    assert exists(repo, "dispatch/late-checkout")
+
+
+def test_an_unreadable_worktree_inventory_raises_a_branch_gc_error(repo, monkeypatch):
+    import worktree_inventory as wi
+
+    branch(repo, "dispatch/merged")
+    merge_main(repo, "dispatch/merged")
+    decision = one(repo, "dispatch/merged", gh_of())
+    assert decision.delete is True
+
+    def broken_inventory(*args, **kwargs):
+        raise wi.WorktreeInventoryError("git worktree list faalde")
+
+    monkeypatch.setattr(wi, "inventory", broken_inventory)
+    with pytest.raises(bgc.BranchGcError):
+        bgc.apply([decision])
+    assert exists(repo, "dispatch/merged")
+
+
 def test_json_output_carries_counts_and_decisions(repo, capsys):
     branch(repo, "dispatch/merged")
     merge_main(repo, "dispatch/merged")
