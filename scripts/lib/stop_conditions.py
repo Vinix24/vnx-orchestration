@@ -67,6 +67,7 @@ if str(_HERE) not in sys.path:
 
 from project_root import resolve_project_root  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
+from ledger_end_line import DISPATCH_FINISHED_EVENT_TYPE, end_status  # noqa: E402
 from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES  # noqa: E402
 # Load-bearing, unlike the advisory FAILURE_CLASSES cross-check below: this is
 # the exact reason-string gate_recorder books a quota refusal under, and E6
@@ -449,6 +450,121 @@ DEFAULT_RECEIPT_TAIL_LINES = 5000
 DEFAULT_EXHAUSTION_THRESHOLD = 3
 
 
+def _attempt_identity(record: Dict[str, Any]) -> Optional[Tuple[str, str, int, str]]:
+    """The (project, dispatch, attempt, provider) key one attempt is known by.
+
+    ``None`` when the line names no dispatch or no valid attempt: such a line
+    cannot be paired with another vocabulary's line, so it stands on its own.
+    An absent or empty attempt reads as attempt 1 — the same convention
+    ``ledger_end_line`` uses; a present but malformed one (a bool, a
+    non-integer, a zero) belongs to no attempt at all and is not folded into
+    attempt 1.
+    """
+    dispatch_id = str(record.get("dispatch_id") or "").strip()
+    if not dispatch_id:
+        return None
+    attempt = record.get("attempt")
+    if attempt is None or (isinstance(attempt, str) and not attempt.strip()):
+        attempt = 1
+    elif isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
+        return None
+    return (
+        str(record.get("project_id") or "").strip(),
+        dispatch_id,
+        attempt,
+        str(record.get("provider") or "").strip(),
+    )
+
+
+def _provider_attempts(
+    lines: List[str], providers: Optional[List[str]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """The clean end-of-attempt records per provider, ONE per attempt.
+
+    ADR-045 §2: one attempt can be closed twice on the ledger — once by the
+    legacy completion family and once by a ``dispatch_finished`` line. The two
+    lines are one attempt, so both may not occupy the exhaustion window: two
+    failed attempts written in both vocabularies would otherwise fill a
+    three-attempt threshold and halt the chain. Within a group that has a
+    lifecycle line the lifecycle line wins (it is the newer contract; the last
+    one wins if the group holds several) and the group's legacy lines are the
+    restatements of that same end. A ``failure_class`` only a legacy line names
+    is kept, because both lines describe the same attempt and the field is
+    evidence, not an end.
+
+    A group with only legacy lines is left alone: the legacy vocabulary does
+    not track attempts, so several lines under one ``dispatch_id`` are several
+    attempts (a retry), not one attempt written repeatedly.
+
+    A ``dispatch_finished`` record's status is its ``end_state`` projection
+    (``ledger_end_line.end_status``), never its raw ``status`` field; an
+    absent, malformed or unknown ``end_state`` yields no attempt at all.
+    """
+    candidates: List[
+        Tuple[str, Dict[str, Any], bool, Optional[Tuple[str, str, int, str]]]
+    ] = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event_type = d.get("event_type")
+        if event_type not in _ATTEMPT_EVENT_TYPES:
+            continue
+        provider = d.get("provider")
+        if not provider:
+            continue
+        if providers is not None and provider not in providers:
+            continue
+        lifecycle = event_type == DISPATCH_FINISHED_EVENT_TYPE
+        raw_status = end_status(d) if lifecycle else d.get("status")
+        status = str(raw_status or "").strip().lower()
+        if status in SUCCESS_STATUSES:
+            norm = "success"
+        elif status in HARD_FAILURE_STATUSES:
+            norm = "failure"
+        else:
+            continue
+        candidates.append((
+            provider,
+            {
+                "status": norm,
+                "failure_class": d.get("failure_class"),
+                "timestamp": d.get("timestamp"),
+                "dispatch_id": d.get("dispatch_id"),
+            },
+            lifecycle,
+            _attempt_identity(d),
+        ))
+
+    groups: Dict[Tuple[str, str, int, str], List[int]] = {}
+    for index, (_, _, _, key) in enumerate(candidates):
+        if key is not None:
+            groups.setdefault(key, []).append(index)
+
+    dropped: Set[int] = set()
+    for indexes in groups.values():
+        lifecycle_indexes = [i for i in indexes if candidates[i][2]]
+        if not lifecycle_indexes:
+            continue
+        winner = lifecycle_indexes[-1]
+        winner_record = candidates[winner][1]
+        for index in indexes:
+            if index == winner:
+                continue
+            dropped.add(index)
+            record = candidates[index][1]
+            if not winner_record["failure_class"] and record["failure_class"]:
+                winner_record["failure_class"] = record["failure_class"]
+
+    by_provider: Dict[str, List[Dict[str, Any]]] = {}
+    for index, (provider, record, _, _) in enumerate(candidates):
+        if index in dropped:
+            continue
+        by_provider.setdefault(provider, []).append(record)
+    return by_provider
+
+
 def check_provider_exhausted(
     receipts_path: Optional[Path] = None,
     *,
@@ -467,6 +583,13 @@ def check_provider_exhausted(
     timeline rather than guessed either way) and triggers only when ALL of
     them are exhaustion-class failures. A single success in that window
     clears the streak.
+
+    One attempt is one slot. ADR-045 §2 lets an attempt be closed by both a
+    legacy completion line and a ``dispatch_finished`` line; ``_provider_attempts``
+    resolves those two into the one end record of that attempt before the
+    window is taken, so repetition of one attempt cannot fill the threshold.
+    A ``dispatch_finished`` line is read through its ``end_state`` projection,
+    never its raw status.
 
     Behavior note: HARD_FAILURE_STATUSES is wider than {"failed", "failure"}
     — it also carries "error", "blocked", "timeout", "contract_invalid".
@@ -497,34 +620,7 @@ def check_provider_exhausted(
     except OSError as exc:
         return _unmeasurable(check_id, f"receipts-bestand niet leesbaar: {exc}")
 
-    by_provider: Dict[str, List[Dict[str, Any]]] = {}
-    for line in lines:
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if d.get("event_type") not in _ATTEMPT_EVENT_TYPES:
-            continue
-        provider = d.get("provider")
-        if not provider:
-            continue
-        if providers is not None and provider not in providers:
-            continue
-        raw_status = str(d.get("status") or "").strip().lower()
-        if raw_status in SUCCESS_STATUSES:
-            norm = "success"
-        elif raw_status in HARD_FAILURE_STATUSES:
-            norm = "failure"
-        else:
-            continue
-        by_provider.setdefault(provider, []).append(
-            {
-                "status": norm,
-                "failure_class": d.get("failure_class"),
-                "timestamp": d.get("timestamp"),
-                "dispatch_id": d.get("dispatch_id"),
-            }
-        )
+    by_provider = _provider_attempts(lines, providers)
 
     if not by_provider:
         return _unmeasurable(check_id, f"geen bruikbare provider-attempts gevonden in laatste {tail_lines} regels")

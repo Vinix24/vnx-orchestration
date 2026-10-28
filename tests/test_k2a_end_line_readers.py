@@ -372,6 +372,153 @@ def test_provider_exhaustion_reads_both_end_vocabularies_alike(tmp_path: Path) -
     assert statuses == [stop_conditions.CheckStatus.TRIGGERED] * 2
 
 
+def _dual_end_records(
+    dispatch_id: str,
+    index: int,
+    *,
+    legacy_failure_class: str | None = "auth_rejected",
+    lifecycle_failure_class: str | None = "auth_rejected",
+    lifecycle_end_state: str = "failed",
+) -> list[dict]:
+    """One attempt written twice: a task_failed and a dispatch_finished line."""
+    minute = 10 - index
+    legacy = {
+        "event_type": "task_failed",
+        "project_id": PROJECT,
+        "dispatch_id": dispatch_id,
+        "attempt": 1,
+        "provider": "kimi",
+        "status": "failed",
+        "failure_class": legacy_failure_class,
+        "timestamp": _stamp(minute),
+    }
+    lifecycle = {
+        "event_type": "dispatch_finished",
+        "project_id": PROJECT,
+        "dispatch_id": dispatch_id,
+        "attempt": 1,
+        "provider": "kimi",
+        "end_state": lifecycle_end_state,
+        "status": {"failed": "failure", "completed": "success"}[lifecycle_end_state],
+        "failure_class": lifecycle_failure_class if lifecycle_end_state == "failed" else None,
+        "timestamp": _stamp(minute),
+    }
+    return [legacy, lifecycle]
+
+
+def _run_exhaustion(tmp_path: Path, records: list[dict]) -> stop_conditions.CheckStatus:
+    ledger_path = tmp_path / "dual.ndjson"
+    _write_ledger(ledger_path, records)
+    return stop_conditions.check_provider_exhausted(
+        ledger_path, providers=["kimi"], threshold=3).status
+
+
+def test_two_attempts_written_in_both_vocabularies_do_not_fill_three_slots(
+        tmp_path: Path) -> None:
+    # Codex reproduction 2: two failed attempts, each written as both a
+    # task_failed and a dispatch_finished line, must stay two attempts.
+    records = []
+    for index in range(2):
+        records.extend(_dual_end_records(f"d-dual-{index}", index))
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.UNMEASURABLE
+
+
+def test_three_attempts_written_in_both_vocabularies_still_trigger(tmp_path: Path) -> None:
+    records = []
+    for index in range(3):
+        records.extend(_dual_end_records(f"d-dual-{index}", index))
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.TRIGGERED
+
+
+def test_exhaustion_reads_a_lifecycle_end_by_its_end_state(tmp_path: Path) -> None:
+    # A raw status="success" must not rescue an end_state="failed" line.
+    records = []
+    for index in range(3):
+        record = dict(_dual_end_records(f"d-endstate-{index}", index)[1])
+        record["status"] = "success"
+        records.append(record)
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.TRIGGERED
+
+
+def test_a_lifecycle_completion_wins_over_the_legacy_failure_of_the_same_attempt(
+        tmp_path: Path) -> None:
+    records = []
+    for index in range(2):
+        records.extend(_dual_end_records(f"d-dual-{index}", index))
+    records.extend(_dual_end_records(
+        "d-completed", 2, lifecycle_end_state="completed"))
+    # Two failures and one success in the window: the success breaks the streak.
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.CLEAR
+
+
+def test_a_legacy_failure_class_is_kept_when_the_lifecycle_line_names_none(
+        tmp_path: Path) -> None:
+    # Both lines describe the same attempt; the lifecycle line decides the
+    # outcome and the legacy line's failure_class is evidence for that attempt.
+    records = []
+    for index in range(3):
+        records.extend(_dual_end_records(
+            f"d-class-{index}", index, lifecycle_failure_class=None))
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.TRIGGERED
+
+
+def test_legacy_only_exhaustion_still_triggers(tmp_path: Path) -> None:
+    records = [
+        {
+            "event_type": "task_failed",
+            "project_id": PROJECT,
+            "dispatch_id": f"d-legacy-only-{index}",
+            "attempt": 1,
+            "provider": "kimi",
+            "status": "failed",
+            "failure_class": "auth_rejected",
+            "timestamp": _stamp(10 - index),
+        }
+        for index in range(3)
+    ]
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.TRIGGERED
+
+
+def test_a_malformed_attempt_is_not_folded_into_attempt_one(tmp_path: Path) -> None:
+    legacy = {
+        "event_type": "task_failed",
+        "project_id": PROJECT,
+        "dispatch_id": "d-malformed",
+        "provider": "kimi",
+        "status": "failed",
+        "failure_class": "auth_rejected",
+        "timestamp": _stamp(5),
+    }
+    lifecycle = {
+        "event_type": "dispatch_finished",
+        "project_id": PROJECT,
+        "dispatch_id": "d-malformed",
+        "attempt": "two",
+        "provider": "kimi",
+        "end_state": "failed",
+        "status": "failure",
+        "failure_class": "auth_rejected",
+        "timestamp": _stamp(4),
+    }
+    ledger_path = tmp_path / "malformed.ndjson"
+    _write_ledger(ledger_path, [legacy, lifecycle])
+    result = stop_conditions.check_provider_exhausted(
+        ledger_path, providers=["kimi"], threshold=2)
+    # Both lines count: the malformed lifecycle attempt belongs to no attempt
+    # and must not pair with (and drop) the legacy line of attempt 1.
+    assert result.status == stop_conditions.CheckStatus.TRIGGERED
+
+
+def test_a_lifecycle_line_without_an_end_state_is_no_attempt(tmp_path: Path) -> None:
+    records = []
+    for index in range(3):
+        no_state = dict(_dual_end_records(f"d-no-state-{index}", index)[1])
+        no_state.pop("end_state")
+        no_state["status"] = "failure"  # a raw failure must not stand in
+        records.append(no_state)
+    assert _run_exhaustion(tmp_path, records) == stop_conditions.CheckStatus.UNMEASURABLE
+
+
 # -- terminal_state_reconciler ----------------------------------------------
 
 def test_terminal_state_normalizes_both_end_vocabularies_alike() -> None:
@@ -409,6 +556,52 @@ def test_pr_discovery_marks_done_in_both_vocabularies() -> None:
             discovery._process_receipt_pr_refs(discovered, record)
         pictures.append(discovered[701]["receipt_done"])
     assert pictures == [True, True]
+
+
+def test_pr_discovery_reads_a_lifecycle_end_by_its_end_state() -> None:
+    # Codex reproduction 1: end_state="failed" with a raw status="success"
+    # must not mark the PR done.
+    failed = dict(_end_record("lifecycle", "d-not-done", ok=False, minutes_ago=2))
+    failed["status"] = "success"
+    discovered: dict = {}
+    PRDiscovery([])._process_receipt_pr_refs(discovered, failed)
+    assert discovered[701]["receipt_done"] is False
+
+
+def test_pr_discovery_lifecycle_line_without_an_end_state_is_not_done() -> None:
+    no_state = dict(_end_record("lifecycle", "d-no-state", ok=True, minutes_ago=2))
+    no_state.pop("end_state")
+    no_state["status"] = "success"
+    discovered: dict = {}
+    PRDiscovery([])._process_receipt_pr_refs(discovered, no_state)
+    assert discovered[701]["receipt_done"] is False
+
+
+@pytest.mark.parametrize("end_state", ["timed_out", "abandoned"])
+def test_pr_discovery_timeout_end_states_are_not_done(end_state: str) -> None:
+    record = dict(_end_record("lifecycle", "d-timeout", ok=True, minutes_ago=2))
+    record["end_state"] = end_state
+    record["status"] = "success"
+    discovered: dict = {}
+    PRDiscovery([])._process_receipt_pr_refs(discovered, record)
+    assert discovered[701]["receipt_done"] is False
+
+
+def test_pr_discovery_legacy_unknown_status_still_marks_done() -> None:
+    # The legacy tolerance is unchanged: a task_complete with status
+    # "unknown" marks the PR done, exactly as on origin/main.
+    record = dict(_end_record("legacy", "d-legacy-unknown", ok=True, minutes_ago=2))
+    record["status"] = "unknown"
+    discovered: dict = {}
+    PRDiscovery([])._process_receipt_pr_refs(discovered, record)
+    assert discovered[701]["receipt_done"] is True
+
+
+def test_pr_discovery_legacy_failure_status_is_not_done() -> None:
+    record = dict(_end_record("legacy", "d-legacy-failed", ok=False, minutes_ago=2))
+    discovered: dict = {}
+    PRDiscovery([])._process_receipt_pr_refs(discovered, record)
+    assert discovered[701]["receipt_done"] is False
 
 
 # -- unified_state_manager --------------------------------------------------

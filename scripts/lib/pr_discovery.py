@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from event_outcome_semantics import COMPLETION_EVENT_TYPES
+from ledger_end_line import DISPATCH_FINISHED_EVENT_TYPE, end_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -87,12 +88,18 @@ class PRDiscovery:
         )
         for m in self._PR_REF_RE.finditer(searchable):
             pr_num = int(m.group(1))
-            # ADR-045 §2: a dispatch ends on dispatch_finished too. The legacy
-            # branch (task_complete, and the "unknown" tolerance) is unchanged.
-            is_done = (
-                str(receipt.get("event_type") or "") in COMPLETION_EVENT_TYPES
-                and receipt.get("status") in ("success", "unknown")
-            )
+            # ADR-045 §2: a dispatch ends on dispatch_finished too. That line's
+            # outcome is its end_state projection, never the raw status field
+            # (a lifecycle line without an end_state is not a success). The
+            # legacy branch keeps its own ("success", "unknown") tolerance and
+            # its exact event_type match.
+            raw_event_type = str(receipt.get("event_type") or "")
+            if raw_event_type.strip().lower() == DISPATCH_FINISHED_EVENT_TYPE:
+                is_done = end_outcome(receipt) == "success"
+            elif raw_event_type in COMPLETION_EVENT_TYPES:
+                is_done = receipt.get("status") in ("success", "unknown")
+            else:
+                is_done = False
             if pr_num not in discovered:
                 title = receipt.get("title", "")
                 desc = self._PR_REF_RE.sub("", title).strip(" -\u2013\u2014:").strip() or f"PR {pr_num}"
