@@ -243,15 +243,23 @@ def _mark_abandoned(conn, intent: Mapping[str, Any]) -> None:
     key = (intent["dispatch_id"], intent["project_id"])
     row = conn.execute("SELECT metadata_json FROM dispatches WHERE dispatch_id = ? "
                        "AND project_id = ?", key).fetchone()
+    if row is None:
+        raise DispatchLifecycleError(
+            "missing_dispatch_row", f"no dispatches row for project_id={key[1]!r}, "
+            f"dispatch_id={key[0]!r}; the abandoned mark has nowhere to land")
     try:
-        metadata = json.loads((row["metadata_json"] if row else None) or "{}")
+        metadata = json.loads(row["metadata_json"] or "{}")
         metadata["end_state"] = "abandoned"
     except (ValueError, TypeError) as exc:
         raise DispatchLifecycleError("invalid_metadata_json", f"metadata_json for "
                                      f"{intent['dispatch_id']!r} is unusable: {exc}") from exc
-    conn.execute("UPDATE dispatches SET metadata_json = ?, updated_at = ? "
-                 "WHERE dispatch_id = ? AND project_id = ?",
-                 (json.dumps(metadata, sort_keys=True), _now_utc()) + key)
+    cursor = conn.execute("UPDATE dispatches SET metadata_json = ?, updated_at = ? "
+                          "WHERE dispatch_id = ? AND project_id = ?",
+                          (json.dumps(metadata, sort_keys=True), _now_utc()) + key)
+    if cursor.rowcount != 1:
+        raise DispatchLifecycleError(
+            "missing_dispatch_row", f"the abandoned mark matched {cursor.rowcount} rows for "
+            f"project_id={key[1]!r}, dispatch_id={key[0]!r}; expected exactly one")
 
 
 def _project(intent: Mapping[str, Any], state_dir: Path) -> Dict[str, Any]:

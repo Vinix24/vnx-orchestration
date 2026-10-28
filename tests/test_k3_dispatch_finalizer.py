@@ -687,3 +687,16 @@ def test_abandoned_from_an_already_timed_out_row_sets_the_mark(state_dir: Path):
     assert again.status == dl.LOST_INTENT
     assert _row(state_dir) == row
     assert len(_end_lines(state_dir)) == 1
+
+
+def test_the_abandoned_mark_refuses_a_row_that_is_not_there(state_dir: Path):
+    """No row means the mark has nowhere to land: that is a refusal, not a no-op.
+
+    Unreachable through ``finalize`` (the projection names the row first), so
+    the branch is pinned at the helper that owns it.
+    """
+    with get_connection(state_dir) as conn:
+        with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+            dl._mark_abandoned(
+                conn, {"dispatch_id": "no-such-dispatch", "project_id": PROJECT})
+    assert excinfo.value.code == "missing_dispatch_row"
