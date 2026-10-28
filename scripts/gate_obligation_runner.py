@@ -215,6 +215,34 @@ runner fulfils them:
       (b) and (c), never past (a), and never past the round ledger's own
       refusal of a second verdict in a seat (R1): the reason lands in the log,
       on the obligation, the request and the result record.
+  15. OI-2459 round 2 — the tick's GitHub budget is BOUNDED, and the head after
+      a gate run is read LIVE. Round 1 read every PR fact from one snapshot,
+      but a snapshot is a point-in-time view: reading the PR head from it
+      AFTER a gate ran (minutes) books a verdict about code that may no
+      longer exist. The post-run head lookup therefore always calls
+      :func:`_get_pr_head_sha_for_gate` (one live ``gh pr view``, never the
+      snapshot); the pre-run baseline of a LAUNCH reads the snapshot only
+      while the PR data it holds is younger than
+      ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` (60 s), because a tick runs
+      gates back to back and the start-of-tick snapshot is minutes old by the
+      third launch. State and branch lookups that only decide retire/pending
+      keep the snapshot: a state that changed during the tick is seen on the
+      next tick, and an unknown answer stays a wait (OI-1388).
+      Worst case per tick, in GitHub calls:
+
+        _PR_SNAPSHOT_CALLS_PER_TICK                              (1)
+        + ceil(dispatch_refs / _BRANCH_LISTING_PAGE_SIZE)        (pages)
+        + _LIVE_HEAD_READS_PER_GATE_LAUNCH * gate_launches        (<= 2 each)
+        + min(per_obligation_fallbacks, _FALLBACK_CALL_CAP_PER_TICK)   (<= 20)
+
+      The per-obligation fallback — used only when the snapshot failed or is
+      suspect — is capped per tick; past the cap every lookup answers
+      ``None``/``""`` (unknown = a wait, never a retirement or a pass) and one
+      warning line names how many lookups were skipped. A fallback refused on
+      a rate limit (gh names ``rate limit``, or HTTP 403/429) stops all further
+      fallback calls in this tick — backoff to the next tick — so a broken
+      snapshot can never reproduce the per-obligation request pattern that
+      exhausted the core quota.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -238,6 +266,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
@@ -553,7 +582,10 @@ def _pr_from_dispatch_metadata(state_dir: Path, dispatch_id: str) -> Optional[in
     return pr_number_from_pr_id(str(row[0]))
 
 
-def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[Any]:
+def _gh_json(
+    args: List[str], *, owner_repo: Optional[str] = None,
+    budget: Optional[_FallbackBudget] = None,
+) -> Optional[Any]:
     """Run a gh CLI command scoped to ``owner_repo``, returning parsed JSON.
 
     ``owner_repo`` (``owner/repo``) is injected as ``--repo`` so the query never
@@ -562,6 +594,11 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
     as the repo and returns nothing, which read as an eternal "no PR yet"
     instead of the misconfiguration it actually is (OI-1253 fix-forward).
     Returns None on any failure (gh missing, timeout, non-zero exit, non-JSON).
+
+    ``budget`` (OI-2459 round 2) is the tick's fallback budget; the snapshot's
+    own fetches do not pass one (they are the bounded per-tick cost, not a
+    per-obligation fallback). A rate-limit refusal is reported to it so the
+    rest of the tick stops calling.
     """
     if shutil.which("gh") is None:
         return None
@@ -578,6 +615,8 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
         _LOG.debug("gh %s failed: %s", args[:2], exc)
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
+        if budget is not None and _is_rate_limit_failure(proc.stdout, proc.stderr):
+            budget.note_rate_limit()
         return None
     try:
         return json.loads(proc.stdout)
@@ -608,6 +647,99 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
 # suspect snapshot is trusted only for PRs it actually contains.
 _PR_SNAPSHOT_LIMIT = 3000
 _DISPATCH_REF_PREFIX = "refs/heads/dispatch/"
+
+# OI-2459 round 2: the tick's worst case, in GitHub calls:
+#
+#   _PR_SNAPSHOT_CALLS_PER_TICK                                    (1)
+#   + ceil(dispatch refs / _BRANCH_LISTING_PAGE_SIZE)              (pages)
+#   + _LIVE_HEAD_READS_PER_GATE_LAUNCH * gate launches             (<= 2 each)
+#   + min(per-obligation fallbacks, _FALLBACK_CALL_CAP_PER_TICK)   (<= 20)
+#
+# Nothing else in the tick asks GitHub. The two live head reads per launch are
+# the only reads that MUST reflect the state at booking time; everything else
+# is answered from the snapshot or bounded by the fallback cap below.
+_PR_SNAPSHOT_CALLS_PER_TICK = 1
+# GitHub returns at most 100 matching refs per page; ``--paginate --slurp``
+# follows every page, so this is the divisor of the listing's page count.
+_BRANCH_LISTING_PAGE_SIZE = 100
+# A failed/suspect snapshot degrades to one call per obligation. That is the
+# pattern that exhausted the 5000-call core quota on 2026-10-28, so it is
+# capped: past this many fallback calls the remaining lookups answer unknown
+# (a wait, never a retirement or a pass, OI-1388) and the tick logs one line.
+_FALLBACK_CALL_CAP_PER_TICK = 20
+# At most one pre-run head read (only when the snapshot is too old) and one
+# post-run read per gate launch.
+_LIVE_HEAD_READS_PER_GATE_LAUNCH = 2
+# A tick runs gates back to back, so the start-of-tick snapshot is minutes old
+# by the third launch. A snapshot older than a minute is no longer a safe
+# pre-run baseline: the head can have moved since it was fetched, and the
+# mid-run push detection would then compare against the wrong "before". Within
+# a minute the snapshot is still inside the same launch window and saves the
+# call. ("60 s" is the named constant the plan gate asked for.)
+_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS = 60
+# gh names a core-quota refusal in one of these ways; HTTP 403/429 is the
+# API-level equivalent.
+_RATE_LIMIT_MARKERS = ("rate limit", "api rate limit exceeded")
+_RATE_LIMIT_HTTP_RE = re.compile(r"\b(?:http[ /:-]*)?(?:403|429)\b", re.IGNORECASE)
+
+
+class _FallbackBudget:
+    """Per-tick cap on per-obligation gh fallbacks (snapshot failed or suspect).
+
+    OI-1388: a lookup past the cap answers ``None``/``""`` — unknown, which
+    every caller already treats as a wait, never a retirement and never a pass.
+    A rate-limit refusal stops every further fallback call in this tick; the
+    next tick starts with a fresh budget, because the quota is shared and
+    hammering it inside one tick is exactly what must not happen.
+    """
+
+    def __init__(self, limit: int = _FALLBACK_CALL_CAP_PER_TICK) -> None:
+        self.limit = limit
+        self.calls = 0
+        self.skipped = 0
+        self.stopped_reason = ""
+
+    def consume(self) -> bool:
+        """True when a fallback call may be made now; False when it must answer unknown."""
+        if self.stopped_reason:
+            self.skipped += 1
+            return False
+        if self.calls >= self.limit:
+            self.stopped_reason = "cap"
+            self.skipped += 1
+            return False
+        self.calls += 1
+        return True
+
+    def note_rate_limit(self) -> None:
+        """Stop all further fallback calls in this tick (backoff to the next tick)."""
+        if not self.stopped_reason:
+            self.stopped_reason = "rate limit"
+
+    def finish(self) -> None:
+        """One warning line for a tick that skipped fallbacks; silent when it did not."""
+        if not self.skipped:
+            return
+        _LOG.warning(
+            "gate_obligation_runner: GitHub fallback budget this tick: %d/%d "
+            "fallback call(s) made, %d lookup(s) skipped (%s) — a skipped "
+            "lookup answers unknown (a wait) and is re-evaluated next tick "
+            "(OI-2459)",
+            self.calls, self.limit, self.skipped, self.stopped_reason or "cap",
+        )
+
+
+def _is_rate_limit_failure(stdout: str, stderr: str) -> bool:
+    """Whether gh's output names a rate-limit / HTTP 403 / 429 refusal."""
+    text = f"{stdout or ''}\n{stderr or ''}".lower()
+    if any(marker in text for marker in _RATE_LIMIT_MARKERS):
+        return True
+    return _RATE_LIMIT_HTTP_RE.search(text) is not None
+
+
+def _fallback_budget(snapshot: Optional["_GithubSnapshot"]) -> Optional[_FallbackBudget]:
+    """The tick's fallback budget, carried by the snapshot (None when no snapshot)."""
+    return snapshot.fallback if snapshot is not None else None
 
 
 def _snapshot_for(
@@ -642,8 +774,12 @@ class _GithubSnapshot:
         self._prs: Optional[List[Dict[str, Any]]] = None
         self._prs_loaded = False
         self._prs_suspect = True
+        self._prs_fetched_at: Optional[float] = None
         self._refs: Optional[Set[str]] = None
         self._refs_loaded = False
+        # The tick's per-obligation fallback cap (OI-2459 round 2). Carried by
+        # the snapshot because the snapshot IS the tick's GitHub context.
+        self.fallback = _FallbackBudget()
 
     def prs(self) -> Optional[List[Dict[str, Any]]]:
         """The newest PRs (all states); None when the call itself failed."""
@@ -655,10 +791,22 @@ class _GithubSnapshot:
                  "--limit", str(_PR_SNAPSHOT_LIMIT)],
                 owner_repo=self.owner_repo,
             )
+            # Monotonic: the age of the PR data, for the launch guard below.
+            self._prs_fetched_at = time.monotonic()
             if isinstance(data, list):
                 self._prs = data
                 self._prs_suspect = len(data) >= _PR_SNAPSHOT_LIMIT
         return self._prs
+
+    def prs_age_seconds(self) -> Optional[float]:
+        """Seconds since the PR list was fetched; None when it was never fetched.
+
+        An unfetched snapshot answers with a read that fetches NOW, so it
+        counts as fresh — the caller's read *is* the fetch.
+        """
+        if not self._prs_loaded or self._prs_fetched_at is None:
+            return None
+        return time.monotonic() - self._prs_fetched_at
 
     def pr_by_number(self, pr_number: int) -> Optional[Dict[str, Any]]:
         """The PR row for ``pr_number`` when the snapshot holds it, else None.
@@ -727,6 +875,34 @@ def _new_github_snapshot(owner_repo: Optional[str]) -> Optional[_GithubSnapshot]
     return _GithubSnapshot(owner_repo) if owner_repo else None
 
 
+def _launch_head_snapshot(
+    snapshot: Optional[_GithubSnapshot],
+) -> Optional[_GithubSnapshot]:
+    """The snapshot as a PRE-RUN head baseline, or None when it is too old.
+
+    A tick runs gates one after the other (minutes each), so a snapshot taken
+    at the start is minutes old by the third launch. A stale pre-run baseline
+    is not harmless: :func:`fulfill_obligation` compares the post-run head
+    with it to detect a push that landed mid-run, and any comparison against a
+    baseline that was already wrong can book a verdict about superseded code.
+    Only while the PR data is younger than
+    ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` is it a safe baseline; older, the
+    launch reads the live head once (the same single call the post-run
+    resolution makes). An unfetched snapshot counts as fresh: the read that
+    follows is itself the fetch.
+
+    State and branch lookups that merely decide retire/pending do NOT go
+    through this guard — they keep the snapshot, because a change mid-tick is
+    seen on the next tick and ``None`` stays a wait (OI-1388).
+    """
+    if snapshot is None:
+        return None
+    age = snapshot.prs_age_seconds()
+    if age is None or age <= _LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS:
+        return snapshot
+    return None
+
+
 def _tick_github_context(
     state_dir: Path,
 ) -> Tuple[Optional[str], Optional[_GithubSnapshot]]:
@@ -747,7 +923,8 @@ def _pr_from_github(
 
     OI-2459: reads the tick's snapshot first. A complete snapshot answers
     definitively (found or genuinely no PR); a failed/suspect one falls back to
-    today's single ``gh pr list --head`` call.
+    today's single ``gh pr list --head`` call, capped by the tick's fallback
+    budget (a skipped lookup answers None = "no PR resolvable yet", a wait).
     """
     snap = _snapshot_for(snapshot, owner_repo)
     if snap is not None:
@@ -755,10 +932,13 @@ def _pr_from_github(
         if known:
             number = pr.get("number") if isinstance(pr, dict) else None
             return number if isinstance(number, int) else None
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return None
     data = _gh_json(
         ["pr", "list", "--state", "all", "--head", f"dispatch/{dispatch_id}",
          "--json", "number", "--limit", "1"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, list) and data:
         number = data[0].get("number")
@@ -777,9 +957,12 @@ def _branch_from_github(
         branch = pr.get("headRefName") if isinstance(pr, dict) else None
         if isinstance(branch, str) and branch.strip():
             return branch.strip()
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return None
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "headRefName"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, dict):
         branch = data.get("headRefName")
@@ -802,7 +985,10 @@ def _branch_exists_on_github(
     OI-2459: a successful per-tick listing (``dispatch/*`` refs, fetched once
     by :class:`_GithubSnapshot`) answers membership directly. A FAILED listing
     falls through to today's single REST call, which keeps its 404-versus-other
-    split — so ``None`` still means "unknown, wait" and never retires.
+    split — so ``None`` still means "unknown, wait" and never retires. The
+    single call is a per-obligation fallback and runs under the tick's
+    fallback budget: past the cap, or after a rate-limit refusal, it answers
+    ``None`` — a wait, never "gone".
     """
     snap = _snapshot_for(snapshot, owner_repo)
     if snap is not None:
@@ -810,6 +996,9 @@ def _branch_exists_on_github(
         if refs is not None:
             return f"{_DISPATCH_REF_PREFIX}{dispatch_id}" in refs
     if shutil.which("gh") is None:
+        return None
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
         return None
     branch = f"dispatch/{dispatch_id}"
     try:
@@ -822,6 +1011,8 @@ def _branch_exists_on_github(
         return None
     if proc.returncode == 0:
         return True
+    if budget is not None and _is_rate_limit_failure(proc.stdout, proc.stderr):
+        budget.note_rate_limit()
     combined = f"{proc.stdout}\n{proc.stderr}"
     if "404" in combined or "Not Found" in combined:
         return False
@@ -969,7 +1160,9 @@ def _pr_state_from_github(
     ambiguous evidence must never close an obligation).
 
     OI-2459: answered from the tick's snapshot when it holds the PR; a failed
-    or non-covering snapshot keeps today's single ``gh pr view`` call.
+    or non-covering snapshot keeps today's single ``gh pr view`` call, capped
+    by the tick's fallback budget — a skipped lookup answers ``None`` (a wait,
+    never a retirement).
     """
     snap = _snapshot_for(snapshot, owner_repo)
     if snap is not None:
@@ -977,9 +1170,12 @@ def _pr_state_from_github(
         state = pr.get("state") if isinstance(pr, dict) else None
         if isinstance(state, str) and state.strip():
             return state.strip().upper()
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return None
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "state"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, dict):
         state = data.get("state")
@@ -1263,6 +1459,32 @@ def _find_prs_without_obligation(
     return unlinked
 
 
+def _report_prs_without_obligation(
+    state_dir: Path, findings: List[Dict[str, Any]], write: bool,
+) -> None:
+    """LOUD log line (and, on a write run, audit entry) per unlinked open PR.
+
+    Extracted from :func:`run` so the tick's function size stays inside the
+    ratchet while OI-2459 round 2 adds its own end-of-tick step.
+    """
+    for finding in findings:
+        _LOG.warning(
+            "PR #%s (branch %s) carries no review-gate obligation: %s",
+            finding["pr_number"], finding["branch"], finding["reason"],
+        )
+        if write:
+            _audit_log_pr_without_obligation(state_dir, finding)
+
+
+def _count_actions(outcomes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """The per-action tally of a tick's outcomes (``summary["action_counts"]``)."""
+    counts: Dict[str, int] = {}
+    for outcome in outcomes:
+        action = outcome.get("action", "")
+        counts[action] = counts.get(action, 0) + 1
+    return counts
+
+
 def _audit_log_pr_without_obligation(state_dir: Path, finding: Dict[str, Any]) -> None:
     """Append a LOUD entry to the repo's existing governance audit trail
     (``governance_audit.ndjson``) for a PR the obligation store cannot link
@@ -1327,13 +1549,26 @@ def _pr_head_sha_for_gate(
     canonical gh path and stays the fallback — but an ordinary tick answers it
     from the one PR snapshot instead of a ``gh pr view --json headRefOid`` per
     obligation. An empty snapshot answer (PR outside L, failed fetch) falls
-    straight through to ``gh``, so "unknown" is never fabricated.
+    through to ONE fallback call under the tick's per-obligation budget; past
+    the cap it answers ``""`` — unknown, which every caller treats as a wait,
+    never a pass or a mismatch. The fallback remains the canonical
+    ``_get_pr_head_sha_for_gate`` (tests and other callers patch THAT seam,
+    and the merge door uses the same source); its stderr is swallowed by the
+    recorder, so a rate limit there is not observable — the cap still bounds
+    it, and every ``_gh_json``-based fallback reports rate limits to the same
+    budget.
+
+    The post-run head in :func:`fulfill_obligation` deliberately calls
+    ``_get_pr_head_sha_for_gate`` directly: the head after a gate ran must be
+    live, because the snapshot was taken before the run (OI-2459 round 2).
     """
     if isinstance(pr_number, int) and pr_number > 0 and snapshot is not None:
         pr = snapshot.pr_by_number(pr_number)
         sha = pr.get("headRefOid") if isinstance(pr, dict) else None
         if isinstance(sha, str) and sha.strip():
             return sha.strip()
+        if not snapshot.fallback.consume():
+            return ""
     return _get_pr_head_sha_for_gate(pr_number)
 
 
@@ -2164,6 +2399,12 @@ def _stale_terminal_evidence(
             evidence_record = {}
         result_sha = str(evidence_record.get("commit_sha") or "")
 
+        # OI-2459 round 2: this read-only diagnostic keeps the snapshot on
+        # purpose. It books nothing — it reports binding drift for a human —
+        # and it is re-run every tick, so a push that lands during this tick is
+        # seen on the next one. Making it live would be one call per open
+        # terminal obligation with evidence, i.e. exactly the unbounded
+        # per-obligation pattern OI-2459 removed.
         if pr_number not in head_sha_cache:
             head_sha_cache[pr_number] = _pr_head_sha_for_gate(
                 pr_number if isinstance(pr_number, int) else None, snapshot,
@@ -2526,6 +2767,12 @@ def _pre_execution_decision(
 
     pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    # OI-2459 round 2: this is a PRE-run retire/pending decision, so it keeps
+    # the snapshot. A PR that merged or closed during the tick is read on the
+    # next tick; the decision here is "may a gate run at all", and a slightly
+    # older OPEN can only cost one extra pre-run check (the launch re-reads
+    # the head), never a wrong booking. ``None`` (snapshot cannot answer and
+    # the fallback also failed/ran out) stays the wait branch below.
     pr_state = (
         _pr_state_from_github(pr_number, owner_repo, snapshot=snapshot)
         if pr_number and owner_repo else None
@@ -3463,8 +3710,20 @@ def fulfill_obligation(
     # snapshot even after a fix-forward push moved the head, which is exactly
     # how the runner booked a verdict about older code onto a new obligation
     # (defect fixed 2026-09-30).
-    head_sha_before_run = _pr_head_sha_for_gate(pr_number, snapshot)
+    #
+    # OI-2459 round 2: this pre-run baseline reads the tick's snapshot only
+    # while that snapshot is younger than
+    # ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` — gates run back to back, so
+    # by the third launch the start-of-tick snapshot is minutes old and no
+    # longer describes "before this run". Older than that, the launch reads
+    # the live head once.
+    head_sha_before_run = _pr_head_sha_for_gate(pr_number, _launch_head_snapshot(snapshot))
 
+    # OI-2459 round 2: the branch NAME keeps the snapshot. A PR's head branch
+    # is the identity of the PR, not a moving fact: a push does not change it,
+    # and the only mid-tick changes (rename/retarget) are seen on the next
+    # tick. This lookup is not a launch baseline and gains nothing from aging
+    # out of the snapshot.
     branch = (
         str(record.get("branch") or "").strip()
         or (_branch_from_github(pr_number, owner_repo, snapshot=snapshot) if owner_repo else "")
@@ -3531,7 +3790,15 @@ def fulfill_obligation(
         # obligation is booked with a verdict about code that no longer exists
         # (defect fixed 2026-09-30). ``_get_pr_head_sha_for_gate`` is the same
         # source the pre-run capture used, never a second implementation.
-        head_sha = _pr_head_sha_for_gate(pr_number, snapshot)
+        #
+        # OI-2459 round 2: this MUST be the live single call, never the tick's
+        # snapshot. The snapshot was taken at the start of the tick (possibly
+        # minutes ago, possibly before this very gate ran), so reading it here
+        # would judge the result against a head that predates the run — the
+        # exactly-2026-09-30 defect reintroduced through the cache. One live
+        # ``gh pr view --json headRefOid`` per gate run is the price of booking
+        # a verdict about the code that actually exists now.
+        head_sha = _get_pr_head_sha_for_gate(pr_number)
         # The commit the result under decision actually records. An empty sha
         # (record has no commit_sha, or no record at all) keeps the existing
         # "binding unverifiable" handling: unknown is never a mismatch.
@@ -4012,9 +4279,7 @@ def run(
         # R10: in_flight and retry_capped leave the obligation open as well.
         if outcome["action"] in _OPEN_ACTIONS:
             pending_after += 1
-    action_counts: Dict[str, int] = {}
-    for outcome in outcomes:
-        action_counts[outcome.get("action", "")] = action_counts.get(outcome.get("action", ""), 0) + 1
+    action_counts = _count_actions(outcomes)
     # Read-only diagnostic over the FULL (unscoped) store — a --since/
     # --dispatch-prefix slice must not hide an already-burned record outside
     # it. Never rewrites anything (see _terminal_evidence_contradictions).
@@ -4064,13 +4329,13 @@ def run(
         if owner_repo_for_sweep
         else []
     )
-    for finding in prs_without_obligation:
-        _LOG.warning(
-            "PR #%s (branch %s) carries no review-gate obligation: %s",
-            finding["pr_number"], finding["branch"], finding["reason"],
-        )
-        if write:
-            _audit_log_pr_without_obligation(state_dir, finding)
+    _report_prs_without_obligation(state_dir, prs_without_obligation, write)
+    # OI-2459 round 2: ONE warning line for a tick that had to skip fallback
+    # lookups (the cap, or a rate-limit refusal) — silence when the snapshot
+    # answered every lookup. Skipped obligations stay in their wait state and
+    # are re-evaluated on the next tick.
+    if snapshot is not None:
+        snapshot.fallback.finish()
     return {
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
