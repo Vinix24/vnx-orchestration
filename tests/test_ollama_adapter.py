@@ -316,10 +316,7 @@ class TestDispatchRoutingNoCapableTerminal:
 
     def test_returns_none_when_no_headless_terminals(self, tmp_path):
         """All terminals non-headless → no capable terminal."""
-        with mock.patch.dict(os.environ, {}, clear=True):
-            # Remove all VNX_ADAPTER_TX vars
-            for k in ("VNX_ADAPTER_T1", "VNX_ADAPTER_T2", "VNX_ADAPTER_T3"):
-                os.environ.pop(k, None)
+        with mock.patch("headless_dispatch_daemon._is_terminal_headless", return_value=False):
             result = _find_capable_terminal({Capability.CODE}, tmp_path)
         assert result is None
 

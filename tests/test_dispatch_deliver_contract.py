@@ -1,26 +1,13 @@
-"""Contract test for the terminal-binding selector (P07 / T-A7).
+"""Contract test for the terminal-binding selector, flipped by T-G1.
 
-``deliver_dispatch_to_terminal`` in ``scripts/lib/dispatch_deliver.sh`` picks a
-lane from ``VNX_ADAPTER_T{n}``: T1/T2/T3 default to the subprocess branch and
-opt into tmux with ``VNX_ADAPTER_Tn=tmux``; T0 defaults to tmux.  Nothing pinned
-that behaviour before: ``tests/test_t2_t3_subprocess_default.sh`` copies the
-selector lines inline instead of sourcing the library, so it proves nothing
-about the shipped code.
+``deliver_dispatch_to_terminal`` in ``scripts/lib/dispatch_deliver.sh`` used to read
+``VNX_ADAPTER_T{n}`` for every terminal, so T1/T2/T3 could opt into tmux. T-G1 removed
+the worker half: T1, T2 and T3 always take the subprocess branch and no value moves them
+back. T0 keeps its behaviour -- tmux by default, subprocess only on the exact value
+``subprocess``.
 
-Every case here starts a real ``bash`` that sources the library, replaces both
-branch entry points with recording stubs, and calls the public delivery
-function once.  The assertion is on the NUMBER of calls per branch, so a
-selector that sends a delivery down both branches (or down none) fails -- that
-is what makes the inverted-selector red run a behavioural failure rather than
-an "import missing" one.  The assertion is deliberately not "the function
-exists": the function exists on every revision this test has ever run against.
-
-The positive value is matched exactly: only the literal ``subprocess`` selects
-that lane, ``tmux`` and an unrecognised value both stay on tmux, and T0 only
-leaves tmux when it is set to ``subprocess``.
-
-T-G1 removes the selector and this test with it; the call counts are what must
-turn red there.
+Each case sources the real library in a real ``bash``, stubs both branch entry points
+and calls the delivery function once; the assertion is the NUMBER of calls per branch.
 """
 from __future__ import annotations
 
@@ -45,19 +32,21 @@ TMUX = "tmux"
 # (terminal, VNX_ADAPTER_<terminal> value or None for unset, expected branch).
 # T0 has no default-subprocess rule, so unset T0 stays on the tmux branch; it
 # reaches the subprocess branch only through the exact value "subprocess".
-# Every other value falls back to tmux: the selector matches the positive value,
-# it does not treat "anything that is not tmux" as subprocess.
+# A worker terminal (T1-T3) is always subprocess: the variable is not read, so
+# "tmux" and an unrecognised value are subprocess cases too (T-G1).
 CASES = [
     ("T0", None, TMUX),
     ("T0", "subprocess", SUBPROCESS),
+    ("T0", "tmux", TMUX),
+    ("T0", "other", TMUX),
     ("T1", None, SUBPROCESS),
     ("T1", "subprocess", SUBPROCESS),
-    ("T1", "tmux", TMUX),
-    ("T1", "other", TMUX),
+    ("T1", "tmux", SUBPROCESS),
+    ("T1", "other", SUBPROCESS),
     ("T2", None, SUBPROCESS),
-    ("T2", "tmux", TMUX),
+    ("T2", "tmux", SUBPROCESS),
     ("T3", None, SUBPROCESS),
-    ("T3", "tmux", TMUX),
+    ("T3", "tmux", SUBPROCESS),
 ]
 CASE_IDS = [f"{terminal}-{value or 'unset'}-to-{branch}" for terminal, value, branch in CASES]
 

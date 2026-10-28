@@ -160,11 +160,17 @@ class TestMonitorDispatchSubprocessCleanup(unittest.TestCase):
                          "dispatch_id must be removed from polling_threads on subprocess early return")
 
     def test_tmux_terminal_is_not_subprocess(self):
-        """Non-subprocess terminals must not trigger the early-return path."""
+        """A non-headless terminal (T0, no opt-in) must not early-return."""
         monitor = _build_monitor()
-        env_without_t1 = {k: v for k, v in os.environ.items() if k != "VNX_ADAPTER_T1"}
-        with patch.dict(os.environ, env_without_t1, clear=True):
-            self.assertFalse(monitor._is_subprocess_terminal("T1"))
+        env_without_t0 = {k: v for k, v in os.environ.items() if k != "VNX_ADAPTER_T0"}
+        with patch.dict(os.environ, env_without_t0, clear=True):
+            self.assertFalse(monitor._is_subprocess_terminal("T0"))
+
+    def test_worker_is_subprocess_even_with_tmux_value(self):
+        """T-G1: VNX_ADAPTER_T1=tmux no longer moves a worker off the subprocess lane."""
+        monitor = _build_monitor()
+        with patch.dict(os.environ, {"VNX_ADAPTER_T1": "tmux"}, clear=False):
+            self.assertTrue(monitor._is_subprocess_terminal("T1"))
 
     def test_missing_dispatch_id_returns_immediately(self):
         """_monitor_dispatch on an unknown dispatch_id must return without error."""
