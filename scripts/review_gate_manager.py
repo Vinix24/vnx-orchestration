@@ -5,6 +5,12 @@ This module is the public facade. Implementation is split across mixin modules:
 - gate_executor.py: request orchestration and execution
 - gate_result_parser.py: finding classification and result recording
 - gate_report_generator.py: audit trail and result persistence
+
+The ``--override-b3`` (R1) carrier: the documented form is
+``--override-b3 --reason "..."``. Next to it, RG-5 accepts the env pair
+``VNX_OVERRIDE_B3=1`` + ``VNX_OVERRIDE_B3_REASON="..."``; the flag wins when
+both are given, and either carrier without a non-empty reason is refused. The
+record names the carrier (``flag`` or ``env``) next to the reason.
 """
 
 from __future__ import annotations
@@ -12,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import secrets
 import shutil
@@ -259,31 +266,70 @@ def _stack_arg(raw: Optional[str]) -> Optional[List[str]]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+B3_OVERRIDE_ENV = "VNX_OVERRIDE_B3"
+B3_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_B3_REASON"
+
+
 def _add_override_b3_arguments(parser: argparse.ArgumentParser) -> None:
     """``--override-b3 --reason "..."``: run the codex seat of a PR at the B3 cap anyway (R1)."""
     parser.add_argument(
         "--override-b3", action="store_true",
         help="Run the codex seat of a PR at the B3 cap anyway; requires --reason. "
+        f"Also read from {B3_OVERRIDE_ENV}=1 plus {B3_OVERRIDE_REASON_ENV} (the flag wins). "
         "Recorded in the round ledger line and the review_gate_result receipt",
     )
     parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
 
 
+def _b3_override_env_on() -> bool:
+    """True when ``VNX_OVERRIDE_B3=1`` asks for the override (RG-5); only the literal ``1`` turns it on."""
+    return (os.environ.get(B3_OVERRIDE_ENV) or "").strip() == "1"
+
+
 def _override_b3_reason(args: argparse.Namespace) -> Optional[str]:
-    """The ``--override-b3`` reason, ``""`` for none, or ``None`` after printing why the flags are refused."""
+    """The override reason, ``""`` for none, or ``None`` after printing why it is refused.
+
+    Two carriers: the documented ``--override-b3 --reason "..."`` and, next to
+    it, ``VNX_OVERRIDE_B3=1`` with ``VNX_OVERRIDE_B3_REASON="..."`` (RG-5). The
+    flag wins when both are given, and either carrier without a non-empty
+    reason is refused — never a silent bypass.
+    """
+    flag = getattr(args, "override_b3", False)
     reason = (getattr(args, "reason", None) or "").strip()
-    if getattr(args, "override_b3", False) and not reason:
-        print('ERROR: --override-b3 needs a non-empty --reason "..." (no silent bypass)', file=sys.stderr)
-        return None
-    if reason and not getattr(args, "override_b3", False):
+    if flag:
+        if not reason:
+            print('ERROR: --override-b3 needs a non-empty --reason "..." (no silent bypass)', file=sys.stderr)
+            return None
+        return reason
+    if reason:
         print("ERROR: --reason only applies to --override-b3", file=sys.stderr)
         return None
-    return reason
+    if not _b3_override_env_on():
+        return ""
+    env_reason = (os.environ.get(B3_OVERRIDE_REASON_ENV) or "").strip()
+    if not env_reason:
+        print(
+            f"ERROR: {B3_OVERRIDE_ENV}=1 needs a non-empty {B3_OVERRIDE_REASON_ENV} (no silent bypass)",
+            file=sys.stderr,
+        )
+        return None
+    return env_reason
 
 
-def _override_b3_kwargs(reason: str) -> Dict[str, str]:
-    """``override_b3`` for the manager call, only when one was given: the call is unchanged without it."""
-    return {"override_b3": reason} if reason else {}
+def _override_b3_carrier(args: argparse.Namespace) -> str:
+    """What carried the override reason: ``flag``, ``env``, or ``""`` when there is none."""
+    if getattr(args, "override_b3", False):
+        return review_rounds.OVERRIDE_CARRIER_FLAG
+    if _b3_override_env_on():
+        return review_rounds.OVERRIDE_CARRIER_ENV
+    return ""
+
+
+def _override_b3_kwargs(reason: str, carrier: str) -> Dict[str, str]:
+    """``override_b3`` and its carrier for the manager call, only when one was given: unchanged without it."""
+    if not reason:
+        return {}
+    return {"override_b3": reason, "override_b3_carrier": carrier}
 
 
 def _print_round_refusals(result: Dict[str, Any]) -> None:
@@ -429,7 +475,7 @@ def _handle_request_and_execute(manager: ReviewGateManager, args: argparse.Names
             changed_files=changed_files,
             mode=args.mode,
             dispatch_id=getattr(args, "dispatch_id", "") or "",
-            **_override_b3_kwargs(override_b3),
+            **_override_b3_kwargs(override_b3, _override_b3_carrier(args)),
         )
     except ReviewGateConfigError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -507,7 +553,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 changed_files=changed_files,
                 mode=args.mode,
                 dispatch_id=getattr(args, "dispatch_id", "") or "",
-                **_override_b3_kwargs(override_b3),
+                **_override_b3_kwargs(override_b3, _override_b3_carrier(args)),
             )
         except ReviewGateConfigError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)

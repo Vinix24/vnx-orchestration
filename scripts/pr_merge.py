@@ -27,6 +27,15 @@ so does the merge record. A missing seat, an empty
 ``contract_hash``/``report_path``, or a verdict contradicting its report is a
 refusal. The same ``--override-reason`` valve applies with a mandatory reason.
 
+B3 override (R1, RG-5): the codex seat of a PR at the B3 cap counts only with
+an operator override, and that override has two carriers. The documented one
+is ``--override-b3 --reason "..."``; next to it this door also reads the env
+pair ``VNX_OVERRIDE_B3=1`` with ``VNX_OVERRIDE_B3_REASON="..."``. The flag wins
+when both are given, and either carrier without a non-empty reason is refused
+with the same message and exit (no silent bypass). The reason and the carrier
+that supplied it (``flag`` or ``env``) land in the ``pr_merged`` receipt under
+``review_seats.round_ledger.override``.
+
 Merge pinning (OI-1264): the merge is pinned to the exact head the gates
 approved. ``_run_ci_gate`` establishes the head SHA, and ``_do_merge`` passes
 it as ``gh pr merge --match-head-commit <sha>`` so ``gh`` refuses to merge any
@@ -210,6 +219,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -664,16 +674,54 @@ def _b3_override_refusal(b3_override: Optional[str]) -> Optional[Dict[str, Any]]
     }
 
 
+B3_OVERRIDE_ENV = "VNX_OVERRIDE_B3"
+B3_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_B3_REASON"
+B3_OVERRIDE_CARRIER_FLAG = "flag"
+B3_OVERRIDE_CARRIER_ENV = "env"
+
+
+def _b3_override_env_on() -> bool:
+    """True when ``VNX_OVERRIDE_B3=1`` asks for the override (RG-5); only the literal ``1`` turns it on."""
+    return (os.environ.get(B3_OVERRIDE_ENV) or "").strip() == "1"
+
+
 def _b3_override_arg(args: argparse.Namespace) -> Optional[str]:
-    """The ``--override-b3`` reason for the review gate: ``None`` without the flag, ``""`` without a reason."""
-    return (args.reason or "") if getattr(args, "override_b3", False) else None
+    """The B3 override reason for the review gate, from either carrier.
+
+    ``None`` without an override, ``""`` for one without a reason (refused
+    downstream with the door's existing message). The flag wins when both
+    carriers are given; next to ``--override-b3``, RG-5 accepts
+    ``VNX_OVERRIDE_B3=1`` with ``VNX_OVERRIDE_B3_REASON="..."``.
+    """
+    if getattr(args, "override_b3", False):
+        return args.reason or ""
+    if _b3_override_env_on():
+        return os.environ.get(B3_OVERRIDE_REASON_ENV) or ""
+    return None
+
+
+def _b3_override_carrier(args: argparse.Namespace) -> str:
+    """What carried the override reason: ``flag``, ``env``, or ``""`` when there is none."""
+    if getattr(args, "override_b3", False):
+        return B3_OVERRIDE_CARRIER_FLAG
+    if _b3_override_env_on():
+        return B3_OVERRIDE_CARRIER_ENV
+    return ""
+
+
+def _b3_override_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
+    """The review gate's B3 override keyword arguments: empty when no carrier asked for one."""
+    b3_override = _b3_override_arg(args)
+    if b3_override is None:
+        return {}
+    return {"b3_override": b3_override, "b3_carrier": _b3_override_carrier(args)}
 
 
 def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
-    b3_override: Optional[str] = None,
+    b3_override: Optional[str] = None, b3_carrier: str = "",
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Fail-closed review-gate check: every review seat of the project is filled
     on this PR head before merge (OI-2058, R5b).
@@ -701,6 +749,8 @@ def _run_review_gate(
     seats are still judged and every PASS must still be in the round ledger; it
     only lets the codex seat of a PR at the B3 cap count, and the merge record
     carries it with its reason (``review_seats.round_ledger.override``).
+    ``b3_carrier`` (``flag`` or ``env``, RG-5) says which carrier supplied it
+    and lands in the same record.
     """
     pr_data = _query_pr(pr_number)
     if pr_data is None:
@@ -777,13 +827,13 @@ def _run_review_gate(
     # as read: a missing or malformed base makes the class high, never main.
     return _review_seats_verdict(
         pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
-        base_branch=pr_data.get("baseRefName"),
+        b3_carrier=b3_carrier, base_branch=pr_data.get("baseRefName"),
     ), pr_data
 
 
 def _review_seats_verdict(
     pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
-    base_branch: Any = None,
+    b3_carrier: str = "", base_branch: Any = None,
 ) -> Dict[str, Any]:
     """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
 
@@ -798,7 +848,9 @@ def _review_seats_verdict(
         return refusal
     from closure_verifier import check_review_gate_for_merge
 
-    override_b3 = {"b3_override": b3_override.strip()} if b3_override else {}
+    override_b3 = (
+        {"b3_override": b3_override.strip(), "b3_override_carrier": b3_carrier} if b3_override else {}
+    )
     # R3b: the risk class is read in the checkout being merged into. Outside
     # main() no target is active and the evaluation reads the store's own checkout.
     checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
@@ -2013,8 +2065,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--override-b3", action="store_true",
         help="R1: let the codex seat of a PR at the B3 cap count at this merge, with --reason "
-             "(empty is refused). Every PASS must still be in the round ledger; the reason "
-             "lands in the pr_merged receipt.",
+             "(empty is refused). Also read from VNX_OVERRIDE_B3=1 plus VNX_OVERRIDE_B3_REASON "
+             "(the flag wins). Every PASS must still be in the round ledger; the reason and "
+             "its carrier (flag/env) land in the pr_merged receipt.",
     )
     parser.add_argument("--reason", default=None, help="The reason for --override-b3 (required with it)")
     parser.add_argument("--json", action="store_true", help="Output result as JSON")
@@ -2104,7 +2157,7 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"CI gate: {gate['message']}")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
-    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, b3_override=_b3_override_arg(args))
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, **_b3_override_kwargs(args))
     evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
         return refuse("review", review_gate, "review_gate")

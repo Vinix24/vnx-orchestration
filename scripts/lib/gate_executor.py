@@ -17,71 +17,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+import deterministic_gate
 from gate_status import REQUEST_TERMINAL_STATUSES
 
 logger = logging.getLogger(__name__)
 
-# `gh pr checks --json` (gh 2.76.2, measured 2026-08-20) has no `status`/
-# `conclusion` fields — it exposes `bucket`, which gh itself documents
-# (`gh pr checks --help`) as categorizing the raw `state` into exactly one
-# of: pass, fail, pending, skipping, cancel. "pending" is the only
-# non-terminal bucket; a bucket outside this known set is treated as
-# non-terminal too, so an unrecognized future value holds the verdict at
-# "running" instead of silently completing.
-_CI_CHECK_BUCKET_TERMINAL = {"pass", "fail", "skipping", "cancel"}
-_CI_CHECK_BUCKET_SKIP = {"skipping", "cancel"}
-
-
-def _format_ci_gate_report(
-    *,
-    pr_number: Optional[int],
-    branch: str,
-    checks: List[Dict[str, Any]],
-    passed: List[Dict[str, Any]],
-    failed: List[Dict[str, Any]],
-    skipped: List[Dict[str, Any]],
-    status: str,
-    generated_at: str,
-) -> str:
-    """Format ci_gate results as a normalized headless report."""
-    verdict_icon = {"pass": "PASS", "fail": "FAIL", "running": "RUNNING"}.get(status, status.upper())
-    lines = [
-        "# ci_gate — Headless Gate Report",
-        "",
-        f"**PR**: {pr_number or 'unknown'}",
-        f"**Branch**: {branch}",
-        f"**Gate**: ci_gate",
-        f"**Generated**: {generated_at}",
-        f"**Verdict**: {verdict_icon}",
-        "",
-        "---",
-        "",
-        "## CI Check Results",
-        "",
-    ]
-    if not checks:
-        lines.append("_(no checks found — vacuously passing)_")
-    else:
-        if passed:
-            lines.append("### Passed")
-            for c in passed:
-                lines.append(f"- [OK] {c.get('name', '?')} — {c.get('state', 'SUCCESS')}")
-            lines.append("")
-        if failed:
-            lines.append("### Failed [BLOCKING]")
-            for c in failed:
-                lines.append(f"- [BLOCKING] {c.get('name', '?')} — {c.get('state', 'FAILURE')}")
-                lines.append(f"  - **Severity**: blocking")
-            lines.append("")
-        if skipped:
-            lines.append("### Skipped / Cancelled")
-            for c in skipped:
-                lines.append(f"- [ADVISORY] {c.get('name', '?')} — {c.get('state', 'SKIPPED')}")
-            lines.append("")
-    lines.append(f"**Status**: {'FAIL' if failed else 'PASS' if status == 'pass' else status.upper()}")
-    lines.append(f"Passed: {len(passed)} | Failed: {len(failed)} | Skipped: {len(skipped)}")
-    lines.append("")
-    return "\n".join(lines) + "\n"
+# The ci gate's local half — the bucket classification, the report and the
+# summary — lives in `deterministic_gate` since GE-6 (ADR-046 §4): the
+# `deterministic` adapter kind owns what runs without a subprocess.
 
 
 class GateExecutorMixin:
@@ -280,21 +223,6 @@ class GateExecutorMixin:
                 )
             # no checks → vacuous pass; checks_list stays empty
 
-        passed = [c for c in checks_list if (c.get("bucket") or "").lower() == "pass"]
-        failed = [c for c in checks_list if (c.get("bucket") or "").lower() == "fail"]
-        skipped = [c for c in checks_list if (c.get("bucket") or "").lower() in _CI_CHECK_BUCKET_SKIP]
-        all_complete = all(
-            (c.get("bucket") or "").lower() in _CI_CHECK_BUCKET_TERMINAL for c in checks_list
-        ) if checks_list else True  # vacuously complete when no checks
-
-        # Determine terminal verdict
-        if not all_complete:
-            verdict = "running"
-        elif failed:
-            verdict = "fail"
-        else:
-            verdict = "pass"
-
         now = utc_now_iso()
 
         # In contract-backed mode the request carries the review contract's content_hash,
@@ -311,66 +239,24 @@ class GateExecutorMixin:
             )
             contract_hash = hashlib.sha256(hash_input.encode()).hexdigest()[:16]
 
-        blocking_findings = [
-            {
-                "severity": "blocking",
-                "title": c.get("name", "unknown"),
-                "description": f"CI check '{c.get('name', '?')}' concluded with {c.get('state', 'FAILURE')}",
-            }
-            for c in failed
-        ]
-        advisory_findings = [
-            {
-                "severity": "advisory",
-                "title": c.get("name", "unknown"),
-                "description": f"CI check '{c.get('name', '?')}' was {c.get('state', 'SKIPPED')}",
-            }
-            for c in skipped
-        ]
-
-        # Write report for terminal verdicts
-        report_path = request_payload.get("report_path", "")
-        report_written = False
-        if report_path and verdict in ("pass", "fail"):
-            report_content = _format_ci_gate_report(
-                pr_number=pr_number,
-                branch=request_payload.get("branch", ""),
-                checks=checks_list,
-                passed=passed,
-                failed=failed,
-                skipped=skipped,
-                status=verdict,
-                generated_at=now,
-            )
-            try:
-                Path(report_path).parent.mkdir(parents=True, exist_ok=True)
-                Path(report_path).write_text(report_content, encoding="utf-8")
-                report_written = True
-            except OSError:
-                pass
-
-        result_payload: Dict[str, Any] = {
-            "gate": gate,
-            "pr_id": pr_id or (str(pr_number) if pr_number is not None else ""),
-            "pr_number": pr_number,
-            "status": verdict,
-            "summary": _ci_gate_summary(verdict, passed, failed, skipped),
-            "passed_checks": [c.get("name", "") for c in passed],
-            "failed_checks": [c.get("name", "") for c in failed],
-            "blocking_findings": blocking_findings,
-            "advisory_findings": advisory_findings,
-            "blocking_count": len(failed),
-            "advisory_count": len(skipped),
-            "contract_hash": contract_hash if verdict in ("pass", "fail") else "",
-            "report_path": report_path if (report_written and verdict in ("pass", "fail")) else "",
-            "required_reruns": [],
-            "residual_risk": (
-                "" if verdict == "pass"
-                else f"CI gate {verdict}: {len(failed)} failed check(s)"
-            ),
-            "duration_seconds": duration,
-            "recorded_at": now,
-        }
+        # The LOCAL half (ADR-046 §4, GE-6): classifying the rows `gh pr checks`
+        # just returned, the findings, the summary and the report. It runs in
+        # deterministic_gate — no subprocess, no network — and the record it
+        # builds is the one this gate wrote before the move (plus `kind`).
+        # `running` is no outcome at all (ADR-046 §1): the adapter returns the
+        # record and no GateOutcome, and _book_ci_gate_result books the snapshot
+        # under the overwrite guard as it always has.
+        local = deterministic_gate.run("ci_gate", deterministic_gate.LocalContext(
+            pr_number=pr_number,
+            pr_id=pr_id,
+            branch=request_payload.get("branch", ""),
+            checks=checks_list,
+            contract_hash=contract_hash,
+            recorded_at=now,
+            duration_seconds=duration,
+            report_path=request_payload.get("report_path", ""),
+        ))
+        result_payload: Dict[str, Any] = local.record
         _rec.stamp_request_identity(result_payload, request_payload)
         return self._book_ci_gate_result(gate, pr_number, pr_id, result_payload, request_payload, now)
 
@@ -590,6 +476,7 @@ class GateExecutorMixin:
         mode: str,
         dispatch_id: str = "",
         override_b3: str = "",
+        override_b3_carrier: str = "",
         force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request and immediately execute all gates atomically.
@@ -617,7 +504,8 @@ class GateExecutorMixin:
         or FAIL, is never superseded, so a blocking verdict always reaches
         ``has_required_failure``. ``review_seats`` is the seat list the round
         requested (``request_reviews``). ``override_b3`` goes to the request
-        round, where the round ledger judges every seat (R1).
+        round, where the round ledger judges every seat (R1);
+        ``override_b3_carrier`` (``flag`` or ``env``, RG-5) travels with it.
         """
         import gate_recorder as _rec
 
@@ -635,6 +523,7 @@ class GateExecutorMixin:
             dispatch_id=dispatch_id,
             head_sha=head_sha,
             **({"override_b3": override_b3} if override_b3 else {}),
+            **({"override_b3_carrier": override_b3_carrier} if override_b3_carrier else {}),
             **({"force_rerun": force_rerun} if force_rerun else {}),
         )
 
@@ -752,20 +641,3 @@ def _classify_sha_binding(head_sha: str, result_sha: str) -> str:
     if not head_sha or not result_sha:
         return "unknown"
     return "match" if head_sha == result_sha else "mismatch"
-
-
-def _ci_gate_summary(
-    verdict: str,
-    passed: List[Dict[str, Any]],
-    failed: List[Dict[str, Any]],
-    skipped: List[Dict[str, Any]],
-) -> str:
-    if verdict == "running":
-        return "CI checks still running — verdict pending"
-    if verdict == "fail":
-        names = ", ".join(c.get("name", "?") for c in failed[:3])
-        tail = f" (+{len(failed) - 3} more)" if len(failed) > 3 else ""
-        return f"CI gate FAIL: {len(failed)} failed check(s): {names}{tail}"
-    if not passed and not failed and not skipped:
-        return "CI gate PASS: no checks configured (vacuous pass)"
-    return f"CI gate PASS: {len(passed)} check(s) passed, {len(skipped)} advisory"

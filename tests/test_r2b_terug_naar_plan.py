@@ -14,7 +14,7 @@ Dispatch 20261020-rs-r2b-terug-naar-plan. Pinned here:
 - OI-2207: a receipt of another project, or of a count before the last attested opening, is
   never booked; a commit message that is no UTF-8 is a logged "no grant"; the writer looks up
   no git facts for a ``verkleinen`` of a count that no longer stands;
-- ``mergen-met-OI`` still lands as ``outcome_unavailable_in_r2a`` (``test_r2a_cap_tiebreaker``);
+- ``mergen-met-OI`` is R2c's outcome and is carried out there (``tests/test_r3_mergen_met_oi.py``);
 - round 3: the PR is looked up and closed in the repo of the store's project, never the cwd's,
   and a store whose repo cannot be established closes nothing; one comment per verdict id, also
   when a close failed after its comment and is retried.

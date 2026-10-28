@@ -487,127 +487,6 @@ class PRQueueManager:
 
         return True, ordered, None
 
-    def promote_dispatch(self, dispatch_id: str, force: bool = False) -> bool:
-        """
-        Promote a staging dispatch to queue for popup approval (atomic + idempotent)
-
-        NOW WITH DEPENDENCY CHECKING: Blocks promotion if PR dependencies not met
-
-        Args:
-            dispatch_id: Dispatch ID or filename (with or without .md)
-            force: If True, skip dependency check and overwrite existing queue file
-
-        Returns:
-            True if promoted successfully
-        """
-        # Normalize dispatch_id
-        if not dispatch_id.endswith('.md'):
-            dispatch_id_file = f"{dispatch_id}.md"
-        else:
-            dispatch_id_file = dispatch_id
-            dispatch_id = dispatch_id[:-3]
-
-        staging_dir = self.dispatch_dir / "staging"
-        queue_dir = self.dispatch_dir / "queue"
-
-        staging_file = staging_dir / dispatch_id_file
-        queue_file = queue_dir / dispatch_id_file
-
-        # Safety check: staging file must exist
-        if not staging_file.exists():
-            print(f"❌ Staging dispatch not found: {dispatch_id}")
-            print(f"   Looked in: {staging_file}")
-            return False
-
-        # Extract PR-ID for dependency check
-        metadata = self.extract_v2_metadata(staging_file)
-        pr_id = metadata.get('pr_id')
-
-        # NEW: Dependency-aware promotion
-        if pr_id and not force:
-            pr = self.get_pr(pr_id)
-            if pr:
-                deps_met, msg = self.check_pr_dependencies(pr_id)
-                if not deps_met:
-                    print(f"❌ Cannot promote {pr_id}: Dependencies not met")
-                    print(f"   {msg}")
-                    print(f"   Use --force to override")
-                    return False
-
-        # Safety check: prevent duplicate promotion
-        if queue_file.exists() and not force:
-            print(f"❌ Dispatch already in queue: {dispatch_id}")
-            print(f"   Use --force to overwrite")
-            return False
-
-        # Auto-approve mode: when popup is disabled, go directly to pending
-        auto_approve = os.environ.get('VNX_QUEUE_POPUP_ENABLED', '1') == '0'
-        target_dir = self.dispatch_dir / ("pending" if auto_approve else "queue")
-        target_file = target_dir / dispatch_id_file
-
-        # Ensure target directory exists
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        # Safety check: prevent duplicate promotion
-        if target_file.exists() and not force:
-            target_name = "pending" if auto_approve else "queue"
-            print(f"❌ Dispatch already in {target_name}: {dispatch_id}")
-            print(f"   Use --force to overwrite")
-            return False
-
-        # Atomic move: temp + rename pattern
-        import shutil
-
-        temp_file = None
-        try:
-            # Extract PR-ID for audit
-            pr_id = self.extract_v2_metadata(staging_file).get('pr_id')
-
-            # Copy to target with temp name (atomic preparation)
-            temp_file = target_dir / f".{dispatch_id_file}.tmp"
-            shutil.copy2(staging_file, temp_file)
-
-            # Atomic rename (OS-level atomic operation)
-            if force and target_file.exists():
-                target_file.unlink()
-            temp_file.rename(target_file)
-
-            # Remove from staging (cleanup phase)
-            staging_file.unlink()
-
-            target_name = "pending (auto-approved)" if auto_approve else "queue"
-
-            # Log promotion with JSONL
-            self._log_audit({
-                'timestamp': datetime.now().isoformat(),
-                'action': 'promote_dispatch',
-                'dispatch_id': dispatch_id,
-                'pr_id': pr_id,
-                'from': str(staging_file),
-                'to': str(target_file),
-                'auto_approved': auto_approve,
-                'forced': force,
-                'actor': 'T0'
-            })
-
-            # SPRINT 1: Log queue event for T0 audit trail
-            if pr_id:
-                self.log_queue_event("promote", pr_id, dispatch_id=dispatch_id, from_location="staging", to_location=target_name, forced=force)
-
-            print(f"✅ Promoted dispatch: {dispatch_id}")
-            print(f"📁 Now in {target_name}: {target_file}")
-            if not auto_approve:
-                print(f"🔔 Popup will detect shortly")
-
-            return True
-
-        except Exception as e:
-            print(f"❌ Promotion failed: {e}")
-            # Cleanup temp file if exists
-            if temp_file and temp_file.exists():
-                temp_file.unlink()
-            return False
-
     def _log_audit(self, entry: Dict) -> None:
         """Write audit entry to JSONL log"""
         audit_log = self.vnx_state_dir / "dispatch_audit.jsonl"
@@ -1148,22 +1027,18 @@ if __name__ == "__main__":
                 )
             )
         elif sys.argv[1] == "promote":
-            # Promote staging dispatch to queue
-            if len(sys.argv) < 3:
-                print("❌ Usage: python pr_queue_manager.py promote <dispatch_id> [--force]")
-                _exit_from_result(_error_result("missing_argument", "promote requires <dispatch_id>"))
-
-            dispatch_id = sys.argv[2]
-            force = '--force' in sys.argv
-            manager = PRQueueManager()
-            success = manager.promote_dispatch(dispatch_id, force=force)
-            _exit_from_result(
-                _result_from_bool(
-                    success,
-                    error_code="operation_failed",
-                    error_msg=f"Failed to promote dispatch: {dispatch_id}",
-                )
+            # Retired (track terminal-binding-afbouwen, T-A10): a staged .md is no
+            # longer a queue. Staged spec bundles are the only queue; they are
+            # fired through the single-entry door. Refuse loud instead of staging
+            # a file nothing will read.
+            print(
+                "Retired: `promote` moved a staged .md into dispatches/queue/. A staged spec\n"
+                "bundle is the only queue now — stage one and fire it through the door:\n"
+                "  vnx dispatch stage --instruction <file> --dispatch-id <id> --role <role> --slot T1\n"
+                "  vnx dispatch <id>",
+                file=sys.stderr,
             )
+            _exit_from_result(_error_result("unknown_command", "promote is retired"))
         elif sys.argv[1] == "status":
             # Show PR queue status
             manager = PRQueueManager()
@@ -1389,6 +1264,7 @@ if __name__ == "__main__":
         print("  python pr_queue_manager.py staging-list  # List staging with dependency status")
         print("  python pr_queue_manager.py show <id>    # Show staging dispatch details")
         print("  python pr_queue_manager.py patch <id> --set key=value  # Patch staging dispatch fields")
-        print("  python pr_queue_manager.py promote <id> [--force]  # Promote staging to queue (with dep check)")
         print("  python pr_queue_manager.py reject <id> --reason \"...\" [--defer PR-X]  # Reject staging dispatch")
+        print("")
+        print("  `promote` is retired: staged spec bundles are the only queue (vnx dispatch stage).")
         print("\nOr import and use PRQueueManager class directly")

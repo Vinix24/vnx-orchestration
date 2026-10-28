@@ -47,7 +47,7 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
-# How each gate's provider is actually reached. Three KINDS, kept apart because
+# How each gate's provider is actually reached. Four KINDS, kept apart because
 # their failure modes are different and collapsing them is OI-1490.
 #
 # PATH_BINARY   the gate drives a CLI that must be on PATH, with a prompt on
@@ -68,6 +68,13 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 #               it, and none is expected (dispatch 20260911-c6 step 2:
 #               availability measures configuration, not file existence; the
 #               existence check made deepseek_gate a dead link, OI-1714).
+# DETERMINISTIC the gate's local half runs in-process (or as a local subprocess
+#               that needs no network): `deterministic_gate.py`, one row per
+#               gate. GE-6/ADR-046 §4: ci_gate's local half classifies the
+#               check rows its `gh` read returned, wiring_gate's analyses a
+#               diff and greps a checkout. The `gh` read of each stays where it
+#               is and keeps its own subprocess; THIS kind is what runs without
+#               one. The name is the adapter's own ("local"), not a binary.
 #
 # Before OI-1490 there was no second kind: a gate absent from the mapping fell
 # back to its own NAME as a binary, so `shutil.which("kimi_gate")` failed and
@@ -83,13 +90,18 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 GATE_PROVIDER_PATH_BINARY = "path_binary"
 GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
 GATE_PROVIDER_HARNESS_LANE = "harness_lane"
+GATE_PROVIDER_DETERMINISTIC = "deterministic"
 
 GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
     "codex_gate": (GATE_PROVIDER_PATH_BINARY, "codex"),
     "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
-    "ci_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
-    "wiring_gate": (GATE_PROVIDER_PATH_BINARY, "gh"),
+    # GE-6: the local half of both gates is the deterministic adapter kind. The
+    # gate's `gh` READ stays (gate_executor._execute_ci_gate / wiring_gate.
+    # _get_pr_diff); what these rows say is that the checks themselves need no
+    # subprocess on the network.
+    "ci_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
+    "wiring_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
     "kimi_gate": (GATE_PROVIDER_HARNESS_LANE, "kimi"),
     "glm_gate": (GATE_PROVIDER_HARNESS_LANE, "glm-harness"),
     # OI-1714: deepseek_gate was registered as a script runner pointing at
@@ -267,6 +279,8 @@ def gate_is_available(
       and friends) and every other caller see the same answer; ``state_dir``
       names the project the switch decides for (provider-schakelaar C). A
       switch refusal is not a reachability fact and is never booked as one.
+    - ``deterministic``  the gate's local half runs in this process
+      (``deterministic_gate``): available by registration, like a harness lane.
 
     An unregistered gate raises :class:`UnknownGateProvider` — never ``False``,
     never a fallback to a binary name invented from the gate's own name.
@@ -291,6 +305,12 @@ def gate_is_available(
         return gate_switch_refusal(
             gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
         ) is None
+    if kind == GATE_PROVIDER_DETERMINISTIC:
+        # Available by registration, like a harness lane: the local checks run in
+        # this process, so there is no file or binary to look for. A missing tool
+        # is discovered when a check RUNS and is booked not_executable with its
+        # reason there — that is a fact about the run, not about routing here.
+        return True
     raise UnknownGateProvider(
         f"{gate} has an unknown provider kind {kind!r} — cannot determine availability"
     )
@@ -1741,17 +1761,25 @@ def publish_forge_review_summary(
     ``__file__`` would name the ENGINE's checkout (the central install, or a
     dispatch worktree), a different repo from the project's; a store that cannot
     be attributed to a project is refused there and logged below with the repair.
+
+    The record's ``override_b3.reason`` IS passed, as the summary's
+    ``b3_override`` (RG-2): the required check has to say why it is green past
+    the cap, or branch protection keeps blocking the merge the door approved
+    (OI-2143). Only a stamped object is read; anything else is no reason.
     """
     try:
         from forge_gate_publisher import (  # noqa: PLC0415
             REVIEW_RECOVERY_COMMAND_TEMPLATE, publish_review_summary,
         )
 
+        override = payload.get("override_b3")
+        b3_override = str(override.get("reason") or "") if isinstance(override, dict) else ""
         publish_review_summary(
             pr_number,
             head_sha,
             results_dir=result_path.parent,
             branch=(payload.get("branch") or "").strip() or None,
+            b3_override=b3_override,
         )
     # vnx-broad-except: same rule as the per-gate publication one call above —
     # this hook may not be able to fail a gate run, and the publisher's failure

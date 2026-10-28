@@ -65,6 +65,12 @@ class CodexSpawnResult:
     token_usage: Optional[Dict[str, Any]] = None
     # Set when an exception terminated the stream read.
     error: Optional[str] = None
+    # K2b round 2: the condition under which codex never launched — no
+    # resolvable model, no binary, a Popen that failed. Explicit evidence only:
+    # a stream failure after the process started (with or without output) is
+    # NOT a refusal and stays None, so the cost line books unknown usage rather
+    # than a zero-token refusal.
+    spawn_refused: Optional[str] = None
     # Number of times event_writer callback raised an exception.
     # > 0 indicates audit-trail gaps the caller must investigate per ADR-005.
     event_writer_failures: int = 0
@@ -398,11 +404,17 @@ class _NormalizerHost(StreamingDrainerMixin):
 # ---------------------------------------------------------------------------
 
 def _launch_failure(returncode: int, error: str) -> CodexSpawnResult:
-    """The result of a codex launch that never produced a process."""
+    """The result of a codex launch that never produced a process.
+
+    This is the one constructor of a launch refusal, and the only place that
+    names ``spawn_refused``: nothing ran, so the attempt is a refused spawn with
+    this reason. When codex DID start, the result carries no usage and its
+    ``error`` but never ``spawn_refused`` (K2b round 2).
+    """
     return CodexSpawnResult(
         returncode=returncode, completion_text="", events_written=0, session_id=None,
         timed_out=False, stopped_early=False, token_usage=None, error=error,
-        event_writer_failures=0,
+        spawn_refused=error, event_writer_failures=0,
     )
 
 
@@ -714,9 +726,11 @@ def spawn_codex(
     """Spawn `codex exec --json` and consume the NDJSON event stream.
 
     Returns CodexSpawnResult on completion (success OR controlled failure).
-    Returns CodexSpawnResult(returncode=127) when the codex binary is absent, and
-    CodexSpawnResult(returncode=1, error="codex_model_unresolved: ...") when the
-    registry gives no model (OI-2062, OI-2068).
+    Returns CodexSpawnResult(returncode=127, spawn_refused="codex binary not found: ...")
+    when the codex binary is absent, and CodexSpawnResult(returncode=1,
+    spawn_refused="codex_model_unresolved: ...") when the registry gives no model
+    (OI-2062, OI-2068). A run that started and then failed mid-stream carries
+    ``error`` with no usage and NO ``spawn_refused`` (K2b round 2).
     Caller is responsible for lease/manifest/receipt/event-archive/retry.
 
     event_writer_strict=True raises RuntimeError if any event_writer call failed,

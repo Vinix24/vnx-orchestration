@@ -113,45 +113,6 @@ _force_normal_mode() {
     sleep 1
 }
 
-# _clear_terminal_context: send context reset command and verify prompt readiness.
-# Params: target_pane provider
-_clear_terminal_context() {
-    local target_pane="$1" provider="$2"
-
-    local reset_cmd
-    reset_cmd=$(get_context_reset_command "$provider")
-    log "V8 MODE_CONTROL: Clearing context via $reset_cmd ..."
-    # C-u safely clears readline buffer (C-c would kill CLI process)
-    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-    sleep 0.3
-    if ! tmux_send_best_effort "$target_pane" -l "$reset_cmd"; then
-        log_structured_failure "context_reset_failed" "Failed to send context reset command" "pane=$target_pane provider=$provider"
-        return 1
-    fi
-    sleep 1
-    if ! tmux_send_best_effort "$target_pane" Enter; then
-        log_structured_failure "context_reset_submit_failed" "Failed to submit context reset command" "pane=$target_pane provider=$provider"
-        return 1
-    fi
-    case "$provider" in
-        gemini_cli|gemini) sleep 6 ;;
-        codex_cli|codex)   sleep 4 ;;
-        *)                 sleep 3 ;;
-    esac
-    local pane_content
-    pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-    if echo "$pane_content" | grep -qi "Was this conversation helpful"; then
-        log "V8 MODE_CONTROL: Feedback modal detected after clear — dismissing with Enter"
-        tmux_send_best_effort "$target_pane" Enter 2>/dev/null || true
-        sleep 2
-        pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-    fi
-    if ! echo "$pane_content" | grep -qE '(❯|>\s*$|\$\s*$|%\s*$)'; then
-        log "V8 MODE_CONTROL: Warning — terminal may not be ready after clear (no prompt detected), adding extra delay"
-        sleep 2
-    fi
-}
-
 # reset_terminal_context: force_normal step + clear_context step.
 # Params: target_pane force_normal clear_context provider
 reset_terminal_context() {
@@ -163,87 +124,6 @@ reset_terminal_context() {
 
     if [[ "$clear_context" == "true" ]]; then
         _clear_terminal_context "$target_pane" "$provider" || return 1
-    fi
-    return 0
-}
-
-# _stm_send_switch_command — send /model command via tmux and verify.
-# Params: target_pane model_cmd requires_model requires_model_strength terminal_id dispatch_basename
-_stm_send_switch_command() {
-    local target_pane="$1" model_cmd="$2" requires_model="$3"
-    local requires_model_strength="$4" terminal_id="$5" dispatch_basename="$6"
-
-    tmux_send_best_effort "$target_pane" C-u 2>/dev/null || true
-    sleep 0.3
-
-    local switch_send_ok=true
-    if ! tmux_send_best_effort "$target_pane" -l "/model $model_cmd"; then switch_send_ok=false; fi
-    if [[ "$switch_send_ok" == "true" ]]; then
-        sleep 1
-        if ! tmux_send_best_effort "$target_pane" Enter; then switch_send_ok=false; fi
-    fi
-
-    if [[ "$switch_send_ok" == "false" ]]; then
-        local fail_event
-        if ! fail_event=$(vnx_emit_model_switch_result \
-                "$requires_model" "failed" "" "$requires_model_strength" \
-                "$terminal_id" "$dispatch_basename"); then
-            log "V8 MODEL_ROUTING: $fail_event"
-            log_structured_failure "model_switch_blocked" \
-                "Dispatch blocked — required model switch command could not be sent" \
-                "requested_model=$requires_model terminal=$terminal_id"
-            return 1
-        fi
-        log "V8 MODEL_ROUTING: $fail_event"
-        return 0
-    fi
-
-    sleep 4  # Critical delay for model switch to complete
-    local pane_content switch_result
-    pane_content=$(tmux capture-pane -p -t "$target_pane" 2>/dev/null || true)
-    switch_result=$(vnx_verify_model_switch_output "$pane_content" "$model_cmd")
-    local result_event
-    if ! result_event=$(vnx_emit_model_switch_result \
-            "$requires_model" "$switch_result" "" "$requires_model_strength" \
-            "$terminal_id" "$dispatch_basename"); then
-        log "V8 MODEL_ROUTING: $result_event"
-        log_structured_failure "model_switch_blocked" \
-            "Dispatch blocked — required model switch could not be verified" \
-            "requested_model=$requires_model switch_result=$switch_result terminal=$terminal_id"
-        return 1
-    fi
-    log "V8 MODEL_ROUTING: $result_event"
-}
-
-# switch_terminal_model: model routing decision, normalization, send switch command, verify.
-# Params: target_pane requires_model requires_model_strength provider terminal_id dispatch_file
-switch_terminal_model() {
-    local target_pane="$1" requires_model="$2" requires_model_strength="$3"
-    local provider="$4" terminal_id="$5" dispatch_file="$6"
-
-    local model_pre_event
-    if ! model_pre_event=$(vnx_eval_model_routing \
-            "$requires_model" "$requires_model_strength" "$provider" \
-            "$terminal_id" "$(basename "$dispatch_file")"); then
-        log "V8 MODEL_ROUTING: $model_pre_event"
-        log_structured_failure "model_routing_blocked" \
-            "Dispatch blocked — required model routing pre-check failed" \
-            "requested_model=$requires_model provider=$provider terminal=$terminal_id"
-        return 1
-    fi
-    log "V8 MODEL_ROUTING: $model_pre_event"
-
-    local model_pre_result
-    model_pre_result=$(echo "$model_pre_event" | \
-        python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('result',''))" 2>/dev/null || echo "")
-
-    if [[ "$model_pre_result" == "needs_switch" ]]; then
-        local model_cmd="$requires_model"
-        # Normalize: "opus" -> "default" selects Opus 4.6 1M context (not 200K)
-        [[ "$model_cmd" == "opus" ]] && model_cmd="default"
-        log "V8 MODEL_ROUTING: Switching to model: $model_cmd (raw=$requires_model provider=$provider)"
-        _stm_send_switch_command "$target_pane" "$model_cmd" "$requires_model" \
-            "$requires_model_strength" "$terminal_id" "$(basename "$dispatch_file")" || return 1
     fi
     return 0
 }

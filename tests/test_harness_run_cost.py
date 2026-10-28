@@ -3,9 +3,10 @@
 Track ``kosten-per-model-in-het-grootboek``, deliverable K2a, second PR
 (ADR-043). Every builder run on ``claude``, ``deepseek-harness`` or
 ``glm-harness`` writes exactly one ``cost_ledger`` line per attempt, and those
-lanes stop writing the old ``emit_provider_cost`` event; codex and kimi keep the
-old event (K2b). Covered here, against the real model registry, real files and
-the real call sites:
+lanes stop writing the old ``emit_provider_cost`` event. Since K2b the codex and
+kimi builder lanes book their own line the same way (the builder half lives in
+``test_k2b_a_builder_cost_lines.py``). Covered here, against the real model
+registry, real files and the real call sites:
 
 - ``token_harvest`` gives the five ledger fields per assistant message,
   deduplicated on ``message.id``; a field a message lacks is ``None``, never 0;
@@ -613,15 +614,27 @@ class TestTheEnvelopeCallSite:
         assert receipt["cost_usd"] == 0.0
         assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
 
-    @pytest.mark.parametrize("provider,model", [("codex", "gpt-5.5"), ("kimi", "kimi-k3")])
-    def test_codex_and_kimi_keep_the_old_line_and_write_no_ledger_line(self, store, provider, model):
-        _govern(_envelope_spec(store, provider, model), _adapter(model, session_id="sess-not-read"))
+    @pytest.mark.parametrize("provider,model,token_usage", [
+        # Codex's input_tokens INCLUDES the cached part, so 14000 in with 10000
+        # cached is 4000 uncached (OI-2407).
+        ("codex", "gpt-5.5", {"input": 14000, "output": 500, "cache_hit": 10000}),
+        # Kimi's input is new tokens only: 4000 in, 10000 read from cache.
+        ("kimi", "kimi-k3", {"input": 4000, "output": 500, "cache_hit": 10000}),
+    ])
+    def test_codex_and_kimi_write_their_own_line_and_no_old_event(self, store, provider, model, token_usage):
+        # K2b inverted this: the two CLI lanes book their own line now, so the
+        # old event must be gone — a lane with both would double-count the run.
+        _govern(_envelope_spec(store, provider, model),
+                _adapter(model, session_id="sess-not-read", token_usage=token_usage))
 
-        assert _ledger_lines(store.ledger) == []
-        (old,) = _old_lines(store.ledger)
-        assert old["provider"] == provider and old["dispatch_id"] == "20261021-kp-env"
+        (line,) = _ledger_lines(store.ledger)
+        assert _old_lines(store.ledger) == [], "K2b books the codex/kimi lane itself"
+        assert line["run_id"] == f"{PROJECT}:envelope_govern:20261021-kp-env:1"
+        assert line["provider"] == provider and line["role"] == "builder"
+        assert line["billing"] == "subscription" and line["cost_usd"] == 0.0
+        assert line["tokens"]["input_uncached"] == 4000 and line["tokens"]["cache_hit"] == 10000
         (receipt,) = _receipts(store.receipts)
-        assert "cost_ledger_run_ids" not in receipt
+        assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
 
     def test_a_review_seat_on_a_harness_lane_keeps_the_old_line(self, store):
         _govern(_envelope_spec(store, "deepseek-harness", "deepseek-v4-pro", role="review-gate"),
@@ -927,16 +940,79 @@ class TestTheProviderDispatchCallSite:
         assert line["model"] == "deepseek-v4-pro"
         assert _old_lines(store.ledger) == []
 
-    def test_codex_keeps_the_old_line_and_writes_no_ledger_line(self, store):
+    def test_codex_writes_its_own_line_and_no_old_event(self, store):
+        # K2b inverted this: the codex builder's measured end books its line.
+        # The cache count is explicit (codex_spawn always emits it): codex's
+        # input_tokens includes the cached part, so a run with 0 cached input
+        # books its whole input as uncached (OI-2407).
         import provider_dispatch as pd
 
-        result = SimpleNamespace(token_usage={"input_tokens": 100, "output_tokens": 20}, completion_text="OK",
-                                 returncode=0, error=None, timed_out=False)
+        result = SimpleNamespace(
+            token_usage={"input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 0},
+            completion_text="OK", returncode=0, error=None, timed_out=False,
+        )
         pd._emit_governance(_pd_args("codex"), "codex", "gpt-5.5", result, START, END, "success")
 
-        assert _ledger_lines(store.ledger) == []
-        (old,) = _old_lines(store.ledger)
-        assert old["provider"] == "codex"
+        (line,) = _ledger_lines(store.ledger)
+        assert _old_lines(store.ledger) == []
+        assert line["run_id"] == f"{PROJECT}:provider_dispatch:20261021-kp-pd:1"
+        assert line["provider"] == "codex" and line["billing"] == "subscription"
+        assert line["tokens"]["input_uncached"] == 100 and line["tokens"]["output"] == 20
+
+    def test_a_codex_run_that_started_and_reported_no_usage_is_unknown_not_refused(self, store):
+        # K2b round 2: codex also returns no usage after a stream failure that
+        # followed model output. An error without explicit refusal evidence is
+        # an unknown-usage run, never a zero-token spawn_refused line.
+        import provider_dispatch as pd
+
+        result = SimpleNamespace(
+            token_usage=None, completion_text="", returncode=1,
+            error="stream disconnected before completion: idle timeout",
+            timed_out=False, spawn_refused=None,
+        )
+
+        cost, source, run_ids = pd._book_dispatch_cost(
+            _pd_args("codex"), "codex", "gpt-5.5", result, {}, (START, END), store.state,
+        )
+
+        (line,) = _ledger_lines(store.ledger)
+        assert line["usage_completeness"] == "unknown:no_usage_fields"
+        assert line["cost_source"] == "unavailable:no_usage_fields"
+        assert all(value is None for value in line["tokens"].values())
+        # A subscription line books 0 at the margin when nothing can be priced;
+        # the honest signal is the unavailable source, never a spawn refusal.
+        assert (cost, source, run_ids) == (0.0, "unavailable:no_usage_fields", [line["run_id"]])
+        assert pd._cli_spawn_refused(result) is None, "no usage alone is not refusal evidence"
+
+    def test_a_codex_run_with_explicit_refusal_evidence_still_books_the_zero_line(self, store):
+        import provider_dispatch as pd
+
+        result = SimpleNamespace(
+            token_usage=None, completion_text="", returncode=1,
+            error="codex_model_unresolved: no codex model in the registry",
+            timed_out=False, spawn_refused="codex_model_unresolved: no codex model in the registry",
+        )
+
+        cost, source, run_ids = pd._book_dispatch_cost(
+            _pd_args("codex"), "codex", "gpt-5.5", result, {}, (START, END), store.state,
+        )
+
+        (line,) = _ledger_lines(store.ledger)
+        assert line["usage_completeness"] == "complete"
+        assert line["cost_source"] == "unavailable:spawn_refused"
+        assert all(value == 0 for value in line["tokens"].values())
+        assert (cost, source) == (0.0, "unavailable:spawn_refused")
+
+    def test_the_refusal_helper_reads_only_the_explicit_field(self):
+        import provider_dispatch as pd
+
+        started_then_failed = SimpleNamespace(token_usage=None, error="stream failed", spawn_refused=None)
+        refused = SimpleNamespace(token_usage=None, error="binary missing", spawn_refused="binary missing")
+        no_field = SimpleNamespace(token_usage=None, error="stream failed")
+
+        assert pd._cli_spawn_refused(started_then_failed) is None
+        assert pd._cli_spawn_refused(no_field) is None, "no inference from error + no usage"
+        assert pd._cli_spawn_refused(refused) == "binary missing"
 
     def test_a_plan_gate_seat_keeps_the_old_line(self, store):
         import provider_dispatch as pd

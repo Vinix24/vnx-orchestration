@@ -1,0 +1,20 @@
+{
+  "advisory_count": 1,
+  "blocking_count": 0,
+  "blocking_findings": [
+    {
+      "description": "app/unwired.py:8 \u2014 zero callers outside definition file",
+      "severity": "advisory",
+      "title": "Unwired function: orphan_symbol"
+    }
+  ],
+  "branch": "dispatch/ge-6-fixture",
+  "gate": "wiring_gate",
+  "pr_number": 4242,
+  "provider": "ast_grep",
+  "required": false,
+  "skipped_symbols": [],
+  "status": "advisory",
+  "summary": "1 unwired symbol(s): orphan_symbol",
+  "total_checked": 2
+}
