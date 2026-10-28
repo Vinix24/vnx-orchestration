@@ -95,7 +95,13 @@ _track_pattern_success_fallback() {
     # consulted.
     case "$event_type" in
         task_complete) ;;
-        dispatch_finished) status=$(rp_end_outcome "$receipt_json") ;;
+        dispatch_finished)
+            # A dead end-line helper is a failure, not a verdict: the failure is
+            # recorded (end_line_helper_failed) and no credit is given.
+            if ! status=$(rp_end_outcome "$receipt_json"); then
+                status=""
+            fi
+            ;;
         *) return 0 ;;
     esac
     [ "$status" != "success" ] && return 0
@@ -225,9 +231,15 @@ update_track_progress() {
     local completion_success="false"
     if [ "$_rf_event_type" = "task_complete" ] && [ "$_rf_status" = "success" ]; then
         completion_success="true"
-    elif [ "$_rf_event_type" = "dispatch_finished" ] \
-         && [ "$(rp_end_outcome "$receipt_json")" = "success" ]; then
-        completion_success="true"
+    elif [ "$_rf_event_type" = "dispatch_finished" ]; then
+        # The helper's exit status is checked before its verdict is believed: a
+        # failed helper (recorded as end_line_helper_failed) is no close, never
+        # an unread empty string compared against "success".
+        local dispatch_outcome=""
+        if dispatch_outcome=$(rp_end_outcome "$receipt_json") \
+           && [ "$dispatch_outcome" = "success" ]; then
+            completion_success="true"
+        fi
     fi
 
     if [ "$completion_success" = "true" ]; then

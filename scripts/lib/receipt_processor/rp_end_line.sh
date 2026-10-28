@@ -45,14 +45,48 @@ _rp_end_line_project_lib_dir() {
     return 0
 }
 
+# _rp_end_line_report_failure <message> <helper-exit-status>
+#   Record a failed end-line helper. The processor log is the first witness when
+#   rp_logging.sh is loaded; the plain one-line record goes to stderr as well,
+#   because log_structured_failure builds its JSON payload with the very python3
+#   that just failed — when python3 is broken that structured line carries no
+#   payload and would be the only, empty, record of the failure. A helper
+#   failure nobody can see is the fail-open this file exists to prevent.
+_rp_end_line_report_failure() {
+    local message="${1:-}"
+    local status="${2:-1}"
+    if declare -F log_structured_failure >/dev/null 2>&1; then
+        log_structured_failure "end_line_helper_failed" "$message" "exit=$status"
+    fi
+    printf '[end_line_helper_failed] exit=%s %s\n' "$status" "$message" >&2
+}
+
 # _rp_end_line_fields <record-json>
 #   Prints "<status>\t<outcome>": the status the record's end line carries and
 #   classify_event_outcome's verdict on it (success|failure|none). Internal —
-#   both public accessors are cut from one call, so a record costs one python
+#   both public accessors read one call, so a record costs one python
 #   invocation whichever of the two a caller needs.
+#
+#   Fail-closed on the helper itself: the python3 exit status is read BEFORE any
+#   field is printed, and its stderr is kept. A helper that dies (missing
+#   module, broken interpreter, failing argv) prints NOTHING on stdout and
+#   returns 2 after recording the diagnostic — never the empty-but-successful
+#   "<empty status>\t<none>" of a record whose end_state merely does not
+#   resolve. Callers must tell those two apart; the accessors below do.
 _rp_end_line_fields() {
     local record="${1:-}"
-    printf '%s' "$record" | python3 -c '
+    local output status stderr_line stderr_file
+
+    # stderr is captured in its own file so a failed helper's diagnostic cannot
+    # be folded into the field read (stdout) or thrown away.
+    if ! stderr_file="$(mktemp "${TMPDIR:-/tmp}/rp_end_line.XXXXXX")"; then
+        _rp_end_line_report_failure "cannot create a temp file for the helper's stderr" 2
+        return 2
+    fi
+
+    # A here-string feeds the record; no pipe means no exit status to mask
+    # (the assignment carries python3's own status, so no pipefail is needed).
+    output="$(python3 -c '
 import json
 import sys
 
@@ -77,7 +111,17 @@ if isinstance(record, dict):
         status = str(record.get("status") or "")
     outcome = classify_event_outcome(event_type, status) or "none"
 sys.stdout.write("%s\t%s\n" % (status, outcome))
-' "${_RP_END_LINE_MODULE_DIR:-}" "$(_rp_end_line_project_lib_dir)" 2>/dev/null
+' "${_RP_END_LINE_MODULE_DIR:-}" "$(_rp_end_line_project_lib_dir)" <<< "$record" 2>"$stderr_file")"
+    status=$?
+    stderr_line="$(head -n 1 "$stderr_file")"
+    rm -f "$stderr_file"
+
+    if [ "$status" -ne 0 ]; then
+        _rp_end_line_report_failure \
+            "${stderr_line:-python3 exited $status with no stderr}" "$status"
+        return 2
+    fi
+    printf '%s\n' "$output"
 }
 
 # rp_is_end_event <event_type>
@@ -110,14 +154,22 @@ rp_is_completion_hook() {
 #   line (read literally, exactly as before) and the end_state projection for a
 #   dispatch_finished. Empty when a dispatch_finished has no resolvable
 #   end_state — callers must treat that as "no status", never as a success.
+#   Returns 2 with nothing on stdout when the end_line helper itself failed:
+#   that is a failure, not an empty status, and no caller may read it as one.
 rp_end_status() {
-    _rp_end_line_fields "${1:-}" | cut -f1
+    local fields
+    fields="$(_rp_end_line_fields "${1:-}")" || return 2
+    printf '%s\n' "${fields%%$'\t'*}"
 }
 
 # rp_end_outcome <record-json>
 #   classify_event_outcome's verdict for the record: success|failure|none.
 #   Use this where a reader needs the governed meaning rather than the literal
 #   status (e.g. "is this line a success?"), so the vocabulary stays in Python.
+#   Returns 2 with nothing on stdout when the end_line helper itself failed —
+#   callers must not take that for the ignorable "none" verdict.
 rp_end_outcome() {
-    _rp_end_line_fields "${1:-}" | cut -f2
+    local fields
+    fields="$(_rp_end_line_fields "${1:-}")" || return 2
+    printf '%s\n' "${fields#*$'\t'}"
 }

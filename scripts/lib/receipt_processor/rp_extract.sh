@@ -27,8 +27,20 @@ extract_receipt_fields() {
     # "status = success" check downstream stays false for it (fail-closed) and
     # no reader can be handed a status the ledger did not earn. Legacy lines
     # keep the literal jq read above, unchanged.
+    #
+    # Two different things leave _rf_status empty, and neither is a success: an
+    # end_state that does not resolve (a valid line, just no verdict) and an
+    # end-line helper that could not run (a failing subprocess, already recorded
+    # as end_line_helper_failed by rp_end_line.sh). A non-zero return from
+    # rp_end_status is never dropped here — it is handled, and the status stays
+    # empty so every downstream "= success" test remains false.
     if [ "$_rf_event_type" = "dispatch_finished" ]; then
-        _rf_status=$(rp_end_status "$json")
+        local end_status
+        if end_status=$(rp_end_status "$json"); then
+            _rf_status="$end_status"
+        else
+            _rf_status=""
+        fi
     fi
 }
 

@@ -192,11 +192,14 @@ _psr_update_dispatch_outcome() {
     [ -n "$dispatch_id" ] || return 0
     case "$event_type" in task_complete|task_failed|task_timeout|dispatch_finished) ;; *) return 0 ;; esac
     # ADR-045 §2: a dispatch_finished has no status of its own — it is projected
-    # from end_state (rp_end_status, via extract_receipt_fields). No resolvable
-    # end_state means there is no outcome to record: skip the write instead of
-    # persisting an invented status (fail-closed), and say so.
+    # from end_state (rp_end_status, via extract_receipt_fields). Two different
+    # things reach here with no status and both mean "record nothing" rather
+    # than persist an invented one: an end_state that does not resolve, and an
+    # end-line helper that could not run (rp_end_line.sh already logged
+    # end_line_helper_failed for the second, so this is the second witness, not
+    # the only one). Fail-closed either way.
     if [ -z "$status" ]; then
-        log "WARN" "OUTCOME: dispatch=$dispatch_id event=$event_type has no resolvable end_state — outcome not recorded"
+        log "WARN" "OUTCOME: dispatch=$dispatch_id event=$event_type has no resolvable status (no end_state or end-line helper failure) — outcome not recorded"
         return 0
     fi
     # Report-derived values (dispatch_id/status/report_path/timestamp) are passed as argv, NOT

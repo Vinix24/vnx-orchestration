@@ -228,6 +228,115 @@ def test_extract_receipt_fields_projects_end_state(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
+# rp_end_line.sh — a failing helper is a failure, never an empty status
+# ---------------------------------------------------------------------------
+
+# The subject line the stub interpreter writes: it must survive as far as the
+# processor log or stderr. Folding it into 2>/dev/null is exactly the defect.
+_STUB_STDERR_LINE = "stub python3: forced failure"
+
+# Reads both accessors, then the status extract_receipt_fields projects and the
+# completion-hook verdict that follows from it. `status_rc`/`outcome_rc` keep
+# the accessors' own exit status; the record comes from a file so JSON braces
+# never reach str.format.
+_END_LINE_BODY = """
+JSON="$(cat "{record}")"
+status_rc=0
+outcome_rc=0
+status_out=$(rp_end_status "$JSON") || status_rc=$?
+outcome_out=$(rp_end_outcome "$JSON") || outcome_rc=$?
+extract_receipt_fields "$JSON"
+if rp_is_completion_hook "$_rf_event_type" "$_rf_status"; then hook=yes; else hook=no; fi
+printf 'status_rc=%s\\nstatus_out=%s\\noutcome_rc=%s\\noutcome_out=%s\\nrf_status=%s\\nhook=%s\\n' \\
+    "$status_rc" "$status_out" "$outcome_rc" "$outcome_out" "$_rf_status" "$hook"
+"""
+
+
+def _install_failing_python3(root: Path) -> Path:
+    """A `python3` earlier on PATH that exits 7 and says why on stderr."""
+    stub_dir = root / "stub-bin"
+    stub_dir.mkdir(parents=True, exist_ok=True)
+    stub = stub_dir / "python3"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"echo '{_STUB_STDERR_LINE}' >&2\n"
+        "exit 7\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub_dir
+
+
+def _parse_end_line(stdout: str) -> dict[str, str]:
+    got: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        key, _, value = line.partition("=")
+        got[key] = value
+    return got
+
+
+def test_end_line_accessors_fail_closed_on_helper_failure(tmp_path: Path):
+    """The codex reproduction: python3 exits 7.
+
+    Both accessors must return non-zero with nothing on stdout — today they
+    return 0 with an empty status, which is indistinguishable from a valid line
+    without an end_state. The helper's stderr line must reach the processor log
+    (or stderr when not defined), and the completion hook must not fire.
+    """
+    dirs = _sandbox(tmp_path / "failing-helper")
+    stub_dir = _install_failing_python3(tmp_path / "failing-helper")
+    record = _write_record(
+        dirs, {"event_type": "dispatch_finished", "end_state": "completed", "dispatch_id": "dlv-stub"})
+
+    result = _run(dirs, f'export PATH="{stub_dir}:$PATH"\n' + _END_LINE_BODY.format(record=record))
+    assert result.returncode == 0, result.stderr
+
+    got = _parse_end_line(result.stdout)
+    assert got["status_rc"] == "2", f"rp_end_status exited {got['status_rc']}, expected 2"
+    assert got["status_out"] == "", f"rp_end_status printed {got['status_out']!r} on a failed helper"
+    assert got["outcome_rc"] == "2", f"rp_end_outcome exited {got['outcome_rc']}, expected 2"
+    assert got["outcome_out"] == "", f"rp_end_outcome printed {got['outcome_out']!r} on a failed helper"
+
+    # No status projected into the caller's field, and no completion hook.
+    assert got["rf_status"] == "", f"_rf_status is {got['rf_status']!r} after a failed helper"
+    assert got["hook"] == "no", "the completion hook fired for a dispatch_finished with a failed helper"
+
+    # The diagnostic survived: in the structured-failure log or on stderr.
+    combined = result.stdout + result.stderr + _log(dirs)
+    assert "end_line_helper_failed" in combined, f"no structured failure recorded: {combined!r}"
+    assert _STUB_STDERR_LINE in combined, f"helper stderr was thrown away: {combined!r}"
+
+
+def test_end_line_accessors_normal_path_unchanged(tmp_path: Path):
+    """With the real python3 the accessors behave exactly as on 4ea92b5b."""
+    dirs = _sandbox(tmp_path / "normal-helper")
+    completed = _write_record(dirs, {"event_type": "dispatch_finished", "end_state": "completed"})
+
+    result = _run(dirs, _END_LINE_BODY.format(record=completed))
+    assert result.returncode == 0, result.stderr
+    got = _parse_end_line(result.stdout)
+    assert got["status_rc"] == "0"
+    assert got["status_out"] == "success"
+    assert got["outcome_rc"] == "0"
+    assert got["outcome_out"] == "success"
+    assert got["rf_status"] == "success"
+    assert got["hook"] == "yes"
+
+    missing = _write_record(dirs, {"event_type": "dispatch_finished"})
+    result = _run(dirs, _END_LINE_BODY.format(record=missing))
+    assert result.returncode == 0, result.stderr
+    got = _parse_end_line(result.stdout)
+    assert got["status_rc"] == "0", "a missing end_state is not a helper failure"
+    assert got["status_out"] == ""
+    assert got["outcome_rc"] == "0"
+    assert got["outcome_out"] == "none"
+    assert got["rf_status"] == ""
+    assert got["hook"] == "no"
+
+
+# ---------------------------------------------------------------------------
 # rp_state.sh — the terminal_state shadow write
 # ---------------------------------------------------------------------------
 
