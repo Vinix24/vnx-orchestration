@@ -118,6 +118,8 @@ the old replay demo was retired.)
 
 There are two binaries on purpose. The pip `vnx` covers the essentials: `init`, `migrate`, `doctor`, `status`, `dispatch-agent`, `track`, `pool`, `dream`, and as of `#1462` also `gate-check`, the same deterministic pre-merge GO/HOLD check the fabric's own CI runs, now usable without a checkout. It also covers `horizon`/`objective`, `deliverable`, `attest`, `handoff`, `role`, `update`, `release`, `learning`, `fabric-audit`, `subsystems`, `version`, `pr-ready` and `worktree-release`. `providers` and `guard` are on main, not yet released. Checkout-only operator commands still live behind `./bin/vnx`: `new-worktree` and the rest of the operator surface (worktree lifecycle, snapshot/restore, staging). For those, clone the repository and run `pip install -e .` from the checkout.
 
+For a shared central install, measure a rollout before it happens. The [install-central runbook](docs/operations/install-central-runbook.md) section "Before a rollout" covers the read-only preflight and the four classes it blocks on, release verification, the `release:main-drift` doctor check, and the three steps that stay manual: the release itself, the `current` flip and reloading the launchd jobs.
+
 ## Your first dispatch
 
 I ran this end to end in a scratch directory on 2026-08-12 to write this section. Two things broke on a completely fresh project, and the Install snippet above does not warn about either.
