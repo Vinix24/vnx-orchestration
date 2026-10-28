@@ -21,6 +21,7 @@ import fcntl
 import itertools
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -140,16 +141,41 @@ def _claim_dir(dest_dir: Path, base: str, *, create: bool) -> Path:
             raise SalvageError(f"create {candidate}: {exc}") from exc
 
 
-def _write_bundle(dir_path: Path, artifact: str, worktree_path: Path, remote: str) -> None:
-    tmp = dir_path / f".{artifact}.tmp"
+def _discard_scratch(scratch: Path) -> None:
+    """Remove the staging directory of one ``_write_bundle`` call.
+
+    A leftover would sit in the destination as state no MANIFEST line explains,
+    so a failed removal is a SalvageError and never silence.
+    """
     try:
-        _run_git(["bundle", "create", str(tmp), "HEAD", "--not", f"--remotes={remote}"],
+        shutil.rmtree(scratch)
+    except OSError as exc:
+        raise SalvageError(f"remove scratch {scratch.name}: {exc}") from exc
+
+
+def _write_bundle(dir_path: Path, artifact: str, worktree_path: Path, remote: str) -> None:
+    """Publish the bundle under ``dir_path / artifact`` by hard link.
+
+    The staging directory is named by ``tempfile.mkdtemp``, never by the
+    destination (OI-1486): a scratch path derived from the destination alone is
+    one path for every writer of that artifact, so two writers stage into the
+    same file, overwrite each other's bytes, and the first to publish lands the
+    other's content under its own name. Each call owns the directory it stages
+    in and removes it when it is done, whether or not the bundle was written.
+    """
+    try:
+        scratch = Path(tempfile.mkdtemp(dir=dir_path, prefix=f".{artifact}."))
+    except OSError as exc:
+        raise SalvageError(f"write {artifact}: {exc}") from exc
+    try:
+        staged = scratch / artifact
+        _run_git(["bundle", "create", str(staged), "HEAD", "--not", f"--remotes={remote}"],
                  worktree_path, "create bundle")
-        os.link(tmp, dir_path / artifact)
+        os.link(staged, dir_path / artifact)
     except OSError as exc:
         raise SalvageError(f"write {artifact}: {exc}") from exc
     finally:
-        tmp.unlink(missing_ok=True)
+        _discard_scratch(scratch)
 
 
 def _append_manifest(dest_dir: Path, line: str) -> None:

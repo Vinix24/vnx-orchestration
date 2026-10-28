@@ -416,6 +416,61 @@ def test_two_trees_with_the_same_basename_keep_their_own_directories(fx: Fixture
     assert two.salvage_dir.name in lines[1]
 
 
+def test_two_writers_of_one_artifact_never_share_a_scratch_path(
+        fx: Fixture, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The staged bundle is named for the call, never for the destination (OI-1486).
+
+    A scratch name derived from the destination alone is one path for every
+    writer of that destination: two writers overwrite each other's bytes and the
+    first to publish lands the other's content under its own name. Each call
+    stages inside a directory ``tempfile.mkdtemp`` names, so two stagings of one
+    destination can never pick the same path.
+    """
+    wt = fx.worktree()
+    fx.commit(wt, "local.txt", "local\n", "worker: local work")
+    dest = fx.tmp / "publish"
+    dest.mkdir()
+    staged_in: list[Path] = []
+    real_mkdtemp = ws.tempfile.mkdtemp
+
+    def recording_mkdtemp(*args, **kwargs) -> str:
+        path = real_mkdtemp(*args, **kwargs)
+        staged_in.append(Path(path))
+        return path
+
+    monkeypatch.setattr(ws.tempfile, "mkdtemp", recording_mkdtemp)
+    ws._write_bundle(dest, "one.bundle", wt, "origin")
+    (dest / "one.bundle").unlink()  # the same artifact, staged a second time
+    ws._write_bundle(dest, "one.bundle", wt, "origin")
+
+    assert len(staged_in) == 2, staged_in
+    assert staged_in[0] != staged_in[1], (
+        f"both writers staged in {staged_in[0]} — one scratch path for one "
+        "destination is shared, so the writers overwrite each other (OI-1486)"
+    )
+    for scratch in staged_in:
+        assert scratch.parent == dest, f"{scratch} is not inside the destination"
+        assert scratch.name.startswith(".one.bundle."), (
+            f"{scratch.name} carries no marker tying it to this write")
+        assert not scratch.exists(), f"a scratch directory survived the publish: {scratch}"
+    assert [p.name for p in dest.iterdir()] == ["one.bundle"]
+    assert (dest / "one.bundle").stat().st_size > 0
+
+
+def test_a_failed_bundle_leaves_no_scratch_behind(fx: Fixture) -> None:
+    """A git failure must not leave a staging directory in the destination."""
+    dest = fx.tmp / "publish"
+    dest.mkdir()
+    not_a_repo = fx.tmp / "not-a-repo"
+    not_a_repo.mkdir()
+
+    with pytest.raises(ws.SalvageError) as failure:
+        ws._write_bundle(dest, "one.bundle", not_a_repo, "origin")
+
+    assert "create bundle" in str(failure.value), failure.value
+    assert list(dest.iterdir()) == [], "the scratch directory outlived the failed bundle"
+
+
 def test_a_file_at_the_target_path_is_never_overwritten(fx: Fixture) -> None:
     wt = fx.worktree()
     head = head_of(wt)
