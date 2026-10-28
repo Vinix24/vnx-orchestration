@@ -28,13 +28,21 @@ import sys
 import time
 from pathlib import Path
 
+# The rollback route starts this file as `python -m scripts.lib.subprocess_dispatch`
+# (pool_manager._pool_worker_command), where the script's own directory is NOT on
+# sys.path. Put it there before the first sibling import, exactly like
+# pool_worker_runner.py does for the same reason.
+_LIB_DIR = Path(__file__).resolve().parent
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
 # OI-1107: Extract Role: header from instruction text when --role is not passed.
 _ROLE_HEADER_RE = re.compile(r"^Role:\s*(\S+)", re.MULTILINE)
 # Single canonical sentinel — imported from dispatch_identity (dispatch-20260804-190000).
 # OI-981: a deliberately-chosen "backend-developer" is structurally
 # distinguishable from a failed role resolution — the sentinel is
 # "identity_unresolved", never the empty string and never a real role name.
-from dispatch_identity import _IDENTITY_UNRESOLVED
+from dispatch_identity import _IDENTITY_UNRESOLVED  # noqa: E402  (after the scripts/lib path guard above)
 _ROLE_FALLBACK = _IDENTITY_UNRESOLVED
 
 
@@ -42,8 +50,6 @@ def _extract_role_from_instruction(instruction: str) -> str | None:
     """Return the role from a 'Role: <name>' header in the instruction, or None."""
     m = _ROLE_HEADER_RE.search(instruction)
     return m.group(1) if m else None
-
-sys.path.insert(0, str(Path(__file__).parent))
 
 from subprocess_adapter import SubprocessAdapter
 from headless_context_tracker import HeadlessContextTracker

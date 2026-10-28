@@ -25,6 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+_LIB_DIR = str(Path(__file__).resolve().parent)
+if _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
 logger = logging.getLogger(__name__)
 
 _POLL_INTERVAL = 5.0       # seconds between pending/ scans
@@ -228,9 +232,14 @@ def _run_governance_pre_check(
 # ---------------------------------------------------------------------------
 
 def _is_terminal_headless(terminal_id: str) -> bool:
-    """Return True when VNX_ADAPTER_TX=subprocess is configured."""
-    env_key = f"VNX_ADAPTER_{terminal_id}"
-    return os.environ.get(env_key, "").lower() == "subprocess"
+    """Return True when the terminal delivers on the headless subprocess lane.
+
+    T-G1: T1-T3 are always headless and their adapter variable is not read.
+    T0 still opts in with ``VNX_ADAPTER_T0=subprocess``.
+    """
+    from terminal_lane import is_headless_terminal
+
+    return is_headless_terminal(terminal_id)
 
 
 def _load_t0_state(state_dir: Path) -> Dict[str, Any]:
