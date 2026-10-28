@@ -160,10 +160,12 @@ class TestCleanupWorktreesRunsAgainstTheProject:
         dest = fake_home / "Library" / "LaunchAgents" / f"{CLEANUP_WORKTREES}.project-alpha.plist"
         data = plistlib.loads(dest.read_bytes())
         program_args = data.get("ProgramArguments")
-        # /bin/bash -c "<command>" — the command is the last array element.
-        command = program_args[-1] if isinstance(program_args, list) and program_args else ""
-        assert f"--repo-root {project_checkout}" in command, (
-            f"installed ProgramArguments {command!r} does not pass --repo-root "
+        # Pinned start (PR-4): /bin/bash <launcher> <project id> <script> <script args...>.
+        assert program_args[:2] == ["/bin/bash", f"{fake_engine_root}/scripts/launchd/vnx_pinned_launcher.sh"]
+        assert program_args[2] == "project-alpha"
+        assert program_args[3] == "scripts/cleanup_reviewed_worktrees.py"
+        assert program_args[4:] == ["--repo-root", str(project_checkout), "--apply"], (
+            f"installed ProgramArguments {program_args!r} does not pass --repo-root "
             f"for the project checkout {project_checkout}"
         )
         env = data.get("EnvironmentVariables") or {}
@@ -239,9 +241,9 @@ class TestVnxInitSweepsTheProject:
         assert init_cmd.vnx_init(ns) == 0
 
         data = _read_install(home, "alpha")
-        command = data["ProgramArguments"][-1]
-        assert f"--repo-root {project.resolve()} " in command + " "
-        assert str(engine) not in command.split("--repo-root", 1)[1]
+        argv = data["ProgramArguments"]
+        assert argv[4:] == ["--repo-root", str(project.resolve()), "--apply"]
+        assert str(engine) not in argv[5], "the sweep must target the project, never the engine"
         assert data["EnvironmentVariables"]["VNX_PROJECT_ROOT"] == str(project.resolve())
 
     def test_installer_without_project_root_refuses(self, tmp_path):
@@ -294,7 +296,7 @@ class TestReloadPlistResolvesTheRootFromTheRegistry:
         result = self._run(home, engine, "alpha")
         assert result.returncode == 0, result.stdout + result.stderr
         data = _read_install(home, "alpha")
-        assert f"--repo-root {alpha.resolve()} " in data["ProgramArguments"][-1] + " "
+        assert data["ProgramArguments"][4:] == ["--repo-root", str(alpha.resolve()), "--apply"]
         assert data["EnvironmentVariables"]["VNX_PROJECT_ROOT"] == str(alpha.resolve())
 
     def test_explicit_root_of_another_project_is_refused_and_nothing_is_written(

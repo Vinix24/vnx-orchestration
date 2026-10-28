@@ -83,10 +83,20 @@ BLOCKING_EVENT_TYPES = frozenset({
 # plan-gate lane reports its status only through it. task_failed/task_timeout
 # carry the lane's failure; what their status means is event_outcome_semantics'
 # call, not a copy of its sets here.
+#
+# ADR-045 (audit-spoor-kern K-1): dispatch_finished is the new single end line
+# of an attempt, so it belongs in the same writer-A family as task_complete —
+# a legacy ledger and a lifecycle ledger read the same way. report_ingested is
+# a REPORT type (it is the report arriving) but never an outcome: the report is
+# not a second end line, so it is not in OUTCOME_EVENT_TYPES and
+# _is_writer_a/_is_writer_b exclude the two non-outcome lifecycle types
+# explicitly. dispatch_started precedes the work and is never an outcome.
 OUTCOME_EVENT_TYPES = frozenset({
     "task_complete", "task_completed", "subprocess_completion", "task_failed", "task_timeout",
+    "dispatch_finished",
 })
-REPORT_EVENT_TYPES = frozenset({"task_complete", "task_completed"})
+REPORT_EVENT_TYPES = frozenset({"task_complete", "task_completed", "report_ingested"})
+NON_OUTCOME_EVENT_TYPES = frozenset({"dispatch_started", "report_ingested"})
 
 INVALID_DISPATCH_IDS = frozenset({"", "unknown", "?", "none", "null"})
 GATE_DISPATCH_RE = re.compile(r"^(?P<gate>[a-z0-9]+)-gate-pr(?P<pr>\d+)-\d+$")
@@ -145,6 +155,8 @@ def noise_reason(receipt: Dict[str, Any], project_id: str) -> Optional[str]:
 
 def _is_writer_a(receipt: Dict[str, Any]) -> bool:
     event_type = outcome_event_type(receipt)
+    if event_type in NON_OUTCOME_EVENT_TYPES:
+        return False  # ADR-045: a start or a report line, never an outcome
     if event_type == "task_timeout" and classify_event_outcome(
             event_type, receipt.get("status")) is None:
         return False  # pending (no_confirmation): not a terminal outcome
@@ -163,7 +175,10 @@ def _verdict_status(receipt: Dict[str, Any]) -> str:
 
 
 def _is_writer_b(receipt: Dict[str, Any]) -> bool:
-    return (outcome_event_type(receipt) in REPORT_EVENT_TYPES
+    event_type = outcome_event_type(receipt)
+    if event_type in NON_OUTCOME_EVENT_TYPES:
+        return False  # ADR-045: report_ingested is a report type, never an outcome
+    return (event_type in REPORT_EVENT_TYPES
             and receipt.get("receipt_kind") in ("dispatch", None)
             and bool(receipt.get("report_file")))
 

@@ -13,6 +13,12 @@ now decides both sides.
 The last group pins the slot lock under every request writer GE-4c-2 wired:
 the three write sites of ``_request_wiring_gate`` and the kimi, glm and
 harness-seat request writers. Nothing here mocks the writer under test.
+
+GE-7 (dlv-20e9ed688893) changed what the three wiring_gate groups write, on
+purpose: the gate is decided at request time, so it now books its outcome
+through ``commit_gate_outcome``. The request record carries the request's own
+lifecycle word where it used to carry the gate's verdict word, and each group
+also asserts the result record. The returned payload keeps the verdict word.
 """
 
 from __future__ import annotations
@@ -281,7 +287,9 @@ def test_the_wiring_gate_result_write_takes_the_slot_lock(env, monkeypatch):
 
     assert (payload["status"], payload["total_checked"]) == ("pass", 12)
     on_disk = _json(_request_slot(env, "wiring_gate"))
-    assert (on_disk["status"], on_disk["gate"]) == ("pass", "wiring_gate")
+    # The request's own lifecycle word since GE-7; the record keeps "pass".
+    assert (on_disk["status"], on_disk["gate"]) == ("completed", "wiring_gate")
+    assert _json(_result_slot(env, "wiring_gate"))["status"] == "pass"
 
 
 def test_the_wiring_gate_error_write_takes_the_slot_lock(env, monkeypatch):
@@ -294,7 +302,8 @@ def test_the_wiring_gate_error_write_takes_the_slot_lock(env, monkeypatch):
 
     assert (payload["status"], payload["blocking_count"]) == ("fail", 1)
     assert "ast-grep exited 3" in payload["summary"]
-    assert _json(_request_slot(env, "wiring_gate"))["status"] == "fail"
+    assert _json(_request_slot(env, "wiring_gate"))["status"] == "completed"
+    assert _json(_result_slot(env, "wiring_gate"))["status"] == "fail"
 
 
 def test_the_wiring_gate_unavailable_write_takes_the_slot_lock(env, monkeypatch):
@@ -304,6 +313,7 @@ def test_the_wiring_gate_unavailable_write_takes_the_slot_lock(env, monkeypatch)
 
     assert (payload["status"], payload["reason"]) == ("not_executable", "provider_not_installed")
     assert _json(_request_slot(env, "wiring_gate"))["status"] == "not_executable"
+    assert _json(_result_slot(env, "wiring_gate"))["status"] == "not_executable"
 
 
 @pytest.mark.parametrize("writer,gate", [("_request_kimi", "kimi_gate"), ("_request_glm", "glm_gate")])

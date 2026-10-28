@@ -173,9 +173,12 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=False)
 
 
-def _unpushed_count(repo_root: Path, head: str | None) -> int | None:
+def unpushed_count(repo_root: Path, head: str | None) -> int | None:
     """Commits on *head* that no ``origin/*`` ref reaches; ``None`` when the
-    count cannot be read."""
+    count cannot be read.
+
+    The one measurement of "every commit of this HEAD is on origin", shared
+    with ``cleanup_reviewed_worktrees``'s evidence for an unlocked tree."""
     if not head:
         return None
     proc = _run_git(["rev-list", "--count", head, "--not", "--remotes=origin"], cwd=repo_root)
@@ -282,7 +285,7 @@ def _entry_from_record(
         locked=lock_reason is not None,
         lock_reason=lock_reason or None,
         dirty_count=None if missing else dirty_count(path, repo_root),
-        unpushed=_unpushed_count(repo_root, head),
+        unpushed=unpushed_count(repo_root, head),
         age_days=_age_days(path, now),
         kind=kind,
         owned=owned,

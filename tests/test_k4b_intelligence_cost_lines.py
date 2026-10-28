@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -220,6 +221,41 @@ def test_session_without_a_project_books_no_line_and_warns_once(store, monkeypat
     warnings = [message for level, message in logs if level == "WARNING"]
     assert len(warnings) == 1
     assert "names no project" in warnings[0] and "not booked" in warnings[0]
+
+
+def test_classifier_run_with_a_session_books_its_project_and_its_identity(store, monkeypatch):
+    """K4b's project and K6a's identity meet on one line (the merge of #2313/#2318).
+
+    ``record_classifier_run`` books under the project it is given — the session's
+    own, never the process's ``VNX_PROJECT_ID`` — and names the transcript it read
+    as ``<provider>:<session_id>``. Neither behaviour may be dropped to make the
+    other one fit.
+    """
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    session_id, project = "cls-k4b-k6a-merge", "other-proj"
+    transcript = store.projects / "-fake-worktree" / f"{session_id}.jsonl"
+    transcript.parent.mkdir(parents=True, exist_ok=True)
+    transcript.write_text(json.dumps({
+        "type": "assistant", "timestamp": "2026-10-21T09:01:00Z",
+        "message": {"id": "m1", "role": "assistant", "model": "deepseek-v4-pro", "usage": {
+            "input_tokens": 1000, "output_tokens": 200, "cache_read_input_tokens": 4000,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0},
+        }},
+    }) + "\n", encoding="utf-8")
+    started = datetime(2026, 10, 21, 9, 0, tzinfo=timezone.utc)
+
+    record, reason = harness_run_cost.record_classifier_run(
+        provider="deepseek-harness", model="deepseek-v4-pro", session_id=session_id,
+        started=started, ended=started + timedelta(minutes=30), project_id=project,
+    )
+
+    assert reason is None
+    assert record["project_id"] == project
+    assert cost_ledger.split_run_id(record["run_id"])[0] == project
+    assert record["transcript_identity"] == f"deepseek-harness:{session_id}"
+    booked, = _records(store)
+    assert (booked["project_id"], booked["transcript_identity"]) == (
+        project, f"deepseek-harness:{session_id}")
 
 
 def test_dream_kimi_call_books_one_intelligence_line(store, monkeypatch):

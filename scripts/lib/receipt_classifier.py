@@ -39,6 +39,7 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from classifier_providers import ClassifierProvider, ClassifierResult, get_provider  # noqa: E402
+from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -126,17 +127,20 @@ def should_classify(receipt: Dict[str, Any], mode: Optional[str] = None) -> bool
     """Whether the receipt is a candidate for classification at all.
 
     Sampling rules per mode:
-      - batch / per_receipt: any task_complete / task_failed / task_timeout receipt.
+      - batch / per_receipt: any completion-family / task_failed / task_timeout
+        receipt (``event_outcome_semantics.COMPLETION_EVENT_TYPES`` plus the two
+        failure types).
       - failures_direct: only failures fire directly; successes are queued for batch.
 
     State-mutation, ack, dispatch_sent and other lightweight events are skipped
-    because they carry no outcome signal.
+    because they carry no outcome signal; so are a dispatch's start and report
+    lines, which are never an outcome (ADR-045 §2).
     """
     if not isinstance(receipt, dict):
         return False
     event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
-    OUTCOME_EVENTS = {"task_complete", "task_completed", "task_failed", "task_timeout"}
-    if event_type not in OUTCOME_EVENTS:
+    outcome_events = COMPLETION_EVENT_TYPES | {"task_failed", "task_timeout"}
+    if event_type not in outcome_events:
         return False
     return True
 

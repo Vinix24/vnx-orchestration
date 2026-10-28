@@ -32,13 +32,9 @@ from .idempotency import (
     _resolve_state_dir_env_first,
     _write_receipt_under_lock,
 )
+from .lifecycle import stamp_lifecycle
 from .receipt_finalize import classify_receipt_v2_warnings, commit_receipt_v2_fields, counter_path_beside
 from .validation import _validate_receipt
-
-# Sibling scripts/lib module (scripts/lib is on sys.path whenever this package
-# is imported, since append_receipt_internals lives there). Single source of
-# truth for the monotonic receipt-schema stamp — see ledger_schema_version.py.
-from ledger_schema_version import CURRENT_SCHEMA_VERSION
 
 import logging
 log = logging.getLogger(__name__)
@@ -525,7 +521,14 @@ def append_receipt_payload(
     # (report_parser.py output, governance_receipts.py, state_mutation.py,
     # raw worker-authored JSON via the append_receipt.py CLI) funnels
     # through — never touched separately from the shape change.
-    receipt.setdefault("schema_version", CURRENT_SCHEMA_VERSION)
+    #
+    # ADR-045 §8 (audit-spoor-kern K-1): the ONE stamp site in the append layer.
+    # A lifecycle line (dispatch_started / dispatch_finished / report_ingested)
+    # is stamped schema_version 3 + writer_sha there and is refused while
+    # ledger_lifecycle is off; every other type keeps the v2 setdefault below,
+    # byte-for-byte. Path 1 (governance_emit) builds a ReceiptV2, which forces
+    # its own v2 stamp and can never carry a lifecycle type.
+    stamp_lifecycle(receipt)
 
     receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
