@@ -234,14 +234,26 @@ def _kimi_lane_model(placeholder: Optional[str], value: str) -> str:
 
 
 def ledger_project_id(state_dir: Optional[Path]) -> str:
-    """The project of the run: from the store, else ``VNX_PROJECT_ID``, else ``vnx-dev``.
+    """The project of the run: the STORE's own, else ``VNX_PROJECT_ID``, else ``vnx-dev``.
 
-    The same order ``emit_provider_cost`` used for the old event (ADR-007:
-    the store decides; the cost record is never skipped for want of a tenant).
+    The store decides (ADR-007), and it decides FIRST: a store under
+    ``.vnx-data/<project>/state`` names its project by its own layout, and that
+    answer wins over the ambient ``VNX_PROJECT_ID``. A line written into
+    tenant-b's ledger belongs to tenant-b, whatever tenant the writing process
+    was started for — reading the env there would stamp one tenant's id on
+    another tenant's ledger, which is exactly the contamination ADR-007 exists
+    to stop. Only a store whose path names no project falls through to the
+    marker/env resolution (``project_scope.resolve_stamp_project_id``) and, when
+    even that resolves nothing, to the env and ``vnx-dev``: a cost record is
+    never skipped for want of a tenant.
     """
+    from project_id_migration import project_id_from_store_path  # noqa: PLC0415
     from project_scope import TenantUnresolved, resolve_stamp_project_id  # noqa: PLC0415
 
     if state_dir is not None:
+        named = project_id_from_store_path(Path(state_dir) / "quality_intelligence.db")
+        if named:
+            return named
         try:
             return resolve_stamp_project_id(db_path=Path(state_dir) / "quality_intelligence.db")
         except TenantUnresolved as exc:
@@ -750,6 +762,14 @@ class AttemptRun:
     runner, never parsed from the model's report text), WHEN, and WHETHER it ran.
     ``reason`` names why a refused run was refused or why a started run has no
     usage; an outcome of ``not_executable`` needs none.
+
+    ``attempt`` is the attempt number the run's SLOT holds — the gate record's
+    ``attempt_seq``, for a producer that can name one. It is the line's address,
+    not its identity: the line is one per execution either way, and a number
+    another execution holds books this run at the ref's next free attempt
+    (``record_attempt_once``). ``None`` books the next free attempt of the ref,
+    which is right for a producer whose every call IS a new run (a panel seat, a
+    tiebreaker) and for an attempt the slot refused, which never took a number.
     """
 
     provider: str
@@ -759,6 +779,7 @@ class AttemptRun:
     outcome: str = ATTEMPT_RAN
     reason: str = ""
     token_usage: Optional[Mapping[str, Any]] = None
+    attempt: Optional[int] = None
 
 
 def attempt_reason(value: object, fallback: str) -> str:
@@ -818,9 +839,16 @@ def record_attempt_run(
     verdict, receipt or request. Every refusal is one WARNING naming the
     producer, the ref, the provider and the reason.
 
-    ``OSError`` is caught beside the ledger's refusals because
-    :func:`cost_ledger.record_next_attempt` propagates a registry/ledger read
-    error unchanged. ``BaseException`` stays uncaught.
+    One execution, one line (:func:`cost_ledger.record_attempt_once`): a run
+    whose record is committed twice — admitted to the slot or refused it —
+    returns the line the first commit booked and writes nothing. A run that
+    names its own ``attempt`` (``AttemptRun.attempt``) is booked at that
+    attempt; the number is the line's address, so a number another execution
+    holds books this run at the ref's next free attempt instead of swallowing it.
+
+    ``OSError`` is caught beside the ledger's refusals because the booking
+    propagates a registry/ledger read error unchanged. ``BaseException`` stays
+    uncaught.
     """
     if run.outcome not in ATTEMPT_OUTCOMES:
         logger.warning(
@@ -857,7 +885,9 @@ def record_attempt_run(
         )
 
     try:
-        record = cost_ledger.record_next_attempt(project_id, producer, ref, make_run, ledger_path=ledger_path)
+        record = cost_ledger.record_attempt_once(
+            project_id, producer, ref, run.attempt, make_run, ledger_path=ledger_path,
+        )
     except (cost_ledger.CostLedgerRefusal, OSError) as exc:
         reason = f"{type(exc).__name__}: {exc}"
         logger.warning(

@@ -227,8 +227,16 @@ def test_the_identity_is_the_one_the_receipt_append_booked(env, writer):
 
 
 def _ndjson_lines(env) -> dict:
+    """Every NDJSON file under the store and its line count, the cost ledger aside.
+
+    The cost ledger is a store of its own (ADR-043): K3 books one line per run
+    there, on purpose, and this test is about what a FAILURE write leaves in the
+    review-gate stores — receipts, the round ledger, transition events.
+    """
     found = {}
     for path in sorted(env["project_root"].rglob("*.ndjson")):
+        if path.name == "provider_costs.ndjson":
+            continue
         lines = [x for x in path.read_text(encoding="utf-8").splitlines() if x.strip()]
         if lines:
             found[str(path.relative_to(env["project_root"]))] = len(lines)
@@ -236,9 +244,10 @@ def _ndjson_lines(env) -> dict:
 
 
 def test_an_unavailable_record_result_leaves_what_the_runners_unavailable_leaves(env):
-    """Measured on main 404c611b: the runner's record_failure for an outage leaves no NDJSON line
-    (no receipt, no round-ledger line, no transition event); its reachability entry, only for a
-    quota text, is JSON state. record_result has neither a reason nor its text, so it leaves none either."""
+    """Measured on main 404c611b: the runner's record_failure for an outage leaves no review-gate
+    NDJSON line (no receipt, no round-ledger line, no transition event); its reachability entry,
+    only for a quota text, is JSON state. record_result has neither a reason nor its text, so it
+    leaves none either. K3's cost-ledger line is that store's, not the review gate's."""
     gate_recorder.record_failure(
         gate="kimi_gate", pr_number=PR, pr_id="",
         result={"reason": "timeout", "reason_detail": "timed out after 600s", "duration_seconds": 600.0,

@@ -544,7 +544,7 @@ def test_ledger_oserror_leaves_outcome_receipt_and_request_intact_and_logs_one_w
     def broken(*args, **kwargs):
         raise OSError(errno.EACCES, "ledger is not writable")
 
-    monkeypatch.setattr(cost_ledger, "record_next_attempt", broken)
+    monkeypatch.setattr(cost_ledger, "record_attempt_once", broken)
     with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
         record, written = _commit(env, record=_record(pr_number=PR + 9), request=request)
 
@@ -560,3 +560,176 @@ def test_ledger_oserror_leaves_outcome_receipt_and_request_intact_and_logs_one_w
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "not booked" in r.getMessage()]
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert _lines(env) == []
+
+
+# ---------------------------------------------------------------------------
+# Acceptance 6 (K3 round 4, OI-2444) — one line per EXECUTION, not per slot write
+#
+# The identity a gate attempt is booked under is the pair that names its run:
+# the record's own ``dispatch_id`` — the gate run's identity, and for a harness
+# lane ``<gate>-gate-pr<pr>-<timestamp>``, unique per run — plus the run's
+# ``attempt_seq``. A write that re-commits the record already on the slot ends
+# that same run, so it books that run's attempt and the booking finds its line
+# and writes nothing; a separate attempt books its own, whether or not the slot
+# accepted its record.
+# ---------------------------------------------------------------------------
+
+
+def test_the_same_unavailable_record_committed_twice_books_one_line(env):
+    """Codex r4 blocker (OI-2444), the reproduction: an ``unavailable``/timeout
+    record is no repeat of the slot (it owes no receipt), so committing it twice
+    landed as attempts ``:1`` and ``:2`` and booked two cost lines for one
+    dispatch. One run, one line."""
+    record = _record(
+        "unavailable", pr_number=PR + 20, reason="timeout",
+        dispatch_id=f"glm-gate-pr{PR + 20}-1",
+    )
+    _commit(env, status="unavailable", record=record)
+    first = _lines(env)
+    assert [line["run_id"] for line in first] == [f"vnx-dev:{GATE}:{record['dispatch_id']}:1"]
+
+    _commit(env, status="unavailable", record=dict(record))
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [f"vnx-dev:{GATE}:{record['dispatch_id']}:1"], (
+        f"the same record booked a second run: {[line['run_id'] for line in lines]}"
+    )
+    slot = json.loads((env["results_dir"] / f"pr-{PR + 20}-{GATE}.json").read_text(encoding="utf-8"))
+    assert slot["attempt_seq"] == 2, "the slot still counts writes; the ledger counts runs"
+
+
+def test_a_repeat_of_a_decided_record_books_one_line(env):
+    """The same rule for a decided record, where the slot itself calls the write a
+    repeat (ADR-046 step 6): re-committing it is the same run and books nothing."""
+    record = _record(pr_number=PR + 21, dispatch_id=f"glm-gate-pr{PR + 21}-1")
+    _commit(env, record=record)
+    _commit(env, record=_record(pr_number=PR + 21, dispatch_id=f"glm-gate-pr{PR + 21}-1", recorded_at=None))
+    lines = _lines(env)
+    assert len(lines) == 1, f"a repeated verdict booked {[line['run_id'] for line in lines]}"
+
+
+def test_a_refused_overwrite_of_a_separate_attempt_books_its_own_line(env):
+    """Codex r4 blocker, second half (OI-2444): a separate attempt that really ran,
+    whose record the guard refuses to put on a decided slot, booked NOTHING —
+    the booking followed the slot write. It books its own line."""
+    decided = _record(pr_number=PR + 22, dispatch_id=f"glm-gate-pr{PR + 22}-1")
+    _commit(env, record=decided)
+    outage = _record(
+        "unavailable", pr_number=PR + 22, reason="timeout",
+        dispatch_id=f"glm-gate-pr{PR + 22}-2", recorded_at="2026-10-27T10:09:00Z",
+    )
+    on_disk, written = _commit(env, status="unavailable", record=outage)
+    assert written is False, "the guard must still refuse the downgrade (OI-1469/1470)"
+    assert on_disk["status"] == "pass", "the decided verdict stays on the slot"
+
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [
+        f"vnx-dev:{GATE}:{decided['dispatch_id']}:1",
+        f"vnx-dev:{GATE}:{outage['dispatch_id']}:1",
+    ], f"the refused attempt's run booked no line: {[line['run_id'] for line in lines]}"
+    assert lines[1]["cost_source"] == "unavailable:timeout"
+    assert lines[1]["usage_completeness"] == "unknown:timeout"
+
+
+def test_two_runs_of_one_slot_book_one_line_each(env):
+    """The other side of the identity: two runs are two lines, never
+    deduplicated — a different dispatch-id names a different run, also when the
+    slot reads the second verdict as a repeat of the first (ADR-046 step 6 is
+    about the slot; the ledger counts runs, and this run called a model)."""
+    for attempt in (1, 2):
+        _commit(env, record=_record(
+            pr_number=PR + 23, dispatch_id=f"glm-gate-pr{PR + 23}-{attempt}",
+            recorded_at=f"2026-10-27T10:0{attempt}:00Z",
+        ))
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [
+        f"vnx-dev:{GATE}:glm-gate-pr{PR + 23}-1:1",
+        f"vnx-dev:{GATE}:glm-gate-pr{PR + 23}-2:1",
+    ]
+
+
+def test_an_admitted_retry_after_a_refused_attempt_is_not_swallowed(env):
+    """A refused attempt books its own number, and a later run of the same ref must
+    not land on it: the ledger numbers each NEW execution at the ref's next free
+    attempt, so the retry's line is written rather than read as already booked."""
+    dispatch_id = f"20261028-builder-{PR + 24}"
+    _commit(env, record=_record(pr_number=PR + 24, dispatch_id=dispatch_id))
+    _commit(env, status="unavailable", record=_record(
+        "unavailable", pr_number=PR + 24, reason="timeout",
+        dispatch_id=dispatch_id, recorded_at="2026-10-27T10:09:00Z",
+    ))
+    retry = _record(
+        pr_number=PR + 24, dispatch_id=dispatch_id, recorded_at="2026-10-27T10:12:00Z",
+        blocking_findings=[{"message": "a second look found another defect"}],
+    )
+    _commit(env, record=retry)
+    ids = [line["run_id"] for line in _lines(env)]
+    assert ids == [
+        f"vnx-dev:{GATE}:{dispatch_id}:1",
+        f"vnx-dev:{GATE}:{dispatch_id}:2",
+        f"vnx-dev:{GATE}:{dispatch_id}:3",
+    ], ids
+
+
+def test_the_same_refused_record_committed_twice_books_one_line(env):
+    """Point 2, on the branch where the slot has no attempt to hand out: the first
+    commit of the outage is refused the decided slot and books its own line, and
+    the identical record committed again is the SAME run — one line, not two."""
+    decided = _record(pr_number=PR + 26, dispatch_id=f"glm-gate-pr{PR + 26}-1")
+    _commit(env, record=decided)
+    outage = _record(
+        "unavailable", pr_number=PR + 26, reason="timeout",
+        dispatch_id=f"glm-gate-pr{PR + 26}-2", recorded_at="2026-10-27T10:09:00Z",
+    )
+    for _ in range(2):
+        _, written = _commit(env, status="unavailable", record=dict(outage))
+        assert written is False, "the guard must still refuse the downgrade (OI-1469/1470)"
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [
+        f"vnx-dev:{GATE}:{decided['dispatch_id']}:1",
+        f"vnx-dev:{GATE}:{outage['dispatch_id']}:1",
+    ], f"the same refused run booked twice: {[line['run_id'] for line in lines]}"
+
+
+def test_an_attempt_k2b_booked_books_no_k3_line_even_when_the_slot_refuses_it(env):
+    """Point 4: the K2b exclusion is read off the record on EVERY path, the refused
+    one included — K2b's line is this attempt's only line."""
+    decided = _record(
+        pr_number=PR + 25, dispatch_id=f"codex-gate-pr{PR + 25}-1",
+        provider="codex", model="gpt-6-astra",
+    )
+    _commit(env, gate="codex_gate", record=decided)
+    codex_record = {
+        "gate": "codex_gate", "pr_id": "", "pr_number": PR + 25, "status": "unavailable",
+        "reason": "timeout", "commit_sha": HEAD, "branch": BRANCH, "contract_hash": "hash-k3",
+        "report_path": "", "recorded_at": "2026-10-27T10:09:00Z",
+        "provider": "codex", "model": "gpt-6-astra",
+        harness_run_cost.COST_BOOKED_FIELD: harness_run_cost.COST_BOOKED_BY_K2B,
+    }
+    _, written = _commit(env, gate="codex_gate", status="unavailable", record=codex_record)
+    assert written is False
+    lines = _lines(env)
+    assert [line["run_id"] for line in lines] == [f"vnx-dev:codex_gate:{decided['dispatch_id']}:1"]
+
+
+def test_the_tiebreaker_books_the_tenant_of_the_store_it_writes_into(tmp_path, monkeypatch):
+    """Point 5: ``review_cap_tiebreaker`` supplies no project_id, and the fallback
+    read the ambient ``VNX_PROJECT_ID`` — so a line written into tenant-b's ledger
+    was stamped ``vnx-dev``. The store decides (ADR-007)."""
+    data_dir = tmp_path / ".vnx-data" / "tenant-b"
+    (data_dir / "state").mkdir(parents=True)
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
+
+    answer = json.dumps({"outcome": rcv.TERUG_NAAR_PLAN, "rationale": "no convergence"})
+    report = f"Decision.\n```{rct.FENCE}\n{answer}\n```\n"
+    rct.ask(
+        "the brief", [rcv.TERUG_NAAR_PLAN, rcv.MERGEN_MET_OI],
+        dispatcher=lambda provider, model, instruction, did: report,
+        data_dir=str(data_dir),
+    )
+
+    ledger = data_dir / "events" / "provider_costs.ndjson"
+    lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [(line["project_id"], line["run_id"]) for line in lines] == [
+        ("tenant-b", lines[0]["run_id"]),
+    ]
+    assert lines[0]["run_id"].startswith("tenant-b:review_cap_tiebreaker:")

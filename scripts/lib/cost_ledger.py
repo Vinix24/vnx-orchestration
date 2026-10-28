@@ -1217,6 +1217,130 @@ def _next_attempt(ledger_path: Path, fh, project_id: str, producer: str, ref: st
     return max(attempts, default=0) + 1
 
 
+class _BookedRun(Exception):
+    """Carries the line :func:`record_attempt_once` found for the run it was asked to book."""
+
+    def __init__(self, record: Dict[str, Any]):
+        super().__init__(record.get("run_id"))
+        self.record = record
+
+
+def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
+    """Every line in the ledger and in the spool that waits for it, under the caller's lock.
+
+    The spool is read as :func:`_next_attempt` reads it, by the ``run_id`` of its
+    records: a run waiting there was written. A ledger that cannot be read
+    raises :class:`_Unwritten` with nothing written — an unreadable ledger is
+    evidence of nothing, so it must never read as "not booked yet".
+    """
+    spool_dir = spool_dir_for(ledger_path)
+    try:
+        text = _read_under_the_lock(fh) if fh is not None else _read_without_the_lock(ledger_path)
+        spooled = [_read_spool_file(spool_dir / name) for name in _spool_names(spool_dir)]
+    except (OSError, _UnreadableSpool) as exc:
+        raise _Unwritten(exc, f"the runs already booked could not be read ({exc}): nothing was written") from exc
+    return [*_parse_lines(text)[0], *(record for run in spooled for record in run)]
+
+
+def _booked_this_run(
+    lines: Sequence[Mapping[str, Any]], key: tuple, window: tuple
+) -> Optional[Dict[str, Any]]:
+    """The line of ``key``'s ref that spans ``window`` — the run the caller commits — or ``None``.
+
+    This is the identity a run has when its slot took nothing: the window it
+    spans (``occurred_from``/``occurred_to``, the record's own timestamps). A
+    producer that commits one record twice — an attempt whose first slot write
+    was refused and that is now committed again — presents that same window
+    both times, so the second commit finds the first's line; the next real run
+    of that ref begins on another record and spans another window. A line that
+    states no window names no run and is never taken for this one, and an
+    unreadable ``run_id`` is no line of this ref either: both cases book, so a
+    run that happened is never read as already booked.
+    """
+    started, ended = window
+    if not started or not ended:
+        return None
+    for line in lines:
+        try:
+            parts = split_run_id(line.get("run_id"))
+        except InvalidRecord:
+            continue
+        if parts[:3] != key:
+            continue
+        if (line.get("occurred_from"), line.get("occurred_to")) == (started, ended):
+            return dict(line)
+    return None
+
+
+def record_attempt_once(
+    project_id: str,
+    producer: str,
+    ref: str,
+    attempt: Optional[int],
+    make_run: Callable[[str], RunCost],
+    *,
+    ledger_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Write one run's line at the attempt its EXECUTION holds, unless that line is there already.
+
+    One execution, one line, whether or not the slot took the run's record: the
+    booking no longer depends on the write to the result slot succeeding.
+
+    ``attempt`` is the number the run's slot holds — the caller read it off the
+    record the slot already carries for this run, so the number NAMES the
+    execution. When the ledger holds that ``run_id`` already, the run is booked:
+    the line is returned and nothing is written, which is what makes a record
+    committed twice one line.
+
+    ``attempt=None`` is a run whose execution the slot has no number for (a
+    record the guard refused never took an ``attempt_seq``). Its identity is
+    then the window it spans, and :func:`_booked_this_run` says whether that run
+    is booked already; when it is not, the run takes the ref's next free
+    attempt. A re-commit of a refused record therefore books nothing the second
+    time, while a later run of the same ref — another window — books its own
+    line rather than being read as booked.
+
+    The lookup, the count and the write run under the same exclusive lock, so
+    two processes booking one execution cannot interleave. Returns the line
+    already booked (nothing written) or the record as written. ``make_run`` is
+    called with the ``run_id`` to price. Refusals and
+    :class:`CostLedgerWriteError` are those of :func:`record_run`.
+    """
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    refuse_real_central_store_write_under_test_runner(path)
+    key = (project_id, producer, ref)
+
+    def build(number: int) -> Dict[str, Any]:
+        try:
+            return build_record(make_run(run_id_for(project_id, producer, ref, number)))
+        except OSError as exc:
+            raise _RecordNotBuilt(str(exc)) from exc
+
+    def record_for(fh) -> Dict[str, Any]:
+        candidate = build(attempt if attempt is not None else _next_attempt(
+            path, fh, project_id, producer, ref,
+        ))
+        lines = _booked_lines(path, fh)
+        if attempt is not None:
+            booked = next(
+                (dict(line) for line in lines if line.get("run_id") == candidate["run_id"]), None,
+            )
+        else:
+            booked = _booked_this_run(
+                lines, key, (candidate.get("occurred_from"), candidate.get("occurred_to")),
+            )
+        if booked is not None:
+            raise _BookedRun(booked)
+        return candidate
+
+    described = f"{producer} {ref}" if attempt is None else run_id_for(project_id, producer, ref, attempt)
+    try:
+        return _write(path, record_for, f"the run {described}")
+    except _BookedRun as booked:
+        logger.debug("cost_ledger: %s is booked already; nothing written", described)
+        return booked.record
+
+
 def record_next_attempt(
     project_id: str,
     producer: str,
@@ -2645,7 +2769,8 @@ __all__ = [
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
     "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "GroupedTotals", "ReplayResult",
     "LedgerFiles", "GROUP_KEYS", "UNKNOWN_GROUP",
-    "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "aggregate_runs",
+    "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "record_attempt_once",
+    "aggregate_runs",
     "aggregate_groups", "utc_day",
     "replay_spool", "spool_dir_for", "spool_file_for", "report_spool_health", "ledger_files",
 ]

@@ -89,6 +89,7 @@ lands as the next attempt, and the key returns its receipt as a duplicate.
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -312,6 +313,11 @@ def commit_gate_outcome(
     ``obligation`` (step 8) are booked on a repeat too, so a caller that decides
     them after the record landed can hand them to a commit that rewrites nothing.
 
+    K3: the attempt's cost line is booked after the slot lock on EVERY end — a
+    new record, a repeat and a guard refusal alike — under the attempt number
+    the run holds (:func:`_execution_attempt`), because a run that called a
+    model cost money whether or not its record replaced the slot.
+
     Raises :class:`RequestWriteFailed` when the record and receipt landed but
     the request write did not (step 7), after the bundle archive: the caller
     sees the failure instead of a status the request on disk never reached.
@@ -328,6 +334,10 @@ def commit_gate_outcome(
     request_failure: Optional[RequestWriteFailed] = None
     with slot_lock(path):
         existing = gate_recorder._read_existing_result(path)
+        # K3: the attempt this run holds, decided from the record and the slot
+        # BEFORE the write — so the same run books the same line whether its
+        # record replaces the slot, repeats it, or is refused the slot.
+        attempt = _execution_attempt(existing, record)
         try:
             _pay_outstanding_receipt(path, existing, gate=gate, pr_ref=pr_ref)
             _pay_outstanding_obligation(path, existing)
@@ -362,12 +372,14 @@ def commit_gate_outcome(
             if isinstance(request_end, RequestWriteFailed):
                 request_failure = request_end
     gate_recorder._archive_finished_gate_bundle(record, gate=gate, result_path=path)
-    if refusal is None and repeated is None:
-        # K3: the run ended here. Booked AFTER the slot lock and after the
-        # record, its receipt, its request end and its obligation landed, so a
-        # ledger that is slow or broken can neither delay nor undo a verdict.
-        _book_gate_attempt(gate=gate, status=outcome.status, record=record,
-                           result_path=path, pr_ref=pr_ref)
+    # K3: the run ended here, whatever the slot did with its record. Booked AFTER
+    # the slot lock and after the record, its receipt, its request end and its
+    # obligation landed, so a ledger that is slow or broken can neither delay nor
+    # undo a verdict; keyed on the attempt decided above, so a repeat and a
+    # refused write are the same run's one line, and a separate attempt that ran
+    # gets its own.
+    _book_gate_attempt(gate=gate, status=outcome.status, record=record,
+                       result_path=path, pr_ref=pr_ref, attempt=attempt)
     if request_failure is not None:
         raise request_failure
     if refusal is not None:
@@ -490,8 +502,63 @@ def _attempt_outcome(status: str, reason: Optional[str]) -> "tuple":
     return harness_run_cost.ATTEMPT_RAN, named
 
 
+# K3: the fields the WRITER stamps on a record once it is on the slot. They are
+# bookkeeping, not what the run says about itself, so two records that differ
+# only in these name the same run (see :func:`_the_same_record`).
+_WRITER_STAMPED_FIELDS = frozenset({
+    "attempt_seq", "receipt_pending", "receipt_fields",
+    OBLIGATION_PENDING_KEY, OBLIGATION_BOOKING_KEY,
+})
+
+
+def _the_same_record(existing: Any, record: Mapping[str, Any]) -> bool:
+    """Positive evidence that both records state the SAME run, not two attempts of it.
+
+    Everything the run says about itself must be equal, the writer's own stamps
+    excepted (:data:`_WRITER_STAMPED_FIELDS`). Compared as the JSON the slot
+    holds, because the record on disk came back through ``json`` and a tuple
+    that came back a list is still the same value. A record missing or
+    unreadable on either side is no evidence of sameness, so it is a new run.
+    """
+    if not isinstance(existing, Mapping):
+        return False
+
+    def stated(payload: Mapping[str, Any]) -> str:
+        fields = {name: value for name, value in payload.items() if name not in _WRITER_STAMPED_FIELDS}
+        return json.dumps(fields, sort_keys=True, default=repr)
+
+    return stated(existing) == stated(record)
+
+
+def _execution_attempt(existing: Any, record: Mapping[str, Any]) -> Optional[int]:
+    """The attempt number the run this commit ends holds, or ``None`` when the ledger must number it.
+
+    That number is the run's identity next to its dispatch-id. A run already on
+    the slot — the write repeats the decided outcome (ADR-046 step 6), or the
+    record is the one the slot holds, e.g. the same ``unavailable``/timeout
+    record committed twice — is the execution whose ``attempt_seq`` is there,
+    so its line is the one that attempt number was booked under, and the
+    booking finds it and writes nothing.
+
+    Any other record is a NEW execution of this slot, and the slot's counter is
+    the wrong number for it: a refused write and a K2b-booked attempt advance no
+    attempt, so a number taken from that counter can collide with an earlier
+    run's line. ``None`` lets the ledger take the ref's next free attempt, which
+    is a number no line of this ref holds yet.
+    """
+    if not isinstance(existing, Mapping):
+        return None
+    slot = existing.get("attempt_seq")
+    if isinstance(slot, bool) or not isinstance(slot, int) or slot < 1:
+        return None
+    if _repeats_the_slot(existing, record) or _the_same_record(existing, record):
+        return slot
+    return None
+
+
 def _book_gate_attempt(
     *, gate: str, status: str, record: Mapping[str, Any], result_path: Path, pr_ref: str,
+    attempt: Optional[int] = None,
 ) -> None:
     """Book one line for the attempt this gate outcome ends (K3), or none when it names no model run.
 
@@ -501,6 +568,10 @@ def _book_gate_attempt(
     (``ci_gate``, a ``gh`` read) has no line to write. The K2b skip is per
     ATTEMPT, read off the record, never per gate name — an attempt that ended
     before K2b's booking path ran carries no marker and gets its one line here.
+
+    ``attempt`` is the number of the run this commit ends (:func:`_execution_attempt`),
+    or ``None`` for a run the ledger has to number. Booking is idempotent on it:
+    the same execution committed again finds its line and writes nothing.
 
     Fail-open by construction: :func:`harness_run_cost.record_attempt_run` returns
     the refusal and logs one WARNING, so a broken ledger leaves the verdict, its
@@ -535,7 +606,7 @@ def _book_gate_attempt(
     harness_run_cost.record_attempt_run(
         harness_run_cost.AttemptRun(
             provider=provider, model=model, started=started, ended=ended,
-            outcome=outcome, reason=reason,
+            outcome=outcome, reason=reason, attempt=attempt,
         ),
         project_id=harness_run_cost.ledger_project_id(state_dir),
         producer=gate, ref=_gate_attempt_ref(record, pr_ref), role=harness_run_cost.GATE_ROLE,

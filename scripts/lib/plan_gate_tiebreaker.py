@@ -1007,6 +1007,13 @@ def _book_tiebreaker_attempt(
     any other raised call is a started attempt without an answer, which books
     unknown. Best-effort throughout: a tiebreaker's decision is never the
     ledger's to lose (one WARNING, never a raise).
+
+    A caller that names no ``project_id`` gets the one of the store the line is
+    written INTO — ``Path(data_dir) / "state"``, the tenant the ledger belongs
+    to — never the ambient ``VNX_PROJECT_ID``: a store under
+    ``.vnx-data/tenant-b`` would otherwise stamp the default tenant on a line
+    that lives in another tenant's ledger (ADR-007, and the same resolution
+    ``panel_leg_cost.project_id_for`` and ``_book_gate_attempt`` use).
     """
     if not data_dir:
         return
@@ -1022,7 +1029,7 @@ def _book_tiebreaker_attempt(
         )
         harness_run_cost.record_attempt_run(
             run,
-            project_id=project_id or harness_run_cost.ledger_project_id(None),
+            project_id=project_id or harness_run_cost.ledger_project_id(Path(data_dir) / "state"),
             producer=producer, ref=dispatch_id, role="tiebreaker",
             ledger_path=costs_path_in(Path(data_dir)),
         )
