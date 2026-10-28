@@ -1,21 +1,26 @@
-"""Salvage of a worktree's commits into a directory of its own (WT-2a1a, WT-2a1b).
+"""Salvage of a worktree's commits and tracked changes (WT-2a1a/2a1b/2a2).
 
 Every test builds a real bare ``origin``, a real main checkout and real ``git
 worktree`` trees under ``tmp_path``, then runs the real functions: the bundle is
-proved by cloning it, and every allowlist case by dirtying a real tree. The
-allowlist excuses one thing only (WT-2a1b): an IGNORED entry inside a throwaway
-cache DIRECTORY named by ``THROWAWAY_IGNORED_DIRS``, and never one below
-``.vnx-data/`` or ``.git/``; a regular file that only shares a cache directory's
-name is not inside one and stays named. Every other status entry — tracked, staged,
-untracked or unmerged, whatever its path — is a named problem, and so is a
-populated submodule, which carries commits no superproject bundle can hold.
+proved by cloning it, the patches by applying them in a scratch checkout of the
+head, and every allowlist case by dirtying a real tree. The allowlist excuses
+three kinds (WT-2a2): an IGNORED entry inside a throwaway cache DIRECTORY named
+by ``THROWAWAY_IGNORED_DIRS`` (never one below ``.vnx-data/`` or ``.git/``; a
+regular file that only shares a cache directory's name is not inside one), a
+staged change to a tracked file and an unstaged change to a tracked file — the
+latter two only because ``verify`` applies their patch and proves it reproduces
+the tree. Every other status entry — untracked or unmerged, whatever its path —
+is a named problem, and so is a populated submodule, which carries commits no
+superproject bundle can hold.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -208,30 +213,146 @@ def test_a_detached_tree_names_detached_in_its_line(fx: Fixture) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. the allowlist: any status entry at all is a named problem
+# 3. tracked changes are carried by patches (WT-2a2)
 # ---------------------------------------------------------------------------
 
 
-def test_a_modified_tracked_file_is_not_covered(fx: Fixture) -> None:
+def index_digest(wt: Path) -> str:
+    index = git(wt, "rev-parse", "--path-format=absolute", "--git-path", "index").stdout.strip()
+    return hashlib.sha256(Path(index).read_bytes()).hexdigest()
+
+
+def scratch_checkout(fx: Fixture, wt: Path, head: str) -> Path:
+    """A fresh repository given ``head`` by sha: it borrows no object store."""
+    scratch = Path(tempfile.mkdtemp(prefix="scratch.", dir=fx.tmp))
+    git(fx.tmp, "init", "-q", str(scratch))
+    git(scratch, "fetch", "-q", "--no-tags", str(wt), head)
+    git(scratch, "checkout", "-q", "-f", "FETCH_HEAD")
+    return scratch
+
+
+def patch_of(result: "ws.SalvageResult", suffix: str) -> Path:
+    return result.salvage_dir / f"{result.name}{suffix}"
+
+
+def test_an_unstaged_change_to_a_tracked_file_is_preserved(fx: Fixture) -> None:
+    """Acceptance 1: one modified tracked file, unstaged."""
     wt = fx.worktree()
+    head = head_of(wt)
     (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["a.txt"]
-    assert verify(fx, result) == [UNCOVERED + "a.txt"]
+    assert result.uncovered == []
+    assert [Path(a).name for a in result.artifacts] == ["worktree-one.unstaged.patch"]
+    patch = patch_of(result, ws.UNSTAGED_SUFFIX)
+    assert patch.stat().st_size > 0
+    assert verify(fx, result) == []
+
+    scratch = scratch_checkout(fx, wt, head)
+    git(scratch, "apply", str(patch))
+    assert (scratch / "a.txt").read_bytes() == (wt / "a.txt").read_bytes()
 
 
-def test_a_staged_change_is_not_covered(fx: Fixture) -> None:
+def test_a_staged_and_an_unstaged_change_on_one_file_are_both_preserved(fx: Fixture) -> None:
+    """Acceptance 2: the index and the worktree hold different states of one file."""
     wt = fx.worktree()
+    head = head_of(wt)
     (wt / "a.txt").write_text("a\nstaged\n", encoding="utf-8")
     git(wt, "add", "a.txt")
-    assert git(wt, "status", "--porcelain=v2").stdout.startswith("1 M. ")
+    (wt / "a.txt").write_text("a\nstaged\nunstaged\n", encoding="utf-8")
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["a.txt"]
-    assert verify(fx, result) == [UNCOVERED + "a.txt"]
+    assert result.uncovered == []
+    assert [Path(a).name for a in result.artifacts] == [
+        "worktree-one.staged.patch", "worktree-one.unstaged.patch"]
+    assert verify(fx, result) == []
+
+    scratch = scratch_checkout(fx, wt, head)
+    git(scratch, "apply", "--index", str(patch_of(result, ws.STAGED_SUFFIX)))
+    assert (scratch / "a.txt").read_bytes() == b"a\nstaged\n", "the staged state"
+    git(scratch, "apply", str(patch_of(result, ws.UNSTAGED_SUFFIX)))
+    assert (scratch / "a.txt").read_bytes() == (wt / "a.txt").read_bytes()
+
+
+def test_a_patch_that_no_longer_applies_is_named(fx: Fixture) -> None:
+    """Acceptance 3: one corrupted byte in the written patch, and verify names it."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("b\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    patch = patch_of(result, ws.UNSTAGED_SUFFIX)
+    patch.write_bytes(patch.read_bytes().replace(b"-a\n", b"-c\n"))
+
+    problems = verify(fx, result)
+    assert len(problems) == 1, problems
+    assert problems[0].startswith(
+        f"{result.salvage_dir.name}/worktree-one.unstaged.patch: "), problems
+
+
+def test_a_staged_rename_is_preserved_through_its_patch(fx: Fixture) -> None:
+    """A rename/copy entry is covered by the patch and proved by the apply."""
+    wt = fx.worktree()
+    (wt / "a.txt").rename(wt / "b.txt")
+    git(wt, "add", "-A")
+    assert ws._status_entries(wt) == [("2", "b.txt")]
+
+    result = salvage(fx, wt)
+
+    assert result.uncovered == []
+    assert verify(fx, result) == []
+    scratch = scratch_checkout(fx, wt, head_of(wt))
+    git(scratch, "apply", "--index", str(patch_of(result, ws.STAGED_SUFFIX)))
+    assert (scratch / "b.txt").read_bytes() == b"a\n" and not (scratch / "a.txt").exists()
+
+
+def test_the_worktree_index_is_byte_identical_after_salvage_and_verify(fx: Fixture) -> None:
+    """Acceptance 5: measuring the tree never writes the tree's own index."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nstaged\n", encoding="utf-8")
+    git(wt, "add", "a.txt")
+    (wt / "a.txt").write_text("a\nstaged\nunstaged\n", encoding="utf-8")
+    before = index_digest(wt)
+
+    result = salvage(fx, wt)
+    problems = verify(fx, result)
+
+    assert problems == []
+    assert index_digest(wt) == before, "salvage or verify rewrote the worktree's index"
+
+
+def test_a_tracked_change_without_its_patch_is_a_problem(fx: Fixture) -> None:
+    """Verify proves a patch by applying it, so a result that lists none is not clean."""
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    result.artifacts = []
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert "no worktree-one.unstaged.patch artifact is listed" in problems[0], problems
+
+
+def test_a_missing_patch_file_is_named(fx: Fixture) -> None:
+    wt = fx.worktree()
+    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
+    result = salvage(fx, wt)
+    patch_of(result, ws.UNSTAGED_SUFFIX).unlink()
+
+    problems = verify(fx, result)
+
+    assert len(problems) == 1, problems
+    assert problems[0].endswith("worktree-one.unstaged.patch: missing"), problems
+
+
+# ---------------------------------------------------------------------------
+# 3a. every other status entry is still a named problem
+# ---------------------------------------------------------------------------
 
 
 def test_an_untracked_file_is_not_covered(fx: Fixture) -> None:
@@ -274,12 +395,12 @@ def test_an_ignored_top_level_pycache_is_throwaway(fx: Fixture) -> None:
 
 def test_the_problem_names_the_first_path_and_counts_the_rest(fx: Fixture) -> None:
     wt = fx.worktree()
-    (wt / "a.txt").write_text("a\nedited\n", encoding="utf-8")
     (wt / "notes.txt").write_text("notes\n", encoding="utf-8")
+    (wt / "other.txt").write_text("other\n", encoding="utf-8")
 
     problems = verify(fx, salvage(fx, wt))
 
-    assert problems == [UNCOVERED + "a.txt (+1 more)"], problems
+    assert problems == [UNCOVERED + "notes.txt (+1 more)"], problems
 
 
 # ---------------------------------------------------------------------------
@@ -461,8 +582,10 @@ def test_an_untracked_file_under_an_allowlisted_directory_still_blocks(
     assert ws._status_entries(wt) == [("?", "pkg/__pycache__/m.py")]
 
 
-def test_a_tracked_pyc_under_an_allowlisted_directory_still_blocks(fx: Fixture) -> None:
-    """A committed ``.pyc`` that is modified is a tracked entry, not an ignored one."""
+def test_a_tracked_pyc_under_an_allowlisted_directory_is_carried_by_a_patch(
+        fx: Fixture) -> None:
+    """A committed ``.pyc`` that is modified is a tracked entry, not an ignored one:
+    the throwaway allowlist does not touch it, its patch carries it instead."""
     wt = fx.worktree()
     cache = wt / "pkg" / "__pycache__"
     cache.mkdir(parents=True)
@@ -473,8 +596,9 @@ def test_a_tracked_pyc_under_an_allowlisted_directory_still_blocks(fx: Fixture) 
 
     result = salvage(fx, wt)
 
-    assert result.uncovered == ["pkg/__pycache__/m.pyc"], result.uncovered
-    assert verify(fx, result) == [UNCOVERED + "pkg/__pycache__/m.pyc"]
+    assert result.uncovered == [], result.uncovered
+    assert result.artifacts[-1].endswith(ws.UNSTAGED_SUFFIX), result.artifacts
+    assert verify(fx, result) == []
 
 
 def test_an_allowlisted_cache_beside_one_blocking_file_gives_one_problem(
