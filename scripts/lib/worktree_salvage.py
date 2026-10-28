@@ -23,14 +23,16 @@ implies, so an empty nested repository is never passed silently.
 ``<name>.untracked.list`` holds one NUL-terminated record per archived member,
 sorted by path; the separator is NUL, so a filename may hold any byte but NUL::
 
-    <kind> <size> <sha256> <path>\\0
+    <kind> <size> <sha256> <mode> <path>\\0
 
 ``kind`` is ``f`` (file), ``l`` (symlink) or ``d`` (directory); ``size`` is the
 byte count of the file or of the symlink's target, ``0`` for a directory;
 ``sha256`` is the hex digest of those bytes, a single ``-`` for a directory;
-``path`` is relative to the tree, POSIX-separated, and runs to the closing NUL.
-Kind, size and digest hold no space, so the first three fields parse whatever
-the filename holds.
+``mode`` is a file's permission bits as four octal digits (``0755``), ``-`` for
+a directory or a symlink, whose modes are fixed; ``path`` is relative to the
+tree, POSIX-separated, and runs to the closing NUL. No first-four field holds a
+space, so they parse whatever the filename holds; a four-field record predates
+modes and is a named problem, never a silent pass.
 
 :func:`verify` returns ``[]`` only when the tree holds nothing else — ``git
 status --porcelain=v2 -z --untracked-files=all --ignored=matching
@@ -42,9 +44,9 @@ entry is excused only inside a throwaway cache DIRECTORY from
 WT-2a1b, OI-2417; a regular file that only shares a cache directory's name is
 never excused), the untracked list parses, the archive opens with ``tarfile``,
 every listed member is in the archive and every archive member in the list with
-the same kind, size and sha256, every listed path is still in the tree as the
-list records it (a file edited or deleted after the salvage is named, as are
-members the tree gained and the list never carried), every gitlink whose
+the same kind, size, sha256 and mode, every listed path is still in the tree as
+the list records it (a file edited or deleted after the salvage is named, as
+are members the tree gained and the list never carried), every gitlink whose
 checkout exists is named even when it is clean (a submodule keeps its commits in
 its own object store, so no superproject bundle can carry them; nothing here
 classifies or excuses one — submodule bundling is OI-2411), a gitlink whose
@@ -76,6 +78,7 @@ import subprocess
 import tarfile
 import tempfile
 import time
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -97,6 +100,11 @@ _GIT_ENV = {"GIT_OPTIONAL_LOCKS": "0"}
 _DETACHED = "(detached)"
 _STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 _SHA_RE = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+# A file keeps its permission bits, never setuid/setgid/sticky (a salvage
+# restores work, not a privilege); a four-field record predates modes.
+_MODE_MASK = 0o777
+_MODE_RE = re.compile(r"[0-7]{3,4}")
+_OLD_LIST = "list without modes: the list records no mode for its members"
 _STATUS = ["status", "--porcelain=v2", "-z", "--untracked-files=all",
            "--ignored=matching", "--ignore-submodules=none"]
 _PATH_FIELD = {"1": 8, "2": 9, "u": 10, "?": 1, "!": 1}  # spaces before the path
@@ -132,27 +140,34 @@ class SalvageResult:
 
 
 class _Record(NamedTuple):
-    """One archived member: kind (``f``/``l``/``d``), size, sha256 and path."""
+    """One archived member: kind, size, sha256, path; mode None when fixed."""
     kind: str
     size: int
     digest: str
     path: str
+    mode: int | None = None
+
+
+def _mode_text(mode: int | None) -> str:
+    """A record's mode field: four octal digits for a file, ``-`` otherwise."""
+    return "-" if mode is None else f"{mode:04o}"
 
 
 @dataclass(frozen=True)
 class _Member:
-    """Content the untracked archive carries for one path: a file's bytes, a
-    symlink's target string, or nothing for an empty directory."""
+    """What the untracked archive carries for one path: a file's bytes (with its
+    masked permission bits), a symlink's target or nothing for an empty dir."""
     kind: str
     path: str
     data: bytes | None = None
+    mode: int | None = None
 
     def record(self) -> _Record:
         """The list record of this member; a directory has no bytes to hash."""
         if self.data is None:
             return _Record(self.kind, 0, "-", self.path)
         return _Record(self.kind, len(self.data),
-                       hashlib.sha256(self.data).hexdigest(), self.path)
+                       hashlib.sha256(self.data).hexdigest(), self.path, self.mode)
 
 
 def _utc_stamp() -> str:
@@ -277,13 +292,15 @@ def _is_internal_link(kind: str, path: str, tree: Path, repo_root: Path) -> bool
 
 def _member_of(entry: Path, rel: str) -> _Member:
     """One member for a path git names as a file: a symlink by the bytes of its
-    target, a regular file by its bytes. A device, socket or fifo raises."""
+    target, a regular file by its bytes and masked permission bits. A device,
+    socket or fifo raises."""
     try:
         mode = os.lstat(entry).st_mode
         if stat.S_ISLNK(mode):
             return _Member("l", rel, os.fsencode(os.readlink(entry)))
         if stat.S_ISREG(mode):
-            return _Member("f", rel, entry.read_bytes())
+            return _Member("f", rel, entry.read_bytes(),
+                           stat.S_IMODE(mode) & _MODE_MASK)
     except OSError as exc:
         raise SalvageError(f"read {rel}: {exc}") from exc
     raise SalvageError(f"read {rel}: not a regular file or symlink")
@@ -353,8 +370,16 @@ def _uncovered_paths(entries: list[tuple[str, str]], populated: set[str], *,
 
 
 def _tar_bytes(members: list[_Member]) -> bytes:
-    """The members as one gzip'd tar named by their relative paths. Owner, mode
-    and mtime are fixed; content, kind and link target are the evidence."""
+    """The members as one gzip'd tar named by their relative paths. Owner, mtime
+    and names are fixed; content, kind, link target and a file's permission bits
+    are the evidence. A regular file keeps the bits it has on disk
+    (``stat.S_IMODE`` of the ``lstat``, masked to :data:`_MODE_MASK`: setuid,
+    setgid and sticky are dropped), so an untracked ``run.sh`` at 0755 restores
+    executable. A directory and a symlink keep fixed modes (0755, 0777): a
+    directory's mode varies and carries no work, and a symlink's mode is
+    meaningless (``chmod`` follows the target), so the archive proves kind and
+    target string instead.
+    """
     buffer = io.BytesIO()
     try:
         with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -369,7 +394,8 @@ def _tar_bytes(members: list[_Member]) -> bytes:
                     info.type, info.mode, info.linkname = tarfile.SYMTYPE, 0o777, os.fsdecode(data)
                     tar.addfile(info)
                 elif member.kind == "f":
-                    info.type, info.mode, info.size = tarfile.REGTYPE, 0o644, len(data)
+                    info.type, info.size = tarfile.REGTYPE, len(data)
+                    info.mode = 0o644 if member.mode is None else member.mode & _MODE_MASK
                     tar.addfile(info, io.BytesIO(data))
                 else:  # a member kind this module never builds is not written
                     raise SalvageError(f"build the untracked archive: no member kind {member.kind!r}")
@@ -381,15 +407,31 @@ def _tar_bytes(members: list[_Member]) -> bytes:
 def _list_bytes(members: list[_Member]) -> bytes:
     """The list artifact: one NUL-terminated record per member, in archive order."""
     return b"".join(
-        (f"{record.kind} {record.size} {record.digest} {record.path}"
-         .encode("utf-8", "surrogateescape") + b"\0")
+        (f"{record.kind} {record.size} {record.digest} {_mode_text(record.mode)} "
+         f"{record.path}".encode("utf-8", "surrogateescape") + b"\0")
         for record in (member.record() for member in members))
 
 
+def _parse_record(chunk: bytes) -> _Record:
+    """One list record; a four-field record predates modes and is named, not passed."""
+    text = os.fsdecode(chunk)
+    for fields, legacy in ((text.split(" ", 4), False), (text.split(" ", 3), True)):
+        kind, size, digest = fields[:3]
+        head_ok = (kind in ("f", "l", "d") and size.isdigit()
+                   and (digest == "-" if kind == "d" else bool(_SHA_RE.fullmatch(digest))))
+        if head_ok and len(fields) == (4 if legacy else 5) and fields[-1]:
+            if legacy:
+                raise SalvageError(_OLD_LIST)
+            mode_text = fields[3]
+            if bool(_MODE_RE.fullmatch(mode_text)) if kind == "f" else mode_text == "-":
+                mode = None if kind in ("d", "l") else int(mode_text, 8)
+                return _Record(kind, int(size), digest, fields[4], mode)
+    raise SalvageError(f"unparseable record {chunk[:60]!r}")
+
+
 def _list_records(path: Path) -> dict[str, _Record]:
-    """The records of one ``.untracked.list`` artifact, keyed by path. A record
-    that does not parse, an empty one and a path listed twice are each a
-    SalvageError: an unreadable list proves nothing about its archive."""
+    """The records of one ``.untracked.list``, keyed by path; an unparseable
+    record, a duplicate path or a record without its mode is a SalvageError."""
     try:
         body = path.read_bytes()
     except OSError as exc:
@@ -401,21 +443,16 @@ def _list_records(path: Path) -> dict[str, _Record]:
             if index < len(chunks) - 1:  # only the last NUL closes the final record
                 raise SalvageError("the list holds an empty record")
             continue
-        fields = os.fsdecode(chunk).split(" ", 3)
-        if len(fields) != 4 or not fields[3]:
-            raise SalvageError(f"unparseable record {chunk[:60]!r}")
-        kind, size, digest, rel = fields
-        if (kind not in ("f", "l", "d") or not size.isdigit()
-                or (digest != "-" if kind == "d" else not _SHA_RE.fullmatch(digest))):
-            raise SalvageError(f"unparseable record {chunk[:60]!r}")
-        if rel in records:
-            raise SalvageError(f"path {rel} is listed twice")
-        records[rel] = _Record(kind, int(size), digest, rel)
+        record = _parse_record(chunk)
+        if record.path in records:
+            raise SalvageError(f"path {record.path} is listed twice")
+        records[record.path] = record
     return records
 
 
 def _archive_record(tar: tarfile.TarFile, info: tarfile.TarInfo) -> _Record:
-    """One archive member as a record, hashed from the archive's own bytes."""
+    """One archive member as a record, hashed from its own bytes; a regular file
+    carries its archive mode, so a member restored without its exec bit is caught."""
     if info.isdir():
         return _Record("d", 0, "-", info.name)
     if info.issym():
@@ -425,12 +462,14 @@ def _archive_record(tar: tarfile.TarFile, info: tarfile.TarInfo) -> _Record:
     data = handle.read() if handle is not None else None
     if data is None:
         raise SalvageError(f"member {info.name} is of no kind this list records")
-    return _Record("f", len(data), hashlib.sha256(data).hexdigest(), info.name)
+    return _Record("f", len(data), hashlib.sha256(data).hexdigest(), info.name,
+                   stat.S_IMODE(info.mode) & _MODE_MASK)
 
 
 def _archive_records(path: Path) -> dict[str, _Record]:
     """The members of one ``.untracked.tgz``, keyed by path. An archive that
-    will not open, or a member archived twice, is a SalvageError, never a pass."""
+    will not open (a truncated gzip raises ``EOFError`` or ``zlib.error``), or a
+    member archived twice, is a SalvageError, never a pass."""
     records: dict[str, _Record] = {}
     try:
         with tarfile.open(path, "r:gz") as tar:
@@ -438,7 +477,7 @@ def _archive_records(path: Path) -> dict[str, _Record]:
                 if info.name in records:
                     raise SalvageError(f"member {info.name} is archived twice")
                 records[info.name] = _archive_record(tar, info)
-    except (OSError, tarfile.TarError) as exc:
+    except (OSError, tarfile.TarError, EOFError, zlib.error) as exc:
         raise SalvageError(f"cannot read the archive ({exc})") from exc
     return records
 
@@ -889,17 +928,29 @@ def _apply_problems(result: SalvageResult, dest: Path, tree: Path,
     return problems
 
 
+def _content(record: _Record) -> tuple[str, int, str]:
+    """A record's content identity — what the bytes say, without its mode."""
+    return record.kind, record.size, record.digest
+
+
 def _archive_vs_list(packed: dict[str, _Record], records: dict[str, _Record],
                      artifact: str) -> list[str]:
-    """Every member one of the two lacks, and every one they disagree on: an
-    archive that holds less than its list restores a tree nobody described."""
+    """Every member one of the two lacks and every one they disagree on: an
+    archive that holds less than its list restores a tree nobody described, and
+    a member whose mode differs is named with the mode — work the archive does
+    not carry."""
     problems = [f"{artifact}: member {path} is in the list but not in the archive"
                 for path in sorted(records) if path not in packed]
     problems.extend(f"{artifact}: member {path} is in the archive but not in the list"
                     for path in sorted(packed) if path not in records)
-    problems.extend(f"{artifact}: member {path} differs from the list"
-                    for path in sorted(packed)
-                    if path in records and packed[path] != records[path])
+    for path in sorted(packed.keys() & records.keys()):
+        if _content(packed[path]) != _content(records[path]):
+            problems.append(f"{artifact}: member {path} differs from the list")
+        elif packed[path].mode != records[path].mode:
+            problems.append(
+                f"{artifact}: member {path} has mode "
+                f"{_mode_text(packed[path].mode)}, the list records "
+                f"{_mode_text(records[path].mode)}")
     return problems
 
 
@@ -919,8 +970,11 @@ def _list_vs_tree(records: dict[str, _Record], fresh: dict[str, _Record],
         if current is None:
             problems.append(f"tree {name}: {path} is not in the tree as the untracked "
                             "list records it")
-        elif current != record:
+        elif _content(current) != _content(record):
             problems.append(f"tree {name}: {path} differs from the untracked list")
+        elif current.mode != record.mode:
+            problems.append(f"tree {name}: {path} has mode {_mode_text(current.mode)}, "
+                            f"the untracked list records {_mode_text(record.mode)}")
     problems.extend(f"tree {name}: {path} is in the tree but not in the untracked list"
                     for path in sorted(fresh) if path not in records)
     return problems
@@ -930,7 +984,7 @@ def _archive_problems(result: SalvageResult, dest: Path, tree: Path, repo_root: 
                       archives: list[str], lists: list[str]) -> list[str]:
     """Prove the untracked archive: one archive and one list, the list parsing,
     the archive opening, the two holding the same members with the same kind,
-    size and sha256, and every listed path still in the tree as recorded.
+    size, sha256 and mode, and every listed path still in the tree as recorded.
 
     ``archives`` and ``lists`` passed their existence checks. The tree is measured
     whether or not an archive is listed: untracked content with no archive to

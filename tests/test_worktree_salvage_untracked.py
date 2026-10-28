@@ -112,6 +112,7 @@ class Record(NamedTuple):
     size: int
     digest: str
     path: str
+    mode: int | None
 
 
 def list_path(result: "ws.SalvageResult") -> Path:
@@ -123,12 +124,25 @@ def archive_path(result: "ws.SalvageResult") -> Path:
 
 
 def records_of(result: "ws.SalvageResult") -> list[Record]:
-    """The list as the contract states it: NUL-separated ``kind size sha path``."""
-    body = list_path(result).read_bytes()
-    return [Record(kind, int(size), digest, path)
-            for kind, size, digest, path in
-            (record.split(" ", 3) for record in
-             (os.fsdecode(chunk) for chunk in body.split(b"\0") if chunk))]
+    """The list as the contract states it: NUL-separated ``kind size sha mode path``.
+
+    A four-field record (a list from before modes were kept) parses with ``mode``
+    ``None``, so a test can state that a mode was not recorded rather than
+    crashing on the split.
+    """
+    records: list[Record] = []
+    for chunk in list_path(result).read_bytes().split(b"\0"):
+        if not chunk:
+            continue
+        fields = os.fsdecode(chunk).split(" ", 4)
+        if len(fields) == 4:
+            kind, size, digest, path = fields
+            records.append(Record(kind, int(size), digest, path, None))
+            continue
+        kind, size, digest, mode, path = fields
+        records.append(Record(kind, int(size), digest, path,
+                              None if mode == "-" else int(mode, 8)))
+    return records
 
 
 def archived_names(result: "ws.SalvageResult") -> list[str]:
@@ -145,6 +159,22 @@ def rebuild_without(result: "ws.SalvageResult", drop: str) -> None:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
         for info, data in kept:
+            tar.addfile(info, io.BytesIO(data) if data is not None else None)
+    archive.write_bytes(buffer.getvalue())
+
+
+def rewrite_member_mode(result: "ws.SalvageResult", name: str, mode: int) -> None:
+    """Re-pack the archive with one member at another mode: the list still
+    records what the salvage saw, so the two disagree."""
+    archive = archive_path(result)
+    with tarfile.open(archive, "r:gz") as tar:
+        kept = [(info, tar.extractfile(info).read() if info.isfile() else None)
+                for info in tar.getmembers()]
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for info, data in kept:
+            if info.name == name:
+                info.mode = mode
             tar.addfile(info, io.BytesIO(data) if data is not None else None)
     archive.write_bytes(buffer.getvalue())
 
@@ -355,7 +385,7 @@ def test_an_empty_directory_is_archived_as_a_member(fx: Fixture) -> None:
     result = salvage(fx, wt)
 
     listed = {record.path: record for record in records_of(result)}
-    assert listed["nested/empty"] == Record("d", 0, "-", "nested/empty")
+    assert listed["nested/empty"] == Record("d", 0, "-", "nested/empty", None)
     with tarfile.open(archive_path(result), "r:gz") as tar:
         assert tar.getmember("nested/empty").isdir()
     assert verify(fx, result) == []
@@ -446,3 +476,116 @@ def test_a_filename_with_spaces_and_newlines_round_trips(fx: Fixture) -> None:
     assert listed["with space.txt"].digest == sha(b"space\n")
     assert archived_names(result) == ["two\nlines.txt", "with space.txt"]
     assert verify(fx, result) == []
+
+
+# ---------------------------------------------------------------------------
+# 9. the permission bits are the work: an executable must restore executable
+# ---------------------------------------------------------------------------
+
+
+def test_a_regular_file_keeps_its_permission_bits(fx: Fixture) -> None:
+    """An untracked 0755 script and a 0644 data file land in the archive and in
+    the list with the modes they have on disk, and verify proves both."""
+    wt = fx.worktree()
+    (wt / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (wt / "run.sh").chmod(0o755)
+    (wt / "data.txt").write_text("data\n", encoding="utf-8")
+
+    result = salvage(fx, wt)
+
+    with tarfile.open(archive_path(result), "r:gz") as tar:
+        assert tar.getmember("run.sh").mode == 0o755
+        assert tar.getmember("data.txt").mode == 0o644
+    listed = {record.path: record for record in records_of(result)}
+    assert listed["run.sh"].mode == 0o755, listed["run.sh"]
+    assert listed["data.txt"].mode == 0o644, listed["data.txt"]
+    assert verify(fx, result) == []
+
+
+def test_an_archive_member_without_its_exec_bit_is_named(fx: Fixture) -> None:
+    """A restored ``run.sh`` at 0644 is lost work: verify must name the mode, not
+    return an empty list that would approve deleting the tree."""
+    wt = fx.worktree()
+    (wt / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (wt / "run.sh").chmod(0o755)
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    rewrite_member_mode(result, "run.sh", 0o644)
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        f"{result.salvage_dir.name}/worktree-one.untracked.tgz: member run.sh "
+        "has mode 0644, the list records 0755"], problems
+
+
+def test_a_file_chmodded_after_the_salvage_is_named(fx: Fixture) -> None:
+    """The recorded mode is compared with the file on disk too: an executable
+    lost after the salvage is state the archive does not describe."""
+    wt = fx.worktree()
+    (wt / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (wt / "run.sh").chmod(0o755)
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    (wt / "run.sh").chmod(0o644)
+
+    problems = verify(fx, result)
+
+    assert problems == [
+        "tree worktree-one: run.sh has mode 0644, the untracked list records 0755"], problems
+
+
+def test_a_setuid_bit_never_reaches_the_archive(fx: Fixture) -> None:
+    """A salvage restores a worker's files, not a privilege: setuid, setgid and
+    sticky are masked out of both the archive and the list."""
+    wt = fx.worktree()
+    (wt / "tool").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (wt / "tool").chmod(0o4755)
+    assert os.lstat(wt / "tool").st_mode & 0o4000, "the fixture set the setuid bit"
+
+    result = salvage(fx, wt)
+
+    with tarfile.open(archive_path(result), "r:gz") as tar:
+        assert tar.getmember("tool").mode == 0o755
+    listed = {record.path: record for record in records_of(result)}
+    assert listed["tool"].mode == 0o755, listed["tool"]
+    assert verify(fx, result) == []
+
+
+def test_a_list_without_modes_is_named(fx: Fixture) -> None:
+    """A list written before modes were kept proves nothing about an executable:
+    it is a named problem, never a silent pass."""
+    wt = fx.worktree()
+    (wt / "run.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+    (wt / "run.sh").chmod(0o755)
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    body = b"".join(
+        f"{record.kind} {record.size} {record.digest} {record.path}"
+        .encode("utf-8", "surrogateescape") + b"\0"
+        for record in records_of(result))
+    list_path(result).write_bytes(body)
+
+    problems = verify(fx, result)
+
+    assert any("list without modes" in p for p in problems), problems
+
+
+def test_an_archive_truncated_to_half_its_bytes_is_named(fx: Fixture) -> None:
+    """A gzip cut in half raises ``EOFError`` while reading; verify translates
+    it into a named problem and never lets it escape."""
+    wt = fx.worktree()
+    (wt / "blob.bin").write_bytes(os.urandom(4096))
+    result = salvage(fx, wt)
+    assert verify(fx, result) == []
+
+    archive = archive_path(result)
+    body = archive.read_bytes()
+    archive.write_bytes(body[: len(body) // 2])
+
+    problems = verify(fx, result)
+
+    assert any("cannot read the archive" in p for p in problems), problems
