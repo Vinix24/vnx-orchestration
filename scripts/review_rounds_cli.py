@@ -37,22 +37,25 @@ verdicts, and every build-door ``--override-b3`` (``override`` line) recorded
 against it.
 
 ``cap-verdict --pr N --for-dispatch <id>`` asks the tiebreaker at the B3 cap
-(R2a, R2b, ADR-041) for the next step and records it in ``review_cap_verdicts``:
-one outcome, never a findings list. ``verkleinen`` grants one extra codex-seat
-round to the dispatch ``--for-dispatch`` names. ``terug-naar-plan`` (B3.1) is
-carried out after its row stands (``review_cap_aftermath``): one open item per
-remaining codex blocker, the deliverable back to ``proposed`` and the PR
-closed with a comment; a PR that links to no deliverable is said loudly on
-stderr and the other steps still run. A verdict that already stands is shown,
-no model is asked again, and for ``terug-naar-plan`` only the missing steps of
-its aftermath run. The verdict's ``review_cap_verdict`` receipt is written
-first and its row only after it landed (ADR-005, OI-2201): a verdict without a
-receipt grants nothing. A receipt that landed while its row did not is booked
-from the receipt (``restored``).
+(R2a, R2b, R2c, ADR-041) for the next step and records it in
+``review_cap_verdicts``: one outcome, never a findings list. ``verkleinen``
+grants one extra codex-seat round to the dispatch ``--for-dispatch`` names.
+``terug-naar-plan`` (B3.1) is carried out after its row stands
+(``review_cap_aftermath``): one open item per remaining codex blocker, the
+deliverable back to ``proposed`` and the PR closed with a comment; a PR that
+links to no deliverable is said loudly on stderr and the other steps still run.
+``mergen-met-OI`` (B3.2) is carried out too (R2c): one open item per remaining
+codex blocker, the deliverable and the PR left where they are, and a closing
+record with ``open_items_written``; the merge still needs an operator approval
+bound to that verdict, its PR and its head. A verdict that already stands is
+shown, no model is asked again, and only the missing steps of its aftermath
+run. The verdict's ``review_cap_verdict`` receipt is written first and its row
+only after it landed (ADR-005, OI-2201): a verdict without a receipt grants
+nothing. A receipt that landed while its row did not is booked from the
+receipt (``restored``).
 
 ``cap-verdict`` exit codes:
-  0  a verdict stands, and for terug-naar-plan its whole aftermath is done (also
-     ``outcome_unavailable_in_r2a`` for mergen-met-OI: the cap stays closed)
+  0  a verdict stands, and its whole aftermath is done
   1  the receipt could not be written: no row, no granted round, run it again
   2  nothing can be decided
   3  the verdict stands, its aftermath is incomplete (a step names what did not
@@ -165,7 +168,7 @@ def _cap_verdict(args) -> int:
         print(f"vnx review cap-verdict: no verdict recorded for PR #{args.pr}: {exc}", file=sys.stderr)
         return EXIT_ERROR
     verdict, aftermath = decision.verdict, None
-    if verdict.outcome == review_cap_verdicts.TERUG_NAAR_PLAN:
+    if verdict.outcome in (review_cap_verdicts.TERUG_NAAR_PLAN, review_cap_verdicts.MERGEN_MET_OI):
         aftermath = review_cap_aftermath.carry_out(state_dir, verdict)
         verdict = aftermath.verdict
     if args.json:
@@ -186,8 +189,7 @@ def _cap_verdict(args) -> int:
 
 
 def _print_cap_verdict(pr: int, status: str, verdict, aftermath) -> None:
-    """The verdict in one line; for ``terug-naar-plan`` one more line per aftermath step."""
-    import review_cap_aftermath
+    """The verdict in one line; for a carried-out one, one more line per aftermath step."""
     import review_cap_verdicts
 
     head = f"PR #{pr} {status} {verdict.verdict_id}: {verdict.cap_rule} -> {verdict.outcome}"
@@ -195,9 +197,27 @@ def _print_cap_verdict(pr: int, status: str, verdict, aftermath) -> None:
         print(f"{head}, one extra codex-seat round for dispatch {verdict.granted_dispatch_id}: {verdict.intervention}")
         return
     if aftermath is None:
-        print(f"{head} (chosen {verdict.chosen_outcome}; the cap stays closed, defer with an OI by hand)")
+        print(f"{head} (chosen {verdict.chosen_outcome}; no aftermath: the cap stays closed)")
+        return
+    if verdict.outcome == review_cap_verdicts.MERGEN_MET_OI:
+        print(
+            f"{head}: the remaining codex blockers become open items, the deliverable and the PR stay; "
+            f"aftermath {'complete' if aftermath.complete else 'INCOMPLETE'}"
+        )
+        _print_aftermath_steps(aftermath)
+        print(
+            f"  merge: still needs an operator approval bound to verdict {verdict.verdict_id}, PR #{pr} "
+            f"and head {verdict.head_sha}"
+        )
         return
     print(f"{head}: the PR goes back to plan; aftermath {'complete' if aftermath.complete else 'INCOMPLETE'}")
+    _print_aftermath_steps(aftermath)
+
+
+def _print_aftermath_steps(aftermath) -> None:
+    """One line per aftermath step: what it did, the ids it wrote, and whether an earlier run booked it."""
+    import review_cap_aftermath
+
     for step in aftermath.steps:
         ids = step.fields.get("oi_ids") if step.step == review_cap_aftermath.STEP_OPEN_ITEMS else None
         listed = f" {', '.join(ids)}" if ids else ""

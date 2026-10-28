@@ -34,6 +34,31 @@ from vnx_cli.commands.update import (
 
 INSTALL_CENTRAL_SCRIPT = Path(__file__).resolve().parent.parent.parent / "install-central.sh"
 
+# The only deviations a central install is ALLOWED to have against its tag:
+# install-central.sh strips the tracked tenant marker (absent on disk) and writes
+# the install-mode marker (present on disk, in no tag). Measured on all 16
+# published dirs on 2026-10-25; any third deviation is drift and fails. These two
+# are the only exceptions: everything else the tag lists must be byte-identical
+# on disk, and nothing else may be there.
+VERIFY_ALLOWED_DELETED = ".vnx-project-id"
+VERIFY_ALLOWED_UNTRACKED = INSTALL_MODE_MARKER
+
+# The only tree modes the comparison knows how to check: a regular file with or
+# without an executable bit, and a symlink (its blob is the link target bytes).
+# A gitlink (160000) is named as unverified, never skipped.
+_REGULAR_MODES = ("100644", "100755")
+_GITLINK_MODE = "160000"
+_SYMLINK_MODE = "120000"
+
+# The default branch a release tag must be reachable from. The remote's own
+# symbolic HEAD wins (that is what "the default branch" means for a hosted
+# repo); the four literals cover a bare local clone (tests, air-gapped boxes)
+# and the pre-2020 default spelling.
+_DEFAULT_BRANCH_REFS = (
+    "refs/remotes/origin/HEAD", "refs/remotes/origin/main", "refs/heads/main",
+    "refs/remotes/origin/master", "refs/heads/master",
+)
+
 
 def _resolve_install_central() -> Path:
     env = os.environ.get("VNX_INSTALL_CENTRAL_SCRIPT")
@@ -223,6 +248,346 @@ def _current_flip_warning(tag: str) -> str:
     )
 
 
+def _rev_parse(repo: Path, ref: str) -> "str | None":
+    """Commit-ish ``ref`` in ``repo``, or None when it does not resolve."""
+    result = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "-q", "--verify", ref],
+        capture_output=True, text=True,
+    )
+    return (result.stdout.strip() or None) if result.returncode == 0 else None
+
+
+def _unmerged_tag_message(repo: str, tag: str) -> "str | None":
+    """None when the tag is on the default branch, else why ancestry is unproven.
+
+    Fail-closed: a remote URL, an unresolvable default branch and a failing
+    ``merge-base`` are "not proven", never a pass.
+    """
+    if not Path(repo).is_dir():
+        return (f"cannot prove tag '{tag}' is on the default branch of {repo}: "
+                "not a local checkout, so there are no objects to walk")
+    for ref in _DEFAULT_BRANCH_REFS:
+        branch_commit = _rev_parse(Path(repo), f"{ref}^{{commit}}")
+        if branch_commit:
+            break
+    else:
+        return (f"cannot find the default branch in {repo} (origin/HEAD, origin/main, "
+                "main, origin/master, master), so the tag's ancestry is unproven")
+    args = ["git", "-C", repo, "merge-base", "--is-ancestor", f"refs/tags/{tag}", branch_commit]
+    result = subprocess.run(args, capture_output=True, text=True)
+    if result.returncode == 0:
+        return None
+    if result.returncode == 1:
+        return (f"tag '{tag}' is NOT on the default branch ({ref} @ {branch_commit[:12]}): "
+                f"its commit is not an ancestor of {ref}; merge it there and retag")
+    return (f"git merge-base --is-ancestor {tag} {branch_commit[:12]} failed (exit "
+            f"{result.returncode}): {result.stderr.strip() or 'no stderr'}")
+
+
+def _guard_publish_source(
+    repo: str, tag: str, allow_unmerged: "str | None"
+) -> "tuple[str | None, str]":
+    """Everything that must hold before any materialization; (tree_version, refusal).
+
+    Refuses a missing tag, an OI-1070 mislabeled tree and a tag outside the
+    default branch; --allow-unmerged-tag <reason> (non-empty, named in the
+    warning) is the only escape for the last. Runs in --dry-run.
+    """
+    if allow_unmerged is not None and not allow_unmerged.strip():
+        return None, "--allow-unmerged-tag requires a non-empty reason"
+    try:
+        if not _tag_exists(repo, tag):
+            return None, f"tag '{tag}' not found in {repo}"
+    except FileNotFoundError:
+        return None, "git executable not found in PATH"
+    except subprocess.CalledProcessError as exc:
+        return None, f"git operation failed: {exc}"
+
+    try:
+        ok, tree_version, tag_version = _check_version_matches_tag(repo, tag)
+    except subprocess.CalledProcessError as exc:
+        return None, f"cannot read VERSION from tag '{tag}' in {repo}: {exc.stderr.strip() or exc}"
+    except FileNotFoundError:
+        return None, "git executable not found in PATH"
+    if not ok:
+        return None, (f"VERSION mismatch for tag '{tag}': tree VERSION reads "
+                      f"'{tree_version}' but tag implies '{tag_version}'. Bump VERSION at "
+                      "the repo root and retag. Refusing to ship a mislabeled release.")
+
+    unmerged = _unmerged_tag_message(repo, tag)
+    if unmerged is None:
+        print(f"Default-branch guard OK: tag '{tag}' is on the default branch")
+        return tree_version, ""
+    if allow_unmerged is not None:
+        print(f"WARNING: {unmerged}", file=sys.stderr)
+        print("WARNING: publishing anyway in spite of --allow-unmerged-tag reason: "
+              f"{allow_unmerged.strip()}", file=sys.stderr)
+        return tree_version, ""
+    return None, f"{unmerged}. Or pass --allow-unmerged-tag \"<reason>\" to publish anyway."
+
+
+def _resolve_release_tag(places, version: str) -> "tuple[str | None, str | None]":
+    """``(tag, commit)`` for ``version``; the source checkout wins over the dir."""
+    candidates = [version] if version[:1] in ("v", "V") else [version, f"v{version}"]
+    for place in places:
+        if not Path(place).is_dir():
+            continue
+        for candidate in candidates:
+            commit = _rev_parse(Path(place), f"refs/tags/{candidate}^{{commit}}")
+            if commit:
+                return candidate, commit
+    return None, None
+
+
+def _git_failure(label: str, result: subprocess.CompletedProcess) -> str:
+    """One fail-closed problem line for a git read that did not succeed."""
+    reason = result.stderr.decode("utf-8", "backslashreplace").strip()
+    return f"cannot read {label}: {reason or f'git exited {result.returncode}'}"
+
+
+def _tag_tree_entries(version_dir: Path, tag_commit: str) -> "tuple[dict | None, list[str]]":
+    """``{path: (mode, type, blob)}`` for every entry of the tag's tree.
+
+    ``-z`` keeps paths byte-exact (a renamed file cannot be split on a guess at
+    quoting) and ``--full-tree`` makes the listing independent of the cwd.
+    """
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "ls-tree",
+           "-r", "-z", "--full-tree", tag_commit]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure(f"the tree of tag {tag_commit[:12]}", result)]
+    entries: "dict[str, tuple[str, str, str]]" = {}
+    for raw in result.stdout.split(b"\0"):
+        if not raw:
+            continue
+        meta, separator, raw_path = raw.partition(b"\t")
+        fields = meta.split()
+        if not separator or len(fields) != 3:
+            return None, [f"cannot parse a tree entry of {tag_commit[:12]}: "
+                          f"{raw.decode('utf-8', 'backslashreplace')!r}"]
+        mode, kind, blob = (field.decode("ascii", "backslashreplace") for field in fields)
+        entries[os.fsdecode(raw_path)] = (mode, kind, blob)
+    return entries, []
+
+
+def _disk_entry(full: str) -> "tuple[str, object]":
+    """``(kind, payload)`` for one filesystem entry: exec bit, or link target."""
+    if os.path.islink(full):
+        return "link", os.fsencode(os.readlink(full))
+    if os.path.isfile(full):
+        return "file", bool(os.lstat(full).st_mode & 0o111)
+    return "special", None
+
+
+def _disk_entries(version_dir: Path) -> "tuple[dict | None, list[str]]":
+    """Every entry of the published dir, keyed by its tag-relative path.
+
+    Only the ``.git`` entry at the root is skipped: it is the checkout's own
+    metadata, not a file of the release. Symlinked directories are recorded as
+    links and never followed, so a link out of the dir can neither hide nor
+    invent content.
+    """
+    entries: "dict[str, tuple[str, object]]" = {}
+    problems: "list[str]" = []
+    root = str(version_dir)
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        relative = os.path.relpath(dirpath, root)
+        prefix = "" if relative == os.curdir else relative + os.sep
+        files = filenames
+        if not prefix:
+            # The checkout's own metadata, not a file of the release: a clone has
+            # a .git directory, a linked worktree a .git file.
+            dirnames[:] = [name for name in dirnames if name != ".git"]
+            files = [name for name in filenames if name != ".git"]
+        # A plain directory is no file of the release; a symlinked one is a link.
+        names = files + [name for name in dirnames
+                         if os.path.islink(os.path.join(dirpath, name))]
+        for name in names:
+            try:
+                entries[prefix + name] = _disk_entry(os.path.join(dirpath, name))
+            except OSError as exc:
+                problems.append(f"cannot read {prefix}{name}: {exc.strerror or exc}")
+    return entries, problems
+
+
+def _disk_blobs(version_dir: Path, paths: "list[str]") -> "tuple[dict | None, list[str]]":
+    """``{path: blob id}`` for the dir's regular files, in one read-only batch.
+
+    ``git hash-object --no-filters --stdin-paths`` hashes exactly the bytes on
+    disk, without ``-w``: nothing is written and the index is never consulted.
+    """
+    if not paths:
+        return {}, []
+    unhashable = sorted(path for path in paths if "\n" in path or "\r" in path)
+    if unhashable:
+        return None, [f"cannot compare {unhashable[0]!r}: the path contains a newline, "
+                      "which git hash-object --stdin-paths cannot carry"]
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "hash-object",
+           "--no-filters", "--stdin-paths"]
+    stdin = b"".join(os.fsencode(path) + b"\n" for path in paths)
+    result = subprocess.run(cmd, input=stdin, capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure(f"the content of {len(paths)} file(s)", result)]
+    blobs = [line.decode("ascii", "backslashreplace")
+             for line in result.stdout.splitlines()]
+    if len(blobs) != len(paths):
+        return None, [f"cannot compare the file content: git hash-object returned "
+                      f"{len(blobs)} blob id(s) for {len(paths)} file(s)"]
+    return dict(zip(paths, blobs)), []
+
+
+def _tag_blob_contents(version_dir: Path,
+                       blob_ids: "list[str]") -> "tuple[dict | None, list[str]]":
+    """``{blob id: content bytes}`` for the tag's symlink blobs, in one batch."""
+    if not blob_ids:
+        return {}, []
+    cmd = ["git", "--no-optional-locks", "-C", str(version_dir), "cat-file", "--batch"]
+    result = subprocess.run(cmd, input="\n".join(blob_ids).encode("ascii") + b"\n",
+                            capture_output=True)
+    if result.returncode != 0:
+        return None, [_git_failure("the symlink targets in the tag", result)]
+    contents: "dict[str, bytes]" = {}
+    rest = result.stdout
+    for blob in blob_ids:
+        header, separator, rest = rest.partition(b"\n")
+        fields = header.split()
+        size = _blob_size(fields)
+        if not separator or size is None:
+            return None, [f"cannot read tag blob {blob}: git cat-file answered "
+                          f"{header.decode('utf-8', 'backslashreplace') or 'nothing'}"]
+        contents[blob] = rest[:size]
+        rest = rest[size + 1:]
+    return contents, []
+
+
+def _blob_size(fields: "list[bytes]") -> "int | None":
+    """The byte size from a ``git cat-file --batch`` header, or None if unusable."""
+    if len(fields) != 3 or fields[1] != b"blob":
+        return None
+    try:
+        return int(fields[2])
+    except ValueError:
+        return None
+
+
+def _compare_entries(tag_entries: dict, disk_entries: dict, blobs: dict,
+                     contents: dict) -> "list[str]":
+    """One problem line per differing path, in path order.
+
+    ``changed`` is a different blob, ``missing`` is a tag file absent on disk,
+    ``extra`` is a disk file absent from the tag (ignored or not), ``mode`` is a
+    different executable bit. Only the two generated files may be missing/extra.
+    """
+    problems: "list[str]" = []
+    for path in sorted(set(tag_entries) | set(disk_entries)):
+        entry, disk = tag_entries.get(path), disk_entries.get(path)
+        if disk is not None and disk[0] == "special":
+            problems.append(f"unsupported {path}: not a regular file or a symlink")
+            continue
+        if entry is None:
+            if path != VERIFY_ALLOWED_UNTRACKED:
+                problems.append(f"extra {path}")
+            continue
+        mode, kind, blob = entry
+        if mode == _GITLINK_MODE or kind == "commit":
+            problems.append(f"submodule {path}: not verified")
+            continue
+        if mode not in _REGULAR_MODES and mode != _SYMLINK_MODE:
+            problems.append(f"unsupported {path}: the tag's mode {mode}")
+            continue
+        if disk is None:
+            if path != VERIFY_ALLOWED_DELETED:
+                problems.append(f"missing {path}")
+            continue
+        if mode == _SYMLINK_MODE:
+            if disk[0] != "link" or contents.get(blob) != disk[1]:
+                problems.append(f"changed {path}")
+            continue
+        if disk[0] != "file":
+            problems.append(f"changed {path}")
+            continue
+        if blobs.get(path) != blob:
+            problems.append(f"changed {path}")
+        if disk[1] != (mode == "100755"):
+            problems.append(f"mode {path}")
+    return problems
+
+
+def _verify_differences(version_dir: Path, tag: str, tag_commit: str) -> "list[str]":
+    """Every difference between ``version_dir`` and its tag, one line each.
+
+    The tag's tree is the reference and the files on disk are the evidence: each
+    regular file is compared by blob id (one ``git hash-object`` batch that never
+    writes), each symlink by its target bytes, each executable bit against the
+    tag's mode. Nothing reads the index, ``.gitignore`` or a skip-worktree flag,
+    so a flagged file cannot hide a change and an ignored extra file is still
+    named. HEAD must be the tag's commit; a git read that fails is a problem line
+    and never a pass. ``--no-optional-locks`` keeps the whole check read-only.
+    """
+    head = _rev_parse(version_dir, "HEAD")
+    problems: "list[str]" = []
+    if head != tag_commit:
+        problems.append(f"HEAD {head or '?'} is not tag '{tag}' ({tag_commit})")
+    tag_entries, tag_problems = _tag_tree_entries(version_dir, tag_commit)
+    problems.extend(tag_problems)
+    disk_entries, disk_problems = _disk_entries(version_dir)
+    problems.extend(disk_problems)
+    if tag_entries is None or disk_entries is None:
+        return problems
+    files = sorted(path for path, entry in disk_entries.items() if entry[0] == "file")
+    blobs, blob_problems = _disk_blobs(version_dir, files)
+    problems.extend(blob_problems)
+    if blobs is None:
+        return problems
+    link_blobs = sorted({entry[2] for path, entry in tag_entries.items()
+                         if entry[0] == _SYMLINK_MODE
+                         and disk_entries.get(path, ("",))[0] == "link"})
+    contents, content_problems = _tag_blob_contents(version_dir, link_blobs)
+    problems.extend(content_problems)
+    if contents is None:
+        return problems
+    problems.extend(_compare_entries(tag_entries, disk_entries, blobs, contents))
+    return problems
+
+
+def vnx_release_verify(args) -> int:
+    """`vnx release verify <version>` — exit 1 and name every differing path."""
+    try:
+        version = _validate_version_name(getattr(args, "version", None) or "")
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+
+    version_dir = _resolve_root() / "versions" / version
+    if not version_dir.is_dir():
+        print(f"Error: release dir not found: {version_dir}. Publish '{version}' first "
+              "(vnx release publish --tag ...).", file=sys.stderr)
+        return 1
+    if _git_toplevel(version_dir) != version_dir:
+        print(f"Error: {version_dir} is not a git checkout, so it cannot be compared "
+              "against a tag tree. Re-publish the tag.", file=sys.stderr)
+        return 1
+
+    tag, tag_commit = _resolve_release_tag([_resolve_repo(args), version_dir], version)
+    if tag is None or tag_commit is None:
+        print(f"Error: no tag for '{version}' in {version_dir} nor {_resolve_repo(args)}: "
+              "without the tag there is nothing to check the release dir against.",
+              file=sys.stderr)
+        return 1
+
+    problems = _verify_differences(version_dir, tag, tag_commit)
+    if problems:
+        report = "\n".join(f"  {problem}" for problem in problems)
+        print(f"FAIL: {version_dir} is not the tree of tag '{tag}' ({tag_commit[:12]}):\n"
+              f"{report}", file=sys.stderr)
+        return 1
+    print(f"OK: {version_dir} matches tag '{tag}' ({tag_commit[:12]}): every file in the "
+          f"tag is byte-identical on disk, and no extra file exists there — apart from the "
+          f"generated {VERIFY_ALLOWED_DELETED} (stripped) and {VERIFY_ALLOWED_UNTRACKED} "
+          "(written).")
+    return 0
+
+
 def vnx_release_publish(args) -> int:
     tag: "str | None" = getattr(args, "tag", None)
     dry_run: bool = getattr(args, "dry_run", False)
@@ -252,49 +617,18 @@ def vnx_release_publish(args) -> int:
 
     repo = _resolve_repo(args)
 
-    try:
-        if not _tag_exists(repo, tag):
-            print(f"Error: tag '{tag}' not found in {repo}", file=sys.stderr)
-            return 1
-    except FileNotFoundError:
-        print("Error: git executable not found in PATH", file=sys.stderr)
-        return 1
-    except subprocess.CalledProcessError as exc:
-        print(f"Error: git operation failed: {exc}", file=sys.stderr)
-        return 1
-
-    # OI-1070: refuse to publish a tag whose tree VERSION disagrees with the
-    # tag name. A mislabeled release (tree says 1.4.3, tag says v1.4.4) would
-    # otherwise silently ship as the wrong version. No --force escape: this
-    # is exactly the accident the guard exists to prevent. --dry-run performs
-    # the same check and surfaces it, so the mismatch is visible before any
-    # commit to a publish.
-    try:
-        ok, tree_version, tag_version = _check_version_matches_tag(repo, tag)
-    except subprocess.CalledProcessError as exc:
-        print(
-            f"Error: cannot read VERSION from tag '{tag}' in {repo}: {exc.stderr.strip() or exc}",
-            file=sys.stderr,
-        )
-        return 1
-    except FileNotFoundError:
-        print("Error: git executable not found in PATH", file=sys.stderr)
-        return 1
-    if not ok:
-        print(
-            f"Error: VERSION mismatch for tag '{tag}': tree VERSION reads "
-            f"'{tree_version}' but tag implies '{tag_version}'. "
-            "Bump VERSION at the repo root and retag before publishing. "
-            "Refusing to ship a mislabeled release.",
-            file=sys.stderr,
-        )
+    tree_version, refusal = _guard_publish_source(
+        repo, tag, getattr(args, "allow_unmerged_tag", None)
+    )
+    if refusal:
+        print(f"Error: {refusal}", file=sys.stderr)
         return 1
 
     if dry_run:
         print(f"[dry-run] VNX_HOME_ROOT: {root}")
         print(
             f"[dry-run] Version guard OK: tag '{tag}' tree VERSION '{tree_version}' "
-            f"== tag '{tag_version}'"
+            f"== tag '{_strip_leading_v(tag)}'"
         )
         print(
             f"[dry-run] Would materialize tag '{tag}' from {repo} -> {target_dir} "
@@ -368,7 +702,10 @@ def vnx_release_publish(args) -> int:
 
 
 def vnx_release(args) -> int:
-    if getattr(args, "release_subcommand", None) == "publish":
+    subcommand = getattr(args, "release_subcommand", None)
+    if subcommand == "publish":
         return vnx_release_publish(args)
-    print("Error: a release subcommand is required (publish).", file=sys.stderr)
+    if subcommand == "verify":
+        return vnx_release_verify(args)
+    print("Error: a release subcommand is required (publish, verify).", file=sys.stderr)
     return 1

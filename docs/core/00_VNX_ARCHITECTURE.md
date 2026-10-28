@@ -885,8 +885,10 @@ FEATURE_PLAN.md → init-feature → staging/ → promote → queue/ → pending
   path as a structural-consolidation follow-up.
 - The roadmap autopilot (`RoadmapManager.run_feature_step` in
   `scripts/roadmap_manager.py`, ticked under `VNX_ROADMAP_AUTOPILOT=1`) calls
-  `create_dispatch_from_pr` and then `promote_dispatch` for the next
-  dependency-ready PR. This path is not T0-only.
+  `create_dispatch_from_pr` for the next dependency-ready PR. It no longer
+  promotes it: the staging `.md` promote flow is retired (T-A10,
+  `terminal-binding-afbouwen`) and a staged spec bundle fired through the door is
+  the only queue. This path is not T0-only.
 
 **CLI Commands**:
 ```bash

@@ -99,16 +99,25 @@ VNX uses a patch-based model for `settings.json` — it manages only its own key
 
 | Owner | Keys |
 |-------|------|
-| **VNX** | `hooks`, `env.VNX_*`, baseline `permissions.allow`, baseline `permissions.deny` |
-| **Project/User** | Extra `env` keys, `permissions.ask`, `additionalDirectories`, any non-VNX keys |
+| **VNX** | VNX-owned hooks, `env.VNX_*`, baseline `permissions.allow`, baseline `permissions.deny` |
+| **Project/User** | Project hooks, extra `env` keys, `permissions.ask`, `additionalDirectories`, any non-VNX keys |
 
 ### Merge Semantics
 
 - `permissions.allow`: union (deduplicated) — VNX baseline + project entries
 - `permissions.deny`: union (deduplicated) — deny takes precedence over allow
 - `permissions.ask` and `additionalDirectories`: preserved as-is (project-owned)
-- `hooks`: replaced entirely (VNX-owned)
+- `hooks`: VNX-owned handlers refreshed from the template, project handlers kept (OI-2057)
 - `env`: VNX_* keys replaced, project keys preserved
+
+A hook handler is VNX-owned when its command equals one the template renders for
+the same event, or names a path in a VNX install's hook tree (a `scripts/hooks/`
+segment, or anything under the central install's `/.vnx-system/`). Everything
+else is project-owned and survives a merge, including a handler whose command
+cannot be read. `--replace-hooks` restores the old replace-everything behaviour
+explicitly, and `--merge --dry-run --json` reports per event what is kept,
+added and replaced under `_vnx_hook_report` (that key is dry-run output only
+and is never written to `settings.json`).
 
 ### Commands
 
@@ -142,7 +151,7 @@ Two hooks keep a T0 session honest. Both ship through the same three templates a
 
 **Role-loaded alarm** (`hooks/sessionstart.sh`, T0 only). The canonical role (`role-orchestrator.md`) reaches a session only through an `@role-orchestrator.md` line in the T0 `CLAUDE.md`. When that line is missing the injection opens with `ROLE NOT LOADED: deze T0 draait zonder de canonieke rol`. It is a warning: the rest of the injection is still delivered. The measurement is the reach axis of `scripts/fleet_role_drift.py` (`--reach <t0-dir>`), not a second implementation. The hook is copied into each project by `bootstrap_hooks`, so it finds the engine under `$_VNX_SCRIPTS_ROOT`, the one scripts root the whole hook resolves (hook-relative, `VNX_HOME`, then `~/.vnx-system/current`). If that root is not reachable the injection opens with `ROLE CHECK UNAVAILABLE` instead of passing silently. `vnx role sync` does not restore a missing import: it refreshes the file the import points at.
 
-`hooks` is replaced entirely on a merge. A project that keeps its own hooks in `settings.json` loses them on `vnx regen-settings --merge`. Move them to `settings.local.json` first.
+A merge refreshes the VNX-owned hooks in place and leaves a project's own hooks in `settings.json` alone (OI-2057). A project hook that runs a script under a `scripts/hooks/` directory, or under `~/.vnx-system/`, is indistinguishable from a VNX hook and is refreshed; keep such hooks out of those two locations, or in `settings.local.json`. `vnx regen-settings --merge --replace-hooks` still replaces every hook, and `--full` still rewrites the file from the template alone — neither is a cutover step.
 
 ## Future Improvements
 

@@ -48,7 +48,8 @@ class TestVNXVars:
         expected = {
             "PROJECT_ROOT", "VNX_HOME", "VNX_DATA_DIR", "VNX_STATE_DIR",
             "VNX_DISPATCH_DIR", "VNX_LOGS_DIR", "VNX_SKILLS_DIR",
-            "VNX_PIDS_DIR", "VNX_LOCKS_DIR", "VNX_REPORTS_DIR", "VNX_DB_DIR",
+            "VNX_PIDS_DIR", "VNX_LOCKS_DIR", "VNX_SOCKETS_DIR",
+            "VNX_REPORTS_DIR", "VNX_DB_DIR",
         }
         assert set(VNX_VARS) == expected
 

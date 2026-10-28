@@ -526,13 +526,21 @@ _fdd_log_dispatch_metadata() {
     }
 }
 
-# finalize_dispatch_delivery — broker success, progress state, heartbeat, metadata, move to active.
+# finalize_dispatch_delivery — broker success, progress state, heartbeat, metadata, consume the dispatch file.
 # Params: dispatch_file track terminal_id dispatch_id pr_id gate agent_role instruction_content [intelligence_data]
 # Reads globals: _DL_RC_ATTEMPT_ID
-# Returns 0 on confirmed-accepted activation, 1 when the broker did not confirm
-# acceptance — in the latter case the dispatch file stays in pending/, no
-# dispatch_promoted is emitted, and dispatch_failed is appended to the register
-# so register-driven views see the rejection.
+# Returns 0 on confirmed-accepted delivery, 1 when the broker did not confirm
+# acceptance — in the latter case the dispatch file stays in pending/ and
+# dispatch_failed is appended to the register so register-driven views see the
+# rejection.
+#
+# The legacy .md promote flow is retired (track terminal-binding-afbouwen, T-A10):
+# a delivered .md is no longer promoted into dispatches/active/ and no
+# dispatch_promoted is emitted. active/ has one writer left after that, the
+# subprocess lane's manifest.json, and a staged spec bundle never reaches this
+# function. The delivered .md is consumed here so pending/ cannot hand it to the
+# dispatcher again; the register line (dispatch_created) and the worker's receipt
+# report are the dispatch's record.
 finalize_dispatch_delivery() {
     local dispatch_file="$1" track="$2" terminal_id="$3" dispatch_id="$4"
     local pr_id="$5" gate="$6" agent_role="$7" instruction_content="$8"
@@ -563,25 +571,6 @@ finalize_dispatch_delivery() {
 
     log "V8 DISPATCH: Successfully sent dispatch to terminal $terminal_id"
 
-    # Emit dispatch_promoted BEFORE the pending→active mv so register-driven
-    # views never observe a dispatch in active/ without a matching canonical
-    # promotion event. Best-effort: emit failures are surfaced via
-    # log_structured_failure so the broker/register inconsistency is visible
-    # in audit, but they do not abort the mv — the broker has confirmed
-    # acceptance and the worker is already running.
-    local _promote_rc=0
-    local _promote_stderr
-    set +e
-    _promote_stderr=$(python3 "$VNX_DIR/scripts/lib/dispatch_register.py" append dispatch_promoted \
-        "dispatch_id=$dispatch_id" "terminal=$terminal_id" 2>&1 >/dev/null)
-    _promote_rc=$?
-    set -e
-    if [ "$_promote_rc" -ne 0 ]; then
-        log_structured_failure "register_emit_failed" \
-            "dispatch_promoted emit failed — register-driven views may miss/misclassify this successfully delivered dispatch" \
-            "dispatch=$dispatch_id terminal=$terminal_id rc=$_promote_rc stderr=${_promote_stderr}"
-    fi
-
     _fdd_update_progress_state "$track" "$gate" "$dispatch_id"
 
     python3 "$VNX_DIR/scripts/notify_dispatch.py" "$dispatch_id" "$terminal_id" "$dispatch_id" "$pr_id" 2>/dev/null || {
@@ -591,9 +580,11 @@ finalize_dispatch_delivery() {
     _fdd_log_dispatch_metadata "$dispatch_file" "$dispatch_id" "$terminal_id" "$track" \
         "$agent_role" "$gate" "$pr_id" "$instruction_content" "$intelligence_data"
 
+    # Retired promote branch (T-A10): no dispatch_promoted emit and no mv into
+    # "$ACTIVE_DIR" — see the function header. The delivered .md is consumed.
     local filename; filename=$(basename "$dispatch_file")
-    mv "$dispatch_file" "$ACTIVE_DIR/$filename"
-    log "V8 DISPATCH: Activated - moved to $ACTIVE_DIR/$filename"
+    rm -f "$dispatch_file"
+    log "V8 DISPATCH: delivered - legacy .md consumed, promote to active/ retired: $filename"
 
     return 0
 }

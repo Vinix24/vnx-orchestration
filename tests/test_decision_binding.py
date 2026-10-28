@@ -73,3 +73,12 @@ class TestOperatorApproval:
         assert led.exists()
         row = json.loads(led.read_text(encoding="utf-8").splitlines()[0])
         assert row["decision_id"] == "d1" and row["action"] == "merge_pr"
+
+    def test_extra_fields_add_an_identifier_and_never_override_the_approval(self, tmp_path):
+        rec = db.record_operator_approval(
+            "cap-pr1-abc", "merge_pr", "vincent", state_dir=tmp_path,
+            fields={"verdict_id": "cap-pr1-abc", "pr_number": 1, "head_sha": "a" * 40,
+                    "event": "x", "action": "skip", "operator": "someone-else"},
+        )
+        assert (rec["verdict_id"], rec["pr_number"], rec["head_sha"]) == ("cap-pr1-abc", 1, "a" * 40)
+        assert (rec["event"], rec["action"], rec["operator"]) == ("operator_approval", "merge_pr", "vincent")

@@ -46,7 +46,7 @@ TIER_UNIVERSAL: FrozenSet[str] = frozenset({
 })
 
 TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
-    "staging-list", "promote", "queue-status", "gate-check", "pr-ready", "suggest",
+    "staging-list", "queue-status", "gate-check", "pr-ready", "suggest",
     "cost-report", "costs", "analyze-sessions", "intelligence-export",
     "intelligence-import", "bootstrap-skills",
     "bootstrap-terminals", "bootstrap-hooks", "regen-settings", "regen-worker-permissions",
@@ -65,7 +65,7 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "smoke", "package-check", "fabric-audit", "subsystems",
     "dispatch", "gate", "gate-reanchor", "review", "dream",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
-    "pool",
+    "pool", "release",
 })
 
 # Mode -> allowed command sets

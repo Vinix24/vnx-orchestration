@@ -186,15 +186,18 @@ class TestGetSessionId(unittest.TestCase):
         list(adapter.read_events("T1"))  # consume iterator
         self.assertEqual(adapter.get_session_id("T1"), "ses_abc123")
 
-    def test_extracted_from_first_init_only(self):
+    def test_later_init_refreshes_session_id(self):
+        # OI-1125 removed the `terminal_id not in self._session_ids` guard on
+        # purpose: a resumed or long-running process must attach later work to
+        # the new conversation, so a later init overwrites the first.  The old
+        # "first init wins" assertion pinned the behaviour that fix replaced.
         second_init = {"type": "init", "session_id": "ses_other", "model": "x"}
         adapter = SubprocessAdapter()
         adapter._processes["T1"] = make_mock_process(
             make_ndjson_bytes([FIXTURE_INIT, second_init])
         )
         list(adapter.read_events("T1"))
-        # First init wins
-        self.assertEqual(adapter.get_session_id("T1"), "ses_abc123")
+        self.assertEqual(adapter.get_session_id("T1"), "ses_other")
 
     def test_no_session_id_if_no_init_event(self):
         adapter = SubprocessAdapter()

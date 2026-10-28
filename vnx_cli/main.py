@@ -447,6 +447,21 @@ def _register_release_subparser(subparsers: argparse.Action) -> None:
              "more than VNX_CUTOVER_MAX_BEHIND_COMMITS commits behind main "
              "(OI-1718); an empty reason is refused",
     )
+    publish_parser.add_argument(
+        "--allow-unmerged-tag",
+        dest="allow_unmerged_tag",
+        default=None,
+        metavar="REASON",
+        help="publish a tag whose commit is NOT an ancestor of the default branch "
+             "(refused by default); requires a non-empty reason, named in the warning",
+    )
+
+    verify_parser = release_subs.add_parser(
+        "verify", help="verify an installed version dir is still the tree of its tag"
+    )
+    verify_parser.add_argument(
+        "version", metavar="VERSION", help="published version (<root>/versions/<VERSION>)"
+    )
 
 
 def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:

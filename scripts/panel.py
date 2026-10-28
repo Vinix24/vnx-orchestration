@@ -23,6 +23,8 @@ _LIB = Path(__file__).resolve().parent / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
+import panel_leg_cost
+import provider_costs
 import provider_switch
 from deliberation_panel import default_roster, MODES, run_deliberation, switch_roster
 
@@ -88,6 +90,26 @@ def _switch_seats(roster, *, project_id, min_seats, allow_degraded):
     return kept, ""
 
 
+def _cost_booking(data_dir: str) -> dict:
+    """K4a: where the panel books its legs — the store it runs for, via the one resolvers.
+
+    ``data_dir`` is the same store the reports and the seats' receipts live in, never the
+    ambient one: a panel run for one project never pays into another project's ledger.
+    """
+    return {
+        "ledger_path": provider_costs.costs_path_in(Path(data_dir)),
+        "project_id": panel_leg_cost.project_id_for(Path(data_dir)),
+    }
+
+
+def _note_booking(result) -> None:
+    """Name the ledger lines this run booked, so an operator sees them without the report."""
+    booked = getattr(result, "cost_ledger_run_ids", [])
+    if booked:
+        print(f"[panel] cost ledger: {len(booked)} leg line(s) booked under "
+              f"{getattr(result, 'panel_run_id', '?')}", file=sys.stderr)
+
+
 def main(argv: "list[str] | None" = None) -> int:
     parser = argparse.ArgumentParser(description="VNX multi-provider deliberation panel")
     parser.add_argument("mode", choices=sorted(MODES), help="deliberation mode")
@@ -146,16 +168,18 @@ def main(argv: "list[str] | None" = None) -> int:
     # panel stage.
     dispatcher = _make_default_dispatcher(data_dir, args.timeout, role="deliberation-panelist")
 
+    cost_kwargs = _cost_booking(data_dir)
+
     print(f"[panel] mode={args.mode} — running 4-stage deliberation across the fleet ...", file=sys.stderr)
     if roster is None:
         result = run_deliberation(
             args.mode, args.question, dispatcher=dispatcher, context=context,
-            min_seats=min_seats, allow_degraded=args.allow_degraded,
+            min_seats=min_seats, allow_degraded=args.allow_degraded, **cost_kwargs,
         )
     else:
         result = run_deliberation(
             args.mode, args.question, dispatcher=dispatcher, context=context, roster=roster,
-            min_seats=min_seats, allow_degraded=args.allow_degraded,
+            min_seats=min_seats, allow_degraded=args.allow_degraded, **cost_kwargs,
         )
     report = result.to_report()
 
@@ -167,6 +191,7 @@ def main(argv: "list[str] | None" = None) -> int:
         print(f"panel: could not write report: {exc}", file=sys.stderr)
 
     print(report)
+    _note_booking(result)
     if result.synthesis_refused_reason:
         print(f"[panel] SYNTHESIS REFUSED: {result.synthesis_refused_reason}", file=sys.stderr)
         return 1

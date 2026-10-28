@@ -3,9 +3,9 @@
 Track ``review-stopregel-en-lichte-stoelen``, plan section 2. When R1 puts a PR
 at the cap (``review_rounds.cap_state``), ``vnx review cap-verdict --pr N
 --for-dispatch <id>`` asks one model for the next step and records it in
-``review_cap_verdicts`` (``review_cap_verdicts.record_verdict``). A
-``terug-naar-plan`` is stored as that outcome and carried out by
-``review_cap_aftermath``; ``mergen-met-OI`` stays ``outcome_unavailable_in_r2a``.
+``review_cap_verdicts`` (``review_cap_verdicts.record_verdict``). Both
+``terug-naar-plan`` and ``mergen-met-OI`` are stored as that outcome and
+carried out by ``review_cap_aftermath``.
 
 - **The model** comes from the registry (ADR-036), through the mechanism the
   plan-gate tiebreaker uses (``plan_gate_tiebreaker.resolve_tiebreaker_model``
@@ -276,10 +276,10 @@ def _forced(pr_number: int, step: rcv.CapStep) -> rcv.CapVerdict:
     """The verdict when one outcome is left: the rule decides, no model is asked."""
     (outcome,) = step.allowed
     stored = rcv.stored_outcome(outcome)
-    then = (
-        "the PR goes back to plan" if stored == rcv.TERUG_NAAR_PLAN
-        else "not available in R2a: the cap stays closed"
-    )
+    then = {
+        rcv.TERUG_NAAR_PLAN: "the PR goes back to plan",
+        rcv.MERGEN_MET_OI: "the remaining blockers become open items and the merge needs the operator's approval",
+    }.get(stored, "outcome_unavailable_in_r2a: the cap stays closed")
     return rcv.CapVerdict(
         project_id="", pr_number=pr_number, verdict_id=rcv.verdict_id_for(pr_number, step.head_sha),
         head_sha=step.head_sha, cap_rule=step.rule, outcome=stored, chosen_outcome=outcome,
