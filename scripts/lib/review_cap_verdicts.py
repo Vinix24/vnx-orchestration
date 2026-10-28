@@ -21,9 +21,12 @@ means for the gate, the writer and the doors:
   ``verkleinen`` or ``mergen-met-OI``. R2a carries out ``verkleinen``, R2b
   ``terug-naar-plan`` (``review_cap_aftermath``: the remaining codex blockers
   become open items, whose ids the row carries, the deliverable goes back to
-  ``proposed`` and the PR closes). ``mergen-met-OI`` is recorded as
-  ``outcome_unavailable_in_r2a`` with the model's choice beside it, and the cap
-  stays closed.
+  ``proposed`` and the PR closes). R2c carries out ``mergen-met-OI``: the
+  remaining codex blockers become open items and nothing else is returned or
+  closed; the merge itself needs an operator approval bound to that verdict, its
+  PR and its head (:func:`record_merge_approval`, :func:`merge_approval`). No
+  choice is left unavailable: :data:`CARRIED_OUT` holds every outcome a rule
+  offers.
 - **Sent back to plan.** A ``terug-naar-plan`` verdict that stands closes the
   PR at the merge door: no PASS of any seat counts on any head, an
   ``--override-b3`` included (:func:`door_return`). It stands as a row or as
@@ -72,7 +75,11 @@ RULE_OUTCOMES = {
     review_rounds.B3_2: (VERKLEINEN, MERGEN_MET_OI),
 }
 # The outcomes that are carried out; any other choice is stored as UNAVAILABLE.
-CARRIED_OUT = (VERKLEINEN, TERUG_NAAR_PLAN)
+CARRIED_OUT = (VERKLEINEN, TERUG_NAAR_PLAN, MERGEN_MET_OI)
+
+# The sensitive action an operator approval for a mergen-met-OI verdict clears.
+APPROVAL_ACTION = "merge_pr"
+APPROVAL_EVENT = "operator_approval"
 
 # What the CLI does next (next_step).
 BELOW_CAP = "below_cap"
@@ -423,11 +430,12 @@ def _verdict_in_receipt(receipt: Dict[str, Any], pr_number: int, verdict_id: str
 
 
 def set_oi_ids(state_dir: Path, verdict: CapVerdict, oi_ids: Sequence[str]) -> None:
-    """Write ``oi_ids`` onto the stored ``terug-naar-plan`` row of ``verdict`` (R2b); idempotent.
+    """Write ``oi_ids`` onto the stored carried-out row of ``verdict`` (R2b, R2c); idempotent.
 
-    Under the store's booking lock. The row must stand: a verdict whose row is
-    gone (the receipt books it again on the next run) raises
-    :class:`CapVerdictError`, as does a store that cannot be written.
+    The outcomes that carry an aftermath are ``terug-naar-plan`` and
+    ``mergen-met-OI``. Under the store's booking lock. The row must stand: a
+    verdict whose row is gone (the receipt books it again on the next run)
+    raises :class:`CapVerdictError`, as does a store that cannot be written.
     """
     from atomic_io import slot_lock
 
@@ -440,8 +448,9 @@ def set_oi_ids(state_dir: Path, verdict: CapVerdict, oi_ids: Sequence[str]) -> N
                 with conn:
                     changed = conn.execute(
                         f"UPDATE {TABLE} SET oi_ids = ? WHERE project_id = ? AND pr_number = ? AND verdict_id = ? "
-                        "AND outcome = ?",
-                        (value, verdict.project_id, verdict.pr_number, verdict.verdict_id, TERUG_NAAR_PLAN),
+                        "AND outcome IN (?, ?)",
+                        (value, verdict.project_id, verdict.pr_number, verdict.verdict_id,
+                         TERUG_NAAR_PLAN, MERGEN_MET_OI),
                     ).rowcount
             finally:
                 conn.close()
@@ -449,7 +458,7 @@ def set_oi_ids(state_dir: Path, verdict: CapVerdict, oi_ids: Sequence[str]) -> N
             raise CapVerdictError(f"{TABLE} in {path} could not be written: {exc}") from exc
     if changed != 1:
         raise CapVerdictError(
-            f"{TABLE} in {path} holds no terug-naar-plan row {verdict.verdict_id} of project {verdict.project_id}: "
+            f"{TABLE} in {path} holds no carried-out row {verdict.verdict_id} of project {verdict.project_id}: "
             f"its open items are not on the row"
         )
 
@@ -574,6 +583,65 @@ def door_return(state_dir: Path, cap: review_rounds.CapState, *, since: str = ""
     if not cap.capped:
         return None
     return standing_return(cap, standing_verdicts(state_dir, cap.pr_number, since=since), since=since)
+
+
+# ---------------------------------------------------------------------------
+# The operator approval of one mergen-met-OI verdict (R2c)
+# ---------------------------------------------------------------------------
+
+
+def record_merge_approval(
+    state_dir: Path, verdict: CapVerdict, operator: str, *, note: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Record the operator's approval of this ``mergen-met-OI`` verdict: one use, one receipt.
+
+    No table of its own (ADR-041 amendment R2c): the approval is the existing
+    ``operator_approval`` receipt (``decision_binding.record_operator_approval``)
+    in the store's approval ledger, bound to the sensitive action ``merge_pr``.
+    It carries the verdict id, the PR number and the head sha, so
+    :func:`merge_approval` can tell this use from another verdict, another PR or
+    another head.
+    """
+    from decision_binding import record_operator_approval
+
+    return record_operator_approval(
+        verdict.verdict_id, APPROVAL_ACTION, operator, note=note, state_dir=state_dir,
+        fields={"verdict_id": verdict.verdict_id, "pr_number": verdict.pr_number, "head_sha": verdict.head_sha},
+    )
+
+
+def merge_approval(state_dir: Path, verdict: CapVerdict) -> Optional[Dict[str, Any]]:
+    """The ``operator_approval`` that clears ``verdict`` for a merge with open items; ``None`` without one.
+
+    The approval is per use: it counts only for the action ``merge_pr``, this
+    verdict id, this PR number and this head sha. An approval for another
+    verdict, another PR or another head is no approval. A ledger that is absent
+    or cannot be read, and a line that does not parse, give none as well: whether
+    the operator cleared this merge cannot be told, so nothing is cleared.
+    """
+    from decision_binding import APPROVAL_LEDGER
+
+    path = Path(state_dir) / APPROVAL_LEDGER
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("review_cap_verdicts: the approval ledger %s could not be read (%s): no approval", path, exc)
+        return None
+    wanted = (APPROVAL_ACTION, verdict.verdict_id, verdict.pr_number, verdict.head_sha)
+    for raw in lines:
+        try:
+            record = json.loads(raw)
+        except ValueError as exc:
+            logger.warning("review_cap_verdicts: an %s line of %s does not parse (%s): skipped",
+                           APPROVAL_EVENT, verdict.verdict_id, exc)
+            continue
+        if not isinstance(record, dict) or record.get("event") != APPROVAL_EVENT:
+            continue
+        if (record.get("action"), record.get("verdict_id"), record.get("pr_number"), record.get("head_sha")) == wanted:
+            return record
+    return None
 
 
 # ---------------------------------------------------------------------------

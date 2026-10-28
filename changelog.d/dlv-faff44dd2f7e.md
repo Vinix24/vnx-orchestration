@@ -1,0 +1,1 @@
+- RG-5: the B3 override also runs through `VNX_OVERRIDE_B3=1` plus `VNX_OVERRIDE_B3_REASON` at the merge door (`pr_merge.py`) and the review gate CLI (`review_gate_manager.py`); the flag wins when both are given, a carrier without a reason is still refused, and the record names the carrier (`flag`/`env`) next to the reason.

@@ -1,4 +1,4 @@
-"""The aftermath of a ``terug-naar-plan`` verdict at the B3 review cap (R2b, ADR-041).
+"""The aftermath of a carried-out verdict at the B3 review cap (R2b, R2c, ADR-041).
 
 Track ``review-stopregel-en-lichte-stoelen``, plan section 2. B3.1 says the PR
 has a design problem; when the tiebreaker picks ``terug-naar-plan`` (or the
@@ -55,6 +55,13 @@ another head or report is refused, never read as the source); the
 deliverable's event names the verdict as its actor; the PR's state and its
 comments are read before it is closed.
 
+**``mergen-met-OI`` (R2c).** B3.2 says the findings did not converge. The same
+step 1 runs (same dedup key, same receipt-first order, same idempotence), and
+nothing else goes back: the deliverable stays where it is and the PR stays
+open. A closing record with ``open_items_written`` says the aftermath is done;
+the merge itself still needs an operator approval bound to this verdict, its
+PR and its head (``review_cap_verdicts.merge_approval``).
+
 The whole aftermath runs under one store lock, so two runs of the command do
 not both close the PR. A step that does not finish raises
 :class:`AftermathError` inside and ends the aftermath there: the verdict
@@ -77,6 +84,7 @@ AFTERMATH_EVENT = "review_cap_aftermath"
 STEP_OPEN_ITEMS = "open_items"
 STEP_DELIVERABLE = "deliverable"
 STEP_PR_CLOSE = "pr_close"
+STEP_MERGE_READY = "merge_ready"
 OI_SOURCE = "review_cap_tiebreaker"
 NO_LINKED_DELIVERABLE = "no_linked_deliverable"
 NOT_APPLIED = "not_applied"
@@ -85,6 +93,7 @@ _STEP_FIELDS = {
     STEP_OPEN_ITEMS: ("oi_ids", "result_record"),
     STEP_DELIVERABLE: ("deliverable", "output_ref", "pr_dispatch_id", "from_state", "to_state", "branch", "track"),
     STEP_PR_CLOSE: ("pr_state", "repo", "comment"),
+    STEP_MERGE_READY: ("open_items_written",),
 }
 _DISPATCH_BRANCH = "dispatch/"
 _BRANCH_PREFIXES = ("refs/heads/", "origin/")
@@ -121,7 +130,7 @@ class StepResult:
 
 @dataclass(frozen=True)
 class Aftermath:
-    """The steps that ran for one ``terug-naar-plan`` verdict; ``failed`` names the one that did not finish."""
+    """The steps that ran for one carried-out verdict; ``failed`` names the one that did not finish."""
 
     verdict: rcv.CapVerdict
     steps: Tuple[StepResult, ...] = ()
@@ -149,16 +158,22 @@ def dedup_key(verdict: rcv.CapVerdict, index: int) -> str:
 
 
 def carry_out(state_dir: Path, verdict: rcv.CapVerdict) -> Aftermath:
-    """Run what is missing of the aftermath of ``verdict``, a stored ``terug-naar-plan``.
+    """Run what is missing of the aftermath of ``verdict``, a carried-out verdict.
 
-    Returns the :class:`Aftermath`, with ``failed`` set when a step did not
-    finish. Raises ``ValueError`` for a verdict of another outcome: nothing
-    else has an aftermath.
+    ``mergen-met-OI`` has its own step set (:func:`carry_out_merge_with_oi`).
+    ``terug-naar-plan`` runs the steps below. Returns the :class:`Aftermath`,
+    with ``failed`` set when a step did not finish. Raises ``ValueError`` for a
+    verdict of another outcome: nothing else has an aftermath.
     """
     from atomic_io import slot_lock
 
+    if verdict.outcome == rcv.MERGEN_MET_OI:
+        return carry_out_merge_with_oi(state_dir, verdict)
     if verdict.outcome != rcv.TERUG_NAAR_PLAN:
-        raise ValueError(f"{verdict.verdict_id} is {verdict.outcome}: only terug-naar-plan has an aftermath")
+        raise ValueError(
+            f"{verdict.verdict_id} is {verdict.outcome}: only terug-naar-plan and mergen-met-OI "
+            "have an aftermath"
+        )
     done: List[StepResult] = []
     with slot_lock(Path(state_dir) / AFTERMATH_EVENT):
         try:
@@ -183,6 +198,52 @@ def carry_out(state_dir: Path, verdict: rcv.CapVerdict) -> Aftermath:
         except AftermathError as exc:
             return Aftermath(verdict, tuple(done), failed=str(exc))
     return Aftermath(verdict, tuple(done))
+
+
+def carry_out_merge_with_oi(state_dir: Path, verdict: rcv.CapVerdict) -> Aftermath:
+    """The aftermath of ``mergen-met-OI``: the open items, then the record that it finished (R2c).
+
+    Nothing goes back: the deliverable stands and the PR stays open. Both steps
+    are receipted and idempotent on the verdict id, as the R2b steps are.
+    """
+    from atomic_io import slot_lock
+
+    if verdict.outcome != rcv.MERGEN_MET_OI:
+        raise ValueError(f"{verdict.verdict_id} is {verdict.outcome}: only mergen-met-OI has this aftermath")
+    done: List[StepResult] = []
+    with slot_lock(Path(state_dir) / AFTERMATH_EVENT):
+        try:
+            booked = _booked_steps(state_dir, verdict)
+            counted = _CountedRound(state_dir, verdict)
+            items = booked.get(STEP_OPEN_ITEMS)
+            done.append(
+                _restore_open_items(state_dir, verdict, items) if items
+                else _open_items_step(state_dir, verdict, counted.line())
+            )
+            verdict = replace(verdict, oi_ids=tuple(done[-1].fields["oi_ids"]))
+            ready = booked.get(STEP_MERGE_READY)
+            done.append(_restored(ready) if ready else _booked(state_dir, verdict, _merge_ready(verdict)))
+        except AftermathError as exc:
+            return Aftermath(verdict, tuple(done), failed=str(exc))
+    return Aftermath(verdict, tuple(done))
+
+
+def _merge_ready(verdict: rcv.CapVerdict) -> StepResult:
+    """The closing record of the merge-with-open-items aftermath: its ``open_items_written``.
+
+    A half-written aftermath has no such record; the merge door counts the
+    verdict by it.
+    """
+    written = len(verdict.oi_ids)
+    return StepResult(
+        STEP_MERGE_READY, "ready",
+        detail=(
+            f"{written} remaining codex blocker(s) of {verdict.verdict_id} on head {verdict.head_sha[:12]} are "
+            f"open items; the merge still needs an operator approval bound to this verdict, PR "
+            f"#{verdict.pr_number} and head {verdict.head_sha[:12]}"
+        ),
+        fields={"open_items_written": written},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +340,7 @@ def _add_open_item(oim: Any, verdict: rcv.CapVerdict, line: review_rounds.RoundL
     details = (
         f"Remaining blocker of the codex seat ({line.reviewer}) on head {verdict.head_sha[:12]} of PR "
         f"#{verdict.pr_number}, carried into an open item by the review-cap tiebreaker: verdict "
-        f"{verdict.verdict_id} ({verdict.cap_rule} -> terug-naar-plan). Severity codex gave: {severity or 'none'}. "
+        f"{verdict.verdict_id} ({verdict.cap_rule} -> {verdict.outcome}). Severity codex gave: {severity or 'none'}. "
         f"Location: {location or 'none'}. Report: {line.report_path}.\n\n{message}"
     )
     fields = dict(

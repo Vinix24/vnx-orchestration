@@ -107,7 +107,7 @@ terminal-pinned worker instead with `VNX_ADAPTER_T{n}=subprocess`. See
 
 ```bash
 ./bin/vnx staging-list
-./bin/vnx promote <dispatch-id>
+./bin/vnx dispatch <dispatch-id>
 ./bin/vnx gate-check --pr <PR-ID>
 ```
 

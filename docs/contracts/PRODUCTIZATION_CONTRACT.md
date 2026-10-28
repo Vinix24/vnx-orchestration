@@ -115,7 +115,6 @@ All 47 commands are available in operator mode. The public command surface must 
 | Command | Description |
 |---------|-------------|
 | `vnx staging-list` | List pending dispatches |
-| `vnx promote` | Promote a dispatch |
 | `vnx queue-status` | Show PR queue status |
 | `vnx gate-check` | Run quality gate check |
 | `vnx suggest` | Get dispatch suggestions |

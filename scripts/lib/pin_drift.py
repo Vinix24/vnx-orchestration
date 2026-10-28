@@ -292,6 +292,28 @@ def _pinned_dir(versions_dir: Path, pin: str) -> Optional[str]:
     return None
 
 
+def pinned_release_dir(versions_dir: Path, pin: str) -> Optional[Path]:
+    """The RESOLVED path of the installed release dir the pin names, or ``None``.
+
+    ``_pinned_dir`` answers with the dir NAME, which is what a store listing
+    speaks; a caller that judges whether an installed job runs the pin needs
+    the directory that name actually resolves to. A ``v1.7.5`` entry that is a
+    symlink into ``v1.7.4`` has the right name and the wrong target, so
+    comparing names alone reports such a job as following a pin it ignores.
+    ``None`` wherever no installed release answers the pin (the same
+    candidates and the same escape rules as ``_pinned_dir``), so a caller can
+    never read "no installed release" as "the pin is followed". Pure read:
+    nothing is created, chmod'ed or entered.
+    """
+    name = _pinned_dir(versions_dir, pin)
+    if name is None:
+        return None
+    try:
+        return (versions_dir / name).resolve()
+    except (OSError, RuntimeError):
+        return None
+
+
 def classify_pin(pin: str, store_root: Path) -> PinDrift:
     """Measure one pin against one store. Pure read; nothing is written."""
     versions_dir = store_root / "versions"

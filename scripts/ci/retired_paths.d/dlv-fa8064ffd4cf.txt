@@ -1,0 +1,7 @@
+# T-A10 (dlv-fa8064ffd4cf) of track `terminal-binding-afbouwen`: the legacy .md
+# promote flow is retired. A staged spec bundle (pending/<id>/dispatch-spec.json,
+# fired through the door) is the only queue, so the staging .md promote — and with
+# it the pending/ → active/ promotion in dispatch_lifecycle.sh — is gone.
+# The script stays (show/patch/reject/staging-list still serve staging bundles);
+# only the promote entry is retired. Pinned by tests/test_md_promote_retired.py.
+scripts/pr_queue_manager.py::PRQueueManager.promote_dispatch

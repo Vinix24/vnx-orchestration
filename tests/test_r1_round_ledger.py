@@ -583,7 +583,9 @@ class TestTheMergeDoor:
         receipts = [json.loads(raw) for raw in door["receipts"].read_text().splitlines() if raw.strip()]
         merged_receipt = [r for r in receipts if r.get("event_type") == "pr_merged"][-1]
         override = merged_receipt["review_seats"]["round_ledger"]["override"]
-        assert override == {"flag": "--override-b3", "reason": "B3.1 op ronde 1, fix is klein", "applied": True}
+        assert override == {
+            "flag": "--override-b3", "carrier": "flag", "reason": "B3.1 op ronde 1, fix is klein", "applied": True,
+        }
 
     def test_a_door_override_without_a_reason_is_refused(self, door, monkeypatch):
         import pr_merge

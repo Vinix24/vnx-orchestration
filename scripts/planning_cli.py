@@ -28,7 +28,7 @@ without recreating it. `task_class` is validated against smart_router's closed
 set (01_code_generation .. 07_translation); `routing_floor` is free text (no
 canonical vocabulary exists for it — see `plan_gate_panel.py`'s "quality
 FLOOR" framing).
-`vnx promote` (top-level) is the PR-queue command — NOT the same.
+The PR-queue command is the door (`vnx dispatch <id>`) — NOT the same.
 
 File import + advisory drift (ADR-047: the tracks DB is the only plan source):
   `objective sync --roadmap <file>` imports one ROADMAP-shaped file into tracks.

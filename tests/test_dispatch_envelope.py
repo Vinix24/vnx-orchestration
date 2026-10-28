@@ -916,8 +916,10 @@ class TestEnvelopeCostUsd:
     this path); OI-882 priced the adapter's token_usage instead. A builder run on
     a claude harness lane now writes its cost-ledger line from the session
     transcript, and the receipt takes ``cost_usd``/``cost_source`` from that line
-    (the ledger itself: tests/test_harness_run_cost.py). A lane not on the ledger
-    yet, codex here, still prices the adapter's token_usage.
+    (the ledger itself: tests/test_harness_run_cost.py). Since K2b the codex and
+    kimi lanes write their own line the same way, so their receipts take the
+    line's cost too — a codex run is a ``subscription`` line at 0 with the list
+    price in ``api_equivalent_usd``.
     """
 
     @pytest.fixture(autouse=True)
@@ -945,11 +947,14 @@ class TestEnvelopeCostUsd:
         (line,) = [json.loads(raw) for raw in lines if raw.strip()]
         return line
 
-    def _spec(self, tmp_path, provider, model, dispatch_id):
-        state_dir = tmp_path / "state"
-        data_dir = tmp_path / "data"
-        state_dir.mkdir(parents=True)
-        (data_dir / "unified_reports").mkdir(parents=True)
+    def _spec(self, _tmp_path, provider, model, dispatch_id):
+        # The store the dispatch resolved IS VNX_DATA_DIR (set by the fixture), as
+        # it is in production: every booker of this dispatch, harness lane and CLI
+        # lane alike, writes to the one ledger under it.
+        data_dir = self.store
+        state_dir = data_dir / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / "unified_reports").mkdir(parents=True, exist_ok=True)
         return EnvelopeSpec(
             dispatch_id=dispatch_id, terminal_id="T1", provider=provider, model=model,
             instruction="review", role="backend-developer", pr_id=None,
@@ -1031,8 +1036,14 @@ class TestEnvelopeCostUsd:
         # plus 50 cache-hit tokens at the registry cache-read rate 0.20/MTok
         assert abs(line["api_equivalent_usd"] - (2.0 * 0.0002 + 10.0 * 0.0001 + 0.20 * 0.00005)) < 1e-9
 
-    def test_a_lane_off_the_ledger_still_prices_its_token_usage(self, tmp_path):
-        """codex is not on the ledger yet (K2b): the receipt prices the adapter's token_usage."""
+    def test_a_codex_lane_books_its_own_line_and_the_receipt_takes_that_cost(self, tmp_path):
+        """K2b put codex on the ledger: the receipt takes the line's cost, not the old event's.
+
+        Codex bills flat on the ChatGPT login, so the line is a ``subscription``
+        one: 0 at the margin with the registry list price in
+        ``api_equivalent_usd``. Booking it here as well as in the old event
+        would price the same run twice.
+        """
         spec = self._spec(tmp_path, "codex", "gpt-5.5", "oi882-test-004")
         adapter_result = dispatch_envelope._AdapterResult(
             returncode=0, completion_text="done", status="success",
@@ -1041,6 +1052,12 @@ class TestEnvelopeCostUsd:
 
         receipt = self._run_govern(spec, adapter_result)
 
-        expected, source = provider_dispatch._compute_cost("codex", "gpt-5.5", adapter_result.token_usage)
-        assert receipt["cost_usd"] == expected and receipt["cost_source"] == source
-        assert receipt["cost_ledger_run_ids"] is None
+        line = self._ledger_line()
+        assert line["provider"] == "codex" and line["role"] == "builder"
+        assert line["billing"] == "subscription" and line["cost_usd"] == 0.0
+        assert line["api_equivalent_usd"] > 0
+        # Codex's input count includes the cached part: 1000 in, 0 cached.
+        assert line["tokens"]["input_uncached"] == 1000 and line["tokens"]["cache_hit"] == 0
+        assert receipt["cost_usd"] == line["cost_usd"] == 0.0
+        assert receipt["cost_source"] == line["cost_source"]
+        assert receipt["cost_ledger_run_ids"] == [line["run_id"]]
