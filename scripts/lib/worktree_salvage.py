@@ -5,10 +5,14 @@
 nothing else — ``git status --porcelain=v2 -z --untracked-files=all
 --ignored=matching --ignore-submodules=none`` names no entry at all (tracked,
 staged, untracked, ignored (OI-2417), submodule or unmerged; no allowlist yet,
-so a ``__pycache__`` blocks too), HEAD is readable and still the salvaged commit,
-and every artifact is a non-empty bundle that unpacks to that head in a scratch
-repository borrowing no object store of the checkout. An artifact or ``dest_dir``
-inside the tree is refused: removal would delete the evidence. A real run writes
+so a ``__pycache__`` blocks too), every gitlink whose checkout exists is named
+even when it is clean (a submodule keeps its commits in its own object store, so
+no superproject bundle can carry them; nothing here classifies or excuses one —
+that is WT-2a1b), a gitlink whose checkout was never made is not named, HEAD is
+readable and still the salvaged commit, and every artifact is a non-empty bundle
+that unpacks to that head in a scratch repository borrowing no object store of
+the checkout. An artifact or ``dest_dir`` inside the tree is refused: removal
+would delete the evidence. A real run writes
 ``dest_dir/<name>-<UTC>-<head[:8]>/*`` and appends the MANIFEST line.
 """
 from __future__ import annotations
@@ -48,7 +52,7 @@ class SalvageResult:
     artifacts: list[str] = field(default_factory=list)
     manifest_line: str = ""
     written: bool = False
-    uncovered: list[str] = field(default_factory=list)  # status paths not preserved
+    uncovered: list[str] = field(default_factory=list)  # paths whose state is unpreserved
     worktree: Path | None = None  # where the tree was measured; verify re-reads it
 
 
@@ -92,6 +96,32 @@ def _status_paths(worktree_path: Path) -> list[str]:
         if entry[0] == "2":
             next(fields, None)  # a rename or copy names its source path too
     return paths
+
+
+def _populated_submodules(worktree_path: Path) -> list[str]:
+    """Every gitlink of the tree's index whose directory holds a checkout (a
+    ``.git`` inside it). A populated submodule keeps its commits in its own
+    object store, which no superproject bundle can carry, so those commits cannot
+    be proved present: dirty or clean, it is named. A gitlink whose checkout was
+    never made is not named — nothing local to lose. Read-only: index plus stat."""
+    raw = _run_git(["ls-files", "--stage", "-z"], worktree_path, "read gitlinks")
+    populated: list[str] = []
+    for chunk in raw.split(b"\0"):
+        if not chunk:
+            continue
+        entry = os.fsdecode(chunk)
+        try:
+            meta, path = entry.split("\t", 1)
+            mode = meta.split(" ", 1)[0]
+        except ValueError:
+            raise SalvageError(f"read gitlinks: unparseable index entry {entry[:60]!r}")
+        if mode != "160000":
+            continue
+        if not path or os.path.isabs(path):
+            raise SalvageError(f"read gitlinks: gitlink names no path {entry[:60]!r}")
+        if os.path.lexists(os.path.join(worktree_path, path, ".git")):
+            populated.append(path)
+    return populated
 
 
 def _claim_dir(dest_dir: Path, base: str, *, create: bool) -> Path:
@@ -156,6 +186,11 @@ def salvage(worktree_path: Path | str, dest_dir: Path | str, *, repo_root: Path 
         raise SalvageError(f"count unpushed commits: git returned {raw!r}, not a count")
     # Read the state first: a dest_dir inside the worktree must not show up in it.
     uncovered, unpushed = _status_paths(worktree_path), int(raw)
+    # A populated submodule's commits ride in no bundle this salvage writes; record
+    # it uncovered while the tree is still readable, before anything is written.
+    for path in _populated_submodules(worktree_path):
+        if path not in uncovered:
+            uncovered.append(path)
     artifacts = [f"{name}{BUNDLE_SUFFIX}"] if unpushed > 0 else []
     if not dry_run:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -228,6 +263,38 @@ def _resolved_inside(path: Path, tree: Path) -> tuple[bool, str | None]:
     return resolved == tree or tree in resolved.parents, None
 
 
+def _tree_problems(tree: Path, result: SalvageResult) -> list[str]:
+    """The tree's own state, read fail-closed: no readable HEAD, a HEAD that moved
+    past the salvaged commit, or any state this salvage does not cover."""
+    try:
+        head = _run_git(["rev-parse", "HEAD"], tree, "resolve HEAD").decode().strip()
+    except SalvageError as exc:
+        return [f"tree {result.name}: state unreadable: {exc}"]
+    if not _SHA_RE.fullmatch(head):
+        return [f"tree {result.name}: state unreadable: HEAD is {head!r}, not a commit"]
+    problems = []
+    if head != result.head:
+        problems.append(
+            f"tree {result.name}: HEAD moved to {head} after the salvage of {result.head}")
+    try:
+        entries = _status_paths(tree)
+    except SalvageError as exc:
+        return problems + [f"tree {result.name}: state unreadable: {exc}"]
+    if entries:
+        rest = f" (+{len(entries) - 1} more)" if len(entries) > 1 else ""
+        problems.append(f"tree has state this salvage does not cover: {entries[0]}{rest}")
+    try:
+        gitlinks = _populated_submodules(tree)
+    except SalvageError as exc:
+        return problems + [f"tree {result.name}: state unreadable: {exc}"]
+    # Dirty or clean, a populated submodule holds commits no bundle carried. One
+    # already named above as a status entry needs no second line.
+    problems.extend(
+        f"tree has state this salvage does not cover: {path}"
+        for path in gitlinks if path not in entries)
+    return problems
+
+
 def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str) -> list[str]:
     """Every problem keeping this salvage from being complete; only ``[]`` lets a removal act."""
     dest, repo, problems = Path(dest_dir), Path(repo_root), []
@@ -240,20 +307,7 @@ def verify(result: SalvageResult, dest_dir: Path | str, *, repo_root: Path | str
     if tree is None or not tree.is_dir():
         problems.append(f"tree {result.name}: no directory to re-read its state from")
     else:
-        try:
-            head = _run_git(["rev-parse", "HEAD"], tree, "resolve HEAD").decode().strip()
-            if not _SHA_RE.fullmatch(head):
-                raise SalvageError(f"HEAD is {head!r}, not a commit")
-            if head != result.head:
-                problems.append(f"tree {result.name}: HEAD moved to {head} after the "
-                                f"salvage of {result.head}")
-            entries = _status_paths(tree)
-            if entries:
-                rest = f" (+{len(entries) - 1} more)" if len(entries) > 1 else ""
-                problems.append(
-                    f"tree has state this salvage does not cover: {entries[0]}{rest}")
-        except SalvageError as exc:
-            problems.append(f"tree {result.name}: state unreadable: {exc}")
+        problems.extend(_tree_problems(tree, result))
     if _git_failure(["rev-parse", "--git-dir"], repo, "resolve repo_root") is not None:
         problems.append(f"no usable repo_root: {repo_root!r} is not a git checkout")
     if result.unpushed > 0 and not any(a.endswith(BUNDLE_SUFFIX) for a in result.artifacts):
