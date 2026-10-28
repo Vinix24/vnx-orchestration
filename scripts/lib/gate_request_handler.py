@@ -2982,43 +2982,155 @@ class GateRequestHandlerMixin:
     def _request_wiring_gate(
         self, pr_number: int, branch: str, dispatch_id: str = "",
     ) -> Dict[str, Any]:
-        from review_gate_manager import _utc_now
-        from wiring_gate import WiringGateError, check_pr_wiring
+        """Run the wiring check and book its outcome through ``commit_gate_outcome`` (GE-7, OI-2412).
+
+        This gate is decided when it is requested — its local half needs no seat —
+        so its ONE result record, its ONE ``review_gate_result`` receipt (with
+        ``commit_sha``), its request's end and its obligation all land in one
+        call, under the result slot's lock (ADR-046 §2). GE-6 built the record.
+
+        **The advisory contract.** ADR-046 §1 knows four statuses and no fifth
+        "advisory", so a shadow-mode run (``VNX_WIRING_GATE_REQUIRED=0``) books
+        ``fail`` — the check found unwired symbols — and ``required: false``,
+        which ``gate_executor``'s pre-booked branch reads, keeps it from gating.
+        ``pass`` would be a green verdict on a diff with findings. The forge
+        posts ``failure`` on ``vnx-gate/wiring_gate``, which no branch protection
+        requires, and ``wiring_gate`` cannot fill or block ``vnx-gate/review``
+        (not a review peer), so the published check cannot fail a merge either.
+
+        The request record is a COPY of the record, ended by the same call: its
+        status is its own lifecycle word, the record keeps the gate's word.
+
+        **A refused write is a failure, never the record it did not replace.**
+        ``commit_gate_outcome`` returns ``(payload_on_disk, written)`` and
+        ``written`` is ``False`` only for a refused write (ADR-046 §5), where
+        ``payload_on_disk`` is the record that already held the slot. That is
+        an EARLIER attempt's verdict — a pass, if the earlier attempt passed —
+        and returning it as this run's answer made ``gate_executor`` count the
+        required gate as passed on a run that never landed (GE-7 round 2,
+        codex B3: a stored pass carrying ``receipt_pending`` whose receipt
+        recovery fails again, then a wiring error). A refusal therefore answers
+        with :meth:`_wiring_gate_write_refused` and never with that record.
+        """
         import config_runtime
         import deterministic_gate
+        from gate_outcome import GateOutcome, GateRequest, commit_gate_outcome
+        from review_gate_manager import _utc_now
 
         available = self._wiring_gate_available()
-        requested_at = _utc_now()
-        # The gate's blocking posture is the same toggle that decides its status
-        # (analyse_diff: status="fail" if required else "advisory"). Carrying it
-        # explicitly lets the required-failure count in gate_executor honor the
-        # advisory contract: a shadow-mode gate (VNX_WIRING_GATE_REQUIRED=0) is
-        # required=False and must never gate the merge, while required=True blocks.
-        required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
+        # The gate's blocking posture is the toggle that also decides the check's
+        # verdict word; the head is what the receipt books as commit_sha.
         context = deterministic_gate.LocalContext(
-            pr_number=pr_number, branch=branch, required=required, requested_at=requested_at,
+            pr_number=pr_number, branch=branch, required=config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED"),
+            requested_at=_utc_now(), recorded_at=_utc_now(),
+            head_sha=get_pr_head_sha(pr_number) if available else "",
         )
+        record = self._wiring_gate_record(context, available)
+        if dispatch_id:
+            record["dispatch_id"] = dispatch_id
+        payload_on_disk, written = commit_gate_outcome(
+            GateOutcome.from_record("wiring_gate", record, pr_id=""),
+            results_dir=self.results_dir,
+            request=GateRequest(
+                self.requests_dir, dict(record),
+                {"completed_at": record.get("completed_at") or _utc_now()},
+            ),
+        )
+        if not written:
+            return self._wiring_gate_write_refused(context, record)
+        return payload_on_disk
+
+    def _wiring_gate_write_refused(
+        self, context: Any, attempted: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """The failure a refused wiring-gate write answers with (GE-7 round 2, B3).
+
+        ``gate_status`` defines no refused status: the recorded statuses are
+        :data:`gate_status.PASS_STATES`, :data:`gate_status.FAIL_STATES`,
+        ``unavailable``, ``partial_review`` and ``not_executable``. So the
+        refusal books ``fail`` — the word a failed run books, and one
+        :func:`gate_status.is_pass` refuses. ``write_refused`` is the engine's
+        own name for it (:data:`gate_outcome.WRITE_REFUSED`, the
+        ``failure_reason`` a refused run's request ends with).
+
+        The head the refused write named stays on ``commit_sha`` and
+        ``attempted_commit_sha``, and the attempted verdict on
+        ``attempted_status``, so the record reads next to the record on the
+        slot it did not replace. It is deliberately NOT the attempted record:
+        that record was refused, so no field of it may read as what landed. It
+        is a fail even when the refused write was a pass.
+        """
+        import deterministic_gate
+        from gate_outcome import WRITE_REFUSED
+        from review_gate_manager import _utc_now
+
+        head = context.head_sha or ""
+        detail = (
+            f"commit_gate_outcome refused the {attempted.get('status', '')!r} wiring_gate record "
+            f"for head {head or 'unknown'}: the record already on the slot was not replaced "
+            f"(ADR-046 §5), so this run has no verdict of its own"
+        )
+        return {
+            "gate": "wiring_gate",
+            "status": "fail",
+            "provider": "ast_grep",
+            "kind": deterministic_gate.DETERMINISTIC_KIND,
+            "required": bool(context.required),
+            "branch": context.branch,
+            "pr_number": context.pr_number,
+            "requested_at": context.requested_at,
+            "completed_at": _utc_now(),
+            "commit_sha": head,
+            "reason": WRITE_REFUSED,
+            "reason_detail": detail,
+            "failure_reason": WRITE_REFUSED,
+            "write_refused": True,
+            "attempted_status": attempted.get("status", ""),
+            "attempted_commit_sha": attempted.get("commit_sha") or head,
+            "summary": f"Wiring gate result not booked: write refused for head {head or 'unknown'}",
+            "blocking_findings": [{
+                "severity": "blocking",
+                "title": "Wiring gate result write refused",
+                "description": detail,
+            }],
+            "blocking_count": 1,
+            "advisory_count": 0,
+            "total_checked": 0,
+            "skipped_symbols": [],
+        }
+
+    def _wiring_gate_record(self, context: Any, available: bool) -> Dict[str, Any]:
+        """The wiring gate's outcome record: no ``gh``, a failed read, or the adapter's own.
+
+        The three branches GE-6 left here, shape unchanged. ``commit_sha`` is
+        stamped whenever a head was readable (OI-1307: no head, no receipt).
+        """
+        import dataclasses
+
+        import deterministic_gate
+        from review_gate_manager import _utc_now
+        from wiring_gate import WiringGateError, check_pr_wiring
 
         if not available:
             # The GitHub half's own answer (no `gh`, no diff to read): it is the
             # caller's diagnosis, not the local check's, and it names gh_cli.
-            payload: Dict[str, Any] = deterministic_gate.not_executable_record(
+            record = deterministic_gate.not_executable_record(
                 "wiring_gate", "provider_not_installed", "gh binary not found in PATH",
                 context, provider="gh_cli",
             )
         else:
             try:
-                result = check_pr_wiring(pr_number)
+                result = check_pr_wiring(context.pr_number)
             except WiringGateError as exc:
-                payload = {
+                record = {
                     "gate": "wiring_gate",
                     "status": "fail",
                     "provider": "ast_grep",
                     "kind": deterministic_gate.DETERMINISTIC_KIND,
-                    "required": required,
-                    "branch": branch,
-                    "pr_number": pr_number,
-                    "requested_at": requested_at,
+                    "required": bool(context.required),
+                    "branch": context.branch,
+                    "pr_number": context.pr_number,
+                    "requested_at": context.requested_at,
                     "completed_at": _utc_now(),
                     "summary": f"Wiring gate error: {exc}",
                     "blocking_findings": [{
@@ -3032,15 +3144,12 @@ class GateRequestHandlerMixin:
                     "skipped_symbols": [],
                 }
             else:
-                # GE-6: the outcome record is the deterministic adapter's, not a
-                # field dict built here. The analysis itself ran inside
-                # check_pr_wiring (its `gh pr diff` read plus analyse_diff), and the
-                # adapter turns it into the record this gate has always written.
-                payload = deterministic_gate.run("wiring_gate", deterministic_gate.LocalContext(
-                    pr_number=pr_number, branch=branch, required=required,
-                    requested_at=requested_at, recorded_at=_utc_now(), wiring_result=result,
-                )).record
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
-        return payload
+                # GE-6: the record is the deterministic adapter's, not a field dict
+                # built here; check_pr_wiring ran the `gh pr diff` read plus
+                # analyse_diff, and the adapter turns that into the usual record.
+                record = deterministic_gate.run(
+                    "wiring_gate", dataclasses.replace(context, wiring_result=result),
+                ).record
+        if context.head_sha:
+            record["commit_sha"] = context.head_sha
+        return record

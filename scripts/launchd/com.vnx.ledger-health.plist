@@ -58,12 +58,26 @@
     resolve to some other project's store. Hardcoding a store path here would
     make a copied template run on the original project's ledger (OI-1253
     fix-forward, same failure mode gate-obligation-runner already fixed once).
+
+    Pinned start (fleet-release-and-rollout PR-4): this job no longer starts
+    from the tree the plist was rendered in. Each start runs
+    scripts/launchd/vnx_pinned_launcher.sh from ${VNX_HOME}; that launcher
+    resolves the project's .vnx-version (via ~/.vnx/projects.json) and
+    starts scripts/ledger_health.py from the pinned release instead — only a
+    project with no pin keeps running ${VNX_HOME}. The launcher's PATH
+    append (OI-1663) still happens before the script runs. A run in progress
+    is never switched: it finishes on the tree it started from, and only the
+    next start picks up a changed pin. A pin that is not installed exits 78
+    with one stderr line naming project, pin and the directory searched;
+    there is no silent fallback. Undo: revert the commit and run
+    `bash scripts/launchd/reload_plist.sh com.vnx.ledger-health <project-id>`.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/ledger_health.py</string>
+    <string>${VNX_HOME}/scripts/launchd/vnx_pinned_launcher.sh</string>
+    <string>${VNX_PROJECT_ID}</string>
+    <string>scripts/ledger_health.py</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>StartInterval</key>
