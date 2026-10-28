@@ -464,6 +464,31 @@ def _register_release_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_preflight_subparser(subparsers: argparse.Action) -> None:
+    """`vnx preflight` — read-only rollout readiness across the fleet."""
+    preflight_parser = subparsers.add_parser(
+        "preflight",
+        help="measure whether the pinned release can be rolled out (changes nothing)",
+    )
+    preflight_parser.add_argument(
+        "--project",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="only this project (repeatable); an unknown id exits 2",
+    )
+    preflight_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the report as JSON",
+    )
+    # The module binds its own handler (the pool.py pattern), so the command
+    # runs through set_defaults instead of growing the dispatch elif chain.
+    from vnx_cli.commands.preflight import vnx_preflight
+
+    preflight_parser.set_defaults(func=vnx_preflight)
+
+
 def _register_dispatch_agent_subparser(subparsers: argparse.Action) -> None:
     dispatch_parser = subparsers.add_parser(
         "dispatch-agent",
@@ -1866,6 +1891,7 @@ def main() -> None:
     _register_guard_subparser(subparsers)
     _register_update_subparser(subparsers)
     _register_release_subparser(subparsers)
+    _register_preflight_subparser(subparsers)
     _register_dispatch_agent_subparser(subparsers)
     _register_track_subparser(subparsers)
     _register_handoff_subparser(subparsers)
