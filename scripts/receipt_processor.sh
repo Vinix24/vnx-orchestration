@@ -117,6 +117,9 @@ source "$RP_LIB/rp_deadletter.sh"
 # shellcheck source=lib/receipt_processor/rp_lock.sh
 source "$RP_LIB/rp_lock.sh"
 # shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/receipt_processor/rp_end_line.sh
+source "$RP_LIB/rp_end_line.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/receipt_processor/rp_extract.sh
 source "$RP_LIB/rp_extract.sh"
 # shellcheck source-path=SCRIPTDIR
@@ -173,17 +176,29 @@ _psr_parse_receipt_json() {
 # Skips no_confirmation timeouts: the terminal stays blocked to prevent immediate re-dispatch.
 _psr_release_lease_on_event() {
     local event_type="$1" status="$2" terminal="$3" dispatch_id="$4"
-    if [ "$event_type" = "task_complete" ] || [ "$event_type" = "task_failed" ] \
-       || { [ "$event_type" = "task_timeout" ] && [ "$status" != "no_confirmation" ]; }; then
-        _auto_release_lease_on_receipt "$terminal" "$dispatch_id"
+    # ADR-045 §2: a dispatch_finished is the end of an attempt, so it releases
+    # the lease like the legacy end types (rp_end_line.sh owns that set; it
+    # excludes dispatch_started and report_ingested).
+    rp_is_end_event "$event_type" || return 0
+    if [ "$event_type" = "task_timeout" ] && [ "$status" = "no_confirmation" ]; then
+        return 0
     fi
+    _auto_release_lease_on_receipt "$terminal" "$dispatch_id"
 }
 
 # Update dispatch outcome in quality_intelligence.db and recompute CQS (non-fatal).
 _psr_update_dispatch_outcome() {
     local dispatch_id="$1" event_type="$2" status="$3" report_path="$4" timestamp="$5"
     [ -n "$dispatch_id" ] || return 0
-    case "$event_type" in task_complete|task_failed|task_timeout) ;; *) return 0 ;; esac
+    case "$event_type" in task_complete|task_failed|task_timeout|dispatch_finished) ;; *) return 0 ;; esac
+    # ADR-045 §2: a dispatch_finished has no status of its own — it is projected
+    # from end_state (rp_end_status, via extract_receipt_fields). No resolvable
+    # end_state means there is no outcome to record: skip the write instead of
+    # persisting an invented status (fail-closed), and say so.
+    if [ -z "$status" ]; then
+        log "WARN" "OUTCOME: dispatch=$dispatch_id event=$event_type has no resolvable end_state — outcome not recorded"
+        return 0
+    fi
     # Report-derived values (dispatch_id/status/report_path/timestamp) are passed as argv, NOT
     # interpolated into the Python source (a crafted report status must not be able to inject Python
     # at the shell→heredoc boundary — codex G2-boundary). The quoted <<'PY' delimiter disables all
@@ -238,10 +253,13 @@ PY
         || log "WARN" "Failed to update dispatch CQS (non-fatal)"
 }
 
-# Verify dispatch contract claims on task_complete (non-fatal, Phase 2a).
+# Verify dispatch contract claims on completion (non-fatal, Phase 2a).
 _psr_verify_contract() {
-    local dispatch_id="$1" event_type="$2"
-    [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
+    local dispatch_id="$1" event_type="$2" status="${3:-}"
+    # ADR-045 §2: the hook runs for a legacy task_complete exactly as before,
+    # and for a dispatch_finished only when its end_state resolves to success
+    # (a failed/unknown end line makes no contract claim worth verifying).
+    [ -n "$dispatch_id" ] && rp_is_completion_hook "$event_type" "$status" || return 0
     local verify_result verify_rc verdict
     verify_result=$(python3 "$SCRIPTS_DIR/verify_claims.py" --dispatch-id "$dispatch_id" --store 2>/dev/null)
     verify_rc=$?
@@ -264,8 +282,10 @@ _psr_verify_contract() {
 # zeroes the injection-effectiveness measurement, so failures log at WARN with
 # the captured stderr instead of vanishing behind 2>/dev/null.
 _psr_record_adoption() {
-    local dispatch_id="$1" terminal="$2" report_path="$3" event_type="$4"
-    [ -n "$dispatch_id" ] && [ "$event_type" = "task_complete" ] || return 0
+    local dispatch_id="$1" terminal="$2" report_path="$3" event_type="$4" status="${5:-}"
+    # Same predicate as the contract hook: legacy task_complete unchanged, a
+    # dispatch_finished only on a success (ADR-045 §2).
+    [ -n "$dispatch_id" ] && rp_is_completion_hook "$event_type" "$status" || return 0
     local adoption_output adoption_rc
     adoption_output=$(python3 "$SCRIPTS_DIR/gather_intelligence.py" record-adoption \
         "$dispatch_id" "${terminal:-unknown}" "$report_path" 2>&1)
@@ -307,14 +327,14 @@ process_single_report() {
     run_state_projector
     _psr_update_dispatch_outcome "$_rf_dispatch_id" "$_rf_event_type" "$_rf_status" "$report_path" "$_rf_timestamp"
     attach_pr_evidence "$receipt_json" "$report_path"
-    _psr_verify_contract "$_rf_dispatch_id" "$_rf_event_type"
+    _psr_verify_contract "$_rf_dispatch_id" "$_rf_event_type" "$_rf_status"
     update_track_progress "$receipt_json" "$terminal"
     send_receipt_to_t0 "$receipt_json" "$terminal"
 
     python3 "$SCRIPTS_DIR/cost_tracker.py" 2>/dev/null \
         || log "WARN" "Failed to update cost metrics (non-fatal)"
 
-    _psr_record_adoption "$_rf_dispatch_id" "$terminal" "$report_path" "$_rf_event_type"
+    _psr_record_adoption "$_rf_dispatch_id" "$terminal" "$report_path" "$_rf_event_type" "$_rf_status"
 
     return 0
 }

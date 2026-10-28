@@ -1,9 +1,15 @@
 # shellcheck shell=bash
 # rp_extract.sh - Receipt field extraction and quality/state line builders
 # Sourced by scripts/receipt_processor.sh
-# Requires: log() from rp_logging.sh, $STATE_DIR
+# Requires: log() from rp_logging.sh, $STATE_DIR, rp_end_line.sh (rp_end_status)
 # Sets module-scope: _rf_status, _rf_event_type, _rf_dispatch_id, _rf_timestamp,
 #                    _rf_pr_id, _rf_report_path
+
+# ADR-045 §2: an end line that is not a legacy one needs the end_line helper
+# (end_state -> status, in Python). Sourced here so this file is correct on its
+# own, not only when receipt_processor.sh happened to source it first.
+# shellcheck source=receipt_processor/rp_end_line.sh
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)/rp_end_line.sh"
 
 # Extract common receipt fields into module scope (one jq call batch).
 extract_receipt_fields() {
@@ -14,6 +20,16 @@ extract_receipt_fields() {
     _rf_timestamp=$(echo "$json" | jq -r '.timestamp // ""' 2>/dev/null)
     _rf_pr_id=$(echo "$json" | jq -r '.pr_id // ""' 2>/dev/null)
     _rf_report_path=$(echo "$json" | jq -r '.report_path // ""' 2>/dev/null)
+
+    # ADR-045 §2: a dispatch_finished line's status is NOT read from the line —
+    # it is projected from end_state by rp_end_status (one Python mapping, no
+    # shell copy). An unresolvable end_state leaves _rf_status empty, so every
+    # "status = success" check downstream stays false for it (fail-closed) and
+    # no reader can be handed a status the ledger did not earn. Legacy lines
+    # keep the literal jq read above, unchanged.
+    if [ "$_rf_event_type" = "dispatch_finished" ]; then
+        _rf_status=$(rp_end_status "$json")
+    fi
 }
 
 # Sub-helper: Build state line from t0_brief.json

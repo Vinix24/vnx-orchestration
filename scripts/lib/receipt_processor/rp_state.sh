@@ -2,7 +2,13 @@
 # rp_state.sh - terminal_state.json shadow writers
 # Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $SCRIPTS_DIR, $CONFIRMATION_GRACE_SECONDS,
+#           rp_end_line.sh (rp_is_end_event),
 #           and _rf_* fields populated by extract_receipt_fields()
+
+# ADR-045 §2: a dispatch_finished ends a dispatch too. Sourced here so this
+# file is correct on its own, not only under receipt_processor.sh.
+# shellcheck source=receipt_processor/rp_end_line.sh
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)/rp_end_line.sh"
 
 # Shadow write helper for terminal_state.json (non-fatal).
 shadow_update_terminal_state() {
@@ -41,9 +47,9 @@ shadow_update_terminal_state() {
 update_receipt_shadow_state() {
     local terminal="$1"
 
-    if [ "$_rf_event_type" != "task_complete" ] && [ "$_rf_event_type" != "task_failed" ] && [ "$_rf_event_type" != "task_timeout" ]; then
-        return 0
-    fi
+    # ADR-045 §2: an end line is either a legacy type or a dispatch_finished;
+    # dispatch_started and report_ingested never reach the shadow writer.
+    rp_is_end_event "$_rf_event_type" || return 0
 
     local completion_status="idle"
     local clear_claim="true"

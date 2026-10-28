@@ -2,7 +2,13 @@
 # rp_pattern.sh - Pattern usage tracking and progress_state updates
 # Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $SCRIPTS_DIR, $STATE_DIR, $VNX_STATE_DIR (env),
+#           rp_end_line.sh (rp_end_outcome),
 #           and _rf_* fields populated by extract_receipt_fields()
+
+# ADR-045 §2: a dispatch_finished is an end line too. Sourced here so this file
+# is correct on its own, not only under receipt_processor.sh.
+# shellcheck source=receipt_processor/rp_end_line.sh
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)/rp_end_line.sh"
 
 # DRY helper: invoke update_progress_state.py with common receipt fields.
 # Usage: _call_progress_update <track> [extra_flags...]
@@ -81,8 +87,17 @@ _track_pattern_success_fallback() {
     local used_hashes
     used_hashes=$(echo "$receipt_json" | jq -r '.used_pattern_hashes // empty | join(",")' 2>/dev/null)
 
-    # Only trigger on task_complete + success + no explicit used_pattern_hashes
-    [ "$event_type" != "task_complete" ] && return 0
+    # Only trigger on a successful completion with no explicit
+    # used_pattern_hashes: the legacy task_complete (read literally, unchanged)
+    # or an ADR-045 dispatch_finished whose end_state classifies as success.
+    # A dispatch_finished with a missing/unknown end_state classifies as none,
+    # so it gives no credit (fail-closed) — and its raw status field is never
+    # consulted.
+    case "$event_type" in
+        task_complete) ;;
+        dispatch_finished) status=$(rp_end_outcome "$receipt_json") ;;
+        *) return 0 ;;
+    esac
     [ "$status" != "success" ] && return 0
     [ -n "$used_hashes" ] && return 0
 
@@ -204,7 +219,18 @@ update_track_progress() {
     local current_active_dispatch
     current_active_dispatch=$(_get_active_dispatch "$track")
 
+    # ADR-045 §2: a successful dispatch_finished closes the track exactly like a
+    # successful task_complete. The legacy branch keeps its literal status test,
+    # unchanged; the new one asks the end_line helper for the classification.
+    local completion_success="false"
     if [ "$_rf_event_type" = "task_complete" ] && [ "$_rf_status" = "success" ]; then
+        completion_success="true"
+    elif [ "$_rf_event_type" = "dispatch_finished" ] \
+         && [ "$(rp_end_outcome "$receipt_json")" = "success" ]; then
+        completion_success="true"
+    fi
+
+    if [ "$completion_success" = "true" ]; then
         _call_progress_update "$track" --status idle --dispatch-id ""
         log "INFO" "PROGRESS_STATE: Task completed → Track $track idle"
     elif [ "$_rf_event_type" = "task_started" ]; then

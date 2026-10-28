@@ -342,9 +342,15 @@ PY
 
 count_completed_last_hour() {
   local output
-  if ! output="$(RECEIPTS_PATH="$RECEIPTS_PATH" python3 - <<'PY' 2>/dev/null
+  if ! output="$(RECEIPTS_PATH="$RECEIPTS_PATH" VNX_SCRIPTS_LIB="$BRIEF_SCRIPT_DIR/lib" python3 - <<'PY' 2>/dev/null
 import json, os, sys
 from datetime import datetime, timedelta, timezone
+
+# ADR-045 §2: a dispatch_finished is the end line of a non-legacy dispatch. Its
+# status is the projection of its end_state, taken from the one module that
+# owns that mapping (never a second table here, never the raw status field).
+sys.path.insert(0, os.environ["VNX_SCRIPTS_LIB"])
+from event_outcome_semantics import end_state_status
 
 path = os.environ.get("RECEIPTS_PATH", "")
 if not path or not os.path.exists(path):
@@ -375,7 +381,14 @@ with open(path, "r", encoding="utf-8", errors="ignore") as f:
             e = json.loads(line)
         except Exception:
             continue
-        if (e.get("event_type") or e.get("event")) not in ("task_complete", "quality_gate_verification"):
+        event_type = e.get("event_type") or e.get("event")
+        if event_type == "dispatch_finished":
+            # Counted like a task_complete: only a completed end_state counts,
+            # so `failed` matches its task_failed counterpart (not counted) and
+            # a missing/unknown end_state never counts at all.
+            if end_state_status(e.get("end_state")) != "success":
+                continue
+        elif event_type not in ("task_complete", "quality_gate_verification"):
             continue
         dt = parse_ts(e.get("timestamp"))
         if dt and dt >= cutoff:

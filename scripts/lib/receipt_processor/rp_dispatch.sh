@@ -2,14 +2,20 @@
 # rp_dispatch.sh - Dispatch lifecycle helpers (move-to-completed, lease release, PR evidence)
 # Sourced by scripts/receipt_processor.sh
 # Requires: log() from rp_logging.sh, $VNX_DISPATCH_DIR, $SCRIPTS_DIR, $PROCESSING_LOG,
+#           rp_end_line.sh (rp_is_end_event),
 #           and _rf_* fields populated by extract_receipt_fields()
+
+# ADR-045 §2: a dispatch_finished ends a dispatch too. Sourced here so this
+# file is correct on its own, not only under receipt_processor.sh.
+# shellcheck source=receipt_processor/rp_end_line.sh
+source "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)/rp_end_line.sh"
 
 # Section C2: Move dispatch from active/ to completed/ on task finish.
 # Reads _rf_* variables. Non-fatal.
 _move_dispatch_to_completed() {
-    if [ "$_rf_event_type" != "task_complete" ] && [ "$_rf_event_type" != "task_failed" ] && [ "$_rf_event_type" != "task_timeout" ]; then
-        return 0
-    fi
+    # ADR-045 §2: an end line is either a legacy type or a dispatch_finished;
+    # dispatch_started and report_ingested never move a dispatch out of active/.
+    rp_is_end_event "$_rf_event_type" || return 0
     [ -z "$_rf_dispatch_id" ] && return 0
     local src
     src=$(ls "$VNX_DISPATCH_DIR/active/${_rf_dispatch_id}"*.md 2>/dev/null | head -1)
@@ -20,7 +26,7 @@ _move_dispatch_to_completed() {
 }
 
 # Section C2b helper: Auto-release canonical lease on terminal task events.
-# Called for task_complete / task_failed / task_timeout.
+# Called for task_complete / task_failed / task_timeout / dispatch_finished.
 # Uses release-on-receipt which resolves generation internally. Non-fatal.
 _auto_release_lease_on_receipt() {
     local terminal="$1"
@@ -65,6 +71,8 @@ attach_pr_evidence() {
     local receipt_json="$1"
     local report_path="$2"
 
+    # A dispatch_finished line reaches this point with _rf_status already
+    # projected from its end_state (rp_end_line.sh), so one check covers both.
     [ "$_rf_status" != "success" ] && return 0
 
     # Strategy 0: PR ID from receipt JSON (most reliable)
