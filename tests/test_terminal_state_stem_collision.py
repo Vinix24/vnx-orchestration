@@ -6,6 +6,12 @@ consumer hooks) used to share its stem with the library that now lives in
 scripts/lib/terminal_state_core.py. With scripts/ ahead of scripts/lib/ on sys.path
 a bare ``from terminal_state_shadow import SCHEMA_VERSION`` resolved to the wrapper
 and the t0 state builder reported ``source: error`` for T1-T3.
+
+T-B1 (terminal-binding-afbouwen) moved the source of the builder's ``terminals``
+block from ``terminal_state.json`` to the ``terminal_leases`` rows. The guard is
+unchanged in purpose — the builder must run with scripts/ before scripts/lib/ and
+report a real terminal state instead of an import error — so the fixture seeds the
+lease table through the lease API and asserts the block idle from that source.
 """
 
 from __future__ import annotations
@@ -14,7 +20,6 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -26,30 +31,6 @@ WRAPPER = SCRIPTS_DIR / "terminal_state_shadow.py"
 
 LIBRARY_STEM = "terminal_state_core"
 WRAPPER_STEM = "terminal_state_shadow"
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _seed_terminal_state(state_dir: Path) -> None:
-    now = _now_iso()
-    terminals = {
-        tid: {
-            "terminal_id": tid,
-            "status": "idle",
-            "claimed_by": None,
-            "claimed_at": None,
-            "lease_expires_at": None,
-            "last_activity": now,
-            "version": 1,
-        }
-        for tid in ("T1", "T2", "T3")
-    }
-    state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / "terminal_state.json").write_text(
-        json.dumps({"schema_version": 1, "terminals": terminals}), encoding="utf-8"
-    )
 
 
 def _isolated_env(tmp_path: Path) -> dict:
@@ -66,6 +47,10 @@ from pathlib import Path
 sys.path.insert(0, {lib!r})
 sys.path.insert(0, {scripts!r})   # scripts/ BEFORE scripts/lib/
 assert sys.path.index({scripts!r}) < sys.path.index({lib!r})
+from lease_manager import LeaseManager   # existing lease API, not a raw SQL insert
+manager = LeaseManager(Path({state!r}))
+leases = {{tid: manager.get(tid) for tid in ("T1", "T2", "T3")}}
+assert all(lease is not None and lease.state == "idle" for lease in leases.values()), leases
 import build_t0_state
 print(json.dumps(build_t0_state._build_terminals(Path({state!r}))))
 """
@@ -73,7 +58,7 @@ print(json.dumps(build_t0_state._build_terminals(Path({state!r}))))
 
 def test_builder_terminals_resolve_with_scripts_before_lib(tmp_path):
     state_dir = tmp_path / "state"
-    _seed_terminal_state(state_dir)
+    state_dir.mkdir()
 
     snippet = _BUILDER_SNIPPET.format(lib=str(LIB_DIR), scripts=str(SCRIPTS_DIR), state=str(state_dir))
     proc = subprocess.run(
@@ -92,7 +77,8 @@ def test_builder_terminals_resolve_with_scripts_before_lib(tmp_path):
         assert entry["source"] != "error", entry
         assert "ImportError" not in str(entry.get("error", "")), entry
         assert entry["status"] == "idle", entry
-        assert entry["source"] == "terminal_state", entry
+        assert entry["source"] == "lease", entry
+        assert entry["lease_state"] == "idle", entry
 
 
 def _stem_files(stem: str) -> list[Path]:

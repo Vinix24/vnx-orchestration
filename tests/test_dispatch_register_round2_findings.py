@@ -21,10 +21,15 @@ The fixes implement:
     not confirm acceptance, it appends ``dispatch_failed`` to the register
     and refuses to mv to active/ — local state stays consistent with the
     broker.
-  - ``dispatch_promoted`` is emitted BEFORE the mv, with captured stderr and
+  - ``dispatch_promoted`` was emitted BEFORE the mv, with captured stderr and
     structured failure logging on emit failure.
-  - ``dispatch_created`` in ``queue_auto_accept.sh`` is emitted BEFORE the
-    mv, with the same captured-stderr / surfaced-failure pattern.
+
+Retired 2026-10-27 (track ``terminal-binding-afbouwen``, T-A10): the legacy
+``.md`` promote flow is gone, so ``finalize_dispatch_delivery`` no longer emits
+``dispatch_promoted`` and no longer moves the delivered file into ``active/``.
+The fail-closed ``delivery_success`` contract below is unchanged and still
+pinned; the emit/mv ordering assertions are replaced by the retirement tests in
+``tests/test_md_promote_retired.py``.
 """
 
 from __future__ import annotations
@@ -293,41 +298,23 @@ def _run_finalize(
 
 
 class TestFinalizeDeliveryAcceptedPath:
-    """When the broker confirms acceptance, finalize must promote AND move."""
+    """When the broker confirms acceptance, finalize succeeds and consumes the .md.
 
-    def test_returns_zero_and_moves_to_active(self, tmp_path):
+    The promote branch (dispatch_promoted + mv into active/) is retired — see
+    ``tests/test_md_promote_retired.py``; only the success path is pinned here.
+    """
+
+    def test_returns_zero_and_consumes_the_legacy_dispatch(self, tmp_path):
         r = _run_finalize(tmp_path, rc_delivery_success_rc=0)
         assert r["rc"] == 0, f"Expected success rc=0, got {r['rc']}\n{r['stdout']}\n{r['stderr']}"
-        assert (r["active_dir"] / "test-d-001.md").exists()
         assert not r["dispatch_file"].exists()
+        assert not (r["active_dir"] / "test-d-001.md").exists()
 
-    def test_dispatch_promoted_emitted_before_mv(self, tmp_path):
-        """Order-of-operations: dispatch_promoted register entry must precede the mv.
-
-        If emit happens after mv and the emit fails, register-driven views
-        will see a dispatch in active/ with no canonical promotion event —
-        exactly the misclassification codex flagged.
-        """
+    def test_no_promotion_event_and_no_mv_on_success(self, tmp_path):
+        """The retired promote branch emits no dispatch_promoted and runs no mv."""
         r = _run_finalize(tmp_path, rc_delivery_success_rc=0)
-        promote_ts = None
-        mv_ts = None
-        for line in r["actions"]:
-            parts = line.split("\t")
-            if len(parts) < 3:
-                continue
-            kind, ts, payload = parts[0], parts[1], parts[2]
-            if kind == "REGISTER" and "dispatch_promoted" in payload and promote_ts is None:
-                promote_ts = int(ts)
-            if kind == "MV" and mv_ts is None:
-                mv_ts = int(ts)
-        assert promote_ts is not None, (
-            f"dispatch_promoted register call not found. Actions: {r['actions']}"
-        )
-        assert mv_ts is not None, f"mv not found. Actions: {r['actions']}"
-        assert promote_ts < mv_ts, (
-            f"dispatch_promoted ({promote_ts}) must be emitted BEFORE mv ({mv_ts}). "
-            f"Actions: {r['actions']}"
-        )
+        assert [line for line in r["actions"] if "dispatch_promoted" in line] == []
+        assert [line for line in r["actions"] if line.startswith("MV\t")] == []
 
     def test_no_dispatch_failed_on_success(self, tmp_path):
         r = _run_finalize(tmp_path, rc_delivery_success_rc=0)
@@ -338,9 +325,9 @@ class TestFinalizeDeliveryAcceptedPath:
             )
 
     def test_register_emit_failure_surfaces_structured_failure(self, tmp_path):
-        """If dispatch_promoted emit fails, log_structured_failure must fire so the
-        broker/register inconsistency is visible in audit (not silent)."""
-        r = _run_finalize(tmp_path, rc_delivery_success_rc=0, register_rc=1)
+        """If the remaining (dispatch_failed) emit fails, log_structured_failure must
+        fire so the broker/register inconsistency is visible in audit (not silent)."""
+        r = _run_finalize(tmp_path, rc_delivery_success_rc=1, register_rc=1)
         assert any("register_emit_failed" in line for line in r["failures"]), (
             f"Expected register_emit_failed in structured failures. Got: {r['failures']}"
         )

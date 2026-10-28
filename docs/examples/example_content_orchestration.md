@@ -69,11 +69,11 @@ PR-3 depends on PR-1 and PR-2 because the changelog should reflect the final doc
 ### Starter Mode (Sequential)
 
 ```bash
-./bin/vnx promote <pr1-dispatch-id>    # API reference first
+./bin/vnx dispatch <pr1-dispatch-id>    # API reference first
 # Wait for completion
-./bin/vnx promote <pr2-dispatch-id>    # Migration guide second
+./bin/vnx dispatch <pr2-dispatch-id>    # Migration guide second
 # Wait for completion
-./bin/vnx promote <pr3-dispatch-id>    # Changelog last (has context from both)
+./bin/vnx dispatch <pr3-dispatch-id>    # Changelog last (has context from both)
 ```
 
 ## 3. Scoped Dispatches

@@ -147,11 +147,14 @@ def _book_ledger_run(
     end_time: datetime,
     model: str,
 ) -> tuple:
-    """Write this attempt's cost-ledger line when it is a builder run on a claude harness lane.
+    """Write this attempt's cost-ledger line when it is a builder run on a claude harness or a codex/kimi lane.
 
     Returns ``(record, None)`` when the line landed, in the ledger or in its
     spool (ADR-043 §6), and ``(None, None)`` for a lane or role that does not
-    write the ledger yet. When the ledger refuses the record
+    write the ledger yet. A codex/kimi builder run (K2b) books through
+    :func:`_book_cli_builder_run`, which is fail-open: a refusal is
+    ``(None, None)`` too and the receipt is then priced from the old event.
+    When the harness ledger refuses the record
     (``CostLedgerRefusal``, e.g. an unknown model), or neither the ledger nor
     the spool took the line (``CostLedgerWriteError``: the outcome is unknown),
     or the line cannot be built at all, it returns ``(None, reason)``: the
@@ -162,12 +165,31 @@ def _book_ledger_run(
     """
     from harness_run_cost import (  # noqa: PLC0415
         BuilderRun,
+        book_cli_builder,
+        books_cli_run,
         lane_model,
         ledger_project_id,
         record_builder_run,
         writes_builder_run,
     )
 
+    if books_cli_run(spec.provider, spec.role):
+        from provider_costs import costs_path_in  # noqa: PLC0415
+
+        # K2b, fail-open: a refused booking is (None, None), and _receipt_cost
+        # then prices the receipt from the old event rather than withholding it,
+        # because a dispatch with no receipt at all is the worse failure.
+        record, _reason = book_cli_builder(
+            provider=spec.provider, model_requested=model, started=start_time, ended=end_time,
+            token_usage=getattr(adapter_result, "token_usage", None),
+            spawn_refused=getattr(adapter_result, "spawn_refused", None),
+            project_id=ledger_project_id(spec.state_dir), producer=COST_LEDGER_PRODUCER,
+            ref=spec.dispatch_id,
+            # The store this dispatch resolved, not the ambient env: the receipt
+            # and the report of this attempt land in the same one.
+            ledger_path=costs_path_in(spec.data_dir),
+        )
+        return record, None
     if not writes_builder_run(spec.provider, spec.role):
         return None, None
     # A spawn refused before the adapter resolved a model carries the plan's
@@ -194,11 +216,13 @@ def _receipt_cost(
 ) -> tuple:
     """``(cost_usd, cost_source, cost_ledger_run_ids)`` for this dispatch's receipt.
 
-    A harness builder run: the values of the ledger record ``_book_ledger_run``
-    wrote, not a second computation. Every other lane (codex, kimi and the
-    rest until K2b, and the seats on a harness lane until K3/K4a): the price
-    via ``provider_dispatch._compute_cost`` (OI-882) and the old
-    ``emit_provider_cost`` event, both best-effort as they always were here.
+    A builder run that booked a line — on a claude harness lane, or on
+    codex/kimi since K2b — takes the values of the record ``_book_ledger_run``
+    wrote, not a second computation. Every other lane (the rest until K3, the
+    seats on any of these lanes until K3/K4a, and a CLI run whose booking the
+    ledger refused): the price via ``provider_dispatch._compute_cost``
+    (OI-882) and the old ``emit_provider_cost`` event, both best-effort as
+    they always were here.
     """
     if ledger_record is not None:
         return ledger_record["cost_usd"], ledger_record["cost_source"], [ledger_record["run_id"]]

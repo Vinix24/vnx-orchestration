@@ -700,15 +700,7 @@ class GateRunner:
             # binary. `provider_not_installed` stays temporary and stays
             # correct for the gates it actually describes.
             if provider is None:
-                return self._not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                    reason="unsupported_gate_type",
-                    reason_detail=(
-                        f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
-                        f"PATH binary, a script runner, or a harness lane; this runner "
-                        f"will not guess a binary name from the gate name"
-                    ),
-                )
+                return self._refuse_unregistered(gate, pr_number, pr_id, request_payload)
             kind, provider_name = provider
             if kind == _rec.GATE_PROVIDER_HARNESS_LANE:
                 # C6 step 1: glm_gate/kimi_gate route through the governed
@@ -716,6 +708,15 @@ class GateRunner:
                 # lane's own identifier ("glm-harness"/"kimi") — never a
                 # shutil.which target.
                 harness_provider = provider_name
+            elif kind == _rec.GATE_PROVIDER_DETERMINISTIC:
+                # GE-6: the local half runs in deterministic_gate, and the GitHub
+                # half of each gate is already where it belongs (ci_gate inline in
+                # gate_executor.execute_gate, wiring_gate at request time). This
+                # runner drives prompted CLIs, so it says so instead of looking up
+                # a binary named after the kind.
+                return self._refuse_deterministic(
+                    gate, pr_number, pr_id, request_payload, kind, provider_name,
+                )
             elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
                 pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
                 # Not-shipped and not-routable are different answers and the
@@ -775,6 +776,44 @@ class GateRunner:
         return self._run_subprocess_path(
             gate=gate, binary=binary, prompt=prompt,
             pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+        )
+
+    def _refuse_unregistered(
+        self, gate: str, pr_number: Optional[int], pr_id: str,
+        request_payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Book ``unsupported_gate_type``: nobody registered a provider for ``gate``."""
+        return self._not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+            reason="unsupported_gate_type",
+            reason_detail=(
+                f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
+                f"PATH binary, a script runner, or a harness lane; this runner "
+                f"will not guess a binary name from the gate name"
+            ),
+        )
+
+    def _refuse_deterministic(
+        self, gate: str, pr_number: Optional[int], pr_id: str,
+        request_payload: Dict[str, Any], kind: str, provider_name: str,
+    ) -> Dict[str, Any]:
+        """Book ``not_executable`` for a GE-6 ``deterministic`` row (ADR-046 §4).
+
+        Its local checks run in-process through ``deterministic_gate``; the
+        gate's GitHub half lives with the gate (ci_gate inline in
+        ``gate_executor.execute_gate``, wiring_gate at request time). Neither is
+        a prompted CLI, so this runner says exactly that instead of looking up a
+        binary named after the adapter kind.
+        """
+        return self._not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+            reason="gate_not_subprocess_routable",
+            reason_detail=(
+                f"{gate} is a {kind} gate ({provider_name}): its local checks run "
+                f"through deterministic_gate, not as a prompted CLI. ci_gate runs "
+                f"inline in gate_executor.execute_gate and wiring_gate books its "
+                f"outcome at request time; neither is driven by this runner"
+            ),
         )
 
     def _not_executable(

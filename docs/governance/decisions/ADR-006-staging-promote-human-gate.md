@@ -1,6 +1,6 @@
 # ADR-006 — Staging→Promote with Mandatory Human Approval Gate
 
-**Status:** Accepted
+**Status:** Accepted, amended 2026-10-27 (T-A10): the staged-`.md` promote CLI named in the Decision below is retired — the human gate lives in `vnx deliverable promote <id>` (proposed→ready) and the door is `vnx dispatch <id>`
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Codification of M2 (staging→promote gate) from `claudedocs/_archive/2026-05-20-pre-centralisatie/2026-05-09-vnx-strategic-replan-proposal.md` §4

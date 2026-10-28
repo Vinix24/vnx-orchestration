@@ -849,7 +849,8 @@ class DoorRounds:
     request, until ``vnx review rounds open --pr N --reason``), or a tiebreaker
     sent the capped PR back to plan (R2b, ``terug-naar-plan``). ``cap`` is the B3
     count over the codex seat, ``override`` the reason of the door's
-    ``--override-b3``, and ``grant`` the extra round a tiebreaker's
+    ``--override-b3``, ``override_carrier`` what carried it (``flag`` or
+    ``env``, RG-5), and ``grant`` the extra round a tiebreaker's
     ``verkleinen`` granted past the cap (R2a): only the codex-seat verdict
     the ledger booked as its use counts.
     """
@@ -860,6 +861,7 @@ class DoorRounds:
     refusal: str = ""
     cap: Any = None
     override: str = ""
+    override_carrier: str = ""
     grant: Any = None
 
     @property
@@ -872,14 +874,23 @@ class DoorRounds:
         if self.cap is not None:
             record["cap"] = self.cap.to_record()
         if self.override:
-            record["override"] = {"flag": "--override-b3", "reason": self.override, "applied": self.capped}
+            record["override"] = {
+                "flag": "--override-b3", "carrier": self.override_carrier,
+                "reason": self.override, "applied": self.capped,
+            }
         if self.grant is not None:
             record["granted_round"] = {"verdict_id": self.grant.verdict_id, "dispatch_id": self.grant.dispatch_id}
         return record
 
 
-def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]:
+def door_rounds(
+    scope: SeatScope, b3_override: str = "", b3_override_carrier: str = "",
+) -> Optional[DoorRounds]:
     """The round ledger for this PR, or ``None`` when the store keeps none.
+
+    ``b3_override_carrier`` (RG-5) is what carried the override reason —
+    ``flag`` for ``--override-b3``, ``env`` for the ``VNX_OVERRIDE_B3`` pair —
+    and is recorded next to the reason in the merge record.
 
     A store without ``review_gates/rounds.ndjson`` predates R1: the gate creates
     the ledger the first time it runs in a store (``ReviewGateManager``), and
@@ -918,7 +929,8 @@ def door_rounds(scope: SeatScope, b3_override: str = "") -> Optional[DoorRounds]
     grant = _door_grant(path.parent.parent, cap, since) if cap.capped else None
     returned = _returned_to_plan(path.parent.parent, cap, since) if cap.capped else ""
     return DoorRounds(
-        str(path), pr_number, lines, refusal=returned, cap=cap, override=b3_override.strip(), grant=grant,
+        str(path), pr_number, lines, refusal=returned, cap=cap, override=b3_override.strip(),
+        override_carrier=b3_override_carrier, grant=grant,
     )
 
 
@@ -1199,6 +1211,7 @@ def evaluate_review_seats(
     seats: Optional[Sequence[str]] = None,
     seats_source: str = SOURCE_EXPLICIT,
     b3_override: str = "",
+    b3_override_carrier: str = "",
     round_ledger: bool = True,
     checkout: Optional[Path] = None,
     by_risk: bool = True,
@@ -1221,7 +1234,8 @@ def evaluate_review_seats(
     Every fill is then counted against the round ledger (R1, :func:`counted_fill`)
     when the store keeps one: a PASS fills its seat only when its line is there,
     and the codex seat of a PR at the B3 cap is not filled unless ``b3_override``
-    (the door's ``--override-b3`` reason) says why. ``round_ledger=False`` skips
+    (the door's ``--override-b3`` reason) says why. ``b3_override_carrier``
+    (``flag`` or ``env``, RG-5) is recorded with it. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
     """
     scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
@@ -1235,7 +1249,7 @@ def evaluate_review_seats(
     on_head = records_on_head(scope, stated, gates)
     seated = seated_records(on_head)
     fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
-    rounds = door_rounds(scope, b3_override) if round_ledger else None
+    rounds = door_rounds(scope, b3_override, b3_override_carrier) if round_ledger else None
     if rounds is not None:
         fills = tuple(counted_fill(fill, rounds, scope, stated) for fill in fills)
     hints = {fill.seat: _unfilled_hint(scope, fill.seat, seated) for fill in fills if not fill.filled}

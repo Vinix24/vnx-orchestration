@@ -26,9 +26,12 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import panel_leg_cost
+from panel_leg_cost import LegBooker
 from receipt_verdict import HARD_FAILURE_STATUSES, SUCCESS_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -211,6 +214,10 @@ class DeliberationResult:
     seat_measurements: List[Dict[str, Any]] = field(default_factory=list)
     unmeasured_seats: List[Dict[str, str]] = field(default_factory=list)  # {provider, lens, dispatch_id, reason}
     ledger_available: bool = True  # False => legacy frontmatter fallback (UNVERIFIED)
+    # Cost ledger (K4a): every leg this run dispatched is one line under this run's id.
+    # The list holds the run ids the ledger confirmed; a refused leg is named in a WARNING.
+    panel_run_id: str = ""
+    cost_ledger_run_ids: List[str] = field(default_factory=list)
 
     @property
     def ledger_divergences(self) -> List[Dict[str, Any]]:
@@ -253,6 +260,12 @@ class DeliberationResult:
             f"\n**Question:** {self.question}\n",
             f"**Coverage:** {self.coverage}\n",
         ]
+        if self.panel_run_id:
+            # K4a: booked legs against dispatched legs, so a refused write stays visible.
+            lines.append(
+                f"**Cost ledger:** {len(self.cost_ledger_run_ids)}/{len(self.seat_measurements)} "
+                f"legs booked by this run under `{self.panel_run_id}`\n"
+            )
         if not self.ledger_available:
             lines.append(
                 "**Ledger:** receipt ledger UNAVAILABLE — coverage measured against the "
@@ -472,6 +485,43 @@ def _stage_prompt(instruction: str, context_sections: List[Tuple[str, str]], rem
     return "\n".join(parts)
 
 
+def _utcnow() -> datetime:
+    """When a leg started or ended, for its ledger line's ``occurred_from``/``occurred_to``."""
+    return datetime.now(timezone.utc)
+
+
+def _diverge_leg(idx: int, provider: str, model: str, mode: str, spec: "ModeSpec",
+                 question: str, ctx_block: str, dispatcher: DispatcherFn) -> Dict[str, Any]:
+    """Stage 1 for one seat: the question through its own lens, plus what its ledger line needs.
+
+    The dispatch-id is carried out (OI-1519: reconciliation against the receipt ledger is
+    impossible when the id is built here and thrown away), and so are the leg's own
+    window, its resolved model and whether its dispatch raised (K4a).
+    """
+    lens = spec.lenses[idx % len(spec.lenses)]
+    prompt = (
+        f"You are one seat on a deliberation panel ({spec.description}).\n"
+        f"QUESTION: {question}\n{ctx_block}\n"
+        f"YOUR LENS: {lens}.\n"
+        "Analyse the question ONLY through your lens. Be concrete and cite evidence "
+        "(file:line for code, a named source for research). Give your strongest findings, "
+        "then one thing you are UNSURE about. Terse."
+    )
+    did = f"panel-{mode}-diverge-{idx}-{uuid.uuid4().hex[:6]}"
+    raised = False
+    resolved_model = ""
+    started = _utcnow()
+    try:
+        resolved_model = _seat_model(model)
+        text = dispatcher(provider, resolved_model, prompt, did)
+    except Exception as exc:  # noqa: BLE001 — a dead provider degrades the panel, never kills it
+        text = f"[dispatch error: {exc!r}]"
+        raised = True
+    return {"provider": provider, "lens": lens, "text": text or "[empty]",
+            "dispatch_id": did, "_raised": raised, "_model": resolved_model or model,
+            "_started": started, "_ended": _utcnow()}
+
+
 def run_deliberation(
     mode: str,
     question: str,
@@ -483,6 +533,9 @@ def run_deliberation(
     min_seats: Optional[int] = None,
     allow_degraded: bool = False,
     receipts_path: Optional["Path | str"] = None,
+    ledger_path: Optional[Path] = None,
+    project_id: Optional[str] = None,
+    panel_run_id: Optional[str] = None,
 ) -> DeliberationResult:
     """Run the 4-stage deliberation. ``dispatcher(provider, model, prompt, dispatch_id)`` runs
     one panelist and returns its report text (governed lane). ``context`` is optional extra
@@ -501,39 +554,26 @@ def run_deliberation(
     each seat's dispatch-id is reconciled against. ``None`` resolves the canonical state
     dir's ledger. When no ledger exists or can be read (fresh checkout), the tally falls
     back to the pre-OI-1519 frontmatter measurement — flagged on the result
-    (``ledger_available=False``) and in the report, never silently."""
+    (``ledger_available=False``) and in the report, never silently.
+
+    ``ledger_path``/``project_id``/``panel_run_id`` (K4a) place the cost ledger this panel
+    books into: one line per leg under ``panel_run_id`` (a fresh one per call when not
+    given). A refused write never fails the panel — see ``panel_leg_cost``."""
     spec = MODES.get(mode)
     if spec is None:
         raise ValueError(f"unknown mode {mode!r}; choose one of {sorted(MODES)}")
     roster = roster or default_roster()
     ctx_block = f"\n\n## Shared context\n{context}\n" if context else ""
     result = DeliberationResult(mode=mode, question=question)
+    # One booker for the whole run: one ref finds every line of this panel run (K4a).
+    booker = LegBooker(ref=panel_run_id or panel_leg_cost.panel_run_id(mode), ledger_path=ledger_path,
+                       project_id=project_id or panel_leg_cost.project_id_for(None))
+    result.panel_run_id, result.cost_ledger_run_ids = booker.ref, booker.run_ids
 
     # ── Stage 1: DIVERGE (parallel fan-out) ──────────────────────────────────
-    def _one(idx: int, provider: str, model: str) -> Dict[str, str]:
-        lens = spec.lenses[idx % len(spec.lenses)]
-        prompt = (
-            f"You are one seat on a deliberation panel ({spec.description}).\n"
-            f"QUESTION: {question}\n{ctx_block}\n"
-            f"YOUR LENS: {lens}.\n"
-            "Analyse the question ONLY through your lens. Be concrete and cite evidence "
-            "(file:line for code, a named source for research). Give your strongest findings, "
-            "then one thing you are UNSURE about. Terse."
-        )
-        # OI-1519: the dispatch-id is CARRIED through — reconciliation against the
-        # receipt ledger is impossible when the id is built here and thrown away.
-        did = f"panel-{mode}-diverge-{idx}-{uuid.uuid4().hex[:6]}"
-        raised = False
-        try:
-            text = dispatcher(provider, _seat_model(model), prompt, did)
-        except Exception as exc:  # noqa: BLE001 — a dead provider degrades the panel, never kills it
-            text = f"[dispatch error: {exc!r}]"
-            raised = True
-        return {"provider": provider, "lens": lens, "text": text or "[empty]",
-                "dispatch_id": did, "_raised": raised}
-
     with _cf.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = [ex.submit(_one, i, p, m) for i, (p, m) in enumerate(roster)]
+        futures = [ex.submit(_diverge_leg, i, p, m, mode, spec, question, ctx_block, dispatcher)
+                   for i, (p, m) in enumerate(roster)]
         result.fan_out = [f.result() for f in _cf.as_completed(futures)]
     # stable order by roster
     order = {p: i for i, (p, _) in enumerate(roster)}
@@ -553,12 +593,23 @@ def run_deliberation(
     result.ledger_available = ledger is not None
     fan_out_measurements = []
     for fo in result.fan_out:
+        raised = fo.pop("_raised", False)
+        dispatch_id = fo.get("dispatch_id", "")
         measurement = _measure_seat(
-            fo["provider"], fo["lens"], fo.get("dispatch_id", ""), fo["text"],
-            stage="diverge", ledger=ledger, raised=fo.pop("_raised", False),
+            fo["provider"], fo["lens"], dispatch_id, fo["text"],
+            stage="diverge", ledger=ledger, raised=raised,
         )
         fo["seat_outcome"] = measurement["outcome"]
         fan_out_measurements.append(measurement)
+        # Booked here because only now the receipt ledger is loaded: a leg the lane
+        # already booked is recognised instead of booked twice (K4a).
+        booker.book(
+            stage="diverge", provider=fo["provider"], model=fo.pop("_model", ""),
+            dispatch_id=dispatch_id, report_text=fo["text"],
+            started=fo.pop("_started"), ended=fo.pop("_ended"),
+            receipts=ledger.lookup(dispatch_id) if ledger is not None else None,
+            failure=panel_leg_cost.DISPATCH_ERROR_REASON if raised else None,
+        )
     result.seat_measurements.extend(fan_out_measurements)
     present_fan_out = [fo for fo in result.fan_out if fo["seat_outcome"] == SEAT_PRESENT]
     failed_fan_out = [fo for fo in result.fan_out if fo["seat_outcome"] == SEAT_FAILED]
@@ -649,7 +700,7 @@ def run_deliberation(
     result.contrarian = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "deepseek-harness", "claude")),
         contra_prompt, f"panel-{mode}-contrarian",
-        ledger=ledger, measure_sink=result.seat_measurements, stage="contrarian",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="contrarian", booker=booker,
     )
 
     # ── Stage 3: VERIFY (adversarial factcheck of the top claims) ────────────
@@ -672,7 +723,7 @@ def run_deliberation(
     result.factcheck = _first_ok(
         dispatcher, _ordered_seats(roster, ("codex", "kimi", "claude")),
         verify_prompt, f"panel-{mode}-verify",
-        ledger=ledger, measure_sink=result.seat_measurements, stage="verify",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="verify", booker=booker,
     )
 
     # ── Stage 4: SYNTHESIS (one cited report) ────────────────────────────────
@@ -695,7 +746,7 @@ def run_deliberation(
     result.synthesis = _first_ok(
         dispatcher, _ordered_seats(roster, ("claude", "codex", "kimi")),
         synth_prompt, f"panel-{mode}-synth",
-        ledger=ledger, measure_sink=result.seat_measurements, stage="synthesis",
+        ledger=ledger, measure_sink=result.seat_measurements, stage="synthesis", booker=booker,
     )
 
     return result
@@ -1006,6 +1057,7 @@ def _first_ok(
     ledger: Optional[_ReceiptLedger] = None,
     measure_sink: Optional[List[Dict[str, Any]]] = None,
     stage: str = "",
+    booker: Optional[LegBooker] = None,
 ) -> str:
     """Try each seat in order until one returns a real (non-error) report. This keeps the
     critical sequential stages (contrarian / verify / synthesis) from collapsing the whole
@@ -1018,17 +1070,31 @@ def _first_ok(
     window) is kept as a last-resort fallback so a measurement gap cannot cascade
     through the whole roster and collapse the stage to ``[empty]`` when real content
     exists — and every measurement is recorded on the result via ``measure_sink`` so
-    the gap stays visible."""
+    the gap stays visible.
+
+    K4a: every attempt here is one model call, so every attempt is one ledger line — also
+    the ones skipped, because a refused or dead seat was paid for too."""
     last = "[empty]"
     unmeasured_fallback: Optional[str] = None
     for provider, model in seats:
         did = f"{did_prefix}-{provider}-{uuid.uuid4().hex[:6]}"
         raised = False
+        resolved_model = ""
+        started = _utcnow()
         try:
-            out = dispatcher(provider, _seat_model(model), prompt, did)
+            resolved_model = _seat_model(model)
+            out = dispatcher(provider, resolved_model, prompt, did)
         except Exception as exc:  # noqa: BLE001
             out = f"[dispatch error {provider}: {exc!r}]"
             raised = True
+        ended = _utcnow()
+        if booker is not None:
+            booker.book(
+                stage=stage or did_prefix, provider=provider, model=resolved_model or model,
+                dispatch_id=did, report_text=out, started=started, ended=ended,
+                receipts=ledger.lookup(did) if ledger is not None else None,
+                failure=panel_leg_cost.DISPATCH_ERROR_REASON if raised else None,
+            )
         measurement = _measure_seat(
             provider, "", did, out, stage=stage or did_prefix, ledger=ledger, raised=raised,
         )
