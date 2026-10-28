@@ -111,6 +111,14 @@ logger = logging.getLogger(__name__)
 RUN_SCHEMA = "provider_cost_run/1"
 TOKEN_FIELDS = ("input_uncached", "cache_hit", "cache_write_5m", "cache_write_1h", "output")
 ROLES = frozenset({"builder", "review", "plan_gate", "tiebreaker", "panel", "intelligence"})
+# A run whose purpose no dispatch row names is still booked (K6b-3, ADR-049): its role says
+# why the purpose is unknown. The set is closed — ``unknown:<anything else>`` is refused, so a
+# free-form reason can never stand in for a purpose role.
+UNKNOWN_ROLE_PREFIX = "unknown:"
+UNKNOWN_ROLES = frozenset({
+    UNKNOWN_ROLE_PREFIX + "no_dispatch_row",
+    UNKNOWN_ROLE_PREFIX + "no_ledger_role",
+})
 KINDS = frozenset({"charge", "correction"})
 BILLINGS = frozenset({"metered", "subscription"})
 SPOOL_DIR_NAME = "provider_costs.spool"
@@ -177,6 +185,42 @@ class InvalidRecord(CostLedgerRefusal):
 
 class InvalidExecutionId(CostLedgerRefusal):
     """A booking with no execution identity (K3-1a): nothing is written and nothing is guessed."""
+
+
+class BackfillRunIdTaken(CostLedgerRefusal):
+    """A backfill charge whose ``run_id`` a line already holds (K6b-3 round 2): nothing is written.
+
+    A backfill numbers a charge from the ledger it read before planning, so two
+    backfills of the same reference can reserve one attempt. The reservation is
+    only real once it is written, so the check runs inside the writer's lock
+    (:func:`record_run`); the caller renumbers the charge and writes again
+    (``cost_ledger_backfill.apply_runs``). Only reached when no line carries the
+    charge's ``transcript_identity``: a line that does is
+    :class:`BackfillTranscriptBooked`, and renumbering would book one transcript
+    twice. A live producer and a correction keep their own behaviour.
+    """
+
+
+class BackfillTranscriptBooked(CostLedgerRefusal):
+    """A backfill charge whose transcript a line already holds (K6b-3 round 3): nothing is written.
+
+    A taken ``run_id`` has two causes, and they need opposite answers. Another
+    transcript of the same reference took the attempt: renumbering is right
+    (:class:`BackfillRunIdTaken`). The same transcript was booked already by a
+    backfill that planned from the same snapshot: renumbering books its spend a
+    second time. So the identity is checked first, inside the writer's lock, in
+    the ledger and in the spool that waits for the replay; ``record`` is the line
+    that holds it. The caller compares usage and amount with that line — equal is
+    a skip, different is a correction on its ``run_id`` — and never renumbers it
+    (``cost_ledger_backfill.apply_runs``).
+    """
+
+    def __init__(self, record: Mapping[str, Any], message: Optional[str] = None):
+        self.record = dict(record)
+        super().__init__(message or (
+            f"transcript {record.get(TRANSCRIPT_IDENTITY)} is booked already as record "
+            f"{record.get('record_id')} of run {record.get('run_id')}"
+        ))
 
 
 class CostLedgerWriteError(OSError):
@@ -320,6 +364,21 @@ def _require_member(value: object, allowed: frozenset, name: str) -> None:
         raise InvalidRecord(f"{name} {value!r} is not one of {sorted(allowed)}")
 
 
+def _check_role(role: object) -> None:
+    """A purpose role, or one of the closed set of ``unknown:<reason>`` roles (:data:`UNKNOWN_ROLES`).
+
+    The reason is machine-readable and the set is closed: a role outside both
+    sets is refused here, before anything is priced or written.
+    """
+    if not isinstance(role, str):
+        raise InvalidRecord(f"role {role!r} is not a ledger role")
+    if role in ROLES or role in UNKNOWN_ROLES:
+        return
+    raise InvalidRecord(
+        f"role {role!r} is not one of {sorted(ROLES)} or {sorted(UNKNOWN_ROLES)}"
+    )
+
+
 def _check_identity(run: RunCost) -> None:
     project, _producer, _ref, _attempt = split_run_id(run.run_id)
     if not isinstance(run.project_id, str) or not run.project_id:
@@ -328,7 +387,7 @@ def _check_identity(run: RunCost) -> None:
         raise RunIdProjectMismatch(
             f"run_id {run.run_id!r} belongs to project {project!r}, the record to {run.project_id!r}"
         )
-    _require_member(run.role, ROLES, "role")
+    _check_role(run.role)
     _require_member(run.kind, KINDS, "kind")
     _require_member(run.billing, BILLINGS, "billing")
     if not isinstance(run.backfill, bool):
@@ -1147,11 +1206,32 @@ def record_run(run: RunCost, *, ledger_path: Optional[Path] = None) -> WrittenRe
     :class:`CostLedgerWriteError` when the spool failed too or the lock file
     could not be taken: the outcome is unknown, so the caller fails its call,
     mutates no state and books no new attempt (ADR-005).
+
+    A backfill charge (``backfill=True``, ``kind="charge"``) is checked inside
+    the writer's lock, on the ledger as it is when the line would land, so
+    nothing planned from an older snapshot is written blindly (K6b-3):
+
+    * a line that already measures this charge's ``transcript_identity``, in the
+      ledger or in the spool that waits for the replay, refuses it with
+      :class:`BackfillTranscriptBooked`, carrying that line (round 3). The same
+      transcript is booked once; changed usage is a correction, never a second
+      charge;
+    * otherwise a ``run_id`` that a line already holds refuses it with
+      :class:`BackfillRunIdTaken` (round 2): another transcript of the same
+      reference took the attempt, and the caller renumbers its charge.
+
+    A correction and a live producer's charge are not checked: they keep their
+    own behaviour.
     """
     record = build_record(run)
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
     refuse_real_central_store_write_under_test_runner(path)
-    return _write(path, lambda _fh: record, f"cost record {record['record_id']} of run {record['run_id']}")
+
+    def record_for(fh) -> Dict[str, Any]:
+        _refuse_a_booked_backfill_charge(path, fh, run)
+        return record
+
+    return _write(path, record_for, f"cost record {record['record_id']} of run {record['run_id']}")
 
 
 def _read_under_the_lock(fh) -> str:
@@ -1302,6 +1382,45 @@ def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
     except (OSError, _UnreadableSpool) as exc:
         raise _Unwritten(exc, f"the runs already booked could not be read ({exc}): nothing was written") from exc
     return [*_parse_lines(text)[0], *(record for run in spooled for record in run)]
+
+
+def _refuse_a_booked_backfill_charge(ledger_path: Path, fh, run: RunCost) -> None:
+    """Refuse a backfill charge whose transcript or ``run_id`` already has a line, under the caller's lock.
+
+    A backfill numbers its charge from the ledger it read before planning, so the
+    plan is only evidence of what was written when it was taken (K6b-3). Here,
+    under the lock the line would land under, the ledger (and the spool that
+    waits for the replay) says what holds now, and two causes are told apart:
+
+    * this charge's ``transcript_identity`` — the same transcript is booked
+      already, so writing the charge again would count its spend twice; refused
+      with :class:`BackfillTranscriptBooked`, which carries that line (round 3);
+    * this charge's ``run_id`` — another transcript of the same reference took
+      the attempt; refused with :class:`BackfillRunIdTaken`, which the caller
+      answers by renumbering (round 2). Only reached when no line carries the
+      identity: a charge without one is never guessed onto another transcript.
+
+    It is checked for a backfill charge only: a correction names the record it
+    supersedes, and a live producer's ``run_id`` decides its own attempt.
+    """
+    if not (run.backfill and run.kind == "charge"):
+        return
+    lines = _booked_lines(ledger_path, fh)
+    if run.transcript_identity is not None:
+        for line in lines:
+            if line.get(TRANSCRIPT_IDENTITY) == run.transcript_identity:
+                raise BackfillTranscriptBooked(
+                    line,
+                    f"transcript {run.transcript_identity} is booked already as record "
+                    f"{line.get('record_id')} of run {line.get('run_id')}: a backfill charge is never "
+                    "written beside the line that already measures this transcript",
+                )
+    for line in lines:
+        if line.get("run_id") == run.run_id:
+            raise BackfillRunIdTaken(
+                f"run_id {run.run_id} is booked already as record {line.get('record_id')}: "
+                "a backfill charge is never written over an existing line",
+            )
 
 
 def record_once(
@@ -2734,12 +2853,13 @@ def ledger_files(ledger_path: Optional[Path] = None) -> LedgerFiles:
 
 
 __all__ = [
-    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
+    "RUN_SCHEMA", "TOKEN_FIELDS", "ROLES", "UNKNOWN_ROLE_PREFIX", "UNKNOWN_ROLES",
+    "KINDS", "BILLINGS", "SPOOL_DIR_NAME", "QUARANTINE_DIR_NAME",
     "RENUMBERED_EVENT", "QUARANTINED_EVENT", "RENUMBERED_RECORD_ID", "TRANSCRIPT_IDENTITY",
     "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
-    "InvalidExecutionId",
+    "InvalidExecutionId", "BackfillRunIdTaken", "BackfillTranscriptBooked",
     "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "GroupedTotals", "ReplayResult",
     "LedgerFiles", "GROUP_KEYS", "UNKNOWN_GROUP",
     "split_run_id", "run_id_for", "execution_run_id", "build_record", "record_run", "record_next_attempt",
