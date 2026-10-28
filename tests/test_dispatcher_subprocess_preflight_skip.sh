@@ -6,8 +6,8 @@
 #   1. T1 default (no env var) → subprocess adapter → skips tmux pre-flight
 #   2. T1 with VNX_ADAPTER_T1=subprocess → skips tmux pre-flight
 #   3. T2 with VNX_ADAPTER_T2=subprocess → skips tmux pre-flight
-#   4. T2 default (no env var) → tmux adapter → runs tmux pre-flight
-#   5. T1 with VNX_ADAPTER_T1=tmux → explicit tmux override → runs tmux pre-flight
+#   4. T2 default (no env var) → subprocess adapter → skips tmux pre-flight
+#   5. T1 with VNX_ADAPTER_T1=tmux → the worker opt-out is gone → skips tmux pre-flight
 #   6. mode_pre_check is called for subprocess terminals (sets _CTM_* globals)
 #   7. mode_pre_check failure blocks dispatch for subprocess terminal
 
@@ -205,31 +205,31 @@ assert_file_contains     "$CALL_LOG" "mode_pre_check"     "T2 subprocess: mode_p
 unset VNX_ADAPTER_T2
 
 # ===========================================================================
-# Test 4: T2 default (no env var) → tmux adapter → runs tmux pre-flight
+# Test 4: T2 default (no env var) → subprocess adapter → skips tmux pre-flight
 # ===========================================================================
 echo ""
-echo "=== Test 4: T2 default → tmux → runs tmux pre-flight ==="
+echo "=== Test 4: T2 default → subprocess → skips tmux pre-flight ==="
 
 reset_call_log
 rc=0; _pdp_resolve_target "$DISPATCH_FILE" "B" "backend-developer" || rc=$?
-assert_pass $rc "T2 default tmux: _pdp_resolve_target succeeds"
-assert_file_contains     "$CALL_LOG" "_input_mode_probe"  "T2 tmux: _input_mode_probe IS called"
-assert_file_contains     "$CALL_LOG" "configure_terminal_mode" "T2 tmux: configure_terminal_mode IS called"
-assert_file_contains     "$CALL_LOG" "tmux_send_best_effort"   "T2 tmux: tmux_send_best_effort (C-u) IS called"
-assert_file_not_contains "$CALL_LOG" "mode_pre_check"     "T2 tmux: mode_pre_check NOT called directly (called via configure_terminal_mode)"
+assert_pass $rc "T2 default: _pdp_resolve_target succeeds"
+assert_file_not_contains "$CALL_LOG" "_input_mode_probe"  "T2 default: _input_mode_probe NOT called"
+assert_file_not_contains "$CALL_LOG" "configure_terminal_mode" "T2 default: configure_terminal_mode NOT called"
+assert_file_contains     "$CALL_LOG" "mode_pre_check"     "T2 default: mode_pre_check IS called"
 
 # ===========================================================================
-# Test 5: T1 with VNX_ADAPTER_T1=tmux → explicit tmux override → runs pre-flight
+# Test 5: T1 with VNX_ADAPTER_T1=tmux → worker opt-out gone → skips pre-flight
 # ===========================================================================
 echo ""
-echo "=== Test 5: VNX_ADAPTER_T1=tmux → explicit tmux override → runs pre-flight ==="
+echo "=== Test 5: VNX_ADAPTER_T1=tmux is not read → skips pre-flight ==="
 
 reset_call_log
 export VNX_ADAPTER_T1=tmux
 rc=0; _pdp_resolve_target "$DISPATCH_FILE" "A" "backend-developer" || rc=$?
-assert_pass $rc "T1 explicit tmux: _pdp_resolve_target succeeds"
-assert_file_contains     "$CALL_LOG" "_input_mode_probe"  "T1 tmux override: _input_mode_probe IS called"
-assert_file_contains     "$CALL_LOG" "configure_terminal_mode" "T1 tmux override: configure_terminal_mode IS called"
+assert_pass $rc "T1 with =tmux: _pdp_resolve_target succeeds"
+assert_file_not_contains "$CALL_LOG" "_input_mode_probe"  "T1 =tmux: _input_mode_probe NOT called"
+assert_file_not_contains "$CALL_LOG" "configure_terminal_mode" "T1 =tmux: configure_terminal_mode NOT called"
+assert_file_contains     "$CALL_LOG" "mode_pre_check"     "T1 =tmux: mode_pre_check IS called"
 unset VNX_ADAPTER_T1
 
 # ===========================================================================

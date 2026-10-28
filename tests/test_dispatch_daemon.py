@@ -115,9 +115,6 @@ def test_picks_up_pending_dispatch(tmp_data, monkeypatch):
     _write_t0_state(state_dir, "T1", "idle")
     _write_dispatch(tmp_data / "dispatches" / "pending", "20260413-test-A.md")
 
-    # Patch headless check: T1 is headless
-    monkeypatch.setenv("VNX_ADAPTER_T1", "subprocess")
-
     # Patch _acquire_lease to succeed without hitting runtime_core_cli
     monkeypatch.setattr(
         "headless_dispatch_daemon._acquire_lease",
@@ -150,12 +147,10 @@ def test_skips_busy_terminal(tmp_data, monkeypatch):
     _write_t0_state(state_dir, "T1", "leased")
     _write_dispatch(tmp_data / "dispatches" / "pending", "20260413-busy-A.md")
 
-    monkeypatch.setenv("VNX_ADAPTER_T1", "subprocess")
-
     deliver_calls = []
     monkeypatch.setattr(
         "headless_dispatch_daemon._deliver",
-        lambda meta, active_path, state_dir: deliver_calls.append(meta) or True,
+        lambda *a, **k: deliver_calls.append(a[0]) or True,
     )
 
     daemon = DispatchDaemon(data_dir=tmp_data, state_dir=state_dir)
@@ -179,7 +174,10 @@ def test_lifecycle_moves_files(tmp_data, monkeypatch):
 
     monkeypatch.setenv("VNX_ADAPTER_T1", "subprocess")
     monkeypatch.setattr("headless_dispatch_daemon._acquire_lease", lambda t, d: 1)
-    monkeypatch.setattr("headless_dispatch_daemon._deliver", lambda m, p, s: True)
+    monkeypatch.setattr("headless_dispatch_daemon._deliver", lambda *a, **k: (True, "T1", 1))
+    monkeypatch.setattr(
+        "headless_dispatch_daemon._run_governance_pre_check", lambda *a, **k: (False, [], None)
+    )
     monkeypatch.setattr("headless_dispatch_daemon._release_lease", lambda t, g: True)
 
     daemon = DispatchDaemon(data_dir=tmp_data, state_dir=state_dir)
@@ -208,7 +206,10 @@ def test_audit_log_written(tmp_data, monkeypatch):
 
     monkeypatch.setenv("VNX_ADAPTER_T1", "subprocess")
     monkeypatch.setattr("headless_dispatch_daemon._acquire_lease", lambda t, d: 7)
-    monkeypatch.setattr("headless_dispatch_daemon._deliver", lambda m, p, s: True)
+    monkeypatch.setattr("headless_dispatch_daemon._deliver", lambda *a, **k: (True, "T1", 7))
+    monkeypatch.setattr(
+        "headless_dispatch_daemon._run_governance_pre_check", lambda *a, **k: (False, [], None)
+    )
     monkeypatch.setattr("headless_dispatch_daemon._release_lease", lambda t, g: True)
 
     daemon = DispatchDaemon(data_dir=tmp_data, state_dir=state_dir)
@@ -233,18 +234,19 @@ def test_audit_log_written(tmp_data, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_skips_non_headless_terminal(tmp_data, monkeypatch):
-    """Non-subprocess terminal is skipped; no delivery attempted."""
+    """A non-headless terminal (T0, no opt-in) is skipped; no delivery attempted."""
     state_dir = tmp_data / "state"
-    _write_t0_state(state_dir, "T1", "idle")
-    _write_dispatch(tmp_data / "dispatches" / "pending", "20260413-tmux-A.md")
+    _write_t0_state(state_dir, "T0", "idle")
+    _write_dispatch(tmp_data / "dispatches" / "pending", "20260413-tmux-A.md",
+                    terminal="T0", track="Z")
 
-    # VNX_ADAPTER_T1 not set → tmux (default) → skip
-    monkeypatch.delenv("VNX_ADAPTER_T1", raising=False)
+    # T-G1: T0 still reads VNX_ADAPTER_T0; unset means the tmux branch → skip
+    monkeypatch.delenv("VNX_ADAPTER_T0", raising=False)
 
     deliver_calls = []
     monkeypatch.setattr(
         "headless_dispatch_daemon._deliver",
-        lambda meta, active_path, state_dir: deliver_calls.append(meta) or True,
+        lambda *a, **k: deliver_calls.append(a[0]) or True,
     )
 
     daemon = DispatchDaemon(data_dir=tmp_data, state_dir=state_dir)
@@ -254,3 +256,4 @@ def test_skips_non_headless_terminal(tmp_data, monkeypatch):
     # File stays in pending (no lifecycle move for skipped dispatches)
     pending = list((tmp_data / "dispatches" / "pending").iterdir())
     assert len(pending) == 1
+
