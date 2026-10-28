@@ -653,10 +653,11 @@ class TestReceiptEnrichment:
         enriched = _enrich_completion_receipt(receipt, repo_root=tmp_path)
 
         # ADR-035 §3.3/§9 PR-5: quality_advisory{} generation is retired
-        # (superseded by verdict{}/warnings[], §6) -- terminal_snapshot is
-        # unaffected.
+        # (superseded by verdict{}/warnings[], §6). ADR-042 amendement 2026-10-28
+        # (T-B2): terminal_snapshot{} is retired too -- a receipt's identity
+        # comes from its dispatch row, and "what is running" is live_work.
         assert "quality_advisory" not in enriched
-        assert "terminal_snapshot" in enriched
+        assert "terminal_snapshot" not in enriched
 
     def test_enrichment_failure_fallback(self, tmp_path):
         """Failed enrichment should add unavailable status markers."""
@@ -671,9 +672,10 @@ class TestReceiptEnrichment:
         # Pass invalid repo_root to trigger failure
         enriched = _enrich_completion_receipt(receipt, repo_root=Path("/nonexistent"))
 
-        # Should have markers with unavailable status or error handling
-        assert "terminal_snapshot" in enriched
-        # May have status=unavailable or may have succeeded with fallback logic
+        # Enrichment never raises on an unusable repo root, and T-B2 means no
+        # terminal_snapshot is added on the way out.
+        assert "provenance" in enriched
+        assert "terminal_snapshot" not in enriched
 
 
 class TestNonRegression:

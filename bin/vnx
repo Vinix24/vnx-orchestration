@@ -388,7 +388,7 @@ Planning commands (strategic-layer read surface):
 
 Process commands (visibility and control):
   status             Show terminal health, dispatch queue, and gate results
-  status --terminals   Just terminal health
+  status --terminals   Just in-flight work (live_work)
   status --dispatches  Just dispatch queue
   status --gates       Just gate results
   status --json        Machine-readable JSON output

@@ -22,7 +22,6 @@ try:
     from project_root import resolve_state_dir
     from project_scope import current_project_id
     from quality_advisory import generate_quality_advisory, get_changed_files
-    from terminal_snapshot import collect_terminal_snapshot
     from cqs_calculator import calculate_cqs
     from receipt_provenance import enrich_receipt_provenance, validate_receipt_provenance
     from ghost_receipt_filter import should_route_to_gate_stream, gate_events_file
@@ -38,7 +37,6 @@ from append_receipt_internals.common import (
     EXIT_UNEXPECTED_ERROR,
     _emit,
     _get_open_items_manager,
-    is_headless_t0,
     register_facade,
 )
 from append_receipt_internals.idempotency import (
@@ -110,14 +108,12 @@ __all__ = [
     "_warn_if_review_gate_missing_dispatch_id",
     "append_receipt_payload",
     "calculate_cqs",
-    "collect_terminal_snapshot",
     "current_project_id",
     "enrich_receipt_provenance",
     "ensure_env",
     "gate_events_file",
     "generate_quality_advisory",
     "get_changed_files",
-    "is_headless_t0",
     "main",
     "rebuild_outcome_index",
     "register_facade",

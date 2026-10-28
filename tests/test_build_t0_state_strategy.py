@@ -316,10 +316,12 @@ class TestBuildIntegration:
 
         state = build_t0_state(state_dir, dispatch_dir)
 
+        # `terminals` is gone since T-B2 (terminal-binding-afbouwen): the block
+        # was a per-terminal view the headless lane never filled, and
+        # live_work is what is running.
         required = {
             "schema_version",
             "generated_at",
-            "terminals",
             "queues",
             "tracks",
             "open_items",
