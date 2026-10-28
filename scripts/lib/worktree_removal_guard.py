@@ -2,6 +2,8 @@
 
 Holds the tree's slot through the removal, keeps it when process liveness is
 unknown, and revalidates HEAD + a clean status under the slot before removing.
+The removal is bound to the HEAD sha its caller evaluated: a tree that moved
+off that sha is refused (``head_moved``), never force-removed.
 """
 
 from __future__ import annotations
@@ -110,6 +112,13 @@ def _gate_seat(wt: Path, dry_run: bool) -> "tuple[Optional[int], Optional[GuardR
 def _dispatch_slot(
     dispatch_id: str, wt: Path, root: Path, dry_run: bool,
 ) -> "tuple[object | None, Optional[GuardResult]]":
+    """Hold the dispatch's occupancy slot for the duration of the assessment.
+
+    The slot is really acquired and released even when *dry_run* is true — the
+    guard must prove that no process holds it — so a read-only run briefly
+    holds a real slot, and a concurrent claim or reap for the same dispatch id
+    can transiently observe it held.
+    """
     import dispatch_worktree_isolation as dwi
 
     claims = dwi._claim_dir(root)
@@ -162,15 +171,29 @@ def _record_removal_decision(dispatch_id: str, wt: Path, head: str) -> str:
     return ""
 
 
+def _head_moved(expected_head: str, observed: str, where: str) -> "tuple[str, str]":
+    return REASON_HEAD_MOVED, (
+        f"HEAD moved {expected_head[:12]} -> {observed[:12]}{where}: "
+        "the worktree no longer sits on the HEAD evaluate_candidate cleared"
+    )
+
+
 def _assess(
-    wt: Path, root: Path, dispatch_id: str, *, dry_run: bool,
+    wt: Path, root: Path, dispatch_id: str, expected_head: str, *, dry_run: bool,
     pause_hook: "Optional[Callable[[str], None]]",
     before_remove: "Optional[Callable[[str], None]]" = None,
 ) -> GuardResult:
-    """Judge and (unless dry_run) remove, while the caller holds the slot."""
+    """Judge and (unless dry_run) remove, while the caller holds the slot.
+
+    ``before_remove`` runs last among the steps that can refuse: under the
+    repository lock, after the revalidation and after the removal decision is
+    persisted, immediately before ``git worktree remove``. A result that keeps
+    the tree therefore never had its lock dropped."""
     reason, detail = _liveness_refusal(dispatch_id, root)
     if not reason:
         head, reason, detail = _evidence(wt)
+    if not reason and head != expected_head:
+        reason, detail = _head_moved(expected_head, head, "")
     if not reason and pause_hook is not None:
         pause_hook("before_revalidation")
         again, reason, detail = _evidence(wt)
@@ -183,22 +206,21 @@ def _assess(
             False, REASON_DRY_RUN, "clean under the slot", dry_run=True, would_remove=True,
         )
     with _worktree_lock(root):
-        if before_remove is not None:
-            before_remove("before_remove")
         # Revalidate every call, not only with a pause_hook: taking the
         # repository lock can block, and anything written into the tree or
         # committed there during that wait must be seen before it is deleted.
         again, reason, detail = _evidence(wt)
-        if not reason and again != head:
-            reason, detail = (
-                REASON_HEAD_MOVED,
-                f"HEAD moved {head[:12]} -> {again[:12]} under the repository lock",
-            )
+        if not reason and again != expected_head:
+            reason, detail = _head_moved(expected_head, again, " under the repository lock")
         if reason:
             return GuardResult(False, reason, detail, dry_run)
         failure = _record_removal_decision(dispatch_id, wt, again)
         if failure:
             return GuardResult(False, REASON_DECISION_UNRECORDED, failure, dry_run)
+        # Every refusal is behind us now, so this is the first point at which
+        # the caller may drop a lock: a tree the guard keeps keeps its lock.
+        if before_remove is not None:
+            before_remove("before_remove")
         ok, detail = _git(root, ["worktree", "remove", "--force", str(wt)])
     if ok:
         return GuardResult(True, REASON_REMOVED)
@@ -208,6 +230,7 @@ def _assess(
 def guarded_remove(
     worktree_path: Path,
     *,
+    expected_head: str,
     dispatch_id: str,
     repo_root: Path,
     dry_run: bool = True,
@@ -219,14 +242,26 @@ def guarded_remove(
     Every refusal has a reason.  The clean/HEAD evidence is taken again under
     the repository lock immediately before the removal, so a change made while
     the guard waited for that lock is refused instead of force-removed.
-    *pause_hook* (before the lock) and *before_remove* (inside it) exist so a
-    test can move the evidence at either point.  The removal decision is
-    persisted to the state-mutation ledger before ``git worktree remove``; if
-    that write does not land, nothing is removed.
+    *expected_head* is the sha ``evaluate_candidate`` judged: the removal is
+    bound to it, and a tree whose HEAD is no longer that sha is refused with
+    ``head_moved`` naming both shas — a commit made after the evidence
+    evaluation never rides along on it.
+    *pause_hook* (before the repository lock) exists so a test can move the
+    evidence during the lock wait.  *before_remove* runs inside that lock
+    after the revalidation and after the removal decision is persisted,
+    immediately before ``git worktree remove`` — every refusal is behind it,
+    so a hook that drops a lock can never unlock a tree the guard keeps.  The
+    removal decision is persisted to the state-mutation ledger before
+    ``git worktree remove``; if that write does not land, nothing is removed.
     """
     wt, root = Path(worktree_path), Path(repo_root)
     if not wt.exists():
         return GuardResult(False, REASON_ABSENT, f"{wt} does not exist", dry_run)
+    if not expected_head:
+        return GuardResult(
+            False, REASON_HEAD_MOVED,
+            "no evaluated HEAD sha to bind the removal to", dry_run,
+        )
     gate = wt.name.startswith(_GATE_PREFIX) or gate_lifetime_lock_path(wt).exists()
     if gate:
         fd, refused = _gate_seat(wt, dry_run)
@@ -234,7 +269,7 @@ def guarded_remove(
             return refused
         try:
             return _assess(
-                wt, root, dispatch_id, dry_run=dry_run,
+                wt, root, dispatch_id, expected_head, dry_run=dry_run,
                 pause_hook=pause_hook, before_remove=before_remove,
             )
         finally:
@@ -250,7 +285,7 @@ def guarded_remove(
         return refused
     try:
         return _assess(
-            wt, root, dispatch_id, dry_run=dry_run,
+            wt, root, dispatch_id, expected_head, dry_run=dry_run,
             pause_hook=pause_hook, before_remove=before_remove,
         )
     finally:

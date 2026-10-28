@@ -405,7 +405,7 @@ Cite the policy code (A1, B2, etc) when invoking.
 
 ### Gate findings handling
 - **B2 (pre-existing main bug)**: Codex blocking that's about lines NOT in this PR's diff → file OI, push merge.
-- **B3 (PR-introduced finding)**: Fix in same PR, retry gates ONCE. After 1 retry still dirty → defer with OI. Don't iterate.
+- **B3 (PR-introduced finding)**: Fix in same PR; one follow-up review round per finding. After three codex FAIL rounds on three distinct heads the gate caps the PR under B3.2 (`review_rounds.cap_state`, `VNX_REVIEW_ROUND_CAP`, default 3): stop iterating and take the cap's next step (`vnx review cap-verdict`, ADR-041) or defer with an OI. Don't iterate past the cap.
 - **B4 (CI red after fix)**: 1 retry, then skip+OI.
 
 ### CI failure rules (hard)

@@ -21,12 +21,14 @@ from .common import (
 from .outcome_identity import (
     compute_outcome_id,
     has_outcome_identity,
+    lifecycle_identity_fields,
     load_outcome_index,
     record_outcome,
     resolve_outcome_booking,
     write_outcome_index,
     _outcome_index_path_for,
 )
+from .lifecycle import check_end_line
 
 _log = logging.getLogger(__name__)
 
@@ -211,6 +213,23 @@ def _compute_idempotency_key(receipt: Dict[str, Any], event_name: str) -> str:
     if "event_type" not in digest_fields and "event" not in digest_fields:
         digest_fields["event_type"] = event_name
 
+    # ADR-045 §3 (audit-spoor-kern K-1): the identity of a lifecycle line is
+    # (project_id, dispatch_id, attempt). Those two extras are deliberately NOT
+    # in IDEMPOTENCY_FIELDS for every receipt shape — adding them globally would
+    # change the dedup key of shapes that already carry project_id. The ONE
+    # helper that also scopes the durable outcome and correction keys decides
+    # which shapes get them, so all three lifecycle types (start, end, report)
+    # are scoped together and cannot drift apart. Without that, attempt 1 and
+    # attempt 2 of one dispatch — or the same dispatch_id in two projects —
+    # collapse onto one cache entry and the second line is silently skipped
+    # before the durable index is ever consulted. The one-end-per-attempt
+    # refusal itself is lifecycle.check_end_line's, not this cache's: a
+    # conflicting second end is refused, not silently skipped.
+    for lifecycle_field in lifecycle_identity_fields(receipt, event_name):
+        value = receipt.get(lifecycle_field)
+        if value is not None and str(value).strip():
+            digest_fields[lifecycle_field] = value
+
     if (
         "dispatch_id" not in digest_fields
         and "task_id" not in digest_fields
@@ -345,11 +364,7 @@ def _write_receipt_under_lock(
                 # Do NOT rewrite the cache on a duplicate hit: rewriting would trim it to
                 # max_entries=2048 and could evict in-window keys we still need for dedup.
                 # The cache is already correct and fresh — just skip the append.
-                return AppendResult(
-                    status="duplicate",
-                    receipts_file=receipt_path,
-                    idempotency_key=idempotency_key,
-                )
+                return AppendResult(status="duplicate", receipts_file=receipt_path, idempotency_key=idempotency_key)
 
             # ADR-038: outcome identity + durable cross-window idempotency.
             # The check above is a fast, short-window (cache_window_seconds)
@@ -371,8 +386,8 @@ def _write_receipt_under_lock(
             receipt["outcome_id"] = compute_outcome_id(receipt)
             outcome_index_data: Optional[Dict[str, Any]] = None
             outcome_booking = None
+            outcome_index_path = _outcome_index_path_for(receipt_path)
             if has_outcome_identity(receipt):
-                outcome_index_path = _outcome_index_path_for(receipt_path)
                 try:
                     outcome_index_data = load_outcome_index(outcome_index_path)
                 except Exception as exc:
@@ -385,13 +400,17 @@ def _write_receipt_under_lock(
                 if outcome_index_data is not None:
                     outcome_booking = resolve_outcome_booking(receipt, outcome_index_data)
                     if outcome_booking.is_duplicate:
-                        return AppendResult(
-                            status="duplicate",
-                            receipts_file=receipt_path,
-                            idempotency_key=idempotency_key,
-                        )
+                        return AppendResult(status="duplicate", receipts_file=receipt_path, idempotency_key=idempotency_key)
                     if outcome_booking.supersedes:
                         receipt["supersedes"] = outcome_booking.supersedes
+
+            # ADR-045 §3 (audit-spoor-kern K-1): one end line per attempt. Runs
+            # under the append lock, so two writers racing on the same
+            # (project_id, dispatch_id, attempt) are serialised here and the
+            # second sees the first's index entry or tail line. A refusal
+            # (AppendReceiptError), not a duplicate-skip: a second end is a bug
+            # or a replay, and silently dropping it would hide that.
+            check_end_line(receipt, index_data=outcome_index_data, ledger_path=receipt_path)
 
             if pre_write_hook is not None:
                 try:

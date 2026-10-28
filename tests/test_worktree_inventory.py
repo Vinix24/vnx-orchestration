@@ -114,12 +114,12 @@ class TestInventory:
         dispatch = [e for e in entries if e.path == fx.dispatch.resolve()][0]
         assert dispatch.age_days == 5
 
-    def test_the_inventory_sees_the_trees_the_sweep_is_blind_to(self, fx):
-        """Red on origin/main: ``discover_locked_dispatch_worktrees`` returns 1
-        here; the inventory must show all three owned trees."""
-        seen = {wt.path for wt in crw.discover_locked_dispatch_worktrees(fx.repo)}
+    def test_the_sweeps_candidates_are_the_owned_trees(self, fx):
+        """PR-4b: the sweep's candidate list IS the inventory's owned set —
+        gate, bench and locked dispatch trees alike (red on origin/main, where
+        only the locked dispatch tree was a candidate)."""
+        assert {wt.path for wt in crw.discover_candidates(fx.repo)} == set(fx.owned())
         assert set(fx.owned()) == {fx.dispatch.resolve(), fx.gate.resolve(), fx.bench_tree.resolve()}
-        assert seen == {fx.dispatch.resolve()}
 
     def test_the_sweep_parses_through_the_inventory_parser(self, fx, monkeypatch):
         calls = []
@@ -130,7 +130,7 @@ class TestInventory:
             return real(text)
 
         monkeypatch.setattr(wi, "parse_worktree_list_porcelain", spy)
-        crw.discover_locked_dispatch_worktrees(fx.repo)
+        crw.discover_candidates(fx.repo)
         assert calls
 
     def test_a_missing_tree_is_reported_not_dropped(self, fx):
@@ -166,9 +166,9 @@ class TestAllFlag:
             assert label in out
 
     def test_all_never_releases_a_tree_that_would_be_safe(self, fx, capsys, monkeypatch):
-        wt = crw.discover_locked_dispatch_worktrees(fx.repo)[0]
+        wt = [c for c in crw.discover_candidates(fx.repo) if c.lock_reason is not None][0]
         assert crw.evaluate_worktree(fx.repo, wt, None).safe
-        monkeypatch.setattr(crw, "release_worktree", lambda *a, **k: pytest.fail("--all released a worktree"))
+        monkeypatch.setattr(crw, "remove_candidate", lambda *a, **k: pytest.fail("--all released a worktree"))
         rc, out, err = run_main(capsys, "--repo-root", str(fx.repo), "--all", "--apply")
         assert rc == 0
         assert fx.dispatch.exists() and fx.gate.exists() and fx.bench_tree.exists()
@@ -186,21 +186,24 @@ class TestExistingDryRunUnchanged:
         assert rc == 0
         payload = json.loads(out)
         assert set(payload) == {"repo_root", "candidates"}
-        assert len(payload["candidates"]) == 1
-        candidate = payload["candidates"][0]
+        assert len(payload["candidates"]) == 3
+        candidate = [c for c in payload["candidates"] if c["dispatch_id"] == "d1"][0]
         assert set(candidate) == {
-            "dispatch_id", "path", "branch", "head_sha", "lock_reason",
-            "safe_to_release", "reason", "released", "errors", "delete_branch",
+            "dispatch_id", "path", "branch", "head_sha", "lock_reason", "kind",
+            "safe_to_release", "reason", "guard_reason", "guard_detail",
+            "released", "errors", "delete_branch",
         }
-        assert candidate["dispatch_id"] == "d1"
         assert candidate["safe_to_release"] and candidate["released"] is False
+        # This fixture's tree has no claim/occupancy record, so the guard names the
+        # reason it could not take the slot — the removal decision is the guard's.
+        assert candidate["guard_reason"] == "slot_unavailable", candidate
         assert fx.dispatch.exists()
 
     def test_human_dry_run_summary_is_unchanged(self, fx, capsys):
         rc, out, err = run_main(capsys, "--repo-root", str(fx.repo))
         assert rc == 0
         assert out.splitlines()[0].startswith(
-            "cleanup_reviewed_worktrees: 1 locked dispatch-worktree(s) gevonden"
+            "cleanup_reviewed_worktrees: 3 worktree(s) uit de inventaris gevonden"
         )
         assert "SAFE_TO_RELEASE" in out and "geen --apply meegegeven" in out
         assert fx.dispatch.exists()
