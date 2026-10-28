@@ -1872,11 +1872,9 @@ def _seat_final_answer(
 def _store_project_id(data_dir: Optional[str]) -> str:
     """The tenant of the store this run writes into (ADR-007), through the one resolver.
 
-    The store decides first: a data dir under ``.vnx-data/<project>/`` names its
-    own tenant, and that answer wins over the ambient ``VNX_PROJECT_ID``. An
-    unnamed store falls back to the env, then ``vnx-dev`` — a cost line is never
-    skipped for want of a tenant. Imported lazily: the panel's import stays as
-    light as it was for every caller that never books.
+    A data dir under ``.vnx-data/<project>/`` names its own tenant and that answer
+    wins over the ambient ``VNX_PROJECT_ID``; an unnamed store falls back to the
+    env, then ``vnx-dev`` — a line is never skipped for want of a tenant.
     """
     import harness_run_cost  # sibling module
 
@@ -1886,11 +1884,9 @@ def _store_project_id(data_dir: Optional[str]) -> str:
 def _seat_producer(member: Dict[str, str]) -> str:
     """The ledger producer naming this seat: ``plan_gate-<label>``.
 
-    K3-1b identity is ``(project_id, producer, execution_id)``; the ref is log
-    context and is not written to the line, so the seat's own name has to ride
-    the producer — the same shape ``panel_leg_cost.producer_for`` uses. A label
-    is sanitised so the producer can never carry the ``:`` that splits a
-    ``run_id``.
+    K3-1a's ``ref`` is log context only, so the seat's own name rides the
+    producer — the shape ``panel_leg_cost.producer_for`` uses. A label is
+    sanitised so it can never carry the ``:`` that splits a ``run_id``.
     """
     label = re.sub(r"[^A-Za-z0-9._-]", "_", str(member.get("label") or "seat"))
     return f"plan_gate-{label}"
@@ -1915,15 +1911,12 @@ def _book_seat_attempt(
     provider/model come from what the panel launched (the registry-resolved
     lane model, ADR-036), never from a model named in the report.
 
-    A raised dispatch is a door refusal (``delivery_refused``, the daily budget)
-    when its text carries the door's code: that attempt provably never started
-    and books zero. Any other raised dispatch started and lost its answer, so it
-    books unknown. Nothing this function does may fail the panel (a seat's
-    verdict is not the ledger's to lose), so the whole body is best-effort with
-    one WARNING.
-
-    The tenant is the store's (ADR-007): ``project_id`` when the caller named
-    one, else the project the data dir itself names — never the ambient env.
+    A raised dispatch is a door refusal when its text carries the door's code:
+    that attempt provably never started and books zero; any other raised
+    dispatch started and lost its answer, so it books unknown. Nothing here may
+    fail the panel (a seat's verdict is not the ledger's to lose): best-effort,
+    one WARNING. The tenant is the store's (ADR-007): ``project_id`` when the
+    caller named one, else the project the data dir itself names.
     """
     if not data_dir:
         return

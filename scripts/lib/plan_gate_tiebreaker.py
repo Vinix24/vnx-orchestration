@@ -983,18 +983,16 @@ def _book_tiebreaker_attempt(
 
     The tiebreaker's run ends here: one governed dispatch, one report, and no
     usage accounting anywhere below it. Its identity is the run's own
-    ``execution_id``, minted before the call; its provider and model come from
-    what the runner launched (the registry-resolved lane model, ADR-036), never
-    a model named in the decision text. A raised call is a door refusal when its
-    text carries the door's code — that attempt provably never started and books
-    zero — and any other raised call is a started attempt without an answer,
-    which books unknown. Best-effort throughout: a tiebreaker's decision is
-    never the ledger's to lose (one WARNING, never a raise).
+    ``execution_id``, minted before the call; provider and model come from what
+    the runner launched (the registry-resolved lane model, ADR-036), never a
+    model named in the decision text. A raised call is a door refusal when its
+    text carries the door's code (books zero); any other raised call started and
+    lost its answer (books unknown). Best-effort: a decision is never the
+    ledger's to lose (one WARNING, never a raise).
 
-    A caller that names no ``project_id`` gets the one of the store the line is
-    written INTO — ``Path(data_dir) / "state"``, the tenant the ledger belongs
-    to — never the ambient ``VNX_PROJECT_ID`` (ADR-007, the same resolution
-    ``panel_leg_cost.project_id_for`` uses).
+    No ``project_id`` means the tenant of the store the line is written INTO —
+    ``Path(data_dir) / "state"`` — never the ambient ``VNX_PROJECT_ID``
+    (ADR-007, the resolution ``panel_leg_cost.project_id_for`` uses).
     """
     if not data_dir:
         return
