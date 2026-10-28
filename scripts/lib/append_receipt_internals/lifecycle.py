@@ -30,7 +30,6 @@ import functools
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -65,31 +64,33 @@ def lifecycle_enabled() -> bool:
 
 @functools.lru_cache(maxsize=1)
 def writer_sha() -> str:
-    """The fabric commit: ``git rev-parse HEAD`` of the fabric root, once per process.
+    """The commit of the checkout THIS module lives in, resolved once per process.
 
-    Resolved through the project-root helper (git-based, never an env-only
-    guess). Fail-closed: an unresolvable sha is an ``AppendReceiptError``, never
-    an empty required field — an unknown provenance is worse than no line.
+    Not the project root: ADR-045 §8 defines ``writer_sha`` as the commit of the
+    code that wrote the line, and the cohort test compares
+    ``git merge-base --is-ancestor <activation> <writer_sha>`` against it. The
+    project root is ``project_root.resolve_project_root``, which the central-mode
+    path gate reserves for the project — asking it here would name the project
+    in a central install, not the fabric. So the probe runs ``git -C <scripts
+    dir>``: git walks up from any directory inside a checkout to that checkout's
+    head, which is the dev repo, a dispatch worktree, or
+    ``~/.vnx-system/versions/<v>``. ``scripts/check_no_file_derived_data_paths.py``
+    (OI-1145 shape 3a) blocks the resolver route here.
+
+    Fail-closed: an unresolvable sha is an ``AppendReceiptError``, never an empty
+    required field — an unknown provenance is worse than no line.
     """
-    if str(SCRIPTS_DIR / "lib") not in sys.path:
-        sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
-    # Imported after the path guard so the helper resolves from scripts/lib even
-    # when this package is imported by path; inside the function so a caller that
-    # only appends a v2 receipt never pays for the git probe.
-    from project_root import resolve_project_root
-
-    root = resolve_project_root(__file__)
     try:
-        probe = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+        probe = subprocess.run(["git", "-C", str(SCRIPTS_DIR), "rev-parse", "HEAD"],
                                capture_output=True, text=True, timeout=10, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise AppendReceiptError("writer_sha_unresolved", EXIT_IO_ERROR,
-                                 f"cannot resolve writer_sha for {root}: {exc}") from exc
+                                 f"cannot resolve writer_sha for {SCRIPTS_DIR}: {exc}") from exc
     sha = probe.stdout.strip()
     if probe.returncode != 0 or not sha:
         raise AppendReceiptError(
             "writer_sha_unresolved", EXIT_IO_ERROR,
-            f"git rev-parse HEAD failed in {root} (exit {probe.returncode}): "
+            f"git rev-parse HEAD failed in {SCRIPTS_DIR} (exit {probe.returncode}): "
             f"{probe.stderr.strip() or 'no output'}")
     return sha
 

@@ -34,6 +34,7 @@ sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
 
 import append_receipt  # noqa: E402
+import check_no_file_derived_data_paths  # noqa: E402
 import config_registry  # noqa: E402
 import event_outcome_semantics  # noqa: E402
 import receipt_outcome  # noqa: E402
@@ -136,6 +137,24 @@ def test_writer_sha_is_the_fabric_head(tmp_path, lifecycle_on):
         capture_output=True, text=True, check=True,
     ).stdout.strip()
     assert _lines(ledger)[0]["writer_sha"] == head
+
+
+def test_the_lifecycle_module_passes_the_central_mode_path_gate():
+    """``lifecycle.py``'s own source holds no un-grandfathered repo-root anchor.
+
+    ``writer_sha`` asks git for the commit of THIS checkout, deliberately without
+    the project-root resolver (OI-1145 shape 3a in
+    ``scripts/check_no_file_derived_data_paths.py``). This runs the gate on the
+    single file so the module cannot regress on its own.
+    """
+    source = (
+        VNX_ROOT / "scripts" / "lib" / "append_receipt_internals" / "lifecycle.py"
+    ).read_text(encoding="utf-8")
+    violations = check_no_file_derived_data_paths.check_source(source)
+    assert violations == [], (
+        "append_receipt_internals/lifecycle.py has an un-grandfathered central-mode "
+        f"path violation (OI-1145 shape 3a): {violations}"
+    )
 
 
 # ---------------------------------------------------------------------------
