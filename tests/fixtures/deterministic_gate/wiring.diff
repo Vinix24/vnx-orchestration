@@ -1,0 +1,13 @@
+diff --git a/app/unwired.py b/app/unwired.py
+--- a/app/unwired.py
++++ b/app/unwired.py
+@@ -1,2 +1,9 @@
+ """Fixture module for the wiring-gate golden: two new public definitions."""
+ 
+ 
++def used_symbol():
++    return "called from app/caller.py"
++
++
++def orphan_symbol():
++    return "nobody calls this one"

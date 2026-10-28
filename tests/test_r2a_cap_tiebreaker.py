@@ -546,8 +546,9 @@ class TestTheStateContract:
         assert kimi_landed is True and still_open["status"] == "requested", still_open
         assert codex_landed is True and _granted(env["ledger"]) == [(x1, "fail", vid)]
         verdict = decision.verdict
+        # R2c carries mergen-met-OI out, so the forced outcome is stored as itself.
         assert (verdict.cap_rule, verdict.outcome, verdict.chosen_outcome) == (
-            "B3.2", review_cap_verdicts.UNAVAILABLE, review_cap_verdicts.MERGEN_MET_OI,
+            "B3.2", review_cap_verdicts.MERGEN_MET_OI, review_cap_verdicts.MERGEN_MET_OI,
         )
 
 
@@ -617,9 +618,9 @@ class TestTheCapVerdictCli:
         assert (_cli("--for-dispatch", X), _cli("--for-dispatch", X)) == (2, 2)
         assert review_cap_verdicts.read_verdicts(env["state_dir"], PR) == ()
 
-    def test_the_other_outcome_is_recorded_unavailable_and_the_cap_stays_closed(self, env, model, capsys):
-        # mergen-met-OI (B3.2) stays closed until R2c; terug-naar-plan (B3.1) is R2b's, see
-        # tests/test_r2b_terug_naar_plan.py.
+    def test_the_other_outcome_is_stored_as_itself_and_carried_out(self, env, model, capsys):
+        # R2c carries mergen-met-OI out; the whole aftermath is pinned in
+        # tests/test_r3_mergen_met_oi.py. Here: the rule's other outcome is no longer unavailable.
         import review_cap_verdicts
 
         x1 = _commit(env["repo"], "fix1.txt", f"fix: one\n\nDispatch-ID: {X}")
@@ -629,12 +630,14 @@ class TestTheCapVerdictCli:
         ])
         model["answers"].append(_answer("mergen-met-OI"))
 
-        assert _cli("--for-dispatch", X) == 0
+        assert _cli("--for-dispatch", X) == 3, "no result record of the counted head: the aftermath is incomplete"
         (verdict,) = review_cap_verdicts.read_verdicts(env["state_dir"], PR)
         assert (verdict.cap_rule, verdict.outcome, verdict.chosen_outcome, verdict.granted_dispatch_id) == (
-            "B3.2", review_cap_verdicts.UNAVAILABLE, "mergen-met-OI", "",
+            "B3.2", review_cap_verdicts.MERGEN_MET_OI, "mergen-met-OI", "",
         )
-        assert "the cap stays closed, defer with an OI by hand" in capsys.readouterr().out
+        out = capsys.readouterr()
+        assert "the remaining codex blockers become open items" in out.out and "aftermath INCOMPLETE" in out.out
+        assert "aftermath is incomplete" in out.err
         assert _codex_request(env, x1)["reason"] == "b3_cap"
 
     def test_nothing_is_decided_below_the_cap_or_without_the_dispatch_to_bind(self, env, model):

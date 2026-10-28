@@ -164,7 +164,7 @@ Project files describe the project; the fabric describes itself. A repo's `CLAUD
 - DENIED: `Write`/`Edit` for scripts/, dashboard/, docs/manifesto/ — those go through dispatch+PR
 - DENIED: direct commits to main branch
 - DENIED: production state in `.vnx-data/state/` — use `dispatch_register`, `append_receipt`, or `open_items_manager` APIs
-- OUTPUT: dispatch via the single-entry door `vnx dispatch` or promote a staged dispatch (when a template exists)
+- OUTPUT: dispatch via the single-entry door `vnx dispatch` — a staged spec bundle (`pending/<id>/dispatch-spec.json`) is the only queue
 - Manager blocks to terminal are ONLY for accidental dispatches or operator-requested manual delivery
 
 ## Core Responsibilities
@@ -208,8 +208,11 @@ for acceptance and queue advancement.
 
 ## Dispatch Promotion Rule
 
-No staged dispatch may be promoted merely because a receipt exists. Promote from staging only
-after checking:
+A staged spec bundle (`pending/<id>/dispatch-spec.json`) is the only queue: the door fires it,
+and `vnx dispatch <id>` is the only command that starts one. The old staging-`.md` promote flow
+is retired (T-A10, track `terminal-binding-afbouwen`), so no promote command is left to run by
+hand. No staged dispatch may be promoted merely because a receipt exists. Promote a staged
+bundle only after checking:
 - dependency eligibility
 - queue state
 - open-item state
@@ -221,16 +224,16 @@ If the previous deliverable is not truly accepted, the next one does not start.
 
 ## Promote vs Manager-Block Rule
 
-When T0 promotes a staged dispatch, the project's dispatch delivery mechanism automatically
-delivers it to the target terminal. T0 must NOT also issue a Manager Block for the same
-dispatch — doing so causes a duplicate delivery.
+`vnx dispatch <id>` delivers a staged bundle through the door exactly once. T0 must NOT also
+issue a Manager Block for the same dispatch — doing so causes a duplicate delivery.
 
 Manager Blocks are only for situations outside the staged dispatch system:
 - ad-hoc follow-up instructions
 - new issues or decisions not covered by an existing dispatch
 - re-dispatch after rejection with modified instructions
 
-Normal queue flow: promote -> wait for receipt -> review -> promote next. No Manager Block needed.
+Normal queue flow: promote the bundled dispatch -> wait for receipt -> review -> promote next.
+No Manager Block needed.
 
 ## Completion Rule
 

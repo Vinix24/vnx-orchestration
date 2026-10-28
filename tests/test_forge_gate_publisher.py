@@ -933,6 +933,34 @@ def test_the_per_gate_publication_goes_first_and_the_summary_after(
     assert order == ["per-gate", "summary"]
 
 
+@pytest.mark.parametrize(
+    "override,expected",
+    [
+        ({"reason": "operator approved the two remaining blockers", "rule": "B3.1"},
+         "operator approved the two remaining blockers"),
+        ("a bare string is not the stamped object", ""),
+        (None, ""),
+    ],
+)
+def test_the_summary_receives_the_recorded_override_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _summary_publication_captured: List[Dict[str, Any]],
+    override: Any,
+    expected: str,
+) -> None:
+    """RG-2: the stamped ``override_b3.reason`` reaches the summary; anything else is no reason."""
+    payload = _recorder_payload()
+    payload["override_b3"] = override
+    monkeypatch.setattr(fcr, "publish_for_record", lambda *_a, **_k: {})
+
+    gate_recorder.write_result_guarded(
+        tmp_path / "pr-1811-glm_gate.json", payload, gate="glm_gate", pr_ref="1811"
+    )
+
+    assert _summary_publication_captured[0]["b3_override"] == expected
+
+
 def test_a_throwing_summary_leaves_the_per_gate_publication_intact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

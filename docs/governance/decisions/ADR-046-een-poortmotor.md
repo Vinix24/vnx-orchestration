@@ -9,7 +9,7 @@
 
 Elke poort heeft vandaag zijn eigen weg naar buiten, en voor de harness-lanes is dat een eigen script. Op main (`3e55e06d`) telt de poortlaag 33.515 regels over 46 bestanden; op 3 september waren dat 19.918 regels over 37. `glm_gate.py` is 1.100 regels, `kimi_gate.py` 1.012 en `codex_final_gate.py` 826. De laag groeide dus, maar de vorm bleef: één motor zou het moeten zijn, met dunne adapters eromheen.
 
-Het register (`GATE_PROVIDERS`, `scripts/lib/gate_recorder.py:87`) kent negen poorten, elk met een eigen weg naar buiten:
+Het register (`GATE_PROVIDERS`, `scripts/lib/gate_recorder.py:95`) kent negen poorten, elk met een eigen weg naar buiten:
 
 | Poort | Register | Weg van vandaag |
 |---|---|---|
@@ -41,7 +41,7 @@ Alleen de result-records hebben een slot en een overschrijfwacht. `write_result_
 
 De idempotentiesleutel draagt sinds #1767 (4 september) `status` en `commit_sha` (`scripts/lib/append_receipt_internals/idempotency.py:64` en `:65`). Wat open is, is de andere kant: de enige poort-emitter stempelt `head_sha` (`scripts/lib/gate_recorder.py:1781`) en geen enkele plek geeft `commit_sha` mee. De commit-as van de sleutel staat dus leeg, en twee uitkomsten met dezelfde status op twee commits vallen samen. Dat is geen sleutelprobleem meer maar een schrijversprobleem.
 
-`codex_final_gate.py` heeft één productiefunctie: `enforce_codex_gate` (`scripts/codex_final_gate.py:176`), met één aanroeper (`scripts/closure_verifier.py:27`). De 569 regels daarna (258 tot 826) zijn alleen vanuit tests bereikbaar. Sinds GE-5b zijn `glm_gate.py` en `kimi_gate.py` shims van 77 regels die hun `main` aan `governed_lane.run_gate_head` geven; de dispatcher wordt daar gebouwd met `governed_lane.review_dispatcher`, dat de fabriek als argument krijgt. Sinds GE-5a staat `_make_default_dispatcher` in `scripts/lib/governed_lane.py:240` (INTERIM-markering op `:247`, daarvoor `scripts/lib/plan_gate_panel.py:1659`/`:1666`). `claude_gate` staat als harness-lane in het register maar loopt via `scripts/lib/claude_gate_lane.py:159`, niet via `provider_dispatch`, dat claude weigert. `ci_gate` en `wiring_gate` staan als `path_binary` op `gh`; alleen hun lokale helft is deterministisch.
+`codex_final_gate.py` heeft één productiefunctie: `enforce_codex_gate` (`scripts/codex_final_gate.py:176`), met één aanroeper (`scripts/closure_verifier.py:27`). De 569 regels daarna (258 tot 826) zijn alleen vanuit tests bereikbaar. Sinds GE-5b zijn `glm_gate.py` en `kimi_gate.py` shims van 77 regels die hun `main` aan `governed_lane.run_gate_head` geven; de dispatcher wordt daar gebouwd met `governed_lane.review_dispatcher`, dat de fabriek als argument krijgt. Sinds GE-5a staat `_make_default_dispatcher` in `scripts/lib/governed_lane.py:240` (INTERIM-markering op `:247`, daarvoor `scripts/lib/plan_gate_panel.py:1659`/`:1666`). `claude_gate` staat als harness-lane in het register maar loopt via `scripts/lib/claude_gate_lane.py:159`, niet via `provider_dispatch`, dat claude weigert. `ci_gate` en `wiring_gate` stonden als `path_binary` op `gh`; sinds GE-6 staan ze als `deterministic` in het register (`scripts/lib/gate_recorder.py:103`), met de `gh`-lezing in de aanroeper.
 
 ADR-037 legde de leeskant al vast: een poort die niet gedraaid heeft is afwezigheid, geen tegenstem. Op vijf PR's met een volledig glm-PASS kon de merge niet door omdat een andere poort `not_executable` was. De schrijfkant heeft die twee soorten afwezigheid nog niet als aparte uitkomsten. Daar gaat dit ADR over.
 

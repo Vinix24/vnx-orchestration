@@ -108,6 +108,10 @@ THRESHOLD_ROUNDS = "rounds"
 
 OVERRIDE_FLAG = "--override-b3"
 OVERRIDE_USAGE = '--override-b3 --reason "..."'
+# What carried the reason: the documented flag, or the env carrier RG-5 adds
+# next to it (``VNX_OVERRIDE_B3=1`` + ``VNX_OVERRIDE_B3_REASON``).
+OVERRIDE_CARRIER_FLAG = "flag"
+OVERRIDE_CARRIER_ENV = "env"
 OPEN_COMMAND = 'vnx review rounds open --pr {pr} --reason "..."'
 
 SOURCE_GATE = "gate"
@@ -954,9 +958,16 @@ def cap_refusal_text(cap: CapState, *, where: str) -> str:
     )
 
 
-def override_record(reason: str, cap: CapState) -> Dict[str, Any]:
-    """What an applied ``--override-b3`` records: the flag, the reason and the cap it won over."""
-    return {"flag": OVERRIDE_FLAG, "reason": reason, **cap.to_record()}
+def override_record(reason: str, cap: CapState, *, carrier: str = OVERRIDE_CARRIER_FLAG) -> Dict[str, Any]:
+    """What an applied ``--override-b3`` records: the carrier, the reason and the cap it won over.
+
+    ``carrier`` names what carried the reason — ``flag`` for the documented
+    ``--override-b3`` and ``env`` for the ``VNX_OVERRIDE_B3`` pair — so an
+    operator reading the record can tell the two doors apart.
+    """
+    return {
+        "flag": OVERRIDE_FLAG, "carrier": carrier, "reason": reason, **cap.to_record(),
+    }
 
 
 def book_b3_override(path: Path, *, project_id: str, cap: CapState, reason: str, set_by: str) -> str:

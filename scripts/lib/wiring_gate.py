@@ -18,7 +18,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import yaml
 
@@ -230,8 +230,14 @@ def _extract_new_public_defs(diff_text: str) -> List[dict]:
     return all_defs
 
 
-def _grep_callers(symbol_name: str, def_file: str) -> Optional[int]:
+def _grep_callers(symbol_name: str, def_file: str, *, root: Optional[str] = None) -> Optional[int]:
     """Count non-test callers of symbol outside its definition file.
+
+    ``root`` is the checkout to search; ``None`` keeps the historical "the
+    process's own working directory" (``.``), which is what ``check_pr_wiring``
+    has always done. A caller that HAS a checkout passes it explicitly, and
+    every hit is then reported relative to it, so ``def_file`` (a path from the
+    diff, always repo-relative) compares the same either way.
 
     Returns None on grep failure (unknown state) — callers must treat
     None as blocking rather than assuming the symbol is wired.
@@ -240,7 +246,7 @@ def _grep_callers(symbol_name: str, def_file: str) -> Optional[int]:
         proc = subprocess.run(
             [
                 "grep", "-r", "--include=*.py",
-                "-l", symbol_name, ".",
+                "-l", symbol_name, str(root) if root is not None else ".",
             ],
             capture_output=True, text=True, timeout=10, check=False,
         )
@@ -252,7 +258,8 @@ def _grep_callers(symbol_name: str, def_file: str) -> Optional[int]:
 
     callers = 0
     for hit_file in proc.stdout.splitlines():
-        hit_file = hit_file.strip().lstrip("./")
+        hit_file = hit_file.strip()
+        hit_file = os.path.relpath(hit_file, root) if root is not None else hit_file.lstrip("./")
         if hit_file == def_file:
             continue
         if hit_file.startswith("tests/") or "/tests/" in hit_file or hit_file.startswith("test_"):
@@ -261,23 +268,76 @@ def _grep_callers(symbol_name: str, def_file: str) -> Optional[int]:
     return callers
 
 
-def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> WiringGateResult:
-    """Check a PR for unwired (dead) public definitions.
+def _classify_symbols(
+    new_defs: List[dict], skip_list: set, root: Optional[str],
+) -> Tuple[List[UnwiredSymbol], List[str], List[str]]:
+    """Split new public defs into (unwired, skipped, grep_failures).
+
+    A symbol whose caller grep could not run lands in BOTH ``unwired`` and
+    ``grep_failures``: unknown is blocking, never "wired".
+    """
+    unwired: List[UnwiredSymbol] = []
+    skipped: List[str] = []
+    grep_failures: List[str] = []
+    for d in new_defs:
+        if d["name"] in skip_list:
+            skipped.append(d["name"])
+            continue
+        caller_count = _grep_callers(d["name"], d["file"], root=root)
+        if caller_count is None:
+            grep_failures.append(d["name"])
+        elif caller_count > 0:
+            continue
+        unwired.append(UnwiredSymbol(
+            name=d["name"],
+            file=d["file"],
+            line=d["line"],
+            kind=d["kind"],
+        ))
+    return unwired, skipped, grep_failures
+
+
+def _grep_failure_result(
+    unwired: List[UnwiredSymbol], skipped: List[str], total_checked: int,
+    grep_failures: List[str],
+) -> WiringGateResult:
+    """The blocking result of a run whose caller analysis could not be done."""
+    names = ", ".join(grep_failures[:5])
+    tail = f" (+{len(grep_failures) - 5} more)" if len(grep_failures) > 5 else ""
+    return WiringGateResult(
+        status="fail",
+        unwired=unwired,
+        skipped=skipped,
+        total_checked=total_checked,
+        summary=f"grep failed for {len(grep_failures)} symbol(s) (treated as blocking): {names}{tail}",
+    )
+
+
+def analyse_diff(
+    diff_text: str,
+    *,
+    state_dir: Optional[Path] = None,
+    root: Optional[str] = None,
+    required: Optional[bool] = None,
+) -> WiringGateResult:
+    """The gate's LOCAL half: analyse a diff and grep a checkout for its callers.
+
+    No ``gh``, no network — ``deterministic_gate`` runs exactly this under the
+    ``deterministic`` adapter kind (GE-6/ADR-046 §4). ``root`` is the checkout
+    the caller analysis greps (``None`` keeps the historical working directory).
+    ``required`` is the gate's blocking posture; ``None`` reads it from
+    :data:`VNX_WIRING_GATE_REQUIRED` as the gate always has.
 
     Returns WiringGateResult with status:
       - "pass": all new public defs have callers
-      - "fail": unwired defs found AND VNX_WIRING_GATE_REQUIRED=1
+      - "fail": unwired defs found AND the gate is required
       - "advisory": unwired defs found but gate is in shadow mode
-      - "error": subprocess failure fetching diff (gate cannot determine wiring)
-
-    Raises WiringGateError if the diff cannot be fetched — the gate runner
-    must catch this and mark the gate outcome as FAILED, never PASS with 0 checks.
     """
     skip_list = _load_skip_list(state_dir)
-    import config_runtime
-    required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
+    if required is None:
+        import config_runtime
+        required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
 
-    diff_text = _get_pr_diff(pr_number)
     if not diff_text:
         return WiringGateResult(
             status="pass", total_checked=0,
@@ -291,45 +351,11 @@ def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> Wiri
             summary="No new public definitions in PR diff",
         )
 
-    unwired: List[UnwiredSymbol] = []
-    skipped: List[str] = []
-    grep_failures: List[str] = []
-
-    for d in new_defs:
-        if d["name"] in skip_list:
-            skipped.append(d["name"])
-            continue
-        caller_count = _grep_callers(d["name"], d["file"])
-        if caller_count is None:
-            grep_failures.append(d["name"])
-            unwired.append(UnwiredSymbol(
-                name=d["name"],
-                file=d["file"],
-                line=d["line"],
-                kind=d["kind"],
-            ))
-        elif caller_count == 0:
-            unwired.append(UnwiredSymbol(
-                name=d["name"],
-                file=d["file"],
-                line=d["line"],
-                kind=d["kind"],
-            ))
-
+    unwired, skipped, grep_failures = _classify_symbols(new_defs, skip_list, root)
     total_checked = len(new_defs) - len(skipped)
 
     if grep_failures:
-        status = "fail"
-        names = ", ".join(grep_failures[:5])
-        tail = f" (+{len(grep_failures) - 5} more)" if len(grep_failures) > 5 else ""
-        summary = f"grep failed for {len(grep_failures)} symbol(s) (treated as blocking): {names}{tail}"
-        return WiringGateResult(
-            status=status,
-            unwired=unwired,
-            skipped=skipped,
-            total_checked=total_checked,
-            summary=summary,
-        )
+        return _grep_failure_result(unwired, skipped, total_checked, grep_failures)
 
     if not unwired:
         return WiringGateResult(
@@ -352,3 +378,16 @@ def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> Wiri
         total_checked=total_checked,
         summary=summary,
     )
+
+
+def check_pr_wiring(pr_number: int, *, state_dir: Optional[Path] = None) -> WiringGateResult:
+    """Check a PR for unwired (dead) public definitions.
+
+    The gate's GitHub half is exactly one call — ``gh pr diff`` — and it stays
+    here; everything after it is :func:`analyse_diff`, the local half the
+    ``deterministic`` adapter kind runs on its own (GE-6).
+
+    Raises WiringGateError if the diff cannot be fetched — the gate runner
+    must catch this and mark the gate outcome as FAILED, never PASS with 0 checks.
+    """
+    return analyse_diff(_get_pr_diff(pr_number), state_dir=state_dir)

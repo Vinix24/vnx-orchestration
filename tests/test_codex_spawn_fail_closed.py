@@ -774,3 +774,97 @@ class TestCodexSpawnDrainThreadLeak:
             "drain thread still alive: the stderr stream never reached EOF and "
             "the daemon thread kept consuming it (OI-910 leak)"
         )
+
+
+# ---------------------------------------------------------------------------
+# K2b round 2: a spawn_refused value is evidence of a LAUNCH refusal only
+# ---------------------------------------------------------------------------
+
+class TestCodexSpawnRefusalEvidence:
+    """CodexSpawnResult.spawn_refused is set only where codex never launched.
+
+    A launch refusal (no model, no binary, Popen failed) is explicit evidence
+    that nothing ran. A stream failure after the process started is not: codex
+    can fail mid-stream after producing output, and booking that as a refused
+    spawn would corrupt usage accounting with a zero line.
+    """
+
+    def test_a_missing_binary_is_an_explicit_launch_refusal(self):
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            MockPopen.side_effect = FileNotFoundError("codex: not found")
+
+            result = spawn_codex(
+                prompt="test", model="gpt-5.5", dispatch_id="test-refused-binary", terminal_id="T1",
+            )
+
+        assert result.returncode == 127
+        assert result.token_usage is None
+        assert result.spawn_refused is not None, "a launch refusal must carry explicit evidence"
+        assert "not found" in result.spawn_refused.lower()
+
+    def test_a_popen_oserror_is_an_explicit_launch_refusal(self):
+        with patch("provider_spawns.codex_spawn.subprocess.Popen") as MockPopen:
+            MockPopen.side_effect = OSError("cannot allocate process")
+
+            result = spawn_codex(
+                prompt="test", model="gpt-5.5", dispatch_id="test-refused-oserror", terminal_id="T1",
+            )
+
+        assert result.returncode == 1 and result.spawn_refused == "cannot allocate process"
+
+    def test_an_unresolvable_model_is_an_explicit_launch_refusal(self, monkeypatch):
+        from providers import provider_registry
+
+        def _no_model(**_kwargs):
+            raise provider_registry.CodexModelResolutionError("no codex model in the registry")
+
+        monkeypatch.setattr(provider_registry, "resolve_codex_model", _no_model)
+
+        result = spawn_codex(
+            prompt="test", model=None, dispatch_id="test-refused-model", terminal_id="T1",
+        )
+
+        assert result.returncode == 1 and result.token_usage is None
+        assert (result.spawn_refused or "").startswith("codex_model_unresolved:")
+
+    def test_a_stream_failure_after_the_process_started_is_not_a_launch_refusal(self):
+        proc = MagicMock()
+        proc.pid = 99
+        proc.returncode = -9
+        proc.wait = MagicMock(return_value=-9)
+        proc.poll = MagicMock(return_value=-9)
+        proc.stdin = MagicMock()
+        proc.stderr = _mock_stderr(b"")
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen", return_value=proc), \
+             patch(
+                 "provider_spawns.codex_spawn._NormalizerHost.drain_stream",
+                 side_effect=RuntimeError("stream read exploded"),
+             ):
+            result = spawn_codex(
+                prompt="test", model="gpt-5.5", dispatch_id="test-stream-failure", terminal_id="T1",
+            )
+
+        assert result.token_usage is None
+        assert result.error is not None and "stream read exploded" in result.error
+        assert result.spawn_refused is None, (
+            "the process started, so this run is unknown usage, never a refused spawn"
+        )
+
+    def test_a_broken_stdin_pipe_is_not_a_launch_refusal(self):
+        proc = MagicMock()
+        proc.pid = 99
+        proc.returncode = 1
+        proc.wait = MagicMock(return_value=1)
+        proc.poll = MagicMock(return_value=1)
+        proc.stdin = MagicMock()
+        proc.stdin.write.side_effect = BrokenPipeError("pipe broken")
+        proc.stderr = _mock_stderr(b"")
+
+        with patch("provider_spawns.codex_spawn.subprocess.Popen", return_value=proc):
+            result = spawn_codex(
+                prompt="test", model="gpt-5.5", dispatch_id="test-broken-pipe-refusal", terminal_id="T1",
+            )
+
+        assert result.error is not None and result.token_usage is None
+        assert result.spawn_refused is None, "codex started and exited early: not a launch refusal"

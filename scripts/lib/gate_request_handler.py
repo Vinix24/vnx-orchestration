@@ -1749,6 +1749,7 @@ class GateRequestHandlerMixin:
         dispatch_id: str = "",
         head_sha: Optional[str] = None,
         override_b3: str = "",
+        override_b3_carrier: str = "",
         force_rerun: str = "",
     ) -> Dict[str, Any]:
         """Request every seat of the review stack for ``pr_number``, each from its own reviewer.
@@ -1784,6 +1785,8 @@ class GateRequestHandlerMixin:
         obligation runner, ``vnx gate``, a takeover), so no entry runs past it.
         ``override_b3`` is the reason of an ``--override-b3``: it wins over the
         B3 cap for the codex seat and travels on that seat's request.
+        ``override_b3_carrier`` (``flag`` or ``env``, RG-5) names what carried
+        the reason and is recorded in that request's ``override_b3`` field.
 
         ``force_rerun`` (R10) is the reason of an operator force-rerun from the
         obligation runner. It is logged once and travels as ``force_rerun`` on
@@ -1817,7 +1820,7 @@ class GateRequestHandlerMixin:
             seat_fields.update(operator_fields)
             payload = self._round_refusal(
                 rounds, head, pr_number=pr_number, branch=branch, seat_fields=seat_fields,
-                override_b3=override_b3,
+                override_b3=override_b3, override_b3_carrier=override_b3_carrier,
             ) or self._dispatch_review_seat(
                 gate, pr_number, branch, risk.risk_class, changed_files, mode, dispatch_id, chain=chain,
                 held=_held_reviewers(requested), head=head, seat_fields=seat_fields, builder=builder,
@@ -1879,7 +1882,7 @@ class GateRequestHandlerMixin:
 
     def _round_refusal(
         self, rounds: _PrRounds, head: _PrHead, *, pr_number: int, branch: str,
-        seat_fields: Dict[str, Any], override_b3: str,
+        seat_fields: Dict[str, Any], override_b3: str, override_b3_carrier: str = "",
     ) -> Optional[Dict[str, Any]]:
         """The seat's payload when the round ledger refuses its run (R1), else ``None``.
 
@@ -1928,7 +1931,10 @@ class GateRequestHandlerMixin:
         if review_rounds.round_granted_past_cap(cap, head_sha=head.sha(), grant=grant, lines=rounds.lines):
             return None
         if override_b3.strip():
-            seat_fields["override_b3"] = review_rounds.override_record(override_b3.strip(), cap)
+            carrier = override_b3_carrier or review_rounds.OVERRIDE_CARRIER_FLAG
+            seat_fields["override_b3"] = review_rounds.override_record(
+                override_b3.strip(), cap, carrier=carrier,
+            )
             logger.warning(
                 "gate_request_handler: --override-b3 applied for pr=%s seat %s -- %s; reason: %s",
                 pr_number, seat, cap.summary(), override_b3.strip(),
@@ -2097,6 +2103,7 @@ class GateRequestHandlerMixin:
         refused = self._round_refusal(
             _PrRounds.read(self.results_dir.parent, pr_number), head, pr_number=pr_number, branch=branch,
             seat_fields=seat_fields, override_b3=str(override.get("reason") or ""),
+            override_b3_carrier=str(override.get("carrier") or ""),
         )
         if refused is not None:
             logger.warning(
@@ -2978,84 +2985,61 @@ class GateRequestHandlerMixin:
         from review_gate_manager import _utc_now
         from wiring_gate import WiringGateError, check_pr_wiring
         import config_runtime
+        import deterministic_gate
 
         available = self._wiring_gate_available()
         requested_at = _utc_now()
         # The gate's blocking posture is the same toggle that decides its status
-        # (check_pr_wiring: status="fail" if required else "advisory"). Carrying it
+        # (analyse_diff: status="fail" if required else "advisory"). Carrying it
         # explicitly lets the required-failure count in gate_executor honor the
         # advisory contract: a shadow-mode gate (VNX_WIRING_GATE_REQUIRED=0) is
         # required=False and must never gate the merge, while required=True blocks.
         required = config_runtime.get_bool("VNX_WIRING_GATE_REQUIRED")
+        context = deterministic_gate.LocalContext(
+            pr_number=pr_number, branch=branch, required=required, requested_at=requested_at,
+        )
 
         if not available:
-            payload: Dict[str, Any] = {
-                "gate": "wiring_gate",
-                "status": "not_executable",
-                "provider": "gh_cli",
-                "required": required,
-                "branch": branch,
-                "pr_number": pr_number,
-                "requested_at": requested_at,
-                "reason": "provider_not_installed",
-                "reason_detail": "gh binary not found in PATH",
-            }
-            if dispatch_id:
-                payload["dispatch_id"] = dispatch_id
-            self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
-            return payload
-
-        try:
-            result = check_pr_wiring(pr_number)
-        except WiringGateError as exc:
-            payload = {
-                "gate": "wiring_gate",
-                "status": "fail",
-                "provider": "ast_grep",
-                "required": required,
-                "branch": branch,
-                "pr_number": pr_number,
-                "requested_at": requested_at,
-                "completed_at": _utc_now(),
-                "summary": f"Wiring gate error: {exc}",
-                "blocking_findings": [{
-                    "severity": "blocking",
-                    "title": "Wiring gate subprocess failure",
-                    "description": str(exc),
-                }],
-                "blocking_count": 1,
-                "advisory_count": 0,
-                "total_checked": 0,
-                "skipped_symbols": [],
-            }
-            if dispatch_id:
-                payload["dispatch_id"] = dispatch_id
-            self._write_request_record(self._request_path("wiring_gate", pr_number), payload)
-            return payload
-
-        payload = {
-            "gate": "wiring_gate",
-            "status": result.status,
-            "provider": "ast_grep",
-            "required": required,
-            "branch": branch,
-            "pr_number": pr_number,
-            "requested_at": requested_at,
-            "completed_at": _utc_now(),
-            "summary": result.summary,
-            "blocking_findings": [
-                {
-                    "severity": "blocking" if result.status == "fail" else "advisory",
-                    "title": f"Unwired {s.kind}: {s.name}",
-                    "description": f"{s.file}:{s.line} — zero callers outside definition file",
+            # The GitHub half's own answer (no `gh`, no diff to read): it is the
+            # caller's diagnosis, not the local check's, and it names gh_cli.
+            payload: Dict[str, Any] = deterministic_gate.not_executable_record(
+                "wiring_gate", "provider_not_installed", "gh binary not found in PATH",
+                context, provider="gh_cli",
+            )
+        else:
+            try:
+                result = check_pr_wiring(pr_number)
+            except WiringGateError as exc:
+                payload = {
+                    "gate": "wiring_gate",
+                    "status": "fail",
+                    "provider": "ast_grep",
+                    "kind": deterministic_gate.DETERMINISTIC_KIND,
+                    "required": required,
+                    "branch": branch,
+                    "pr_number": pr_number,
+                    "requested_at": requested_at,
+                    "completed_at": _utc_now(),
+                    "summary": f"Wiring gate error: {exc}",
+                    "blocking_findings": [{
+                        "severity": "blocking",
+                        "title": "Wiring gate subprocess failure",
+                        "description": str(exc),
+                    }],
+                    "blocking_count": 1,
+                    "advisory_count": 0,
+                    "total_checked": 0,
+                    "skipped_symbols": [],
                 }
-                for s in result.unwired
-            ],
-            "blocking_count": len(result.unwired) if result.status == "fail" else 0,
-            "advisory_count": len(result.unwired) if result.status == "advisory" else 0,
-            "total_checked": result.total_checked,
-            "skipped_symbols": result.skipped,
-        }
+            else:
+                # GE-6: the outcome record is the deterministic adapter's, not a
+                # field dict built here. The analysis itself ran inside
+                # check_pr_wiring (its `gh pr diff` read plus analyse_diff), and the
+                # adapter turns it into the record this gate has always written.
+                payload = deterministic_gate.run("wiring_gate", deterministic_gate.LocalContext(
+                    pr_number=pr_number, branch=branch, required=required,
+                    requested_at=requested_at, recorded_at=_utc_now(), wiring_result=result,
+                )).record
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         self._write_request_record(self._request_path("wiring_gate", pr_number), payload)

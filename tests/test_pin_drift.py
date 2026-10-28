@@ -27,6 +27,7 @@ from pin_drift import (
     current_version,
     load_store,
     mislabeled,
+    pinned_release_dir,
     unlabeled,
     writable,
 )
@@ -138,6 +139,33 @@ def test_missing_store_has_nothing_to_load_and_every_pin_is_dead(tmp_path):
 
     assert (drift.verdict, drift.current, drift.behind) == (VERDICT_DEAD, None, None)
     assert load_store(tmp_path / "no-store" / "versions") == []
+
+
+@pytest.mark.parametrize("pin", ("1.7.5", "v1.7.5"))
+def test_pinned_release_dir_resolves_the_installed_dir(store, pin):
+    """Both spellings of one release answer with the SAME resolved directory --
+    the value a caller compares an installed job's VNX_HOME against."""
+    assert pinned_release_dir(store / "versions", pin) == (store / "versions" / "v1.7.5").resolve()
+
+
+def test_pinned_release_dir_is_none_when_no_installed_release_answers_the_pin(store, tmp_path):
+    """Dead pin, escaping pin and a missing store all answer ``None`` -- never
+    a path a caller could mistake for a followed pin."""
+    (store.parent / "outside" / "v1.7.5").mkdir(parents=True)
+
+    for pin in ("9.9.9", "..", "../../outside/v1.7.5"):
+        assert pinned_release_dir(store / "versions", pin) is None, pin
+    assert pinned_release_dir(tmp_path / "no-store" / "versions", "1.7.5") is None
+
+
+def test_pinned_release_dir_is_the_target_not_the_name(tmp_path):
+    """A ``versions/v1.7.5`` symlink into ``v1.7.4`` resolves to ``v1.7.4``:
+    the name says one release, the directory a job would run is another."""
+    versions = tmp_path / "versions"
+    (versions / "v1.7.4").mkdir(parents=True)
+    os.symlink("v1.7.4", versions / "v1.7.5")
+
+    assert pinned_release_dir(versions, "1.7.5") == (versions / "v1.7.4").resolve()
 
 
 def test_current_version_reads_the_symlink_target(store):

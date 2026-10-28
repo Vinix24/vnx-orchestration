@@ -86,6 +86,28 @@ Drie regels, elk deterministisch en elk met een test (`tests/test_r2a_cap_tiebre
 - **De deliverable-levenscyclus krijgt één overgang terug**: `ready` naar `proposed`, alleen via de uitspraak, met een event `deliverable_returned_to_plan` en een lege `operator_approved_at`. Het werk komt daarna in een nieuwe PR, na een nieuwe promotie.
 - **De koppeling PR naar deliverable loopt alleen via `output_ref`.** Een bouwdispatch die de deur zonder `output_ref` start, hoort bij geen deliverable. In zo'n store gaat er niets terug naar plan, en de uitvoer zegt dat luid. De deliverable wordt dan met de hand verplaatst.
 
+## Amendement R2c (27-10-2026, dispatch dlv-1144c10d92f2)
+
+Dit amendement vervangt wat hierboven over `mergen-met-OI` staat. De eerdere secties blijven staan als geschiedenis; vanaf R2c geldt dit.
+
+### R2c: `mergen-met-OI` wordt uitgevoerd, met een akkoord per gebruik
+
+`mergen-met-OI` is geen `outcome_unavailable_in_r2a` meer. Een modelkeuze of een regel die hem afdwingt (B3.2) wordt als `mergen-met-OI` opgeslagen (`review_cap_verdicts.CARRIED_OUT`) en daarna uitgevoerd door `review_cap_aftermath`:
+
+1. **OI's.** Eén open item per resterende codex-blocker op de kop van de uitspraak, met de ernst die codex gaf, de titel en `file:line`, uit het resultaatrecord van de getelde uitspraak (zelfde kop, zelfde rapport). Nooit uit het model. De dedupsleutel is `review-cap:<project>:<verdict-id>:blocker-<n>`. De id's gaan in `oi_ids` van de rij. Ontbreekt het record van de getelde kop, dan weigert de nasleep luid en schrijft hij geen OI.
+2. **Niets terug.** Anders dan bij `terug-naar-plan` gaat de deliverable niet naar `proposed` en gaat de PR niet dicht. De PR blijft open; de merge is de volgende stap.
+3. **Het nasleeprecord.** Aan het eind boekt de nasleep één `review_cap_aftermath`-record met `open_items_written`, het aantal geschreven OI's. Een latere lezer (de merge-deur, RG-4) ziet daaraan dat de nasleep af is; een half geschreven nasleep heeft dat record niet.
+
+De nasleep is idempotent op het verdict-id: een tweede aanroep voor dezelfde uitspraak schrijft geen tweede OI en geen tweede record, en geeft het bestaande record terug.
+
+### Het akkoord: een `operator_approval`-receipt, geen `review_cap_approvals`-tabel
+
+De tabel `review_cap_approvals` uit sectie 4 komt er niet. Het akkoord is het bestaande `decision_binding.record_operator_approval`, dat een `operator_approval`-receipt in `state/operator_approvals.ndjson` schrijft, gebonden aan de gevoelige actie `merge_pr`. Voor een `mergen-met-OI`-uitspraak draagt dat receipt het verdict-id, het PR-nummer en de kop-sha (`review_cap_verdicts.record_merge_approval`).
+
+Het akkoord geldt voor precies één gebruik. `review_cap_verdicts.merge_approval` geeft het alleen terug als alle drie matchen: hetzelfde verdict-id, dezelfde PR en dezelfde kop. Een akkoord voor een andere uitspraak, een andere PR of een andere kop telt als geen akkoord, en een ontbrekend of onleesbaar akkoordgrootboek geeft er ook geen. Een tweede uitspraak of een nieuwe kop vraagt dus een nieuw akkoord van de operator — dat is de "één regel per geval" uit punt 1, nu als binding in plaats van als tabel.
+
+Dit amendement bouwt het record en de opzoeking; de deur die het leest is RG-4 (`scripts/lib/review_seat_evaluation.py`, `scripts/pr_merge.py`). Het eerste echte gebruik blijft een akkoord van Vincent.
+
 ## Amendement R1e - de rondegrens is deel van B3.2
 
 **Toegevoegd:** 2026-10-27, RG-1 (dispatch `dlv-5c8bb4e59ead`, track `review-rondegrens-met-tiebreaker`).

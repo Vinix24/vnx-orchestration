@@ -107,10 +107,16 @@ def record_operator_approval(
     note: Optional[str] = None,
     state_dir: "str | Path | None" = None,
     ts: Optional[str] = None,
+    fields: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Append an ``operator_approval`` receipt clearing a sensitive judge decision for one
     action. This is the human-on-the-last-set record; ``binding_verdict`` only lets a sensitive
-    action bind once such an approval exists."""
+    action bind once such an approval exists.
+
+    ``fields`` adds the identifiers of one use beside the approval (the review cap's
+    ``mergen-met-OI`` binds an approval to a verdict id, a PR and a head). A key the
+    record already has is never overridden: the event, its action and its operator
+    stay the approver's, whatever a caller passes."""
     record = {
         "event": "operator_approval",
         "decision_id": decision_id,
@@ -119,6 +125,7 @@ def record_operator_approval(
         "note": note,
         "ts": ts or _now_iso(),
     }
+    record.update({key: value for key, value in (fields or {}).items() if key not in record})
     path = _state_dir(state_dir) / APPROVAL_LEDGER
     path.parent.mkdir(parents=True, exist_ok=True)
     sentinel = path.parent / (APPROVAL_LEDGER + ".lock")
