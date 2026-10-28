@@ -8,6 +8,7 @@
   "evidence_source": "live",
   "execution_depth": {
     "agent_messages": 0,
+    "cache_read_tokens": null,
     "diff_chars": 203,
     "diff_limit": 800000,
     "diff_truncated": false,

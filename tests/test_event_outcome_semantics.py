@@ -173,8 +173,10 @@ def test_classify_is_case_insensitive():
 # ---------------------------------------------------------------------------
 
 def test_completion_event_types_contains_all_three_forms():
+    # ADR-045 (K-1) widens the set with the lifecycle end line: dispatch_finished
+    # is a completion type with a closed end_state (see END_STATE_TO_STATUS).
     assert COMPLETION_EVENT_TYPES == frozenset(
-        {"task_complete", "task_completed", "subprocess_completion"}
+        {"task_complete", "task_completed", "subprocess_completion", "dispatch_finished"}
     )
 
 
