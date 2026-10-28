@@ -244,20 +244,31 @@ def verify_release(store_root: Path, version: str) -> Optional[str]:
 
 def pin_findings(row: Mapping[str, Any], store_root: Path,
                  versions_dir: Path) -> List[Dict[str, Any]]:
-    """A dead pin or an unverifiable pinned release dir, judged by the two owners."""
+    """A dead pin or an unverifiable pinned release dir, judged by the two owners.
+
+    A pin and its release dir need not spell the version the same way: a pin is
+    commonly written ``1.0.0`` while the dir is ``versions/v1.0.0`` (OI-2270).
+    The installed dir is therefore resolved first (``pin_drift`` owns the three
+    spellings) and it is that dir's own NAME the verifier is asked about -- a
+    raw pin would make it look for a dir that does not exist and report a valid
+    pin as unverifiable. ``pinned_release_dir`` answers ``None`` only when no
+    installed release responds to the pin; that stays the ``dead`` finding and
+    never becomes a ``verify`` one.
+    """
     pin = row.get("pin")
     if pin is None:
         return []
-    if row.get("verdict") == fleet_pin_audit.DEAD:
-        installed = pin_drift.pinned_release_dir(versions_dir, pin)
+    installed = pin_drift.pinned_release_dir(versions_dir, pin)
+    if row.get("verdict") == fleet_pin_audit.DEAD or installed is None:
         detail = (f"pin {pin!r} names no installed release dir under {versions_dir}"
                   if installed is None else
                   f"pin {pin!r} is installed at {installed}, but the project's engine "
                   "link dangles or points outside the store")
         return [{"state": "dead", "pin": pin, "detail": detail}]
-    problem = verify_release(store_root, pin)
+    problem = verify_release(store_root, installed.name)
     return [] if problem is None else [
-        {"state": "verify", "pin": pin, "detail": f"vnx release verify {pin} failed: {problem}"}]
+        {"state": "verify", "pin": pin,
+         "detail": f"pin {pin!r}: vnx release verify {installed.name} failed: {problem}"}]
 
 def launchd_findings(alignment: Mapping[str, Any], project_id: str) -> List[Dict[str, Any]]:
     """Every ``check_pin_alignment`` violation attributed to this project."""

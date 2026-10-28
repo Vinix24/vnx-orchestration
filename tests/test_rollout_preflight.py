@@ -5,8 +5,11 @@ The measurement is built entirely on owners that already exist:
 ``vnx_cli.commands.release.vnx_release_verify`` and the doctor check
 ``release:main-drift``. These tests therefore build a FIXTURE fleet under
 ``tmp_path`` (a fake store, project roots, an installed-plist dir, settings
-files) and patch only the three external processes: the ``regen_settings.sh``
-dry-run, ``git``-backed release verify and the doctor's release-drift check.
+files) and patch only the external processes: the ``regen_settings.sh``
+dry-run and the doctor's release-drift check. The release verifier is mocked
+only in the shared ``fleet`` fixture, whose release dirs are not git
+checkouts and whose tests are about the other classes; the pin tests build a
+real release dir and run the real verifier against a temporary git repo.
 Nothing reads ``~/Library/LaunchAgents``, ``~/.vnx-system``, ``~/.vnx`` or a
 real project.
 """
@@ -43,6 +46,34 @@ def _release(store: Path, name: str) -> None:
     version_dir = store / "versions" / name
     version_dir.mkdir(parents=True, exist_ok=True)
     (version_dir / "VERSION").write_text(name.lstrip("v") + "\n", encoding="utf-8")
+
+
+def _git(*args: str, cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True)
+
+
+def _source_release(path: Path) -> Path:
+    """The source checkout the verifier compares against: a real tag and tree."""
+    path.mkdir(parents=True)
+    _git("init", "-q", "-b", "main", cwd=path)
+    _git("config", "user.email", "t@example.com", cwd=path)
+    _git("config", "user.name", "tester", cwd=path)
+    (path / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    (path / "scripts").mkdir()
+    (path / "scripts" / "run.py").write_text("print('v1')\n", encoding="utf-8")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-q", "-m", "release 1.0.0", cwd=path)
+    _git("tag", "v1.0.0", cwd=path)
+    return path
+
+
+def _published_release(store: Path, source: Path, name: str = "v1.0.0") -> Path:
+    """A real release dir in the layout ``vnx release verify`` checks: a clone at the tag."""
+    target = store / "versions" / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    _git("clone", "--quiet", str(source), str(target), cwd=target.parent)
+    _git("checkout", "--quiet", name, cwd=target)
+    return target
 
 
 def _project(tmp_path: Path, name: str, pin: str | None, settings: dict | None = None) -> Path:
@@ -109,6 +140,36 @@ def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
             "registry": rp.DEFAULT_REGISTRY}
 
 
+@pytest.fixture()
+def release_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A fleet whose release dir is a real checkout and really verified.
+
+    Nothing here patches ``verify_release`` or ``vnx_release_verify``: the store
+    carries a git clone of a temporary source repo at tag ``v1.0.0``, exactly the
+    layout the verifier checks. ``_ENGINE_ROOT`` is pointed at that source so the
+    tag is resolved from the fixture and never from this checkout, which happens
+    to carry a ``v1.0.0`` tag of its own.
+    """
+    source = _source_release(tmp_path / "source")
+    store = tmp_path / "store"
+    _published_release(store, source)
+    os.symlink("versions/v1.0.0", store / "current")
+    roots = {"alpha": _project(tmp_path, "alpha", "1.0.0")}
+    _link(roots["alpha"], store / "versions" / "v1.0.0")
+    plist_dir = tmp_path / "LaunchAgents"
+    plist_dir.mkdir()
+    monkeypatch.setattr(rp, "run_regen_settings_dry_run",
+                        lambda root, engine_root=None: _completed(0, json.dumps(RENDER), ""))
+    monkeypatch.setattr(rp.doctor, "_check_release_main_drift",
+                        lambda root: doctor.Check("release:main-drift", doctor.PASS, LEVEL))
+    monkeypatch.setattr(rp, "_ENGINE_ROOT", source)
+    monkeypatch.setattr(rp, "DEFAULT_REGISTRY", _registry(tmp_path, roots))
+    monkeypatch.setattr(rp, "DEFAULT_STORE_ROOT", store)
+    monkeypatch.setattr(rp, "DEFAULT_PLIST_DIR", plist_dir)
+    return {"tmp": tmp_path, "store": store, "source": source, "roots": roots,
+            "plist_dir": plist_dir, "registry": rp.DEFAULT_REGISTRY}
+
+
 def _run(fleet: dict, capsys: pytest.CaptureFixture, *argv: str) -> tuple[int, str, str]:
     # Tests add projects by mutating fleet["roots"]; the registry is rewritten
     # here so every run sees the current fleet through the same path.
@@ -153,20 +214,53 @@ def test_dead_pin_blocks_with_a_pin_finding(fleet, capsys):
     assert report["exit_code"] == 1
 
 
-# ── 2b. a pinned release dir that fails verify is a pin finding ────────────
-def test_release_verify_failure_blocks_with_a_pin_finding(fleet, capsys, monkeypatch):
-    def failing(args):
-        print(f"FAIL: versions/{args.version} is not the tree of tag", file=sys.stderr)
-        return 1
+# ── 2b. a pin verifies the INSTALLED dir, whatever the pin spells ──────────
+def test_pin_without_the_decorative_v_verifies_the_installed_dir(release_fleet, capsys):
+    """Pin ``1.0.0`` installed at ``versions/v1.0.0``: the real verifier passes."""
+    assert (release_fleet["roots"]["alpha"] / ".vnx-version").read_text().strip() == "1.0.0"
 
-    monkeypatch.setattr(rp.release, "vnx_release_verify", failing)
-    code, report = _json(fleet, capsys)
+    code, report = _json(release_fleet, capsys)
+
+    assert code == 0, report
+    assert report["projects"]["alpha"]["pin"] == []
+
+
+def test_pin_spelled_like_the_dir_verifies_the_same_dir(release_fleet, capsys):
+    """Pin ``v1.0.0`` naming the same ``versions/v1.0.0``: identical, no finding."""
+    (release_fleet["roots"]["alpha"] / ".vnx-version").write_text("v1.0.0\n", encoding="utf-8")
+
+    code, report = _json(release_fleet, capsys)
+
+    assert code == 0, report
+    assert report["projects"]["alpha"]["pin"] == []
+
+
+def test_corrupted_release_dir_is_one_verify_finding_naming_the_pin(release_fleet, capsys):
+    """A changed file the verifier checks: exactly one ``verify`` finding."""
+    changed = release_fleet["store"] / "versions" / "v1.0.0" / "scripts" / "run.py"
+    changed.write_text("print('edited')\n", encoding="utf-8")
+
+    code, report = _json(release_fleet, capsys)
 
     assert code == 1
     findings = report["projects"]["alpha"]["pin"]
-    assert findings and findings[0]["state"] == "verify"
-    assert "vnx release verify 1.0.0 failed" in findings[0]["detail"]
-    assert "not the tree of tag" in findings[0]["detail"]
+    assert [finding["state"] for finding in findings] == ["verify"]
+    assert findings[0]["pin"] == "1.0.0"
+    assert "vnx release verify v1.0.0 failed" in findings[0]["detail"]
+    assert "changed scripts/run.py" in findings[0]["detail"]
+
+
+def test_pin_with_no_installed_dir_is_dead_and_never_verified(release_fleet, capsys):
+    """No dir answers the pin: one ``dead`` finding, and no verification attempt."""
+    (release_fleet["roots"]["alpha"] / ".vnx-version").write_text("9.9.9\n", encoding="utf-8")
+
+    code, report = _json(release_fleet, capsys)
+
+    assert code == 1
+    findings = report["projects"]["alpha"]["pin"]
+    assert [finding["state"] for finding in findings] == ["dead"]
+    assert "9.9.9" in findings[0]["detail"]
+    assert all(finding["state"] != "verify" for finding in findings)
 
 
 # ── 3. installed plists on current / unmeasurable are launchd findings ─────
