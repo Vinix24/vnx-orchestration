@@ -16,6 +16,7 @@ import fcntl
 import json
 import os
 import tempfile
+from collections.abc import Mapping as MappingABC
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +24,8 @@ from typing import Any, Dict, Iterator, Mapping
 
 from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import (
-    EndIntentMalformed, build_end_intent, end_intent_path, load_end_intent,
+    END_INTENT_DIRNAME, EndIntentMalformed, build_end_intent, end_intent_path,
+    load_end_intent,
 )
 # The one append entry point (Path 2 of scripts/append_receipt.py), imported from
 # the internals module: a lib-only entry point has scripts/lib on sys.path, not scripts/.
@@ -76,12 +78,90 @@ def _now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# One identifier is one path component under ``state/dispatch_end``: it may not
+# carry a separator, a NUL or a bare ``.``/``..``, and it may not be absolute.
+# Kept as data so the error message names the rule the caller broke.
+_UNSAFE_COMPONENT_CHARS = ("/", "\\", "\x00")
+_TRAVERSAL_COMPONENTS = (".", "..")
+
+
+def _safe_component(value: object, field: str) -> str:
+    """Validate one identifier as a single safe path component (returns it)."""
+    if not isinstance(value, str) or not value.strip():
+        raise DispatchLifecycleError(
+            "invalid_identifier", f"{field} must be a non-empty string, got {value!r}")
+    if value in _TRAVERSAL_COMPONENTS:
+        raise DispatchLifecycleError(
+            "invalid_identifier", f"{field} may not be {value!r}")
+    if any(char in value for char in _UNSAFE_COMPONENT_CHARS):
+        raise DispatchLifecycleError(
+            "invalid_identifier",
+            f"{field} may not contain a path separator or NUL: {value!r}")
+    if Path(value).is_absolute() or os.path.isabs(value):
+        raise DispatchLifecycleError(
+            "invalid_identifier", f"{field} may not be an absolute path: {value!r}")
+    return value
+
+
 def _validate_key(project_id: str, dispatch_id: str, attempt: int) -> None:
-    for value, field in ((project_id, "project_id"), (dispatch_id, "dispatch_id")):
-        if not str(value or "").strip():
-            raise DispatchLifecycleError(f"missing_{field}", f"the key needs a {field}")
+    _safe_component(project_id, "project_id")
+    _safe_component(dispatch_id, "dispatch_id")
+    # ``attempt`` reaches the intent filename as ``.<attempt>.json``; an int can
+    # only render as digits, so the positive-int check is the whole rule.
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
         raise DispatchLifecycleError("invalid_attempt", f"attempt is not a positive int: {attempt!r}")
+
+
+def _lock_file_for(intent_file: Path) -> Path:
+    return intent_file.with_suffix(".lock")
+
+
+def _refuse_paths_outside_end_intents(state_dir: Path, *paths: Path) -> None:
+    """Second guard: every path finalize touches must resolve under ``dispatch_end``."""
+    root = (Path(state_dir) / END_INTENT_DIRNAME).resolve()
+    for path in paths:
+        if not path.resolve().is_relative_to(root):
+            raise DispatchLifecycleError(
+                "invalid_identifier",
+                f"{path} resolves outside {root}: project_id/dispatch_id must be single "
+                "path components")
+
+
+def _validate_end_line(project_id: str, dispatch_id: str, attempt: int,
+                       end_line: Mapping[str, Any]) -> str:
+    """The complete end payload, checked before the immutable intent exists.
+
+    The intent is the one thing this module freezes and the append rule then
+    holds every later writer to, so a payload that is not a ``dispatch_finished``
+    for this exact key would freeze a lie. Returns the validated ``end_state``.
+    """
+    if not isinstance(end_line, MappingABC):
+        raise DispatchLifecycleError(
+            "invalid_end_line", f"the end line must be a mapping, got {type(end_line).__name__}")
+    event_type = str(end_line.get("event_type") or "").strip()
+    if event_type != DISPATCH_FINISHED_EVENT_TYPE:
+        raise DispatchLifecycleError(
+            "invalid_end_line",
+            f"the end line must be a {DISPATCH_FINISHED_EVENT_TYPE!r} event, got {event_type!r}")
+    for field, expected in (("project_id", project_id), ("dispatch_id", dispatch_id),
+                            ("attempt", attempt)):
+        supplied = end_line.get(field)
+        if field == "attempt":
+            matches = (isinstance(supplied, int) and not isinstance(supplied, bool)
+                       and supplied == expected)
+        else:
+            matches = isinstance(supplied, str) and supplied == expected
+        if not matches:
+            raise DispatchLifecycleError(
+                "invalid_end_line",
+                f"the end line's {field} is {supplied!r}, not the supplied key's {expected!r}")
+    end_state = str(end_line.get("end_state") or "").strip()
+    if end_state not in LIFECYCLE_END_STATES:
+        raise DispatchLifecycleError(
+            "invalid_end_line",
+            f"the end line's end_state must be one of {sorted(LIFECYCLE_END_STATES)}, "
+            f"got {end_state!r}")
+    return end_state
 
 
 def _write_atomic(target: Path, text: str, prefix: str, *, exclusive: bool) -> bool:
@@ -185,6 +265,13 @@ def _project(intent: Mapping[str, Any], state_dir: Path) -> Dict[str, Any]:
         out: Dict[str, Any] = {"from_state": from_state, "steps": [],
                                "target": PROJECTION_TARGET[end_state]}
         if path is None and from_state == out["target"]:
+            # The row is already where the end_state projects to, but
+            # ``abandoned`` also carries metadata_json.end_state — a mark the
+            # projection state alone cannot express, so it is applied here too
+            # or recovery (which skips a published intent) leaves it absent.
+            if end_state == "abandoned":
+                _mark_abandoned(conn, intent)
+                conn.commit()
             return dict(out, status=PROJECTION_ALREADY_AT_TARGET)
         if path is None:
             reason = ("no_row" if from_state is None else
@@ -208,7 +295,7 @@ def _result(status, intent, intent_file, ledger_written, projection) -> Finalize
 
 
 def _run_steps_under_lock(intent_file: Path, state_dir: Path) -> FinalizeResult:
-    lock_file = intent_file.with_suffix(".lock")
+    lock_file = _lock_file_for(intent_file)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with lock_file.open("a+") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -253,14 +340,11 @@ def finalize(project_id: str, dispatch_id: str, attempt: int,
     state_dir = Path(state_dir).resolve()
     ledger_path = ledger_path_for(state_dir)
     intent_file = end_intent_path(state_dir, project_id, dispatch_id, attempt)
-    end_state = str(end_line.get("end_state") or "").strip()
+    _refuse_paths_outside_end_intents(state_dir, intent_file, _lock_file_for(intent_file))
+    end_state = _validate_end_line(project_id, dispatch_id, attempt, end_line)
     if lifecycle_mode_of(project_id, dispatch_id, attempt, ledger_path=ledger_path) != "v3":
         return _result(NOT_V3, {"end_state": end_state, "sha256": ""}, intent_file, False,
                        {"status": "skipped", "reason": "lifecycle_mode=legacy"})
-    if end_state not in LIFECYCLE_END_STATES:
-        raise DispatchLifecycleError("invalid_end_state",
-                                     f"end_state must be one of {sorted(LIFECYCLE_END_STATES)}, "
-                                     f"got {end_state!r}")
     try:
         document = build_end_intent(
             project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
@@ -279,5 +363,6 @@ def recover(project_id: str, dispatch_id: str, attempt: int, *,
     _validate_key(project_id, dispatch_id, attempt)
     state_dir = Path(state_dir).resolve()
     intent_file = end_intent_path(state_dir, project_id, dispatch_id, attempt)
+    _refuse_paths_outside_end_intents(state_dir, intent_file, _lock_file_for(intent_file))
     _read_intent(intent_file)
     return _run_steps_under_lock(intent_file, state_dir)

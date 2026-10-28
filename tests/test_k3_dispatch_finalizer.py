@@ -21,7 +21,11 @@ What this file pins, deterministically:
   - the append rule: a ``dispatch_finished`` is accepted only when a winner's
     intent exists for the key AND its canonical form is byte-equal to the
     intent's line. Another ``end_state`` with the same ``outcome_id`` is
-    refused, and so is any end line without an intent.
+    refused, and so is any end line without an intent;
+  - the finalizer validates what it finalizes (round 2): an identifier that is
+    not one safe path component, an end payload that is not this attempt's
+    ``dispatch_finished``, a receipt field the intent never decided, and the
+    ``abandoned`` mark on an already-``timed_out`` row.
 
 The coordination DB is the real schema built by the project's own helpers in
 ``tmp_path`` (``init_schema`` + the project_id column migration + the 0017
@@ -493,3 +497,193 @@ def test_a_dispatch_without_a_start_line_is_refused(state_dir: Path):
         dl.finalize(PROJECT, DISPATCH, 1, _end_line("completed"), state_dir=state_dir)
     assert excinfo.value.code == "missing_start_line"
     assert _end_lines(state_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# 8. the finalizer validates what it finalizes (round 2)
+#
+# The four reproductions from the codex gate on cb1519b1: an identifier that is
+# not one path component, an end payload that is not this attempt's
+# dispatch_finished, a receipt field the intent never decided, and the
+# abandoned mark skipped by the already-at-target return.
+# ---------------------------------------------------------------------------
+
+UNSAFE_IDENTIFIERS = ["..", "../x", "a/b", "a\\b", "nul\x00byte", "", "   "]
+
+
+@pytest.mark.parametrize("dispatch_id", UNSAFE_IDENTIFIERS)
+def test_an_unsafe_dispatch_id_is_refused_and_creates_nothing(state_dir: Path,
+                                                              dispatch_id):
+    _finalizable(state_dir)
+    ledger_before = _ledger(state_dir).read_bytes()
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, dispatch_id, 1,
+                    _end_line("completed", dispatch_id=dispatch_id), state_dir=state_dir)
+    assert excinfo.value.code == "invalid_identifier"
+    assert _row(state_dir)["state"] == "running"
+    assert _ledger(state_dir).read_bytes() == ledger_before
+    assert _end_lines(state_dir) == []
+    assert not (state_dir / "dispatch_end").exists()
+
+
+def test_an_absolute_dispatch_id_is_refused_and_creates_nothing_outside(state_dir: Path,
+                                                                       tmp_path: Path):
+    _finalizable(state_dir)
+    outside = str(tmp_path / "escaped-dispatch")
+    before = sorted(tmp_path.iterdir())
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, outside, 1, _end_line("completed", dispatch_id=outside),
+                    state_dir=state_dir)
+    assert excinfo.value.code == "invalid_identifier"
+    # Nothing was created beside ``state/``: no intent, no lock.
+    assert sorted(tmp_path.iterdir()) == before
+    assert not Path(f"{outside}.1.json").exists()
+    assert not Path(f"{outside}.1.lock").exists()
+    assert _row(state_dir)["state"] == "running"
+    assert _end_lines(state_dir) == []
+
+
+@pytest.mark.parametrize("project_id", UNSAFE_IDENTIFIERS)
+def test_an_unsafe_project_id_is_refused_and_creates_nothing(state_dir: Path, project_id):
+    _finalizable(state_dir)
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(project_id, DISPATCH, 1,
+                    _end_line("completed", project_id=project_id), state_dir=state_dir)
+    assert excinfo.value.code == "invalid_identifier"
+    assert _row(state_dir)["state"] == "running"
+    assert not (state_dir / "dispatch_end").exists()
+
+
+def test_recover_refuses_an_unsafe_identifier_too(state_dir: Path, tmp_path: Path):
+    outside = str(tmp_path / "recovered-elsewhere")
+    before = sorted(tmp_path.iterdir())
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.recover(PROJECT, outside, 1, state_dir=state_dir)
+    assert excinfo.value.code == "invalid_identifier"
+    assert sorted(tmp_path.iterdir()) == before
+    assert not Path(f"{outside}.1.json").exists()
+    assert not Path(f"{outside}.1.lock").exists()
+
+
+def test_a_resolved_intent_path_outside_dispatch_end_is_refused(state_dir: Path, tmp_path: Path):
+    """The second guard: a symlinked project directory resolves out of the root."""
+    root = state_dir / "dispatch_end"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (root / PROJECT).symlink_to(elsewhere, target_is_directory=True)
+
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, DISPATCH, 1, _end_line("completed"), state_dir=state_dir)
+
+    assert excinfo.value.code == "invalid_identifier"
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_a_start_line_as_the_end_payload_is_refused_and_changes_nothing(state_dir: Path):
+    _finalizable(state_dir)
+    ledger_before = _ledger(state_dir).read_bytes()
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, DISPATCH, 1, dict(_start_line(), end_state="completed"),
+                    state_dir=state_dir)
+    assert excinfo.value.code == "invalid_end_line"
+    assert _row(state_dir)["state"] == "running"
+    assert _ledger(state_dir).read_bytes() == ledger_before
+    assert _end_lines(state_dir) == []
+    assert not end_intent_path(state_dir, PROJECT, DISPATCH, 1).exists()
+    assert not (state_dir / "dispatch_end").exists()
+
+
+@pytest.mark.parametrize("override", [
+    {"project_id": OTHER_PROJECT},
+    {"dispatch_id": "another-dispatch"},
+    {"attempt": 2},
+    {"end_state": "gave_up"},
+    {"event_type": "task_complete"},
+    {"attempt": True},
+])
+def test_an_end_payload_that_does_not_match_the_key_is_refused(state_dir: Path, override):
+    _finalizable(state_dir)
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, DISPATCH, 1, dict(_end_line("completed"), **override),
+                    state_dir=state_dir)
+    assert excinfo.value.code == "invalid_end_line"
+    assert _row(state_dir)["state"] == "running"
+    assert _end_lines(state_dir) == []
+    assert not (state_dir / "dispatch_end").exists()
+
+
+def test_an_end_payload_that_is_not_a_mapping_is_refused(state_dir: Path):
+    _finalizable(state_dir)
+    with pytest.raises(dl.DispatchLifecycleError) as excinfo:
+        dl.finalize(PROJECT, DISPATCH, 1, ["not", "a", "mapping"], state_dir=state_dir)
+    assert excinfo.value.code == "invalid_end_line"
+    assert _end_lines(state_dir) == []
+
+
+def test_a_receipt_field_the_intent_never_decided_is_a_mismatch(state_dir: Path):
+    """The codex reproduction: an added ``no_push`` against an intent without one."""
+    assert _append(state_dir, _start_line()).status == "appended"
+    line = _end_line("completed")
+    _write_intent(state_dir, line)
+
+    with pytest.raises(AppendReceiptError) as excinfo:
+        _append(state_dir, dict(line, no_push="nothing to push"))
+    assert excinfo.value.code == "end_line_mismatch"
+    assert _end_lines(state_dir) == []
+
+    # The line the intent decided is still accepted.
+    assert _append(state_dir, line).status == "appended"
+    assert len(_end_lines(state_dir)) == 1
+
+
+# One plausible value per derived stamp, so a stamp added to the append layer
+# without a name in DERIVED_STAMP_FIELDS fails this test.
+STAMP_VALUES = {
+    "schema_version": 2,
+    "writer_sha": "f" * 40,
+    "status": "success",
+    "operator_id": "operator",
+    "orchestrator_id": "T0",
+    "agent_id": "deepseek-flash",
+    "observability_tier": "tier-low",
+    "parent_dispatch": "dlv-parent",
+    "task_class": "01_code_generation",
+    "tier_from": "tier-low",
+    "tier_to": "tier-low",
+    "open_items_created": 2,
+    "ingested_at": "2020-01-01T00:00:00Z",
+    "outcome_id": "0" * 64,
+}
+
+
+def test_the_derived_stamps_the_append_layer_adds_are_not_a_mismatch(state_dir: Path):
+    from append_receipt_internals.lifecycle import DERIVED_STAMP_FIELDS
+
+    assert set(STAMP_VALUES) == DERIVED_STAMP_FIELDS
+    assert _append(state_dir, _start_line()).status == "appended"
+    line = _end_line("completed")
+    _write_intent(state_dir, line)
+
+    assert _append(state_dir, dict(line, **STAMP_VALUES)).status == "appended"
+    end_lines = _end_lines(state_dir)
+    assert len(end_lines) == 1
+    assert end_lines[0]["end_state"] == "completed"
+
+
+def test_abandoned_from_an_already_timed_out_row_sets_the_mark(state_dir: Path):
+    _finalizable(state_dir, state="timed_out")
+
+    result = dl.finalize(PROJECT, DISPATCH, 1, _end_line("abandoned"), state_dir=state_dir)
+
+    assert result.projection["status"] == dl.PROJECTION_ALREADY_AT_TARGET
+    row = _row(state_dir)
+    assert row["state"] == "timed_out"
+    assert json.loads(row["metadata_json"])["end_state"] == "abandoned"
+    assert len(_end_lines(state_dir)) == 1
+
+    # A second finalize is still a no-op: the intent is already published.
+    again = dl.finalize(PROJECT, DISPATCH, 1, _end_line("abandoned"), state_dir=state_dir)
+    assert again.status == dl.LOST_INTENT
+    assert _row(state_dir) == row
+    assert len(_end_lines(state_dir)) == 1

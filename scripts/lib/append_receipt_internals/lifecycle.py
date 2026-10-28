@@ -254,14 +254,43 @@ def load_end_intent(intent_path: Path) -> Optional[Dict[str, Any]]:
     return parse_end_intent(raw, source=str(intent_path))
 
 
+# The append layer's own stamps: values it derives and writes itself, never a
+# decision the caller made about this end. They are the ONLY fields allowed to
+# be present on the receipt and absent from the intent — every other field
+# present on one side and absent on the other is a mismatch (ADR-045 §3): a
+# caller-supplied ``no_push`` (or any other decision) added after the intent was
+# frozen must not slip through by not being in the intent.
+DERIVED_STAMP_FIELDS = frozenset({
+    # this module, the lifecycle seam:
+    "schema_version",   # stamp_lifecycle: LIFECYCLE_SCHEMA_VERSION
+    "writer_sha",       # stamp_lifecycle: writer_sha()
+    "status",           # stamp_lifecycle: the end_state projection
+    # payload.py, the one append entry point:
+    "operator_id", "orchestrator_id", "agent_id",   # _stamp_identity
+    "observability_tier",                           # _stamp_observability_tier
+    "parent_dispatch", "task_class", "tier_from", "tier_to",  # _CHAIN_LINK_ENV_FIELDS
+    "open_items_created",                           # append_receipt_payload setdefault
+    "ingested_at",                                  # _stamp_ingested_at
+    # idempotency.py, the ADR-038 outcome identity:
+    "outcome_id",                                   # _write_receipt_under_lock
+})
+
+
 def end_line_matches_intent(receipt: Mapping[str, Any], intent: Mapping[str, Any]) -> bool:
     """True when the receipt's canonical line is byte-equal to the intent's.
 
-    Only the fields the intent's line carries are compared; the append layer's
-    derived stamps (``outcome_id``, ``schema_version``, ``writer_sha``) are not
-    decisions, so they cannot cause a false mismatch.
+    Every field is compared: the receipt's set of fields must equal the intent
+    line's set apart from :data:`DERIVED_STAMP_FIELDS`, and each shared value
+    must be identical. Discarding unknown fields would let a caller amend the
+    frozen decision (an added ``no_push``) and still be accepted.
     """
     expected = json.loads(intent["line"])
+    if not isinstance(expected, dict) or not expected:
+        return False
+    if set(expected) - set(receipt):
+        return False
+    if set(receipt) - set(expected) - DERIVED_STAMP_FIELDS:
+        return False
     canonical = canonical_end_line({key: receipt.get(key) for key in expected})
     return canonical == intent["line"] and end_line_sha256(canonical) == intent["sha256"]
 
@@ -343,7 +372,7 @@ def record_lifecycle_end(
 
 __all__ = [
     "LIFECYCLE_SETTING_KEY", "LIFECYCLE_TAIL_BYTES", "END_LINE_ACCEPTED",
-    "END_INTENT_DIRNAME", "END_INTENT_VERSION", "EndIntentMalformed",
+    "DERIVED_STAMP_FIELDS", "END_INTENT_DIRNAME", "END_INTENT_VERSION", "EndIntentMalformed",
     "build_end_intent", "canonical_end_line", "check_end_line", "decide_end_line",
     "end_intent_path", "end_intent_path_for_ledger",
     "end_line_matches_intent", "end_line_sha256", "find_prior_end_line",
