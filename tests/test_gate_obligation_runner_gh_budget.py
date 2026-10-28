@@ -37,6 +37,24 @@ OI-2459 round 2 bounds the cost and pins where a head may come from:
     rest of the tick; skipped lookups answer unknown (a wait), never a
     retirement or a pass.
 
+OI-2461 (round 3) makes the SNAPSHOT a filter and a LIVE READ the thing that
+books:
+
+  - every decision that books a TERMINAL status on a snapshot-derived fact
+    (evidence rescue, retire on MERGED/CLOSED, retire on a branch gone from
+    the listing) confirms that fact with exactly ONE live read right before
+    the booking; a live answer that differs, cannot be read, or was skipped by
+    the per-tick live-confirm cap (``_LIVE_CONFIRM_CAP_PER_TICK`` = 20) books
+    nothing;
+  - a lookup the tick's budget SKIPPED (fallback cap, rate-limit stop, live
+    confirm cap) is its own outcome — ``DEFERRED`` at the lookup,
+    ``{"kind": "deferred"}`` at the decision — never the ``None`` that means
+    "could not be determined". A deferred obligation gets no write,
+    ``attempts`` does not move, and it can never escalate to
+    ``not_executable`` through deferrals. A GENUINE failure (gh missing,
+    timed out, non-zero exit without a rate-limit marker) keeps today's
+    unresolvable/escalate path exactly.
+
 Every test runs a fake ``gh`` on ``PATH`` (a script that logs each argv and
 answers from a JSON fixture). No test here ever talks to real GitHub.
 """
@@ -62,7 +80,7 @@ for p in (ROOT / "scripts" / "lib", ROOT / "scripts", ROOT):
         sys.path.insert(0, str(p))
 
 import gate_obligation_runner as runner  # noqa: E402
-from gate_obligations import obligation_path, register_obligation  # noqa: E402
+from gate_obligations import obligation_path, register_obligation, update_obligation  # noqa: E402
 
 # Captured at import time, BEFORE tests/conftest.py's autouse
 # ``_stub_gate_identity_gh_calls`` replaces ``subprocess.run`` in place. A test
@@ -260,12 +278,15 @@ def _dispatch_ids(n: int) -> List[str]:
 
 
 def _budget_fixtures(n: int) -> Dict[str, Any]:
-    """N obligations: exactly ONE OPEN PR, the rest MERGED, every fifth without a PR.
+    """N obligations, NONE of which books a terminal status (OI-2461).
 
-    Exactly one gate LAUNCH in both ticks is deliberate (OI-2459 round 2): a
-    launch legitimately costs one LIVE post-run head read, so the constant-cost
-    invariant is asserted on a fixture whose launch count does not vary with N.
-    The per-launch bound itself is pinned separately below.
+    Exactly ONE OPEN PR — so exactly one gate LAUNCH, which legitimately costs
+    one LIVE post-run head read — and every other obligation has no PR and a
+    live branch, so it simply waits. No retire and no evidence rescue: a
+    terminal booking legitimately costs one live confirmation (OI-2461), so
+    the constant-cost invariant is measured on the NON-BOOKING path here; the
+    booking path's own bound is pinned separately below
+    (``_LIVE_CONFIRM_CAP_PER_TICK``).
     """
     snapshot: List[Dict[str, Any]] = []
     open_prs: List[Dict[str, Any]] = []
@@ -274,20 +295,18 @@ def _budget_fixtures(n: int) -> Dict[str, Any]:
     branch_refs: List[str] = []
     for index, dispatch_id in enumerate(_dispatch_ids(n)):
         branch = f"dispatch/{dispatch_id}"
-        number = 1000 + index
         branch_refs.append(f"refs/heads/{branch}")
-        if index % 5 == 4:
-            pr_list_head[branch] = []
+        pr_list_head[branch] = []
+        if index != 0:
             continue
-        state = "OPEN" if index == 0 else "MERGED"
-        head = f"{index:08x}" * 5
+        number = 1000
+        head = "0" * 40
         snapshot.append({
-            "number": number, "state": state, "headRefName": branch, "headRefOid": head,
+            "number": number, "state": "OPEN", "headRefName": branch, "headRefOid": head,
         })
-        if state == "OPEN":
-            open_prs.append({"number": number, "headRefName": branch})
+        open_prs.append({"number": number, "headRefName": branch})
         pr_list_head[branch] = [{"number": number}]
-        pr_view[str(number)] = {"state": state, "headRefName": branch, "headRefOid": head}
+        pr_view[str(number)] = {"state": "OPEN", "headRefName": branch, "headRefOid": head}
     return {
         "pr_snapshot": snapshot,
         "pr_list_open": open_prs,
@@ -343,18 +362,20 @@ def test_gh_call_count_is_constant_in_the_obligation_count(tmp_path, monkeypatch
     assert counts5.get("pr_list_open", 0) == 1, counts5
     assert counts40.get("pr_list_open", 0) == 1, counts40
 
-    # OI-2459 round 2: the per-tick cost is still independent of the backlog.
-    # Both fixtures have exactly one gate launch, so the one live head read it
-    # needs does not vary with N either — everything else is the fixed
-    # snapshot + listing + open list.
+    # OI-2459 round 2 / OI-2461: the per-tick cost is still independent of the
+    # backlog on the NON-BOOKING path. Both fixtures have exactly one gate
+    # launch, so the one live head read it needs does not vary with N either —
+    # everything else is the fixed snapshot + listing + open list. No
+    # obligation here books a terminal status, so no live confirmation is
+    # owed; the booking path's own cap is pinned further down.
     assert sum(counts5.values()) == 4, counts5   # snapshot + listing + open list + 1 live head read
     assert sum(counts40.values()) == sum(counts5.values()), (
         f"the tick's gh budget must not grow with the obligation count: {counts5} vs {counts40}"
     )
     # The decision logic is unchanged: an open PR stays pending (temporary
-    # refusal), merged PRs retire, a no-PR obligation with a live branch waits.
-    assert summary5["pending_after"] == 2
-    assert summary40["pending_after"] == 9
+    # refusal), a no-PR obligation with a live branch waits.
+    assert summary5["pending_after"] == 5
+    assert summary40["pending_after"] == 40
 
 
 # ---------------------------------------------------------------------------
@@ -529,7 +550,11 @@ def test_a_snapshot_merged_pr_retires_like_the_state_call_did(tmp_path, monkeypa
     assert (from_snapshot["status"], from_snapshot["reason"]) == (
         from_single_call["status"], from_single_call["reason"],
     ), "the booked outcome must not depend on where the facts came from"
-    assert from_snapshot["counts"].get("pr_view_state", 0) == 0, from_snapshot["counts"]
+    # OI-2461: the snapshot only SELECTS the merged PR; the retire itself is
+    # booked on a LIVE state read, so both paths cost exactly one call — and
+    # the deferred/single-call path needs no second read (it was never a
+    # snapshot fact).
+    assert from_snapshot["counts"].get("pr_view_state", 0) == 1, from_snapshot["counts"]
     assert from_single_call["counts"].get("pr_view_state", 0) == 1, from_single_call["counts"]
 
 
@@ -755,8 +780,15 @@ def test_a_failed_snapshot_fallback_stops_at_the_cap(tmp_path, monkeypatch, fake
     assert counts.get("pr_view_state", 0) == cap, (
         f"the per-obligation fallback must stop at {cap} calls, not run 40: {counts}"
     )
+    actions = [outcome["action"] for outcome in summary["outcomes"]]
+    # The first `cap` lookups were ASKED and failed (the fake gh has no answer
+    # for them): a genuine failure keeps today's unresolvable path. Every
+    # lookup after the cap was NEVER ASKED (OI-2461): that is a deferral —
+    # pending, nothing written, no attempt counted — never "unresolvable".
+    assert actions[:cap] == ["unresolvable"] * cap, actions
+    assert actions[cap:] == ["pending"] * (40 - cap), actions
+    assert all(outcome.get("deferred") for outcome in summary["outcomes"][cap:])
     assert summary["pending_after"] == 40, "a skipped lookup is a wait, never a retirement"
-    assert all(outcome["action"] == "unresolvable" for outcome in summary["outcomes"])
     skipped_lines = [rec.getMessage() for rec in caplog.records if "lookup(s) skipped" in rec.getMessage()]
     assert len(skipped_lines) == 1, skipped_lines
     assert "20 lookup(s) skipped" in skipped_lines[0], skipped_lines[0]
@@ -778,8 +810,349 @@ def test_a_rate_limit_stops_the_fallback_for_the_rest_of_the_tick(
     assert counts.get("pr_view_state", 0) == 1, (
         f"a rate-limit answer on the first fallback must stop every later one: {counts}"
     )
+    actions = [outcome["action"] for outcome in summary["outcomes"]]
+    # The lookup that RECEIVED the rate-limit reply was asked and failed — a
+    # genuine failure, today's unresolvable path. The two lookups the stop
+    # SKIPPED were never asked: deferred (OI-2461), nothing written.
+    assert actions == ["unresolvable", "pending", "pending"], actions
+    assert all(outcome.get("deferred") for outcome in summary["outcomes"][1:])
     assert summary["pending_after"] == 3
-    assert all(outcome["action"] == "unresolvable" for outcome in summary["outcomes"])
     skipped_lines = [rec.getMessage() for rec in caplog.records if "lookup(s) skipped" in rec.getMessage()]
     assert len(skipped_lines) == 1, skipped_lines
     assert "rate limit" in skipped_lines[0], skipped_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# OI-2461: the snapshot FILTERS, a LIVE read BOOKS — and a skipped lookup is
+# DEFERRED, never an attempt.
+# ---------------------------------------------------------------------------
+
+
+def _seed_decided_evidence(
+    state_dir: Path, *, dispatch_id: str, pr_number: int, commit_sha: str,
+    gate: str = GATE,
+) -> Path:
+    """Write a DECIDED, complete-evidence result record for one dispatch."""
+    report = state_dir.parent / "unified_reports" / f"{gate}-pr{pr_number}.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(f"{gate} report for {dispatch_id}", encoding="utf-8")
+    path = state_dir / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+    path.write_text(json.dumps({
+        "gate": gate,
+        "pr_number": pr_number,
+        "dispatch_id": dispatch_id,
+        "status": "pass",
+        "contract_hash": "sha256:oi-2461-round-3",
+        "report_path": str(report),
+        "commit_sha": commit_sha,
+    }), encoding="utf-8")
+    return path
+
+
+def _evidence_fixtures(
+    dispatch_id: str, pr_number: int, *,
+    snapshot_head: str, live_head: str,
+    snapshot_state: str = "OPEN", live_state: str = "OPEN",
+) -> Dict[str, Any]:
+    """The snapshot and the live ``pr view`` disagree — the round-3 shape."""
+    branch = f"dispatch/{dispatch_id}"
+    return {
+        "pr_snapshot": [{
+            "number": pr_number, "state": snapshot_state,
+            "headRefName": branch, "headRefOid": snapshot_head,
+        }],
+        "pr_list_open": [],
+        "pr_list_head": {branch: [{"number": pr_number}]},
+        "pr_view": {
+            str(pr_number): {
+                "state": live_state, "headRefName": branch, "headRefOid": live_head,
+            },
+        },
+        "branch_refs": [f"refs/heads/{branch}"],
+        "branches": {},
+    }
+
+
+def _open_evidence_tick(
+    root: Path, monkeypatch, fake_gh: _FakeGh, *,
+    dispatch_id: str,
+    pr_number: Optional[int],
+    fixtures: Dict[str, Any],
+    evidence_sha: Optional[str] = None,
+    attempts: int = 0,
+    occupancy_lock: bool = False,
+) -> Dict[str, Any]:
+    """Register one obligation, run one tick, return everything worth asserting."""
+    monkeypatch.setattr(subprocess, "run", _REAL_SUBPROCESS_RUN)
+    state_dir = _make_state_dir(root)
+    path = register_obligation(
+        state_dir, dispatch_id=dispatch_id, gate=GATE, project_id="vnx-dev",
+        pr_number=pr_number,
+    )
+    if evidence_sha is not None:
+        _seed_decided_evidence(
+            state_dir, dispatch_id=dispatch_id, pr_number=pr_number, commit_sha=evidence_sha,
+        )
+    if attempts:
+        update_obligation(path, attempts=attempts)
+    if occupancy_lock:
+        lock_path = state_dir / "dispatch_worktree_claims" / f"{dispatch_id}.occupancy"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("", encoding="utf-8")
+    fake_gh.fixtures(fixtures)
+    fake_gh.reset()
+    manager = _FakeReviewGateManager(state_dir)
+    _patch_runner(monkeypatch, manager)
+    summary = runner.run(state_dir)
+    return {
+        "summary": summary,
+        "record": json.loads(obligation_path(state_dir, dispatch_id).read_text(encoding="utf-8")),
+        "counts": fake_gh.counts(),
+        "manager": manager,
+        "state_dir": state_dir,
+        "path": path,
+    }
+
+
+def test_evidence_current_on_the_snapshot_but_not_live_is_never_booked(
+    tmp_path, monkeypatch, fake_gh,
+):
+    """Red on 9eeeb8f4: the verdict names commit A, the snapshot still says A,
+    the PR has advanced to B — ``_fulfilling_result`` judged the evidence
+    against the SNAPSHOT and booked ``fulfilled`` with zero live reads."""
+    dispatch_id = "20261028-oi2461-head-advanced"
+    tick = _open_evidence_tick(
+        tmp_path, monkeypatch, fake_gh,
+        dispatch_id=dispatch_id, pr_number=62001,
+        fixtures=_evidence_fixtures(
+            dispatch_id, 62001, snapshot_head=HEAD_A, live_head=HEAD_B,
+        ),
+        evidence_sha=HEAD_A,
+    )
+
+    record, counts = tick["record"], tick["counts"]
+    assert tick["manager"].calls == [], "no gate run is owed; the evidence check comes first"
+    assert record["status"] == runner.STATUS_PENDING, record
+    assert record["status"] != runner.STATUS_FULFILLED, (
+        "evidence about A must never be booked once the LIVE head is B, even "
+        "while the tick snapshot still says A"
+    )
+    assert (record.get("attempts") or 0) == 0, "a deferral counts no attempt"
+    assert tick["summary"]["outcomes"][0]["action"] == "pending"
+    assert tick["summary"]["outcomes"][0]["deferred"] is True
+    assert tick["summary"]["pending_after"] == 1
+    assert counts.get("pr_view_headRefOid", 0) == 1, (
+        f"the booking must rest on exactly one live head read: {counts}"
+    )
+
+
+def test_snapshot_closed_but_live_open_does_not_retire(tmp_path, monkeypatch, fake_gh):
+    """Red on 9eeeb8f4: a CLOSED row in the snapshot retired the obligation
+    without ever asking GitHub whether the PR was still closed."""
+    dispatch_id = "20261028-oi2461-closed-vs-open"
+    tick = _open_evidence_tick(
+        tmp_path, monkeypatch, fake_gh,
+        dispatch_id=dispatch_id, pr_number=62002,
+        fixtures=_evidence_fixtures(
+            dispatch_id, 62002, snapshot_head=HEAD_A, live_head=HEAD_A,
+            snapshot_state="CLOSED", live_state="OPEN",
+        ),
+    )
+
+    record, counts = tick["record"], tick["counts"]
+    assert record["status"] == runner.STATUS_PENDING, record
+    assert record["status"] != runner.STATUS_RETIRED, (
+        "a snapshot CLOSED that the live read says is OPEN must not retire"
+    )
+    assert record.get("reason") != runner.REASON_PR_CLOSED
+    assert (record.get("attempts") or 0) == 0, "a deferral counts no attempt"
+    assert tick["summary"]["outcomes"][0]["action"] == "pending"
+    assert tick["summary"]["outcomes"][0]["deferred"] is True
+    assert counts.get("pr_view_state", 0) == 1, (
+        f"the retire decision must rest on exactly one live state read: {counts}"
+    )
+
+
+def test_branch_gone_in_the_listing_but_present_live_does_not_retire(
+    tmp_path, monkeypatch, fake_gh,
+):
+    """Red on 9eeeb8f4: a branch missing from ``matching-refs`` retired the
+    obligation; the live single-branch check says it is still there."""
+    dispatch_id = "20261028-oi2461-branch-gone"
+    branch = f"dispatch/{dispatch_id}"
+    fixtures = {
+        # No PR for this dispatch, and the LISTING says its branch is gone.
+        "pr_snapshot": [],
+        "pr_list_open": [],
+        "pr_list_head": {branch: []},
+        "pr_view": {},
+        "branch_refs": [],
+        # ...but the LIVE single-branch check says it exists.
+        "branches": {branch: "exists"},
+    }
+    tick = _open_evidence_tick(
+        tmp_path, monkeypatch, fake_gh,
+        dispatch_id=dispatch_id, pr_number=None, fixtures=fixtures,
+        occupancy_lock=True,  # the lock file exists and is unheld: not live
+    )
+
+    record, counts = tick["record"], tick["counts"]
+    assert record["status"] == runner.STATUS_PENDING, record
+    assert record["status"] != runner.STATUS_RETIRED, (
+        "a branch gone from the listing but present on the live check must "
+        "not retire the obligation"
+    )
+    assert tick["summary"]["outcomes"][0]["deferred"] is True
+    assert (record.get("attempts") or 0) == 0, "a deferral counts no attempt"
+    assert counts.get("branch_single", 0) == 1, (
+        f"the retire must rest on exactly one live branch read: {counts}"
+    )
+
+
+def test_an_exhausted_budget_defers_and_never_escalates(tmp_path, monkeypatch, fake_gh):
+    """Red on 9eeeb8f4: a lookup SKIPPED by the budget answered ``None``,
+    which flowed into ``unresolvable``, advanced ``attempts``, and at 96 booked
+    the terminal ``not_executable`` — over a lookup that was never even asked.
+
+    The budget is exhausted by a rate-limit refusal on the FIRST lookup, which
+    stops every later one for the rest of the tick (OI-2459 round 2) — repeated
+    on every tick. The last obligation is one attempt short of the escalation
+    threshold: one MORE inexhausted tick would book it not_executable on
+    9eeeb8f4, and must never do so here.
+    """
+    monkeypatch.setattr(subprocess, "run", _REAL_SUBPROCESS_RUN)
+    dispatch_ids = [f"20261028-oi2461-noescalate-{index}" for index in range(3)]
+    state_dir = _make_state_dir(tmp_path)
+    for index, dispatch_id in enumerate(dispatch_ids):
+        path = register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate=GATE, project_id="vnx-dev",
+            pr_number=62003 + index,
+        )
+        if index == len(dispatch_ids) - 1:
+            update_obligation(path, attempts=95)
+    fake_gh.fixtures(_failing_snapshot_fixtures(len(dispatch_ids), rate_limit=True))
+    fake_gh.reset()
+    manager = _FakeReviewGateManager(state_dir)
+    _patch_runner(monkeypatch, manager)
+
+    skipped = dispatch_ids[-1]
+    for _ in range(3):
+        summary = runner.run(state_dir)
+        record = json.loads(obligation_path(state_dir, skipped).read_text(encoding="utf-8"))
+        outcome = [
+            item for item in summary["outcomes"] if item["dispatch_id"] == skipped
+        ][0]
+        assert outcome["action"] == "pending", outcome
+        assert outcome["deferred"] is True, outcome
+        assert record["status"] == runner.STATUS_PENDING, record
+        assert record["status"] != runner.STATUS_NOT_EXECUTABLE, (
+            "a lookup the budget skipped must never escalate an obligation"
+        )
+        assert (record.get("attempts") or 0) == 95, (
+            "a deferral must not move attempts, so deferrals can never escalate"
+        )
+    assert manager.calls == []
+
+
+def test_a_genuine_gh_failure_still_advances_attempts(tmp_path, monkeypatch, fake_gh):
+    """A real failure (non-zero exit, no rate-limit marker) is NOT a deferral."""
+    dispatch_id = "20261028-oi2461-genuine-failure"
+    tick = _open_evidence_tick(
+        tmp_path, monkeypatch, fake_gh,
+        dispatch_id=dispatch_id, pr_number=62004,
+        fixtures=_failing_snapshot_fixtures(1),
+    )
+
+    outcome = tick["summary"]["outcomes"][0]
+    assert outcome["action"] == "unresolvable", outcome
+    assert not outcome.get("deferred"), outcome
+    assert (tick["record"].get("attempts") or 0) == 1, tick["record"]
+    # Exactly as on origin/main: a genuine failure is recorded as unresolvable
+    # and counts its attempt (the escalate branch converts it to
+    # not_executable once attempts reach the threshold).
+    assert tick["record"]["status"] == runner.STATUS_UNRESOLVABLE, tick["record"]
+
+
+def test_a_genuine_gh_failure_still_escalates_at_the_threshold(
+    tmp_path, monkeypatch, fake_gh,
+):
+    """The escalate path is unchanged for a real failure (attempts 95 -> 96)."""
+    dispatch_id = "20261028-oi2461-genuine-escalation"
+    tick = _open_evidence_tick(
+        tmp_path, monkeypatch, fake_gh,
+        dispatch_id=dispatch_id, pr_number=62005,
+        fixtures=_failing_snapshot_fixtures(1),
+        attempts=95,
+    )
+
+    assert tick["summary"]["outcomes"][0]["action"] == "not_executable", tick["summary"]["outcomes"]
+    assert not tick["summary"]["outcomes"][0].get("deferred")
+    assert tick["record"]["status"] == runner.STATUS_NOT_EXECUTABLE, tick["record"]
+    assert (tick["record"].get("attempts") or 0) == 96, tick["record"]
+
+
+def _booking_fixtures(n: int) -> Dict[str, Any]:
+    """N obligations, every one wanting a terminal booking, all CURRENT."""
+    snapshot: List[Dict[str, Any]] = []
+    pr_view: Dict[str, Any] = {}
+    pr_list_head: Dict[str, Any] = {}
+    branch_refs: List[str] = []
+    for index, dispatch_id in enumerate(_dispatch_ids(n)):
+        branch = f"dispatch/{dispatch_id}"
+        number = 2000 + index
+        head = f"{index:08x}" * 5
+        branch_refs.append(f"refs/heads/{branch}")
+        pr_list_head[branch] = [{"number": number}]
+        snapshot.append({
+            "number": number, "state": "OPEN", "headRefName": branch, "headRefOid": head,
+        })
+        pr_view[str(number)] = {"state": "OPEN", "headRefName": branch, "headRefOid": head}
+    return {
+        "pr_snapshot": snapshot,
+        "pr_list_open": [],  # the read-only diagnostics stay quiet
+        "pr_list_head": pr_list_head,
+        "pr_view": pr_view,
+        "branch_refs": branch_refs,
+        "branches": {},
+    }
+
+
+def test_live_confirmations_stop_at_the_cap_and_the_rest_are_deferred(
+    tmp_path, monkeypatch, fake_gh,
+):
+    """40 bookings want a live confirmation; only the cap is spent."""
+    monkeypatch.setattr(subprocess, "run", _REAL_SUBPROCESS_RUN)
+    n = 40
+    capacity = runner._LIVE_CONFIRM_CAP_PER_TICK
+    state_dir = _make_state_dir(tmp_path)
+    for index, dispatch_id in enumerate(_dispatch_ids(n)):
+        number = 2000 + index
+        register_obligation(
+            state_dir, dispatch_id=dispatch_id, gate=GATE, project_id="vnx-dev",
+            pr_number=number,
+        )
+        _seed_decided_evidence(
+            state_dir, dispatch_id=dispatch_id, pr_number=number,
+            commit_sha=f"{index:08x}" * 5,
+        )
+    fake_gh.fixtures(_booking_fixtures(n))
+    fake_gh.reset()
+    _patch_runner(monkeypatch, _FakeReviewGateManager(state_dir))
+
+    summary = runner.run(state_dir)
+
+    counts = fake_gh.counts()
+    assert counts.get("pr_view_headRefOid", 0) == capacity, (
+        f"live confirmations must stop at {capacity} per tick: {counts}"
+    )
+    statuses = {}
+    for dispatch_id in _dispatch_ids(n):
+        record = json.loads(obligation_path(state_dir, dispatch_id).read_text(encoding="utf-8"))
+        statuses.setdefault(record["status"], []).append(dispatch_id)
+        if record["status"] == runner.STATUS_PENDING:
+            assert (record.get("attempts") or 0) == 0, record
+    assert len(statuses.get(runner.STATUS_FULFILLED, [])) == capacity, statuses
+    assert len(statuses.get(runner.STATUS_PENDING, [])) == n - capacity, statuses
+    assert summary["pending_after"] == n - capacity
+    deferred = [outcome for outcome in summary["outcomes"] if outcome.get("deferred")]
+    assert len(deferred) == n - capacity, deferred
