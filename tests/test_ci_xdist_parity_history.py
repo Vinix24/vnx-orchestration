@@ -3,9 +3,16 @@
 The rule (plan "The cutover rule"): every run in the window clean (exit 0,
 every step success, the comparison step included), at least 10 distinct head
 SHAs over at least two UTC calendar days with the latest on main, the shadow
-suite at most 15 minutes on each, every watch-list OI closed. The window:
-heavy verdicts with the target fingerprint whose head descends from the merge
-commit of the last D3 PR.
+suite at most 40 percent of that run's own serial reference duration (the
+bound T0 set in OI-2442; it replaces the absolute 15 minutes), every
+watch-list OI closed. The window: heavy verdicts with the target fingerprint
+whose head descends from the merge commit of the last D3 PR.
+
+The wall-time bound reads both numbers from one verdict: the shadow's
+``shadow.suite_wall_s`` and the reference's ``reference.duration_s``. A run
+without a whole-number reference duration is no more within the bound than
+one without a shadow wall time, and the share is compared in whole numbers
+(``5 * shadow <= 2 * reference``), never in floats.
 
 Every verdict is a fixture in tests/fixtures/xdist_parity_verdicts/, in the
 schema the pipeline writes today; tests/test_ci_record_xdist_parity_verdict.py
@@ -314,17 +321,83 @@ def test_the_latest_run_must_be_on_main():
     assert failed(evaluate(runs)) == {"latest_on_main"}
 
 
-@pytest.mark.parametrize("wall", [901, None], ids=["over-15-minutes", "no-wall-time"])
+@pytest.mark.parametrize("wall", [800, None], ids=["over-the-share", "no-wall-time"])
 def test_a_slow_or_untimed_shadow_blocks(wall):
+    """800 s is under the old absolute bound and over 2/5 of the fixture's 1773 s reference."""
     runs = clean_window()
     runs[5].verdict["shadow"]["suite_wall_s"] = wall
     assert {"suite_wall_time", "every_run_clean"} == failed(evaluate(runs))
 
 
-def test_a_shadow_of_exactly_15_minutes_is_within_the_bound():
+# --- the wall-time bound: the shadow against the serial reference of the same run (OI-2442) ----------
+
+
+def _wall(runs: list, index: int, shadow_s, reference_s) -> list:
+    """Run *index* with a shadow wall time and a reference duration, as one verdict records both."""
+    runs[index].verdict["shadow"]["suite_wall_s"] = shadow_s
+    runs[index].verdict["reference"]["duration_s"] = reference_s
+    return runs
+
+
+def test_a_shadow_within_the_share_of_its_own_reference_is_clean():
+    """Shadow 980 s beside a 2900 s serial reference (34 percent): within the bound, red on the old 900 s rule."""
+    runs = _wall(clean_window(), 5, 980, 2900)
+    evaluation = evaluate(runs)
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[5].reasons == []
+    assert hist.within_wall_bound(runs[5].verdict) is True
+
+
+def test_a_shadow_of_exactly_the_share_of_its_reference_is_within_the_bound():
+    """Exactly 2/5 is within, compared in whole numbers: 5 * 1200 == 2 * 3000, no float rounding at the edge."""
+    runs = _wall(clean_window(), 5, 1200, 3000)
+    evaluation = evaluate(runs)
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+
+
+def test_a_shadow_over_the_share_of_its_reference_blocks_with_its_reason():
+    """Shadow 1300 s beside a 3000 s reference (43 percent): over the bound, named on the run and in the condition."""
+    runs = _wall(clean_window(), 5, 1300, 3000)
+    evaluation = evaluate(runs)
+    assert failed(evaluation) == {"suite_wall_time", "every_run_clean"}
+    assert evaluation.placements[5].reasons == ["shadow suite 1300 s > 40% of reference 3000 s"]
+    [condition] = [c for c in evaluation.conditions if c.name == "suite_wall_time"]
+    assert condition.detail == ("1 run(s) over 40% of their serial reference (2/5) or without a shadow "
+                                "wall time or a reference duration")
+    assert "cutover rule: DOES NOT HOLD" in hist.render(evaluation, HEADER)
+
+
+NO_DURATION = object()
+
+
+@pytest.mark.parametrize("duration", [NO_DURATION, None, "1800", 1800.0, True, "unknown"],
+                         ids=["missing", "none", "text", "float", "bool", "unknown-text"])
+def test_a_reference_without_a_whole_number_duration_is_no_bound_to_measure_against(duration):
+    """Fail closed: missing, None, malformed and unknown all give ``no reference duration``, and the run blocks."""
     runs = clean_window()
-    runs[5].verdict["shadow"]["suite_wall_s"] = 900
-    assert evaluate(runs).holds
+    runs[5].verdict["shadow"]["suite_wall_s"] = 980
+    if duration is NO_DURATION:
+        del runs[5].verdict["reference"]["duration_s"]
+    else:
+        runs[5].verdict["reference"]["duration_s"] = duration
+    evaluation = evaluate(runs)
+    assert failed(evaluation) == {"suite_wall_time", "every_run_clean"}
+    assert evaluation.placements[5].reasons == ["no reference duration"]
+    assert hist.reference_duration_s(runs[5].verdict) is None
+    assert hist.within_wall_bound(runs[5].verdict) is False
+
+
+def test_a_reference_block_that_is_no_object_names_no_duration():
+    """The shape check turns such a verdict away first; the reader still answers None instead of raising."""
+    verdict_without_block = {"shadow": {"suite_wall_s": 600}, "reference": "ok"}
+    assert hist.reference_duration_s(verdict_without_block) is None
+    assert hist.reference_duration_s({"shadow": {"suite_wall_s": 600}}) is None
+
+
+def test_the_share_is_read_from_one_constant_pair():
+    """One name for the bound: the reason and the condition text both derive from MAX_SHADOW_SHARE."""
+    assert hist.MAX_SHADOW_SHARE == (2, 5)
+    assert hist.SHADOW_SHARE_PERCENT == 40
 
 
 def test_a_run_whose_head_cannot_be_found_blocks():
@@ -473,7 +546,7 @@ def test_the_history_and_the_parity_job_share_one_rule_for_current_evidence():
 # --- option A: a run without a measurable comparison does not count (operator 2026-10-22) ----------------------
 
 
-REFERENCE_OK = {"duration_s": 900, "exit": 0, "job_result": "success", "result": "present"}
+REFERENCE_OK = {"duration_s": 3000, "exit": 0, "job_result": "success", "result": "present"}
 SHADOW_OK = {"durations_s": {"parallel": 600, "serial": None}, "exit_codes": {"parallel": 0, "serial": None},
              "job_result": "success", "record": "present", "suite_wall_s": 600, "verdict": "shadow_passed"}
 
@@ -559,7 +632,7 @@ def test_a_serial_job_failure_with_parity_exit_0_is_not_measurable():
 def test_a_serial_job_failure_and_a_parity_difference_still_block():
     """Never more: a real difference keeps a run dirty even when the serial reference job also failed."""
     dirty = run(20, day=2, hour=5, name="heavy-differences", exit=1, verdict="differences",
-                reference={"duration_s": 900, "exit": 0, "job_result": "failure", "result": "present"})
+                reference={"duration_s": 3000, "exit": 0, "job_result": "failure", "result": "present"})
     evaluation = evaluate(clean_window() + [dirty], job_evidence=lambda _run: job_evidence("failure", "success"))
     assert failed(evaluation) == {"every_run_clean"}
     assert evaluation.placements[-1].place == "in_window"
@@ -682,13 +755,19 @@ def test_a_reference_exit_of_false_is_not_a_whole_number_and_keeps_the_run_dirty
 @pytest.mark.parametrize("conclusion", ["cancelled", "timed_out", "skipped", None],
                          ids=["cancelled", "timed-out", "skipped", "unknown"])
 def test_a_reference_conclusion_that_is_not_failure_is_no_cause(conclusion):
-    """Only the conclusion `failure` is positive evidence of a failure; any other one names no cause."""
+    """Only the conclusion `failure` is positive evidence of a failure; any other one names no cause.
+
+    The run still blocks, on both counts: the step failure it records, and the wall-time
+    condition, because a cancelled reference records no ``duration_s`` to measure the shadow
+    against (fail-closed, OI-2442).
+    """
     cancelled = run(20, day=2, hour=5, **reference_cancelled_fields())
     evaluation = evaluate(clean_window() + [cancelled],
                           job_evidence=lambda _run: job_evidence(conclusion, "success"))
-    assert failed(evaluation) == {"every_run_clean"}
+    assert failed(evaluation) == {"every_run_clean", "suite_wall_time"}
     assert evaluation.placements[-1].place == "in_window"
     assert "step reference.job=cancelled" in evaluation.placements[-1].reasons
+    assert "no reference duration" in evaluation.placements[-1].reasons
 
 
 @pytest.mark.parametrize("job_result", ["cancelled", "timed_out", None], ids=["cancelled", "timed-out", "unknown"])
