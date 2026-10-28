@@ -34,15 +34,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 _HERE = Path(__file__).resolve().parent
-# The engine root carries ``vnx_cli/`` in a checkout, one level higher when
-# packaged. Same bootstrap as ``pin_drift``; the file check keeps an unrelated
-# ``vnx_cli`` off the path.
-_ENGINE_ROOT = _HERE.parent
-for _candidate in (_ENGINE_ROOT, _ENGINE_ROOT.parent):
+# The IMPORT root is the directory that holds ``vnx_cli/``: the repo root in a
+# checkout, ``site-packages`` in a wheel (``vnx_cli`` ships as a top-level
+# package). It is put on ``sys.path`` only -- it is not the engine root. The
+# file check keeps an unrelated ``vnx_cli`` off the path.
+for _candidate in (_HERE.parent, _HERE.parent.parent):
     if (_candidate / "vnx_cli" / "_reexec.py").is_file():
         if str(_candidate) not in sys.path:
             sys.path.insert(0, str(_candidate))
-        _ENGINE_ROOT = _candidate
         break
 for _path in (_HERE / "lib", _HERE, _HERE / "launchd"):
     if str(_path) not in sys.path:
@@ -52,7 +51,16 @@ import fleet_pin_audit
 import hook_coverage
 import launchd_project_scope
 import pin_drift
+from vnx_cli._engine import engine_root
 from vnx_cli.commands import doctor, release
+
+# The ENGINE root is where ``scripts/commands/`` lives. Its owner resolves it
+# (packaged installs keep the engine under ``vnx_orchestration/``, a sibling of
+# ``vnx_cli``), never a probe copied here: in a wheel the import root above is
+# site-packages, and building engine paths under it would look for a
+# ``scripts/commands/regen_settings.sh`` that does not exist. Every engine path
+# in this module builds on this value.
+_ENGINE_ROOT = engine_root()
 
 BLOCKING_CLASSES = ("pin", "launchd", "hooks", "main_drift")
 REPORT_CLASSES = BLOCKING_CLASSES + ("unmeasured", "info")
@@ -334,27 +342,49 @@ def measure(selected: Mapping[str, Path], fleet: Mapping[str, Path], *,
 
 def _resolve_fleet(entries: Sequence[Mapping[str, Any]],
                    wanted: Sequence[str]) -> Tuple[Dict[str, Path], Dict[str, Path]]:
-    """``(project_id -> root, selected)``; ``project_id`` wins, as in launchd.
+    """``(project_id -> root, selected)``; an exact ``project_id`` wins, as in launchd.
 
-    An unknown ``--project`` id is a measurement error, never a shrunken fleet.
+    An exact id is resolved first. The aliases -- the registry ``name`` and the
+    directory basename -- are consulted only for a wanted name that is not an
+    exact id, so an alias equal to another project's id can never shadow that
+    id. An alias two projects carry is refused, naming both: it is never
+    resolved to whichever project happened to be registered first. An unknown
+    ``--project`` name is a measurement error, never a shrunken fleet.
     """
     fleet: Dict[str, Path] = {}
-    aliases: Dict[str, str] = {}
+    alias_owners: Dict[str, List[str]] = {}
     for entry in entries:
         root = Path(entry["path"]).expanduser()
         project_id = str(entry.get("project_id") or entry.get("name") or root.name)
         if project_id in fleet:
             raise MeasurementError(f"duplicate project id {project_id!r} in the registry")
         fleet[project_id] = root
-        for alias in (project_id, entry.get("name"), root.name):
-            if alias:
-                aliases.setdefault(str(alias), project_id)
+        for alias in (entry.get("name"), root.name):
+            if not alias:
+                continue
+            owners = alias_owners.setdefault(str(alias), [])
+            if project_id not in owners:
+                owners.append(project_id)
     if not wanted:
         return fleet, dict(fleet)
-    unknown = [name for name in wanted if name not in aliases]
+    selected: Dict[str, Path] = {}
+    unknown: List[str] = []
+    for name in wanted:
+        if name in fleet:
+            selected[name] = fleet[name]
+            continue
+        owners = alias_owners.get(name) or []
+        if len(owners) > 1:
+            raise MeasurementError(
+                f"ambiguous project name {name!r}: carried by "
+                f"{', '.join(repr(owner) for owner in owners)}")
+        if not owners:
+            unknown.append(name)
+            continue
+        selected[owners[0]] = fleet[owners[0]]
     if unknown:
         raise MeasurementError(f"unknown project id(s): {', '.join(unknown)}")
-    return fleet, {aliases[name]: fleet[aliases[name]] for name in wanted}
+    return fleet, selected
 
 def summarize(projects: Mapping[str, Mapping[str, Any]]) -> Dict[str, int]:
     summary = {"projects": len(projects)}

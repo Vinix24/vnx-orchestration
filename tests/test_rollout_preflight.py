@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -439,3 +440,110 @@ def test_project_narrows_and_unknown_id_exits_two(fleet, capsys):
     assert code == 2
     assert out == ""
     assert "ghost" in err
+
+
+# ── 11. two roots: a packaged install finds the wrapper in the engine ─────
+def _packaged_install(tmp_path: Path) -> tuple[Path, Path]:
+    """A wheel layout: ``vnx_cli`` at ``site-packages``, the engine in a sibling.
+
+    Every module is REAL code copied into the layout the wheel ships
+    (``vnx_orchestration/scripts``, ``vnx_orchestration/scripts/lib``, ...), so
+    no module resolves its own root back into this checkout. Only the wrapper is
+    a fixture: a bash function printing the render, standing in for the real
+    ``regen_settings.sh``.
+    """
+    site = tmp_path / "site-packages"
+    ignore = shutil.ignore_patterns("__pycache__")
+    shutil.copytree(REPO_ROOT / "vnx_cli", site / "vnx_cli", ignore=ignore)
+    scripts = site / "vnx_orchestration" / "scripts"
+    scripts.mkdir(parents=True)
+    for name in ("rollout_preflight.py", "fleet_pin_audit.py", "fleet_role_drift.py"):
+        shutil.copy2(REPO_ROOT / "scripts" / name, scripts / name)
+    for name in ("lib", "launchd"):
+        shutil.copytree(REPO_ROOT / "scripts" / name, scripts / name, ignore=ignore)
+    (scripts / "commands").mkdir()
+    (scripts / "commands" / "regen_settings.sh").write_text(
+        "cmd_regen_settings() { printf '%s\\n' '{\"hooks\": {}}'; }\n", encoding="utf-8")
+    return site, scripts
+
+
+def test_packaged_layout_finds_the_wrapper_in_the_engine(tmp_path: Path):
+    _site, scripts = _packaged_install(tmp_path)
+    home = tmp_path / "home"
+    (home / ".vnx-system" / "versions").mkdir(parents=True)
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    root = _project(tmp_path, "alpha", None, settings={"hooks": {}})
+    registry = home / ".vnx" / "projects.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({"projects": [
+        {"project_id": "alpha", "name": "alpha", "path": str(root)}]}), encoding="utf-8")
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("VNX_")}
+    env.pop("PYTHONPATH", None)
+    env["HOME"] = str(home)
+    proc = subprocess.run([sys.executable, str(scripts / "rollout_preflight.py"), "--json"],
+                          capture_output=True, text=True, env=env, cwd=str(tmp_path),
+                          timeout=120)
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    assert "wrapper not found" not in output
+    report = json.loads(proc.stdout)
+    assert report["projects"]["alpha"]["hooks"] == []
+
+
+def test_source_checkout_layout_finds_the_wrapper(tmp_path: Path):
+    root = _project(tmp_path, "alpha", None)
+
+    proc = rp.run_regen_settings_dry_run(root)
+
+    assert "wrapper not found" not in (proc.stderr or "")
+    assert proc.returncode == 0, proc.stderr
+
+
+# ── 12. fleet resolution: exact ids first, aliases only for a free name ───
+def _entry(tmp_path: Path, dirname: str, project_id: str,
+           name: str | None = None) -> dict:
+    root = tmp_path / dirname
+    root.mkdir()
+    entry = {"project_id": project_id, "path": str(root)}
+    if name is not None:
+        entry["name"] = name
+    return entry
+
+
+def test_exact_project_id_beats_an_earlier_projects_name(tmp_path: Path):
+    alpha = _entry(tmp_path, "alpha-dir", "alpha", name="beta")
+    beta = _entry(tmp_path, "beta-dir", "beta")
+
+    _fleet, selected = rp._resolve_fleet([alpha, beta], ["beta"])
+
+    assert list(selected) == ["beta"]
+    assert selected["beta"] == Path(beta["path"])
+
+
+def test_an_alias_resolves_a_name_that_is_no_exact_id(tmp_path: Path):
+    alpha = _entry(tmp_path, "alpha-dir", "alpha", name="beta")
+
+    _fleet, selected = rp._resolve_fleet([alpha], ["beta"])
+
+    assert list(selected) == ["alpha"]
+
+
+def test_an_alias_two_projects_carry_is_refused(tmp_path: Path):
+    alpha = _entry(tmp_path, "alpha-dir", "alpha", name="gamma")
+    beta = _entry(tmp_path, "beta-dir", "beta", name="gamma")
+
+    with pytest.raises(rp.MeasurementError) as raised:
+        rp._resolve_fleet([alpha, beta], ["gamma"])
+
+    message = str(raised.value)
+    assert "gamma" in message
+    assert "alpha" in message and "beta" in message
+
+
+def test_an_unknown_name_still_raises_the_unknown_project_error(tmp_path: Path):
+    alpha = _entry(tmp_path, "alpha-dir", "alpha")
+
+    with pytest.raises(rp.MeasurementError, match="unknown project id"):
+        rp._resolve_fleet([alpha], ["ghost"])
