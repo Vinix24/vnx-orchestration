@@ -7,7 +7,7 @@ per run in the shape ``provider_cost_run/1``; a run is one start of one model
 for one purpose: a dispatch attempt, a gate run, a plan-gate seat, a panel leg,
 an intelligence call.
 
-Two entry points, and every writer and reader goes through them:
+Every writer and reader goes through these entry points:
 
 - :func:`record_run` validates a :class:`RunCost`, prices it through
   ``provider_costs.price_run`` when the caller has tokens but no provider cost
@@ -20,6 +20,10 @@ Two entry points, and every writer and reader goes through them:
   :func:`record_next_attempt` is the same writer for a producer that knows its
   dispatch but not the attempt number: it takes the next attempt from the
   ledger and the spool under the same lock as the write.
+- :func:`record_once` (K3-1a) books one line per caller-supplied execution
+  identity ``(project_id, producer, execution_id)``: the same key again returns
+  the line already booked and writes nothing, and an ``execution_id`` that is
+  not one ``uuid4().hex`` string is refused before any lock is taken.
 - :func:`aggregate_runs` is the one aggregation: per ``run_id`` only the last
   line counts (a ``correction`` replaces the earlier contribution), a run
   without a price is listed in ``unavailable`` and never summed as 0, a line in
@@ -140,6 +144,8 @@ _PRICE_RUN_COUNTS = (
     ("cache_write", ("cache_write_5m", "cache_write_1h")),
 )
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._:@+-]")
+# The one shape a booking's execution id may have (K3-1a): exactly what ``uuid4().hex`` gives.
+_EXECUTION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # The spool file name: at most this many readable characters, then ``~`` and this many hex digits of the digest.
 _SPOOL_READABLE_CHARS = 128
 _SPOOL_DIGEST_HEX = 16
@@ -175,6 +181,10 @@ class UnknownModel(CostLedgerRefusal):
 
 class InvalidRecord(CostLedgerRefusal):
     """Any other malformed field: a role, kind, billing, source, token count or timestamp."""
+
+
+class InvalidExecutionId(CostLedgerRefusal):
+    """A booking with no execution identity (K3-1a): nothing is written and nothing is guessed."""
 
 
 class CostLedgerWriteError(OSError):
@@ -1274,6 +1284,92 @@ def record_next_attempt(
             raise _RecordNotBuilt(str(exc)) from exc
 
     return _write(path, record_for, f"the next attempt of {project_id}:{producer}:{ref}")
+
+
+def execution_run_id(project_id: str, producer: str, execution_id: object) -> str:
+    """The ``run_id`` a booking key names, derived from the key alone (K3-1a): ``<project>:<producer>:<id>:1``.
+
+    The trailing ``1`` is the ledger's fixed attempt slot for this writer, never
+    a counter: the execution id IS the identity. Anything but a ``uuid4().hex``
+    string (32 lowercase hex digits) raises :class:`InvalidExecutionId` before a
+    lock is taken — a run without an identity is never booked under a guessed one.
+    """
+    if not isinstance(execution_id, str) or not _EXECUTION_ID_RE.match(execution_id):
+        raise InvalidExecutionId(
+            f"execution_id {execution_id!r} is not a uuid4().hex string (32 lowercase hex digits): "
+            "a run without an identity is not booked",
+        )
+    return run_id_for(project_id, producer, execution_id, 1)
+
+
+class _BookedRun(Exception):
+    """Carries the line :func:`record_once` found for the execution it was asked to book."""
+
+    def __init__(self, record: Dict[str, Any]):
+        super().__init__(record.get("run_id"))
+        self.record = record
+
+
+def _booked_lines(ledger_path: Path, fh) -> List[Dict[str, Any]]:
+    """Every line in the ledger and in the spool that waits for it, under the caller's lock.
+
+    The spool is read as :func:`_next_attempt` reads it, by the ``run_id`` of its
+    records: a run waiting there was written. A ledger that cannot be read
+    raises :class:`_Unwritten` with nothing written — an unreadable ledger is
+    evidence of nothing, so it must never read as "not booked yet".
+    """
+    spool_dir = spool_dir_for(ledger_path)
+    try:
+        text = _read_under_the_lock(fh) if fh is not None else _read_without_the_lock(ledger_path)
+        spooled = [_read_spool_file(spool_dir / name) for name in _spool_names(spool_dir)]
+    except (OSError, _UnreadableSpool) as exc:
+        raise _Unwritten(exc, f"the runs already booked could not be read ({exc}): nothing was written") from exc
+    return [*_parse_lines(text)[0], *(record for run in spooled for record in run)]
+
+
+def record_once(
+    project_id: str,
+    producer: str,
+    execution_id: str,
+    make_run: Callable[[str], RunCost],
+    *,
+    ledger_path: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """Write one line for one execution identity, unless that line is there already (K3-1a).
+
+    The identity is the caller's: ``(project_id, producer, execution_id)``, one
+    ``uuid4().hex`` minted per real execution. The line's ``run_id`` is derived
+    from that key alone (:func:`execution_run_id`), so no attempt number,
+    timestamp window or slot counter can book the same execution twice or a
+    different one under the same key — the round-4 failure of K3 (#2329).
+
+    The lookup and the write run under one exclusive hold of the ledger's lock
+    file, so two processes booking one key produce one line. Returns the line
+    already booked (in the ledger or its spool) and writes nothing; otherwise
+    returns the record as written. A missing identity raises
+    :class:`InvalidExecutionId` before the lock is taken. Refusals and
+    :class:`CostLedgerWriteError` are those of :func:`record_run`.
+    """
+    run_id = execution_run_id(project_id, producer, execution_id)
+    path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
+    refuse_real_central_store_write_under_test_runner(path)
+
+    def record_for(fh) -> Dict[str, Any]:
+        booked = next(
+            (dict(line) for line in _booked_lines(path, fh) if line.get("run_id") == run_id), None,
+        )
+        if booked is not None:
+            raise _BookedRun(booked)
+        try:
+            return build_record(make_run(run_id))
+        except OSError as exc:
+            raise _RecordNotBuilt(str(exc)) from exc
+
+    try:
+        return _write(path, record_for, f"the run {run_id}")
+    except _BookedRun as booked:
+        logger.debug("cost_ledger: run %s is booked already; nothing written", run_id)
+        return booked.record
 
 
 # ---------------------------------------------------------------------------
@@ -2667,9 +2763,11 @@ __all__ = [
     "BEACON_COMPONENT", "BEACON_REFRESH_SECONDS",
     "CostLedgerRefusal", "CostWithoutSource", "UnavailableWithAmount", "CorrectionWithoutSupersedes",
     "IncompleteUsageMarkedComplete", "RunIdProjectMismatch", "UnknownModel", "InvalidRecord",
+    "InvalidExecutionId",
     "CostLedgerWriteError", "RunCost", "WrittenRecord", "LedgerTotals", "GroupedTotals", "ReplayResult",
     "LedgerFiles", "GROUP_KEYS", "UNKNOWN_GROUP",
-    "split_run_id", "run_id_for", "build_record", "record_run", "record_next_attempt", "aggregate_runs",
+    "split_run_id", "run_id_for", "execution_run_id", "build_record", "record_run", "record_next_attempt",
+    "record_once", "aggregate_runs",
     "aggregate_groups", "utc_day",
     "replay_spool", "spool_dir_for", "spool_file_for", "report_spool_health", "ledger_files",
 ]
