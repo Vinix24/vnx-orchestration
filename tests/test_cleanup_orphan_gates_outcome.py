@@ -297,6 +297,110 @@ def test_a_retry_that_replaced_a_half_ended_request_is_not_finished(env, monkeyp
     assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "executing"
 
 
+class _SimulatedCrash(BaseException):
+    """A process death between the receipt append and clearing ``receipt_pending``.
+
+    ``BaseException`` on purpose: every ``except`` on that path is narrower, so
+    nothing turns the crash into a handled write failure.
+    """
+
+
+def test_a_crash_after_the_receipt_append_books_one_receipt_for_the_attempt(env, monkeypatch):
+    """GE-8 round 4 (blocker): the receipt's identity is the request's, not the emission time.
+
+    The record carries ``dispatch_id``/``commit_sha`` on its top level, so the
+    receipt booked for it dedupes on a stable key. A crash after the append and
+    before the flag is cleared leaves the debt on disk; the next run pays it and
+    the append returns a duplicate — one ``review_gate_result`` for one attempt.
+    """
+    import governance_receipts
+
+    import cleanup_orphan_gates as m
+    import gate_recorder
+
+    request_path = _write_request(env, _request_payload(commit_sha=review_stack_support.HEAD_SHA))
+    # The recovery is a LATER run, in a later second: the emission time is what
+    # an identity-less receipt key falls back to, so those two must differ for
+    # the old key to be seen as unstable (it collided only by the same-second
+    # accident the codex repro got past).
+    clock = {"now": "2026-10-28T16:00:00Z"}
+    monkeypatch.setattr(governance_receipts, "utc_now_iso", lambda: clock["now"])
+    real_write = gate_recorder._write_result_atomic
+    calls = {"n": 0}
+
+    def crash_after_the_append(path, record):
+        calls["n"] += 1
+        if calls["n"] == 2:  # 1 = the record, 2 = clearing receipt_pending after the append
+            raise _SimulatedCrash("dead between the receipt append and clearing receipt_pending")
+        return real_write(path, record)
+
+    monkeypatch.setattr(gate_recorder, "_write_result_atomic", crash_after_the_append)
+
+    with pytest.raises(_SimulatedCrash):
+        _main(m, env)
+
+    slot = env["results_dir"] / f"{STEM}.json"
+    crashed = json.loads(slot.read_text(encoding="utf-8"))
+    assert crashed["status"] == "unavailable"
+    assert crashed["receipt_pending"] is True, "the crash left the debt on disk"
+    assert len(_receipts(env)) == 1, "the append landed before the crash"
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "executing"
+
+    clock["now"] = "2026-10-28T16:00:05Z"
+    assert _main(m, env) == 0, "the next run pays the receipt the crashed run left owed"
+
+    assert len(_receipts(env)) == 1, "exactly one review_gate_result for the attempt, never two"
+    assert crashed["dispatch_id"] == "ge8-orphan-fixture", "the identity is on the record's top level"
+    assert crashed["commit_sha"] == review_stack_support.HEAD_SHA
+    assert "receipt_pending" not in json.loads(slot.read_text(encoding="utf-8"))
+    assert json.loads(slot.read_text(encoding="utf-8"))["attempt_seq"] == 1, "no second record"
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "unavailable"
+
+
+def test_a_transient_append_failure_is_paid_by_the_next_run(env, monkeypatch):
+    """GE-8 round 4 (warning): a receipt debt outlives the request's end.
+
+    The append fails once, so the run leaves ``receipt_pending: true`` on the
+    unavailable record and still ends the request. The orphan scan drops the
+    slot (it has a result) and the request has ended, so only the recovery's
+    debt check can pick it up: the next run books exactly one receipt.
+    """
+    import cleanup_orphan_gates as m
+    import gate_recorder
+
+    request_path = _write_request(env, _request_payload(commit_sha=review_stack_support.HEAD_SHA))
+    real_emit = gate_recorder.emit_governance_receipt
+    calls = {"n": 0}
+
+    def flaky_emit(event_type, *args, **kwargs):
+        if event_type == "review_gate_result":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("transient receipt store failure")
+        return real_emit(event_type, *args, **kwargs)
+
+    monkeypatch.setattr(gate_recorder, "emit_governance_receipt", flaky_emit)
+
+    assert _main(m, env) == 0, "the record and the request end land; only the receipt failed"
+
+    slot = env["results_dir"] / f"{STEM}.json"
+    record = json.loads(slot.read_text(encoding="utf-8"))
+    assert record["status"] == "unavailable"
+    assert record["receipt_pending"] is True, "the failed append left its durable trace"
+    assert _receipts(env) == [], "no receipt was booked"
+    assert json.loads(request_path.read_text(encoding="utf-8"))["status"] == "unavailable", (
+        "the request ended although its receipt is still owed"
+    )
+    ended_request = request_path.read_bytes()
+
+    assert _main(m, env) == 0, "the next run books the receipt the ended request left owed"
+
+    assert len(_receipts(env)) == 1, "exactly one receipt after the transient failure"
+    assert "receipt_pending" not in json.loads(slot.read_text(encoding="utf-8"))
+    assert json.loads(slot.read_text(encoding="utf-8"))["attempt_seq"] == 1, "no second record"
+    assert request_path.read_bytes() == ended_request, "an already-ended request is not written again"
+
+
 def test_the_store_comes_from_the_resolver_not_the_repo(env, monkeypatch):
     """``$VNX_DATA_DIR`` + ``VNX_DATA_DIR_EXPLICIT=1`` decide the store (issue #225)."""
     import cleanup_orphan_gates as m

@@ -36,6 +36,17 @@ request through the same writer: the record on the slot is handed back
 unchanged, which step 6 reads as a repeat, so no second record and no second
 receipt is written and only the request's end lands.
 
+**The record names the request's identity, and an unpaid receipt is recovery's
+work too** (GE-8 round 4). ``dispatch_id`` and ``commit_sha`` sit on the
+record's top level as well as inside ``original_request``, because the booked
+``review_gate_result`` is deduplicated on the receipt's fields, not on a nested
+copy: without them the key fell back to the emission timestamp and a retry
+after a crash appended a second line for the same attempt. And a request that
+has ended while its record still carries ``receipt_pending: true`` is picked up
+by the recovery scan: the append failed, the orphan scan drops the slot (it has
+a result) and the ended request used to drop it too, so the debt was never
+paid. The recovery pays it through the same stable identity.
+
 The store is resolved through ``project_root.resolve_data_dir`` (ADR-026,
 issue #225): ``$VNX_DATA_DIR`` needs ``VNX_DATA_DIR_EXPLICIT=1``; never a
 repo-relative ``.vnx-data`` fallback.
@@ -213,6 +224,21 @@ def _named(value: Any) -> bool:
     return not (isinstance(value, str) and not value.strip())
 
 
+# The request fields the booked receipt's dedup key reads
+# (``append_receipt_internals.idempotency.IDEMPOTENCY_FIELDS``) and the cleanup
+# record therefore carries at its TOP level (GE-8 round 4). Leaving them nested
+# in ``original_request`` gave the receipt no stable identity: the key fell back
+# to the emission timestamp, so a retry after a crash between the append and
+# clearing ``receipt_pending`` appended a SECOND ``review_gate_result`` for the
+# same attempt.
+_OUTCOME_IDENTITY_FIELDS: Tuple[str, ...] = ("dispatch_id", "commit_sha")
+
+
+def _request_identity(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """The request's identity for the record's top level; a value it does not name is not invented."""
+    return {name: request_data[name] for name in _OUTCOME_IDENTITY_FIELDS if _named(request_data.get(name))}
+
+
 def _identity_mismatch(scan_payload: Dict[str, Any], on_disk: Dict[str, Any]) -> Optional[str]:
     """The first :data:`_REQUEST_IDENTITY_FIELDS` the scan and the slot disagree on, or ``None``.
 
@@ -279,6 +305,10 @@ def _commit_orphan(
         "abandoned_by": ABANDONED_BY,
         "age_hours": orphan["age_hours"],
         "source_request": orphan["stem"],
+        # Top level, not only inside ``original_request``: the receipt's dedup
+        # key reads these there, and without them it keys on the emission
+        # timestamp (GE-8 round 4).
+        **_request_identity(request_data),
         "original_request": request_data,
     }
     # ``pr_id`` stays what the filename names: a filled-in ``str(pr_number)``
@@ -358,13 +388,31 @@ def _is_cleanup_record(record: Dict[str, Any]) -> bool:
     )
 
 
-def _find_unfinished() -> List[Dict[str, Any]]:
-    """Requests a previous run left ``executing`` although the cleanup's record landed (dicts).
+def _owes_receipt(record: Dict[str, Any]) -> bool:
+    """Does this record still owe its ``review_gate_result`` receipt?
 
-    Step 7's write can fail after the record and its receipt landed. The slot
-    then holds a result, so :func:`_find_orphans` skips it and the request stays
-    in flight for ever. This scan finds exactly that state: a cleanup record,
-    and a request that has not ended.
+    Only ``receipt_pending is True`` is a debt: that is the one value
+    ``gate_outcome`` sets (``_write_record_then_receipt``), and it is the one
+    value ``_pay_outstanding_receipt`` pays. A missing, ``None`` or other value
+    was not set by this writer and names no debt.
+    """
+    return record.get("receipt_pending") is True
+
+
+def _find_unfinished() -> List[Dict[str, Any]]:
+    """Work a previous run left behind although the cleanup's record landed (dicts).
+
+    Two shapes, both invisible to :func:`_find_orphans` because the slot holds
+    a result:
+
+    - the request is still ``executing``: step 7's write failed after the
+      record and its receipt landed, and the request would stay in flight for
+      ever;
+    - the request has ended while its record still carries
+      ``receipt_pending: true``: the receipt append failed, and every other
+      scan drops the slot — the orphan scan because it has a result, the
+      terminal check here because the request ended (GE-8 round 4). The debt
+      is the work, so it is picked up too.
     """
     requests_dir, results_dir = _current_dirs()
     if not requests_dir.exists():
@@ -380,8 +428,10 @@ def _find_unfinished() -> List[Dict[str, Any]]:
             continue
         stem = req_path.stem
         request_data = _read_request(req_path)
-        if canonical_status(request_data) in REQUEST_TERMINAL_STATUSES:
-            continue  # already ended: nothing left to finish
+        request_ended = canonical_status(request_data) in REQUEST_TERMINAL_STATUSES
+        receipt_debt = _owes_receipt(record)
+        if request_ended and not receipt_debt:
+            continue  # ended and owes nothing: nothing left to finish
         gate_name, pr_number, pr_id = _slot_identity(stem, request_data)
         unfinished.append({
             "request_path": req_path,
@@ -394,6 +444,7 @@ def _find_unfinished() -> List[Dict[str, Any]]:
             "request_data": request_data,
             "record": record,
             "recovery": True,
+            "receipt_debt": receipt_debt,
         })
     return unfinished
 
@@ -406,6 +457,11 @@ def _finish_unfinished(candidate: Dict[str, Any], requests_dir: Path) -> OrphanR
     only the request's end lands. The identity check is the same one the
     cleanup does — a request a retry replaced is somebody else's, and it is
     left alone.
+
+    GE-8 round 4: the same hand-back also pays a ``receipt_pending`` debt. The
+    writer pays it before step 6, through the same stable receipt identity, so
+    a receipt that already landed comes back as a duplicate — never a second
+    line. A request that already ended is not written again.
     """
     gate_name, pr_number, pr_id = candidate["gate_name"], candidate["pr_number"], candidate["pr_id"]
     request_path = gate_recorder.result_file_path(requests_dir, gate_name, pr_number, pr_id)
@@ -445,11 +501,16 @@ def _finish_unfinished_locked(
         gate=candidate["gate_name"], status="unavailable", pr_id=candidate["pr_id"],
         pr_number=candidate["pr_number"], record=dict(stored),
     )
-    request = GateRequest(
-        requests_dir=requests_dir,
-        payload=dict(on_disk.record),
-        fields={"reason": ABANDONED_ORPHAN_REQUEST, "abandoned_by": ABANDONED_BY},
-    )
+    # An already-ended request has nothing left to write: this commit is here
+    # for the ``review_gate_result`` its record still owes (GE-8 round 4).
+    # Handing the writer no request keeps a finished request byte for byte.
+    request = None
+    if canonical_status(on_disk.record) not in REQUEST_TERMINAL_STATUSES:
+        request = GateRequest(
+            requests_dir=requests_dir,
+            payload=dict(on_disk.record),
+            fields={"reason": ABANDONED_ORPHAN_REQUEST, "abandoned_by": ABANDONED_BY},
+        )
     try:
         _payload, written = commit_gate_outcome(
             outcome,
@@ -476,6 +537,7 @@ def _log_to_audit(orphans: List[Dict[str, Any]]) -> None:
             pr_number = _extract_pr_number_from_stem(orphan["stem"])
             dispatch_id = orphan.get("request_data", {}).get("dispatch_id") or None
             recovered = bool(orphan.get("recovery"))
+            receipt_debt = bool(orphan.get("receipt_debt"))
             context: dict = {
                 "stem": orphan["stem"],
                 "age_hours": orphan["age_hours"],
@@ -486,7 +548,12 @@ def _log_to_audit(orphans: List[Dict[str, Any]]) -> None:
                 context["pr_number"] = pr_number
             if dispatch_id is not None:
                 context["dispatch_id"] = dispatch_id
+            if receipt_debt:
+                context["receipt_debt"] = True
             message = (
+                f"Orphan gate {orphan['stem']} receipt booked: the request had ended while its "
+                f"unavailable record still owed a review_gate_result"
+                if receipt_debt else
                 f"Orphan gate {orphan['stem']} request finished after a failed write: its "
                 f"unavailable record was already booked"
                 if recovered else
@@ -556,11 +623,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\n{mode_label}Found {len(unfinished)} half-ended request(s) to finish:\n")
     requests_dir = _current_dirs()[0]
     for candidate in unfinished:
-        status = "would finish" if args.dry_run else "finishing"
-        print(
-            f"  {candidate['stem']}  gate={candidate['gate_name']}  → {status} the request "
-            f"(its unavailable record is already booked)"
-        )
+        if candidate.get("receipt_debt"):
+            verb = "would book" if args.dry_run else "booking"
+            detail = "the receipt its unavailable record still owes"
+        elif args.dry_run:
+            verb, detail = "would finish", "the request (its unavailable record is already booked)"
+        else:
+            verb, detail = "finishing", "the request (its unavailable record is already booked)"
+        print(f"  {candidate['stem']}  gate={candidate['gate_name']}  → {verb} {detail}")
         if args.dry_run:
             resolution = OrphanResolution(DRY_RUN)
         else:
