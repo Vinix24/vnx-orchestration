@@ -528,6 +528,16 @@ def _finish_unfinished_locked(
     return OrphanResolution(RESOLVED)
 
 
+def _recovery_action(candidate: Dict[str, Any], dry_run: bool) -> str:
+    """The recovery's progress line: a receipt debt is not a request end (GE-8 round 4)."""
+    if candidate.get("receipt_debt"):
+        return ("would book " if dry_run else "booking ") + "the receipt its unavailable record still owes"
+    return (
+        ("would finish " if dry_run else "finishing ")
+        + "the request (its unavailable record is already booked)"
+    )
+
+
 def _log_to_audit(orphans: List[Dict[str, Any]]) -> None:
     """Append cleanup event to governance_audit.ndjson."""
     try:
@@ -623,14 +633,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\n{mode_label}Found {len(unfinished)} half-ended request(s) to finish:\n")
     requests_dir = _current_dirs()[0]
     for candidate in unfinished:
-        if candidate.get("receipt_debt"):
-            verb = "would book" if args.dry_run else "booking"
-            detail = "the receipt its unavailable record still owes"
-        elif args.dry_run:
-            verb, detail = "would finish", "the request (its unavailable record is already booked)"
-        else:
-            verb, detail = "finishing", "the request (its unavailable record is already booked)"
-        print(f"  {candidate['stem']}  gate={candidate['gate_name']}  → {verb} {detail}")
+        print(
+            f"  {candidate['stem']}  gate={candidate['gate_name']}  → "
+            f"{_recovery_action(candidate, args.dry_run)}"
+        )
         if args.dry_run:
             resolution = OrphanResolution(DRY_RUN)
         else:
