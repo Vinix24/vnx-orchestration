@@ -34,6 +34,7 @@ from gate_billing_table import (
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
+import gate_status
 import provider_reachability
 import provider_switch
 
@@ -860,6 +861,10 @@ def stamp_request_identity(
 ) -> Dict[str, Any]:
     """Stamp ``branch`` + ``commit_sha`` from the request onto a result record.
 
+    Also carries the run's ``execution_id`` (K3-2a) when the request has a
+    minted one, so every record of a run — not just the success record — names
+    the execution it describes.
+
     OI-1307 (dispatch-20260816-fix1588-poort-b): the merge door's closure check
     matches a review-gate result on BOTH branch (ADR-005) and head sha. Before
     this, no writer stamped either field, so a result never carried the branch
@@ -922,6 +927,14 @@ def stamp_request_identity(
     for field in _ROUND_FIELDS + _OPERATOR_FIELDS:
         if request_payload.get(field):
             result_payload[field] = request_payload[field]
+    # K3-2a: the run's execution_id travels with the rest of the request's
+    # identity, so EVERY record of the run (the success record, a failure
+    # record, a not-executable one) carries the id the run was started with.
+    # Only a minted id is copied — a request without one (a run that never
+    # started) leaves the field absent rather than stamping a placeholder.
+    execution_id = request_payload.get(gate_status.EXECUTION_ID_FIELD)
+    if gate_status.is_execution_id(execution_id):
+        result_payload[gate_status.EXECUTION_ID_FIELD] = execution_id
     return result_payload
 
 
@@ -1839,6 +1852,7 @@ def _emit_terminal_result_receipt(
     lock_timeout: Optional[float] = None,
     raise_on_failure: bool = False,
     extra_fields: Optional[Mapping[str, Any]] = None,
+    book_undecided: bool = False,
 ) -> None:
     """Emit the RESULT receipt for a decided gate verdict (OI-1702/OI-1703).
 
@@ -1877,12 +1891,21 @@ def _emit_terminal_result_receipt(
     residual risk and the claude_github head off its request. They fill keys
     this function left unset and never replace one, so ``status``,
     ``gate_status``, the record's head and ``attempt_seq`` stay its own.
+
+    ``book_undecided`` is GE-8's one opt-in: the orphan cleanup books an
+    ``unavailable`` record and its receipt in the same commit, so the ledger
+    shows that the request ended. It is off for every other caller, which keeps
+    ADR-046 §1 intact (an outage is absence, not a vote). Such a receipt
+    carries the record's own status rather than ``failed``: a receipt reads for
+    a rejection otherwise, which is exactly what ADR-037 forbids.
     """
-    if not owes_outcome_receipt(payload):
+    if not owes_outcome_receipt(payload) and not book_undecided:
         # not_executable / unavailable / in-flight: not a decided verdict, so
         # there is no outcome receipt to book.
         return
-    receipt_status, fields = _outcome_receipt_fields(payload, gate=gate, pr_ref=pr_ref, extra_fields=extra_fields)
+    receipt_status, fields = _outcome_receipt_fields(
+        payload, gate=gate, pr_ref=pr_ref, extra_fields=extra_fields, book_undecided=book_undecided,
+    )
     try:
         emit_governance_receipt(
             _OUTCOME_RECEIPT_EVENT,
@@ -1916,13 +1939,22 @@ _OUTCOME_RECEIPT_ENVELOPE: Dict[str, str] = {"receipt_kind": "review_gate", "ter
 
 def _outcome_receipt_fields(
     payload: Dict[str, Any], *, gate: str, pr_ref: str, extra_fields: Optional[Mapping[str, Any]],
+    book_undecided: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
-    """The receipt ``status`` and fields a decided ``payload`` books; the caller checked it owes one."""
+    """The receipt ``status`` and fields a decided ``payload`` books; the caller checked it owes one.
+
+    ``book_undecided`` (GE-8, off by default) is the orphan cleanup's opt-in: an
+    ``unavailable`` record's receipt keeps that status instead of reading as
+    ``failed``, so the verdict rule books ``investigate`` — never a rejection.
+    """
     from gate_status import canonical_status, is_pass
 
     status = canonical_status(payload)
-    passed, _reason = is_pass(payload)
-    receipt_status = "completed" if passed else "failed"
+    if book_undecided and not owes_outcome_receipt(payload):
+        receipt_status, passed = status or "unavailable", False
+    else:
+        passed, _reason = is_pass(payload)
+        receipt_status = "completed" if passed else "failed"
     blocking = payload.get("blocking_findings") or []
     blocking_count = len(blocking) if isinstance(blocking, list) else 0
 

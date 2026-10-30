@@ -49,6 +49,7 @@ said — previously only the final resolved record survived the run (OI-888).
 from __future__ import annotations
 
 import json
+import logging
 import re
 import os
 import subprocess
@@ -78,6 +79,8 @@ import provider_switch
 # without a change. The INTERIM side-door marker travels with the function
 # (its docstring in governed_lane.py).
 from governed_lane import _make_default_dispatcher, read_report as _read_report
+
+logger = logging.getLogger(__name__)
 
 HERE =Path(__file__).resolve().parent
 PROVIDER_DISPATCH = HERE / "provider_dispatch.py"
@@ -1866,9 +1869,88 @@ def _seat_final_answer(
     )
 
 
+def _store_project_id(data_dir: Optional[str]) -> str:
+    """The tenant of the store this run writes into (ADR-007), through the one resolver.
+
+    A data dir under ``.vnx-data/<project>/`` names its own tenant and that answer
+    wins over the ambient ``VNX_PROJECT_ID``; an unnamed store falls back to the
+    env, then ``vnx-dev`` — a line is never skipped for want of a tenant.
+    """
+    import harness_run_cost  # sibling module
+
+    return harness_run_cost.ledger_project_id(Path(data_dir) / "state" if data_dir else None)
+
+
+def _seat_producer(member: Dict[str, str]) -> str:
+    """The ledger producer naming this seat: ``plan_gate-<label>``.
+
+    K3-1a's ``ref`` is log context only, so the seat's own name rides the
+    producer — the shape ``panel_leg_cost.producer_for`` uses. A label is
+    sanitised so it can never carry the ``:`` that splits a ``run_id``.
+    """
+    label = re.sub(r"[^A-Za-z0-9._-]", "_", str(member.get("label") or "seat"))
+    return f"plan_gate-{label}"
+
+
+def _book_seat_attempt(
+    member: Dict[str, str],
+    *,
+    execution_id: str,
+    dispatch_id: str,
+    started: datetime,
+    ended: datetime,
+    error: Optional[BaseException],
+    data_dir: Optional[str],
+    project_id: Optional[str],
+) -> None:
+    """Book this seat dispatch as one cost-ledger line (K3-1b), or none with no store.
+
+    A seat's run ends HERE, in the panel process: the dispatcher returns the
+    report text (or raises), and nothing further down reports usage. The line's
+    identity is the run's own ``execution_id``, minted before the call, and its
+    provider/model come from what the panel launched (the registry-resolved
+    lane model, ADR-036), never from a model named in the report.
+
+    A raised dispatch is a door refusal when its text carries the door's code:
+    that attempt provably never started and books zero; any other raised
+    dispatch started and lost its answer, so it books unknown. Nothing here may
+    fail the panel (a seat's verdict is not the ledger's to lose): best-effort,
+    one WARNING. The tenant is the store's (ADR-007): ``project_id`` when the
+    caller named one, else the project the data dir itself names.
+    """
+    if not data_dir:
+        return
+    try:
+        import harness_run_cost  # sibling module
+        from provider_costs import costs_path_in
+
+        provider = member["provider"]
+        refusal = harness_run_cost.door_refusal_reason(error) if error is not None else None
+        run = harness_run_cost.AttemptRun(
+            provider=provider,
+            model=harness_run_cost.lane_model(provider, member.get("model_arg", "")),
+            execution_id=execution_id,
+            started=started, ended=ended,
+            outcome=(harness_run_cost.ATTEMPT_REFUSED if refusal else harness_run_cost.ATTEMPT_RAN),
+            reason=refusal or ("seat_dispatch_error" if error is not None else ""),
+        )
+        harness_run_cost.record_attempt_run(
+            run,
+            project_id=project_id or harness_run_cost.ledger_project_id(Path(data_dir) / "state"),
+            producer=_seat_producer(member), ref=dispatch_id, role="plan_gate",
+            ledger_path=costs_path_in(Path(data_dir)),
+        )
+    except Exception as exc:  # vnx-silent-except: a seat's cost line never fails the panel
+        logger.warning(
+            "plan_gate_panel: seat %s attempt %s not booked (%s): %s",
+            member.get("label"), dispatch_id, type(exc).__name__, exc,
+        )
+
+
 def _dispatch_one(
     dispatcher: DispatcherFn, member: Dict[str, str], instruction: str, dispatch_id: str,
-    archive_base: Optional[Path] = None,
+    archive_base: Optional[Path] = None, *,
+    data_dir: Optional[str] = None, project_id: Optional[str] = None,
 ) -> PanelistResult:
     """Dispatch ONE panelist once and parse its verdict into a ``PanelistResult``.
 
@@ -1902,13 +1984,28 @@ def _dispatch_one(
             dispatched=False, error=member["model_error"], report_path=dispatch_id,
             seat_status=SEAT_MODEL_UNRESOLVED,
         )
+    # K3-1b: the run's identity is minted HERE, before the call, so a report read
+    # again later (a re-parse, a re-render) can never book a second line.
+    execution_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc)
+    dispatch_exc: Optional[BaseException] = None
+    report_text = ""
     try:
         report_text = dispatcher(member["provider"], member["model_arg"], instruction, dispatch_id)
     except Exception as exc:  # vnx-silent-except: dispatch/report-read failure -> no verdict, recorded as abstain
+        dispatch_exc = exc
+    # The dispatch ended (answered or raised), so its one line is booked before
+    # the verdict is read and never changes it.
+    _book_seat_attempt(
+        member, execution_id=execution_id, dispatch_id=dispatch_id, started=started,
+        ended=datetime.now(timezone.utc), error=dispatch_exc,
+        data_dir=data_dir, project_id=project_id,
+    )
+    if dispatch_exc is not None:
         return PanelistResult(
             label=member["label"], provider=member["provider"],
             model=member.get("model_arg", ""),
-            dispatched=False, error=str(exc), report_path=dispatch_id,
+            dispatched=False, error=str(dispatch_exc), report_path=dispatch_id,
             seat_status=SEAT_DISPATCH_FAILED,
         )
     # OI-1066: detect the synthesized marker BEFORE parse_verdict. A fabricated
@@ -1960,6 +2057,9 @@ def _reextract_verdict(
     member: Dict[str, str],
     result: PanelistResult,
     dispatch_id: str,
+    *,
+    data_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> PanelistResult:
     """Second, cheap extraction of a verdict from a seat's OWN prose report (OI-1434).
 
@@ -2004,6 +2104,12 @@ def _reextract_verdict(
         result.error = f"{result.error}; {note}" if result.error else note
         return result
 
+    # K3-1b: the re-extraction is its own model call, so its own run and its own
+    # execution id — never the seat's line booked a second time.
+    execution_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc)
+    extraction_exc: Optional[BaseException] = None
+    answer = ""
     try:
         answer = dispatcher(
             member["provider"], member["model_arg"],
@@ -2011,7 +2117,14 @@ def _reextract_verdict(
             dispatch_id,
         )
     except Exception as exc:  # vnx-silent-except: a failed re-extraction leaves the seat exactly as it was
-        return _unchanged(f"verdict re-extraction failed: {exc}")
+        extraction_exc = exc
+    _book_seat_attempt(
+        member, execution_id=execution_id, dispatch_id=dispatch_id, started=started,
+        ended=datetime.now(timezone.utc), error=extraction_exc,
+        data_dir=data_dir, project_id=project_id,
+    )
+    if extraction_exc is not None:
+        return _unchanged(f"verdict re-extraction failed: {extraction_exc}")
     if not (answer or "").strip():
         return _unchanged("verdict re-extraction returned an empty answer")
     # OI-2066: an answer the lane's own deadline cut off is no answer, even
@@ -2195,6 +2308,8 @@ def _run_seat(
     track_id: str,
     archive_base: Optional[Path],
     retries: int,
+    data_dir: Optional[str] = None,
+    project_id: Optional[str] = None,
 ) -> PanelistResult:
     """One seat's verdict: dispatch, re-extract a prose review, retry a flake.
 
@@ -2215,7 +2330,10 @@ def _run_seat(
     reextractions_left = REEXTRACTION_BUDGET_PER_SEAT
     for _ in range(retries + 1):
         did = f"plan-gate-{track_id}-{member['label']}-{uuid.uuid4().hex[:8]}"
-        result = _dispatch_one(dispatcher, member, instruction, did, archive_base)
+        result = _dispatch_one(
+            dispatcher, member, instruction, did, archive_base,
+            data_dir=data_dir, project_id=project_id,
+        )
         # OI-1066: a no-verdict seat (lane timed out / governance-synthesized) is
         # retryable too — the lane may deliver on a fresh dispatch id.
         if is_scoring(result):
@@ -2224,7 +2342,10 @@ def _run_seat(
         if (result.seat_status == SEAT_PROSE_NO_FENCE and reextractions_left > 0
                 and not result.final_answer_refused):
             reextractions_left -= 1
-            result = _reextract_verdict(extraction_lane(), member, result, f"{did}-reextract")
+            result = _reextract_verdict(
+                extraction_lane(), member, result, f"{did}-reextract",
+                data_dir=data_dir, project_id=project_id,
+            )
             if is_scoring(result):
                 break  # the review was readable after all — the retry never fires
     return result
@@ -2276,7 +2397,7 @@ def run_panel(
     *,
     doc_text: Optional[str] = None,
     track_id: str,
-    project_id: str = "vnx-dev",
+    project_id: Optional[str] = None,
     panel: Optional[List[Dict[str, str]]] = None,
     dispatcher: Optional[DispatcherFn] = None,
     data_dir: Optional[str] = None,
@@ -2328,8 +2449,16 @@ def run_panel(
     left out of this run. They are never dispatched and never booked; they are
     named in the rationale (the round's decision text) and returned under
     ``switched_off_seats``.
+
+    ``project_id`` (K3-1b): the tenant the round's cost lines and seat records
+    belong to. Omitted means the STORE's own tenant (ADR-007), resolved from
+    ``data_dir``'s path, never the ambient ``VNX_PROJECT_ID``.
     """
     panel = panel or default_panel()
+    # ADR-007 / K3-1b: an unnamed project is the STORE's tenant, resolved once
+    # here so the cost lines, the seat records and the returned outcome all name
+    # the same project — never the ambient env behind the caller's back.
+    project_id = project_id or _store_project_id(data_dir)
     resolved_timeout = _seat_timeout(timeout_seconds)
     caller_supplied_lane = dispatcher is not None
     dispatcher = dispatcher or _make_default_dispatcher(data_dir, resolved_timeout)
@@ -2366,6 +2495,7 @@ def run_panel(
             member, dispatcher=dispatcher, extraction_lane=_extraction_lane,
             instruction=instruction, track_id=track_id,
             archive_base=archive_base, retries=retries,
+            data_dir=data_dir, project_id=project_id,
         )
 
     results = [_seat(member) for member in panel]
