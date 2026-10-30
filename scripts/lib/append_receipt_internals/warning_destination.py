@@ -122,6 +122,33 @@ def derive_open_items_created(warnings_list: Optional[Any]) -> int:
     )
 
 
+def reapply_frozen_classification(
+    entry: Dict[str, Any], frozen_entry: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One entry's lock-time fields, re-derived from a frozen decision.
+
+    An end line is classified once, when its intent is frozen (ADR-045 §3); the
+    append re-classifies against the recurrence counter, and that counter can
+    cross its threshold between the two moments (OI-2452). The frozen decision
+    wins: the line is written against the classification the intent holds, and
+    the deferred commit acts on it — a ``counted`` entry stays counted, an
+    ``oi_pending`` one still gets its open item. A frozen entry without a
+    boolean ``requires_tracking`` is left untouched, so the comparison reports
+    the mismatch instead of a guess. Never mutates either argument.
+    """
+    frozen = frozen_entry.get("requires_tracking")
+    if not isinstance(frozen, bool):
+        return dict(entry)
+    result: Dict[str, Any] = dict(entry)
+    if result.get("requires_tracking") is frozen and "destination" in result:
+        return result
+    result["requires_tracking"] = frozen
+    result["destination"] = "oi_pending" if frozen else "counted"
+    result["oi_id"] = None
+    result["reason"] = _PENDING_COMMIT_REASON
+    return result
+
+
 def counter_path_beside(receipts_file: Path) -> Path:
     """The recurrence counter for a ledger: next to that ledger, in its own state dir.
 

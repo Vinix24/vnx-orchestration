@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
 from .common import AppendReceiptError, EXIT_IO_ERROR, EXIT_VALIDATION_ERROR, SCRIPTS_DIR
+from .warning_destination import reapply_frozen_classification
 
 from config_registry import get_bool
 from event_outcome_semantics import end_state_status
@@ -199,8 +200,19 @@ class EndIntentMalformed(ValueError):
 
 
 def canonical_end_line(line: Mapping[str, Any]) -> str:
-    return json.dumps(dict(line), sort_keys=True, separators=_CANONICAL_SEPARATORS,
-                      ensure_ascii=False, allow_nan=False)
+    """The one canonical form the freeze and the comparison share.
+
+    A value JSON cannot represent (a NaN or Infinity float, a non-serialisable
+    object) is a named ``invalid_end_line`` refusal, not a bare ``ValueError``
+    from deep inside ``json``: nothing is frozen from a line that has no
+    canonical form (K-3b follow-up, 30-10).
+    """
+    try:
+        return json.dumps(dict(line), sort_keys=True, separators=_CANONICAL_SEPARATORS,
+                          ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise _refuse_invalid_end_line(
+            f"the end line has no canonical JSON form: {exc}") from exc
 
 
 def end_line_sha256(canonical: str) -> str:
@@ -326,10 +338,25 @@ def parse_end_intent(raw: str, *, source: str = "intent") -> Dict[str, Any]:
 
 
 def load_end_intent(intent_path: Path) -> Optional[Dict[str, Any]]:
+    """The intent at ``intent_path``, ``None`` when there is none.
+
+    A file that exists but cannot be read or decoded is a named
+    ``invalid_end_intent`` refusal, never a bare ``UnicodeDecodeError`` or
+    ``OSError`` escaping into a caller that only knows the append vocabulary
+    (K-3b follow-up, 30-10).
+    """
     try:
         raw = intent_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    except UnicodeDecodeError as exc:
+        raise AppendReceiptError(
+            "invalid_end_intent", EXIT_VALIDATION_ERROR,
+            f"the end intent at {intent_path} is not valid UTF-8: {exc}") from exc
+    except OSError as exc:
+        raise AppendReceiptError(
+            "invalid_end_intent", EXIT_IO_ERROR,
+            f"cannot read the end intent at {intent_path}: {exc}") from exc
     return parse_end_intent(raw, source=str(intent_path))
 
 
@@ -446,6 +473,33 @@ def end_line_matches_intent(receipt: Mapping[str, Any], intent: Mapping[str, Any
     return canonical == intent["line"] and end_line_sha256(canonical) == intent["sha256"]
 
 
+def restore_frozen_classification(receipt: Dict[str, Any], intent: Mapping[str, Any]) -> None:
+    """Put the intent's frozen warning classification back onto the receipt.
+
+    ``requires_tracking`` is decided once, when the intent is frozen; the append
+    classifies warnings again against the recurrence counter, which can cross
+    its threshold in between (OI-2452). The frozen decision is what the line is
+    written against, so it is restored before the deferred commit and before the
+    comparison. A side that is not a ``warnings`` list, or two lists of a
+    different length, is left as it stands: the comparison then refuses the line
+    instead of guessing which entry the other belongs to.
+    """
+    frozen = json.loads(intent["line"]).get("warnings")
+    entries = receipt.get("warnings")
+    if not isinstance(entries, list) or not isinstance(frozen, list) or len(entries) != len(frozen):
+        return
+    receipt["warnings"] = [
+        reapply_frozen_classification(entry, frozen_entry)
+        if isinstance(entry, Mapping) and isinstance(frozen_entry, Mapping) else entry
+        for entry, frozen_entry in zip(entries, frozen)
+    ]
+
+
+def _event_type(receipt: Mapping[str, Any]) -> str:
+    """The type the append layer stamps by: ``event_type``, else ``event``."""
+    return str(receipt.get("event_type") or receipt.get("event") or "").strip()
+
+
 def _refuse_end_line(receipt: Mapping[str, Any], detail: str, code: str) -> AppendReceiptError:
     return AppendReceiptError(
         code, EXIT_VALIDATION_ERROR,
@@ -476,6 +530,7 @@ def decide_end_line(receipt: Dict[str, Any], prior_end: Optional[str], *,
     if intent_key != receipt_key:
         raise _refuse_end_line(
             receipt, f"the intent at {intent_path} is for another attempt", "invalid_end_intent")
+    restore_frozen_classification(receipt, intent)
     if prior_end is not None:
         raise AppendReceiptError(
             "duplicate_lifecycle_end", EXIT_VALIDATION_ERROR,
@@ -499,17 +554,31 @@ def check_end_line(
     ledger_path: Path,
 ) -> str:
     """Enforce the end rule for ``dispatch_finished``; a no-op for every other type."""
-    if str(receipt.get("event_type") or "").strip() != DISPATCH_FINISHED_EVENT_TYPE:
+    if _event_type(receipt) != DISPATCH_FINISHED_EVENT_TYPE:
         return END_LINE_ACCEPTED
     prior = find_prior_end_line(receipt, index_data=index_data, ledger_path=ledger_path)
     return decide_end_line(receipt, prior, ledger_path=ledger_path)
 
 
-def verify_final_end_line(receipt: Mapping[str, Any], *, ledger_path: Path) -> str:
+def verify_final_end_line(receipt: Dict[str, Any], *, ledger_path: Path,
+                          frozen_event_type: Optional[str] = None) -> str:
     """Re-check the line against its intent after the pre-write hook rewrote the
     derived fields, so what is persisted is what was frozen; a no-op otherwise.
+
+    ``frozen_event_type`` is the type the receipt carried when the append took
+    the lock. The hook runs in between, so without it a hook that turned an end
+    line into ``task_complete`` (or a ``task_complete`` into an end line) would
+    decide whether this guard runs at all (OI-2470). A line whose type moved is
+    refused; one that was never an end line stays a no-op.
     """
-    if str(receipt.get("event_type") or "").strip() != DISPATCH_FINISHED_EVENT_TYPE:
+    current = _event_type(receipt)
+    frozen = current if frozen_event_type is None else frozen_event_type
+    if current != frozen:
+        raise _refuse_end_line(
+            receipt, f"the pre-write hook changed event_type from {frozen!r} to "
+            f"{current!r}; the line frozen in the intent is not the line being written",
+            "end_line_mismatch")
+    if frozen != DISPATCH_FINISHED_EVENT_TYPE:
         return END_LINE_ACCEPTED
     intent_path = end_intent_path_for_ledger(ledger_path, receipt)
     try:
@@ -520,6 +589,7 @@ def verify_final_end_line(receipt: Mapping[str, Any], *, ledger_path: Path) -> s
     if intent is None:
         raise _refuse_end_line(receipt, f"no intent exists at {intent_path} after the hook",
                                "missing_end_intent")
+    restore_frozen_classification(receipt, intent)
     if not end_line_matches_intent(receipt, intent):
         raise _refuse_end_line(receipt, "the pre-write hook changed a frozen field",
                                "end_line_mismatch")
@@ -547,5 +617,6 @@ __all__ = [
     "decide_end_line", "end_intent_path", "end_intent_path_for_ledger",
     "end_line_matches_intent", "end_line_sha256", "find_prior_end_line",
     "lifecycle_enabled", "load_end_intent", "parse_end_intent", "prepare_end_line", "project_end_line",
-    "record_lifecycle_end", "stamp_lifecycle", "verify_final_end_line", "write_end_intent", "writer_sha",
+    "record_lifecycle_end", "restore_frozen_classification", "stamp_lifecycle",
+    "verify_final_end_line", "write_end_intent", "writer_sha",
 ]

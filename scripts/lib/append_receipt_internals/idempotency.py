@@ -86,6 +86,45 @@ def _chain_receipts_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _close_a_torn_tail(receipt_path: Path) -> bool:
+    """Start the next record on its own line when the ledger tail is torn.
+
+    ADR-045 §3 (K-3c r2): a crash mid-append can leave a partial JSON fragment
+    with no closing newline. Appending straight onto it glues the new record to
+    the fragment, so the new record itself is unparseable — and a caller that
+    trusted its own ``appended`` status would publish a loss no later recovery
+    can see. This ledger is append-only: the fragment stays on disk
+    byte-for-byte and exactly one ``\\n`` is written so the new line starts on
+    its own line. ``True`` when a terminator was written.
+
+    MUST be called while holding the append lock.
+    """
+    try:
+        with receipt_path.open("rb") as reader:
+            reader.seek(0, os.SEEK_END)
+            if reader.tell() == 0:
+                return False
+            reader.seek(-1, os.SEEK_END)
+            if reader.read(1) == b"\n":
+                return False
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AppendReceiptError(
+            "receipt_tail_unreadable", EXIT_IO_ERROR,
+            f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
+    try:
+        with receipt_path.open("ab") as writer:
+            writer.write(b"\n")
+            writer.flush()
+            _fsync_receipt_append(writer, context=f"torn tail of {receipt_path}")
+    except OSError as exc:
+        raise AppendReceiptError(
+            "receipt_tail_terminator_failed", EXIT_IO_ERROR,
+            f"cannot terminate the torn tail at {receipt_path}: {exc}") from exc
+    return True
+
+
 def _last_hash_under_lock(receipt_path: Path) -> str:
     """Inline tail-hash read for the chained append.
 
@@ -315,6 +354,39 @@ def _remember_the_key(cache_path: Path, cache_entries: List[Dict[str, Any]], ide
         )
 
 
+def _freeze_then_run_pre_write_hook(
+    receipt: Dict[str, Any],
+    receipt_path: Path,
+    pre_write_hook: Optional[Callable[[Dict[str, Any]], None]],
+) -> None:
+    """Freeze the event type, run the hook, then hold the line to that freeze.
+
+    ADR-045 §3 (K-3c, OI-2470): the type is frozen BEFORE the hook, so a hook
+    cannot decide whether the post-hook end-line guard runs at all by rewriting
+    ``dispatch_finished`` into another type or the other way round.
+
+    The hook's own side effects (recurrence counter, open-items store) do their
+    own filesystem I/O. An OSError from there must not reach the caller's
+    lock handler, which reports every OSError as "Failed to acquire append
+    lock": that label sent the OI-1788 diagnosis after the lock path while the
+    lock was held and the failing mkdir was the counter's.
+
+    ADR-045 §3 (K-3b round 2): the hook rewrites derived fields; the FINAL line
+    is checked against the intent afterwards, so what is persisted is what was
+    frozen.
+    """
+    frozen_event_type = str(receipt.get("event_type") or receipt.get("event") or "").strip()
+    if pre_write_hook is not None:
+        try:
+            pre_write_hook(receipt)
+        except OSError as exc:
+            raise AppendReceiptError(
+                "pre_write_hook_failed", EXIT_IO_ERROR,
+                f"Receipt pre-write hook failed (lock was held): {exc}",
+            ) from exc
+    verify_final_end_line(receipt, ledger_path=receipt_path, frozen_event_type=frozen_event_type)
+
+
 def _write_receipt_under_lock(
     receipt: Dict[str, Any],
     receipt_path: Path,
@@ -356,6 +428,10 @@ def _write_receipt_under_lock(
     try:
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
             _take_the_append_lock(lock_handle, lock_path, lock_deadline)
+
+            # A torn tail (a crash mid-append) would swallow this record: the
+            # new line starts on its own line before anything is written.
+            _close_a_torn_tail(receipt_path)
 
             cache_entries = _load_cache(cache_path, min_epoch)
             recent_keys = {entry["key"] for entry in cache_entries}
@@ -412,24 +488,9 @@ def _write_receipt_under_lock(
             # or a replay, and silently dropping it would hide that.
             check_end_line(receipt, index_data=outcome_index_data, ledger_path=receipt_path)
 
-            if pre_write_hook is not None:
-                try:
-                    pre_write_hook(receipt)
-                except OSError as exc:
-                    # The hook's own side effects (recurrence counter, open-items
-                    # store) do their own filesystem I/O. An OSError from there
-                    # must not fall through to the handler below, which reports
-                    # every OSError as "Failed to acquire append lock": that label
-                    # sent the OI-1788 diagnosis after the lock path while the
-                    # lock was held and the failing mkdir was the counter's.
-                    raise AppendReceiptError(
-                        "pre_write_hook_failed", EXIT_IO_ERROR,
-                        f"Receipt pre-write hook failed (lock was held): {exc}",
-                    ) from exc
-
-            # ADR-045 §3 (K-3b round 2): the hook above rewrote derived fields;
-            # re-check the FINAL line so what is persisted is what was frozen.
-            verify_final_end_line(receipt, ledger_path=receipt_path)
+            # ADR-045 §3 (K-3c): freeze the event type and hold the final line
+            # to it across the pre-write hook (OI-2470, OI-2452 side effects).
+            _freeze_then_run_pre_write_hook(receipt, receipt_path, pre_write_hook)
 
             # Hash-chain stamping (flag-gated). The read-tail + stamp happens
             # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so
