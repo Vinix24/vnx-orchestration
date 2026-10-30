@@ -191,9 +191,10 @@ def _patch_manager(monkeypatch, manager: "_FakeManager", *, pr_state: str = "OPE
     resolution) keeps reaching ``attempt_gate`` exactly as before this fix.
     """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     # _write_not_executable_result (mixed into _FakeManager, real production
@@ -593,8 +594,9 @@ def test_runner_leaves_pending_when_no_pr_yet(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: True)
 
     summary = runner.run(state_dir)
 
@@ -616,8 +618,9 @@ def test_runner_leaves_pending_when_branch_existence_unknown(tmp_path, monkeypat
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: None)
 
     summary = runner.run(state_dir)
 
@@ -645,8 +648,9 @@ def test_runner_retires_obligation_when_dispatch_died_without_pr(tmp_path, monke
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
     # OI-1532: a dead dispatch's occupancy lock is held by nobody — the kernel
     # released it when the holder exited. Mock the liveness probe to False so
     # the three-way branch reaches the unchanged "retire" outcome; without this
@@ -688,7 +692,8 @@ def test_runner_never_refires_a_retired_obligation(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: (_ for _ in ()).throw(
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: (_ for _ in ()).throw(
         AssertionError("a terminal obligation must never be re-resolved")
     ))
 
@@ -744,6 +749,7 @@ def test_runner_marks_unresolvable_when_repo_unattributable(tmp_path, monkeypatc
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
 
     summary = runner.run(state_dir)
 
@@ -766,6 +772,7 @@ def test_runner_escalates_unresolvable_to_not_executable_after_threshold(tmp_pat
     update_obligation(path, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS - 1)
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
 
     summary = runner.run(state_dir)
 
@@ -1582,8 +1589,9 @@ def test_runner_stamps_fulfilled_instead_of_retiring_when_evidence_exists(tmp_pa
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
     result_path = _write_result_record(
         state_dir, filename="pr-9700-codex_gate",
         dispatch_id="20260826-oi1388r-rescued", gate="codex_gate", pr_number=9700,
@@ -1614,8 +1622,9 @@ def test_runner_still_retires_when_no_evidence_exists(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
     # OI-1532: dead dispatch — occupancy lock held by nobody.
     monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)
 
@@ -1639,6 +1648,7 @@ def test_runner_stamps_fulfilled_instead_of_escalating_when_evidence_exists(tmp_
     update_obligation(path, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS - 1)
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     _write_result_record(
         state_dir, filename="pr-9701-ci_gate",
         dispatch_id="20260826-oi1388r-rescued-escalate", gate="ci_gate", pr_number=9701,
@@ -1801,8 +1811,9 @@ def test_evidence_discriminator_verdict_split(
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
     # OI-1532: dead dispatch — occupancy lock held by nobody. The not_executable
     # row falls through to retire (no usable evidence); the decided rows are
     # rescued by evidence before the liveness branch is reached.
@@ -1859,12 +1870,13 @@ def test_dry_run_and_real_run_choose_the_same_action(tmp_path, monkeypatch):
             dispatch_id="20260826-oi1388r-parity-rescued", gate="codex_gate", pr_number=9800,
         )
 
-    def branch_exists(did, owner_repo):
+    def branch_exists(did, owner_repo, snapshot=None):
         return not (did.endswith("parity-retire") or did.endswith("parity-rescued"))
 
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_branch_exists_on_github", branch_exists)
     # OI-1532: the parity-retire dispatch is dead (branch gone, no live holder).
     # parity-rescued is rescued by evidence before the liveness branch; the
@@ -1907,10 +1919,11 @@ def test_summary_reports_action_counts_breakdown(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
     monkeypatch.setattr(
         runner, "_branch_exists_on_github",
-        lambda did, owner_repo: did.endswith("counts-pending"),
+        lambda did, owner_repo, snapshot=None: did.endswith("counts-pending"),
     )
     # OI-1532: counts-retire is a dead dispatch (branch gone, no live holder).
     monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: False)

@@ -128,10 +128,12 @@ class _Manager:
 
 def _patch(monkeypatch, manager, *, head=HEAD, pr_state="OPEN"):
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    # OI-2459: hermetic — the tick snapshot must never hit real gh here.
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head)
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: pr_state)
     fake = types.ModuleType("review_gate_manager")
     fake._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake)
@@ -151,7 +153,7 @@ def _obligation(state_dir, dispatch_id):
 
 def _decision(state_dir, dispatch_id, gate, pr, monkeypatch, *, head=HEAD, pr_state="OPEN"):
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda n: head)
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda n, o: pr_state)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda n, o, snapshot=None: pr_state)
     resolution = runner.PrResolution(
         runner.RESOLUTION_RESOLVED, pr_number=pr, owner_repo="Vinix24/vnx-orchestration",
     )

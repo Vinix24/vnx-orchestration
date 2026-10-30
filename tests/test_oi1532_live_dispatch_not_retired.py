@@ -87,8 +87,9 @@ def _patch_resolution(monkeypatch, *, branch_exists, dispatch_live=None) -> None
     """
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: branch_exists)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: branch_exists)
 
 
 # A tiny program that takes an exclusive flock on a given path and holds it
