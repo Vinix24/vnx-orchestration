@@ -315,6 +315,39 @@ def _remember_the_key(cache_path: Path, cache_entries: List[Dict[str, Any]], ide
         )
 
 
+def _freeze_then_run_pre_write_hook(
+    receipt: Dict[str, Any],
+    receipt_path: Path,
+    pre_write_hook: Optional[Callable[[Dict[str, Any]], None]],
+) -> None:
+    """Freeze the event type, run the hook, then hold the line to that freeze.
+
+    ADR-045 §3 (K-3c, OI-2470): the type is frozen BEFORE the hook, so a hook
+    cannot decide whether the post-hook end-line guard runs at all by rewriting
+    ``dispatch_finished`` into another type or the other way round.
+
+    The hook's own side effects (recurrence counter, open-items store) do their
+    own filesystem I/O. An OSError from there must not reach the caller's
+    lock handler, which reports every OSError as "Failed to acquire append
+    lock": that label sent the OI-1788 diagnosis after the lock path while the
+    lock was held and the failing mkdir was the counter's.
+
+    ADR-045 §3 (K-3b round 2): the hook rewrites derived fields; the FINAL line
+    is checked against the intent afterwards, so what is persisted is what was
+    frozen.
+    """
+    frozen_event_type = str(receipt.get("event_type") or receipt.get("event") or "").strip()
+    if pre_write_hook is not None:
+        try:
+            pre_write_hook(receipt)
+        except OSError as exc:
+            raise AppendReceiptError(
+                "pre_write_hook_failed", EXIT_IO_ERROR,
+                f"Receipt pre-write hook failed (lock was held): {exc}",
+            ) from exc
+    verify_final_end_line(receipt, ledger_path=receipt_path, frozen_event_type=frozen_event_type)
+
+
 def _write_receipt_under_lock(
     receipt: Dict[str, Any],
     receipt_path: Path,
@@ -412,24 +445,9 @@ def _write_receipt_under_lock(
             # or a replay, and silently dropping it would hide that.
             check_end_line(receipt, index_data=outcome_index_data, ledger_path=receipt_path)
 
-            if pre_write_hook is not None:
-                try:
-                    pre_write_hook(receipt)
-                except OSError as exc:
-                    # The hook's own side effects (recurrence counter, open-items
-                    # store) do their own filesystem I/O. An OSError from there
-                    # must not fall through to the handler below, which reports
-                    # every OSError as "Failed to acquire append lock": that label
-                    # sent the OI-1788 diagnosis after the lock path while the
-                    # lock was held and the failing mkdir was the counter's.
-                    raise AppendReceiptError(
-                        "pre_write_hook_failed", EXIT_IO_ERROR,
-                        f"Receipt pre-write hook failed (lock was held): {exc}",
-                    ) from exc
-
-            # ADR-045 §3 (K-3b round 2): the hook above rewrote derived fields;
-            # re-check the FINAL line so what is persisted is what was frozen.
-            verify_final_end_line(receipt, ledger_path=receipt_path)
+            # ADR-045 §3 (K-3c): freeze the event type and hold the final line
+            # to it across the pre-write hook (OI-2470, OI-2452 side effects).
+            _freeze_then_run_pre_write_hook(receipt, receipt_path, pre_write_hook)
 
             # Hash-chain stamping (flag-gated). The read-tail + stamp happens
             # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so
