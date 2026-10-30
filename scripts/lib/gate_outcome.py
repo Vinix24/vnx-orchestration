@@ -40,7 +40,12 @@ Partial-failure contract (ADR-046 §3), fixed here before the code:
    or the outcome id of a receipt that names a dispatch). The append would
    return it as a duplicate and the record would change while the ledger
    keeps the old line, so it is refused (:class:`DuplicateReceiptRefused`)
-   before the round ledger, like every refusal of step 5.
+   before the round ledger, like every refusal of step 5. The one undecided
+   exception is the writer that books its undecided records' receipts
+   (``book_undecided_receipt``, GE-8): a write whose record is the answer
+   already on the slot — same status, same keys, bar the ones that record when
+   and how often it was written — is a repeat too, so a commit that only has
+   to finish that record's request rewrites nothing.
 7. **Request** (GE-4b). An admitted outcome, a repeat included, then gives
    its :class:`GateRequest` the terminal status of the record on the slot
    (:data:`REQUEST_STATUS_OF`, or the request's own :attr:`GateRequest.status`),
@@ -131,6 +136,14 @@ RECEIPT_LOCK_TIMEOUT_SECONDS = 30.0
 # Step 6: the evidence a repeat carries unchanged, next to head, status and
 # decision. Nothing else joins: not report_path, recorded_at or attempt_seq.
 REPEAT_EVIDENCE_FIELDS: Tuple[str, ...] = ("blocking_findings", "advisory_findings", "required_reruns", "residual_risk")
+
+# Step 6 (GE-8): the keys that say WHEN and HOW OFTEN a record was written, not
+# what it answers. Two undecided records that agree on everything else are the
+# same answer, re-committed.
+_VOLATILE_RECORD_KEYS = frozenset({
+    "attempt_seq", "timestamp", "recorded_at", "receipt_pending", "receipt_fields",
+    "obligation_pending", "obligation_booking",
+})
 
 # Step 8: the two keys the record carries while it owes its obligation booking.
 OBLIGATION_PENDING_KEY = "obligation_pending"
@@ -297,6 +310,7 @@ def commit_gate_outcome(
     raise_on_refusal: bool = False,
     request: Optional[GateRequest] = None,
     obligation: Optional[GateObligation] = None,
+    book_undecided_receipt: bool = False,
 ) -> Tuple[Dict[str, Any], bool]:
     """Write one outcome's record, its one receipt, its request's end and its obligation under the slot's lock.
 
@@ -313,6 +327,16 @@ def commit_gate_outcome(
     Raises :class:`RequestWriteFailed` when the record and receipt landed but
     the request write did not (step 7), after the bundle archive: the caller
     sees the failure instead of a status the request on disk never reached.
+
+    ``book_undecided_receipt`` (GE-8) is the orphan cleanup's one hook: an
+    ``unavailable`` record books its ``review_gate_result`` receipt in the same
+    commit, so ending a request that never got an answer leaves a ledger line
+    saying so. Off by default; every other writer keeps ADR-046 §1 (only a
+    decided pass or fail books an outcome receipt). The record's own status
+    travels on the receipt, so the verdict rule reads ``investigate``. It also
+    makes an undecided write that repeats the record on the slot a repeat
+    (step 6), which is how the cleanup finishes a request whose record landed
+    but whose end did not, without writing that record a second time.
     """
     path = result_path or gate_recorder.result_file_path(
         results_dir, outcome.gate, outcome.pr_number, outcome.pr_id,
@@ -339,13 +363,13 @@ def commit_gate_outcome(
                 gate_recorder._audit_write_refusal(path, gate, pr_ref, record, reason_detail=detail)
             on_disk = existing if isinstance(existing, dict) else {}
         else:
-            if _repeats_the_slot(existing, record):
+            if _repeats_the_slot(existing, record, undecided_repeats=book_undecided_receipt):
                 repeated = existing
                 _persist_obligation_work_order(path, repeated, obligation)
             else:
                 _write_record_then_receipt(
                     path, record, existing, gate=gate, pr_ref=pr_ref, receipt_fields=outcome.receipt_fields,
-                    obligation=obligation,
+                    obligation=obligation, book_undecided_receipt=book_undecided_receipt,
                 )
             if obligation is not None:
                 _book_obligation(path, repeated or record, obligation)
@@ -377,7 +401,14 @@ def _pay_outstanding_receipt(path: Path, existing: Any, *, gate: str, pr_ref: st
     """Step 3: book the receipt the record on the slot still owes, or refuse to replace it."""
     if not (isinstance(existing, dict) and existing.get("receipt_pending") is True):
         return
-    if _book_receipt(path, existing, gate=gate, pr_ref=pr_ref):
+    # Only this writer sets ``receipt_pending``, and it sets it on an undecided
+    # record only through GE-8's ``book_undecided_receipt`` hook. So a pending
+    # undecided record IS such a debt: paying it must book the receipt rather
+    # than return early and then clear the flag with nothing booked.
+    if _book_receipt(
+        path, existing, gate=gate, pr_ref=pr_ref,
+        book_undecided=not gate_recorder.owes_outcome_receipt(existing),
+    ):
         return
     raise ReceiptPendingRefused(
         f"{gate} result for pr={pr_ref!r} at {path}: the record on the slot "
@@ -525,26 +556,60 @@ def commit_obligation_outcome(
     return booked or {}  # ``raise_on_failure``: a booking that did not land never reaches here
 
 
-def _repeats_the_slot(existing: Any, record: Dict[str, Any]) -> bool:
-    """Step 6: does this write repeat the decided outcome on the slot?
+def _repeats_the_slot(existing: Any, record: Dict[str, Any], *, undecided_repeats: bool = False) -> bool:
+    """Step 6: does this write repeat the outcome already on the slot?
 
     Positive evidence only: both records owe a receipt, both name the same
     non-empty head, status and pass/fail decision are equal (the receipt
     books ``is_pass``, so a ``completed`` with blocking findings is a fail),
     and so is the evidence (:func:`_changed_evidence`). Anything missing or
     malformed is no repeat, and the write goes ahead.
+
+    ``undecided_repeats`` (GE-8) is the opt-in of the writer that books a
+    receipt for an UNDECIDED record too (``book_undecided_receipt``). Such a
+    record's receipt is already booked when the slot holds the same answer, so
+    rewriting it would advance ``attempt_seq`` while the key returned that
+    receipt as a duplicate — and a commit that only has to finish a request
+    (the orphan cleanup's recovery) would write a second record for a first one
+    it never changed. Both sides must then be undecided, and the records must
+    be the same answer (:func:`_same_undecided_record`).
     """
     if not isinstance(existing, dict):
         return False
-    if not (gate_recorder.owes_outcome_receipt(existing) and gate_recorder.owes_outcome_receipt(record)):
+    if gate_recorder.owes_outcome_receipt(existing) and gate_recorder.owes_outcome_receipt(record):
+        old_head, new_head = existing.get("commit_sha"), record.get("commit_sha")
+        if not (isinstance(old_head, str) and isinstance(new_head, str) and old_head.strip()):
+            return False
+        return (old_head.strip() == new_head.strip()
+                and canonical_status(existing) == canonical_status(record)
+                and is_pass(existing)[0] == is_pass(record)[0]
+                and not _changed_evidence(existing, record))
+    if not undecided_repeats:
         return False
-    old_head, new_head = existing.get("commit_sha"), record.get("commit_sha")
-    if not (isinstance(old_head, str) and isinstance(new_head, str) and old_head.strip()):
+    if gate_recorder.owes_outcome_receipt(existing) or gate_recorder.owes_outcome_receipt(record):
         return False
-    return (old_head.strip() == new_head.strip()
-            and canonical_status(existing) == canonical_status(record)
-            and is_pass(existing)[0] == is_pass(record)[0]
-            and not _changed_evidence(existing, record))
+    return _same_undecided_record(existing, record)
+
+
+def _same_undecided_record(existing: Dict[str, Any], record: Dict[str, Any]) -> bool:
+    """Step 6 (GE-8): is the undecided record on the slot already this very answer?
+
+    Every key either side names, other than the ones that record when and how
+    often the record was written (:data:`_VOLATILE_RECORD_KEYS`), must be
+    present on both sides and equal. A key only one side names is a difference,
+    like a differing value: absent is not "unset on both", and this decides a
+    write rather than a display. Both sides must also name the same non-empty
+    status — a record with none is not evidence that anything is already booked.
+    """
+    status = canonical_status(existing)
+    if not status or status != canonical_status(record):
+        return False
+    for name in set(existing) | set(record):
+        if name in _VOLATILE_RECORD_KEYS:
+            continue
+        if name not in existing or name not in record or existing[name] != record[name]:
+            return False
+    return True
 
 
 def _changed_evidence(existing: Dict[str, Any], record: Dict[str, Any]) -> List[str]:
@@ -597,16 +662,19 @@ def _refuse_a_duplicate_receipt(path: Path, existing: Any, outcome: GateOutcome)
 def _write_record_then_receipt(
     path: Path, record: Dict[str, Any], existing: Any, *, gate: str, pr_ref: str,
     receipt_fields: Mapping[str, Any], obligation: Optional[GateObligation] = None,
+    book_undecided_receipt: bool = False,
 ) -> None:
     """Steps 1, 2, 4 and 8's work order; the caller holds the slot's lock and the guard admitted the write.
 
     The pending obligation booking is stamped on the record BEFORE the atomic
     write, next to ``receipt_pending``: a process that dies between the record
     and the obligation leaves the same durable work order (step 8).
+    ``book_undecided_receipt`` is GE-8's opt-in: an ``unavailable`` record
+    stamped here carries a receipt debt like a decided one.
     """
     seq = existing.get("attempt_seq") if isinstance(existing, dict) else None
     record["attempt_seq"] = seq + 1 if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 1 else 1
-    owes_receipt = gate_recorder.owes_outcome_receipt(record)
+    owes_receipt = gate_recorder.owes_outcome_receipt(record) or book_undecided_receipt
     if owes_receipt:
         record["receipt_pending"] = True
         if receipt_fields:
@@ -617,7 +685,9 @@ def _write_record_then_receipt(
         _stamp_obligation_work_order(record, obligation)
     gate_recorder._write_result_atomic(path, record)
     if owes_receipt:
-        _book_receipt(path, record, gate=gate, pr_ref=pr_ref)
+        _book_receipt(
+            path, record, gate=gate, pr_ref=pr_ref, book_undecided=book_undecided_receipt,
+        )
 
 
 def _finish_request(request: GateRequest, record: Dict[str, Any], outcome: GateOutcome) -> Optional[RequestWriteFailed]:
@@ -750,7 +820,9 @@ def _finish_refused_request(
     return None
 
 
-def _book_receipt(path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str) -> bool:
+def _book_receipt(
+    path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str, book_undecided: bool = False,
+) -> bool:
     """Book the record's receipt, then clear its flag; a failed append leaves the flag.
 
     Only ``receipt_pending is True`` is a debt (the caller checks): a missing,
@@ -759,6 +831,8 @@ def _book_receipt(path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str)
     owed any more: the append returned (appended or duplicate), or the record
     owes no receipt; a failed clearing write afterwards does not change that.
     The writer's own ``receipt_fields`` travel with the flag.
+    ``book_undecided`` (GE-8) books the receipt of an ``unavailable`` record;
+    the caller that sets it is the only one that stamped such a debt.
     """
     extra = record.get("receipt_fields")
     try:
@@ -769,6 +843,7 @@ def _book_receipt(path: Path, record: Dict[str, Any], *, gate: str, pr_ref: str)
             # record from disk books the generic receipt: the debt is paid
             # with what can be read rather than block the slot for ever.
             extra_fields=extra if isinstance(extra, dict) else None,
+            book_undecided=book_undecided,
         )
     # vnx-broad-except: the record is on disk with receipt_pending, which is
     # this failure's durable trace and the next commit's work order. The
