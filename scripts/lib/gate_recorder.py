@@ -37,6 +37,7 @@ import gate_depth
 import gate_status
 import provider_reachability
 import provider_switch
+from review_report_counts import counts_for_payload
 
 logger = logging.getLogger(__name__)
 
@@ -1946,6 +1947,11 @@ def _outcome_receipt_fields(
     ``book_undecided`` (GE-8, off by default) is the orphan cleanup's opt-in: an
     ``unavailable`` record's receipt keeps that status instead of reading as
     ``failed``, so the verdict rule books ``investigate`` — never a rejection.
+
+    OI-2476: a decided receipt also carries the counts of THIS verdict's own
+    report (``warning_count``, ``prescan_notice_count``). A count that cannot
+    be read is not booked at all: an absent field is unknown, and a zero would
+    claim the reviewer wrote no warning.
     """
     from gate_status import canonical_status, is_pass
 
@@ -1989,6 +1995,13 @@ def _outcome_receipt_fields(
         value = payload.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             fields[key] = value
+    # OI-2476: the two counts of THIS verdict, read from the report it names.
+    # Unknown is not booked at all -- an absent field reads as unknown, and a
+    # zero here would say the reviewer wrote no warning when nobody could tell.
+    counts = counts_for_payload(payload)
+    if counts is not None:
+        fields["warning_count"] = counts.warnings
+        fields["prescan_notice_count"] = counts.notices
     for key, value in (extra_fields or {}).items():
         if key not in _RECEIPT_ENVELOPE_KEYS:
             fields.setdefault(key, value)

@@ -65,6 +65,13 @@ enforceable:
   names, every PR when it names none) until the operator sets the file aside.
   Nothing removes, moves or rewrites a line.
 
+- **The counts per verdict (OI-2476, track tweede-stoel-op-signaal).** Every
+  verdict line also carries ``warning_count`` and ``prescan_notice_count``,
+  read from that verdict's own report (``review_report_counts``) and never from
+  an earlier run on the PR. The field is absent when the count is unknown -- an
+  old line, a missing or unreadable report, or a takeover -- and absent is
+  never read as zero.
+
 Readers: ``gate_request_handler`` (refusal where a run starts),
 ``review_seat_evaluation`` (the merge door, ``vnx-gate/review``,
 ``vnx pr-ready``), ``dispatch_cli`` (the early warning for a build on a capped
@@ -86,6 +93,8 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+
+from review_report_counts import counts_for_payload
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +366,11 @@ class RoundLine:
     # ``verkleinen`` verdict in ``review_cap_verdicts`` (R2a). Stamped by the
     # writer under the ledger lock, never taken from a payload.
     granted_by: str = ""
+    # OI-2476: counted from this verdict's own report (``report_path``). ``None``
+    # is unknown -- the field is then not written at all, and an old line
+    # without it reads the same way. Unknown is never zero.
+    warning_count: Optional[int] = None
+    prescan_notice_count: Optional[int] = None
 
     @property
     def key(self) -> Tuple[str, int, str, str]:
@@ -388,6 +402,10 @@ class RoundLine:
             record["reanchored_from"] = self.reanchored_from
         if self.granted_by:
             record["granted_by"] = self.granted_by
+        if self.warning_count is not None:
+            record["warning_count"] = self.warning_count
+        if self.prescan_notice_count is not None:
+            record["prescan_notice_count"] = self.prescan_notice_count
         return record
 
     @classmethod
@@ -409,7 +427,12 @@ class RoundLine:
         override = data.get("override")
         if override is not None and not isinstance(override, dict):
             raise ValueError("override must be an object")
-        return cls(pr_number=pr_number, blocking_count=blocking, override=override, **values)
+        warning = _optional_count(data, "warning_count")
+        notices = _optional_count(data, "prescan_notice_count")
+        return cls(
+            pr_number=pr_number, blocking_count=blocking, override=override,
+            warning_count=warning, prescan_notice_count=notices, **values,
+        )
 
 
 @dataclass(frozen=True)
@@ -465,6 +488,23 @@ class OpenedLine:
 
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _optional_count(data: Dict[str, Any], name: str) -> Optional[int]:
+    """An optional count field: absent is unknown (``None``), present must be a non-negative int.
+
+    OI-2476: unknown is represented by the field's absence, so an old line
+    reads exactly like a new line whose report could not be read. A present
+    but malformed value is no count at all: the line does not parse. A silent
+    ``0`` there would be the very "unknown read as clean" this field exists to
+    prevent.
+    """
+    value = data.get(name)
+    if value is None:
+        return None
+    if not _is_int(value) or value < 0:
+        raise ValueError(f"field {name!r} must be a non-negative integer when present")
+    return value
 
 
 @dataclass(frozen=True)
@@ -1431,6 +1471,9 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
         return None
     takeover_from = str(payload.get("takeover_from") or "") if payload.get("takeover") is True else ""
     override = payload.get("override_b3")
+    # OI-2476: this verdict's own report, never an earlier run's. Unknown stays
+    # ``None`` and is not written; a takeover books unknown (review_report_counts).
+    counts = counts_for_payload(payload)
     return RoundLine(
         project_id=project_id, pr_number=pr_number, head_sha=head_sha,
         seat=payload_seat(gate, payload), reviewer=gate, takeover_from=takeover_from,
@@ -1441,6 +1484,8 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
         branch=str(payload.get("branch") or ""),
         override=override if isinstance(override, dict) and override else None,
         reanchored_from=reanchored_from(payload),
+        warning_count=counts.warnings if counts is not None else None,
+        prescan_notice_count=counts.notices if counts is not None else None,
     )
 
 
