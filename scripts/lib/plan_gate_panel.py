@@ -70,6 +70,7 @@ import dispatch_worktree_isolation
 # A claude seat's stream is archived when its run ends (_archive_seat_stream).
 import event_store
 import final_answer_verdict
+import gate_status  # K3-2b: the ONE execution-id minter and format check
 import provider_switch
 
 # GE-5a / ADR-046 §4: the dispatcher wiring and the report reader are the one
@@ -1986,7 +1987,7 @@ def _dispatch_one(
         )
     # K3-1b: the run's identity is minted HERE, before the call, so a report read
     # again later (a re-parse, a re-render) can never book a second line.
-    execution_id = uuid.uuid4().hex
+    execution_id = gate_status.new_execution_id()
     started = datetime.now(timezone.utc)
     dispatch_exc: Optional[BaseException] = None
     report_text = ""
@@ -2106,7 +2107,7 @@ def _reextract_verdict(
 
     # K3-1b: the re-extraction is its own model call, so its own run and its own
     # execution id — never the seat's line booked a second time.
-    execution_id = uuid.uuid4().hex
+    execution_id = gate_status.new_execution_id()
     started = datetime.now(timezone.utc)
     extraction_exc: Optional[BaseException] = None
     answer = ""
