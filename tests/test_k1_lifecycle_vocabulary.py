@@ -46,6 +46,12 @@ from append_receipt_internals.outcome_identity import (  # noqa: E402
     compute_outcome_id,
 )
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from append_receipt_internals.lifecycle import (  # noqa: E402
+    build_end_intent,
+    end_intent_path,
+    prepare_end_line,
+    write_end_intent,
+)
 
 START = "dispatch_started"
 FINISH = "dispatch_finished"
@@ -89,7 +95,34 @@ def _ledger(tmp_path: Path) -> Path:
     return tmp_path / "state" / "t0_receipts.ndjson"
 
 
+def _ensure_end_intent(ledger: Path, receipt: dict) -> None:
+    """Freeze this attempt's intent before the append; the K-3 rule compares to it.
+
+    ADR-045 §3, as K-3b filled it: a ``dispatch_finished`` is accepted only
+    when the intent for its ``(project_id, dispatch_id, attempt)`` exists and
+    its canonical form is byte-equal to the intent's line. This helper writes
+    the intent for the line a test is about to append, from the line exactly as
+    ``prepare_end_line`` canonicalises it. A line the append would refuse
+    raises from ``prepare_end_line`` with the same code and leaves no intent
+    behind, so the K-1 refusal cases stay refusals (codex round 3 finding 1).
+    """
+    if str(receipt.get("event_type") or "") != FINISH:
+        return
+    prepared = prepare_end_line(receipt, ledger_path=ledger)
+    intent_path = end_intent_path(
+        ledger.parent, prepared["project_id"], prepared["dispatch_id"], prepared["attempt"])
+    if intent_path.exists():
+        return  # the first line's intent stands; a second line must match it
+    offset = ledger.stat().st_size if ledger.exists() else 0
+    write_end_intent(intent_path, build_end_intent(
+        project_id=prepared["project_id"], dispatch_id=prepared["dispatch_id"],
+        attempt=prepared["attempt"], end_state=str(prepared["end_state"]),
+        end_line=prepared, ledger_path=ledger, ledger_offset=offset,
+    ))
+
+
 def _append(ledger: Path, receipt: dict):
+    _ensure_end_intent(ledger, receipt)
     return append_receipt.append_receipt_payload(
         dict(receipt), receipts_file=str(ledger), skip_enrichment=True,
     )
