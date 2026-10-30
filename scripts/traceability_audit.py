@@ -31,6 +31,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR / "lib"))
 
+from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 from project_root import resolve_project_root, resolve_data_dir  # noqa: E402
 
 
@@ -458,13 +459,10 @@ def load_github_prs(
 # Gap analysis
 # ---------------------------------------------------------------------------
 
-COMPLETION_EVENTS = frozenset({
-    "task_complete",
-    "task_completed",
-    "completion",
-    "complete",
-    "subprocess_completion",
-})
+# ADR-045 K-2c: the canonical completion set (a v3 dispatch ends in
+# ``dispatch_finished``) plus the two historical spellings this audit has always
+# counted, so a legacy ledger keeps reporting exactly the gaps it reported.
+COMPLETION_EVENTS = COMPLETION_EVENT_TYPES | {"completion", "complete"}
 
 _VALID_DISPATCH_ID_RE = re.compile(r"^\d{8}-")  # YYYYMMDD-... date-prefix format
 
@@ -512,7 +510,7 @@ def gap_dispatches_without_completion_receipt(
         examples=gaps[:10],
         notes=(
             "Dispatch file in completed/ state but no task_complete/task_completed/"
-            "subprocess_completion receipt with matching dispatch_id."
+            "subprocess_completion/dispatch_finished receipt with matching dispatch_id."
         ),
     )
 
@@ -695,9 +693,10 @@ def gap_receipts_without_pr_or_dispatch(
         gap_pct=round(gap_count / total * 100, 1) if total else 0.0,
         examples=gaps[:10],
         notes=(
-            "Completion receipt (task_complete, subprocess_completion, etc.) "
-            "has neither a valid pr_id nor a dispatch_id that resolves to a "
-            "known dispatch file. Full audit trail broken for these events."
+            "Completion receipt (task_complete, subprocess_completion, "
+            "dispatch_finished, etc.) has neither a valid pr_id nor a dispatch_id "
+            "that resolves to a known dispatch file. Full audit trail broken for "
+            "these events."
         ),
     )
 
