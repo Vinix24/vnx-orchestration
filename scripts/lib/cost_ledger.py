@@ -23,7 +23,11 @@ Every writer and reader goes through these entry points:
 - :func:`record_once` (K3-1a) books one line per caller-supplied execution
   identity ``(project_id, producer, execution_id)``: the same key again returns
   the line already booked and writes nothing, and an ``execution_id`` that is
-  not one ``uuid4().hex`` string is refused before any lock is taken.
+  not a minted one (``gate_status.is_execution_id``, the one format) is refused
+  before any lock is taken. A line the same producer booked for that execution
+  under another ref counts as booked too (K3-2b): K2b numbers a gate run by its
+  PR or dispatch id, and the execution id on its line is what makes it the same
+  run.
 - :func:`aggregate_runs` is the one aggregation: per ``run_id`` only the last
   line counts (a ``correction`` replaces the earlier contribution), a run
   without a price is listed in ``unavailable`` and never summed as 0, a line in
@@ -150,8 +154,6 @@ _PRICE_RUN_COUNTS = (
     ("cache_write", ("cache_write_5m", "cache_write_1h")),
 )
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._:@+-]")
-# The one shape a booking's execution id may have (K3-1a): exactly what ``uuid4().hex`` gives.
-_EXECUTION_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 # The spool file name: at most this many readable characters, then ``~`` and this many hex digits of the digest.
 _SPOOL_READABLE_CHARS = 128
 _SPOOL_DIGEST_HEX = 16
@@ -1380,13 +1382,15 @@ def execution_run_id(project_id: str, producer: str, execution_id: object) -> st
     """The ``run_id`` a booking key names, derived from the key alone (K3-1a): ``<project>:<producer>:<id>:1``.
 
     The trailing ``1`` is the ledger's fixed attempt slot for this writer, never
-    a counter: the execution id IS the identity. Anything but a ``uuid4().hex``
-    string (32 lowercase hex digits) raises :class:`InvalidExecutionId` before a
-    lock is taken — a run without an identity is never booked under a guessed one.
+    a counter: the execution id IS the identity. Anything that is not a minted
+    id raises :class:`InvalidExecutionId` before a lock is taken — a run without
+    an identity is never booked under a guessed one. The format is ASKED, not
+    re-derived (K3-2b): :func:`gate_status.is_execution_id` is its one
+    definition, next to the one minter (:func:`gate_status.new_execution_id`).
     """
-    if not isinstance(execution_id, str) or not _EXECUTION_ID_RE.match(execution_id):
+    if not gate_status.is_execution_id(execution_id):
         raise InvalidExecutionId(
-            f"execution_id {execution_id!r} is not a uuid4().hex string (32 lowercase hex digits): "
+            f"execution_id {execution_id!r} is not a gate execution id (32 lowercase hex digits): "
             "a run without an identity is not booked",
         )
     return run_id_for(project_id, producer, execution_id, 1)
@@ -1524,6 +1528,36 @@ def _refuse_a_booked_backfill_charge(ledger_path: Path, fh, run: RunCost) -> Non
             )
 
 
+def _line_of_this_execution(
+    lines: Sequence[Mapping[str, Any]], run_id: str, project_id: str, producer: str, execution_id: str,
+) -> Optional[Dict[str, Any]]:
+    """The line that books this execution already, or ``None`` (K3-1a, K3-2b).
+
+    Two shapes name one execution and both are it. This writer's own line is the
+    one whose ``run_id`` the key derives (:func:`execution_run_id`). Another
+    writer of the SAME producer may have booked the execution first under its
+    own ref — K2b books a codex/kimi gate run as
+    ``<project>:<gate>:<pr or dispatch id>:<n>``, which is not this key — and
+    that line names the execution in its ``execution_id`` field (K3-2a). Matching
+    on that field is what keeps K3-2b from booking a second line for a run the
+    gate itself already measured. The producer still has to be this one: it is
+    part of the key, so another producer's line is another booking (K3-1a).
+    A line with no readable ``run_id`` names no producer and never matches.
+    """
+    for line in lines:
+        if line.get("run_id") == run_id:
+            return dict(line)
+        if line.get(EXECUTION_ID) != execution_id:
+            continue
+        try:
+            tenant, line_producer, _ref, _attempt = split_run_id(line.get("run_id"))
+        except InvalidRecord:
+            continue
+        if (tenant, line_producer) == (project_id, producer):
+            return dict(line)
+    return None
+
+
 def record_once(
     project_id: str,
     producer: str,
@@ -1542,18 +1576,21 @@ def record_once(
 
     The lookup and the write run under one exclusive hold of the ledger's lock
     file, so two processes booking one key produce one line. Returns the line
-    already booked (in the ledger or its spool) and writes nothing; otherwise
-    returns the record as written. A missing identity raises
-    :class:`InvalidExecutionId` before the lock is taken. Refusals and
-    :class:`CostLedgerWriteError` are those of :func:`record_run`.
+    already booked and writes nothing; that line is this writer's own
+    (``run_id`` match) OR one the same producer booked for the execution under
+    another ref (:func:`_line_of_this_execution`) — K3-2b relies on the second
+    case for the run K2b already measured. Otherwise the record as written. A
+    missing identity raises :class:`InvalidExecutionId` before the lock is
+    taken. Refusals and :class:`CostLedgerWriteError` are those of
+    :func:`record_run`.
     """
     run_id = execution_run_id(project_id, producer, execution_id)
     path = Path(ledger_path) if ledger_path is not None else provider_costs._resolve_costs_path()
     refuse_real_central_store_write_under_test_runner(path)
 
     def record_for(fh) -> Dict[str, Any]:
-        booked = next(
-            (dict(line) for line in _booked_lines(path, fh) if line.get("run_id") == run_id), None,
+        booked = _line_of_this_execution(
+            _booked_lines(path, fh), run_id, project_id, producer, execution_id,
         )
         if booked is not None:
             raise _BookedRun(booked)

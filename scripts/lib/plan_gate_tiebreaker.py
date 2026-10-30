@@ -65,6 +65,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 # the panel never drift on what a "dispatcher" is or where the seat ledger lives.
 import plan_gate_panel as pgp  # noqa: PLC0415  (sibling module, on sys.path)
 import final_answer_verdict  # noqa: PLC0415  (sibling module, on sys.path)
+import gate_status  # K3-2b: the ONE execution-id minter and format check
 import provider_switch
 
 logger = logging.getLogger(__name__)
@@ -1107,7 +1108,7 @@ def run_tiebreaker(
     # K3-1b: one execution, one id — minted before the door is asked, so a
     # second tiebreaker attempt is a new run with a new id and a re-read of this
     # run's report books nothing.
-    execution_id = uuid.uuid4().hex
+    execution_id = gate_status.new_execution_id()
     started = datetime.now(timezone.utc)
     dispatch_exc: Optional[BaseException] = None
     report_text = ""

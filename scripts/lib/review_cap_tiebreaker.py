@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
+import gate_status  # K3-2b: the ONE execution-id minter and format check
 import plan_gate_panel as pgp
 import plan_gate_tiebreaker as pgt
 import review_cap_verdicts as rcv
@@ -243,7 +244,7 @@ def ask(
     did = f"review-cap-tiebreak-{uuid.uuid4().hex[:8]}"
     # K3-1b: one execution, one id — minted before the door is asked, so a second
     # attempt is a new run and a re-read of this answer books nothing new.
-    execution_id = uuid.uuid4().hex
+    execution_id = gate_status.new_execution_id()
     started = datetime.now(timezone.utc)
     dispatch_exc: Optional[BaseException] = None
     report = ""

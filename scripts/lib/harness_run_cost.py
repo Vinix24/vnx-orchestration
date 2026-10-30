@@ -148,6 +148,26 @@ ATTEMPT_OUTCOMES = frozenset({ATTEMPT_REFUSED, ATTEMPT_RAN, ATTEMPT_NEVER_STARTE
 # lanes, the two own-key harness lanes, and the two flat CLI lanes K2b measures.
 LANE_BILLING: Mapping[str, str] = {**BILLING_BY_PROVIDER, **CLI_BILLING}
 
+# K3-2b: a booking this door could not make, counted BY NAME next to the
+# booking primitive that refused it. A record of a run that did start but names
+# no execution id has no identity to book under, so it books nothing — that must
+# be a number a reader can see, not one WARNING lost in a stream. The count is
+# per process (the ledger keeps no counter of its own: a refused booking wrote
+# nothing, so nothing on disk records it).
+UNBOOKED_NO_EXECUTION_ID = "unbooked_no_execution_id"
+BOOKING_REFUSALS: Dict[str, int] = {}
+
+
+def count_booking_refusal(name: str) -> None:
+    """Count one refusal of the booking door by ``name`` (K3-2b)."""
+    BOOKING_REFUSALS[name] = BOOKING_REFUSALS.get(name, 0) + 1
+
+
+def booking_refusal_counts() -> Dict[str, int]:
+    """Every booking refusal this process counted, by name; ``{}`` when there were none."""
+    return dict(BOOKING_REFUSALS)
+
+
 # The door's own refusal markers, in the order the reason is preferred: the
 # specific budget refusal outranks the generic delivery refusal it is carried in.
 _DOOR_REFUSAL_MARKERS: Tuple[Tuple[str, str], ...] = (
@@ -1051,11 +1071,12 @@ def receipt_cost(
 
 __all__ = [
     "ATTEMPT_NEVER_STARTED", "ATTEMPT_OUTCOMES", "ATTEMPT_RAN", "ATTEMPT_REFUSED", "AttemptRun",
-    "BILLING_BY_PROVIDER", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER", "CLI_BILLING", "CliRun",
-    "CODEX_PROVIDER", "GATE_ROLE", "INPUT_CACHE_SPLIT_INVALID", "INPUT_CACHE_SPLIT_UNMEASURED",
-    "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER", "LANE_BILLING",
-    "NOT_BUILDER_ROLES", "SPAWN_REFUSED_REASON", "SPAWN_REFUSED_SOURCE", "attempt_reason",
-    "book_cli_builder", "books_cli_run", "cli_run", "door_refusal_reason",
+    "BILLING_BY_PROVIDER", "BOOKING_REFUSALS", "BUILDER_ROLE", "BuilderRun", "CLASSIFIER_PRODUCER",
+    "CLI_BILLING", "CliRun", "CODEX_PROVIDER", "GATE_ROLE", "INPUT_CACHE_SPLIT_INVALID",
+    "INPUT_CACHE_SPLIT_UNMEASURED", "INTELLIGENCE_ROLE", "KIMI_NO_USAGE_REASON", "KIMI_PROVIDER",
+    "LANE_BILLING", "NOT_BUILDER_ROLES", "SPAWN_REFUSED_REASON", "SPAWN_REFUSED_SOURCE",
+    "UNBOOKED_NO_EXECUTION_ID", "attempt_reason", "book_cli_builder", "booking_refusal_counts",
+    "books_cli_run", "cli_run", "count_booking_refusal", "door_refusal_reason",
     "lane_model", "ledger_project_id", "price_segments",
     "receipt_cost", "record_attempt_run", "record_builder_run", "record_classifier_run", "record_cli_run",
     "record_codex_run", "record_kimi_run", "run_fields", "run_tokens", "transcript_identity",
