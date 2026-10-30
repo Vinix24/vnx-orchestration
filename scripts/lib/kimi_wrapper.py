@@ -76,6 +76,16 @@ def _parse_kimi_token_usage(stdout: str) -> Optional[dict]:
     return {"input_tokens": input_t, "output_tokens": output_t}
 
 
+def kimi_token_usage(stdout: str) -> Optional[dict]:
+    """The token counts a kimi stream-json run reported, or ``None`` when it reported none.
+
+    Public view of :func:`_parse_kimi_token_usage` for the callers that book a
+    cost-ledger line from a ``kimi_exec`` result (K4b: the dream cycle), so the
+    "no usage accounting" marker of kimi-cli 1.46.0 is read the same way there.
+    """
+    return _parse_kimi_token_usage(stdout)
+
+
 def kimi_exec(
     prompt: str,
     model: Optional[str] = None,

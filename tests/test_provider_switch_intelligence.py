@@ -281,6 +281,15 @@ def harness(monkeypatch):
     return run
 
 
+def _launch_calls(run):
+    """The calls that started the claude child.
+
+    The spy replaces the global ``subprocess.run``, so it also sees the booking's own store
+    resolution (``git rev-parse --show-toplevel``). A launch count is about the child only.
+    """
+    return [c for c in run.call_args_list if c.args and c.args[0] and c.args[0][0] == "claude"]
+
+
 def test_try_deepseek_harness_requires_before_any_launch(switch, harness):
     switch(global_off=["deepseek"])
     with pytest.raises(ps.ProviderDisabledError):
@@ -316,11 +325,12 @@ def test_cross_project_global_off_project_x_on(switch, harness):
     switch(global_off=["deepseek"], project_on={PROJECT_X: ["deepseek"]})
     analyzer_x, result_x = _analyze(_origin(PROJECT_X))
     assert result_x is not None and result_x["_model"].startswith("deepseek-harness:")
-    assert harness.call_count == 1 and analyzer_x.deep_attempts == 1 and analyzer_x.deep_disabled_skips == 0
+    assert len(_launch_calls(harness)) == 1 and analyzer_x.deep_attempts == 1
+    assert analyzer_x.deep_disabled_skips == 0
 
     analyzer_y, result_y = _analyze(_origin(PROJECT_Y))
     assert result_y is None
-    assert harness.call_count == 1
+    assert len(_launch_calls(harness)) == 1
     assert analyzer_y.deep_attempts == 0 and analyzer_y.deep_failures == 0
     assert analyzer_y.deep_config_skips == 0 and analyzer_y.deep_disabled_skips == 1
 
@@ -329,9 +339,9 @@ def test_a_session_without_a_project_is_decided_globally(switch, harness):
     """The process project (VNX_PROJECT_ID=proj-x, on) does not stand in for the session's."""
     switch(global_off=["deepseek"], project_on={PROJECT_X: ["deepseek"]})
     analyzer, result = _analyze(content_class.Origin(content_class.FABRIC, None, content_class.SRC_NONE))
-    assert result is None and harness.call_count == 0 and analyzer.deep_disabled_skips == 1
+    assert result is None and _launch_calls(harness) == [] and analyzer.deep_disabled_skips == 1
     analyzer, result = _analyze(None)
-    assert result is None and harness.call_count == 0 and analyzer.deep_disabled_skips == 1
+    assert result is None and _launch_calls(harness) == [] and analyzer.deep_disabled_skips == 1
 
 
 def test_a_disabled_lane_is_not_a_failure_or_a_config_gap(switch, harness):
@@ -427,7 +437,7 @@ def _run_and_beacon(world):
 def test_beacon_is_degraded_when_every_deep_session_was_skipped_by_the_switch(world, switch, harness):
     switch(global_off=["deepseek"])
     stats, beacon = _run_and_beacon(world)
-    assert harness.call_count == 0
+    assert _launch_calls(harness) == []
     assert stats.deep_disabled_skips == 2 and stats.deep_attempts == 0 and stats.sessions_deep == 0
     assert beacon["status"] == "degraded"
     assert beacon["details"]["reason"] == "provider_switched_off"
@@ -437,7 +447,7 @@ def test_beacon_is_degraded_when_every_deep_session_was_skipped_by_the_switch(wo
 def test_beacon_stays_ok_when_one_project_was_analysed(world, switch, harness):
     switch(global_off=["deepseek"], project_on={PROJECT_X: ["deepseek"]})
     stats, beacon = _run_and_beacon(world)
-    assert harness.call_count == 1
+    assert len(_launch_calls(harness)) == 1
     assert stats.deep_attempts == 1 and stats.deep_disabled_skips == 1
     assert beacon["status"] == "ok" and beacon["details"]["deep_disabled_skips"] == 1
     assert "reason" not in beacon["details"]
@@ -446,7 +456,7 @@ def test_beacon_stays_ok_when_one_project_was_analysed(world, switch, harness):
 def test_beacon_ok_when_the_switch_is_on(world, switch, harness):
     switch()
     stats, beacon = _run_and_beacon(world)
-    assert harness.call_count == 2 and stats.deep_disabled_skips == 0
+    assert len(_launch_calls(harness)) == 2 and stats.deep_disabled_skips == 0
     assert beacon["status"] == "ok" and beacon["details"]["deep_disabled_skips"] == 0
 
 

@@ -30,6 +30,11 @@ ANALYZER_VERSION = "1.1.0"
 
 LLM_STRATEGY = os.environ.get("VNX_ANALYZER_LLM", "ollama-only")
 OLLAMA_MODEL = os.environ.get("VNX_OLLAMA_MODEL", "qwen2.5-coder:14b")
+# The claude-max lane passes no --model: the CLI runs its own configured default, which the
+# fabric cannot read. The cost-ledger line names the model the CLI reports in its JSON and
+# falls back to this label only when the child named none (a timeout, a crash), overridable
+# for a fleet that pins another model in the CLI.
+CLAUDE_MAX_MODEL = os.environ.get("VNX_ANALYZER_CLAUDE_MODEL", "sonnet")
 DEEPSEEK_HARNESS_MODEL = os.environ.get("VNX_ANALYZER_DEEPSEEK_MODEL", "deepseek-flash")
 # A run below this DeepSeek balance (USD) is skipped loudly before any session is sent.
 DEEPSEEK_MIN_BALANCE_USD = float(os.environ.get("VNX_ANALYZER_DEEPSEEK_MIN_BALANCE", "0.50"))
