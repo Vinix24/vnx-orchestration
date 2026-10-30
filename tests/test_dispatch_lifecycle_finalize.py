@@ -24,11 +24,14 @@ Every store lives in ``tmp_path``; nothing here touches the real ledger.
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util as _ilu
 import json
 import multiprocessing
 import sqlite3
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -41,7 +44,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import coordination_db  # noqa: E402
 import project_id_migration  # noqa: E402
 import dispatch_lifecycle as lifecycle  # noqa: E402
-from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from append_receipt_internals.common import AppendReceiptError, AppendResult  # noqa: E402
 from append_receipt_internals.idempotency import (  # noqa: E402
     _cache_file_for,
     _write_receipt_under_lock,
@@ -754,3 +757,113 @@ def test_a_malformed_intent_is_a_named_refusal_in_recover_too(state_dir, lifecyc
 
     assert excinfo.value.code == "invalid_end_intent"
     assert _lines(state_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# 11. a torn ledger tail: the end line must start on its own line (K-3c r2)
+# ---------------------------------------------------------------------------
+
+TORN_FRAGMENT = b'{"timestamp":"2026-10-30T09:00:00Z","event_type":"dispatch_fin'
+
+
+def _parseable_end_lines(state_dir: Path) -> list:
+    """Every parseable ``dispatch_finished`` line for the test key, whole ledger."""
+    ledger = _ledger(state_dir)
+    if not ledger.exists():
+        return []
+    found = []
+    for raw in ledger.read_bytes().split(b"\n"):
+        try:
+            line = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if (isinstance(line, dict)
+                and line.get("event_type") == "dispatch_finished"
+                and (line.get("project_id"), line.get("dispatch_id"), line.get("attempt"))
+                == (PROJECT, DISPATCH, ATTEMPT)):
+            found.append(line)
+    return found
+
+
+def test_a_torn_tail_keeps_the_fragment_and_recover_writes_one_end_line(
+    state_dir, lifecycle_on,
+):
+    """The retry must not be glued onto the fragment: that swallowed the end line
+    and recover then published a row with no valid end record (codex blocker)."""
+    _insert_row(state_dir)
+    ledger = _ledger(state_dir)
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_bytes(TORN_FRAGMENT)
+    _freeze(state_dir, _line())
+
+    result = _recover(state_dir)
+
+    assert result.status == lifecycle.STATUS_RECOVERED
+    assert result.line_status == "appended"
+    # The append-only ledger keeps the torn fragment byte-for-byte.
+    assert ledger.read_bytes().startswith(TORN_FRAGMENT)
+    assert ledger.read_bytes()[len(TORN_FRAGMENT):len(TORN_FRAGMENT) + 1] == b"\n"
+    assert len(_parseable_end_lines(state_dir)) == 1
+    assert _row(state_dir)["state"] == "completed"
+    assert load_end_intent(end_intent_path(state_dir, PROJECT, DISPATCH, ATTEMPT))["published_at"]
+
+
+def test_a_missing_end_line_after_the_append_is_a_named_refusal_and_recover_retries(
+    state_dir, lifecycle_on, monkeypatch,
+):
+    """An append that reports ``appended`` but writes nothing must never project:
+    the ledger read-back, not the return status, is the evidence (codex blocker)."""
+    _insert_row(state_dir)
+    _freeze(state_dir, _line())
+
+    def append_writes_nothing(receipt, **kwargs):
+        return AppendResult(status="appended", receipts_file=_ledger(state_dir),
+                            idempotency_key="k3c-readback")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("append_receipt_internals.payload.append_receipt_payload",
+                      append_writes_nothing)
+        with pytest.raises(AppendReceiptError) as excinfo:
+            _recover(state_dir)
+
+    assert excinfo.value.code == "end_line_not_verified"
+    assert _row(state_dir)["state"] == "running"
+    assert "published_at" not in load_end_intent(
+        end_intent_path(state_dir, PROJECT, DISPATCH, ATTEMPT))
+
+    again = _recover(state_dir)
+
+    assert again.status == lifecycle.STATUS_RECOVERED
+    assert len(_parseable_end_lines(state_dir)) == 1
+    assert _row(state_dir)["state"] == "completed"
+    assert load_end_intent(end_intent_path(state_dir, PROJECT, DISPATCH, ATTEMPT))["published_at"]
+
+
+def test_append_lock_contention_is_bounded_by_the_caller_timeout(state_dir, lifecycle_on):
+    """``lock_timeout`` bounds the whole operation, not only the publication lock."""
+    _insert_row(state_dir)
+    _freeze(state_dir, _line())
+    lock_path = state_dir / "append_receipt.lock"
+    held = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+
+    def release_after_a_second() -> None:
+        time.sleep(0.5)
+        fcntl.flock(held.fileno(), fcntl.LOCK_UN)
+
+    releaser = threading.Thread(target=release_after_a_second)
+    releaser.start()
+    try:
+        started = time.monotonic()
+        with pytest.raises(AppendReceiptError) as excinfo:
+            _recover(state_dir, lock_timeout=0.02)
+        elapsed = time.monotonic() - started
+    finally:
+        releaser.join(timeout=5)
+        held.close()
+
+    assert excinfo.value.code == "lock_timeout"
+    assert elapsed < 1.0
+    assert _parseable_end_lines(state_dir) == []
+    assert "published_at" not in load_end_intent(
+        end_intent_path(state_dir, PROJECT, DISPATCH, ATTEMPT))

@@ -9,7 +9,8 @@ K-5 wires the lanes, K-6 the sweep (ADR-045 §9 — the writers land behind
 What the line SAYS is not decided here. The K-3b contract in
 ``append_receipt_internals.lifecycle`` owns the canonical form, the intent
 layout and the accept rule; this module owns the ORDER in which a line is
-frozen, appended, projected and published (ADR-005, ledger first), and the one
+frozen, appended, read back from the ledger, projected and published (ADR-005,
+ledger first), and the one
 thing the ADR leaves to the finalizer: the attempt check under
 ``BEGIN IMMEDIATE`` (OI-2443). The intent lives beside the LEDGER, because the
 accept rule resolves it from the ledger it appends to.
@@ -26,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from append_receipt_internals.common import (
     EXIT_IO_ERROR,
@@ -38,6 +39,7 @@ from append_receipt_internals.lifecycle import (
     EndIntentMalformed,
     build_end_intent,
     end_intent_path,
+    end_line_matches_intent,
     load_end_intent,
     prepare_end_line,
     write_end_intent,
@@ -141,8 +143,8 @@ def _ledger_size(ledger: Path) -> int:
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot stat the ledger {ledger}: {exc}") from exc
 
 
-def _find_end_line(ledger: Path, document: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
-    """The end line for this intent's key at or after its byte offset, if any.
+def _end_lines_from_offset(ledger: Path, document: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Every parseable end record for this intent's key at or after its offset.
 
     A torn line (a crash mid-append) is not evidence that a complete end line
     exists, so it is skipped and the append layer decides (ADR-045 §3).
@@ -150,16 +152,17 @@ def _find_end_line(ledger: Path, document: Mapping[str, Any]) -> Optional[Dict[s
     offset = int(document["ledger_offset"])
     try:
         if ledger.stat().st_size <= offset:
-            return None
+            return []
         with ledger.open("rb") as handle:
             handle.seek(offset)
             blob = handle.read()
     except FileNotFoundError:
-        return None
+        return []
     except OSError as exc:
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read the ledger {ledger}: {exc}") from exc
     key = (document["project_id"], document["dispatch_id"], document["attempt"])
+    found: List[Dict[str, Any]] = []
     for raw in blob.split(b"\n"):
         try:
             line = json.loads(raw)
@@ -168,20 +171,36 @@ def _find_end_line(ledger: Path, document: Mapping[str, Any]) -> Optional[Dict[s
         if (isinstance(line, dict)
                 and str(line.get("event_type") or "").strip() == DISPATCH_FINISHED_EVENT_TYPE
                 and (line.get("project_id"), line.get("dispatch_id"), line.get("attempt")) == key):
-            return line
-    return None
+            found.append(line)
+    return found
 
 
-def _append_end_line(document: Mapping[str, Any]) -> str:
-    """Step 3: append the frozen line unless the ledger already carries it."""
+def _find_end_line(ledger: Path, document: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """The first parseable end line for this intent's key after its offset, if any."""
+    found = _end_lines_from_offset(ledger, document)
+    return found[0] if found else None
+
+
+def _append_end_line(document: Mapping[str, Any], *,
+                     lock_deadline: Optional[float] = None) -> str:
+    """Step 3: append the frozen line unless the ledger already carries it.
+
+    ``lock_deadline`` (a ``time.monotonic()`` value) is the caller's bound for
+    the whole operation: the append wait gets what is left of it, so a caller
+    that bounds ``recover`` never waits longer on the append lock than its own
+    ``lock_timeout``.
+    """
     from append_receipt_internals.payload import append_receipt_payload
 
     ledger = Path(document["ledger_path"])
     if _find_end_line(ledger, document) is not None:
         return LINE_ALREADY_IN_LEDGER
+    remaining = (None if lock_deadline is None
+                 else max(0.0, lock_deadline - time.monotonic()))
     try:
         return append_receipt_payload(
             json.loads(document["line"]), receipts_file=str(ledger), skip_enrichment=True,
+            lock_timeout=remaining,
         ).status
     except AppendReceiptError as exc:
         # Only another writer of this same attempt can have produced a second
@@ -190,6 +209,34 @@ def _append_end_line(document: Mapping[str, Any]) -> str:
         if exc.code != "duplicate_lifecycle_end" or _find_end_line(ledger, document) is None:
             raise
         return LINE_ALREADY_IN_LEDGER
+
+
+def _verify_the_end_line(ledger: Path, document: Mapping[str, Any]) -> None:
+    """Step 3b: the ledger, not the append's return, proves the record landed.
+
+    The append's ``appended`` status only says what the append layer believes
+    it wrote. A torn tail used to swallow the new line, so ``appended`` was
+    reported for a record the ledger does not carry; the row was then completed
+    and the intent published, and recovery skips a published intent — the loss
+    became permanent. One parseable record for this ``(project_id,
+    dispatch_id, attempt)`` that equals the frozen intent is required before
+    anything is projected or published; anything else is a named refusal.
+    """
+    found = _end_lines_from_offset(ledger, document)
+    key = (document["project_id"], document["dispatch_id"], document["attempt"])
+    if len(found) != 1:
+        raise AppendReceiptError(
+            "end_line_not_verified", EXIT_VALIDATION_ERROR,
+            f"the ledger {ledger} carries {len(found)} parseable "
+            f"{DISPATCH_FINISHED_EVENT_TYPE} records for (project_id={key[0]!r}, "
+            f"dispatch_id={key[1]!r}, attempt={key[2]!r}) after the append, not exactly "
+            "one; nothing was projected or published")
+    if not end_line_matches_intent(found[0], document):
+        raise AppendReceiptError(
+            "end_line_not_verified", EXIT_VALIDATION_ERROR,
+            f"the ledger record for (project_id={key[0]!r}, dispatch_id={key[1]!r}, "
+            f"attempt={key[2]!r}) does not equal the frozen intent; nothing was "
+            "projected or published")
 
 
 def _stamp_abandoned(conn: Any, row: Any, document: Mapping[str, Any]) -> str:
@@ -298,26 +345,25 @@ def _project(state_dir: Path, document: Mapping[str, Any], *,
 
 
 @contextmanager
-def _publication_lock(lock_path: Path, lock_timeout: Optional[float]):
+def _publication_lock(lock_path: Path, lock_deadline: Optional[float]):
     """An exclusive flock held through step 5 (ADR-045 §3).
 
-    Without ``lock_timeout`` the wait is unbounded, as a lane's finalizer may be;
-    a bounded caller gets ``lock_timeout`` and nothing published, so the next
-    tick retries.
+    ``lock_deadline`` is a ``time.monotonic()`` value or None. Without it the
+    wait is unbounded, as a lane's finalizer may be; at the deadline the wait
+    ends with ``lock_timeout`` and nothing published, so the next tick retries.
     """
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = None if lock_timeout is None else time.monotonic() + max(0.0, lock_timeout)
     with lock_path.open("a+", encoding="utf-8") as handle:
         while True:
-            flags = fcntl.LOCK_EX if deadline is None else fcntl.LOCK_EX | fcntl.LOCK_NB
+            flags = fcntl.LOCK_EX if lock_deadline is None else fcntl.LOCK_EX | fcntl.LOCK_NB
             try:
                 fcntl.flock(handle.fileno(), flags)
                 break
             except BlockingIOError:
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= lock_deadline:
                     raise AppendReceiptError(
                         "lock_timeout", EXIT_LOCK_ERROR,
-                        f"publication lock {lock_path} was still held after {lock_timeout}s; "
+                        f"publication lock {lock_path} was still held at the deadline; "
                         "nothing was published") from None
                 time.sleep(0.02)
         try:
@@ -368,7 +414,8 @@ def _run_steps_2_to_5(*, intent_path: Path, state_dir: Path, actor: str,
                       reason: Optional[str], lock_timeout: Optional[float],
                       status: str) -> LifecycleResult:
     """The locked middle: re-read the intent, ledger, projection, publication."""
-    with _publication_lock(intent_path.with_suffix(".lock"), lock_timeout):
+    lock_deadline = None if lock_timeout is None else time.monotonic() + max(0.0, lock_timeout)
+    with _publication_lock(intent_path.with_suffix(".lock"), lock_deadline):
         document = _reload_intent(intent_path)  # step 2, re-read under the lock
         if document is None:
             return LifecycleResult(status=STATUS_NO_INTENT, intent_path=intent_path)
@@ -376,7 +423,8 @@ def _run_steps_2_to_5(*, intent_path: Path, state_dir: Path, actor: str,
         if published_at:
             return LifecycleResult(status=STATUS_ALREADY_PUBLISHED, intent_path=intent_path,
                                    end_state=document["end_state"], published_at=published_at)
-        line_status = _append_end_line(document)                               # step 3
+        line_status = _append_end_line(document, lock_deadline=lock_deadline)   # step 3
+        _verify_the_end_line(Path(document["ledger_path"]), document)          # step 3b
         projection = _project(state_dir, document, actor=actor, reason=reason)  # step 4
         published_at = _publish_intent(intent_path, document)                  # step 5
         return LifecycleResult(status=status, intent_path=intent_path,

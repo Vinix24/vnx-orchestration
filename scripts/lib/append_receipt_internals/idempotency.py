@@ -86,6 +86,45 @@ def _chain_receipts_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _close_a_torn_tail(receipt_path: Path) -> bool:
+    """Start the next record on its own line when the ledger tail is torn.
+
+    ADR-045 §3 (K-3c r2): a crash mid-append can leave a partial JSON fragment
+    with no closing newline. Appending straight onto it glues the new record to
+    the fragment, so the new record itself is unparseable — and a caller that
+    trusted its own ``appended`` status would publish a loss no later recovery
+    can see. This ledger is append-only: the fragment stays on disk
+    byte-for-byte and exactly one ``\\n`` is written so the new line starts on
+    its own line. ``True`` when a terminator was written.
+
+    MUST be called while holding the append lock.
+    """
+    try:
+        with receipt_path.open("rb") as reader:
+            reader.seek(0, os.SEEK_END)
+            if reader.tell() == 0:
+                return False
+            reader.seek(-1, os.SEEK_END)
+            if reader.read(1) == b"\n":
+                return False
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AppendReceiptError(
+            "receipt_tail_unreadable", EXIT_IO_ERROR,
+            f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
+    try:
+        with receipt_path.open("ab") as writer:
+            writer.write(b"\n")
+            writer.flush()
+            _fsync_receipt_append(writer, context=f"torn tail of {receipt_path}")
+    except OSError as exc:
+        raise AppendReceiptError(
+            "receipt_tail_terminator_failed", EXIT_IO_ERROR,
+            f"cannot terminate the torn tail at {receipt_path}: {exc}") from exc
+    return True
+
+
 def _last_hash_under_lock(receipt_path: Path) -> str:
     """Inline tail-hash read for the chained append.
 
@@ -389,6 +428,10 @@ def _write_receipt_under_lock(
     try:
         with lock_path.open("a+", encoding="utf-8") as lock_handle:
             _take_the_append_lock(lock_handle, lock_path, lock_deadline)
+
+            # A torn tail (a crash mid-append) would swallow this record: the
+            # new line starts on its own line before anything is written.
+            _close_a_torn_tail(receipt_path)
 
             cache_entries = _load_cache(cache_path, min_epoch)
             recent_keys = {entry["key"] for entry in cache_entries}
