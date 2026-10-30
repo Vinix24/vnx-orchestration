@@ -32,7 +32,12 @@ _DIFF = (
     "+    # the answer changed\n+    return 2\n"
 )
 # Named one by one, never "everything that differs": a NEW random field must fail this test.
-VOLATILE_KEYS = frozenset({"recorded_at", "dispatch_id", "duration_seconds", "report_path", "report_path_informational"})
+# ``execution_id`` (K3-2a) is random per run by construction — the goldens were recorded before it
+# existed, and two runs of one seat must never share it.
+VOLATILE_KEYS = frozenset({
+    "recorded_at", "dispatch_id", "duration_seconds", "report_path", "report_path_informational",
+    "execution_id",
+})
 
 
 def _drive(provider, data_dir):

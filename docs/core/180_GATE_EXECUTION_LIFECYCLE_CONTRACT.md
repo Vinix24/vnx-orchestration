@@ -76,11 +76,14 @@ not_executable → (terminal)
 {
   "status": "executing",
   "started_at": "2026-04-01T14:45:00Z",
-  "runner_pid": 12345
+  "runner_pid": 12345,
+  "execution_id": "5b5e0aefc7d048d18dc704eaf8e987f4"
 }
 ```
 
 This enables stall detection (Section 4) and distinguishes "not yet started" from "started but not finished."
+
+**GATE-3a (One execution, one id)**: `execution_id` names the ONE run the record describes. It is minted once per run, at the transition to `executing` — before the first model call, after every "this gate will not run" refusal — by `gate_status.new_execution_id()` (32 lower-case hex characters; no other code mints one). A takeover run is a run of its own and mints its own. The id is CARRIED, never recomputed: every record of that run (the success record, a failure record, a not-executable record written after the run started, and a record handed back to a caller and committed again) carries it unchanged, and nothing derives it from the result slot, `attempt_seq`, a timestamp, the PR, the head or the report. A `--reprocess` run calls no model and is no run: it carries the id the run whose report it rebuilds recorded with that report, and none when that run recorded none. The cost ledger books a review-gate line on this id (ADR-043, K3).
 
 ### 2.3 State Persistence
 

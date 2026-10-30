@@ -12,10 +12,61 @@ Schema drift fixed here:
 """
 from __future__ import annotations
 
+import uuid
 import warnings
 from typing import Any, Dict, Tuple
 
 import gate_depth
+
+# The two run-identity fields a gate result record carries (K3-2a).
+#
+# ``evidence_source`` names HOW the record came to exist (``live``,
+# ``reprocessed``, ``reanchored``); it is not an identity and two runs of the
+# same seat share it.
+# ``execution_id`` names the ONE run the record describes: one id per seat run,
+# minted before the run's first model call (:func:`new_execution_id`), carried
+# unchanged onto every record of that run. It is the identity the cost ledger
+# books on (K3), and it exists BEFORE the result slot does — deriving it from
+# anything the slot hands back (an ``attempt_seq``, a timestamp, the PR, the
+# head or the report) is exactly the duplicate-booking defect OI-2444 measured:
+# the same run committed twice got two numbers, and two runs with a refused
+# write got none.
+EVIDENCE_SOURCE_FIELD = "evidence_source"
+EXECUTION_ID_FIELD = "execution_id"
+
+# ``uuid4().hex``: 32 characters, lower-case hexadecimal, nothing else.
+_EXECUTION_ID_LENGTH = 32
+_EXECUTION_ID_CHARS = frozenset("0123456789abcdef")
+
+
+def new_execution_id() -> str:
+    """Mint the identity of ONE review-gate seat run: 32 lower-case hex characters.
+
+    The only place an execution id is minted (K3-2a). Called once per run,
+    before the run's first model call — in ``gate_runner.GateRunner`` when the
+    request turns ``executing``, and in ``governed_lane.run_gate_head`` before
+    the dispatcher is built. A takeover run is a run of its own and gets its
+    own id. Never derived from the result slot, ``attempt_seq``, a timestamp,
+    the PR, the head or the report: an identity that only exists after the
+    slot write cannot tell a re-commit of one run from a second run
+    (OI-2444).
+    """
+    return uuid.uuid4().hex
+
+
+def is_execution_id(value: object) -> bool:
+    """True when ``value`` is a minted execution id (32 lower-case hex characters).
+
+    Read-side evidence: a missing, empty, non-string or differently shaped
+    value is NO id, never an id to match on. A reader that books or
+    de-duplicates on identity (K3-2b) must ask this before it uses a field it
+    read from a record or a ledger line.
+    """
+    return (
+        isinstance(value, str)
+        and len(value) == _EXECUTION_ID_LENGTH
+        and all(char in _EXECUTION_ID_CHARS for char in value)
+    )
 
 PASS_STATES = frozenset({"approve", "completed", "pass", "passed"})
 FAIL_STATES = frozenset({"failed", "errored", "fail", "blocked"})
