@@ -8,7 +8,15 @@ on:
 jobs:
   profile-a:
     name: Profile A (doctor + core tests)
-    runs-on: ubuntu-latest
+    # Pinned to the 24.04 image deliberately (2026-10-30): the moving
+    # `latest` runner label was bumped to the 26.04 image, which turned main
+    # red on run 41079080194 — four profile-a suites died inside `install-central`
+    # with `BASH_SOURCE[0]: unbound variable`, and setup-python has no 3.9
+    # build for 26.04 ("The version '3.9' with architecture 'x64' was not
+    # found for Ubuntu 26.04"). Every job in both CI workflows carries this
+    # pin. OI "Main-CI rood door runner-image" holds the way back to the
+    # moving label.
+    runs-on: ubuntu-24.04
     # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
     # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
     # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
@@ -267,7 +275,7 @@ jobs:
   #     "verdict": "not_applicable" — success, never skipped.
   profile-a-xdist-shadow:
     name: Profile A (xdist shadow)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 80
 
     steps:
@@ -447,7 +455,7 @@ jobs:
   # run it runs its prelude and records "verdict": "not_applicable".
   xdist-parity:
     name: xdist parity
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [profile-a, profile-a-xdist-shadow]
     if: ${{ !cancelled() }}
     timeout-minutes: 55
@@ -663,7 +671,7 @@ jobs:
 
   trace-token-check:
     name: Trace Token Validation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -712,7 +720,7 @@ jobs:
 
   slug-match-check:
     name: Dispatch-ID Slug-Match Gate
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -785,7 +793,7 @@ jobs:
 
   profile-c:
     name: Profile C (adoption smoke tests)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
@@ -842,7 +850,7 @@ jobs:
 
   profile-b:
     name: Profile B (snapshot integration)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: profile-a
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
@@ -877,14 +885,14 @@ jobs:
             exit 0
           fi
           # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
           # never fires, and apt-get against azure.archive.ubuntu.com stalls
           # intermittently and hangs the job even with the timeout+retry from
           # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
           # 32291338049 (main) both died in this exact step with exit 124, on
           # different jobs each time. x86_64-unknown-linux-musl is statically
           # linked — no glibc dependency, so it runs unchanged across any
-          # ubuntu-latest base-image drift.
+          # runner base-image drift.
           RG_VERSION="15.2.0"
           RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
           RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
@@ -944,7 +952,7 @@ jobs:
 
   dashboard-lint:
     name: Dashboard TS Lint (fixture-gate + typecheck)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -970,7 +978,7 @@ jobs:
 
   lint-patterns:
     name: Lint Patterns (silent-except + atomic-write)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1054,7 +1062,7 @@ jobs:
 
   profile-d:
     name: Profile D (pip install smoke)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1079,7 +1087,7 @@ jobs:
 
   context-rotation-plugin:
     name: Context-rotation plugin tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's 6-hour hard limit.
     timeout-minutes: 15
     strategy:
@@ -1107,7 +1115,7 @@ jobs:
 
   state-pin-gate:
     name: Repo-local state-pin gate (#1043 footgun)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # See "Profile A" above: bounds a hung job to minutes, not GitHub's
     # 6-hour hard limit (measured baseline 16-21 min, 45 min ceiling).
     timeout-minutes: 45
@@ -1124,14 +1132,14 @@ jobs:
             exit 0
           fi
           # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu-latest image, so this skip-tak
+          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
           # never fires, and apt-get against azure.archive.ubuntu.com stalls
           # intermittently and hangs the job even with the timeout+retry from
           # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
           # 32291338049 (main) both died in this exact step with exit 124, on
           # different jobs each time. x86_64-unknown-linux-musl is statically
           # linked — no glibc dependency, so it runs unchanged across any
-          # ubuntu-latest base-image drift.
+          # runner base-image drift.
           RG_VERSION="15.2.0"
           RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
           RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
