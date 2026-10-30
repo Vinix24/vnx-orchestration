@@ -498,12 +498,20 @@ _PR_DATA = {
 
 def _stub_door_edges(monkeypatch, door) -> None:
     import file_scope_overlap
+    import forge_gate_publisher
     import gate_obligations
     import pr_merge
 
     def go(message: str) -> Dict[str, Any]:
         return {"verdict": "GO", "message": message, "overridden": False, "override_reason": None}
 
+    # RG-4: a door that clears a head under --override-b3 republishes vnx-gate/review
+    # first. The forge edge is stubbed here, as the gh edges are: no test reads GitHub.
+    # The payload shape is the real publisher's: the door reads its conclusion.
+    monkeypatch.setattr(
+        forge_gate_publisher, "refresh_review_summary",
+        lambda *a, **k: {"conclusion": forge_gate_publisher.CONCLUSION_SUCCESS},
+    )
     monkeypatch.setattr(pr_merge, "_run_ci_gate", lambda pr, **k: (go("CI groen"), dict(_PR_DATA)))
     monkeypatch.setattr(pr_merge, "_query_pr", lambda n: dict(_PR_DATA))
     monkeypatch.setattr(pr_merge, "_resolve_override_reason", lambda reason: reason)
