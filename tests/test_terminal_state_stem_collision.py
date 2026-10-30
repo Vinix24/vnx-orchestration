@@ -7,11 +7,11 @@ scripts/lib/terminal_state_core.py. With scripts/ ahead of scripts/lib/ on sys.p
 a bare ``from terminal_state_shadow import SCHEMA_VERSION`` resolved to the wrapper
 and the t0 state builder reported ``source: error`` for T1-T3.
 
-T-B1 (terminal-binding-afbouwen) moved the source of the builder's ``terminals``
-block from ``terminal_state.json`` to the ``terminal_leases`` rows. The guard is
-unchanged in purpose — the builder must run with scripts/ before scripts/lib/ and
-report a real terminal state instead of an import error — so the fixture seeds the
-lease table through the lease API and asserts the block idle from that source.
+T-B1 (terminal-binding-afbouwen) moved the builder's ``terminals`` block off
+``terminal_state.json``, and T-B2 removed the block entirely: the builder no
+longer imports the terminal-state modules. The guard is now (a) the stems stay
+unique under scripts/, and (b) the builder still imports cleanly with scripts/
+ahead of scripts/lib/.
 """
 
 from __future__ import annotations
@@ -41,26 +41,19 @@ def _isolated_env(tmp_path: Path) -> dict:
     return env
 
 
-_BUILDER_SNIPPET = """
-import json, sys
-from pathlib import Path
+_IMPORT_SNIPPET = """
+import sys
 sys.path.insert(0, {lib!r})
 sys.path.insert(0, {scripts!r})   # scripts/ BEFORE scripts/lib/
 assert sys.path.index({scripts!r}) < sys.path.index({lib!r})
-from lease_manager import LeaseManager   # existing lease API, not a raw SQL insert
-manager = LeaseManager(Path({state!r}))
-leases = {{tid: manager.get(tid) for tid in ("T1", "T2", "T3")}}
-assert all(lease is not None and lease.state == "idle" for lease in leases.values()), leases
 import build_t0_state
-print(json.dumps(build_t0_state._build_terminals(Path({state!r}))))
+assert callable(build_t0_state.build_t0_state)
+print("ok")
 """
 
 
-def test_builder_terminals_resolve_with_scripts_before_lib(tmp_path):
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-
-    snippet = _BUILDER_SNIPPET.format(lib=str(LIB_DIR), scripts=str(SCRIPTS_DIR), state=str(state_dir))
+def test_builder_imports_with_scripts_before_lib(tmp_path):
+    snippet = _IMPORT_SNIPPET.format(lib=str(LIB_DIR), scripts=str(SCRIPTS_DIR))
     proc = subprocess.run(
         [sys.executable, "-c", snippet],
         capture_output=True,
@@ -70,15 +63,7 @@ def test_builder_terminals_resolve_with_scripts_before_lib(tmp_path):
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
-    terminals = json.loads(proc.stdout.strip().splitlines()[-1])
-
-    for tid in ("T1", "T2", "T3"):
-        entry = terminals[tid]
-        assert entry["source"] != "error", entry
-        assert "ImportError" not in str(entry.get("error", "")), entry
-        assert entry["status"] == "idle", entry
-        assert entry["source"] == "lease", entry
-        assert entry["lease_state"] == "idle", entry
+    assert proc.stdout.strip().splitlines()[-1] == "ok"
 
 
 def _stem_files(stem: str) -> list[Path]:

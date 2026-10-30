@@ -147,14 +147,10 @@ def test_t11_v2_receipt_no_session_object_session_id_present(tmp_path):
                        return_value={"model": "claude-sonnet-4-6", "provider": "claude_code"}):
         with patch.object(ar, "_resolve_session_id", return_value="sess-t11-abc123"):
             with patch.object(ar, "_extract_session_token_usage", return_value=None):
-                with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
-                    snap = MagicMock()
-                    snap.to_dict.return_value = {"status": "ok"}
-                    mock_snap.return_value = snap
-                    with patch.object(ar, "enrich_receipt_provenance", return_value=None):
-                        with patch.object(ar, "validate_receipt_provenance") as mock_val:
-                            mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
-                            result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_path))
+                with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                    with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                        mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                        result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_path))
 
     assert result.status == "appended"
     line = _read_lines(receipts_path)[-1]
@@ -409,14 +405,10 @@ def test_quality_advisory_no_longer_written_on_completion_receipt(tmp_path):
                        return_value={"model": "claude-sonnet-4-6", "provider": "claude_code"}):
         with patch.object(ar, "_resolve_session_id", return_value="sess-qa-0001"):
             with patch.object(ar, "_extract_session_token_usage", return_value=None):
-                with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
-                    snap = MagicMock()
-                    snap.to_dict.return_value = {"status": "ok"}
-                    mock_snap.return_value = snap
-                    with patch.object(ar, "enrich_receipt_provenance", return_value=None):
-                        with patch.object(ar, "validate_receipt_provenance") as mock_val:
-                            mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
-                            result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_path))
+                with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                    with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                        mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                        result = ar.append_receipt_payload(receipt, receipts_file=str(receipts_path))
 
     assert result.status == "appended"
     line = _read_lines(receipts_path)[-1]

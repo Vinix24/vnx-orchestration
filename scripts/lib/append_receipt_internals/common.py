@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import subprocess
 import sys
 import time
@@ -102,11 +101,6 @@ class _FacadeProxy:
 
 
 facade = _FacadeProxy()
-
-
-def is_headless_t0() -> bool:
-    """Return True when T0 is configured to run via subprocess adapter."""
-    return os.environ.get("VNX_ADAPTER_T0", "tmux").lower() == "subprocess"
 
 
 def _emit(level: str, code: str, **fields: Any) -> None:

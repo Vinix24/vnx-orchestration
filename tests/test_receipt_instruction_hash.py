@@ -255,19 +255,15 @@ def test_subprocess_completion_surfaces_sha256_via_append_path(ar, tmp_path):
                           return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
             with patch.object(ar, "_resolve_session_id", return_value="sess-f-0001"):
                 with patch.object(ar, "_extract_session_token_usage", return_value=None):
-                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
-                        snap = MagicMock()
-                        snap.to_dict.return_value = {"status": "ok"}
-                        mock_snap.return_value = snap
-                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
-                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
-                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
-                                with patch.object(ar, "_build_git_provenance",
-                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
-                                    result = ar.append_receipt_payload(
-                                        receipt,
-                                        receipts_file=receipts_file,
-                                    )
+                    with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                        with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                            mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                            with patch.object(ar, "_build_git_provenance",
+                                              return_value={"git_ref": "HEAD", "branch": "test"}):
+                                result = ar.append_receipt_payload(
+                                    receipt,
+                                    receipts_file=receipts_file,
+                                )
 
     assert result.status == "appended", f"append failed: {result}"
 
@@ -383,25 +379,21 @@ def test_subprocess_completion_does_not_overwrite_dispatch_metadata(ar, tmp_path
                           return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
             with patch.object(ar, "_resolve_session_id", return_value="sess-g-0001"):
                 with patch.object(ar, "_extract_session_token_usage", return_value=None):
-                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
-                        snap = MagicMock()
-                        snap.to_dict.return_value = {"status": "ok"}
-                        mock_snap.return_value = snap
-                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
-                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
-                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
-                                with patch.object(ar, "_build_git_provenance",
-                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
-                                    with patch.object(ar, "get_changed_files", return_value=[]):
-                                        with patch.object(ar, "calculate_cqs",
+                    with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                        with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                            mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                            with patch.object(ar, "_build_git_provenance",
+                                              return_value={"git_ref": "HEAD", "branch": "test"}):
+                                with patch.object(ar, "get_changed_files", return_value=[]):
+                                    with patch.object(ar, "calculate_cqs",
+                                                      side_effect=AssertionError(
+                                                          "calculate_cqs must NOT be called for subprocess_completion"
+                                                      )):
+                                        with patch.object(ar, "generate_quality_advisory",
                                                           side_effect=AssertionError(
-                                                              "calculate_cqs must NOT be called for subprocess_completion"
+                                                              "generate_quality_advisory must NOT be called for subprocess_completion"
                                                           )):
-                                            with patch.object(ar, "generate_quality_advisory",
-                                                              side_effect=AssertionError(
-                                                                  "generate_quality_advisory must NOT be called for subprocess_completion"
-                                                              )):
-                                                enriched = ar._enrich_completion_receipt(receipt)
+                                            enriched = ar._enrich_completion_receipt(receipt)
 
     # Receipt itself must not carry a synthetic advisory or CQS payload.
     assert "quality_advisory" not in enriched, (
@@ -469,18 +461,14 @@ def test_task_complete_still_persists_quality_advisory_and_cqs(ar, tmp_path):
                           return_value={"model": "claude-sonnet-4-6", "provider": "anthropic"}):
             with patch.object(ar, "_resolve_session_id", return_value="sess-h-0001"):
                 with patch.object(ar, "_extract_session_token_usage", return_value=None):
-                    with patch.object(ar, "collect_terminal_snapshot") as mock_snap:
-                        snap = MagicMock()
-                        snap.to_dict.return_value = {"status": "ok"}
-                        mock_snap.return_value = snap
-                        with patch.object(ar, "enrich_receipt_provenance", return_value=None):
-                            with patch.object(ar, "validate_receipt_provenance") as mock_val:
-                                mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
-                                with patch.object(ar, "_build_git_provenance",
-                                                  return_value={"git_ref": "HEAD", "branch": "test"}):
-                                    with patch.object(ar, "get_changed_files", return_value=[]):
-                                        with patch.object(ar, "calculate_cqs", return_value=fake_cqs) as mock_cqs:
-                                            enriched = ar._enrich_completion_receipt(receipt)
+                    with patch.object(ar, "enrich_receipt_provenance", return_value=None):
+                        with patch.object(ar, "validate_receipt_provenance") as mock_val:
+                            mock_val.return_value = MagicMock(gaps=[], chain_status="ok")
+                            with patch.object(ar, "_build_git_provenance",
+                                              return_value={"git_ref": "HEAD", "branch": "test"}):
+                                with patch.object(ar, "get_changed_files", return_value=[]):
+                                    with patch.object(ar, "calculate_cqs", return_value=fake_cqs) as mock_cqs:
+                                        enriched = ar._enrich_completion_receipt(receipt)
 
     assert mock_cqs.called, "calculate_cqs must run for task_complete events"
     assert enriched.get("cqs") == fake_cqs
