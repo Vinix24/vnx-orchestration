@@ -24,7 +24,11 @@ ancestor (``git merge-base --is-ancestor``). The rule holds only if:
   can fail after writing exit 0 (OI-2145);
 * the window holds at least 10 distinct head SHAs (a re-run of one commit
   counts once), over at least two UTC calendar days, the latest run on main;
-* the shadow's suite wall time is at most 15 minutes on every run in it;
+* the shadow's suite wall time is at most one half of the serial reference's suite
+  duration on every run in it, both read from that run's own verdict (the shadow's
+  ``shadow.suite_wall_s``, the reference's ``reference.duration_s``): a run without a
+  whole-number reference duration is no more within the bound than one without a shadow
+  wall time;
 * every watch-list OI from triage is closed (status ``done``) in the
   open-items ledger.
 
@@ -130,7 +134,19 @@ VERDICT_ARTIFACT = "xdist-parity-verdict"
 WORKFLOW_NAME = "VNX CI"
 MIN_DISTINCT_HEADS = 10
 MIN_CALENDAR_DAYS = 2
-MAX_SUITE_WALL_S = 15 * 60
+# The wall-time bound of the cutover rule (T0 decision OI-2442, 2026-10-28, round-2 amendment):
+# the shadow's suite wall time is at most one half of the serial reference's duration in the same
+# verdict (2 * shadow <= reference), so the parallel shape at least halves Profile A. Round 1 set
+# the share at 2/5 (40 percent) and measured it: six runs of the window sat between 40.6 and 44.5
+# percent of their own reference, so a 40 percent bound could never hold on runs the window keeps.
+# One half is a plain, explainable target, not a number tuned to that 44.5 percent maximum; the
+# plan pins nothing tighter than "a real speed-up that keeps Profile A far from its 55-minute
+# timeout". The absolute 15 minutes this replaced was measured against a 35.4-minute serial
+# Profile A and stood for 42 percent; with more than 30,000 tests the serial reference takes 42 to
+# 50 minutes, and a fixed bound would measure the size of the suite rather than the cost the shape
+# adds. The share is compared in whole numbers only, never in floats.
+MAX_SHADOW_SHARE = (1, 2)
+SHADOW_SHARE_PERCENT = 100 * MAX_SHADOW_SHARE[0] // MAX_SHADOW_SHARE[1]
 MAIN_BRANCH = "main"
 CLOSED_OI_STATUS = "done"
 OI_ID = re.compile(r"OI-[1-9][0-9]*")
@@ -478,10 +494,13 @@ def run_blockers(run: Run) -> list:
         reasons.append(f"exit {verdict['exit']} ({verdict['verdict']}){_difference_note(verdict)}")
     reasons += [f"step {failure}" for failure in recorded_step_failures(verdict)]
     wall = suite_wall_s(verdict)
+    reference = reference_duration_s(verdict)
     if wall is None:
         reasons.append("no shadow suite wall time")
-    elif wall > MAX_SUITE_WALL_S:
-        reasons.append(f"shadow suite {wall} s > {MAX_SUITE_WALL_S} s")
+    elif reference is None:
+        reasons.append("no reference duration")
+    elif not within_wall_bound(verdict):
+        reasons.append(f"shadow suite {wall} s > {SHADOW_SHARE_PERCENT}% of reference {reference} s")
     return reasons
 
 
@@ -512,6 +531,35 @@ def _difference_note(verdict: dict) -> str:
 def suite_wall_s(verdict: dict) -> int | None:
     shadow = verdict.get("shadow")
     return whole_number(shadow.get("suite_wall_s")) if isinstance(shadow, dict) else None
+
+
+def reference_duration_s(verdict: dict) -> int | None:
+    """The serial reference's suite duration of *verdict*; None when it records no whole number.
+
+    The reference block is the evidence (``reference_block`` in check_xdist_parity.py writes
+    ``duration_s`` from the reference phase's own result); no job timing is fetched from the
+    API for it. Fail closed: a missing block, a block that is no object, a missing
+    ``duration_s`` and a value that is not a whole number (None, a decimal string, a bool)
+    all name no duration, and a run without one is never within the bound.
+    """
+    reference = verdict.get("reference")
+    return whole_number(reference.get("duration_s")) if isinstance(reference, dict) else None
+
+
+def within_wall_bound(verdict: dict) -> bool:
+    """Whether the run's shadow stayed within ``MAX_SHADOW_SHARE`` of its own serial reference.
+
+    Compared in whole numbers: the shadow's seconds times the share's denominator against
+    the reference's seconds times its numerator, so exactly one half (``2 * shadow`` equal
+    to ``reference``) is within and no float rounding decides the edge. Missing evidence on
+    either side is not within the bound.
+    """
+    shadow_s = suite_wall_s(verdict)
+    reference_s = reference_duration_s(verdict)
+    if shadow_s is None or reference_s is None:
+        return False
+    numerator, denominator = MAX_SHADOW_SHARE
+    return denominator * shadow_s <= numerator * reference_s
 
 
 def _created(run: Run) -> datetime:
@@ -548,7 +596,7 @@ def window_conditions(window: list, placements: list) -> list:
     days = sorted({_created(run).date().isoformat() for run in window})
     latest = max(window, key=_created) if window else None
     on_main = latest is not None and latest.event == "push" and latest.head_branch == MAIN_BRANCH
-    slow = [r for r in window if suite_wall_s(r.verdict) is None or suite_wall_s(r.verdict) > MAX_SUITE_WALL_S]
+    slow = [r for r in window if not within_wall_bound(r.verdict)]
     return [
         Condition("every_run_clean", not dirty, _blocked_detail(dirty) or "every run exit 0, every step success"),
         *evidence_conditions(placements),
@@ -561,7 +609,9 @@ def window_conditions(window: list, placements: list) -> list:
                   else f"latest run {latest.run_id}: {latest.event} on {latest.head_branch}"),
         Condition("suite_wall_time", not slow and bool(window),
                   "no run in the window" if not window
-                  else f"{len(slow)} run(s) over {MAX_SUITE_WALL_S} s or without a wall time"),
+                  else f"{len(slow)} run(s) over {SHADOW_SHARE_PERCENT}% of their serial reference "
+                       f"({MAX_SHADOW_SHARE[0]}/{MAX_SHADOW_SHARE[1]}) or without a shadow wall time "
+                       f"or a reference duration"),
     ]
 
 
