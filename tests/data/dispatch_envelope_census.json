@@ -149,35 +149,35 @@
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 970,
+      "line": 975,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 983,
+      "line": 988,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1003,
+      "line": 1008,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1020,
+      "line": 1025,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_dispatch_envelope.py",
-      "line": 1037,
+      "line": 1048,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "_AdapterResult"
@@ -1045,42 +1045,42 @@
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 545,
+      "line": 546,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 555,
+      "line": 556,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 569,
+      "line": 570,
       "mechanism": "direct-call",
       "module_target": "envelope_govern",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 657,
+      "line": 670,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 723,
+      "line": 736,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_provider",
       "symbol": "_map_harness_spawn_result"
     },
     {
       "file": "tests/test_harness_run_cost.py",
-      "line": 737,
+      "line": 750,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
@@ -1891,15 +1891,57 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 37,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 192,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 193,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_skill_applied_receipt.py",
+      "line": 198,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
       "file": "tests/test_skill_injection_seam.py",
-      "line": 34,
+      "line": 36,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_skill_injection_seam.py",
-      "line": 71,
+      "line": 75,
       "mechanism": "direct-call",
       "module_target": "envelope_prepare",
       "symbol": "_prepare"
@@ -2008,6 +2050,7 @@
     "envelope_prepare::_prepare",
     "envelope_prepare::_record_integrity",
     "envelope_prepare::_verify_role_application",
+    "envelope_prepare::_verify_skill_application",
     "envelope_types.EnvelopeResult::__eq__",
     "envelope_types.EnvelopeResult::__init__",
     "envelope_types.EnvelopeResult::__repr__",
