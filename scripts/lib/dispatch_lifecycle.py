@@ -52,7 +52,6 @@ from append_receipt_internals.lifecycle import (
 from atomic_io import atomic_write_json
 from coordination_db import TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection
 from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
-from ledger_end_line import end_line
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from runtime_state_machine import transition_dispatch_idempotent
 
@@ -563,11 +562,14 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
                  ) -> Tuple[Tuple[InFlightAttempt, ...], Tuple[str, ...]]:
     """The ``v3`` attempts with a start line and no end line, plus unkeyable starts.
 
-    Only a dispatch with a ``v3`` start keeps its records here: all ``end_line`` needs.
+    An attempt ends only on its own lifecycle end: a ``dispatch_finished`` whose
+    ``project_id``, ``dispatch_id`` and ``attempt`` are exactly its key. A legacy
+    ``task_complete`` (also one refusing delivery), another completion type or a
+    line without an ``attempt`` is no end for it (ADR-045 §2).
     """
     ledger = Path(state_dir) / LEDGER_FILENAME
     starts: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
-    records: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    finished: set = set()
     errors: List[str] = []
     try:
         handle = ledger.open("rb")
@@ -584,23 +586,23 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
             if not isinstance(line, dict):
                 continue
             key = (line.get("project_id"), line.get("dispatch_id"))
-            if key in records: records[key].append(line)
-            if str(line.get("event_type") or "").strip() != DISPATCH_STARTED_EVENT_TYPE or \
-                    str(line.get("lifecycle_mode") or "").strip() != MODE_V3:
-                continue
             attempt = line.get("attempt")
-            if not (all(isinstance(part, str) and part.strip() for part in key)
-                    and isinstance(attempt, int) and not isinstance(attempt, bool)
-                    and attempt >= 1):
-                errors.append(f"unkeyable dispatch_started: {key!r} attempt={attempt!r}")
-            elif (key[0], key[1], attempt) not in starts:
-                starts[(key[0], key[1], attempt)] = line
-                records.setdefault(key, [line])
+            keyed = (all(isinstance(part, str) and part.strip() for part in key)
+                     and isinstance(attempt, int) and not isinstance(attempt, bool)
+                     and attempt >= 1)
+            kind = str(line.get("event_type") or "").strip()
+            if kind == DISPATCH_FINISHED_EVENT_TYPE:
+                if keyed: finished.add((key[0], key[1], attempt))
+            elif kind == DISPATCH_STARTED_EVENT_TYPE and \
+                    str(line.get("lifecycle_mode") or "").strip() == MODE_V3:
+                if not keyed:
+                    errors.append(f"unkeyable dispatch_started: {key!r} attempt={attempt!r}")
+                elif (key[0], key[1], attempt) not in starts:
+                    starts[(key[0], key[1], attempt)] = line
     return tuple(
         InFlightAttempt(pid, did, attempt, start)
         for (pid, did, attempt), start in starts.items()
-        if (project_id is None or pid == project_id)
-        and end_line(records.get((pid, did), []), pid, did, attempt) is None
+        if (project_id is None or pid == project_id) and (pid, did, attempt) not in finished
     ), tuple(errors)
 
 
@@ -736,20 +738,23 @@ def _as_utc(value: Any) -> Optional[datetime]:
 
 def _stamp_lifecycle_mode(state_dir: Path, row: Optional[Mapping[str, Any]],
                           attempt: InFlightAttempt) -> None:
-    """ADR-045 §6: the start line is the source; the sweep writes the row's mode."""
+    """ADR-045 §6: the start line is the source; the sweep writes the row's mode.
+
+    One statement: SQLite merges the field under whatever ``metadata_json`` holds
+    when it runs, so a key committed after this tick read the row survives; a row
+    whose metadata is not an object, or is already ``v3``, is not matched at all.
+    """
     if row is None:
         return
-    try:
-        metadata = json.loads(row.get("metadata_json") or "{}")
-    except (TypeError, ValueError):
-        return  # unreadable metadata stays untouched: rewriting it would lose the row's history
-    if not isinstance(metadata, dict) or metadata.get("lifecycle_mode") == MODE_V3:
-        return
     with get_connection(state_dir) as conn:
-        conn.execute("UPDATE dispatches SET metadata_json = ?, updated_at = ? "
-                     "WHERE dispatch_id = ? AND project_id = ?",
-                     (json.dumps({**metadata, "lifecycle_mode": MODE_V3}, sort_keys=True),
-                      _now_utc(), attempt.dispatch_id, attempt.project_id))
+        conn.execute(
+            "UPDATE dispatches SET metadata_json = "
+            "json_set(COALESCE(metadata_json, '{}'), '$.lifecycle_mode', ?), updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ? "
+            "AND json_valid(COALESCE(metadata_json, '{}')) "
+            "AND json_type(COALESCE(metadata_json, '{}')) = 'object' "
+            "AND json_extract(COALESCE(metadata_json, '{}'), '$.lifecycle_mode') IS NOT ?",
+            (MODE_V3, _now_utc(), attempt.dispatch_id, attempt.project_id, MODE_V3))
         conn.commit()
 
 

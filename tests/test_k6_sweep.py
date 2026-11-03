@@ -38,6 +38,7 @@ import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -266,6 +267,35 @@ def _end_line(**overrides) -> dict:
             "head_sha": "c" * 40}
     line.update(overrides)
     return line
+
+
+#: A door that has exited: the pid is reused by this process with another start time.
+_STALE_DOOR_START = "Mon Jan  1 00:00:00 2024"
+
+
+def _begin_v3(state_dir: Path, *, dispatch_id: str = DISPATCH,
+              project_id: str = PROJECT) -> dispatch_start.Handover:
+    """A real ``dispatch_start.begin`` line, with only the clock and the door's start
+    time pinned: the recorded door identity is stale, so the sweep reads it as dead."""
+    spec_file, _sha = _spec(state_dir, dispatch_id=dispatch_id)
+    with patch.object(dispatch_start, "process_started_at", lambda pid: _STALE_DOOR_START), \
+            patch.object(dispatch_start, "_now", lambda: START):
+        return dispatch_start.begin(project_id=project_id, dispatch_id=dispatch_id,
+                                    role=ROLE, base_sha="a" * 40, spec_file=spec_file,
+                                    target_slot="T1", state_dir=state_dir)
+
+
+def _attempt_stub() -> "lifecycle.InFlightAttempt":
+    return lifecycle.InFlightAttempt(PROJECT, DISPATCH, ATTEMPT, {})
+
+
+def _set_metadata(state_dir: Path, metadata_json, *, project_id: str = PROJECT,
+                  dispatch_id: str = DISPATCH) -> None:
+    with get_connection(state_dir) as conn:
+        conn.execute("UPDATE dispatches SET metadata_json = ? "
+                     "WHERE dispatch_id = ? AND project_id = ?",
+                     (metadata_json, dispatch_id, project_id))
+        conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -681,3 +711,131 @@ def test_the_count_command_reports_the_lifecycle_off_in_flight(
     assert report["v3_in_flight"] == 1
     assert report["lifecycle_off"] is True
     assert report["v3_in_flight_lifecycle_off"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 12. K-6 round 2: only a real end ends a v3 attempt
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("with_attempt", [False, True], ids=["no-attempt", "attempt-1"])
+def test_a_refusal_receipt_does_not_end_a_v3_attempt(
+        state_dir, lifecycle_on, with_attempt):
+    """Codex's reproduction: start, then a refused delivery, and no dispatch_finished."""
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    refusal = {"timestamp": START, "event_type": "task_complete", "project_id": PROJECT,
+               "dispatch_id": DISPATCH, "status": "blocked",
+               "delivery_state": "delivery_refused"}
+    if with_attempt:
+        refusal["attempt"] = ATTEMPT
+    _append(state_dir, refusal)
+
+    assert [attempt.attempt for attempt in lifecycle.v3_in_flight(state_dir)[0]] == [ATTEMPT]
+    code, report = _count(state_dir)
+    assert code == 0, report
+    assert report["v3_in_flight"] == 1, report
+
+    result = lifecycle.sweep(state_dir=state_dir,
+                             now=_now_after(START_DT, DEADLINE + GRACE + 60))
+
+    assert result.abandoned == 1, result
+    assert result.in_flight == 1, result
+    assert [line["end_state"] for line in _finished(state_dir)] == ["abandoned"]
+    assert _count(state_dir)[1]["v3_in_flight"] == 0
+
+
+@pytest.mark.parametrize("event_type", ["task_complete", "task_failed", "task_timeout"])
+def test_no_legacy_completion_ends_a_v3_attempt(state_dir, lifecycle_on, event_type):
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    _append(state_dir, {"timestamp": START, "event_type": event_type,
+                        "project_id": PROJECT, "dispatch_id": DISPATCH, "attempt": ATTEMPT})
+
+    assert [attempt.attempt for attempt in lifecycle.v3_in_flight(state_dir)[0]] == [ATTEMPT]
+
+
+def test_a_dispatch_finished_without_an_attempt_never_ends_the_attempt(
+        state_dir, lifecycle_on):
+    """The append layer refuses such a line, so a legacy writer's line is written raw."""
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    with _ledger(state_dir).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"timestamp": START, "event_type": "dispatch_finished",
+                                 "project_id": PROJECT, "dispatch_id": DISPATCH,
+                                 "end_state": "completed"}) + "\n")
+
+    assert [attempt.attempt for attempt in lifecycle.v3_in_flight(state_dir)[0]] == [ATTEMPT]
+
+
+def test_a_finished_for_attempt_one_does_not_end_attempt_two(state_dir, lifecycle_on):
+    _insert_row(state_dir, attempt_count=1)
+    _begin_v3(state_dir)  # attempt 1
+    lifecycle.finalize(state_dir=state_dir, project_id=PROJECT, dispatch_id=DISPATCH,
+                       attempt=1, end_state="completed", end_line=_end_line(attempt=1))
+    _begin_v3(state_dir)  # attempt 2
+
+    flights, errors = lifecycle.v3_in_flight(state_dir)
+
+    assert [(attempt.dispatch_id, attempt.attempt) for attempt in flights] == [(DISPATCH, 2)]
+    assert errors == ()
+
+
+def test_a_finished_of_another_project_does_not_end_the_attempt(state_dir, lifecycle_on):
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    lifecycle.finalize(state_dir=state_dir, project_id=OTHER_PROJECT, dispatch_id=DISPATCH,
+                       attempt=ATTEMPT, end_state="completed",
+                       end_line=_end_line(project_id=OTHER_PROJECT))
+
+    flights, errors = lifecycle.v3_in_flight(state_dir)
+
+    assert [(attempt.project_id, attempt.attempt) for attempt in flights] == [
+        (PROJECT, ATTEMPT)]
+    assert errors == ()
+
+
+# ---------------------------------------------------------------------------
+# 13. K-6 round 2: the mode stamp is one atomic statement
+# ---------------------------------------------------------------------------
+
+def test_the_stamp_merges_under_a_key_committed_after_the_read(state_dir):
+    _insert_row(state_dir, metadata={"a": 1})
+    row = lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)  # the sweep's read
+    _set_metadata(state_dir, json.dumps({"a": 1, "b": 2}))        # a later writer, before the stamp
+
+    lifecycle._stamp_lifecycle_mode(state_dir, row, _attempt_stub())
+
+    assert json.loads(_row(state_dir)["metadata_json"]) == {
+        "a": 1, "b": 2, "lifecycle_mode": "v3"}
+
+
+def test_the_stamp_gives_null_metadata_the_mode(state_dir):
+    _insert_row(state_dir)
+    _set_metadata(state_dir, None)
+    row = lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)
+
+    lifecycle._stamp_lifecycle_mode(state_dir, row, _attempt_stub())
+
+    assert json.loads(_row(state_dir)["metadata_json"]) == {"lifecycle_mode": "v3"}
+
+
+@pytest.mark.parametrize("raw", ["[1]", "not json"])
+def test_the_stamp_leaves_metadata_that_is_not_an_object_untouched(state_dir, raw):
+    _insert_row(state_dir)
+    _set_metadata(state_dir, raw)
+    row = lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)
+
+    lifecycle._stamp_lifecycle_mode(state_dir, row, _attempt_stub())
+
+    assert _row(state_dir)["metadata_json"] == raw
+
+
+def test_the_stamp_leaves_another_projects_row_untouched(state_dir):
+    _insert_row(state_dir, metadata={"a": 1})
+    _insert_row(state_dir, project_id=OTHER_PROJECT, metadata={"a": 1})
+    row = lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)
+
+    lifecycle._stamp_lifecycle_mode(state_dir, row, _attempt_stub())
+
+    assert json.loads(_row(state_dir)["metadata_json"]) == {"a": 1, "lifecycle_mode": "v3"}
+    assert json.loads(_row(state_dir, project_id=OTHER_PROJECT)["metadata_json"]) == {"a": 1}

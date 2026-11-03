@@ -4694,20 +4694,12 @@ def _lifecycle_sweep_step(state_dir: Path, *, write: bool) -> Dict[str, Any]:
         return {"ran": False, "reason": "dry_run"}
     try:
         from dispatch_lifecycle import sweep  # noqa: PLC0415
-
         result = sweep(state_dir=state_dir)
     except Exception as exc:  # vnx-silent-except: the sweep's heartbeat carries the failure and this tick's own obligations must still run
         _LOG.warning("[gate_obligation_runner] dispatch sweep failed: %r", exc)
         return {"ran": True, "error": f"{type(exc).__name__}: {exc}"}
     return {"ran": True, "abandoned": result.abandoned, "errors": len(result.errors),
             "lifecycle_off": result.lifecycle_off, "heartbeat": result.heartbeat_path}
-
-
-def _unreadable_obligations_summary(state_dir: Path, exc: ValueError,
-                                    lifecycle_sweep: Dict[str, Any]) -> Dict[str, Any]:
-    """The summary of a tick whose obligation store could not be read (never skipped)."""
-    return {"state_dir": str(state_dir), "error": str(exc), "outcomes": [],
-            "pending_after": -1, "lifecycle_sweep": lifecycle_sweep}
 
 
 def run(
@@ -4797,7 +4789,8 @@ def run(
     except ValueError as exc:
         # An unreadable obligation is surfaced, not skipped — same contract
         # as the freshness monitor's source_unreadable finding.
-        return _unreadable_obligations_summary(state_dir, exc, lifecycle_sweep)
+        return {"state_dir": str(state_dir), "error": str(exc), "outcomes": [],
+                "pending_after": -1, "lifecycle_sweep": lifecycle_sweep}
     scoped: List[Tuple[Path, Dict[str, Any]]] = [
         (path, record)
         for path, record in obligations
