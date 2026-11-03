@@ -4789,8 +4789,13 @@ def run(
     except ValueError as exc:
         # An unreadable obligation is surfaced, not skipped — same contract
         # as the freshness monitor's source_unreadable finding.
-        return {"state_dir": str(state_dir), "error": str(exc), "outcomes": [],
-                "pending_after": -1, "lifecycle_sweep": lifecycle_sweep}
+        return {
+            "state_dir": str(state_dir),
+            "error": str(exc),
+            "outcomes": [],
+            "pending_after": -1,
+            "lifecycle_sweep": lifecycle_sweep,
+        }
     scoped: List[Tuple[Path, Dict[str, Any]]] = [
         (path, record)
         for path, record in obligations

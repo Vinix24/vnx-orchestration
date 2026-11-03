@@ -631,20 +631,25 @@ def in_flight_counts(state_dir: str | Path) -> Dict[str, Any]:
     intents, intent_errors = open_intents(state_dir)
     flights, flight_errors = v3_in_flight(state_dir)
     off = not lifecycle_enabled()
+    unreadable = list(intent_errors) + list(flight_errors)
+    # Whether the store answers at all: no row is wanted, so no ids are passed.
+    try: _dispatch_row(Path(state_dir), "", "")
+    except AppendReceiptError as exc: unreadable.append(str(exc))
     return {"v3_in_flight": len(flights), "open_intents": len(intents), "lifecycle_off": off,
-            "v3_in_flight_lifecycle_off": len(flights) if off else 0,
-            "unreadable": list(intent_errors) + list(flight_errors)}
+            "v3_in_flight_lifecycle_off": len(flights) if off else 0, "unreadable": unreadable}
 
 
 def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optional[Dict[str, Any]]:
+    """The attempt's row: ``None`` for no store and no row, raised when the store cannot be read."""
     if not Path(db_path_from_state_dir(state_dir)).is_file(): return None
     try:
         with get_connection(state_dir) as conn:
             row = conn.execute("SELECT bundle_path, metadata_json FROM dispatches "
                                "WHERE dispatch_id = ? AND project_id = ?",
                                (dispatch_id, project_id)).fetchone()
-    except Exception:  # vnx-silent-except: an unreadable row only loses the deadline source; the named constant decides
-        return None
+    except Exception as exc:  # vnx-silent-except: raised to the caller as the store's refusal, never "no row"
+        raise AppendReceiptError("store_unreadable", EXIT_IO_ERROR,
+                                 f"cannot read {db_path_from_state_dir(state_dir)}: {exc}") from exc
     return dict(row) if row is not None else None
 
 
@@ -809,8 +814,7 @@ def _collect(state_dir: Path, project_id: Optional[str], now: datetime) -> Dict[
         try:
             counter, source, error = sweep_attempt(state_dir, attempt, now)
         except Exception as exc:  # vnx-silent-except: one refused attempt is counted and reported, never silently dropped
-            errors.append(f"sweep {attempt.dispatch_id}#{attempt.attempt}: "
-                          f"{type(exc).__name__}: {exc}")
+            errors.append(f"sweep {attempt.dispatch_id}#{attempt.attempt}: {type(exc).__name__}: {exc}")
             continue
         if counter in _THE_COUNTS:
             collected[counter] += 1

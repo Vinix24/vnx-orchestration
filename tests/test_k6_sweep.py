@@ -53,6 +53,7 @@ import dispatch_start  # noqa: E402
 import gate_obligation_runner as runner  # noqa: E402
 import project_id_migration  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
+from append_receipt_internals.common import AppendReceiptError  # noqa: E402
 from append_receipt_internals.lifecycle import (  # noqa: E402
     build_end_intent,
     end_intent_path,
@@ -839,3 +840,106 @@ def test_the_stamp_leaves_another_projects_row_untouched(state_dir):
 
     assert json.loads(_row(state_dir)["metadata_json"]) == {"a": 1, "lifecycle_mode": "v3"}
     assert json.loads(_row(state_dir, project_id=OTHER_PROJECT)["metadata_json"]) == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# 14. K-6 round 3: a store that cannot be read is reported, never "no row"
+# ---------------------------------------------------------------------------
+
+def _store_path(state_dir: Path) -> Path:
+    return coordination_db.db_path_from_state_dir(state_dir)
+
+
+def _corrupt_store(state_dir: Path) -> bytes:
+    """Check the readable store's bytes out, then leave a file that is no database."""
+    db = _store_path(state_dir)
+    with get_connection(state_dir) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchall()
+    kept = db.read_bytes()
+    db.write_bytes(b"this file is not a sqlite database\n")
+    return kept
+
+
+def _restore_store(state_dir: Path, kept: bytes) -> None:
+    """Put the readable store back, without the write-ahead files a failed read leaves."""
+    db = _store_path(state_dir)
+    for suffix in ("-wal", "-shm"):
+        Path(f"{db}{suffix}").unlink(missing_ok=True)
+    db.write_bytes(kept)
+
+
+def _remove_store(state_dir: Path) -> None:
+    """No store at all: not a row, and never "unreadable" (ADR-045 §6)."""
+    db = _store_path(state_dir)
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{db}{suffix}").unlink(missing_ok=True)
+
+
+def test_an_unreadable_store_books_nothing_and_is_reported(state_dir, lifecycle_on):
+    """Codex's reproduction: past the threshold with no liveness, and a store
+    that is not a database. The row read fails, and the sweep says so."""
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    _corrupt_store(state_dir)
+
+    result = lifecycle.sweep(state_dir=state_dir,
+                             now=_now_after(START_DT, DEADLINE + GRACE + 30 * 60))
+
+    assert result.abandoned == 0, result
+    assert result.in_flight == 1, result
+    assert _finished(state_dir) == []  # nothing booked: no end line, no projection, no stamp
+    assert len(result.errors) == 1, result.errors
+    assert f"{DISPATCH}#{ATTEMPT}" in result.errors[0], result.errors
+    assert "is not a database" in result.errors[0], result.errors
+    heartbeat = _heartbeat(state_dir)
+    assert heartbeat["counts"]["errors"] == 1, heartbeat
+    assert heartbeat["last_error"] == result.errors[0], heartbeat
+    code, report = _count(state_dir)
+    assert code == 2, report
+    assert len(report["unreadable"]) == 1, report
+
+
+def test_an_absent_store_is_no_row_and_the_attempt_is_abandoned(state_dir, lifecycle_on):
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    _remove_store(state_dir)
+
+    result = lifecycle.sweep(state_dir=state_dir,
+                             now=_now_after(START_DT, DEADLINE + GRACE + 60))
+
+    assert result.abandoned == 1, result
+    assert result.errors == (), result.errors
+    assert [line["end_state"] for line in _finished(state_dir)] == ["abandoned"]
+    assert _count(state_dir)[0] == 0  # absent is not unreadable, also for the count
+
+
+def test_after_the_store_is_repaired_the_next_sweep_abandons(state_dir, lifecycle_on):
+    _insert_row(state_dir)
+    _begin_v3(state_dir)
+    kept = _corrupt_store(state_dir)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    first = lifecycle.sweep(state_dir=state_dir, now=now)
+
+    assert first.abandoned == 0, first
+    assert len(first.errors) == 1, first.errors
+    assert _finished(state_dir) == []
+
+    _restore_store(state_dir, kept)
+    second = lifecycle.sweep(state_dir=state_dir, now=now)
+
+    assert second.abandoned == 1, second
+    assert second.errors == (), second.errors
+    assert [line["end_state"] for line in _finished(state_dir)] == ["abandoned"]
+
+
+def test_the_dispatch_row_read_raises_on_an_unreadable_store(state_dir):
+    """Three outcomes, not two: no store is ``None``, an unreadable one raises."""
+    _insert_row(state_dir)
+    assert lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)["bundle_path"] is None
+
+    _corrupt_store(state_dir)
+
+    with pytest.raises(AppendReceiptError) as raised:
+        lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)
+    assert "is not a database" in str(raised.value), raised.value
