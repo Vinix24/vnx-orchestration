@@ -3873,8 +3873,7 @@ def run_dispatch(
         # Point 3 (golf 1A) + K-4 (ADR-045 §1/§5): claimed -> delivering, then the
         # dispatch_started line at the hand-over, before the slot and the spawn.
         handover = _owner_hand_over(
-            plan, vspec.spec, project_id=project_id, spec_file=spec_file,
-            state_dir=state_dir, attempt_id=attempt_id)
+            plan, vspec.spec, project_id=project_id, spec_file=spec_file, state_dir=state_dir, attempt_id=attempt_id)
         if handover is None:
             return 1
 
