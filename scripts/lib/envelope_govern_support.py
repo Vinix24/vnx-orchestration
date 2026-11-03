@@ -46,12 +46,24 @@ def _is_lane_completion_receipt(entry: Any, dispatch_id: str) -> bool:
     is optional and so not part of the test). Review-gate,
     report_parser, converter, restore and corrective (``pr_enforcement`` /
     ``phantom_guard``) records are not lane completion receipts.
+
+    A REFUSAL is never a lane completion (ADR-045 K-4c round 3). A refused start
+    (``dispatch_cli._record_door_refusal_receipt``) and a refused provider family
+    share one shape: ``blocked``, ``delivery_state: delivery_refused``, nothing
+    spent — and because it is written through ``emit_dispatch_receipt`` it also
+    carries the ReceiptV2 fields, which made it indistinguishable here. Counted as
+    a completion, it made the following refire's GOVERN skip its own receipt and
+    left the refusal as the dispatch's only completion evidence. Only that exact
+    positive value excludes an entry: every other state (``session_ready``,
+    ``submit_failed``, ``deliver_failed``, absent) keeps the decision it had.
     """
     if not isinstance(entry, dict):
         return False
     if entry.get("dispatch_id") != dispatch_id:
         return False
     if entry.get("receipt_kind") != "dispatch":
+        return False
+    if entry.get("delivery_state") == "delivery_refused":
         return False
     source = entry.get("source")
     if source == "subprocess":

@@ -20,7 +20,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -113,11 +113,83 @@ def _drive_row_past_the_queue(state_dir: Path, dispatch_id: str) -> None:
         conn.commit()
 
 
-def _run_door(spec_file: Path, state_dir: Path, seen: dict):
+def _run_door(spec_file: Path, state_dir: Path, seen: dict, *, refire_reason=None):
     with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
          patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
-        return dispatch_cli.run_dispatch(spec_file), headless
+        return dispatch_cli.run_dispatch(spec_file, refire_reason=refire_reason), headless
+
+
+def _run_provider_door(spec_file: Path, state_dir: Path, seen: dict, *, refire_reason=None):
+    """The same real door on the provider lane: the lane executor is a spy."""
+    envelope = MagicMock(return_value=MagicMock(returncode=0, status="success", error=None))
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
+         patch("dispatch_cli._check_reachability",
+               return_value=dispatch_cli.ReachabilityVerdict(block=False)), \
+         patch("dispatch_cli.run_envelope_plan", envelope):
+        return dispatch_cli.run_dispatch(spec_file, refire_reason=refire_reason), envelope
+
+
+def _switch_file(tmp_path: Path, *, deepseek_enabled: bool) -> Path:
+    """The operator's switch file, driven through VNX_PROVIDER_SWITCH_FILE."""
+    path = tmp_path / "switch" / "providers.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "version": 1,
+        "global": {"deepseek": {
+            "enabled": deepseek_enabled, "changed_at": "2026-11-03T00:00:00Z",
+            "changed_by": "test", "reason": "K-4c round 3",
+        }},
+        "projects": {},
+    }), encoding="utf-8")
+    return path
+
+
+_COMPLETION_BODY = (
+    "## Summary\n\nA complete implementation with enough words to satisfy the body "
+    "contract of every report the fabric reads, written after a refused fire.\n\n"
+    "## Changes\n\n- `scripts/lib/envelope_govern_support.py`\n\n"
+    "## Verification\n\n- pytest tests/test_k4c_start_refusal_receipt.py -q\n\n"
+    "## Open Items\n\nNone\n"
+)
+
+
+def _govern_the_refire(
+    data_dir: Path, state_dir: Path, dispatch_id: str, *, provider: str = PROVIDER,
+) -> None:
+    """Run the lane's real end-of-dispatch GOVERN against the SAME ledger the refusal hit.
+
+    The only question this test asks of it: does GOVERN see the earlier refusal as a lane
+    completion (and skip its own receipt) or not?
+    """
+    from datetime import datetime
+
+    import envelope_govern
+    from envelope_types import EnvelopeSpec, _AdapterResult
+
+    report = data_dir / "unified_reports" / f"{dispatch_id}.md"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(_COMPLETION_BODY, encoding="utf-8")
+    spec = EnvelopeSpec(
+        dispatch_id=dispatch_id, terminal_id="T0", provider=provider, model="sonnet",
+        instruction="do the thing", role="backend-developer", pr_id=None,
+        state_dir=state_dir, data_dir=data_dir,
+    )
+    result = _AdapterResult(returncode=0, completion_text=_COMPLETION_BODY, status="success")
+    with patch("envelope_govern._archive_dispatch_events", return_value=("", True)), \
+         patch("envelope_govern._clear_dispatch_events"):
+        envelope_govern._govern(
+            spec, result,
+            start_time=datetime(2026, 11, 3, 12, 0, 0),
+            end_time=datetime(2026, 11, 3, 12, 1, 0),
+        )
+
+
+def _completions(state_dir: Path, dispatch_id: str) -> list:
+    return [r for r in _receipts(state_dir)
+            if r.get("dispatch_id") == dispatch_id
+            and r.get("delivery_state") != "delivery_refused"]
 
 
 # ---------------------------------------------------------------------------
@@ -279,3 +351,81 @@ def test_legacy_fire_without_a_refusal_writes_no_extra_receipt(tmp_path, monkeyp
     decision = json.loads(
         (state_dir / "route_decisions" / f"{dispatch_id}.json").read_text(encoding="utf-8"))
     assert decision["decision"]["lane"] == "claude_headless"
+
+
+# ---------------------------------------------------------------------------
+# 6. a refusal is never the lane's completion: the refire's GOVERN still books
+# ---------------------------------------------------------------------------
+
+def test_a_refused_start_then_a_fixed_base_refire_keeps_both_lines(
+        tmp_path, monkeypatch, capsys):
+    """ADR-045 K-4c round 3: the refusal must not stand in for the refire's completion."""
+    dispatch_id = "20261103-k4c-base-refused-then-fixed"
+    data_dir, spec_file = _make_bundle(
+        tmp_path, dispatch_id=dispatch_id, base_ref="not-a-ref-anywhere")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    rc_value, headless = _run_door(spec_file, state_dir, {})
+    assert rc_value == 1
+    headless.assert_not_called()
+    assert "REJECT [start-line-refused]: base_ref_unresolved" in capsys.readouterr().err
+    assert len(_refusals(state_dir, dispatch_id)) == 1
+
+    # The base is fixed and the SAME dispatch fires again — and succeeds.
+    spec = json.loads(spec_file.read_text(encoding="utf-8"))
+    spec["base_ref"] = "origin/main"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+
+    rc_value, headless = _run_door(
+        spec_file, state_dir, {}, refire_reason="base ref fixed upstream")
+    assert rc_value == 0
+    headless.assert_called_once()
+
+    # The lane's own GOVERN step: it must not mistake the refusal for its completion.
+    _govern_the_refire(data_dir, state_dir, dispatch_id)
+
+    refusals = _refusals(state_dir, dispatch_id)
+    completions = _completions(state_dir, dispatch_id)
+    assert len(refusals) == 1, refusals
+    assert "start-line-refused" in refusals[0]["failure_reason"]
+    assert len(completions) == 1, completions
+    assert completions[0]["status"] == "success"
+    assert completions[0]["completion_pct"] == 100
+
+
+def test_a_switched_off_family_then_switched_back_on_keeps_both_lines(
+        tmp_path, monkeypatch, capsys):
+    """The same hole on the other door refusal: provider switch off, then back on."""
+    dispatch_id = "20261103-k4c-switch-refused-then-on"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id)
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+    spec = json.loads(spec_file.read_text(encoding="utf-8"))
+    spec["provider"] = "deepseek-harness"
+    spec["model"] = "deepseek-v4-pro"
+    spec["target_slot"] = "T1"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setenv("VNX_PROVIDER_SWITCH_FILE", str(_switch_file(tmp_path, deepseek_enabled=False)))
+
+    rc_value, envelope = _run_provider_door(spec_file, state_dir, {})
+    assert rc_value == 1
+    envelope.assert_not_called()
+    assert "REJECT [provider-disabled]" in capsys.readouterr().err
+    [refusal] = _refusals(state_dir, dispatch_id)
+    assert refusal["failure_class"] == "provider_switched_off"
+
+    # The operator switches the family back on; the same dispatch fires and succeeds.
+    _switch_file(tmp_path, deepseek_enabled=True)
+    rc_value, envelope = _run_provider_door(
+        spec_file, state_dir, {}, refire_reason="provider family back on")
+    assert rc_value == 0
+    envelope.assert_called_once()
+
+    _govern_the_refire(data_dir, state_dir, dispatch_id, provider="deepseek-harness")
+
+    refusals = _refusals(state_dir, dispatch_id)
+    completions = _completions(state_dir, dispatch_id)
+    assert len(refusals) == 1, refusals
+    assert refusals[0]["failure_class"] == "provider_switched_off"
+    assert len(completions) == 1, completions
+    assert completions[0]["status"] == "success"
+    assert completions[0]["provider"] == "deepseek-harness"
