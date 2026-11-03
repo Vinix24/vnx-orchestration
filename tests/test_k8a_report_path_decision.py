@@ -516,3 +516,93 @@ def test_a_v3_report_line_links_the_exact_end_outcome(state_dir, spec_file, v3, 
     assert line["end_outcome_id"] == ended["outcome_id"]
     assert "end_pending" not in line
     receipt_schema.validate_lifecycle_receipt(line)
+
+
+# ---------------------------------------------------------------------------
+# Rule 8 (K-8a r2, OI-2520/OI-2515): the tenant is resolved here, once
+# ---------------------------------------------------------------------------
+
+def _tenantless_receipt(**overrides) -> dict:
+    """The receipt shape the converter and the parser build: no ``project_id`` yet."""
+    receipt = _receipt()
+    receipt.pop("project_id")
+    receipt.update(overrides)
+    return receipt
+
+
+def test_a_tenantless_legacy_receipt_with_a_legacy_row_is_legacy(state_dir, legacy, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    _insert_row(state_dir, metadata="{}")
+    receipt = _tenantless_receipt()
+
+    assert rlm.report_line(receipt, state_dir=state_dir) is receipt
+    assert "project_id" not in receipt
+
+
+def test_a_tenantless_legacy_receipt_with_no_row_and_with_no_db_is_legacy(
+        state_dir, legacy, monkeypatch, tmp_path):
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    receipt = _tenantless_receipt()
+
+    assert rlm.report_line(receipt, state_dir=state_dir) is receipt
+    coordination_db.db_path_from_state_dir(state_dir).unlink()
+    assert rlm.report_line(receipt, state_dir=state_dir) is receipt
+
+
+def test_a_v3_row_under_the_resolved_tenant_books_a_report(state_dir, legacy, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    _insert_row(state_dir, metadata=json.dumps({"lifecycle_mode": "v3"}))
+    # The converter's receipt shape: no project_id (the append layer stamps it) and no attempt.
+    receipt = _tenantless_receipt(attempt=None)
+
+    line = rlm.report_line(receipt, state_dir=state_dir)
+
+    assert line is not receipt
+    assert line["event_type"] == "report_ingested"
+    assert line["project_id"] == PROJECT
+    assert line["attempt"] == 1
+    assert line["end_pending"] is True
+
+
+def test_a_v3_start_and_row_under_another_tenant_refuse_project_mismatch(
+        state_dir, spec_file, v3, clock, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", OTHER_PROJECT)
+    _begin(state_dir, spec_file)
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(_receipt(project_id=OTHER_PROJECT), state_dir=state_dir)
+
+    assert exc.value.code == "project_mismatch"
+    assert PROJECT in exc.value.detail and OTHER_PROJECT in exc.value.detail
+
+
+def test_a_v3_row_under_another_tenant_refuses_with_the_env_tenant(
+        state_dir, legacy, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", OTHER_PROJECT)
+    _insert_row(state_dir, project_id=PROJECT, metadata=json.dumps({"lifecycle_mode": "v3"}))
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(_tenantless_receipt(), state_dir=state_dir)
+
+    assert exc.value.code == "project_mismatch"
+    assert PROJECT in exc.value.detail and OTHER_PROJECT in exc.value.detail
+
+
+def test_a_legacy_row_under_another_tenant_is_still_legacy(state_dir, legacy, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", OTHER_PROJECT)
+    _insert_row(state_dir, project_id=PROJECT, metadata="{}")
+    receipt = _tenantless_receipt()
+
+    assert rlm.report_line(receipt, state_dir=state_dir) is receipt
+
+
+def test_an_unresolvable_tenant_with_a_db_refuses_never_legacy(
+        state_dir, legacy, monkeypatch, tmp_path):
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    receipt = _tenantless_receipt()
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(receipt, state_dir=state_dir)
+
+    assert exc.value.code == "lifecycle_mode_undecidable"
