@@ -549,6 +549,27 @@ class TestClosureJudgesTheMergeUnderItsVerdict:
         assert NEW_HEAD[:12] in detail and HEAD[:12] in detail
         assert "kop" in detail
 
+    @pytest.mark.parametrize("broken", ["null", "no-verdict-id", "not-approved", "not-a-mapping"])
+    def test_a_block_that_cannot_be_read_never_fills_the_seat(self, env, monkeypatch, broken):
+        _capped_world(env)
+        _book(env)
+        seat_record = _seat_record(env, monkeypatch)
+        block = seat_record["round_ledger"]["merge_with_oi"]
+        if broken == "null":
+            seat_record["round_ledger"]["merge_with_oi"] = None
+        elif broken == "no-verdict-id":
+            seat_record["round_ledger"]["merge_with_oi"] = {**block, "verdict_id": ""}
+        elif broken == "not-approved":
+            seat_record["round_ledger"]["merge_with_oi"] = {**block, "approved": False}
+        else:
+            seat_record["round_ledger"]["merge_with_oi"] = [block]
+
+        by_name = {check.name: check for check in _closure_checks(env, seat_record)}
+
+        assert by_name["seat_merge_with_oi"].status == "FAIL"
+        assert by_name["seat_codex_gate"].status == "FAIL"
+        assert "telt hier niet" in by_name["seat_merge_with_oi"].detail
+
     def test_a_record_without_the_block_judges_as_on_main(self, env, monkeypatch):
         _capped_world(env)
         _book(env)

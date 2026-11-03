@@ -2058,7 +2058,10 @@ def _recorded_merge_with_oi(seat_record: Dict[str, Any]) -> Any:
     ledger = seat_record.get("round_ledger")
     if not isinstance(ledger, dict) or "merge_with_oi" not in ledger:
         return None
-    return ledger.get("merge_with_oi")
+    block = ledger.get("merge_with_oi")
+    # A key that names no block is a block that cannot be read, not "no verdict":
+    # an empty mapping makes the evaluation refuse it (fail-closed).
+    return {} if block is None else block
 
 
 def _seat_rule_checks(
