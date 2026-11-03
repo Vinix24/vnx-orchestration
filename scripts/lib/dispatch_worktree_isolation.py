@@ -47,6 +47,9 @@ log = logging.getLogger(__name__)
 _UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_SAFE_ID_LEN = 60
 
+# A full commit object id (SHA-1 40 hex, SHA-256 64 hex), never a ref name.
+_FULL_COMMIT_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
 # The shared VNX central-install tree (e.g. ~/.vnx-system/versions/<v>/). A
 # dispatch worktree must NEVER be created here — see CentralInstallWorktreeError.
 _CENTRAL_INSTALL_ROOT = Path.home() / ".vnx-system"
@@ -743,6 +746,32 @@ def _check_unpushed_local_commits(
     }
 
 
+def _is_full_commit_sha(value: str) -> bool:
+    """True when *value* is a full commit object id, not a ref name.
+
+    The door resolves the base ONCE and hands the immutable sha down (ADR-045
+    K-4b / OI-2510 p. 5). A sha is used verbatim: re-resolving it would let a
+    moved ``origin/main`` (or a fetch racing the dispatch) put the worktree on
+    a different commit than the start line names.
+    """
+    return bool(_FULL_COMMIT_SHA_RE.match(value))
+
+
+def _resolve_worktree_base_sha(root: Path, base_ref: str, dispatch_id: str) -> str:
+    """``git -C root rev-parse base_ref``; loud RuntimeError when it does not resolve."""
+    try:
+        sha_result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", base_ref],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"create_dispatch_worktree: cannot resolve base_ref {base_ref!r} "
+            f"for dispatch {dispatch_id!r}: {(exc.stderr or '').strip()}"
+        ) from exc
+    return sha_result.stdout.strip()
+
+
 def create_dispatch_worktree(
     dispatch_id: str,
     *,
@@ -766,6 +795,10 @@ def create_dispatch_worktree(
          request would reproduce the exact silent-wrong-base defect this
          parameter exists to fix, just from a different source.
       3. ``"origin/main"`` — the default when neither is given.
+
+    When *base_ref* is a full commit sha it is used verbatim — no fetch and no
+    ``rev-parse`` (see ``_is_full_commit_sha``): the door resolved that commit
+    once in the consumer repo and every later consumer must build on exactly it.
 
     An unresolvable base ref (bad ref, deleted dispatch branch, etc.) fails
     LOUD — both the ``rev-parse`` and the ``git worktree add`` step below raise
@@ -820,17 +853,11 @@ def create_dispatch_worktree(
 
         # Resolve base_sha BEFORE adding the worktree — needed for teardown
         # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().
-        try:
-            sha_result = subprocess.run(
-                ["git", "-C", str(root), "rev-parse", resolved_base_ref],
-                check=True, capture_output=True, text=True,
-            )
-            base_sha = sha_result.stdout.strip()
-        except subprocess.CalledProcessError as exc:
-            raise RuntimeError(
-                f"create_dispatch_worktree: cannot resolve base_ref {resolved_base_ref!r} "
-                f"for dispatch {dispatch_id!r}: {(exc.stderr or '').strip()}"
-            ) from exc
+        # A full sha is already the answer: never re-resolve it through a ref.
+        base_sha = (
+            resolved_base_ref if _is_full_commit_sha(resolved_base_ref)
+            else _resolve_worktree_base_sha(root, resolved_base_ref, dispatch_id)
+        )
 
         # OI-975: capture the main checkout HEAD BEFORE worktree creation so
         # teardown can detect unexpected checkout jumps during the dispatch.

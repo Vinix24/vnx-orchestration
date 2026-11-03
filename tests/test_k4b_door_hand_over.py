@@ -1,0 +1,418 @@
+"""ADR-045 audit-spoor-kern K-4b: the door calls the hand-over.
+
+Dispatch-ID: dlv-ddbfffc4b9fb
+
+K-4a added ``dispatch_start.begin``; nothing called it. K-4b wires it into the
+single-entry door (``dispatch_cli.run_dispatch``): one ``begin`` call per lane,
+after the plan is validated and before the serialization slot and the spawn,
+with ONE base sha resolved in the consumer repo and handed both to the start
+line and to worktree creation. Every test drives the real door against real
+stores under ``tmp_path``; the lane executors and the slot are spied on.
+
+Red on the K-4a head: nothing there calls ``begin`` (no ``dispatch_started``
+line, no start-line refusal, no consumer-repo resolution).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+VNX_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = VNX_ROOT / "scripts" / "lib"
+sys.path.insert(0, str(SCRIPT_DIR))
+
+import coordination_db  # noqa: E402
+import dispatch_cli  # noqa: E402
+import dispatch_start  # noqa: E402
+import project_id_migration  # noqa: E402
+import runtime_coordination as rc  # noqa: E402
+from append_receipt_internals import payload as payload_module  # noqa: E402
+from dispatch_plan import ModelPin, RuntimeSnapshot  # noqa: E402
+from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: E402
+from receipt_schema import DISPATCH_STARTED_EVENT_TYPE  # noqa: E402
+
+PROJECT = "vnx-dev"
+STAGED = "k4b"
+_GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "vnx-test",
+    "GIT_AUTHOR_EMAIL": "vnx-test@example.invalid",
+    "GIT_COMMITTER_NAME": "vnx-test",
+    "GIT_COMMITTER_EMAIL": "vnx-test@example.invalid",
+}
+
+
+# ---------------------------------------------------------------------------
+# Fixtures / helpers
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _hermetic_append(monkeypatch):
+    """Keep the append layer real, but never fire its process-spawning hooks."""
+    real = payload_module.append_receipt_payload
+
+    def _append(receipt, **kwargs):
+        kwargs.setdefault("skip_enrichment", True)
+        return real(receipt, **kwargs)
+
+    monkeypatch.setattr(payload_module, "append_receipt_payload", _append)
+    monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
+
+
+def _clean_snapshot() -> RuntimeSnapshot:
+    return RuntimeSnapshot(
+        constraint_verdicts=(),
+        staging_promoted=True,
+        target_health={"ephemeral": "healthy", "T1": "healthy"},
+        target_capable={"ephemeral": True, "T1": True},
+        model_pins={
+            "T0": ModelPin(model="opus", semantics="floor"),
+            "T1": ModelPin(model="sonnet", semantics="floor"),
+            "T2": ModelPin(model="sonnet", semantics="floor"),
+            "T3": ModelPin(model="sonnet", semantics="floor"),
+        },
+    )
+
+
+def _make_coordination_db(state_dir: Path) -> Path:
+    """The production-shaped coordination store (project_id + composite UNIQUE)."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    coordination_db.init_schema(state_dir)
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
+    return db_path
+
+
+def _make_bundle(
+    tmp_path: Path, *, dispatch_id: str, base_ref: str = "origin/main",
+) -> "tuple[Path, Path]":
+    data_dir = tmp_path / "vnx-data"
+    bundle_dir = data_dir / "dispatches" / "pending" / f"staging-{dispatch_id}"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    instruction = bundle_dir / "instruction.md"
+    instruction.write_text("Do something useful.", encoding="utf-8")
+    spec = {
+        "schema_version": 1,
+        "project_id": PROJECT,
+        "dispatch_id": dispatch_id,
+        "staging_id": f"staging-{dispatch_id}",
+        "instruction_file": str(instruction),
+        "role": "backend-developer",
+        "target_slot": "T0",
+        "gate": "codex_gate",
+        "dispatch_paths": [],
+        "provider": "claude",
+        "deadline_seconds": 3600,
+        "isolation": "worktree",
+        "base_ref": base_ref,
+    }
+    spec_file = bundle_dir / "dispatch-spec.json"
+    spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    return data_dir, spec_file
+
+
+def _start_lines(state_dir: Path) -> list:
+    ledger = state_dir / "t0_receipts.ndjson"
+    if not ledger.is_file():
+        return []
+    lines = []
+    for raw in ledger.read_text(encoding="utf-8").splitlines():
+        try:
+            line = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(line, dict) and line.get("event_type") == DISPATCH_STARTED_EVENT_TYPE:
+            lines.append(line)
+    return lines
+
+
+def _seed_live_attempt(state_dir: Path, *, dispatch_id: str, attempt_number: int = 1) -> str:
+    """A pre-existing live attempt of the same dispatch, owned by nobody in this door run."""
+    with rc.get_connection(state_dir) as conn:
+        rc.register_dispatch(conn, dispatch_id=dispatch_id, project_id=PROJECT, actor="test")
+        rc.increment_attempt_count(conn, dispatch_id)
+        row = rc.create_attempt(
+            conn, dispatch_id=dispatch_id, project_id=PROJECT, terminal_id="T0",
+            attempt_number=attempt_number, actor="test",
+        )
+        rc.update_attempt(conn, attempt_id=row["attempt_id"], state="running", actor="test")
+        conn.commit()
+    return row["attempt_id"]
+
+
+def _attempt_rows(state_dir: Path, dispatch_id: str) -> "dict[int, dict]":
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM dispatch_attempts WHERE dispatch_id = ? ORDER BY attempt_number",
+        (dispatch_id,),
+    ).fetchall()
+    conn.close()
+    return {row["attempt_number"]: dict(row) for row in rows}
+
+
+def _dispatch_row(state_dir: Path, dispatch_id: str) -> dict:
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+    conn.close()
+    assert row is not None, f"no dispatches row for {dispatch_id!r}"
+    return dict(row)
+
+
+@contextlib.contextmanager
+def _slot_spy(state_dir: Path, seen: dict):
+    seen["start_lines_at_slot"] = _start_lines(state_dir)
+    yield
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True, env=_GIT_ENV)
+    (path / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=path, check=True, env=_GIT_ENV)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=path, check=True, env=_GIT_ENV)
+
+
+def _rev_parse(repo: Path, ref: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", ref],
+        check=True, capture_output=True, text=True, env=_GIT_ENV,
+    ).stdout.strip()
+
+
+def _commit(repo: Path, name: str, body: str) -> str:
+    (repo / name).write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True, env=_GIT_ENV)
+    subprocess.run(["git", "commit", "-q", "-m", name], cwd=repo, check=True, env=_GIT_ENV)
+    return _rev_parse(repo, "HEAD")
+
+
+# ---------------------------------------------------------------------------
+# 1. lifecycle on: one line, before the slot, with the consumer repo's base sha
+# ---------------------------------------------------------------------------
+
+def test_one_start_line_written_before_the_slot(tmp_path, monkeypatch):
+    dispatch_id = "20261103-k4b-line"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id)
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+    seen: dict = {}
+    consumer_root = dispatch_cli._resolve_repo_root()
+    expected_sha = _rev_parse(consumer_root, "origin/main")
+
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0):
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    assert lines[0]["dispatch_id"] == dispatch_id
+    assert lines[0]["base_sha"] == expected_sha
+    # The spy proves ORDER: the line was already durable when the slot opened.
+    assert [line["dispatch_id"] for line in seen["start_lines_at_slot"]] == [dispatch_id]
+
+
+# ---------------------------------------------------------------------------
+# 2. one base, resolved in the consumer repo, handed to begin and the worktree
+# ---------------------------------------------------------------------------
+
+def test_base_resolves_in_the_consumer_repo_and_the_worktree_uses_it(tmp_path, monkeypatch):
+    dispatch_id = "20261103-k4b-consumer"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="consumer-only")
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+    consumer = tmp_path / "consumer-repo"
+    _init_repo(consumer)
+    consumer_sha = _commit(consumer, "consumer.txt", "consumer branch\n")
+    subprocess.run(["git", "-C", str(consumer), "branch", "consumer-only", consumer_sha],
+                   check=True, env=_GIT_ENV)
+    # Advance the branch the worktree would otherwise drift to.
+    _commit(consumer, "later.txt", "later\n")
+
+    # The engine checkout (dispatch_cli.__file__) must NOT know this branch.
+    engine_root = Path(dispatch_cli.__file__).resolve().parents[2]
+    probe = subprocess.run(
+        ["git", "-C", str(engine_root), "rev-parse", "--verify", "-q", "consumer-only^{commit}"],
+        capture_output=True, text=True,
+    )
+    assert probe.returncode != 0, "fixture: the engine checkout must not carry the consumer branch"
+
+    with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer), \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    # (a) the hand-over recorded the consumer repo's commit, not the engine's
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    assert lines[0]["base_sha"] == consumer_sha
+    # (b) the SAME sha travelled to the lane
+    assert headless.call_args.kwargs["base_sha"] == consumer_sha
+
+    # (c) the worktree is built on exactly that commit when handed the sha
+    wt = create_dispatch_worktree(dispatch_id, project_root=consumer, base_ref=consumer_sha)
+    assert _rev_parse(wt, "HEAD") == consumer_sha
+
+
+def test_unresolvable_ref_refuses_before_the_hand_over(tmp_path, monkeypatch, capsys):
+    dispatch_id = "20261103-k4b-noref"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="not-a-ref-anywhere")
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+    seen: dict = {}
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 1
+
+    assert "start_lines_at_slot" not in seen, "a refused base must never reach the slot"
+    headless.assert_not_called()
+    assert _start_lines(state_dir) == []
+    err = capsys.readouterr().err
+    assert "REJECT [start-line-refused]: base_ref_unresolved" in err, err
+
+
+# ---------------------------------------------------------------------------
+# 3. a forced StartRefused: nothing in flight, this door's attempt closed
+# ---------------------------------------------------------------------------
+
+def test_refused_start_closes_only_this_doors_attempt(tmp_path, monkeypatch, capsys):
+    dispatch_id = "20261103-k4b-refused"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id)
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+    live_attempt_id = _seed_live_attempt(state_dir, dispatch_id=dispatch_id, attempt_number=1)
+
+    entered = {"slot": False}
+
+    @contextlib.contextmanager
+    def _slot(serialization_class, *, dispatch_id):
+        entered["slot"] = True
+        yield
+
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", _slot), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless, \
+         patch("dispatch_start.begin",
+               side_effect=dispatch_start.StartRefused("start_test_forced", "forced by the test")):
+        assert dispatch_cli.run_dispatch(spec_file) == 1
+
+    assert entered["slot"] is False, "a refused start must not take the slot"
+    headless.assert_not_called()
+    assert "REJECT [start-line-refused]: start_test_forced: forced by the test" in capsys.readouterr().err
+
+    attempts = _attempt_rows(state_dir, dispatch_id)
+    # The door created attempt 2 (attempt 1 was already live) and closed exactly it.
+    assert attempts[2]["state"] == "failed"
+    assert attempts[2]["failure_reason"] == "start_test_forced"
+    # The other live attempt of the same dispatch is untouched.
+    assert attempts[1]["attempt_id"] == live_attempt_id
+    assert attempts[1]["state"] == "running"
+    assert attempts[1]["failure_reason"] is None
+    assert _dispatch_row(state_dir, dispatch_id)["state"] == "failed_delivery"
+
+
+# ---------------------------------------------------------------------------
+# 4. mode_write: write_failed is named, the dispatch goes on
+# ---------------------------------------------------------------------------
+
+def test_failed_projection_is_named_and_the_dispatch_proceeds(tmp_path, monkeypatch, capsys):
+    dispatch_id = "20261103-k4b-writefail"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id)
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+    failed = dispatch_start.Handover(
+        project_id=PROJECT, dispatch_id=dispatch_id, attempt=1,
+        lifecycle_mode=dispatch_start.MODE_LEGACY, door_pid=os.getpid(),
+        door_started_at="", started_at="2026-11-03T00:00:00Z",
+        mode_write=dispatch_start.MODE_WRITE_FAILED,
+    )
+    entered = {"slot": False}
+
+    @contextlib.contextmanager
+    def _slot(serialization_class, *, dispatch_id):
+        entered["slot"] = True
+        yield
+
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", _slot), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless, \
+         patch("dispatch_start.begin", return_value=failed):
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    assert entered["slot"] is True
+    headless.assert_called_once()
+    err = capsys.readouterr().err
+    assert "hand-over row projection write_failed" in err, err
+    assert "fire continues" in err, err
+
+
+# ---------------------------------------------------------------------------
+# 5. ledger_lifecycle off: nothing on the ledger, decision/receipts/rc unchanged
+# ---------------------------------------------------------------------------
+
+def test_legacy_writes_no_line_and_keeps_main_s_decision(tmp_path, monkeypatch):
+    dispatch_id = "20261103-k4b-legacy"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id)
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+
+    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    headless.assert_called_once()
+    # No lifecycle line and no lifecycle receipt anywhere on the ledger.
+    assert _start_lines(state_dir) == []
+
+    # The decision object the door writes is the plan's canonical dict — the
+    # hand-over adds no field to it (K-4a-head parity).
+    decision_path = state_dir / "route_decisions" / f"{dispatch_id}.json"
+    decision = json.loads(decision_path.read_text(encoding="utf-8"))
+    assert decision["dispatch_id"] == dispatch_id
+    assert decision["decision"]["dispatch_id"] == dispatch_id
+    assert decision["decision"]["lane"] == "claude_headless"
+    assert decision["decision"]["base_ref"] == "origin/main"
+    assert "lifecycle_mode" not in json.dumps(decision["decision"]), (
+        "the hand-over must never leak into the route decision"
+    )
+
+    # The legacy hand-over still projects lifecycle_mode: legacy into the row.
+    metadata = json.loads(_dispatch_row(state_dir, dispatch_id)["metadata_json"] or "{}")
+    assert metadata.get("lifecycle_mode") == "legacy"

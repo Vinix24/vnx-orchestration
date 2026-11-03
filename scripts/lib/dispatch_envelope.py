@@ -43,7 +43,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -529,12 +529,19 @@ def run_envelope_plan(
     *,
     state_dir: Path,
     data_dir: Path,
-    role: Optional[str] = None,
+    role: Optional[str] = None, handover: "Optional[Any]" = None, base_sha: Optional[str] = None,
 ) -> EnvelopeResult:
     """Execute a validated ExecutionPlan for the provider lane.
 
     Provider lane covers codex, kimi, gemini, litellm:*, deepseek-harness,
     local-gemma. The claude_headless lane runs through run_envelope_headless_plan.
+
+    *handover* (ADR-045 K-4b) is the door's ``dispatch_start.Handover``. This lane
+    accepts and ignores it in K-4b; K-4c/K-5 read it at the spawn and the exit.
+
+    *base_sha* (OI-2510 p. 5) is the immutable commit the door resolved once in the
+    consumer repo; when given it is what the worktree is built on, never a re-resolved
+    ref (the start line and the worktree must name the same commit).
 
     require_permit is the first action — un-evadable and cannot be moved.
 
@@ -688,8 +695,8 @@ def run_envelope_plan(
         # a worktree-creation failure — never falls back to a shared checkout.
         _consumer_project_root = resolve_consumer_project_root()
         wt_path = create_dispatch_worktree(
-            plan.dispatch_id, project_root=_consumer_project_root, base_ref=_base_ref,
-        )
+            plan.dispatch_id, project_root=_consumer_project_root, base_ref=(base_sha or "").strip() or _base_ref)
+
     except Exception as _wt_exc:
         _isolation_error = (
             f"isolation required (require_worktree) but worktree creation failed "
@@ -831,7 +838,7 @@ def run_envelope_headless_plan(
     *,
     state_dir: Path,
     data_dir: Path,
-    role: Optional[str] = None,
+    role: Optional[str] = None, handover: "Optional[Any]" = None, base_sha: Optional[str] = None,
 ) -> EnvelopeResult:
     """Execute a validated ExecutionPlan for the claude_headless lane.
 
@@ -843,6 +850,13 @@ def run_envelope_headless_plan(
     Headless lane routes to ClaudeSubprocessAdapter (spawn_claude, claude -p) with the
     same require_permit + instruction-sha256 TOCTOU verify + fail-closed GOVERN as the
     provider lane. ClaudeSubprocessAdapter is reused — not reimplemented.
+
+    *handover* (ADR-045 K-4b) is the door's ``dispatch_start.Handover``. This lane
+    accepts and ignores it in K-4b; K-4c/K-5 read it at the spawn and the exit.
+
+    *base_sha* (OI-2510 p. 5) is the immutable commit the door resolved once in the
+    consumer repo; when given it is what the worktree is built on, never a re-resolved
+    ref (the start line and the worktree must name the same commit).
 
     Raises:
         PermissionError: permit was not issued by issue_permit for this plan.
@@ -980,8 +994,8 @@ def run_envelope_headless_plan(
     try:
         _consumer_project_root = resolve_consumer_project_root()
         wt_path = create_dispatch_worktree(
-            plan.dispatch_id, project_root=_consumer_project_root, base_ref=_base_ref,
-        )
+            plan.dispatch_id, project_root=_consumer_project_root, base_ref=(base_sha or "").strip() or _base_ref)
+
     except Exception as _wt_exc:
         _isolation_error = (
             f"isolation required but worktree creation failed "

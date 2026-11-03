@@ -277,7 +277,12 @@ def test_retry_is_idempotent(tmp_path, monkeypatch):
 
     assert _row_count(db_path) == 1, "retry must not create a second dispatches row"
     second = _read_row(db_path, "20260731-oi847-retry")
-    assert dict(second) == dict(first), "retry must leave the first row untouched"
+    # ADR-045 K-4b: the door's hand-over projects lifecycle_mode into the row on
+    # every fire, so a retry re-stamps updated_at. Every OTHER column — state,
+    # attempt_count, track, metadata — must stay exactly what the first fire left.
+    first_row, second_row = dict(first), dict(second)
+    assert first_row.pop("updated_at") and second_row.pop("updated_at")
+    assert second_row == first_row, "retry must leave every other field of the row untouched"
 
 
 # ---------------------------------------------------------------------------
@@ -503,14 +508,14 @@ def _write_unpinned_claude_spec(tmp_path: Path, *, suffix: str) -> "tuple[Path, 
     return data_dir, spec_file
 
 
-def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path, monkeypatch, caplog):
+def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path, monkeypatch, capsys):
     data_dir, spec_file = _write_unpinned_claude_spec(tmp_path, suffix="abort")
 
-    # FORCE the non-git condition at the exact place create_dispatch_worktree
-    # resolves its project root — not tmp_path, which the function never
-    # consults. An empty, freshly-created directory that was never `git init`'d
-    # guarantees `git -C <dir> rev-parse origin/main` fails with "not a git
-    # repository", which is what actually trips the isolation abort.
+    # FORCE the non-git condition at the exact place the door and
+    # create_dispatch_worktree resolve their project root — not tmp_path, which
+    # neither consults. An empty, freshly-created directory that was never
+    # `git init`'d guarantees `git -C <dir> rev-parse origin/main` fails with
+    # "not a git repository".
     non_git_root = tmp_path / "non-git-consumer-root"
     non_git_root.mkdir()
 
@@ -521,10 +526,23 @@ def test_unpinned_claude_spec_in_non_git_dir_fails_with_isolation_abort(tmp_path
         "dispatch_worktree_isolation.resolve_consumer_project_root",
         return_value=non_git_root,
     ):
-        with caplog.at_level("ERROR"):
-            rc = run_dispatch(spec_file)
+        rc = run_dispatch(spec_file)
 
-    _assert_isolation_abort(rc, caplog.records)
+    assert rc != 0, (
+        "an unpinned claude spec routed through a non-git working directory "
+        "must fail — a silent success here would mean the headless lane "
+        "stopped requiring isolation, which is exactly the PR #1416 "
+        "guarantee this test protects"
+    )
+    # ADR-045 K-4b: the door resolves the base ONCE in the consumer repo and
+    # refuses BEFORE the hand-over when it cannot, so the start line and the
+    # worktree can never name different commits. A non-git consumer root has no
+    # base to isolate on: the refusal fires one step earlier than the lane's own
+    # worktree abort, but delivers the same guarantee — no unisolated worker.
+    assert "REJECT [start-line-refused]: base_ref_unresolved" in capsys.readouterr().err, (
+        "a non-git consumer root must refuse at the start line, not spawn an "
+        "unisolated worker (PR #1416 guarantee)"
+    )
 
 
 def test_control_isolation_success_makes_the_abort_check_fail(tmp_path, monkeypatch, caplog):

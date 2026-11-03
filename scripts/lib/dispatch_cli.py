@@ -57,6 +57,7 @@ from dispatch_internal import (  # noqa: E402
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
 from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
+import dispatch_start  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
 from receipt_verdict import (  # noqa: E402
     HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
@@ -2839,6 +2840,8 @@ def _execute_claude_headless(
     state_dir: Path,
     data_dir: Path,
     role: Optional[str] = None,
+    handover: Optional[dispatch_start.Handover] = None,
+    base_sha: Optional[str] = None,
 ) -> int:
     """Execute a validated claude_headless plan via ClaudeSubprocessAdapter.
 
@@ -2848,6 +2851,10 @@ def _execute_claude_headless(
 
     Delegates all permit verification, TOCTOU check, and GOVERN to
     run_envelope_headless_plan — same security contract as the provider lane.
+
+    *handover* travels to the lane so K-4c/K-5 can read it at the spawn and the
+    exit; K-4b only carries it. *base_sha* is the immutable commit the door
+    resolved once — the lane builds the worktree on exactly it.
 
     Fail-closed last gate before spawn: consults lane_safety.headless_block from
     routing_policy.yaml (OI-223) instead of a hardcoded env check, so the yaml stays
@@ -2862,7 +2869,8 @@ def _execute_claude_headless(
         raise PermissionError(
             f"claude_headless lane blocked by default; set {override_env}=1 to opt in"
         )
-    result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role)
+    result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role,
+                                        handover=handover, base_sha=base_sha)
     return result.returncode
 
 
@@ -3380,6 +3388,94 @@ def _owner_transition(
         )
 
 
+def _resolve_start_base_sha(plan: ExecutionPlan) -> "tuple[Path, str]":
+    """Resolve the dispatch base ONCE, in the consumer repo the lanes build in.
+
+    OI-2510 point 5: the base must be resolved in the same consumer root
+    ``create_dispatch_worktree`` uses (``resolve_consumer_project_root``), never in
+    the engine checkout ``dispatch_cli.__file__`` lives in — in a central install
+    that checkout is ``~/.vnx-system``, so it would record the fabric's base (or
+    refuse a consumer-only branch) while the worker builds somewhere else. The
+    returned commit is immutable: the same sha goes to ``dispatch_start.begin`` and
+    down to ``create_dispatch_worktree``, so the start line and the worktree can
+    never name different commits when a ref moves between the two.
+
+    A missing consumer root or an unresolvable ref is a named ``StartRefused``:
+    the caller refuses before the hand-over, so no line, no slot and no worker.
+    """
+    from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+    try:
+        consumer_root = resolve_consumer_project_root()
+    except Exception as exc:  # a base that cannot be located refuses the start (fail closed)
+        raise dispatch_start.StartRefused(
+            "consumer_root_unresolved",
+            f"cannot resolve the consumer project root for the start line: {exc}") from exc
+    base_ref = (plan.base_ref or "origin/main").strip() or "origin/main"
+    try:
+        probe = subprocess.run(
+            ["git", "-C", str(consumer_root), "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+            capture_output=True, text=True, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise dispatch_start.StartRefused(
+            "base_ref_unresolved",
+            f"cannot resolve base ref {base_ref!r} in the consumer repo {consumer_root}: {exc}") from exc
+    sha = probe.stdout.strip()
+    if probe.returncode != 0 or not sha:
+        raise dispatch_start.StartRefused(
+            "base_ref_unresolved",
+            f"base ref {base_ref!r} does not resolve in the consumer repo {consumer_root}: "
+            f"{(probe.stderr or '').strip() or 'git rev-parse failed'}")
+    return consumer_root, sha
+
+
+def _owner_hand_over(
+    plan: ExecutionPlan, spec: DispatchSpec, *, project_id: str, spec_file: Path,
+    state_dir: Path, attempt_id: Optional[str],
+) -> "tuple[Optional[dispatch_start.Handover], Optional[str]]":
+    """Point 3 + K-4b: claimed -> delivering, then the start line at the hand-over.
+
+    The ledger line precedes the row's ``lifecycle_mode`` stamp, the slot and the
+    spawn (ADR-045 §1), and this is the door's ONE call into
+    ``dispatch_start.begin()`` for both lanes. On ``StartRefused`` the attempt THIS
+    door owns is closed the same way a caught-before-spawn failure already is
+    (``_owner_finish``, as the lock-wait timeout path does), with the refusal code
+    as its reason; another live attempt of the same dispatch is never touched.
+    Returns ``(None, None)`` after printing ``REJECT [start-line-refused]`` so the
+    caller returns without entering the slot or the lane.
+
+    On success returns the ``Handover`` (the caller passes it to the lane) and the
+    one immutable base sha the door resolved (also handed to worktree creation).
+    """
+    _owner_transition(
+        spec.dispatch_id, "delivering", state_dir=state_dir,
+        reason="handing off to lane executor",
+    )
+    try:
+        _consumer_root, base_sha = _resolve_start_base_sha(plan)
+        handover = dispatch_start.begin(
+            project_id=project_id, dispatch_id=spec.dispatch_id, role=spec.role,
+            base_sha=base_sha, spec_file=spec_file, target_slot=plan.target_id,
+            state_dir=state_dir)
+    except dispatch_start.StartRefused as exc:
+        print(f"[dispatch_cli] REJECT [{dispatch_start.REFUSAL_CODE}]: {exc.code}: {exc.detail}",
+              file=sys.stderr)
+        if attempt_id is not None:
+            _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
+                          success=False, failure_reason=exc.code)
+        return None, None
+    if handover.mode_write != dispatch_start.MODE_WRITE_OK:
+        # The ledger line landed (dispatch_start already logged the failure); the
+        # row is only a projection, so the fire goes on — but never silently.
+        print(
+            f"[dispatch_cli] [WARN] hand-over row projection {handover.mode_write} "
+            f"for dispatch {handover.dispatch_id} attempt {handover.attempt}; "
+            "the ledger line stands and the fire continues",
+            file=sys.stderr,
+        )
+    return handover, base_sha
+
+
 def _owner_update_attempt(
     attempt_id: Optional[str], state: str, *, dispatch_id: str, state_dir: Path,
     failure_reason: Optional[str] = None,
@@ -3801,19 +3897,20 @@ def run_dispatch(
             _print_plan(plan, fp, spec=vspec.spec)
             return 0
 
-        # Point 3 (golf 1A): claimed -> delivering — the door is about to
-        # hand off to the lane executor. Best-effort, no-op when attempt_id
-        # is None (registration/claim did not produce a door-owned row).
-        _owner_transition(
-            vspec.spec.dispatch_id, "delivering", state_dir=state_dir,
-            reason="handing off to lane executor",
-        )
+        # Point 3 (golf 1A) + K-4b (ADR-045 §1/§5): claimed -> delivering, then the
+        # dispatch_started line at the hand-over — one call into dispatch_start.begin
+        # for both lanes, before the slot and the spawn. A refused start returns None
+        # and has already closed this door's own attempt; nothing enters the slot.
+        handover, start_base_sha = _owner_hand_over(
+            plan, vspec.spec, project_id=project_id, spec_file=spec_file, state_dir=state_dir, attempt_id=attempt_id)
+        if handover is None:
+            return 1
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
             if plan.lane == "provider":
                 result = run_envelope_plan(
                     plan, permit, state_dir=state_dir, data_dir=data_dir,
-                    role=vspec.spec.role,
+                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
                 )
                 if result.status != "success":
                     # Fail-loud: the door must never swallow a provider-lane failure into a
@@ -3854,7 +3951,7 @@ def run_dispatch(
                     permit,
                     state_dir=state_dir,
                     data_dir=data_dir,
-                    role=vspec.spec.role,
+                    role=vspec.spec.role, handover=handover, base_sha=start_base_sha,
                 )
                 _owner_finish(
                     vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,
