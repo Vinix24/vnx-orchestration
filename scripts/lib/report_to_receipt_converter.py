@@ -46,6 +46,10 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
+# ADR-045 (K-8): the report line's path is decided in one place, shared with
+# scripts/report_parser.py, so the two writers cannot drift.
+from report_lifecycle_mode import ReportPathRefused, report_line
+from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 # Canonical receipt status vocabulary (single generated source). The converter
 # no longer carries its own hand-copied terminal-status sets; it resolves every
 # declared status through resolve_status_category() below.
@@ -957,6 +961,33 @@ def _run_fail_closed_checks(
     return violations
 
 
+def _log_refusal(exc: "ReportPathRefused", report_path: Path) -> None:
+    """Name the dispatch and the reason; the caller books nothing (K-8 point 4)."""
+    logger.warning(
+        "report_to_receipt_converter: REFUSED (ledger lifecycle) dispatch=%s "
+        "file=%s reason=%s: %s — nothing written, report stays for the next scan",
+        exc.dispatch_id, report_path.name, exc.code, exc.detail,
+    )
+
+
+def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
+    """True when *record* is the line *receipt* would book — same attempt and all.
+
+    ADR-045 (K-8): a v3 report line is a ``report_ingested`` and the report is
+    not the end, so the duplicate guard may only skip on an earlier report line
+    of the SAME attempt; a ``dispatch_finished`` must never suppress it. Every
+    legacy shape keeps the plain dispatch + receipt_kind match.
+    """
+    if record.get("dispatch_id") != receipt.get("dispatch_id"):
+        return False
+    if record.get("receipt_kind") != receipt.get("receipt_kind"):
+        return False
+    if str(receipt.get("event_type") or "").strip() != REPORT_INGESTED_EVENT_TYPE:
+        return True
+    return (str(record.get("event_type") or "").strip() == REPORT_INGESTED_EVENT_TYPE
+            and record.get("attempt") == receipt.get("attempt"))
+
+
 def _build_receipt_from_report_core(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None,
     dry_run: bool = False,
@@ -1434,10 +1465,23 @@ def build_receipt_from_report(
     suppressed) and into ``_resolve_pr_link`` (obligation write suppressed)
     so the function honours the scan-level dry-run contract "nothing on disk
     changes" end to end (OI-1744).
+
+    ADR-045 (K-8): for a ``v3`` dispatch the returned receipt is one
+    ``report_ingested`` instead of a ``task_complete``. When the v3 path
+    cannot be established the core builder raises
+    ``report_lifecycle_mode.ReportPathRefused`` (dispatch id + named reason)
+    and this function lets it through: the caller must book nothing and keep
+    the report retryable.
     """
     receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir, dry_run=dry_run)
     if receipt is None:
         return receipt
+    # ADR-045 (K-8): the ONE shaping point after the report's own verdict. A v3
+    # dispatch's report becomes one ``report_ingested`` (never a
+    # ``task_complete``, on any path) and raises ``ReportPathRefused`` when that
+    # line cannot be established; a legacy dispatch's receipt passes through
+    # untouched, byte for byte.
+    receipt = report_line(receipt, state_dir=state_dir)
 
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
@@ -1611,6 +1655,9 @@ def _convert_one_detailed(
         receipt = build_receipt_from_report(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
+    except ReportPathRefused as exc:
+        _log_refusal(exc, report_path)
+        return None, "error"
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1678,10 +1725,7 @@ def _convert_one_detailed(
                     _rec = json.loads(_line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    _rec.get("dispatch_id") == _guard_did
-                    and _rec.get("receipt_kind") == _guard_kind
-                ):
+                if _same_booking(_rec, receipt):
                     logger.info(
                         "report_to_receipt_converter: skipping dispatch=%s — "
                         "completion receipt already exists (hot-path wrote first)",

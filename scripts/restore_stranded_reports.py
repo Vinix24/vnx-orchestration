@@ -148,6 +148,11 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
         try:
             text = path.read_text(encoding="utf-8")
             receipt = rc._build_receipt_from_report_core(path, text, state_dir=state_dir)
+            if receipt is not None:
+                # ADR-045 (K-8): the same routing the scan and the public
+                # builder apply, so a v3 dispatch never gets a task_complete
+                # from this third writer either.
+                receipt = rc.report_line(receipt, state_dir=state_dir)
         except Exception:
             continue
         if receipt is None:

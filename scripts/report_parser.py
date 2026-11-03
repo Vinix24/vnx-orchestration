@@ -796,6 +796,33 @@ class ReportParser:
         except Exception:
             return _IDENTITY_UNRESOLVED
 
+    def _book_report_line(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+        """Book the report as the line the dispatch's lifecycle mode asks for.
+
+        ADR-045 (audit-spoor-kern K-8): a report is not an end. For a v3
+        dispatch this receipt becomes one report_ingested carrying the same
+        payload, linked to the dispatch_finished when it is already there; a
+        legacy dispatch keeps the task-shaped receipt byte for byte. The
+        decision lives in report_lifecycle_mode, the same helper the converter
+        uses, so the two writers cannot drift.
+
+        A refusal returns the ``error`` shape and writes nothing: no
+        task_complete, no partial report_ingested. ``receipt_processor.sh``
+        then fails the append, leaves the report in place and retries it.
+        """
+        # ReportParser.__init__ puts scripts/lib on sys.path, so this import
+        # cannot depend on the caller's environment.
+        from report_lifecycle_mode import ReportPathRefused, report_line
+        try:
+            return report_line(receipt, state_dir=self.state_dir)
+        except ReportPathRefused as exc:
+            sys.stderr.write(f"report_parser: REFUSED (ledger lifecycle) {exc}\n")
+            return {
+                'error': str(exc),
+                'dispatch_id': exc.dispatch_id,
+                'lifecycle_refusal': exc.code,
+            }
+
     def _build_verification(self, validation: Dict[str, Any], dispatch_id: Any,
                             report_path: str) -> Dict[str, Any]:
         """verification{} for this receipt — Path 2 of the two receipt write paths.
@@ -954,7 +981,7 @@ class ReportParser:
         if missing_fields:
             receipt['missing_fields'] = missing_fields
 
-        return receipt
+        return self._book_report_line(receipt)
 
 
 def main():
