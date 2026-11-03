@@ -148,10 +148,22 @@ def _golden() -> dict:
     return json.loads(GOLDEN.read_text(encoding="utf-8"))
 
 
+def _verdict_body(payload: dict) -> dict:
+    """The golden's own payload, without the shadow seat record PR 2 added beside it.
+
+    ``shadow_seat_rule`` is recorded evidence the door does not decide by; the
+    golden is the door's DECISION on the head before GE-4c, and that is what it
+    keeps pinning. Its presence is asserted separately.
+    """
+    body = {key: value for key, value in payload.items() if key != "shadow_seat_rule"}
+    assert payload.get("shadow_seat_rule", {}).get("rule") == "first_seat_or_every_seat_on_signal"
+    return body
+
+
 def test_the_dry_run_on_the_old_way_booking_is_the_committed_golden(tmp_path, monkeypatch):
     payload, _obligation = _dry_run(tmp_path, monkeypatch, booked_by="old_way")
 
-    assert payload == _golden(), "the golden is the door's own output on the head before GE-4c"
+    assert _verdict_body(payload) == _golden(), "the golden is the door's own output on the head before GE-4c"
     assert payload["exit_code"] == pr_merge.EXIT_OK
 
 
@@ -159,7 +171,7 @@ def test_the_dry_run_on_a_booking_through_the_commit_gives_the_same_verdict(tmp_
     committed, obligation = _dry_run(tmp_path, monkeypatch, booked_by="commit")
     payload, old_obligation = _dry_run(tmp_path / "old", monkeypatch, booked_by="old_way")
 
-    assert committed == _golden(), "the door reads a booking by the commit exactly as before"
+    assert _verdict_body(committed) == _golden(), "the door reads a booking by the commit exactly as before"
     # The same booking, bar the store it names (each run has its own tmp store).
     booked = ("status", "reason", "reason_detail", "resolved_at")
     assert {k: obligation[k] for k in booked} == {k: old_obligation[k] for k in booked}
