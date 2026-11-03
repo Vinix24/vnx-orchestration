@@ -2,10 +2,9 @@
 """ADR-045 (audit-spoor-kern K-3c): the finalizer and the recovery of one end.
 
 ``finalize`` owns steps 1 to 5 of the plan's "Einde en herstel", ``recover``
-steps 2 to 5 for an intent that never published, and ``sweep`` (K-6) is the one
-tick that runs both unattended: it recovers every open intent and books
-``abandoned`` for a ``v3`` attempt past its deadline plus the grace, without
-liveness (ADR-045 §5/§6). K-5 wires the lanes; K-act turns the setting on.
+steps 2 to 5 for an intent that never published, and ``sweep`` (K-6) runs both
+unattended: every open intent, and ``abandoned`` for a ``v3`` attempt past its
+deadline plus the grace without liveness (ADR-045 §5/§6). K-act turns it on.
 
 What the line SAYS is not decided here. The K-3b contract in
 ``append_receipt_internals.lifecycle`` owns the canonical form, the intent
@@ -532,8 +531,7 @@ MODE_V3 = "v3"
 SPEC_DIRS = ("pending", "completed", "failed")  # where a staged bundle may sit
 LIVENESS_LIVE, LIVENESS_DEAD, LIVENESS_UNKNOWN = "live", "dead", "unknown"
 _LEDGER_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
-_THE_COUNTS = ("recovered", "abandoned", "live", "unknown_liveness", "lifecycle_off_in_flight",
-               "in_flight")
+_THE_COUNTS = ("recovered", "abandoned", "live", "unknown_liveness", "lifecycle_off_in_flight", "in_flight")
 
 
 class InFlightAttempt(NamedTuple):
@@ -588,8 +586,7 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
             key = (line.get("project_id"), line.get("dispatch_id"))
             attempt = line.get("attempt")
             keyed = (all(isinstance(part, str) and part.strip() for part in key)
-                     and isinstance(attempt, int) and not isinstance(attempt, bool)
-                     and attempt >= 1)
+                     and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1)
             kind = str(line.get("event_type") or "").strip()
             if kind == DISPATCH_FINISHED_EVENT_TYPE:
                 if keyed: finished.add((key[0], key[1], attempt))
@@ -632,8 +629,7 @@ def in_flight_counts(state_dir: str | Path) -> Dict[str, Any]:
     flights, flight_errors = v3_in_flight(state_dir)
     off = not lifecycle_enabled()
     unreadable = list(intent_errors) + list(flight_errors)
-    # Whether the store answers at all: no row is wanted, so no ids are passed.
-    try: _dispatch_row(Path(state_dir), "", "")
+    try: _dispatch_row(Path(state_dir), "", "")  # no ids: no row wanted, only whether the store answers
     except AppendReceiptError as exc: unreadable.append(str(exc))
     return {"v3_in_flight": len(flights), "open_intents": len(intents), "lifecycle_off": off,
             "v3_in_flight_lifecycle_off": len(flights) if off else 0, "unreadable": unreadable}
