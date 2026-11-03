@@ -9,6 +9,7 @@ Author: T-MANAGER
 import json
 import os
 import sys
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -24,7 +25,11 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
-from completion_reading import completion_matches_outcome, is_completion  # noqa: E402
+from completion_reading import (  # noqa: E402
+    completion_matches_outcome,
+    dedupe_completions,
+    is_completion,
+)
 
 _PATHS = ensure_env()
 VNX_ROOT = Path(_PATHS["VNX_HOME"]).expanduser().resolve()
@@ -89,6 +94,30 @@ def _dispatch_roots() -> List[Path]:
         if root not in deduped:
             deduped.append(root)
     return deduped
+
+def witnessed_receipts(receipts: List[Dict]) -> List[Dict]:
+    """The receipts in order, with every dispatch attempt's completion read once.
+
+    OI-2468: one attempt can leave several completion lines -- a legacy
+    ``task_complete`` next to the v3 ``dispatch_finished``, or next to the
+    synthesized ``subprocess_completion`` lane line -- and analyzing each of
+    them can emit a recommendation per line, including contradictory ones.
+    ``dedupe_completions`` picks the strongest line of each ``(dispatch_id,
+    attempt)``, so only that line is kept here; every non-completion receipt
+    passes through unchanged and in its place.
+    """
+    remaining = Counter(id(record) for record in dedupe_completions(receipts))
+    kept: List[Dict] = []
+    for receipt in receipts:
+        if not is_completion(receipt):
+            kept.append(receipt)
+            continue
+        slot = id(receipt)
+        if remaining[slot] > 0:
+            remaining[slot] -= 1
+            kept.append(receipt)
+    return kept
+
 
 class RecommendationEngine:
     """Generates dispatch recommendations based on task outcomes and v2 metadata"""
@@ -758,8 +787,9 @@ class RecommendationEngine:
         receipts = self.load_recent_receipts()
         print(f"   Found {len(receipts)} recent receipts")
 
-        # Analyze each receipt for recommendations
-        for receipt in receipts:
+        # Analyze each receipt for recommendations. The completions are read
+        # once per dispatch attempt (OI-2468); everything else passes through.
+        for receipt in witnessed_receipts(receipts):
             self.analyze_task_completion(receipt)
 
         # Check for conflicts and dependencies
