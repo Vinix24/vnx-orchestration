@@ -21,7 +21,12 @@ to 14400. This file covers plan row 6 and OI-2522:
 6. two overlapping sweeps on one dead attempt still give one end line;
 7. a bounded sweep that stops early leaves a continuation cursor, so repeated
    bounded sweeps visit every attempt instead of restarting on the live prefix
-   (codex finding on the round-1 head).
+   (codex finding on the round-1 head);
+8. a cursor is read back only with a ``project_id``, a ``dispatch_id``, an
+   integer ``attempt`` of at least 1 and a non-negative integer ``offset``;
+   anything else — a cursor left without a ``project_id`` included — is the
+   front for the next bounded sweep and never an error inside ``_resume_at``
+   (codex finding on the round-2 head).
 
 Every store is real (a real ledger, a real ``runtime_coordination.db``) under
 ``tmp_path``; only clocks and process liveness are pinned.
@@ -282,6 +287,13 @@ def _cursor(state_dir: Path) -> dict | None:
     return _heartbeat(state_dir).get("cursor")
 
 
+def _write_heartbeat(state_dir: Path, cursor: object) -> None:
+    """The heartbeat the previous run left behind, with ``cursor`` as its continuation."""
+    path = state_dir / "dispatch_end" / lifecycle.SWEEP_HEARTBEAT_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"cursor": cursor}), encoding="utf-8")
+
+
 class _PinnedClock:
     """A monotonic clock that walks a fixed list, then repeats its last value."""
 
@@ -534,6 +546,98 @@ def test_open_intents_keep_their_place_whatever_the_cursor_says(
     second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
 
     assert second.recovered == 1, second  # intents are never behind the cursor
+
+
+# ---------------------------------------------------------------------------
+# 3c. K-6b round 3: a cursor without a project_id starts at the front
+# ---------------------------------------------------------------------------
+
+def test_a_cursor_without_a_project_id_starts_the_next_bounded_sweep_at_the_front(
+        state_dir, lifecycle_on, monkeypatch):
+    """Codex's reproduction: the heartbeat's cursor has no project_id and work is in flight."""
+    dispatch_ids = ["d-k6b-p1", "d-k6b-p2", "d-k6b-p3"]
+    for dispatch_id in dispatch_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    _write_heartbeat(state_dir, {"dispatch_id": "d", "attempt": 1, "offset": 0})
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.live, first.budget_exhausted) == (1, True), first
+    assert _cursor(state_dir)["dispatch_id"] == dispatch_ids[1]  # the front was taken
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 0.0]))
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (second.live, second.budget_exhausted) == (3, False), second  # its own cursor resumes
+    assert _cursor(state_dir) is None
+
+
+@pytest.mark.parametrize("cursor", [
+    {"dispatch_id": "d-k6b-x", "attempt": 1, "offset": 0},  # no project_id (codex)
+    {"project_id": "", "dispatch_id": "d-k6b-x", "attempt": 1, "offset": 0},
+    {"project_id": PROJECT, "attempt": 1, "offset": 0},  # no dispatch_id
+    {"project_id": PROJECT, "dispatch_id": "", "attempt": 1, "offset": 0},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 0, "offset": 0},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": True, "offset": 0},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": "1", "offset": 0},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": -1},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": False},
+])
+def test_read_cursor_rejects_a_cursor_that_cannot_be_resumed(state_dir, cursor):
+    _write_heartbeat(state_dir, cursor)
+
+    assert lifecycle._read_cursor(state_dir, None) is None  # an unscoped sweep too
+    assert lifecycle._read_cursor(state_dir, PROJECT) is None
+
+
+def test_read_cursor_accepts_a_well_formed_cursor_only_in_its_own_scope(state_dir):
+    good = {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": 0}
+    _write_heartbeat(state_dir, good)
+
+    assert lifecycle._read_cursor(state_dir, None) == good
+    assert lifecycle._read_cursor(state_dir, PROJECT) == good
+    assert lifecycle._read_cursor(state_dir, "another-project") is None
+
+
+@pytest.mark.parametrize("cursor", [
+    {},
+    {"project_id": PROJECT},
+    {"dispatch_id": "d-k6b-x", "attempt": 1},
+    {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1},
+    "not a cursor at all",
+])
+def test_resume_at_starts_at_the_front_on_a_cursor_missing_a_key(state_dir, lifecycle_on, cursor):
+    for dispatch_id in ["d-k6b-r1", "d-k6b-r2"]:
+        _attempt(state_dir, dispatch_id, live=True)
+    flights, errors = lifecycle.v3_in_flight(state_dir, None)
+    assert (len(flights), errors) == (2, ())
+
+    assert lifecycle._resume_at(flights, cursor) == 0
+
+
+def test_a_raising_sweep_never_carries_an_unreadable_cursor_forward(
+        state_dir, lifecycle_on, monkeypatch):
+    _attempt(state_dir, "d-k6b-e1", live=True)
+    _write_heartbeat(state_dir, {"dispatch_id": "d-k6b-e1", "attempt": 1, "offset": 0})
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    def _unreadable(*args, **kwargs):
+        raise RuntimeError("store unreadable")
+
+    with monkeypatch.context() as failing:
+        failing.setattr(lifecycle, "open_intents", _unreadable)
+        with pytest.raises(RuntimeError):
+            lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    # the failed run's heartbeat holds the front, not a cursor the next run would choke on
+    assert _cursor(state_dir) is None
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 0.0]))
+    result = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert result.live == 1, result
 
 
 # ---------------------------------------------------------------------------

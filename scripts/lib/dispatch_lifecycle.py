@@ -813,19 +813,20 @@ def _read_cursor(state_dir: Path, project_id: Optional[str]) -> Optional[Dict[st
         cursor = json.loads(path.read_text(encoding="utf-8")).get("cursor")
     except (OSError, ValueError, AttributeError):  # vnx-silent-except: a missing or malformed heartbeat starts at the front
         return None
-    okay = (isinstance(cursor, dict) and isinstance(cursor.get("dispatch_id"), str)
-            and isinstance(cursor.get("attempt"), int) and not isinstance(cursor.get("attempt"), bool)
-            and isinstance(cursor.get("offset"), int) and cursor["offset"] >= 0 and project_id in (None, cursor.get("project_id")))
+    kinds = {"project_id": str, "dispatch_id": str, "attempt": int, "offset": int}
+    okay = (isinstance(cursor, dict) and all(type(cursor.get(k)) is t for k, t in kinds.items())
+            and bool(cursor["project_id"]) and bool(cursor["dispatch_id"])
+            and cursor["attempt"] >= 1 and cursor["offset"] >= 0 and project_id in (None, cursor["project_id"]))
     return cursor if okay else None
 
 
 def _resume_at(flights: Tuple[InFlightAttempt, ...], cursor: Optional[Dict[str, Any]]) -> int:
-    """Where a bounded sweep starts: the cursor's item, its old offset, else the front."""
-    if not cursor or not flights: return 0
-    key = (cursor["project_id"], cursor["dispatch_id"], cursor["attempt"])
-    found = next((index for index, attempt in enumerate(flights)
-                  if (attempt.project_id, attempt.dispatch_id, attempt.attempt) == key), cursor["offset"])
-    return found % len(flights)
+    """Where a bounded sweep starts: the cursor's item, its old offset, else the front (a missing field is never an error)."""
+    if not flights or not isinstance(cursor, dict): return 0
+    keys = [(a.project_id, a.dispatch_id, a.attempt) for a in flights]
+    key = tuple(cursor.get(name) or "" for name in ("project_id", "dispatch_id", "attempt"))
+    offset = cursor.get("offset") if type(cursor.get("offset")) is int else 0
+    return (keys.index(key) if key in keys else offset) % len(flights)
 
 
 def _collect(state_dir: Path, project_id: Optional[str], now: datetime,
