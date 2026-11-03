@@ -152,7 +152,7 @@ class TestGhJsonRepoScoping:
     def test_pr_from_github_requests_the_right_repo(self, monkeypatch):
         captured = {}
 
-        def fake_gh_json(args, *, owner_repo=None):
+        def fake_gh_json(args, *, owner_repo=None, budget=None):
             captured["args"] = args
             captured["owner_repo"] = owner_repo
             return [{"number": 42}]
@@ -308,14 +308,17 @@ def _patch_manager(
     outcomes.
     """
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    # OI-2459: this harness stubs every GitHub lookup itself, so the tick
+    # snapshot must not turn into a real `gh pr list --state all` call.
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head_sha)
     # raising=False: on unfixed pre-OI-1508 code this attribute does not
     # exist yet — the RED proof for OI-1508 must fail on BEHAVIOR (the gate
     # manager gets called when it must not be), never on this shared test
     # helper's own AttributeError.
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -1126,7 +1129,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_open_still_attempts_the_gate(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "OPEN")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "OPEN")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "attempt_gate"
 
@@ -1134,7 +1137,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_merged_retires_with_pr_merged_reason(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "MERGED")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "MERGED")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "retire"
         assert decision["retire_reason"] == REASON_PR_MERGED
@@ -1143,7 +1146,7 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_closed_retires_with_pr_closed_reason(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: "CLOSED")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: "CLOSED")
         decision = self._decide(state_dir, monkeypatch)
         assert decision["kind"] == "retire"
         assert decision["retire_reason"] == REASON_PR_CLOSED
@@ -1152,14 +1155,14 @@ class TestResolvedBranchPreExecutionDecision:
 
     def test_pr_state_undetermined_neither_retires_nor_gates(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: None)
         decision = self._decide(state_dir, monkeypatch, attempts=1)
         assert decision["kind"] == "unresolvable"
         assert decision["detail"] is not None and "could not be determined" in decision["detail"]
 
     def test_pr_state_undetermined_escalates_past_threshold(self, tmp_path, monkeypatch):
         state_dir = _make_state_dir(tmp_path)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo: None)
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr, owner_repo, snapshot=None: None)
         decision = self._decide(
             state_dir, monkeypatch, attempts=runner._UNRESOLVABLE_ESCALATION_ATTEMPTS,
         )
@@ -1351,8 +1354,8 @@ class TestEvidenceIndexJoinsOnPrNumber:
         )
         monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
         monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-        monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-        monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: False)
+        monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+        monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: False)
         monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: self.HEAD_SHA)
         self._seed_result(
             state_dir, dispatch_id=dispatch_id, gate="codex_gate", pr_number=50200,
@@ -1604,7 +1607,7 @@ class TestListOpenPRs:
     def test_normal_list_is_not_suspect(self, monkeypatch):
         monkeypatch.setattr(
             runner, "_gh_json",
-            lambda args, owner_repo=None: [{"number": 1, "headRefName": "dispatch/x"}],
+            lambda args, owner_repo=None, budget=None: [{"number": 1, "headRefName": "dispatch/x"}],
         )
 
         result = runner._list_open_prs("Vinix24/vnx-orchestration")
@@ -1613,7 +1616,7 @@ class TestListOpenPRs:
         assert result["suspect"] is False
 
     def test_gh_failure_is_none_and_suspect(self, monkeypatch):
-        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None: None)
+        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None, budget=None: None)
 
         result = runner._list_open_prs("Vinix24/vnx-orchestration")
 
@@ -1624,7 +1627,7 @@ class TestListOpenPRs:
         """OI-1766: a list hitting the --limit cap exactly might be
         truncated — gh gives no way to tell, so it must be flagged."""
         capped = [{"number": n, "headRefName": f"dispatch/{n}"} for n in range(runner._OPEN_PR_LIST_LIMIT)]
-        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None: capped)
+        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None, budget=None: capped)
 
         result = runner._list_open_prs("Vinix24/vnx-orchestration")
 
@@ -1636,7 +1639,7 @@ class TestListOpenPRs:
             {"number": n, "headRefName": f"dispatch/{n}"}
             for n in range(runner._OPEN_PR_LIST_LIMIT - 1)
         ]
-        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None: under_cap)
+        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None, budget=None: under_cap)
 
         result = runner._list_open_prs("Vinix24/vnx-orchestration")
 
@@ -1669,7 +1672,7 @@ class TestPRsWithoutObligationReportedByRun:
         manager = _FakeReviewGateManager(state_dir, result_status="pass")
         _patch_manager(monkeypatch, manager)
 
-        def fake_gh_json(args, *, owner_repo=None):
+        def fake_gh_json(args, *, owner_repo=None, budget=None):
             if args[:4] == ["pr", "list", "--state", "open"]:
                 return [
                     {"number": 4241, "headRefName": "dispatch/20260917-oi1751-linked"},
@@ -2048,7 +2051,7 @@ class TestStaleTerminalEvidenceReportedByRun:
         )
         monkeypatch.setattr(
             runner, "_gh_json",
-            lambda args, owner_repo=None: (
+            lambda args, owner_repo=None, budget=None: (
                 [{"number": 1864, "headRefName": "dispatch/whatever"}]
                 if args[:4] == ["pr", "list", "--state", "open"] else None
             ),
@@ -2105,7 +2108,7 @@ class TestStaleTerminalEvidenceReportedByRun:
         )
         monkeypatch.setattr(
             runner, "_gh_json",
-            lambda args, owner_repo=None: (
+            lambda args, owner_repo=None, budget=None: (
                 [{"number": 1862, "headRefName": "dispatch/whatever"}]
                 if args[:4] == ["pr", "list", "--state", "open"] else None
             ),
@@ -2147,7 +2150,7 @@ class TestStaleTerminalEvidenceReportedByRun:
         )
         monkeypatch.setattr(
             runner, "_gh_json",
-            lambda args, owner_repo=None: (
+            lambda args, owner_repo=None, budget=None: (
                 [] if args[:4] == ["pr", "list", "--state", "open"] else None
             ),
         )
@@ -2189,7 +2192,7 @@ class TestStaleTerminalEvidenceReportedByRun:
         monkeypatch.setattr(
             runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration",
         )
-        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None: None)
+        monkeypatch.setattr(runner, "_gh_json", lambda args, owner_repo=None, budget=None: None)
         dispatch_id = "20260917-oi1764-list-failed"
         obligation_file = register_obligation(
             state_dir, dispatch_id=dispatch_id, gate="codex_gate",
@@ -2237,7 +2240,7 @@ class TestStaleTerminalEvidenceReportedByRun:
         state_dir = _make_state_dir(tmp_path)
         monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: None)
 
-        def _no_gh(args, owner_repo=None):
+        def _no_gh(args, owner_repo=None, budget=None):
             raise AssertionError("must not call gh when no owner/repo resolves")
 
         monkeypatch.setattr(runner, "_gh_json", _no_gh)
@@ -2291,7 +2294,7 @@ class TestStaleTerminalEvidenceReportedByRun:
 
         gh_list_calls: list = []
 
-        def fake_gh_json(args, *, owner_repo=None):
+        def fake_gh_json(args, *, owner_repo=None, budget=None):
             if args[:4] == ["pr", "list", "--state", "open"]:
                 gh_list_calls.append(args)
                 return [{"number": 5001, "headRefName": "dispatch/20260917-open-one"}]

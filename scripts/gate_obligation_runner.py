@@ -215,6 +215,64 @@ runner fulfils them:
       (b) and (c), never past (a), and never past the round ledger's own
       refusal of a second verdict in a seat (R1): the reason lands in the log,
       on the obligation, the request and the result record.
+  15. OI-2459 round 2 — the tick's GitHub budget is BOUNDED, and the head after
+      a gate run is read LIVE. Round 1 read every PR fact from one snapshot,
+      but a snapshot is a point-in-time view: reading the PR head from it
+      AFTER a gate ran (minutes) books a verdict about code that may no
+      longer exist. The post-run head lookup therefore always calls
+      :func:`_get_pr_head_sha_for_gate` (one live ``gh pr view``, never the
+      snapshot); the pre-run baseline of a LAUNCH reads the snapshot only
+      while the PR data it holds is younger than
+      ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` (60 s), because a tick runs
+      gates back to back and the start-of-tick snapshot is minutes old by the
+      third launch. State and branch lookups that only decide retire/pending
+      keep the snapshot: a state that changed during the tick is seen on the
+      next tick, and an unknown answer stays a wait (OI-1388).
+      Worst case per tick, in GitHub calls:
+
+        _PR_SNAPSHOT_CALLS_PER_TICK                              (1)
+        + ceil(dispatch_refs / _BRANCH_LISTING_PAGE_SIZE)        (pages)
+        + _LIVE_HEAD_READS_PER_GATE_LAUNCH * gate_launches        (<= 2 each)
+        + min(per_obligation_fallbacks, _FALLBACK_CALL_CAP_PER_TICK)   (<= 20)
+        + min(terminal_bookings, _LIVE_CONFIRM_CAP_PER_TICK)     (<= 20)
+
+      The per-obligation fallback — used only when the snapshot failed or is
+      suspect — is capped per tick; past the cap every lookup answers
+      ``None``/``""`` (unknown = a wait, never a retirement or a pass) and one
+      warning line names how many lookups were skipped. A fallback refused on
+      a rate limit (gh names ``rate limit``, or HTTP 403/429) stops all further
+      fallback calls in this tick — backoff to the next tick — so a broken
+      snapshot can never reproduce the per-obligation request pattern that
+      exhausted the core quota.
+  16. OI-2461 (round 3): **the snapshot filters, a live read books.** A
+      snapshot is a point-in-time view, so a fact taken from it may be stale
+      by the time a TERMINAL status is booked on it. Measured on PR #2353
+      (``9eeeb8f4``), both defects reproduced: (a) ``_fulfilling_result``
+      judged the evidence's head against the SNAPSHOT, so a verdict on
+      commit A booked ``fulfilled`` after the PR had advanced to B (the same
+      evidence against B is rejected), and (b) a lookup the tick's budget
+      SKIPPED answered ``None`` — indistinguishable from a genuine gh
+      failure, so a skip advanced ``attempts`` and could escalate the
+      obligation to the terminal ``not_executable`` at
+      ``_UNRESOLVABLE_ESCALATION_ATTEMPTS``. Now every decision that books a
+      terminal status on a snapshot-derived fact confirms that fact with
+      exactly ONE live read right before the booking: the evidence's PR head
+      in :func:`_fulfilling_result`, the ``MERGED``/``CLOSED`` state before a
+      :func:`_pre_execution_decision` retire, and the gone-branch fact before
+      a ``REASON_NO_PR_BRANCH_GONE*`` retire. A live answer that DIFFERS from
+      the snapshot, or that cannot be read, books nothing: the obligation is
+      ``deferred`` for this tick (no write, no attempt counted) and the next
+      tick decides on a fresh snapshot. The live confirmations are bounded by
+      ``_LIVE_CONFIRM_CAP_PER_TICK`` — past the cap the decision is deferred
+      too — so the tick's worst-case cost stays a constant (the formula in
+      item 15 gained its last term). A lookup SKIPPED by the fallback cap, by
+      the rate-limit stop or by the live-confirm cap is its own outcome
+      (:data:`DEFERRED` at the lookup, ``{"kind": "deferred"}`` at the
+      decision), never the ``None`` that means "could not be determined": a
+      deferred obligation is never written, its ``attempts`` never moves, and
+      it can never reach ``escalate``/``not_executable`` through deferrals. A
+      GENUINE failure (gh missing, timed out, an unrecognised reply) keeps
+      today's ``unresolvable``/``escalate`` path exactly.
 
 Scheduling: launchd ``com.vnx.gate-obligation-runner.plist`` (StartInterval
 900s); also safe to run manually at any time — fulfilment is idempotent
@@ -238,6 +296,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
@@ -387,6 +446,9 @@ _DRY_RUN_OPEN_ACTIONS = frozenset({
     "would_stay_unresolvable",
     "would_fulfill",
     "would_stay_pending_sha_unverifiable",
+    # OI-2461: a dry run writes nothing, so a deferred obligation is still
+    # pending — and it must count toward the forecast backlog.
+    "would_defer",
 })
 
 # R10: the decisions an operator force-rerun turns into a run on an OPEN PR. A
@@ -402,6 +464,30 @@ _FORCE_RERUN_SET_BY = "gate_obligation_runner --force-rerun"
 RESOLUTION_RESOLVED = "resolved"
 RESOLUTION_AWAITING = "awaiting"
 RESOLUTION_UNRESOLVABLE = "unresolvable"
+# OI-2461: a lookup the tick's budget skipped. NOT "no PR yet" and NOT a
+# fault: nothing was asked, so nothing may be concluded — the obligation is
+# deferred (no write) and re-evaluated next tick.
+RESOLUTION_DEFERRED = "deferred"
+
+
+class _DeferredLookup:
+    """The answer of a lookup the tick's budget SKIPPED (OI-2461).
+
+    Distinct from ``None``/``""`` on purpose: those mean "asked and could not
+    determine" (a genuine failure, which keeps today's unresolvable/escalate
+    path), while this sentinel means "never asked, because this tick had no
+    budget left for it". A caller must answer ``deferred`` — never a booking
+    and never a failure count.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "DEFERRED"
+
+
+# The one instance every lookup returns; identity (``is DEFERRED``) is the test.
+DEFERRED = _DeferredLookup()
 
 
 @dataclass
@@ -421,6 +507,11 @@ class PrResolution:
     of the other two: retiring on ``None`` reintroduces the exact defect this
     field exists to close. Only populated when ``status == RESOLUTION_AWAITING``
     and ``branch_exists is False``; the other branches do not need it.
+
+    ``status == RESOLUTION_DEFERRED`` (OI-2461) means a lookup the tick's
+    budget skipped, so neither "no PR yet" nor "the environment is broken" was
+    established: the obligation must be deferred (no write, no attempt) and
+    re-evaluated on the next tick's fresh snapshot.
     """
 
     status: str
@@ -553,7 +644,10 @@ def _pr_from_dispatch_metadata(state_dir: Path, dispatch_id: str) -> Optional[in
     return pr_number_from_pr_id(str(row[0]))
 
 
-def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[Any]:
+def _gh_json(
+    args: List[str], *, owner_repo: Optional[str] = None,
+    budget: Optional[_FallbackBudget] = None,
+) -> Optional[Any]:
     """Run a gh CLI command scoped to ``owner_repo``, returning parsed JSON.
 
     ``owner_repo`` (``owner/repo``) is injected as ``--repo`` so the query never
@@ -562,6 +656,11 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
     as the repo and returns nothing, which read as an eternal "no PR yet"
     instead of the misconfiguration it actually is (OI-1253 fix-forward).
     Returns None on any failure (gh missing, timeout, non-zero exit, non-JSON).
+
+    ``budget`` (OI-2459 round 2) is the tick's fallback budget; the snapshot's
+    own fetches do not pass one (they are the bounded per-tick cost, not a
+    per-obligation fallback). A rate-limit refusal is reported to it so the
+    rest of the tick stops calling.
     """
     if shutil.which("gh") is None:
         return None
@@ -578,6 +677,8 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
         _LOG.debug("gh %s failed: %s", args[:2], exc)
         return None
     if proc.returncode != 0 or not proc.stdout.strip():
+        if budget is not None and _is_rate_limit_failure(proc.stdout, proc.stderr):
+            budget.note_rate_limit()
         return None
     try:
         return json.loads(proc.stdout)
@@ -585,12 +686,455 @@ def _gh_json(args: List[str], *, owner_repo: Optional[str] = None) -> Optional[A
         return None
 
 
-def _pr_from_github(dispatch_id: str, owner_repo: str) -> Optional[int]:
-    """Find the open/merged PR whose head branch is dispatch/<dispatch_id>."""
+# ---------------------------------------------------------------------------
+# OI-2459: one PR snapshot + one branch listing per tick, not one gh call per
+# obligation
+# ---------------------------------------------------------------------------
+#
+# Measured 2026-10-28 (OI-2459): one run() of this runner asked GitHub once per
+# obligation — a ``pr list --head dispatch/<id>`` per dispatch, a ``pr view <n>
+# --json state/headRefName/headRefOid`` per PR, and one REST branch-existence
+# call per obligation without a PR. The account's core quota stood at
+# 5000/5000 when that was measured, a second project's gates got 403s, and a
+# codex obligation here was booked not_executable on the rate limit. The
+# per-tick cost must be a constant, so every GitHub fact this module needs is
+# read from ONE snapshot, built lazily and at most once per run() — the same
+# shape :func:`_list_open_prs` already had (OI-1764/OI-1766).
+#
+# ``_PR_SNAPSHOT_LIMIT`` covers every PR an in-scope obligation can name: the
+# oldest obligations in scope predate PR #1469 and the repo carried ~2350 PRs
+# on 2026-10-28, so 3000 newest-first rows cover the whole history with room to
+# grow while staying a single bounded query. A list that reaches the limit is
+# SUSPECT (possibly truncated, exactly like :func:`_list_open_prs`) and a
+# suspect snapshot is trusted only for PRs it actually contains.
+_PR_SNAPSHOT_LIMIT = 3000
+_DISPATCH_REF_PREFIX = "refs/heads/dispatch/"
+
+# OI-2459 round 2: the tick's worst case, in GitHub calls:
+#
+#   _PR_SNAPSHOT_CALLS_PER_TICK                                    (1)
+#   + ceil(dispatch refs / _BRANCH_LISTING_PAGE_SIZE)              (pages)
+#   + _LIVE_HEAD_READS_PER_GATE_LAUNCH * gate launches             (<= 2 each)
+#   + min(per-obligation fallbacks, _FALLBACK_CALL_CAP_PER_TICK)   (<= 20)
+#
+# Nothing else in the tick asks GitHub. The two live head reads per launch are
+# the only reads that MUST reflect the state at booking time; everything else
+# is answered from the snapshot or bounded by the fallback cap below.
+_PR_SNAPSHOT_CALLS_PER_TICK = 1
+# GitHub returns at most 100 matching refs per page; ``--paginate --slurp``
+# follows every page, so this is the divisor of the listing's page count.
+_BRANCH_LISTING_PAGE_SIZE = 100
+# A failed/suspect snapshot degrades to one call per obligation. That is the
+# pattern that exhausted the 5000-call core quota on 2026-10-28, so it is
+# capped: past this many fallback calls the remaining lookups answer DEFERRED
+# (a wait with no write, never a retirement or a pass, OI-1388/OI-2461) and
+# the tick logs one line.
+_FALLBACK_CALL_CAP_PER_TICK = 20
+# OI-2461: a terminal booking on a snapshot-derived fact must confirm that
+# fact with ONE live read first (the snapshot may be minutes old by the time
+# the decision is taken). That read is a gh call per booking, so it is capped
+# like the fallback: past this many confirmations in one tick the remaining
+# decisions are DEFERRED — no write, attempts unchanged, re-evaluated next
+# tick on a fresh snapshot. 20 is the same order as the fallback cap, i.e. a
+# bounded constant on top of the one snapshot + one listing, and it keeps the
+# worst case well inside a 5000/hour core quota even for a full backlog tick.
+_LIVE_CONFIRM_CAP_PER_TICK = 20
+# At most one pre-run head read (only when the snapshot is too old) and one
+# post-run read per gate launch.
+_LIVE_HEAD_READS_PER_GATE_LAUNCH = 2
+# A tick runs gates back to back, so the start-of-tick snapshot is minutes old
+# by the third launch. A snapshot older than a minute is no longer a safe
+# pre-run baseline: the head can have moved since it was fetched, and the
+# mid-run push detection would then compare against the wrong "before". Within
+# a minute the snapshot is still inside the same launch window and saves the
+# call. ("60 s" is the named constant the plan gate asked for.)
+_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS = 60
+# gh names a core-quota refusal in one of these ways; HTTP 403/429 is the
+# API-level equivalent.
+_RATE_LIMIT_MARKERS = ("rate limit", "api rate limit exceeded")
+_RATE_LIMIT_HTTP_RE = re.compile(r"\b(?:http[ /:-]*)?(?:403|429)\b", re.IGNORECASE)
+
+
+class _FallbackBudget:
+    """Per-tick cap on the gh calls a tick may still make per obligation.
+
+    Two instances per tick, each with its own limit and label: the FALLBACK
+    budget (a failed or suspect snapshot degrades to one call per obligation,
+    OI-2459 round 2) and the LIVE-CONFIRM budget (a terminal booking on a
+    snapshot-derived fact must be confirmed live first, OI-2461).
+
+    A lookup past the cap — or after a rate-limit refusal — answers
+    :data:`DEFERRED`, never ``None``/``""``: the caller must not write
+    anything and must not count an attempt. A rate-limit refusal stops every
+    further call of that budget in this tick; the next tick starts with a
+    fresh budget, because the quota is shared and hammering it inside one tick
+    is exactly what must not happen.
+    """
+
+    def __init__(
+        self, limit: int = _FALLBACK_CALL_CAP_PER_TICK, label: str = "fallback",
+    ) -> None:
+        self.limit = limit
+        self.label = label
+        self.calls = 0
+        self.skipped = 0
+        self.stopped_reason = ""
+
+    def consume(self) -> bool:
+        """True when a call may be made now; False means the lookup DEFERS."""
+        if self.stopped_reason:
+            self.skipped += 1
+            return False
+        if self.calls >= self.limit:
+            self.stopped_reason = "cap"
+            self.skipped += 1
+            return False
+        self.calls += 1
+        return True
+
+    def note_rate_limit(self) -> None:
+        """Stop all further calls of this budget in this tick (backoff to the next tick)."""
+        if not self.stopped_reason:
+            self.stopped_reason = "rate limit"
+
+    def finish(self) -> None:
+        """One warning line for a tick that skipped lookups; silent when it did not."""
+        if not self.skipped:
+            return
+        _LOG.warning(
+            "gate_obligation_runner: GitHub %s budget this tick: %d/%d "
+            "%s call(s) made, %d lookup(s) skipped (%s) — a skipped lookup is "
+            "deferred (no write, attempts unchanged) and is re-evaluated next "
+            "tick (OI-2459/OI-2461)",
+            self.label, self.calls, self.limit, self.label, self.skipped,
+            self.stopped_reason or "cap",
+        )
+
+
+def _is_rate_limit_failure(stdout: str, stderr: str) -> bool:
+    """Whether gh's output names a rate-limit / HTTP 403 / 429 refusal."""
+    text = f"{stdout or ''}\n{stderr or ''}".lower()
+    if any(marker in text for marker in _RATE_LIMIT_MARKERS):
+        return True
+    return _RATE_LIMIT_HTTP_RE.search(text) is not None
+
+
+def _fallback_budget(snapshot: Optional["_GithubSnapshot"]) -> Optional[_FallbackBudget]:
+    """The tick's fallback budget, carried by the snapshot (None when no snapshot)."""
+    return snapshot.fallback if snapshot is not None else None
+
+
+def _live_confirm_budget(snapshot: Optional["_GithubSnapshot"]) -> Optional[_FallbackBudget]:
+    """The tick's live-confirm budget, carried by the snapshot (None when no snapshot)."""
+    return snapshot.live_confirms if snapshot is not None else None
+
+
+def _live_confirm_allowed(snapshot: Optional["_GithubSnapshot"]) -> bool:
+    """Consume one live-confirm slot; False means the decision must DEFER.
+
+    Only ever asked when the fact under decision came from the SNAPSHOT — a
+    fact a lookup already read live needs no second read. Such a fact can
+    only exist when there is a snapshot, so the no-budget branch is the
+    direct-caller case (tests, ``fulfill_obligation`` called by hand): one
+    call, no tick context to bound it.
+    """
+    budget = _live_confirm_budget(snapshot)
+    if budget is None:
+        return True
+    return budget.consume()
+
+
+def _as_sha(value: Any) -> str:
+    """``value`` as a head sha for callers where the read is NOT a booking fact.
+
+    A deferred or missing answer collapses to the empty sha ("unknown"), which
+    every one of those callers already handles: a pre-run baseline, a
+    read-only diagnostic, or an evidence-binding check that must suspend
+    judgement. Only the decision points that BOOK a terminal status test for
+    :data:`DEFERRED` themselves.
+    """
+    return value if isinstance(value, str) else ""
+
+
+def _snapshot_for(
+    snapshot: Optional["_GithubSnapshot"], owner_repo: Optional[str],
+) -> Optional["_GithubSnapshot"]:
+    """``snapshot`` when it belongs to ``owner_repo``, else None.
+
+    A caller resolves the owner/repo per obligation; a snapshot is only
+    authoritative for the repo it was built from. Passing the wrong one is
+    never an error, it just means "no snapshot" (and today's single call).
+    """
+    if snapshot is None or not owner_repo or snapshot.owner_repo != owner_repo:
+        return None
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
+# OI-2461: read a fact from the snapshot, and confirm it LIVE before it books
+# ---------------------------------------------------------------------------
+#
+# These three answer exactly what the corresponding lookup asks the snapshot,
+# and ``None`` means "the snapshot cannot answer this one" — the caller then
+# uses the lookup's own live fallback. They exist so a decision point can tell
+# a SNAPSHOT-derived fact (which must be confirmed live before a terminal
+# booking) from one a lookup already read live (which must not be read twice).
+
+
+def _snapshot_head_sha(
+    pr_number: Optional[int], snapshot: Optional["_GithubSnapshot"],
+) -> Optional[str]:
+    """The PR head the snapshot holds, or None when it cannot answer."""
+    if snapshot is None or not isinstance(pr_number, int) or pr_number <= 0:
+        return None
+    pr = snapshot.pr_by_number(pr_number)
+    sha = pr.get("headRefOid") if isinstance(pr, dict) else None
+    if isinstance(sha, str) and sha.strip():
+        return sha.strip()
+    return None
+
+
+def _snapshot_pr_state(
+    pr_number: Optional[int], snapshot: Optional["_GithubSnapshot"],
+) -> Optional[str]:
+    """The PR state the snapshot holds, or None when it cannot answer."""
+    if snapshot is None or not isinstance(pr_number, int):
+        return None
+    pr = snapshot.pr_by_number(pr_number)
+    state = pr.get("state") if isinstance(pr, dict) else None
+    if isinstance(state, str) and state.strip():
+        return state.strip().upper()
+    return None
+
+
+def _snapshot_branch_exists(
+    dispatch_id: str, snapshot: Optional["_GithubSnapshot"],
+) -> Optional[bool]:
+    """The branch listing's answer for ``dispatch/<dispatch_id>``, or None."""
+    if snapshot is None:
+        return None
+    refs = snapshot.branch_refs()
+    if refs is None:
+        return None
+    return f"{_DISPATCH_REF_PREFIX}{dispatch_id}" in refs
+
+
+def _confirm_head_live(pr_number: int, snapshot: Optional["_GithubSnapshot"]) -> Any:
+    """One live head read confirming a snapshot head; DEFERRED past the cap."""
+    if not _live_confirm_allowed(snapshot):
+        return DEFERRED
+    return _get_pr_head_sha_for_gate(pr_number)
+
+
+def _confirm_pr_state_live(
+    pr_number: int, owner_repo: str, snapshot: Optional["_GithubSnapshot"],
+) -> Any:
+    """One live state read confirming a snapshot state; DEFERRED past the cap."""
+    if not _live_confirm_allowed(snapshot):
+        return DEFERRED
+    return _pr_state_from_github(pr_number, owner_repo)
+
+
+def _confirm_branch_live(
+    dispatch_id: str, owner_repo: Optional[str], snapshot: Optional["_GithubSnapshot"],
+) -> Any:
+    """One live branch-existence read confirming the listing; DEFERRED past the cap."""
+    if not owner_repo:
+        return None
+    if not _live_confirm_allowed(snapshot):
+        return DEFERRED
+    return _branch_exists_on_github(dispatch_id, owner_repo)
+
+
+class _GithubSnapshot:
+    """One tick's view of the repo's PRs and its ``dispatch/*`` head refs.
+
+    Both halves are fetched lazily, at most once per instance, and an instance
+    never outlives a :func:`run` call (tests run ``run()`` many times in one
+    process, so a module-level cache would go stale between ticks).
+
+    Fail-closed contract: a failed fetch answers ``None``/``known=False``, which
+    every caller turns into today's single call. A failed fetch is NEVER read
+    as "absent" — only a COMPLETE PR list can say "no PR", because a truncated
+    or failed one cannot distinguish "none" from "not fetched".
+    """
+
+    def __init__(self, owner_repo: str) -> None:
+        self.owner_repo = owner_repo
+        self._prs: Optional[List[Dict[str, Any]]] = None
+        self._prs_loaded = False
+        self._prs_suspect = True
+        self._prs_fetched_at: Optional[float] = None
+        self._refs: Optional[Set[str]] = None
+        self._refs_loaded = False
+        # The tick's per-obligation fallback cap (OI-2459 round 2). Carried by
+        # the snapshot because the snapshot IS the tick's GitHub context.
+        self.fallback = _FallbackBudget()
+        # OI-2461: the cap on live reads that confirm a snapshot-derived fact
+        # before a terminal booking. Same carrier, same reason.
+        self.live_confirms = _FallbackBudget(
+            limit=_LIVE_CONFIRM_CAP_PER_TICK, label="live-confirm",
+        )
+
+    def prs(self) -> Optional[List[Dict[str, Any]]]:
+        """The newest PRs (all states); None when the call itself failed."""
+        if not self._prs_loaded:
+            self._prs_loaded = True
+            data = _gh_json(
+                ["pr", "list", "--state", "all",
+                 "--json", "number,state,headRefName,headRefOid",
+                 "--limit", str(_PR_SNAPSHOT_LIMIT)],
+                owner_repo=self.owner_repo,
+            )
+            # Monotonic: the age of the PR data, for the launch guard below.
+            self._prs_fetched_at = time.monotonic()
+            if isinstance(data, list):
+                self._prs = data
+                self._prs_suspect = len(data) >= _PR_SNAPSHOT_LIMIT
+        return self._prs
+
+    def prs_age_seconds(self) -> Optional[float]:
+        """Seconds since the PR list was fetched; None when it was never fetched.
+
+        An unfetched snapshot answers with a read that fetches NOW, so it
+        counts as fresh — the caller's read *is* the fetch.
+        """
+        if not self._prs_loaded or self._prs_fetched_at is None:
+            return None
+        return time.monotonic() - self._prs_fetched_at
+
+    def pr_by_number(self, pr_number: int) -> Optional[Dict[str, Any]]:
+        """The PR row for ``pr_number`` when the snapshot holds it, else None.
+
+        None means "the snapshot cannot answer" (failed fetch, or a PR older
+        than the newest L) — the caller falls back to today's single call, so
+        absence is never mistaken for the answer.
+        """
+        prs = self.prs()
+        if not isinstance(prs, list):
+            return None
+        for pr in prs:
+            if isinstance(pr, dict) and pr.get("number") == pr_number:
+                return pr
+        return None
+
+    def head_lookup(self, branch: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """``(known, pr)`` for the PR whose head branch is ``branch``.
+
+        ``known`` is False when the snapshot cannot answer (failed fetch, or a
+        list that hit L and does not contain the branch) — the caller must fall
+        back to today's single call. ``known`` True with ``pr`` None is a
+        definite "no PR": only a complete list can say that.
+        """
+        prs = self.prs()
+        if not isinstance(prs, list):
+            return False, None
+        for pr in prs:
+            if isinstance(pr, dict) and pr.get("headRefName") == branch:
+                return True, pr
+        if self._prs_suspect:
+            return False, None
+        return True, None
+
+    def branch_refs(self) -> Optional[Set[str]]:
+        """Every ``refs/heads/dispatch/*`` ref on GitHub; None when the call failed.
+
+        ``gh api --paginate`` follows the Link pages to exhaustion, so a
+        successful listing is complete — there is no truncation state to
+        account for, unlike the PR list's ``--limit``.
+        """
+        if not self._refs_loaded:
+            self._refs_loaded = True
+            data = _gh_json(
+                ["api", "--paginate", "--slurp",
+                 f"repos/{self.owner_repo}/git/matching-refs/heads/dispatch/"],
+                owner_repo=None,
+            )
+            refs: Set[str] = set()
+            if isinstance(data, list):
+                # ``--slurp`` yields an array of pages; a single page may come
+                # back as the bare array. Flatten both shapes.
+                stack: List[Any] = list(data)
+                while stack:
+                    item = stack.pop()
+                    if isinstance(item, list):
+                        stack.extend(item)
+                    elif isinstance(item, dict) and isinstance(item.get("ref"), str):
+                        refs.add(item["ref"])
+                self._refs = refs
+        return self._refs
+
+
+def _new_github_snapshot(owner_repo: Optional[str]) -> Optional[_GithubSnapshot]:
+    """This tick's snapshot, or None when no owner/repo resolves (no gh either)."""
+    return _GithubSnapshot(owner_repo) if owner_repo else None
+
+
+def _launch_head_snapshot(
+    snapshot: Optional[_GithubSnapshot],
+) -> Optional[_GithubSnapshot]:
+    """The snapshot as a PRE-RUN head baseline, or None when it is too old.
+
+    A tick runs gates one after the other (minutes each), so a snapshot taken
+    at the start is minutes old by the third launch. A stale pre-run baseline
+    is not harmless: :func:`fulfill_obligation` compares the post-run head
+    with it to detect a push that landed mid-run, and any comparison against a
+    baseline that was already wrong can book a verdict about superseded code.
+    Only while the PR data is younger than
+    ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` is it a safe baseline; older, the
+    launch reads the live head once (the same single call the post-run
+    resolution makes). An unfetched snapshot counts as fresh: the read that
+    follows is itself the fetch.
+
+    State and branch lookups that merely decide retire/pending do NOT go
+    through this guard — they keep the snapshot, because a change mid-tick is
+    seen on the next tick and ``None`` stays a wait (OI-1388).
+    """
+    if snapshot is None:
+        return None
+    age = snapshot.prs_age_seconds()
+    if age is None or age <= _LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS:
+        return snapshot
+    return None
+
+
+def _tick_github_context(
+    state_dir: Path,
+) -> Tuple[Optional[str], Optional[_GithubSnapshot]]:
+    """The tick's ``(owner/repo, snapshot)``, resolved once (OI-2459).
+
+    ``owner_repo`` is also what the read-only diagnostics at the end of
+    :func:`run` need; the snapshot is None exactly when no GitHub repo
+    resolves, in which case every lookup keeps today's unresolvable path.
+    """
+    owner_repo = _resolve_github_owner_repo(state_dir)
+    return owner_repo, _new_github_snapshot(owner_repo)
+
+
+def _pr_from_github(
+    dispatch_id: str, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Any:
+    """Find the open/merged PR whose head branch is dispatch/<dispatch_id>.
+
+    OI-2459: reads the tick's snapshot first. A complete snapshot answers
+    definitively (found or genuinely no PR); a failed/suspect one falls back to
+    today's single ``gh pr list --head`` call, capped by the tick's fallback
+    budget. OI-2461: a skipped fallback answers :data:`DEFERRED` — the caller
+    defers the obligation rather than reading the skip as "no PR yet".
+    """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        known, pr = snap.head_lookup(f"dispatch/{dispatch_id}")
+        if known:
+            number = pr.get("number") if isinstance(pr, dict) else None
+            return number if isinstance(number, int) else None
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return DEFERRED
     data = _gh_json(
         ["pr", "list", "--state", "all", "--head", f"dispatch/{dispatch_id}",
          "--json", "number", "--limit", "1"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, list) and data:
         number = data[0].get("number")
@@ -599,10 +1143,28 @@ def _pr_from_github(dispatch_id: str, owner_repo: str) -> Optional[int]:
     return None
 
 
-def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+def _branch_from_github(
+    pr_number: int, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Any:
+    """The PR's head branch; answered from the snapshot when it holds the PR.
+
+    OI-2461: a skipped fallback answers :data:`DEFERRED`. This is not a
+    booking fact (it only names the branch on the obligation record), so the
+    caller degrades to ``dispatch/<dispatch_id>`` exactly as it does for an
+    unknown answer.
+    """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        pr = snap.pr_by_number(pr_number)
+        branch = pr.get("headRefName") if isinstance(pr, dict) else None
+        if isinstance(branch, str) and branch.strip():
+            return branch.strip()
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return DEFERRED
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "headRefName"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, dict):
         branch = data.get("headRefName")
@@ -611,17 +1173,36 @@ def _branch_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
     return None
 
 
-def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool]:
+def _branch_exists_on_github(
+    dispatch_id: str, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Any:
     """Whether ``dispatch/<dispatch_id>`` still exists as a head ref on GitHub.
 
     Returns ``True``/``False`` on a definite answer, ``None`` when it cannot be
-    determined (gh missing, timeout, network error, or any non-404 failure).
-    OI-1388: a caller may only treat ``False`` as "the dispatch died without a
-    PR" — ``None`` must stay a wait, never a retirement, so a transient gh
-    hiccup can never close an obligation on ambiguous evidence.
+    determined (gh missing, timeout, network error, or any non-404 failure),
+    and :data:`DEFERRED` when the tick's fallback budget skipped the call
+    (OI-2461). OI-1388: a caller may only treat ``False`` as "the dispatch
+    died without a PR" — ``None`` must stay a wait, never a retirement, so a
+    transient gh hiccup can never close an obligation on ambiguous evidence;
+    ``DEFERRED`` is a wait too, but a distinct one (nothing was asked).
+
+    OI-2459: a successful per-tick listing (``dispatch/*`` refs, fetched once
+    by :class:`_GithubSnapshot`) answers membership directly. A FAILED listing
+    falls through to today's single REST call, which keeps its 404-versus-other
+    split — so ``None`` still means "unknown, wait" and never retires. The
+    single call is a per-obligation fallback and runs under the tick's
+    fallback budget.
     """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        refs = snap.branch_refs()
+        if refs is not None:
+            return f"{_DISPATCH_REF_PREFIX}{dispatch_id}" in refs
     if shutil.which("gh") is None:
         return None
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return DEFERRED
     branch = f"dispatch/{dispatch_id}"
     try:
         proc = subprocess.run(
@@ -633,6 +1214,8 @@ def _branch_exists_on_github(dispatch_id: str, owner_repo: str) -> Optional[bool
         return None
     if proc.returncode == 0:
         return True
+    if budget is not None and _is_rate_limit_failure(proc.stdout, proc.stderr):
+        budget.note_rate_limit()
     combined = f"{proc.stdout}\n{proc.stderr}"
     if "404" in combined or "Not Found" in combined:
         return False
@@ -762,7 +1345,9 @@ def _dispatch_is_live(state_dir: Path, dispatch_id: str) -> Optional[bool]:
             pass
 
 
-def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
+def _pr_state_from_github(
+    pr_number: int, owner_repo: str, snapshot: Optional[_GithubSnapshot] = None,
+) -> Any:
     """Whether a resolved PR is ``OPEN``, ``MERGED``, or ``CLOSED`` on GitHub.
 
     OI-1508: the RESOLVED branch of :func:`_pre_execution_decision` knows a
@@ -776,10 +1361,25 @@ def _pr_state_from_github(pr_number: int, owner_repo: str) -> Optional[str]:
     response) — mirrors :func:`_branch_exists_on_github`: a caller may only
     retire on a definite ``MERGED``/``CLOSED``, never on ``None`` (OI-1388:
     ambiguous evidence must never close an obligation).
+
+    OI-2459: answered from the tick's snapshot when it holds the PR; a failed
+    or non-covering snapshot keeps today's single ``gh pr view`` call, capped
+    by the tick's fallback budget. OI-2461: a skipped fallback answers
+    :data:`DEFERRED` — a wait with no write, never a retirement and never an
+    attempt (the skip is not a failure).
     """
+    snap = _snapshot_for(snapshot, owner_repo)
+    if snap is not None:
+        pr = snap.pr_by_number(pr_number)
+        state = pr.get("state") if isinstance(pr, dict) else None
+        if isinstance(state, str) and state.strip():
+            return state.strip().upper()
+    budget = _fallback_budget(snapshot)
+    if budget is not None and not budget.consume():
+        return DEFERRED
     data = _gh_json(
         ["pr", "view", str(pr_number), "--json", "state"],
-        owner_repo=owner_repo,
+        owner_repo=owner_repo, budget=budget,
     )
     if isinstance(data, dict):
         state = data.get("state")
@@ -857,7 +1457,9 @@ def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
     return None
 
 
-def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
+def resolve_pr_number(
+    state_dir: Path, record: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
+) -> PrResolution:
     """Resolve the obligation's PR number from every available source.
 
     Returns a :class:`PrResolution` carrying one of three statuses so the caller
@@ -895,7 +1497,14 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
                 "for a central install is a release-time temp checkout (OI-1253)"
             ),
         )
-    from_github = _pr_from_github(dispatch_id, owner_repo)
+    from_github = _pr_from_github(dispatch_id, owner_repo, snapshot=snapshot)
+    if from_github is DEFERRED:
+        # OI-2461: the tick had no budget for this lookup. Nothing was asked,
+        # so nothing may be concluded — not "no PR yet", not a fault.
+        return PrResolution(
+            RESOLUTION_DEFERRED, owner_repo=owner_repo,
+            reason=f"PR lookup for dispatch/{dispatch_id} deferred to the next tick (budget)",
+        )
     if from_github:
         return PrResolution(
             RESOLUTION_RESOLVED, pr_number=from_github, owner_repo=owner_repo,
@@ -903,7 +1512,15 @@ def resolve_pr_number(state_dir: Path, record: Dict[str, Any]) -> PrResolution:
     # OI-1388: no PR exists yet, but that reads as "not yet" forever unless we
     # also ask whether the dispatch could still produce one. A dead branch is
     # the one fact that answers that without a timer.
-    branch_exists = _branch_exists_on_github(dispatch_id, owner_repo)
+    branch_exists = _branch_exists_on_github(dispatch_id, owner_repo, snapshot=snapshot)
+    if branch_exists is DEFERRED:
+        return PrResolution(
+            RESOLUTION_DEFERRED, owner_repo=owner_repo,
+            reason=(
+                f"branch-existence lookup for dispatch/{dispatch_id} deferred "
+                "to the next tick (budget)"
+            ),
+        )
     # OI-1532: ``branch_exists is False`` folds two states into one. Before
     # retiring on it (the caller's temptation), split it with the occupancy
     # lock: a live holder means the dispatch is still running and has simply
@@ -989,6 +1606,22 @@ def _list_open_prs(owner_repo: str) -> Dict[str, Any]:
     return {"prs": open_prs, "suspect": len(open_prs) >= _OPEN_PR_LIST_LIMIT}
 
 
+def _open_pr_lookup(owner_repo: Optional[str]) -> Dict[str, Any]:
+    """The shared open-PR list, or "coverage undetermined" when no repo resolves.
+
+    PR #1865 review: an unresolvable owner/repo must never read as
+    ``{"prs": [], "suspect": False}`` — that is indistinguishable from
+    "resolved, genuinely zero open PRs", and :func:`_stale_terminal_evidence`
+    would silently read "not checked" as "checked, nothing found". It degrades
+    to the same ``prs is None`` shape :func:`_list_open_prs` returns on an
+    outright gh failure, with an ``owner_repo_unresolvable`` marker so the
+    caller can name the real cause.
+    """
+    if not owner_repo:
+        return {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
+    return _list_open_prs(owner_repo)
+
+
 def _find_prs_without_obligation(
     open_prs: Optional[List[Dict[str, Any]]],
     obligations: List[Tuple[Path, Dict[str, Any]]],
@@ -1045,6 +1678,32 @@ def _find_prs_without_obligation(
     return unlinked
 
 
+def _report_prs_without_obligation(
+    state_dir: Path, findings: List[Dict[str, Any]], write: bool,
+) -> None:
+    """LOUD log line (and, on a write run, audit entry) per unlinked open PR.
+
+    Extracted from :func:`run` so the tick's function size stays inside the
+    ratchet while OI-2459 round 2 adds its own end-of-tick step.
+    """
+    for finding in findings:
+        _LOG.warning(
+            "PR #%s (branch %s) carries no review-gate obligation: %s",
+            finding["pr_number"], finding["branch"], finding["reason"],
+        )
+        if write:
+            _audit_log_pr_without_obligation(state_dir, finding)
+
+
+def _count_actions(outcomes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """The per-action tally of a tick's outcomes (``summary["action_counts"]``)."""
+    counts: Dict[str, int] = {}
+    for outcome in outcomes:
+        action = outcome.get("action", "")
+        counts[action] = counts.get(action, 0) + 1
+    return counts
+
+
 def _audit_log_pr_without_obligation(state_dir: Path, finding: Dict[str, Any]) -> None:
     """Append a LOUD entry to the repo's existing governance audit trail
     (``governance_audit.ndjson``) for a PR the obligation store cannot link
@@ -1098,6 +1757,39 @@ def _get_pr_head_sha_for_gate(pr_number: Optional[int]) -> str:
     from gate_recorder import get_pr_head_sha  # noqa: PLC0415
 
     return get_pr_head_sha(pr_number)
+
+
+def _pr_head_sha_for_gate(
+    pr_number: Optional[int], snapshot: Optional[_GithubSnapshot] = None,
+) -> Any:
+    """The PR head sha, from the tick's snapshot when it holds the PR (OI-2459).
+
+    Same answer as :func:`_get_pr_head_sha_for_gate` — that function is the
+    canonical gh path and stays the fallback — but an ordinary tick answers it
+    from the one PR snapshot instead of a ``gh pr view --json headRefOid`` per
+    obligation. An empty snapshot answer (PR outside L, failed fetch) falls
+    through to ONE fallback call under the tick's per-obligation budget;
+    OI-2461: past the cap it answers :data:`DEFERRED` instead of ``""``, so a
+    decision point can tell "the tick ran out of budget" from "gh said
+    nothing" (a genuine failure, which stays the unknown sha). Callers where
+    the head is NOT a booking fact collapse both through :func:`_as_sha`.
+    The fallback remains the canonical ``_get_pr_head_sha_for_gate`` (tests
+    and other callers patch THAT seam, and the merge door uses the same
+    source); its stderr is swallowed by the recorder, so a rate limit there
+    is not observable — the cap still bounds it, and every ``_gh_json``-based
+    fallback reports rate limits to the same budget.
+
+    The post-run head in :func:`fulfill_obligation` deliberately calls
+    ``_get_pr_head_sha_for_gate`` directly: the head after a gate ran must be
+    live, because the snapshot was taken before the run (OI-2459 round 2).
+    """
+    if isinstance(pr_number, int) and pr_number > 0 and snapshot is not None:
+        sha = _snapshot_head_sha(pr_number, snapshot)
+        if sha is not None:
+            return sha
+        if not snapshot.fallback.consume():
+            return DEFERRED
+    return _get_pr_head_sha_for_gate(pr_number)
 
 
 def _flag_fast_fulfillment_if_evidence_predates_attempt(
@@ -1536,11 +2228,75 @@ def _has_decided_evidence(record: Dict[str, Any], head_sha: str) -> Tuple[str, s
     )
 
 
+def _classify_evidence_candidate(
+    dispatch_id: str,
+    gate: str,
+    record: Dict[str, Any],
+    snapshot: Optional[_GithubSnapshot],
+) -> Tuple[str, str]:
+    """Classify ONE candidate result record — the body of the evidence scan.
+
+    Returns ``(kind, detail)`` where ``kind`` is one of the four
+    ``_EVIDENCE_*`` answers, or ``"deferred"`` (OI-2461): the tick could not
+    decide this candidate — the head lookup was skipped by the fallback budget,
+    the live confirmation was skipped by ``_LIVE_CONFIRM_CAP_PER_TICK``, or the
+    live head did not confirm the snapshot's. ``detail`` carries the reason.
+
+    OI-2461: the snapshot may only SELECT a candidate. A candidate the snapshot
+    answers as CURRENT is re-checked against a LIVE head read (exactly one, and
+    only when the snapshot answered at all), so a verdict about commit A can
+    never be booked once the PR has advanced to B. A candidate with no snapshot
+    answer goes through the single-call lookup, whose own skip is a deferral.
+    """
+    candidate_pr = record.get("pr_number")
+    if not isinstance(candidate_pr, int):
+        return _has_decided_evidence(record, "")
+    snapshot_sha = _snapshot_head_sha(candidate_pr, snapshot)
+    if snapshot_sha is None:
+        # No snapshot answer: the lookup IS the live single call, budgeted by
+        # the fallback cap — its skip is a deferral, never an unknown head.
+        head_sha = _pr_head_sha_for_gate(candidate_pr, snapshot)
+        if head_sha is DEFERRED:
+            return "deferred", (
+                f"head lookup for PR #{candidate_pr} ({gate} evidence of dispatch "
+                f"{dispatch_id}) deferred to the next tick (budget) — nothing is "
+                "booked (OI-2461)"
+            )
+        return _has_decided_evidence(record, head_sha)
+    kind, detail = _has_decided_evidence(record, snapshot_sha)
+    if kind != _EVIDENCE_USABLE:
+        return kind, detail
+    live_sha = _confirm_head_live(candidate_pr, snapshot)
+    if live_sha is DEFERRED:
+        return "deferred", (
+            f"{gate} evidence for dispatch {dispatch_id} looks current against "
+            f"the snapshot head {snapshot_sha[:8]}, but this tick's live-confirm "
+            "budget ran out — nothing is booked, re-checked next tick (OI-2461)"
+        )
+    live_kind, live_detail = _has_decided_evidence(record, live_sha)
+    if live_kind == _EVIDENCE_USABLE:
+        return live_kind, live_detail
+    # The snapshot said this evidence is current; the live head says otherwise
+    # (or could not be read). Nothing terminal may be booked on the snapshot.
+    _LOG.warning(
+        "gate_obligation_runner: %s evidence for dispatch %s read as current "
+        "against the snapshot head %s but the live head says otherwise (%s) — "
+        "deferring the obligation to the next tick (OI-2461)",
+        gate, dispatch_id, snapshot_sha[:8] or "?", live_detail,
+    )
+    return "deferred", (
+        f"{gate} evidence for dispatch {dispatch_id} is current against the "
+        f"snapshot head {snapshot_sha[:8] or '?'} but not against the live head "
+        f"({live_detail}) — nothing is booked on a snapshot fact, re-checked "
+        "next tick (OI-2461)"
+    )
+
+
 def _fulfilling_result(
     index: GateResultIndex,
     dispatch_id: str,
     gate: str,
-    pr_number: Optional[int] = None,
+    pr_number: Optional[int] = None, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Scan for a complete-evidence, DECIDED, sha-CURRENT result — a gate
     that actually ran, reached a verdict, and is provably about the PR's
@@ -1582,6 +2338,21 @@ def _fulfilling_result(
         MISMATCH seen (both shas), when one was, so a caller's
         retire/escalate record can document why a candidate was rejected
         rather than silently proceeding as if nothing existed at all.
+      - ``{"kind": "deferred", "detail": ...}`` (OI-2461) — the tick could not
+        decide: the head lookup was skipped by the fallback cap / rate-limit
+        stop, the live confirmation was skipped by
+        ``_LIVE_CONFIRM_CAP_PER_TICK``, or the live head DID NOT CONFIRM the
+        snapshot's (it differed, or could not be read). The caller must not
+        book anything and must not count an attempt — this is the round-3
+        defect: the snapshot said commit A was current, the PR had advanced
+        to B, and the obligation was permanently closed with zero live reads.
+
+    OI-2461: the SNAPSHOT may only SELECT a candidate. Before this function
+    answers ``"found"``, the candidate's head is read LIVE (exactly one
+    ``gh pr view --json headRefOid``, bounded per tick) and
+    :func:`_has_decided_evidence` is judged against THAT sha. A candidate the
+    snapshot already answers live (PR outside the snapshot, or no snapshot at
+    all) is not read twice — it was never a snapshot fact.
 
     The caller determines PASS vs. FAIL on a ``"found"`` entry via
     :func:`gate_status.is_pass` — this function only answers "does usable
@@ -1599,11 +2370,9 @@ def _fulfilling_result(
     unverifiable: Optional[Tuple[Path, Dict[str, Any], str]] = None
     mismatch_detail: Optional[str] = None
     for entry, record in candidates:
-        candidate_pr = record.get("pr_number")
-        head_sha = (
-            _get_pr_head_sha_for_gate(candidate_pr) if isinstance(candidate_pr, int) else ""
-        )
-        kind, detail = _has_decided_evidence(record, head_sha)
+        kind, detail = _classify_evidence_candidate(dispatch_id, gate, record, snapshot)
+        if kind == "deferred":
+            return {"kind": "deferred", "detail": detail}
         if kind == _EVIDENCE_USABLE:
             return {"kind": "found", "entry": (entry, record)}
         if kind == _EVIDENCE_UNKNOWN_SHA and unverifiable is None:
@@ -1798,7 +2567,7 @@ def _terminal_evidence_contradictions(
 
 def _stale_terminal_evidence(
     obligations: List[Tuple[Path, Dict[str, Any]]],
-    open_pr_lookup: Dict[str, Any],
+    open_pr_lookup: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
 ) -> List[Dict[str, Any]]:
     """Report every TERMINAL obligation, for a currently OPEN PR, whose own
     evidence record no longer binds to the PR's current head.
@@ -1927,10 +2696,19 @@ def _stale_terminal_evidence(
             evidence_record = {}
         result_sha = str(evidence_record.get("commit_sha") or "")
 
+        # OI-2459 round 2: this read-only diagnostic keeps the snapshot on
+        # purpose. It books nothing — it reports binding drift for a human —
+        # and it is re-run every tick, so a push that lands during this tick is
+        # seen on the next one. Making it live would be one call per open
+        # terminal obligation with evidence, i.e. exactly the unbounded
+        # per-obligation pattern OI-2459 removed.
         if pr_number not in head_sha_cache:
-            head_sha_cache[pr_number] = _get_pr_head_sha_for_gate(
-                pr_number if isinstance(pr_number, int) else None
-            )
+            # OI-2461: a skipped lookup reads as the unknown head here — this
+            # is a read-only diagnostic that books nothing, so "unknown" (a
+            # loud finding) is the correct, safe answer for a deferred read.
+            head_sha_cache[pr_number] = _as_sha(_pr_head_sha_for_gate(
+                pr_number if isinstance(pr_number, int) else None, snapshot,
+            ))
         head_sha = head_sha_cache[pr_number]
 
         binding = _classify_sha_binding(head_sha, result_sha)
@@ -2013,7 +2791,7 @@ def _pre_execution_decision(
     gate: str,
     resolution: PrResolution,
     attempts: int,
-    result_index: GateResultIndex,
+    result_index: GateResultIndex, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Decide what happens to an obligation before any gate is actually run.
 
@@ -2091,6 +2869,13 @@ def _pre_execution_decision(
         resolution) confirmed OPEN, or no evidence-check applies at all:
         the caller must actually run the gate to learn the outcome (only
         the real run does this)
+      - ``deferred``                   — OI-2461: this tick could not decide
+        and must book NOTHING (no write, no attempt counted, never an
+        escalation). Three causes: a lookup the tick's budget SKIPPED (the
+        fallback cap, a rate-limit stop, or ``_LIVE_CONFIRM_CAP_PER_TICK``),
+        a live confirmation that came back DIFFERENT from the snapshot fact,
+        or one that could not be read. Carries ``decision["detail"]``. The
+        next tick decides on a fresh snapshot.
 
     ``not_executable`` and any other undecided status are never returned as
     evidence here — :func:`_fulfilling_result` rejects those itself, so a
@@ -2139,107 +2924,206 @@ def _pre_execution_decision(
     least 19 of them already carried a DECIDED PASS this branch was
     silently discarding.
     """
+    if resolution.status == RESOLUTION_DEFERRED:
+        # OI-2461: a lookup the tick's budget skipped. Nothing was asked, so
+        # nothing may be concluded — and above all not an attempt, which
+        # could escalate this to the terminal not_executable later.
+        return {
+            "kind": "deferred",
+            "detail": resolution.reason or "PR resolution deferred to the next tick (budget)",
+        }
+
     if resolution.status == RESOLUTION_UNRESOLVABLE:
-        lookup = _fulfilling_result(result_index, dispatch_id, gate)
-        if lookup["kind"] == "found":
-            return _evidence_decision(lookup["entry"])
-        if lookup["kind"] == "unverifiable":
-            return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
-        if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
-            return {"kind": "escalate", "mismatch_detail": lookup.get("detail")}
-        return {"kind": "unresolvable"}
+        return _unresolvable_decision(dispatch_id, gate, attempts, result_index, snapshot)
 
     if resolution.status == RESOLUTION_AWAITING:
         # OI-1532: branch_exists is False folds "dead and deleted" together
         # with "still running, not pushed yet". Split it with the occupancy
         # lock before any retire decision — see PrResolution.dispatch_live.
         if resolution.branch_exists is False:
-            lookup = _fulfilling_result(result_index, dispatch_id, gate)
-            if lookup["kind"] == "found":
-                # Usable (decided, sha-matching) evidence fulfils REGARDLESS
-                # of liveness — the gate already reviewed this dispatch; the
-                # branch being gone afterwards changes nothing about that.
-                return _evidence_decision(lookup["entry"])
-            # No usable evidence. OI-1571 tak 3 meets OI-1532: the sha check
-            # answered "does THIS evidence count" (no — mismatch, or
-            # unverifiable); the liveness check answers the SEPARATE question
-            # "is MORE evidence still coming". Never fold the two into one
-            # rejection: a live dispatch is never retired on a sha mismatch.
-            if resolution.dispatch_live is True:
-                # The dispatch is still running — it has simply not pushed its
-                # branch yet. Retiring here is the defect this dispatch fixes
-                # (live on 20260830-124500-sidedoor). Stays pending, distinctly
-                # labelled so the recorded reason says "live, not pushed" and
-                # not a generic "no PR yet".
-                # OI-1587: DELIBERATELY UNBOUNDED — no attempts threshold here,
-                # on purpose. A held occupancy lock is kernel-enforced POSITIVE
-                # evidence that a live process owns this dispatch right now,
-                # and the kernel releases the lock the instant the holder exits
-                # (clean finish OR crash) — the state self-corrects without a
-                # timer, unlike every other branch that waits on an absence.
-                # Escalating on an attempt count would book a loud terminal
-                # not_executable over a dispatch that is provably still
-                # working — the exact retire-the-live defect in a new shape.
-                # The remaining unbounded case (a holder that never exits AND
-                # never pushes) is a HUNG dispatch: detecting that needs a
-                # runtime/stall signal owned by dispatch supervision, not a
-                # gate-obligation runner that only sees the lock every 900s.
-                return {
-                    "kind": "stay_pending_live",
-                    "mismatch_detail": lookup.get("detail"),
-                    "rejected_evidence": lookup["kind"],
-                }
-            if resolution.dispatch_live is None:
-                # Liveness could not be measured — a THIRD state. Do not retire
-                # (a live dispatch must never be closed on ambiguous evidence),
-                # and carry the reason visibly so it is not mistaken for a
-                # normal wait. OI-1587: this branch IS bounded — by the SAME
-                # _STAY_PENDING_ESCALATION_ATTEMPTS the genuine-wait branch
-                # below uses, never a second bound. A state that could not be
-                # measured once is "unknown"; a state that failed 96
-                # consecutive measurements (≈24h at the 900s cadence) is a
-                # defect in the MEASUREMENT itself — waiting longer cannot fix
-                # a probe that never answers, so it escalates loudly under its
-                # own reason instead of retrying forever (the pre-fix comment
-                # here claimed "the same bound as below"; no bound existed —
-                # the attempts check lived only in the branch_exists
-                # True/None tak and this return never reached it).
-                if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS:
-                    return {
-                        "kind": "escalate_stay_pending_unmeasured",
-                        "liveness": "unmeasured",
-                        "mismatch_detail": lookup.get("detail"),
-                        "rejected_evidence": lookup["kind"],
-                    }
-                return {
-                    "kind": "stay_pending_unmeasured",
-                    "liveness": "unmeasured",
-                    "mismatch_detail": lookup.get("detail"),
-                    "rejected_evidence": lookup["kind"],
-                }
-            # dispatch_live is False: the dispatch ended and its branch is gone
-            # — nothing will ever gate this obligation. The existing, correct
-            # retirement, unchanged — except it now documents WHY any rejected
-            # evidence did not count (mismatch/unverifiable detail), never
-            # silently proceeding as if nothing existed at all (OI-1571 tak 3).
-            return {
-                "kind": "retire",
-                "mismatch_detail": lookup.get("detail"),
-                "rejected_evidence": lookup["kind"],
-            }
-        # branch_exists is True (branch still there) or None (gh could not
-        # tell) — a genuine wait. OI-1532: this branch was unbounded; it now
-        # escalates loudly past the same threshold the other branches use, so
-        # a wait that never produces a PR cannot retry silently for eight days
-        # (measured on mission-control 2026-08-30).
-        if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS:
-            return {"kind": "escalate_stay_pending"}
-        return {"kind": "stay_pending"}
+            return _awaiting_gone_decision(
+                dispatch_id, gate, resolution, attempts, result_index, snapshot,
+            )
+        return _awaiting_wait_decision(attempts)
 
-    # resolution.status == RESOLUTION_RESOLVED (OI-1508): a PR is known, but
-    # that alone never used to be checked against existing evidence or the
-    # PR's live state — see the docstring measurement above.
-    #
+    # RESOLUTION_RESOLVED (OI-1508): a PR is known, but that alone was never
+    # checked against existing evidence or the PR's live state.
+    return _resolved_decision(
+        state_dir, dispatch_id, gate, resolution, attempts, result_index, snapshot,
+    )
+
+
+_DEFERRED_NO_DETAIL = (
+    "this tick cannot confirm the fact a booking would rest on — the obligation "
+    "stays pending and is re-decided on a fresh snapshot (OI-2461)"
+)
+
+
+def _deferred_decision(detail: Optional[str]) -> Dict[str, Any]:
+    """OI-2461: the tick could not decide, so NOTHING is written and no attempt is counted."""
+    return {"kind": "deferred", "detail": detail or _DEFERRED_NO_DETAIL}
+
+
+def _unresolvable_decision(
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    result_index: GateResultIndex,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """The obligation's PR could not be resolved at all (no repo, no checkout).
+
+    Existing evidence still rescues it (OI-1388); otherwise past the attempts
+    threshold it escalates under its own reason. OI-2461: a DEFERRED evidence
+    lookup is checked BEFORE that threshold, on purpose — a tick that asked
+    nothing must never count an attempt, or a skip could escalate the
+    obligation to the terminal ``not_executable``.
+    """
+    lookup = _fulfilling_result(result_index, dispatch_id, gate, snapshot=snapshot)
+    if lookup["kind"] == "found":
+        return _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "deferred":
+        return _deferred_decision(lookup.get("detail"))
+    if lookup["kind"] == "unverifiable":
+        return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
+    if attempts >= _UNRESOLVABLE_ESCALATION_ATTEMPTS:
+        return {"kind": "escalate", "mismatch_detail": lookup.get("detail")}
+    return {"kind": "unresolvable"}
+
+
+def _awaiting_wait_decision(attempts: int) -> Dict[str, Any]:
+    """The branch still exists (or gh could not tell) — a genuine wait.
+
+    OI-1532: this branch was unbounded; since OI-1587 it escalates loudly past
+    the same threshold the other branches use, so a wait that never produces a
+    PR cannot retry silently for eight days (measured on mission-control
+    2026-08-30).
+    """
+    if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS:
+        return {"kind": "escalate_stay_pending"}
+    return {"kind": "stay_pending"}
+
+
+def _awaiting_gone_decision(
+    dispatch_id: str,
+    gate: str,
+    resolution: PrResolution,
+    attempts: int,
+    result_index: GateResultIndex,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """No PR exists and the branch is GONE — the OI-1532 three-valued split.
+
+    The sha check and the liveness check answer DIFFERENT questions and are
+    never folded into a single rejection: the sha check answers whether THIS
+    evidence counts, the liveness check answers whether MORE evidence is still
+    coming. So usable (sha-matching, decided) evidence fulfils REGARDLESS of
+    liveness; with no usable evidence, liveness decides — a live or unmeasured
+    dispatch stays pending (its own run may still produce current evidence),
+    only a DEAD dispatch is retired, with ``mismatch_detail`` recorded when
+    rejected evidence existed (OI-1571 tak 3 meets OI-1532).
+    """
+    lookup = _fulfilling_result(result_index, dispatch_id, gate, snapshot=snapshot)
+    if lookup["kind"] == "found":
+        # The gate already reviewed this dispatch; the branch being gone
+        # afterwards changes nothing about that.
+        return _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "deferred":
+        # OI-2461: a skipped lookup is NOT "no usable evidence" — it could
+        # hide evidence that is current. Nothing is concluded.
+        return _deferred_decision(lookup.get("detail"))
+    if resolution.dispatch_live is True:
+        # The dispatch is still running — it has simply not pushed its branch
+        # yet. Retiring here is the defect OI-1532 fixes (live on
+        # 20260830-124500-sidedoor). Stays pending, distinctly labelled so the
+        # recorded reason says "live, not pushed" and not a generic "no PR".
+        # DELIBERATELY UNBOUNDED — no attempts threshold here, on purpose: a
+        # held occupancy lock is kernel-enforced POSITIVE evidence that a live
+        # process owns this dispatch right now, and the kernel releases the
+        # lock the instant the holder exits (clean finish OR crash), so the
+        # state self-corrects without a timer. The remaining unbounded case (a
+        # holder that never exits AND never pushes) is a HUNG dispatch, which
+        # needs a runtime/stall signal owned by dispatch supervision, not a
+        # gate-obligation runner that only sees the lock every 900s.
+        return {
+            "kind": "stay_pending_live",
+            "mismatch_detail": lookup.get("detail"),
+            "rejected_evidence": lookup["kind"],
+        }
+    if resolution.dispatch_live is None:
+        # Liveness could not be measured — a THIRD state. Do not retire (a
+        # live dispatch must never be closed on ambiguous evidence) and carry
+        # the reason visibly so it is not mistaken for a normal wait. OI-1587:
+        # this branch IS bounded by _STAY_PENDING_ESCALATION_ATTEMPTS — a
+        # state that failed 96 consecutive measurements (≈24h at the 900s
+        # cadence) is a defect in the MEASUREMENT itself, not a wait, so it
+        # escalates loudly under its own reason instead of retrying forever.
+        kind = (
+            "escalate_stay_pending_unmeasured"
+            if attempts >= _STAY_PENDING_ESCALATION_ATTEMPTS
+            else "stay_pending_unmeasured"
+        )
+        return {
+            "kind": kind,
+            "liveness": "unmeasured",
+            "mismatch_detail": lookup.get("detail"),
+            "rejected_evidence": lookup["kind"],
+        }
+    return _gone_branch_retire_decision(dispatch_id, resolution, lookup, snapshot)
+
+
+def _gone_branch_retire_decision(
+    dispatch_id: str,
+    resolution: PrResolution,
+    lookup: Dict[str, Any],
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """The dispatch ended and its branch is gone: retire — live-confirmed (OI-2461).
+
+    This books a TERMINAL retire on the branch-gone fact, so that fact is
+    confirmed with ONE live read right before the booking — but only when it
+    came from the branch LISTING; a branch check that already went over the
+    single live call needs no second read. A live answer that is not "gone"
+    (still there, or unknown) or a capped confirmation books nothing: deferred
+    to the next tick, which decides on a fresh snapshot.
+    """
+    if _snapshot_branch_exists(dispatch_id, snapshot) is False:
+        live_branch = _confirm_branch_live(dispatch_id, resolution.owner_repo, snapshot)
+        if live_branch is DEFERRED:
+            return _deferred_decision(
+                f"branch dispatch/{dispatch_id} is gone in this tick's listing, "
+                "but the live-confirm budget ran out before the retire — nothing "
+                "is booked, re-checked next tick (OI-2461)"
+            )
+        if live_branch is not False:
+            _LOG.warning(
+                "gate_obligation_runner: dispatch %s retires on a branch reported "
+                "gone in the listing, but the live check says %r — deferring "
+                "instead of retiring on a stale snapshot fact (OI-2461)",
+                dispatch_id, live_branch,
+            )
+            return _deferred_decision(
+                f"branch dispatch/{dispatch_id} is gone in this tick's listing "
+                f"but the live check answered {live_branch!r} — nothing is booked "
+                "on a snapshot fact, re-checked next tick (OI-2461)"
+            )
+    return {
+        "kind": "retire",
+        "mismatch_detail": lookup.get("detail"),
+        "rejected_evidence": lookup["kind"],
+    }
+
+
+def _resolved_decision(
+    state_dir: Path,
+    dispatch_id: str,
+    gate: str,
+    resolution: PrResolution,
+    attempts: int,
+    result_index: GateResultIndex,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """A PR is known: existing evidence first, then the PR's live disposition."""
     # Fix-forward defect (2026-09-30): an obligation whose OWN dispatch is
     # positively live (its occupancy lock is held by a live process) must not
     # be gated against the PR's CURRENT head, and no verdict about that head
@@ -2280,35 +3164,112 @@ def _pre_execution_decision(
     # differently-named dispatch_id no longer hides its evidence from this
     # obligation.
     lookup = _fulfilling_result(
-        result_index, dispatch_id, gate, pr_number=resolution.pr_number,
+        result_index, dispatch_id, gate, pr_number=resolution.pr_number, snapshot=snapshot,
     )
     if lookup["kind"] == "found":
         return _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "deferred":
+        # OI-2461: a skipped lookup is not "no evidence" — it may hide
+        # evidence that is current, so nothing is concluded this tick.
+        return _deferred_decision(lookup.get("detail"))
     if lookup["kind"] == "unverifiable":
         return {"kind": "sha_unverifiable", "detail": lookup["detail"]}
-
-    pr_number = resolution.pr_number
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
+    return _pr_state_decision(resolution.pr_number, owner_repo, lookup, attempts, snapshot)
+
+
+def _pr_state_decision(
+    pr_number: Optional[int],
+    owner_repo: Optional[str],
+    lookup: Dict[str, Any],
+    attempts: int,
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """May a gate run on this PR at all — or is it already merged/closed?
+
+    OI-2459 round 2: this is a PRE-run retire/pending decision, so it keeps the
+    snapshot. A PR that merged or closed during the tick is read on the next
+    tick; the decision here is "may a gate run at all", and a slightly older
+    OPEN can only cost one extra pre-run check (the launch re-reads the head),
+    never a wrong booking.
+
+    OI-2461: a SKIPPED lookup (the fallback cap or the rate-limit stop) is
+    DEFERRED, never ``None`` — the ``None`` path advances ``attempts`` and
+    eventually escalates to the terminal ``not_executable``, which a skip must
+    never cause. A genuine failure still reaches that path unchanged.
+    """
     pr_state = (
-        _pr_state_from_github(pr_number, owner_repo)
+        _pr_state_from_github(pr_number, owner_repo, snapshot=snapshot)
         if pr_number and owner_repo else None
     )
+    if pr_state is DEFERRED:
+        return _deferred_decision(
+            f"PR #{pr_number} state lookup on {owner_repo} was skipped by this "
+            "tick's fallback budget (cap or rate limit) — not a failure, nothing "
+            "is booked, re-checked next tick (OI-2461)"
+        )
     if pr_state == "OPEN":
         return {"kind": "attempt_gate"}
     if pr_state in ("MERGED", "CLOSED"):
-        retire_reason = REASON_PR_MERGED if pr_state == "MERGED" else REASON_PR_CLOSED
-        return {
-            "kind": "retire",
-            "retire_reason": retire_reason,
-            "mismatch_detail": lookup.get("detail"),
-        }
+        return _pr_retire_decision(pr_number, owner_repo, pr_state, lookup, snapshot)
+    return _pr_state_unknown_decision(pr_number, owner_repo, lookup, attempts)
 
-    # PR state could not be determined (gh missing/timed out/unrecognised
-    # response, or the owner/repo itself could not be resolved) — a THIRD
-    # outcome, distinct from both "confirmed open" (attempt_gate) and
-    # "confirmed merged/closed" (retire). OI-1388: ambiguous evidence must
-    # never retire an obligation; an unqueryable PR state must not silently
-    # gate on it either, since it might just as well already be closed.
+
+def _pr_retire_decision(
+    pr_number: Optional[int],
+    owner_repo: Optional[str],
+    pr_state: str,
+    lookup: Dict[str, Any],
+    snapshot: Optional[_GithubSnapshot],
+) -> Dict[str, Any]:
+    """``MERGED``/``CLOSED`` retires the obligation — live-confirmed (OI-2461).
+
+    This books a TERMINAL retire, so a state taken from the SNAPSHOT is
+    confirmed with exactly ONE live read right before it. A state the lookup
+    already read live (the snapshot could not answer, or there is none) needs
+    no second read. Anything but the same live answer — a different state, an
+    unknown one, or a capped confirmation — books nothing.
+    """
+    retire_reason = REASON_PR_MERGED if pr_state == "MERGED" else REASON_PR_CLOSED
+    if _snapshot_pr_state(pr_number, snapshot) is not None:
+        live_state = _confirm_pr_state_live(pr_number, owner_repo, snapshot)
+        if live_state is DEFERRED:
+            return _deferred_decision(
+                f"PR #{pr_number} reads {pr_state} in this tick's snapshot, but "
+                "the live-confirm budget ran out before the retire — nothing is "
+                "booked, re-checked next tick (OI-2461)"
+            )
+        if live_state != pr_state:
+            _LOG.warning(
+                "gate_obligation_runner: PR #%s reads %s in this tick's snapshot "
+                "but %r live — deferring instead of retiring on a stale snapshot "
+                "fact (OI-2461)",
+                pr_number, pr_state, live_state,
+            )
+            return _deferred_decision(
+                f"PR #{pr_number} reads {pr_state} in this tick's snapshot but "
+                f"{live_state!r} live — nothing is booked on a snapshot fact, "
+                "re-checked next tick (OI-2461)"
+            )
+    return {
+        "kind": "retire",
+        "retire_reason": retire_reason,
+        "mismatch_detail": lookup.get("detail"),
+    }
+
+
+def _pr_state_unknown_decision(
+    pr_number: Optional[int],
+    owner_repo: Optional[str],
+    lookup: Dict[str, Any],
+    attempts: int,
+) -> Dict[str, Any]:
+    """The PR state could not be determined — a THIRD outcome, not a retire.
+
+    OI-1388: ambiguous evidence must never retire an obligation; an
+    unqueryable PR state must not silently gate on it either, since it might
+    just as well already be closed.
+    """
     if pr_number and owner_repo:
         detail = (
             f"PR #{pr_number} state on {owner_repo} could not be determined "
@@ -2324,7 +3285,6 @@ def _pre_execution_decision(
         return {"kind": "escalate", "detail": detail, "mismatch_detail": lookup.get("detail")}
     return {"kind": "unresolvable", "detail": detail}
 
-
 _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "unresolvable": "would_stay_unresolvable",
     "escalate": "would_escalate_not_executable",
@@ -2339,14 +3299,25 @@ _DRY_RUN_ACTION_LABELS: Dict[str, str] = {
     "escalate_stay_pending": "would_escalate_stay_pending",
     "escalate_stay_pending_unmeasured": "would_escalate_stay_pending_unmeasured",
     "attempt_gate": "would_fulfill",
+    # OI-2461: a deferred decision writes nothing, so a dry run forecasts the
+    # obligation as still pending — distinct from "no PR yet" on purpose.
+    "deferred": "would_defer",
 }
+
+
+def _with_mismatch_note(outcome: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    """Append the rejected-evidence note to a dry-run detail when one was recorded."""
+    if decision.get("mismatch_detail"):
+        outcome["detail"] = (
+            f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        )
 
 
 def _dry_run_outcome(
     state_dir: Path,
     path: Path,
     record: Dict[str, Any],
-    result_index: GateResultIndex,
+    result_index: GateResultIndex, snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Report the action a real run would take for one obligation — never writes.
 
@@ -2370,8 +3341,8 @@ def _dry_run_outcome(
         }
 
     attempts = int(record.get("attempts") or 0) + 1
-    resolution = resolve_pr_number(state_dir, record)
-    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index)
+    resolution = resolve_pr_number(state_dir, record, snapshot=snapshot)
+    decision = _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index, snapshot=snapshot)
     outcome: Dict[str, Any] = {
         "dispatch_id": dispatch_id,
         "gate": gate,
@@ -2390,6 +3361,8 @@ def _dry_run_outcome(
         outcome["result_path"] = str(evidence_path)
     elif decision["kind"] == "sha_unverifiable":
         outcome["detail"] = decision.get("detail")
+    elif decision["kind"] == "deferred":
+        outcome["detail"] = decision.get("detail") or _DEFERRED_NO_DETAIL
     elif decision["kind"] == "retire":
         # OI-1508: retire_reason distinguishes the RESOLVED branch's own
         # merged/closed retirement from the pre-existing "branch gone, no
@@ -2405,15 +3378,13 @@ def _dry_run_outcome(
             )
         else:
             outcome["detail"] = resolution.reason or "dispatch died without ever producing a PR; branch gone"
-        if decision.get("mismatch_detail"):
-            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        _with_mismatch_note(outcome, decision)
     elif decision["kind"] == "stay_pending_live":
         outcome["detail"] = (
             "dispatch branch is gone on GitHub but the dispatch is still RUNNING "
             "(occupancy lock held) — not pushed yet, NOT retired (OI-1532)"
         )
-        if decision.get("mismatch_detail"):
-            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        _with_mismatch_note(outcome, decision)
     elif decision["kind"] == "stay_pending_dispatch_live":
         outcome["detail"] = decision.get("detail") or (
             "PR is open but the obligation's own dispatch is still running "
@@ -2425,8 +3396,7 @@ def _dry_run_outcome(
             "(no occupancy lock file or probe failed) — staying pending rather than "
             "retiring on ambiguous evidence (OI-1532)"
         )
-        if decision.get("mismatch_detail"):
-            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        _with_mismatch_note(outcome, decision)
     elif decision["kind"] == "escalate_stay_pending":
         outcome["detail"] = (
             f"obligation has waited {attempts} attempts for a PR that never appeared "
@@ -2440,16 +3410,14 @@ def _dry_run_outcome(
             "never resolves is a measurement defect, not a wait; escalating to a "
             "loud terminal outcome (OI-1587)"
         )
-        if decision.get("mismatch_detail"):
-            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        _with_mismatch_note(outcome, decision)
     elif decision["kind"] in ("unresolvable", "escalate"):
         # OI-1508: decision["detail"] carries the RESOLVED branch's own
         # "PR state undeterminable" message when present — resolution.reason
         # is unset for RESOLUTION_RESOLVED, so it is only the fallback for
         # the pre-existing RESOLUTION_UNRESOLVABLE origin of this branch.
         outcome["detail"] = decision.get("detail") or resolution.reason
-        if decision.get("mismatch_detail"):
-            outcome["detail"] = f"{outcome['detail']} (rejected mismatched evidence: {decision['mismatch_detail']})"
+        _with_mismatch_note(outcome, decision)
     return outcome
 
 
@@ -2692,6 +3660,7 @@ def _guard_launch(
     pr_number: int,
     head_sha: str,
     force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> _LaunchGuard:
     """R10: take the run lock of (PR, gate, head), then recheck what may have changed on the way.
 
@@ -2714,7 +3683,7 @@ def _guard_launch(
     fresh = _read_obligation_record(path) or record
     refusal, evidence = _recheck_under_lock(
         state_dir, path, fresh, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
-        head_sha=head_sha, force_rerun=force_rerun,
+        head_sha=head_sha, force_rerun=force_rerun, snapshot=snapshot,
     )
     if refusal is not None or evidence is not None:
         lock.release()
@@ -2742,6 +3711,7 @@ def _recheck_under_lock(
     pr_number: int,
     head_sha: str,
     force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """``(refusal, evidence)`` for a launch that holds the run lock; both ``None``: it runs.
 
@@ -2761,9 +3731,25 @@ def _recheck_under_lock(
         return None, None
     if gate_run_guard.cap_reached(fresh.get("head_runs"), head_sha):
         return _park_at_cap(path, fresh, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id), None
-    lookup = _fulfilling_result(_index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number)
+    lookup = _fulfilling_result(
+        _index_gate_results(state_dir), dispatch_id, gate, pr_number=pr_number, snapshot=snapshot,
+    )
     if lookup["kind"] == "found":
         return None, _evidence_decision(lookup["entry"])
+    if lookup["kind"] == "deferred":
+        # OI-2461: a verdict may have landed on this head while this launch
+        # was on its way, and this tick cannot confirm it — so neither book it
+        # nor overwrite it with a run. The launch is refused, nothing is
+        # written, and the next tick decides on a fresh snapshot.
+        return {
+            "action": "pending",
+            "detail": lookup.get("detail") or (
+                "a verdict on this head may have landed while this launch "
+                "waited, but this tick could not confirm it — not run again "
+                "this tick (OI-2461)"
+            ),
+            "deferred": True,
+        }, None
     return None, None
 
 
@@ -2813,6 +3799,7 @@ def _book_reviewer_run(
 
 def _apply_force_rerun(
     state_dir: Path, resolution: PrResolution, decision: Dict[str, Any], force_rerun: str,
+    snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """R10: an operator force-rerun turns a verdict rescue on an OPEN PR into a run; nothing else changes.
 
@@ -2825,9 +3812,64 @@ def _apply_force_rerun(
     if resolution.status != RESOLUTION_RESOLVED or not resolution.pr_number:
         return decision
     owner_repo = resolution.owner_repo or _resolve_github_owner_repo(state_dir)
-    if not owner_repo or _pr_state_from_github(resolution.pr_number, owner_repo) != "OPEN":
+    if not owner_repo or _pr_state_from_github(resolution.pr_number, owner_repo, snapshot=snapshot) != "OPEN":
         return decision
     return {"kind": "attempt_gate", "forced_over": decision["kind"]}
+
+
+def _launch_context(
+    record: Dict[str, Any],
+    dispatch_id: str,
+    pr_number: Optional[int],
+    owner_repo: Optional[str],
+    snapshot: Optional[_GithubSnapshot],
+) -> Tuple[str, str]:
+    """(head sha before the run, branch) for a launch — the two pre-run reads.
+
+    OI-2459 round 2: the pre-run baseline reads the tick's snapshot only while
+    that snapshot is younger than ``_LAUNCH_HEAD_SNAPSHOT_MAX_AGE_SECONDS`` —
+    gates run back to back, so by the third launch the start-of-tick snapshot
+    is minutes old and no longer describes "before this run". Older than that,
+    the launch reads the live head once. OI-2461: this is not a booking fact
+    (it keys the run lock and documents a mid-run push), so a skipped lookup is
+    the unknown head, exactly as an unreadable one already is.
+
+    The branch NAME keeps the snapshot: a PR's head branch is the identity of
+    the PR, not a moving fact — a push does not change it, and the only
+    mid-tick changes (rename/retarget) are seen on the next tick. OI-2461: a
+    skipped lookup is likewise just "no name", which degrades to the dispatch
+    branch exactly like an unknown one.
+    """
+    head_sha_before_run = _as_sha(
+        _pr_head_sha_for_gate(pr_number, _launch_head_snapshot(snapshot))
+    )
+    branch_from_gh = (
+        _branch_from_github(pr_number, owner_repo, snapshot=snapshot) if owner_repo else ""
+    )
+    branch = (
+        str(record.get("branch") or "").strip()
+        or (branch_from_gh if isinstance(branch_from_gh, str) else "")
+        or f"dispatch/{dispatch_id}"
+    )
+    return head_sha_before_run, branch
+
+
+def _deferred_outcome(
+    outcome: Dict[str, Any], decision: Dict[str, Any],
+) -> Dict[str, Any]:
+    """OI-2461: a deferred decision books NOTHING — no write, no attempt counted.
+
+    The obligation keeps its status, ``attempts`` does not move (so a deferral
+    can never escalate it), and no record is touched. The next tick re-decides
+    on a fresh snapshot.
+    """
+    outcome["action"] = "pending"
+    outcome["detail"] = decision.get("detail") or (
+        "deferred to the next tick — this tick could not confirm the fact a "
+        "booking would rest on (OI-2461)"
+    )
+    outcome["deferred"] = True
+    return outcome
 
 
 def fulfill_obligation(
@@ -2836,7 +3878,7 @@ def fulfill_obligation(
     record: Dict[str, Any],
     *,
     result_index: Optional[GateResultIndex] = None,
-    force_rerun: str = "",
+    force_rerun: str = "", snapshot: Optional[_GithubSnapshot] = None,
 ) -> Dict[str, Any]:
     """Attempt fulfilment of one pending obligation.
 
@@ -2872,12 +3914,15 @@ def fulfill_obligation(
     attempts = int(record.get("attempts") or 0) + 1
     now = utc_now_iso()
 
-    resolution = resolve_pr_number(state_dir, record)
+    resolution = resolve_pr_number(state_dir, record, snapshot=snapshot)
     decision = _apply_force_rerun(
         state_dir, resolution,
-        _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index),
-        force_rerun,
+        _pre_execution_decision(state_dir, dispatch_id, gate, resolution, attempts, result_index, snapshot=snapshot),
+        force_rerun, snapshot=snapshot,
     )
+
+    if decision["kind"] == "deferred":
+        return _deferred_outcome(outcome, decision)
 
     if decision["kind"] in ("fulfill_by_evidence", "fulfill_by_failed_evidence"):
         # OI-1388 defect 1 / BETA3-C2: a gate already produced a decided,
@@ -3221,12 +4266,9 @@ def fulfill_obligation(
     # snapshot even after a fix-forward push moved the head, which is exactly
     # how the runner booked a verdict about older code onto a new obligation
     # (defect fixed 2026-09-30).
-    head_sha_before_run = _get_pr_head_sha_for_gate(pr_number)
-
-    branch = (
-        str(record.get("branch") or "").strip()
-        or (_branch_from_github(pr_number, owner_repo) if owner_repo else "")
-        or f"dispatch/{dispatch_id}"
+    #
+    head_sha_before_run, branch = _launch_context(
+        record, dispatch_id, pr_number, owner_repo, snapshot,
     )
 
     # Scope context for the reviewers: best-effort diff; an unresolvable
@@ -3243,7 +4285,7 @@ def fulfill_obligation(
     # run (released in ``finally``); see item 14 of the module docstring.
     launch = _guard_launch(
         state_dir, path, record, dispatch_id=dispatch_id, gate=gate, pr_number=pr_number,
-        head_sha=head_sha_before_run, force_rerun=force_rerun,
+        head_sha=head_sha_before_run, force_rerun=force_rerun, snapshot=snapshot,
     )
     if launch.evidence is not None:
         attempts = int(launch.record.get("attempts") or 0) + 1
@@ -3289,6 +4331,14 @@ def fulfill_obligation(
         # obligation is booked with a verdict about code that no longer exists
         # (defect fixed 2026-09-30). ``_get_pr_head_sha_for_gate`` is the same
         # source the pre-run capture used, never a second implementation.
+        #
+        # OI-2459 round 2: this MUST be the live single call, never the tick's
+        # snapshot. The snapshot was taken at the start of the tick (possibly
+        # minutes ago, possibly before this very gate ran), so reading it here
+        # would judge the result against a head that predates the run — the
+        # exactly-2026-09-30 defect reintroduced through the cache. One live
+        # ``gh pr view --json headRefOid`` per gate run is the price of booking
+        # a verdict about the code that actually exists now.
         head_sha = _get_pr_head_sha_for_gate(pr_number)
         # The commit the result under decision actually records. An empty sha
         # (record has no commit_sha, or no record at all) keeps the existing
@@ -3702,6 +4752,13 @@ def run(
     function. Shares its open-PR list with ``prs_without_obligation`` below
     via :func:`_list_open_prs` — a single ``gh pr list --state open`` call
     per :func:`run`, not two.
+
+    OI-2459: every PR and branch fact the per-obligation loop needs comes from
+    ONE lazily built :class:`_GithubSnapshot` — at most one ``gh pr list
+    --state all`` and, only when a branch check is actually needed, one ``gh
+    api --paginate .../git/matching-refs/heads/dispatch/`` — so the tick's gh
+    cost is constant in the obligation count. A failed fetch degrades to the
+    per-call paths unchanged; a failed snapshot is never read as "no PRs".
     """
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
@@ -3740,23 +4797,30 @@ def run(
     # same decision tree (_pre_execution_decision) either way, so the two
     # paths can never diverge.
     result_index = _index_gate_results(state_dir)
+    # OI-2459: the tick's GitHub context — the owner/repo plus the ONE PR
+    # snapshot and branch listing every obligation (and the read-only
+    # diagnostics below) share. Both halves of the snapshot are fetched
+    # lazily on first use, so a tick that needs neither still asks GitHub
+    # only for the open-PR list.
+    owner_repo_for_sweep, snapshot = _tick_github_context(state_dir)
     for path, record in scoped:
         if record.get("status", STATUS_PENDING) in TERMINAL_STATUSES:
             continue
         if not write:
-            outcome = _dry_run_outcome(state_dir, path, record, result_index)
+            outcome = _dry_run_outcome(state_dir, path, record, result_index, snapshot)
             outcomes.append(outcome)
             if outcome["action"] in _DRY_RUN_OPEN_ACTIONS:
                 pending_after += 1
             continue
-        outcome = fulfill_obligation(state_dir, path, record, result_index=result_index, force_rerun=force_rerun)
+        outcome = fulfill_obligation(
+            state_dir, path, record, result_index=result_index, force_rerun=force_rerun,
+            snapshot=snapshot,
+        )
         outcomes.append(outcome)
         # R10: in_flight and retry_capped leave the obligation open as well.
         if outcome["action"] in _OPEN_ACTIONS:
             pending_after += 1
-    action_counts: Dict[str, int] = {}
-    for outcome in outcomes:
-        action_counts[outcome.get("action", "")] = action_counts.get(outcome.get("action", ""), 0) + 1
+    action_counts = _count_actions(outcomes)
     # Read-only diagnostic over the FULL (unscoped) store — a --since/
     # --dispatch-prefix slice must not hide an already-burned record outside
     # it. Never rewrites anything (see _terminal_evidence_contradictions).
@@ -3780,12 +4844,7 @@ def run(
     # prs_without_obligation (OI-1751) is untouched here: it already guards
     # on owner_repo_for_sweep directly and keeps its own documented
     # silent-empty contract for this case.
-    owner_repo_for_sweep = _resolve_github_owner_repo(state_dir)
-    open_pr_lookup = (
-        _list_open_prs(owner_repo_for_sweep)
-        if owner_repo_for_sweep
-        else {"prs": None, "suspect": True, "owner_repo_unresolvable": True}
-    )
+    open_pr_lookup = _open_pr_lookup(owner_repo_for_sweep)
     # OI-1764: a third full-store, read-only diagnostic, scoped to OPEN PRs
     # only — terminal obligations the loop above skips outright (line
     # ~2981) whose own evidence has since gone stale (a later commit landed
@@ -3793,7 +4852,7 @@ def run(
     # evidence is never re-examined: its head is frozen, so it would only
     # ever repeat the same finding forever. Never mutates anything, same
     # discipline as contradictions/prs_without_obligation.
-    stale_terminal_evidence = _stale_terminal_evidence(obligations, open_pr_lookup)
+    stale_terminal_evidence = _stale_terminal_evidence(obligations, open_pr_lookup, snapshot)
     stale_terminal_evidence_mismatch_count = sum(
         1 for finding in stale_terminal_evidence if finding["binding"] == "mismatch"
     )
@@ -3811,13 +4870,15 @@ def run(
         if owner_repo_for_sweep
         else []
     )
-    for finding in prs_without_obligation:
-        _LOG.warning(
-            "PR #%s (branch %s) carries no review-gate obligation: %s",
-            finding["pr_number"], finding["branch"], finding["reason"],
-        )
-        if write:
-            _audit_log_pr_without_obligation(state_dir, finding)
+    _report_prs_without_obligation(state_dir, prs_without_obligation, write)
+    # OI-2459 round 2 / OI-2461: ONE warning line per budget for a tick that
+    # had to skip lookups (the cap, a rate-limit refusal, or the live-confirm
+    # cap) — silence when the snapshot answered every lookup. A skipped
+    # lookup's obligation is deferred: nothing was written, so it stays in
+    # whatever state it had and is re-evaluated on the next tick.
+    if snapshot is not None:
+        snapshot.fallback.finish()
+        snapshot.live_confirms.finish()
     return {
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
