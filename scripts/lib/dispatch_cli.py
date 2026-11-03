@@ -3402,8 +3402,21 @@ def _resolve_start_base_sha(plan: ExecutionPlan) -> "tuple[Path, str]":
 
     A missing consumer root or an unresolvable ref is a named ``StartRefused``:
     the caller refuses before the hand-over, so no line, no slot and no worker.
+
+    K-4b round 2 (codex on 30b21e0f): because the door now hands
+    ``create_dispatch_worktree`` a full sha, that function's own ``git fetch
+    origin <branch>`` never runs — a stale local ``origin/main`` would silently
+    start every worker, legacy included, on an old commit, and a branch that
+    exists upstream but was not fetched yet would be refused. So the fetch comes
+    back here, BEFORE the resolution, through the SAME helper
+    ``create_dispatch_worktree`` uses (``fetch_remote_base``): same command, same
+    best-effort semantics — a failed fetch warns and resolution decides, exactly
+    as on main. A full sha or a local ref is never fetched (the helper is a no-op
+    for a non-``origin/`` ref).
     """
-    from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+    from dispatch_worktree_isolation import (  # noqa: PLC0415
+        fetch_remote_base, resolve_consumer_project_root,
+    )
     try:
         consumer_root = resolve_consumer_project_root()
     except Exception as exc:  # a base that cannot be located refuses the start (fail closed)
@@ -3411,6 +3424,12 @@ def _resolve_start_base_sha(plan: ExecutionPlan) -> "tuple[Path, str]":
             "consumer_root_unresolved",
             f"cannot resolve the consumer project root for the start line: {exc}") from exc
     base_ref = (plan.base_ref or "origin/main").strip() or "origin/main"
+    # Best-effort, remote refs only — never blocks on a failed fetch. A full sha
+    # or a local branch is not fetched at all (the helper is a no-op for them;
+    # the call-site guard keeps it un-called, so "no fetch for a sha" is
+    # observable and true).
+    if base_ref.startswith("origin/"):
+        fetch_remote_base(consumer_root, base_ref)
     try:
         probe = subprocess.run(
             ["git", "-C", str(consumer_root), "rev-parse", "--verify", f"{base_ref}^{{commit}}"],

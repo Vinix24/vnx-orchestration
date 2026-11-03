@@ -757,6 +757,42 @@ def _is_full_commit_sha(value: str) -> bool:
     return bool(_FULL_COMMIT_SHA_RE.match(value))
 
 
+def fetch_remote_base(root: Path, resolved_base_ref: str) -> bool:
+    """Best-effort ``git fetch origin <branch>`` for an ``origin/<branch>`` base.
+
+    The ONE fetch implementation for a remote base ref. ``create_dispatch_worktree``
+    has always run it before resolving ``origin/...`` (a stale local
+    ``origin/main`` would otherwise start the worker on an old commit, and a
+    branch that exists upstream but was never fetched would not resolve at all);
+    the door now resolves the base BEFORE handing the worktree a sha, so it must
+    run the same fetch in the consumer repo first — same command, same
+    best-effort semantics, one implementation (K-4b round 2 / codex finding on
+    ``dispatch_cli._resolve_start_base_sha``).
+
+    A failed fetch never raises: it is logged and the caller resolves whatever
+    is there, exactly the behaviour ``create_dispatch_worktree`` always had.
+    A non-``origin/`` ref (a local branch or a full commit sha) is not fetched
+    and returns False; the worktree path never re-resolves a full sha anyway.
+    """
+    if not resolved_base_ref.startswith("origin/"):
+        return False
+    branch = resolved_base_ref[len("origin/"):]
+    try:
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=str(root),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.warning(
+            "git fetch %s failed (continuing): %s",
+            resolved_base_ref, (exc.stderr or "").strip(),
+        )
+    return True
+
+
 def _resolve_worktree_base_sha(root: Path, base_ref: str, dispatch_id: str) -> str:
     """``git -C root rev-parse base_ref``; loud RuntimeError when it does not resolve."""
     try:
@@ -832,24 +868,12 @@ def create_dispatch_worktree(
         # benchmark tasks to main. Default (unset) keeps origin/main — production unchanged.
         bench_override = os.environ.get("VNX_BENCH_WORKTREE_BASE_REF", "").strip()
         resolved_base_ref = (base_ref or "").strip() or bench_override or "origin/main"
-        is_remote = resolved_base_ref.startswith("origin/")
-
         wt_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if is_remote:
-            try:
-                subprocess.run(
-                    ["git", "fetch", "origin", resolved_base_ref[len("origin/"):]],
-                    cwd=str(root),
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            except subprocess.CalledProcessError as exc:
-                log.warning(
-                    "create_dispatch_worktree: git fetch %s failed (continuing): %s",
-                    resolved_base_ref, (exc.stderr or "").strip(),
-                )
+        # Best-effort fetch of an origin/<branch> base (no-op for a local ref or
+        # the full sha the door resolved once). Same helper the door uses before
+        # it resolves the base, so both paths stay on one implementation.
+        fetch_remote_base(root, resolved_base_ref)
 
         # Resolve base_sha BEFORE adding the worktree — needed for teardown
         # classification (L3 provider-lane reap).  Mirrors tmux_worktree.allocate().

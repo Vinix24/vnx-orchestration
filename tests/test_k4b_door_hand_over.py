@@ -199,6 +199,52 @@ def _commit(repo: Path, name: str, body: str) -> str:
     return _rev_parse(repo, "HEAD")
 
 
+def _init_origin_and_clone(tmp_path: Path) -> "tuple[Path, Path]":
+    """A real bare ``origin`` plus a consumer clone of it (fetchable, unpatchable)."""
+    bare = tmp_path / "origin.git"
+    seed = tmp_path / "seed-repo"
+    consumer = tmp_path / "consumer-repo"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, env=_GIT_ENV)
+    _init_repo(seed)
+    subprocess.run(["git", "-C", str(seed), "branch", "-M", "main"], check=True, env=_GIT_ENV)
+    subprocess.run(["git", "-C", str(seed), "remote", "add", "origin", str(bare)],
+                   check=True, env=_GIT_ENV)
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"],
+                   check=True, env=_GIT_ENV)
+    # Point the bare HEAD at main so the clone checks out a real branch instead
+    # of warning about an unborn HEAD.
+    subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/main"],
+                   check=True, env=_GIT_ENV)
+    subprocess.run(["git", "clone", "-q", str(bare), str(consumer)], check=True, env=_GIT_ENV)
+    return seed, consumer
+
+
+def _push_main(seed: Path, name: str) -> str:
+    """Advance ``main`` in the seed repo and push it to the bare origin."""
+    sha = _commit(seed, name, f"{name} upstream\n")
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "main"],
+                   check=True, env=_GIT_ENV)
+    return sha
+
+
+def _door_env(monkeypatch, data_dir: Path, *, lifecycle: bool) -> Path:
+    state_dir = data_dir / "state"
+    _make_coordination_db(state_dir)
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    if lifecycle:
+        monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    else:
+        monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    return state_dir
+
+
+@contextlib.contextmanager
+def _consumer_root(path: Path):
+    with patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=path):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # 1. lifecycle on: one line, before the slot, with the consumer repo's base sha
 # ---------------------------------------------------------------------------
@@ -416,3 +462,128 @@ def test_legacy_writes_no_line_and_keeps_main_s_decision(tmp_path, monkeypatch):
     # The legacy hand-over still projects lifecycle_mode: legacy into the row.
     metadata = json.loads(_dispatch_row(state_dir, dispatch_id)["metadata_json"] or "{}")
     assert metadata.get("lifecycle_mode") == "legacy"
+
+
+# ---------------------------------------------------------------------------
+# 6. base freshness — the fetch that create_dispatch_worktree used to run
+#    (codex on 30b21e0f: the door resolved the base before any fetch, but it
+#    now hands the worktree a full sha, so the worktree's own fetch never runs)
+# ---------------------------------------------------------------------------
+
+def test_advanced_origin_main_is_fetched_before_it_is_resolved(tmp_path, monkeypatch):
+    """origin/main moves upstream after the clone: the door must start on the new commit."""
+    dispatch_id = "20261103-k4b-fresh-main"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="origin/main")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    stale_sha = _rev_parse(consumer, "origin/main")
+    fresh_sha = _push_main(seed, "upstream-moved.txt")
+    assert fresh_sha != stale_sha
+    assert _rev_parse(consumer, "origin/main") == stale_sha, (
+        "fixture: the clone's local origin/main must still be stale"
+    )
+
+    import dispatch_worktree_isolation as dwi
+
+    real_run = dwi.subprocess.run
+    seen: "list[list[str]]" = []
+
+    def _record(cmd, **kwargs):
+        seen.append([str(part) for part in cmd] if not isinstance(cmd, str) else [cmd])
+        return real_run(cmd, **kwargs)
+
+    with _consumer_root(consumer), \
+         patch("dispatch_worktree_isolation.subprocess.run", side_effect=_record), \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    # The door fetched the branch, in the consumer repo, before resolving it.
+    assert ["git", "fetch", "origin", "main"] in seen, seen
+
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    assert lines[0]["base_sha"] == fresh_sha, "the start line must name the fetched commit"
+    assert headless.call_args.kwargs["base_sha"] == fresh_sha
+
+    wt = create_dispatch_worktree(
+        dispatch_id, project_root=consumer, base_ref=headless.call_args.kwargs["base_sha"],
+    )
+    assert _rev_parse(wt, "HEAD") == fresh_sha, "the worktree must be built on the fetched commit"
+
+
+def test_branch_that_exists_only_upstream_is_fetched_and_resolved(tmp_path, monkeypatch):
+    """A branch pushed after the clone exists only in the bare repo until the fetch."""
+    dispatch_id = "20261103-k4b-fresh-branch"
+    data_dir, spec_file = _make_bundle(
+        tmp_path, dispatch_id=dispatch_id, base_ref="origin/upstream-only")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    subprocess.run(["git", "-C", str(seed), "checkout", "-q", "-b", "upstream-only"],
+                   check=True, env=_GIT_ENV)
+    branch_sha = _commit(seed, "upstream-only.txt", "only upstream\n")
+    subprocess.run(["git", "-C", str(seed), "push", "-q", "origin", "upstream-only"],
+                   check=True, env=_GIT_ENV)
+    probe = subprocess.run(
+        ["git", "-C", str(consumer), "rev-parse", "--verify", "-q", "origin/upstream-only^{commit}"],
+        capture_output=True, text=True, env=_GIT_ENV,
+    )
+    assert probe.returncode != 0, "fixture: the clone must not know the branch before the fetch"
+
+    with _consumer_root(consumer), \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    assert lines[0]["base_sha"] == branch_sha
+    assert headless.call_args.kwargs["base_sha"] == branch_sha
+
+    wt = create_dispatch_worktree(dispatch_id, project_root=consumer, base_ref=branch_sha)
+    assert _rev_parse(wt, "HEAD") == branch_sha
+
+
+def test_full_sha_base_is_not_fetched(tmp_path, monkeypatch):
+    """A full sha is already the answer: no fetch call, it is resolved verbatim."""
+    dispatch_id = "20261103-k4b-fresh-sha"
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    _push_main(seed, "moved-again.txt")
+    sha = _rev_parse(consumer, "origin/main")
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref=sha)
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    with _consumer_root(consumer), \
+         patch("dispatch_worktree_isolation.fetch_remote_base", create=True) as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    # create=True: the assertion also holds on the K-4b head, where the helper
+    # does not exist yet (nothing there fetches at all).
+    fetch_spy.assert_not_called()
+    assert _start_lines(state_dir)[0]["base_sha"] == sha
+    assert headless.call_args.kwargs["base_sha"] == sha
+
+
+def test_legacy_path_has_the_same_freshness(tmp_path, monkeypatch):
+    """ledger_lifecycle off: the legacy path must equal main — stale ref refreshed too."""
+    dispatch_id = "20261103-k4b-legacy-fresh"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="origin/main")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=False)
+
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    stale_sha = _rev_parse(consumer, "origin/main")
+    fresh_sha = _push_main(seed, "legacy-moved.txt")
+    assert _rev_parse(consumer, "origin/main") == stale_sha
+
+    with _consumer_root(consumer), \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    assert headless.call_args.kwargs["base_sha"] == fresh_sha
+    # Still no lifecycle line: only the freshness changed.
+    assert _start_lines(state_dir) == []
