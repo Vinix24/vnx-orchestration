@@ -1,0 +1,466 @@
+"""ADR-045 audit-spoor-kern K-9: the lifecycle count, its beacon, its briefing line.
+
+Dispatch-ID: dlv-321a4fa83c55
+
+The count reports five defects over the ``v3`` lines of one store — a start
+without an end past its deadline plus the sweep's grace, an end without a
+start, a double end, a projection conflict and an unknown provenance — and it
+never moves ``ledger_health``'s exit code. Every store here is real (a real
+ledger written by ``dispatch_start.begin`` and the real finalizer, a real
+``runtime_coordination.db``); only the clock and the writer's provenance are
+pinned. The provenance repo is a throwaway git repository with two commits, so
+the cohort boundary is a real ancestor test.
+
+The red run of this file on the pre-K-9 base is in the completion report: no
+``lifecycle_count`` module, no ``compute_health`` key, no briefing line.
+"""
+
+from __future__ import annotations
+
+import importlib.util as _ilu
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+VNX_ROOT = Path(__file__).resolve().parents[1]
+SCRIPT_DIR = VNX_ROOT / "scripts"
+sys.path.insert(0, str(SCRIPT_DIR / "lib"))
+sys.path.insert(0, str(SCRIPT_DIR))
+
+import build_t0_state  # noqa: E402
+import coordination_db  # noqa: E402
+import dispatch_exit  # noqa: E402
+import dispatch_lifecycle as lifecycle  # noqa: E402
+import dispatch_start  # noqa: E402
+import ledger_health as lh  # noqa: E402
+import lifecycle_count  # noqa: E402
+import project_id_migration  # noqa: E402
+from append_receipt_internals import lifecycle as append_lifecycle  # noqa: E402
+from append_receipt_internals import payload as payload_module  # noqa: E402
+from atomic_io import atomic_write_json  # noqa: E402
+from coordination_db import get_connection  # noqa: E402
+from migrations.auto_apply import (  # noqa: E402
+    _DEFAULT_MIGRATIONS_DIR,
+    _RUNNERS_DIR,
+    highest_auto_applicable_migration,
+)
+
+PROJECT = "vnx-dev"
+ROLE = "backend-developer"
+DEADLINE = 300  # dispatch_spec.DEADLINE_SECONDS_MIN: the smallest legal deadline
+GRACE = 30 * 60  # ADR-045 §6's 30-minute decision, pinned literally
+START = "2026-11-01T10:00:00Z"
+START_DT = datetime(2026, 11, 1, 10, 0, 0, tzinfo=timezone.utc)
+DOOR_START = "Mon Jan  1 00:00:00 2024"
+SIX_HOURS = 6 * 60 * 60
+
+
+def _at(seconds: float) -> datetime:
+    return START_DT + timedelta(seconds=seconds)
+
+
+# ---------------------------------------------------------------------------
+# Real store fixtures (the shape tests/test_k6_sweep.py proved)
+# ---------------------------------------------------------------------------
+
+_spec_0017 = _ilu.spec_from_file_location(
+    "apply_0017_k9", SCRIPT_DIR / "lib" / "migrations" / "apply_0017.py")
+_mod_0017 = _ilu.module_from_spec(_spec_0017)
+_spec_0017.loader.exec_module(_mod_0017)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_append(monkeypatch):
+    real = payload_module.append_receipt_payload
+
+    def _append(receipt, **kwargs):
+        kwargs.setdefault("skip_enrichment", True)
+        return real(receipt, **kwargs)
+
+    monkeypatch.setattr(payload_module, "append_receipt_payload", _append)
+    monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
+
+
+@pytest.fixture()
+def data_dir(tmp_path: Path) -> Path:
+    return tmp_path / "vnx-data"
+
+
+@pytest.fixture()
+def state_dir(data_dir: Path) -> Path:
+    sd = data_dir / "state"
+    sd.mkdir(parents=True)
+    coordination_db.init_schema(sd)
+    db_path = coordination_db.db_path_from_state_dir(sd)
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("BEGIN")
+        _mod_0017._rebuild_dispatches(conn)
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
+    return sd
+
+
+@pytest.fixture()
+def lifecycle_on(monkeypatch):
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+
+@pytest.fixture()
+def git_repo(tmp_path: Path) -> dict:
+    """A real repository with two commits: the cohort boundary is a real ancestor."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for args in (("init",), ("config", "user.email", "k9@example.invalid"),
+                 ("config", "user.name", "K9")):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+    (repo / "a.txt").write_text("a", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "a.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "one"], check=True, capture_output=True)
+    old = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    (repo / "b.txt").write_text("b", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "b.txt"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "two"], check=True, capture_output=True)
+    new = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
+                         capture_output=True, text=True).stdout.strip()
+    assert old and new and old != new
+    return {"path": repo, "old": old, "new": new}
+
+
+@pytest.fixture()
+def writer_sha(monkeypatch, git_repo) -> dict:
+    """Pin the provenance the real append layer stamps; the repo is the fixture's."""
+    state = {"value": git_repo["new"]}
+    monkeypatch.setattr(append_lifecycle, "writer_sha", lambda: state["value"])
+    return state
+
+
+# ---------------------------------------------------------------------------
+# Helpers: real lines from the real writers
+# ---------------------------------------------------------------------------
+
+def _ledger(state_dir: Path) -> Path:
+    return state_dir / "t0_receipts.ndjson"
+
+
+def _append_raw(state_dir: Path, line: dict) -> None:
+    """Append a line the way a corrupted/duplicated ledger would carry it."""
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
+def _begin(state_dir: Path, dispatch_id: str) -> dispatch_start.Handover:
+    """A real ``dispatch_start.begin`` line, clock and door identity pinned."""
+    spec = state_dir.parent / "dispatches" / "completed" / dispatch_id / "dispatch-spec.json"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(spec, {"dispatch_id": dispatch_id, "deadline_seconds": DEADLINE})
+    with patch.object(dispatch_start, "process_started_at", lambda pid: DOOR_START), \
+            patch.object(dispatch_start, "_now", lambda: START):
+        return dispatch_start.begin(project_id=PROJECT, dispatch_id=dispatch_id, role=ROLE,
+                                    base_sha="a" * 40, spec_file=spec, target_slot="T1",
+                                    state_dir=state_dir)
+
+
+def _handover(dispatch_id: str, attempt: int = 1) -> dispatch_start.Handover:
+    return dispatch_start.Handover(project_id=PROJECT, dispatch_id=dispatch_id, attempt=attempt,
+                                   lifecycle_mode="v3", door_pid=0, door_started_at="",
+                                   started_at=START)
+
+
+def _finish(state_dir: Path, handover, end_state: str = "completed", **extra):
+    """A real finalizer end line (K-3c), projected like the lanes project it."""
+    extra.setdefault("head_sha", "c" * 40)
+    return lifecycle.finalize(
+        state_dir=state_dir, project_id=handover.project_id,
+        dispatch_id=handover.dispatch_id, attempt=handover.attempt, end_state=end_state,
+        end_line=dispatch_exit.build_end_line(handover, end_state=end_state, **extra),
+    )
+
+
+def _insert_row(state_dir: Path, dispatch_id: str, *, state: str = "running",
+                attempt_count: int = 1) -> None:
+    with get_connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (dispatch_id, PROJECT, state, attempt_count, json.dumps({"lifecycle_mode": "v3"})))
+        conn.commit()
+
+
+def _sweep_heartbeat(state_dir: Path, written: datetime) -> None:
+    path = state_dir / lifecycle.END_INTENT_DIRNAME / lifecycle.SWEEP_HEARTBEAT_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, {"project_id": PROJECT,
+                             "finished_at": written.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                             "counts": {"abandoned": 0}})
+
+
+def _count(state_dir: Path, git_repo: dict, now: datetime = None, **kwargs) -> dict:
+    return lifecycle_count.compute_lifecycle_count(
+        state_dir, project_id=PROJECT, repo=git_repo["path"],
+        now=now or _at(SIX_HOURS), **kwargs)
+
+
+def _five_defects(state_dir: Path, writer_sha: dict) -> None:
+    """One key per defect, each written by the real start line and the real finalizer."""
+    _begin(state_dir, "d-k9-swe")                       # start, no end (past deadline+grace)
+    _finish(state_dir, _handover("d-k9-ews"))           # end, no start
+    handover = _begin(state_dir, "d-k9-dual")
+    _finish(state_dir, handover)                        # one real end...
+    _append_raw(state_dir, {"timestamp": START, "event_type": "dispatch_finished",
+                            "schema_version": 3, "project_id": PROJECT, "dispatch_id": "d-k9-dual",
+                            "attempt": 1, "end_state": "completed", "head_sha": "d" * 40,
+                            "writer_sha": writer_sha["value"]})   # ...and a second one
+    _insert_row(state_dir, "d-k9-conf", state="expired")
+    handover = _begin(state_dir, "d-k9-conf")
+    _finish(state_dir, handover)                        # completed vs an expired row: no path
+    _begin(state_dir, "d-k9-prov")
+    _append_raw(state_dir, {"timestamp": START, "event_type": "dispatch_finished",
+                            "schema_version": 3, "project_id": PROJECT, "dispatch_id": "d-k9-prov",
+                            "attempt": 1, "end_state": "completed", "head_sha": "d" * 40,
+                            "writer_sha": "0123456789abcdef0123456789abcdef01234567"})
+
+
+# ---------------------------------------------------------------------------
+# 1. five defects, one finding each, with the right key
+# ---------------------------------------------------------------------------
+
+def test_five_defects_give_five_findings(state_dir, git_repo, writer_sha, lifecycle_on):
+    _five_defects(state_dir, writer_sha)
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == "measured", count
+    assert count["cohort"] == "all_v3"
+    assert count["counts"] == {"start_without_end": 1, "end_without_start": 1, "double_end": 1,
+                               "projection_conflict": 1, "provenance_unknown": 1, "total": 5}
+    # rule 3's shape: a list of keys per defect; the list's length is the count
+    assert {name: [(k[1], k[2]) for k in count["findings"][name]]
+            for name in lifecycle_count.DEFECTS} == {
+        "start_without_end": [("d-k9-swe", 1)],
+        "end_without_start": [("d-k9-ews", 1)],
+        "double_end": [("d-k9-dual", 1)],
+        "projection_conflict": [("d-k9-conf", 1)],
+        "provenance_unknown": [("d-k9-prov", 1)],
+    }
+    assert count["findings"]["double_end"] == [("vnx-dev", "d-k9-dual", 1)]
+    assert count["problems"] == []
+
+
+def test_a_start_inside_deadline_plus_grace_is_not_a_finding(state_dir, git_repo, writer_sha,
+                                                             lifecycle_on):
+    _begin(state_dir, "d-k9-fresh")
+
+    count = _count(state_dir, git_repo, now=_at(DEADLINE + GRACE - 60))
+
+    assert count["counts"]["total"] == 0, count
+
+
+def test_the_projection_target_comes_from_the_finalizer_table(state_dir, git_repo, writer_sha,
+                                                              lifecycle_on):
+    """``failed`` projects to ``failed_delivery``; a row already there is no conflict."""
+    _insert_row(state_dir, "d-k9-failed", state="delivering")
+    _finish(state_dir, _begin(state_dir, "d-k9-failed"), end_state="failed")
+
+    count = _count(state_dir, git_repo)
+
+    assert count["counts"]["projection_conflict"] == 0, count
+
+
+# ---------------------------------------------------------------------------
+# 2. the exit code of ledger_health never moves with the count
+# ---------------------------------------------------------------------------
+
+def test_exit_code_is_equal_with_and_without_the_count(state_dir, data_dir, git_repo, writer_sha,
+                                                       lifecycle_on, monkeypatch):
+    _five_defects(state_dir, writer_sha)
+    (data_dir / "state" / "dispatch_register.ndjson").write_text("", encoding="utf-8")
+    # The tmp store carries no derivable project id; the other checks read the
+    # same env fallback, so the count does too (never a silently empty project).
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+
+    with_count = lh.compute_health(data_dir, state_dir, repo=git_repo["path"])
+    assert with_count["lifecycle_count"]["counts"]["total"] == 5
+
+    real_count = lh.compute_lifecycle_count
+    no_count = {"status": lifecycle_count.STATUS_UNMEASURED,
+                "counts": {name: None for name in lifecycle_count.DEFECTS}}
+    monkeypatch.setattr(lh, "compute_lifecycle_count", lambda *a, **k: no_count)
+    without_count = lh.compute_health(data_dir, state_dir, repo=git_repo["path"])
+
+    assert with_count["exit_code"] == without_count["exit_code"]
+    assert with_count["overall_status"] == without_count["overall_status"]
+
+    monkeypatch.setattr(lh, "compute_lifecycle_count", real_count)
+    rc_with = lh.main(["--data-dir", str(data_dir), "--state-dir", str(state_dir), "--no-write"])
+    monkeypatch.setattr(lh, "compute_lifecycle_count", lambda *a, **k: no_count)
+    rc_without = lh.main(["--data-dir", str(data_dir), "--state-dir", str(state_dir), "--no-write"])
+
+    assert rc_with == rc_without == with_count["exit_code"]
+
+
+# ---------------------------------------------------------------------------
+# 3. provenance and the activation cohort
+# ---------------------------------------------------------------------------
+
+def test_an_unknown_writer_sha_is_provenance_unknown(state_dir, git_repo, writer_sha, lifecycle_on):
+    _begin(state_dir, "d-k9-ghost")
+    _append_raw(state_dir, {"timestamp": START, "event_type": "dispatch_finished",
+                            "schema_version": 3, "project_id": PROJECT, "dispatch_id": "d-k9-ghost",
+                            "attempt": 1, "end_state": "completed", "head_sha": "d" * 40,
+                            "writer_sha": "f" * 40})
+
+    count = _count(state_dir, git_repo)
+
+    assert count["counts"]["provenance_unknown"] == 1, count
+    assert count["findings"]["provenance_unknown"] == [("vnx-dev", "d-k9-ghost", 1)]
+
+
+def test_the_activation_commit_narrows_the_cohort(state_dir, git_repo, writer_sha, lifecycle_on):
+    writer_sha["value"] = git_repo["old"]
+    _begin(state_dir, "d-k9-before")          # before the activation commit: not in the cohort
+    writer_sha["value"] = git_repo["new"]
+    _begin(state_dir, "d-k9-at")              # at/after it: in the cohort
+
+    everything = _count(state_dir, git_repo)
+    cohort = _count(state_dir, git_repo, activation_commit=git_repo["new"])
+
+    assert everything["cohort"] == "all_v3"
+    assert {k[1] for k in everything["findings"]["start_without_end"]} == {"d-k9-before", "d-k9-at"}
+    assert cohort["cohort"] == git_repo["new"]
+    assert [k[1] for k in cohort["findings"]["start_without_end"]] == ["d-k9-at"]
+
+
+def test_a_line_with_an_unknown_sha_stays_provenance_unknown_in_the_cohort(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    _begin(state_dir, "d-k9-ghost")
+    _append_raw(state_dir, {"timestamp": START, "event_type": "dispatch_finished",
+                            "schema_version": 3, "project_id": PROJECT,
+                            "dispatch_id": "d-k9-ghost", "attempt": 1, "end_state": "completed",
+                            "head_sha": "d" * 40, "writer_sha": "f" * 40})
+
+    count = _count(state_dir, git_repo, activation_commit=git_repo["new"])
+
+    assert count["counts"]["provenance_unknown"] == 1, count
+
+
+# ---------------------------------------------------------------------------
+# 4. legacy history and unmeasurable stores
+# ---------------------------------------------------------------------------
+
+def test_a_legacy_dispatch_is_never_paired(state_dir, git_repo, writer_sha, lifecycle_on):
+    _append_raw(state_dir, {"timestamp": START, "event_type": "task_complete",
+                            "schema_version": 2, "project_id": PROJECT,
+                            "dispatch_id": "d-k9-legacy", "status": "success"})
+
+    count = _count(state_dir, git_repo)
+
+    assert count["counts"]["total"] == 0, count
+    assert count["findings"]["end_without_start"] == []
+
+
+def test_a_git_that_cannot_run_makes_the_count_unmeasured(state_dir, git_repo, writer_sha,
+                                                          lifecycle_on, monkeypatch):
+    _five_defects(state_dir, writer_sha)
+    monkeypatch.setattr(lifecycle_count, "GIT_TIMEOUT_SECONDS", 0.0)  # every probe times out
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == "unmeasured", count
+    assert count["counts"] == {name: None for name in lifecycle_count.DEFECTS}
+    assert "git could not run" in count["reason"]
+    assert "unmeasured" in lifecycle_count.briefing_line(count)
+
+
+def test_a_directory_that_is_no_repository_is_unmeasured(tmp_path, state_dir, writer_sha,
+                                                         lifecycle_on):
+    _begin(state_dir, "d-k9-swe")
+    count = lifecycle_count.compute_lifecycle_count(
+        state_dir, project_id=PROJECT, repo=tmp_path / "not-a-repo")
+
+    assert count["status"] == "unmeasured", count
+    assert count["counts"]["start_without_end"] is None
+
+
+# ---------------------------------------------------------------------------
+# 5. the beacon and the one briefing line
+# ---------------------------------------------------------------------------
+
+def test_the_count_writes_its_own_beacon_with_a_timestamp(state_dir, data_dir, git_repo,
+                                                          writer_sha, lifecycle_on, monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    _five_defects(state_dir, writer_sha)
+    rc = lh.main(["--data-dir", str(data_dir), "--state-dir", str(state_dir), "--json"])
+    beacon = json.loads((data_dir / "health" / "lifecycle_count.json").read_text(encoding="utf-8"))
+
+    assert beacon["component"] == lh.LIFECYCLE_COUNT_COMPONENT
+    assert beacon["status"] == "fail"  # five defects are never a green heartbeat
+    assert beacon["details"]["counts"]["total"] >= 1
+    assert beacon["details"]["counted_at"]
+    assert rc == lh.EXIT_UNMEASURABLE  # the four checks cannot certify this bare store
+
+
+def test_the_briefing_line_carries_the_five_numbers_and_the_sweep_age(
+        state_dir, data_dir, git_repo, writer_sha, lifecycle_on):
+    _five_defects(state_dir, writer_sha)
+    now = _at(SIX_HOURS)
+    _sweep_heartbeat(state_dir, now - timedelta(seconds=600))
+    count = _count(state_dir, git_repo, now=now)
+    lh.write_count_beacon(data_dir, {"overall_status": "ok", "exit_code": 0,
+                                     "lifecycle_count": count})
+
+    index = build_t0_state._build_t0_index(
+        {"lifecycle_count": build_t0_state._lifecycle_count_index_summary(state_dir)})
+
+    assert index["lifecycle"]["line"] == (
+        "lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+        "1 provenance-unknown; sweep 600s")
+    assert count["sweep_heartbeat_age_seconds"] == 600
+    assert count["sweep_heartbeat_reason"] is None
+
+
+def test_the_missing_sweep_heartbeat_is_null_with_a_reason(state_dir, git_repo, writer_sha,
+                                                           lifecycle_on):
+    count = _count(state_dir, git_repo)
+
+    assert count["sweep_heartbeat_age_seconds"] is None
+    assert "no sweep heartbeat" in count["sweep_heartbeat_reason"]
+    assert "sweep unknown" in lifecycle_count.briefing_line(count)
+
+
+def test_the_sessionstart_hook_prints_the_lifecycle_line(tmp_path, state_dir, data_dir, git_repo,
+                                                         writer_sha, lifecycle_on):
+    _five_defects(state_dir, writer_sha)
+    now = _at(SIX_HOURS)
+    _sweep_heartbeat(state_dir, now - timedelta(seconds=600))
+    count = _count(state_dir, git_repo, now=now)
+    lh.write_count_beacon(data_dir, {"overall_status": "ok", "exit_code": 0,
+                                     "lifecycle_count": count})
+    index = build_t0_state._build_t0_index(
+        {"lifecycle_count": build_t0_state._lifecycle_count_index_summary(state_dir)})
+    (state_dir / "t0_index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    terminal = tmp_path / "project" / ".claude" / "terminals" / "T0"
+    terminal.mkdir(parents=True)
+    (tmp_path / "project" / ".vnx").mkdir()
+    env = dict(os.environ, VNX_STATE_DIR=str(state_dir), VNX_DATA_DIR=str(data_dir),
+               VNX_DATA_DIR_EXPLICIT="1")
+    for var in ("VNX_PROJECT_ID", "VNX_HOME", "VNX_BIN", "VNX_EXECUTABLE"):
+        env.pop(var, None)
+    run = subprocess.run(["bash", str(VNX_ROOT / "hooks" / "sessionstart.sh")],
+                         capture_output=True, text=True, cwd=str(terminal), env=env, timeout=30)
+
+    assert run.returncode == 0, run.stderr
+    context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert ("lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+            "1 provenance-unknown; sweep 600s") in context, context

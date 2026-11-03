@@ -2577,6 +2577,28 @@ def _lifecycle_sweep_section(state_dir: Path) -> Dict[str, Any]:
     return {"abandoned": result.abandoned, "errors": len(result.errors), "budget_exhausted": result.budget_exhausted}
 
 
+def _lifecycle_count_index_summary(state_dir: Path) -> Dict[str, Any]:
+    """ADR-045 K-9 rule 6: the count beacon, compact, for the SessionStart briefing.
+
+    Reads ``health/lifecycle_count.json`` (ledger_health's beacon, one level above
+    the state dir) instead of recounting: its timestamp says how old the count is.
+    An absent or unreadable beacon is UNMEASURED in the line, never a row of zeros.
+    """
+    from lifecycle_count import briefing_line  # noqa: PLC0415
+
+    path = state_dir.parent / "health" / "lifecycle_count.json"
+    try:
+        details = json.loads(path.read_text(encoding="utf-8"))["details"]
+        if not isinstance(details, dict): raise ValueError("details is not an object")
+    except FileNotFoundError:
+        return {"line": "lifecycle: unmeasured (no lifecycle_count beacon); sweep unknown"}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"line": f"lifecycle: unmeasured (unreadable {path}: {exc}); sweep unknown"}
+    return {"line": briefing_line(details), "counts": details.get("counts"),
+            "sweep_heartbeat_age_seconds": details.get("sweep_heartbeat_age_seconds"),
+            "counted_at": details.get("counted_at")}
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2619,6 +2641,7 @@ def build_t0_state(
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
     lifecycle_sweep = _lifecycle_sweep_section(state_dir)
+    lifecycle_count = _lifecycle_count_index_summary(state_dir)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2646,6 +2669,7 @@ def build_t0_state(
         "pr_queue": pr_queue,
         "strategic_state": strategic_state,
         "lifecycle_sweep": lifecycle_sweep,
+        "lifecycle_count": lifecycle_count,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
@@ -2818,6 +2842,7 @@ def _build_t0_index(state: Dict[str, Any]) -> Dict[str, Any]:
         "health": _slim_health_for_index(state.get("system_health") or {}),
         "track_freshness": _track_freshness_summary(state.get("track_freshness")),
         "contract_invalid": _contract_invalid_index_summary(state.get("contract_invalid")),
+        "lifecycle": state.get("lifecycle_count") or {},
         "last_rebuild_seconds": state.get("_build_seconds"),
     }
     if pr_unavailable:

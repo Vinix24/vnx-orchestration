@@ -345,6 +345,11 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     ``scripts/fleet_pin_audit.py --write-state`` on the daily launchd cadence.
     Periodic (86400), so its absence is a real finding until the driver has
     run once.
+
+    ADR-045 K-9 (audit-spoor-kern) adds the 13th: ``lifecycle_count``, written
+    by ``ledger_health.write_count_beacon`` on the same daily run that writes
+    the health surface. Periodic (86400), so a store whose reconciliation job
+    stopped shows up as absent, not as a quiet zero.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -364,4 +369,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "receipt_conversion_rejections",
         "cost-ledger",
         "fleet_pin_audit",
+        "lifecycle_count",
     }

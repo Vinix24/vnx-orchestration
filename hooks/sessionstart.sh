@@ -186,10 +186,18 @@ except Exception:
         T0_CONTRACT_INVALID="contract_invalid: ${_ci_total} (24u: ${_ci_24h})"
       fi
 
+      # ADR-045 K-9: the count module's own line, built from the beacon ledger_health
+      # writes — absent, not zeroed, when that beacon was never written.
+      T0_LIFECYCLE=$(jq -r '.lifecycle.line // empty' "$_ci_file" 2>/dev/null || true)
+
       T0_STATE_SECTION="Terminals:
 $(echo -e "${T0_TERMINAL_STATES:-No terminal state data}")
 ${T0_OPEN_ITEMS:-No open items data}
 ${T0_CONTRACT_INVALID}"
+      if [ -n "$T0_LIFECYCLE" ]; then
+        T0_STATE_SECTION="${T0_STATE_SECTION}
+${T0_LIFECYCLE}"
+      fi
     else
       # Not-found is a DIFFERENT state than found-but-empty (a genuinely
       # measured zero). Say so explicitly instead of falling through to a
