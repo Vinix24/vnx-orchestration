@@ -33,7 +33,8 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeSpec, _AdapterResult
-from envelope_prepare import _verify_role_application
+from envelope_prepare import _verify_role_application, _verify_skill_application
+from skill_application import skill_receipt_fields
 from envelope_govern_support import (
     _archive_dispatch_events,
     _clear_dispatch_events,
@@ -496,9 +497,10 @@ def _govern(
                 # _role that is stamped on the receipt so role_applied is truthful.
                 # FAIL-OPEN — a verification error must never break receipt
                 # emission; the fields simply stay None (omitted).
-                _role_app = _verify_role_application(
-                    spec.instruction, spec.terminal_id, _role,
-                )
+                _role_app = _verify_role_application(spec.instruction, spec.terminal_id, _role)
+                # RS-3 (ADR-048 §3): the same final prompt, the same resolved
+                # role — a spec-bound skill is proven, or its absence reasoned.
+                _skill_app = _verify_skill_application(spec.instruction, {"skill": spec.skill}, _role)
 
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate
                 # PreToolUse-hook tool-call signals for this dispatch
@@ -606,6 +608,7 @@ def _govern(
                     role_source_path=(
                         getattr(_role_app, "source_path", None) if _role_app is not None else None
                     ),
+                    **skill_receipt_fields(_skill_app),
                     session_id=adapter_result.session_id,
                     model_resolved=getattr(adapter_result, "model_resolved", None),
                     tool_call_count=_toolcall_signals.get("tool_call_count"),

@@ -112,6 +112,8 @@ def emit_dispatch_receipt(
     role_tier: Optional[str] = None,
     role_not_applied_reason: Optional[str] = None,
     role_source_path: Optional[str] = None,
+    skill_applied: Optional[bool] = None, skill_source_path: Optional[str] = None,
+    skill_unapplied_reason: Optional[str] = None,
     parent_dispatch: Optional[str] = None,
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
@@ -328,6 +330,7 @@ def emit_dispatch_receipt(
         role_tier=role_tier,
         role_not_applied_reason=role_not_applied_reason,
         role_source_path=role_source_path,
+        skill_applied=skill_applied, skill_source_path=skill_source_path, skill_unapplied_reason=skill_unapplied_reason,
         parent_dispatch=parent_dispatch,
         task_class=task_class,
         tier_from=tier_from,
@@ -383,10 +386,7 @@ def emit_dispatch_receipt(
     if result.status == "appended":
         _update_confidence_from_receipt(receipt, state_dir=Path(state_dir))
 
-    logger.info(
-        "governance_emit: receipt written dispatch=%s provider=%s status=%s",
-        dispatch_id, provider, status,
-    )
+    logger.info("governance_emit: receipt written dispatch=%s provider=%s status=%s", dispatch_id, provider, status)
     return receipt_path
 
 

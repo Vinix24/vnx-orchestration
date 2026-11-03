@@ -191,3 +191,27 @@ def _verify_role_application(
             exc,
         )
         return None
+
+
+def _verify_skill_application(
+    final_prompt: str,
+    dispatch_metadata: "dict | None",
+    role: Optional[str],
+):
+    """Best-effort: run the deterministic skill-applied control for *final_prompt*.
+
+    Mirrors ``_verify_role_application``: returns a SkillApplicationVerdict, or
+    None on any failure (the control must never break receipt emission; the
+    three fields then stay absent, like the role control). None is also the
+    verdict for a spec that carries no ``skill`` — there is nothing to prove.
+    """
+    try:
+        from skill_application import verify_skill_applied  # noqa: PLC0415
+        return verify_skill_applied(final_prompt, dispatch_metadata, role)
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "envelope._verify_skill_application: failed (non-fatal) role=%s: %s",
+            role,
+            exc,
+        )
+        return None
