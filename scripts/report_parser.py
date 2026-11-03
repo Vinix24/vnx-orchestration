@@ -294,7 +294,7 @@ class ReportParser:
                     extracted['intelligence'] = dispatch_intelligence
 
         # Build enhanced receipt structure
-        return self._build_enhanced_receipt(extracted, markdown_path)
+        return self._build_enhanced_receipt(extracted, markdown_path, text=content)
 
     def extract_metadata(self, content: str) -> Dict[str, str]:
         """Extract all metadata fields from report header"""
@@ -813,8 +813,9 @@ class ReportParser:
         from verification_runs import verification_record_for_report
         return verification_record_for_report(validation, dispatch_id, report_path)
 
-    def _build_enhanced_receipt(self, extracted: Dict, report_path: str) -> Dict[str, Any]:
-        """Build enhanced receipt structure from extracted data"""
+    def _build_enhanced_receipt(self, extracted: Dict, report_path: str,
+                                text: str = "") -> Dict[str, Any]:
+        """Build enhanced receipt structure from extracted data."""
         metadata = extracted.get('metadata', {})
 
         # Governance (audit #10): a receipt that CLAIMS success must satisfy the report body contract.
@@ -956,9 +957,9 @@ class ReportParser:
         if missing_fields:
             receipt['missing_fields'] = missing_fields
 
-        return self._book_report_line(receipt, metadata, report_path)
+        return self._book_report_line(receipt, text, report_path)
 
-    def _book_report_line(self, receipt: Dict[str, Any], metadata: Dict[str, Any],
+    def _book_report_line(self, receipt: Dict[str, Any], text: str,
                           report_path: str) -> Dict[str, Any]:
         """Book the report as the line its dispatch's lifecycle mode asks for.
 
@@ -977,20 +978,10 @@ class ReportParser:
         from report_lifecycle_mode import (  # noqa: PLC0415
             ReportPathRefused, append_destination_state_dir, report_line,
         )
-        # ONE attempt reader for both writers (K-8b round 3): the converter's,
-        # so a quoted ``attempt: '1'`` is read the same way on both paths.
-        from report_to_receipt_converter import _named_attempt  # noqa: PLC0415
-        hint = receipt
-        named: Dict[str, Any] = {}
-        if not receipt.get('project_id'):
-            tenant = str(metadata.get('project_id') or '').strip()
-            if tenant:
-                named['project_id'] = tenant
-        attempt = _named_attempt(metadata)
-        if attempt is not None:
-            named['attempt'] = attempt
-        if named:
-            hint = {**receipt, **named}
+        # THE one hint builder (round 4): the converter's, quoting included.
+        from report_to_receipt_converter import report_hint_fields  # noqa: PLC0415
+        named = report_hint_fields(text, receipt)
+        hint = {**receipt, **named} if named else receipt
         try:
             written_at = os.stat(report_path).st_mtime
         except OSError:

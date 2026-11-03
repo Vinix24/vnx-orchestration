@@ -811,11 +811,10 @@ def test_a_legacy_report_naming_attempt_and_project_id_keeps_the_k8a_line(
                            attempt=1)
     text = report.read_text(encoding="utf-8")
     core = rtc._build_receipt_from_report_core(report, text, state_dir=state_dir)
-    merged = {**rtc._extract_body_fields(text), **rtc.parse_frontmatter(text)}
 
     # The one shaping point hands a legacy receipt back untouched: the very
     # same object, so no lifecycle key (and no project_id) can be added.
-    assert rtc._lifecycle_report_line(core, merged, state_dir=state_dir,
+    assert rtc._lifecycle_report_line(core, text, state_dir=state_dir,
                                       report_path=report) is core
 
     built = rtc.build_receipt_from_report(report, text, state_dir=state_dir)
@@ -865,7 +864,7 @@ def test_the_parsers_legacy_shaping_point_returns_the_very_same_object(
 
     shaped = report_parser.ReportParser()._book_report_line(
         receipt,
-        {"dispatch_id": DISPATCH, "project_id": PROJECT, "attempt": "1"},
+        report.read_text(encoding="utf-8"),
         str(report),
     )
 
@@ -908,4 +907,138 @@ def test_no_local_tenant_rule_remains_in_the_writers():
         capture_output=True, text=True, cwd=VNX_ROOT,
     )
     assert run.returncode == 1, run.stdout  # 1 = no match
+    assert run.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# Round 4: one hint builder, one metadata reader, for both writers
+# ---------------------------------------------------------------------------
+
+def _write_report_naming_literal(path: Path, field: str, literal: str, *, mtime: str = T1) -> Path:
+    """The shared report with *field*'s frontmatter value replaced by *literal* verbatim.
+
+    ``yaml.safe_dump`` writes ``project_id: proj-alpha`` and ``attempt: 1``
+    unquoted; the replacement puts the reviewer's literal (quotes, padding,
+    nothing) on the line the two writers read.
+    """
+    text = _report_text(DISPATCH, attempt=1)
+    current = f"{field}: " + ("proj-alpha" if field == "project_id" else "1")
+    assert current in text
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text.replace(current, f"{field}: {literal}", 1), encoding="utf-8")
+    stamp = _epoch(mtime)
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.mark.parametrize("literal", ["'proj-alpha'", '"proj-alpha"'])
+def test_parser_books_a_quoted_tenant_the_report_names(
+    state_dir, spec_file, v3, clock, monkeypatch, tmp_path, literal
+):
+    """Codex's reproduction: a v3 dispatch under proj-alpha, the report quoting the tenant.
+
+    ``ReportParser.extract_metadata`` kept the YAML quotes, so the parser handed
+    the decision ``'proj-alpha'``, refused ``project_mismatch`` and retried a
+    valid report forever — while the converter booked it. Both writers must book
+    this file as one ``report_ingested`` for ``proj-alpha``.
+    """
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _write_report_naming_literal(
+        tmp_path / "reports" / f"{DISPATCH}.md", "project_id", literal)
+    assert f"project_id: {literal}" in report.read_text(encoding="utf-8")
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+
+    receipt = report_parser.ReportParser().parse_report(str(report))
+    assert "lifecycle_refusal" not in receipt
+    assert receipt["event_type"] == "report_ingested"
+    assert receipt["project_id"] == PROJECT
+
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data", v3=True))
+    assert run.returncode == 0, run.stderr
+    assert "project_mismatch" not in run.stderr
+    subprocess_receipt = json.loads(run.stdout)
+    assert subprocess_receipt["event_type"] == "report_ingested"
+    assert subprocess_receipt["project_id"] == PROJECT
+
+
+@pytest.mark.parametrize("literal", ["'proj-alpha'", '"proj-alpha"'])
+def test_converter_books_the_same_tenant_for_the_quoted_report(
+    state_dir, spec_file, v3, clock, tmp_path, literal
+):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _write_report_naming_literal(
+        tmp_path / "reports" / f"{DISPATCH}.md", "project_id", literal)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "appended"
+    ingested = _of_type(state_dir, "report_ingested")
+    assert [line["project_id"] for line in ingested] == [PROJECT]
+
+
+@pytest.mark.parametrize("literal, expected", [
+    ("proj-alpha", "proj-alpha"),
+    ("'proj-alpha'", "proj-alpha"),
+    ('"proj-alpha"', "proj-alpha"),
+    ("  proj-alpha  ", "proj-alpha"),
+    ("'proj-alpha", "'proj-alpha"),
+    ("", None),
+])
+def test_the_one_hint_builder_reads_the_tenant_table(literal, expected):
+    """Rule 1 of round 4, on the one builder both writers use."""
+    text = _report_text(DISPATCH, attempt=1).replace(
+        "project_id: proj-alpha", f"project_id: {literal}", 1)
+    assert rtc.report_hint_fields(text, {}).get("project_id") == expected
+
+
+@pytest.mark.parametrize("literal, expected", [
+    ("1", 1), ("'1'", 1), ('"1"', 1), (" 1 ", 1), ("'1", None), ("", None),
+])
+def test_the_one_hint_builder_reads_the_attempt_table(literal, expected):
+    text = _report_text(DISPATCH, attempt=1).replace("attempt: 1", f"attempt: {literal}", 1)
+    assert rtc.report_hint_fields(text, {}).get("attempt") == expected
+
+
+def test_the_one_hint_builder_leaves_a_receipts_own_tenant_alone():
+    """A receipt that already carries ``project_id`` gains no hint for it (round 2's rule)."""
+    named = rtc.report_hint_fields(_report_text(DISPATCH, attempt=1),
+                                   {"project_id": "proj-other"})
+    assert "project_id" not in named
+
+
+def test_the_parser_routes_its_hint_through_the_one_builder(
+    state_dir, spec_file, v3, clock, monkeypatch, tmp_path
+):
+    """A spy on the one builder fires when the parser books a report: no second copy left."""
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH, mtime=T1)
+    seen = []
+    real = rtc.report_hint_fields
+
+    def _spy(text, receipt):
+        seen.append(real(text, receipt))
+        return real(text, receipt)
+
+    monkeypatch.setattr(rtc, "report_hint_fields", _spy)
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+
+    receipt = report_parser.ReportParser().parse_report(str(report))
+
+    assert seen and seen[0]["project_id"] == PROJECT
+    assert receipt["event_type"] == "report_ingested"
+
+
+def test_the_parser_keeps_no_hint_code_of_its_own():
+    r"""`git grep -n "named_attempt(metadata)\|metadata.get('project_id')" scripts/report_parser.py`."""
+    run = subprocess.run(
+        ["git", "grep", "-n", "named_attempt(metadata)\\|metadata.get('project_id')",
+         "scripts/report_parser.py"],
+        capture_output=True, text=True, cwd=VNX_ROOT,
+    )
+    assert run.returncode == 1, run.stdout + run.stderr  # 1 = no match
     assert run.stdout == ""
