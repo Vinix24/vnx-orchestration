@@ -22,6 +22,7 @@ import hashlib
 import importlib
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -447,6 +448,143 @@ def test_refire_is_allowed_when_the_pid_was_reused(tmp_path, monkeypatch):
     assert _begin(state_dir, repo, dispatch_id).attempt == 2, (
         "pid reuse must never read as a live predecessor")
     assert [line["attempt"] for line in _starts(state_dir, dispatch_id)] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# (e2) The ledger key is exact: a longer id that CONTAINS this one is not this one
+# ---------------------------------------------------------------------------
+
+def test_a_finish_of_a_longer_id_never_ends_this_attempt(tmp_path, monkeypatch):
+    """Codex's reproduction: a ``job-extra`` finish must not close ``job`` attempt 1.
+
+    A substring prefilter admits ``job-extra``'s records; only an exact
+    ``dispatch_id`` match may let them count as this dispatch's start or end.
+    """
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-job"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+    started = dispatch_start.process_started_at(os.getpid())
+    assert started, "the test process must have a readable start time"
+    _append_raw(state_dir, _start_line(dispatch_id, 1, door_pid=os.getpid(),
+                                       door_started_at=started))
+    _append_raw(state_dir, {"event_type": FINISH, "project_id": PROJECT_ID,
+                            "dispatch_id": f"{dispatch_id}-extra", "attempt": 1,
+                            "end_state": "completed"})
+
+    with pytest.raises(dispatch_start.StartRefused) as refused:
+        _begin(state_dir, repo, dispatch_id)
+
+    assert refused.value.code == "refire_attempt_live", (
+        "the foreign finish must play no part; the live attempt 1 still owns the worktree")
+    assert [line["attempt"] for line in _starts(state_dir, dispatch_id)] == [1], (
+        "a refused refire writes nothing")
+
+
+def test_a_start_of_a_longer_id_does_not_block_this_dispatch(tmp_path, monkeypatch):
+    """The mirror: ``job-extra``'s live start is not ``job``'s start."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-mirror"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+    started = dispatch_start.process_started_at(os.getpid())
+    assert started, "the test process must have a readable start time"
+    _append_raw(state_dir, _start_line(f"{dispatch_id}-extra", 1, door_pid=os.getpid(),
+                                       door_started_at=started))
+
+    assert _begin(state_dir, repo, dispatch_id).attempt == 1, (
+        "another dispatch's live start must not refuse this one")
+    assert [line["attempt"] for line in _starts(state_dir, dispatch_id)] == [1]
+
+
+# ---------------------------------------------------------------------------
+# (f) A failed row projection is loud and named, never silent
+# ---------------------------------------------------------------------------
+
+def test_a_failed_lifecycle_mode_write_is_named_and_carried(tmp_path, monkeypatch, caplog):
+    """The ledger is the source, so the fire goes on — but the failed projection is
+    logged with the key and the exception, and the Handover carries it."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-mode-write"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("coordination db gone")
+
+    # The attempt read succeeded before the store died; the mode write is what fails.
+    with patch.object(dispatch_start, "read_attempt_count", lambda *a, **k: 1), \
+            patch.object(dispatch_start, "get_connection", boom), \
+            caplog.at_level(logging.WARNING, logger="dispatch_start"):
+        handover = _begin(state_dir, repo, dispatch_id)
+
+    assert handover.mode_write == "write_failed", (
+        "the door must be able to name the failed projection")
+    assert handover.attempt == 1
+    assert [line["attempt"] for line in _starts(state_dir, dispatch_id)] == [1], (
+        "the ledger line landed, so the fire proceeds")
+    warnings = [rec.getMessage() for rec in caplog.records
+                if rec.levelno == logging.WARNING and rec.name == "dispatch_start"]
+    assert warnings, "a failed mode write must not be swallowed silently"
+    text = "\n".join(warnings)
+    assert dispatch_id in text, f"the warning must name the dispatch: {text}"
+    assert "attempt" in text and "1" in text, f"the warning must name the attempt: {text}"
+    assert "coordination db gone" in text, f"the warning must carry the exception: {text}"
+
+
+# ---------------------------------------------------------------------------
+# (g) Legacy needs no door identity; v3 does
+# ---------------------------------------------------------------------------
+
+def _row_metadata(db_path: Path, dispatch_id: str) -> Dict[str, Any]:
+    row = _read_row(db_path, dispatch_id)
+    assert row is not None, "the seeded row must exist"
+    return json.loads(row["metadata_json"] or "{}")
+
+
+def test_legacy_without_a_readable_door_start_time_still_hands_over(tmp_path, monkeypatch):
+    """With the setting off nothing new may refuse: no ``ps``, no refusal."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    dispatch_id = "20261103-k4-legacy-no-ps"
+    state_dir = tmp_path / "state"
+    db_path = _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+    monkeypatch.setattr(dispatch_start, "process_started_at", lambda pid: None)
+
+    handover = _begin(state_dir, repo, dispatch_id)
+
+    assert handover.lifecycle_mode == "legacy"
+    assert handover.door_pid == os.getpid(), "a legacy hand-over records what it can"
+    assert not handover.door_started_at, "it records no start time it could not read"
+    assert handover.mode_write == "ok"
+    assert _starts(state_dir, dispatch_id) == [], "a legacy hand-over writes no line"
+    assert _row_metadata(db_path, dispatch_id)["lifecycle_mode"] == "legacy", (
+        "the row still learns the mode")
+
+
+def test_v3_without_a_readable_door_start_time_is_refused(tmp_path, monkeypatch):
+    """A v3 start line cannot record liveness without it, so the fire is refused."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-v3-no-ps"
+    state_dir = tmp_path / "state"
+    db_path = _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+    monkeypatch.setattr(dispatch_start, "process_started_at", lambda pid: None)
+
+    with pytest.raises(dispatch_start.StartRefused) as refused:
+        _begin(state_dir, repo, dispatch_id)
+
+    assert refused.value.code == "door_identity_unresolved"
+    assert _starts(state_dir, dispatch_id) == [], "nothing may be written"
+    assert "lifecycle_mode" not in _row_metadata(db_path, dispatch_id)
 
 
 # ---------------------------------------------------------------------------

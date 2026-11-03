@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,6 +29,10 @@ LEDGER_FILENAME = "t0_receipts.ndjson"
 MODE_V3 = "v3"
 MODE_LEGACY = "legacy"
 REFUSAL_CODE = "start-line-refused"
+MODE_WRITE_OK = "ok"
+MODE_WRITE_FAILED = "write_failed"
+
+logger = logging.getLogger(__name__)
 
 
 class StartRefused(Exception):
@@ -49,6 +54,10 @@ class Handover:
     door_pid: int
     door_started_at: str
     started_at: str
+    # Step 2's outcome: ``ok`` when the row knows (or has no row to learn) its mode,
+    # ``write_failed`` when the projection raised — the ledger line stands either way,
+    # so the door goes on and names the gap (ADR-045 §1: the ledger is the source).
+    mode_write: str = MODE_WRITE_OK
 
     @property
     def is_v3(self) -> bool:
@@ -103,7 +112,11 @@ def _lifecycle_lines(state_dir: str | Path, project_id: str,
             line = json.loads(raw)
         except json.JSONDecodeError:
             continue  # a torn line is not evidence of a completed record
-        if not isinstance(line, dict) or line.get("project_id") != project_id:
+        # The prefilter is a substring test, so it also admits ids that merely CONTAIN
+        # this one (``job-extra`` for ``job``). Only the exact key counts: another
+        # dispatch's start or finish is not this dispatch's evidence (ADR-045 §3).
+        if (not isinstance(line, dict) or line.get("project_id") != project_id
+                or line.get("dispatch_id") != dispatch_id):
             continue
         attempt = line.get("attempt")
         if isinstance(attempt, bool) or not isinstance(attempt, int):
@@ -212,8 +225,16 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path) -> str:
                  handover.dispatch_id, handover.project_id))
             conn.commit()
             return "written"
-    except Exception:  # vnx-silent-except: ledger is the source; a DB hiccup must not kill the dispatch after its start line
-        return "write_failed"
+    except Exception as exc:
+        # The ledger is the source and the row is a projection, so a store hiccup
+        # must not kill a dispatch whose start line is already on disk. It must
+        # never be silent either: name the key, the attempt and the exception, and
+        # carry the outcome on the Handover so the door can say it out loud.
+        logger.warning(
+            "[dispatch_start] lifecycle_mode write failed dispatch_id=%s attempt=%s: %s",
+            handover.dispatch_id, handover.attempt, exc,
+        )
+        return MODE_WRITE_FAILED
 
 
 def _base_sha(repo_root: Path, base_ref: str) -> str:
@@ -242,13 +263,19 @@ def begin(
     """
     state_path = Path(state_dir)
     door_pid = os.getpid()
-    door_started = process_started_at(door_pid)
-    if door_started is None:
-        raise StartRefused(
-            "door_identity_unresolved",
-            f"the door process {door_pid} has no readable start time; a start line "
-            "cannot record liveness (ADR-045 §5)")
+    # The mode decides what the hand-over owes BEFORE anything is read: only a v3
+    # start line needs the door's kernel start time, so a legacy fire must never be
+    # refused (or delayed) by an unreadable or slow ``ps``. Off is identical to main.
     mode = MODE_V3 if lifecycle_enabled() else MODE_LEGACY
+    if mode == MODE_V3:
+        door_started = process_started_at(door_pid)
+        if door_started is None:
+            raise StartRefused(
+                "door_identity_unresolved",
+                f"the door process {door_pid} has no readable start time; a start line "
+                "cannot record liveness (ADR-045 §5)")
+    else:
+        door_started = ""  # a legacy hand-over records the pid, not a start time it did not need
     if mode == MODE_V3:
         attempt = _plan_attempt(state_dir=state_path, project_id=project_id, dispatch_id=dispatch_id)
     else:
@@ -276,7 +303,9 @@ def begin(
             append_receipt_payload(receipt, receipts_file=str(state_path / LEDGER_FILENAME))
         except AppendReceiptError as exc:
             raise StartRefused(exc.code, str(exc)) from exc
-    _record_lifecycle_mode(handover, state_dir=state_path)
+    mode_write = _record_lifecycle_mode(handover, state_dir=state_path)
+    if mode_write == MODE_WRITE_FAILED:
+        return replace(handover, mode_write=MODE_WRITE_FAILED)
     return handover
 
 

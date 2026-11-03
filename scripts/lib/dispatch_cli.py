@@ -3408,7 +3408,7 @@ def _owner_hand_over(
         reason="handing off to lane executor",
     )
     try:
-        return dispatch_start.begin(
+        handover = dispatch_start.begin(
             project_id=project_id, dispatch_id=spec.dispatch_id, role=spec.role,
             base_ref=plan.base_ref or "origin/main", spec_file=spec_file,
             target_slot=plan.target_id, state_dir=state_dir, project_root=repo_root)
@@ -3416,6 +3416,17 @@ def _owner_hand_over(
         print(f"[dispatch_cli] REJECT [{dispatch_start.REFUSAL_CODE}]: {exc.code}: {exc.detail}",
               file=sys.stderr)
         return None
+    if handover.mode_write != dispatch_start.MODE_WRITE_OK:
+        # The ledger line landed (the dispatch_start module already logged the
+        # failure); the row is a projection, so the fire goes on — but the door
+        # never lets a failed projection pass unmentioned.
+        print(
+            f"[dispatch_cli] [WARN] hand-over row projection {handover.mode_write} "
+            f"for dispatch {handover.dispatch_id} attempt {handover.attempt}; "
+            "the ledger line stands and the fire continues",
+            file=sys.stderr,
+        )
+    return handover
 
 
 def _owner_update_attempt(
