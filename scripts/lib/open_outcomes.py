@@ -871,9 +871,7 @@ def open_outcome_items(
     one, liveness (``_verdict_destination``). A ``legacy`` dispatch keeps
     ``summarize``'s outcome, unchanged.
 
-    A ``v3`` end state other than ``completed`` stays an open point until a T0
-    ``accept``/``reject`` decides it, whatever ``summarize`` folded its receipts
-    to: an implicit supersession never closes it.
+    A ``v3`` end other than ``completed`` stays an open point until a T0 decision.
     """
     summary = summarize(receipts, project_id=project_id, cutoff=_parse_ts(since))
     last_seen = _last_seen(receipts, project_id)
@@ -894,17 +892,16 @@ def open_outcome_items(
         elif outcome["decision"] not in OPEN_DECISIONS or did in decisions:
             continue
         seen = last_seen.get(did)
-        item = {
+        items.append({
             "kind": KIND_RECEIPT_OUTCOME,
             "dispatch_id": did,
             "outcome": open_as,
             "status": outcome.get("status"),
             "reason": reason,
             "last_seen": seen.isoformat() if seen else None,
-        }
-        if v3 and outcome["decision"] == "superseded":
-            item["superseded_by"] = list(summary["superseded_by"].get(did, []))
-        items.append(item)
+            **({"superseded_by": summary["superseded_by"][did]}
+               if v3 and outcome["decision"] == "superseded" else {}),
+        })
     items.sort(key=lambda i: i["dispatch_id"])
     items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
     return items

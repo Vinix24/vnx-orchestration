@@ -367,12 +367,12 @@ def _fold(record: Dict[str, Any], receipt: Dict[str, Any], pos: int, did: str) -
             record["children_of"].add(parent)
 
 
-def _outcome_of(did: str, record: Dict[str, Any], superseded_by: Dict[str, List[str]]) -> Dict[str, Any]:
+def _outcome_of(did: str, record: Dict[str, Any], superseded_by: Dict[str, str]) -> Dict[str, Any]:
     decided = _decide(record) or {"decision": "unknown", "status": None,
                                   "reason": "no outcome receipt, only evidence"}
     if decided["decision"] in ("reject", "investigate") and did in superseded_by:
         decided = {**decided, "decision": "superseded",
-                   "reason": f"{decided['decision']} superseded by {', '.join(superseded_by[did])}"}
+                   "reason": f"{decided['decision']} superseded by {superseded_by[did]}"}
     return {
         "dispatch_id": did, **decided,
         "evidence": [{k: v for k, v in e.items() if k != "pos"} for e in record["evidence"]],
@@ -390,8 +390,7 @@ def summarize(
 
     ``cutoff`` scopes which dispatches are reported (any attributed receipt at
     or after it) and which lines are counted as bookkeeping/noise. A reported
-    dispatch is always decided on its full history. ``superseded_by`` maps each
-    parent dispatch to the child ids that carry ``parent_dispatch`` for it.
+    dispatch is always decided on its full history.
     """
     in_window = _Window(cutoff)
     noise: Counter = Counter()
@@ -412,10 +411,12 @@ def summarize(
         record["in_window"] = record["in_window"] or in_window(receipt)
         _fold(record, receipt, pos, did)
 
-    superseded_by: Dict[str, List[str]] = {}
+    superseded_by: Dict[str, str] = {}
+    child_ids: Dict[str, List[str]] = {}
     for did, record in records.items():
         for parent in record["children_of"]:
-            superseded_by.setdefault(parent, []).append(did)
+            superseded_by.setdefault(parent, did)
+            child_ids.setdefault(parent, []).append(did)
 
     outcomes = [_outcome_of(did, record, superseded_by)
                 for did, record in records.items() if record["in_window"]]
@@ -425,7 +426,7 @@ def summarize(
     return {
         "verdict_counts": counts,
         "outcomes": outcomes,
-        "superseded_by": superseded_by,
+        "superseded_by": child_ids,
         "bookkeeping_counts": {k: v for k, v in bookkeeping.items() if v},
         "noise_counts": {k: v for k, v in noise.items() if v},
         "unlinked_gate_evidence": unlinked_gate_evidence,
