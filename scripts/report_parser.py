@@ -954,7 +954,63 @@ class ReportParser:
         if missing_fields:
             receipt['missing_fields'] = missing_fields
 
-        return receipt
+        return self._book_report_line(receipt, metadata, report_path)
+
+    def _book_report_line(self, receipt: Dict[str, Any], metadata: Dict[str, Any],
+                          report_path: str) -> Dict[str, Any]:
+        """Book the report as the line its dispatch's lifecycle mode asks for.
+
+        ADR-045 (K-8b rule 6): a v3 dispatch's report becomes one
+        ``report_ingested`` (linked to the ``dispatch_finished`` when it is
+        already there); a legacy dispatch keeps the task-shaped receipt byte for
+        byte. The decision lives in ``report_lifecycle_mode``, is handed the store
+        ``append_receipt.py`` writes to and the write time of the file READ here,
+        and gets a tenant hint on a copy (a legacy receipt stays untouched). A
+        refusal returns the ``error`` shape and books nothing; ``main()`` then
+        exits non-zero and ``receipt_processor.sh`` retries the report.
+        """
+        # ReportParser.__init__ puts scripts/lib on sys.path.
+        from report_lifecycle_mode import (  # noqa: PLC0415
+            ReportPathRefused, append_destination_state_dir, report_line,
+        )
+        hint = receipt
+        tenant = str(metadata.get('project_id') or '').strip()
+        if not tenant:
+            try:
+                from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+                tenant = str(_resolve_project_id() or '').strip()
+            except Exception:  # vnx-silent-except: no tenant is None; decide refuses
+                tenant = ''
+        if tenant and not receipt.get('project_id'):
+            hint = {**receipt, 'project_id': tenant}
+        try:
+            written_at = os.stat(report_path).st_mtime
+        except OSError:
+            written_at = None
+        try:
+            line = report_line(hint, state_dir=append_destination_state_dir(),
+                               report_written_at=written_at)
+        except ReportPathRefused as exc:
+            return {'error': str(exc), 'dispatch_id': exc.dispatch_id,
+                    'lifecycle_refusal': exc.code}
+        return receipt if line is hint else line
+
+
+def _print_receipt_or_exit(result: Dict[str, Any]) -> None:
+    """Print the receipt JSON, or refuse it without booking anything.
+
+    A lifecycle refusal (K-8b rule 6) prints NOTHING on stdout, names the
+    dispatch and the code on stderr and exits non-zero — the
+    ``receipt_parse_failed`` branch of ``receipt_processor.sh`` then appends
+    nothing and retries the report next run.
+    """
+    refusal = result.get('lifecycle_refusal')
+    if refusal:
+        sys.stderr.write(
+            "report_parser: REFUSED (ledger lifecycle) dispatch="
+            f"{result.get('dispatch_id')} reason={refusal}\n")
+        raise SystemExit(1)
+    print(json.dumps(result))
 
 
 def main():
@@ -972,7 +1028,7 @@ def main():
         result = parser.parse_report(test_report)
 
         # Output clean JSON only (no headers for automated processing)
-        print(json.dumps(result))
+        _print_receipt_or_exit(result)
 
         # Size info to stderr for debugging (won't interfere with JSON output)
         receipt_json = json.dumps(result)
@@ -993,7 +1049,7 @@ def main():
             if reports:
                 sys.stderr.write(f"Testing with: {reports[0]}\n")
                 result = parser.parse_report(str(reports[0]))
-                print(json.dumps(result))  # Clean JSON to stdout
+                _print_receipt_or_exit(result)  # Clean JSON to stdout
 
 
 if __name__ == '__main__':

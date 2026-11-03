@@ -45,6 +45,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ADR-045 (K-8b): one decision, in report_lifecycle_mode. Imported as a MODULE so
+# `report_line` is not rebound here for other writers to reuse.
+import report_lifecycle_mode
+from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 # Canonical receipt status vocabulary (single generated source). The converter
 # no longer carries its own hand-copied terminal-status sets; it resolves every
@@ -957,6 +961,87 @@ def _run_fail_closed_checks(
     return violations
 
 
+def _read_report_mtime(report_path: Path) -> Optional[float]:
+    """When the worker WROTE the file this caller read — never the canonical path's.
+
+    The receipt's own ``report_path`` can be a different file (codex round 2,
+    advisory); a missing file yields ``None`` and the decision refuses instead.
+    """
+    try:
+        return report_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _lifecycle_project_id(merged: Dict[str, Any]) -> Optional[str]:
+    """The tenant that addresses the ``dispatches`` row, resolved as the role join does.
+
+    ``report_lifecycle_mode`` cannot address a row without a tenant and refuses
+    (K-8a); this never invents one — an unresolvable tenant stays ``None`` and
+    the decision refuses.
+    """
+    try:
+        project_id = str(merged.get("project_id") or "").strip()
+        if not project_id:
+            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+            project_id = str(_resolve_project_id() or "").strip()
+        return project_id or None
+    except Exception:  # vnx-silent-except: an unresolvable tenant is None; decide refuses
+        return None
+
+
+def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
+    """Name the dispatch and the reason; the caller books nothing (K-8b rule 4)."""
+    logger.warning(
+        "report_to_receipt_converter: REFUSED (ledger lifecycle) dispatch=%s "
+        "file=%s reason=%s: %s — nothing written, report stays for the next scan",
+        exc.dispatch_id, report_path.name, exc.code, exc.detail,
+    )
+
+
+def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
+    """True when *record* is the line *receipt* would book — attempt for attempt.
+
+    K-8b rule 5: a ``report_ingested`` may only be suppressed by an earlier one
+    with the same ``dispatch_id``, ``project_id`` and ``attempt``. Every legacy
+    shape keeps the plain ``dispatch_id`` + ``receipt_kind`` match, byte for byte.
+    """
+    if record.get("dispatch_id") != receipt.get("dispatch_id"):
+        return False
+    if record.get("receipt_kind") != receipt.get("receipt_kind"):
+        return False
+    if str(receipt.get("event_type") or "").strip() != REPORT_INGESTED_EVENT_TYPE:
+        return True
+    return (
+        str(record.get("event_type") or "").strip() == REPORT_INGESTED_EVENT_TYPE
+        and record.get("project_id") == receipt.get("project_id")
+        and record.get("attempt") == receipt.get("attempt")
+    )
+
+
+def _lifecycle_report_line(
+    receipt: Dict[str, Any], merged: Dict[str, Any], *, state_dir: Optional[Path],
+    report_path: Path,
+) -> Dict[str, Any]:
+    """The ONE shaping point: the line this dispatch's lifecycle mode asks for.
+
+    A legacy dispatch gets its receipt object back untouched; a v3 dispatch gets
+    one ``report_ingested`` copy. The tenant goes on a copy so a legacy booking
+    never gains a field it did not have.
+    """
+    hint = receipt
+    tenant = str(receipt.get("project_id") or "").strip() or _lifecycle_project_id(merged)
+    if tenant and not receipt.get("project_id"):
+        hint = {**receipt, "project_id": tenant}
+    line = report_lifecycle_mode.report_line(
+        hint,
+        state_dir=(state_dir if state_dir is not None
+                   else report_lifecycle_mode.append_destination_state_dir()),
+        report_written_at=_read_report_mtime(report_path),
+    )
+    return receipt if line is hint else line
+
+
 def _build_receipt_from_report_core(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None,
     dry_run: bool = False,
@@ -1434,6 +1519,12 @@ def build_receipt_from_report(
     suppressed) and into ``_resolve_pr_link`` (obligation write suppressed)
     so the function honours the scan-level dry-run contract "nothing on disk
     changes" end to end (OI-1744).
+
+    ADR-045 (K-8b): a ``v3`` dispatch returns one ``report_ingested`` instead of
+    a ``task_complete``; a legacy receipt passes through untouched. When the line
+    cannot be established this RAISES ``report_lifecycle_mode.ReportPathRefused``
+    (dispatch id + named reason) instead of returning a receipt: the caller must
+    book nothing and keep the report retryable.
     """
     receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir, dry_run=dry_run)
     if receipt is None:
@@ -1442,6 +1533,7 @@ def build_receipt_from_report(
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     merged: Dict[str, Any] = {**body, **fm}
+    receipt = _lifecycle_report_line(receipt, merged, state_dir=state_dir, report_path=report_path)
     pr_link, pr_link_reason = _resolve_pr_link(
         receipt.get("dispatch_id"), merged, state_dir, dry_run=dry_run,
     )
@@ -1606,11 +1698,17 @@ def _convert_one_detailed(
         logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
         return None, "malformed"
 
+    # The store the line is appended to (K-8b rule 2); a None state_dir is never "legacy".
     state_dir_for_route = Path(receipts_file).parent if receipts_file else None
     try:
         receipt = build_receipt_from_report(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
+    except report_lifecycle_mode.ReportPathRefused as exc:
+        # Named refusal (K-8b rule 4): book nothing, keep the report retryable.
+        # Caught BEFORE the generic handler so it can never be reported as a crash.
+        _log_refusal(exc, report_path)
+        return None, "error"
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1658,12 +1756,7 @@ def _convert_one_detailed(
     _guard_did = receipt.get("dispatch_id")
     _guard_kind = receipt.get("receipt_kind")
     _guard_matched = False
-    if (
-        _guard_did
-        and _guard_kind
-        and receipts_file
-        and Path(receipts_file).exists()
-    ):
+    if _guard_did and _guard_kind and receipts_file and Path(receipts_file).exists():
         try:
             _text = Path(receipts_file).read_text(encoding="utf-8", errors="replace")
             # Parse NDJSON lines: compare the parsed dispatch_id field
@@ -1678,10 +1771,7 @@ def _convert_one_detailed(
                     _rec = json.loads(_line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    _rec.get("dispatch_id") == _guard_did
-                    and _rec.get("receipt_kind") == _guard_kind
-                ):
+                if _same_booking(_rec, receipt):
                     logger.info(
                         "report_to_receipt_converter: skipping dispatch=%s — "
                         "completion receipt already exists (hot-path wrote first)",
