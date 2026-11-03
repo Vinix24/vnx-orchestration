@@ -661,10 +661,12 @@ def _resolve_report_role(
     role: Optional[str] = None
     try:
         from dispatch_identity import resolve_effective_role  # noqa: PLC0415
-        project_id = merged.get("project_id") or None
+        project_id = str(merged.get("project_id") or "").strip() or None
         if not project_id:
-            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-            project_id = _resolve_project_id()
+            # The report's role join still needs a tenant; reuse the door's
+            # canonical resolver rather than the door's private wrapper.
+            from project_root import resolve_project_id  # noqa: PLC0415
+            project_id = resolve_project_id()
         role = resolve_effective_role(
             merged.get("role"), dispatch_id, project_id, state_dir=state_dir,
         )
@@ -973,21 +975,22 @@ def _read_report_mtime(report_path: Path) -> Optional[float]:
         return None
 
 
-def _lifecycle_project_id(merged: Dict[str, Any]) -> Optional[str]:
-    """The tenant that addresses the ``dispatches`` row, resolved as the role join does.
+def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
+    """The report's own ``attempt`` when it names a positive integer; else ``None``.
 
-    ``report_lifecycle_mode`` cannot address a row without a tenant and refuses
-    (K-8a); this never invents one — an unresolvable tenant stays ``None`` and
-    the decision refuses.
+    ``report_lifecycle_mode`` reads an attempt off the receipt and refuses
+    ``attempt_unknown`` for anything that is not a positive integer, so a
+    report naming ``"x"`` / ``0`` hands over nothing and the decision
+    attributes by write time as before (K-8b round 2, rule 3).
     """
-    try:
-        project_id = str(merged.get("project_id") or "").strip()
-        if not project_id:
-            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-            project_id = str(_resolve_project_id() or "").strip()
-        return project_id or None
-    except Exception:  # vnx-silent-except: an unresolvable tenant is None; decide refuses
+    raw = merged.get("attempt")
+    if raw is None or isinstance(raw, bool):
         return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
 
 
 def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
@@ -1026,13 +1029,21 @@ def _lifecycle_report_line(
     """The ONE shaping point: the line this dispatch's lifecycle mode asks for.
 
     A legacy dispatch gets its receipt object back untouched; a v3 dispatch gets
-    one ``report_ingested`` copy. The tenant goes on a copy so a legacy booking
-    never gains a field it did not have.
+    one ``report_ingested`` copy. Only what the REPORT itself names goes on the
+    hint copy — its tenant and its attempt — so a legacy booking never gains a
+    field it did not have, and the tenant is resolved once, by K-8a.
     """
     hint = receipt
-    tenant = str(receipt.get("project_id") or "").strip() or _lifecycle_project_id(merged)
-    if tenant and not receipt.get("project_id"):
-        hint = {**receipt, "project_id": tenant}
+    named: Dict[str, Any] = {}
+    if not receipt.get("project_id"):
+        tenant = str(merged.get("project_id") or "").strip()
+        if tenant:
+            named["project_id"] = tenant
+    attempt = _named_attempt(merged)
+    if attempt is not None:
+        named["attempt"] = attempt
+    if named:
+        hint = {**receipt, **named}
     line = report_lifecycle_mode.report_line(
         hint,
         state_dir=(state_dir if state_dir is not None

@@ -51,6 +51,23 @@ _IDENTITY_LINE_RE = re.compile(
 )
 
 
+def _named_attempt(metadata: Dict[str, Any]) -> Optional[int]:
+    """The report's own ``attempt`` when it names a positive integer; else ``None``.
+
+    ``report_lifecycle_mode`` refuses anything on the receipt that is not a
+    positive integer, so a report naming ``"x"`` / ``0`` hands over nothing and
+    the decision attributes by write time as before (K-8b round 2, rule 3).
+    """
+    raw = metadata.get('attempt')
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
 def _normalize_model_to_canonical(value: str) -> "Optional[str]":
     """Return the canonical registry key for *value*.
 
@@ -788,8 +805,10 @@ class ReportParser:
         try:
             project_id = os.environ.get('VNX_PROJECT_ID', '').strip()
             if not project_id:
-                from dispatch_cli import _resolve_project_id
-                project_id = _resolve_project_id()
+                # The role join still needs a tenant; reuse the door's canonical
+                # resolver rather than the door's private wrapper.
+                from project_root import resolve_project_id
+                project_id = resolve_project_id()
             return resolve_effective_role(
                 metadata.get('role'), dispatch_id, project_id, state_dir=self.state_dir,
             )
@@ -965,24 +984,27 @@ class ReportParser:
         already there); a legacy dispatch keeps the task-shaped receipt byte for
         byte. The decision lives in ``report_lifecycle_mode``, is handed the store
         ``append_receipt.py`` writes to and the write time of the file READ here,
-        and gets a tenant hint on a copy (a legacy receipt stays untouched). A
-        refusal returns the ``error`` shape and books nothing; ``main()`` then
-        exits non-zero and ``receipt_processor.sh`` retries the report.
+        and gets on a copy only what the REPORT itself names — its tenant and its
+        attempt (a legacy receipt stays untouched). The tenant is resolved once,
+        by K-8a. A refusal returns the ``error`` shape and books nothing;
+        ``main()`` then exits non-zero and ``receipt_processor.sh`` retries the
+        report.
         """
         # ReportParser.__init__ puts scripts/lib on sys.path.
         from report_lifecycle_mode import (  # noqa: PLC0415
             ReportPathRefused, append_destination_state_dir, report_line,
         )
         hint = receipt
-        tenant = str(metadata.get('project_id') or '').strip()
-        if not tenant:
-            try:
-                from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-                tenant = str(_resolve_project_id() or '').strip()
-            except Exception:  # vnx-silent-except: no tenant is None; decide refuses
-                tenant = ''
-        if tenant and not receipt.get('project_id'):
-            hint = {**receipt, 'project_id': tenant}
+        named: Dict[str, Any] = {}
+        if not receipt.get('project_id'):
+            tenant = str(metadata.get('project_id') or '').strip()
+            if tenant:
+                named['project_id'] = tenant
+        attempt = _named_attempt(metadata)
+        if attempt is not None:
+            named['attempt'] = attempt
+        if named:
+            hint = {**receipt, **named}
         try:
             written_at = os.stat(report_path).st_mtime
         except OSError:

@@ -44,6 +44,7 @@ import coordination_db  # noqa: E402
 import dispatch_lifecycle as lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import project_id_migration  # noqa: E402
+import report_parser  # noqa: E402
 import report_to_receipt_converter as rtc  # noqa: E402
 import restore_stranded_reports as restore  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
@@ -140,12 +141,12 @@ def clock(monkeypatch):
 # Report, lifecycle and ledger helpers
 # ---------------------------------------------------------------------------
 
-def _report_text(dispatch_id: str, *, project_id: str = PROJECT,
-                 model: str = "claude-sonnet-4-6") -> str:
+def _report_text(dispatch_id: str, *, project_id: str | None = PROJECT,
+                 model: str = "claude-sonnet-4-6",
+                 attempt: int | str | None = None) -> str:
     fm = {
         "schema_version": 1,
         "dispatch_id": dispatch_id,
-        "project_id": project_id,
         "provider": "claude",
         "sub_provider": "anthropic",
         "model": model,
@@ -164,6 +165,12 @@ def _report_text(dispatch_id: str, *, project_id: str = PROJECT,
         "terminal": "T1",
         "timestamp": "2026-11-03T09:00:00Z",
     }
+    # Omitted rather than nulled: a report that names no tenant must reach the
+    # writers exactly as legacy reports do (rule 4 of the K-8b round 2 dispatch).
+    if project_id is not None:
+        fm["project_id"] = project_id
+    if attempt is not None:
+        fm["attempt"] = attempt
     return (
         f"---\n{yaml.safe_dump(fm, sort_keys=False).strip()}\n---\n\n"
         "## Summary\n\nImplemented the feature per dispatch specification. "
@@ -174,10 +181,12 @@ def _report_text(dispatch_id: str, *, project_id: str = PROJECT,
     )
 
 
-def _write_report(path: Path, dispatch_id: str, *, project_id: str = PROJECT,
-                  mtime: str | float | None = None, model: str = "claude-sonnet-4-6") -> Path:
+def _write_report(path: Path, dispatch_id: str, *, project_id: str | None = PROJECT,
+                  mtime: str | float | None = None, model: str = "claude-sonnet-4-6",
+                  attempt: int | str | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_report_text(dispatch_id, project_id=project_id, model=model),
+    path.write_text(_report_text(dispatch_id, project_id=project_id, model=model,
+                                 attempt=attempt),
                     encoding="utf-8")
     if mtime is not None:
         stamp = mtime if isinstance(mtime, float) else _epoch(mtime)
@@ -483,10 +492,11 @@ def _parser_env(state_dir: Path, data_dir: Path, *, v3: bool = False) -> dict:
     return env
 
 
-def _run_parser(report: Path, env: dict) -> subprocess.CompletedProcess:
+def _run_parser(report: Path, env: dict,
+                cwd: Path | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT_DIR / "report_parser.py"), str(report)],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True, text=True, env=env, timeout=120, cwd=cwd,
     )
 
 
@@ -560,3 +570,236 @@ def test_restore_on_a_refused_report_returns_false_and_leaves_the_bytes(state_di
     assert detail.startswith("lifecycle_mode_undecidable:")
     assert report.read_bytes() == before
     assert _lines(state_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# Round 2, rule 3: the report's OWN attempt reaches the decision
+# ---------------------------------------------------------------------------
+
+def _two_started_attempts(state_dir: Path, spec_file: Path, clock) -> None:
+    """Attempt 1 started and ended, attempt 2 started: write time alone says 2."""
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    clock["now"] = T2
+    _begin(state_dir, spec_file)
+
+
+def _finished_of_attempt(state_dir: Path, attempt: int) -> list:
+    return [line for line in _of_type(state_dir, "dispatch_finished")
+            if line.get("attempt") == attempt]
+
+
+def test_the_reports_own_attempt_outranks_write_time(state_dir, spec_file, v3, clock,
+                                                     tmp_path):
+    """Codex's reproduction: attempt 1 named, file written after attempt 2 started."""
+    _two_started_attempts(state_dir, spec_file, clock)
+    reports = tmp_path / "reports"
+    ledger = str(_ledger(state_dir))
+
+    # An attempt-2 booking already exists, so a guard keyed on the dispatch alone
+    # would suppress the attempt-1 report below as a duplicate.
+    second = _write_report(reports / "attempt-2.md", DISPATCH, mtime=T2, attempt=2)
+    _r, outcome_two = rtc._convert_one_detailed(second, receipts_file=ledger)
+    assert outcome_two == "appended"
+    assert _of_type(state_dir, "report_ingested")[0]["attempt"] == 2
+
+    first = _write_report(reports / "attempt-1.md", DISPATCH, mtime=T3, attempt=1)
+    _r, outcome_one = rtc._convert_one_detailed(first, receipts_file=ledger)
+
+    assert outcome_one == "appended"
+    ingested = _of_type(state_dir, "report_ingested")
+    assert [line["attempt"] for line in ingested] == [2, 1]
+    finished_one = _finished_of_attempt(state_dir, 1)
+    assert len(finished_one) == 1
+    assert ingested[1]["end_outcome_id"] == finished_one[0]["outcome_id"]
+    assert "end_outcome_id" not in ingested[0]
+
+
+def test_parser_books_the_reports_own_attempt(state_dir, spec_file, v3, clock, tmp_path):
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           mtime=T3, attempt=1)
+
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data", v3=True))
+
+    assert run.returncode == 0, run.stderr
+    receipt = json.loads(run.stdout)
+    assert receipt["event_type"] == "report_ingested"
+    assert receipt["attempt"] == 1
+    assert receipt["end_outcome_id"] == _finished_of_attempt(state_dir, 1)[0]["outcome_id"]
+
+
+def test_a_named_attempt_with_no_start_refuses_the_converter(
+    state_dir, spec_file, v3, clock, caplog, tmp_path
+):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           mtime=T1, attempt=3)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "error"
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
+    assert "attempt_unknown" in caplog.text
+
+
+def test_parser_refuses_a_named_attempt_with_no_start(state_dir, spec_file, v3, clock,
+                                                      tmp_path):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           mtime=T1, attempt=3)
+
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data", v3=True))
+
+    assert run.returncode != 0
+    assert run.stdout == ""
+    assert "attempt_unknown" in run.stderr
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
+
+
+@pytest.mark.parametrize("named", ["x", 0])
+def test_a_named_attempt_that_is_not_a_positive_integer_is_ignored_by_the_converter(
+    state_dir, spec_file, v3, clock, tmp_path, named
+):
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           mtime=T1, attempt=named)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "appended"
+    ingested = _of_type(state_dir, "report_ingested")
+    assert [line["attempt"] for line in ingested] == [1]
+    assert ingested[0]["end_outcome_id"] == _finished_of_attempt(state_dir, 1)[0]["outcome_id"]
+
+
+@pytest.mark.parametrize("named", ["x", 0])
+def test_parser_ignores_a_named_attempt_that_is_not_a_positive_integer(
+    state_dir, spec_file, v3, clock, tmp_path, named
+):
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           mtime=T1, attempt=named)
+
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data", v3=True))
+
+    assert run.returncode == 0, run.stderr
+    receipt = json.loads(run.stdout)
+    assert receipt["attempt"] == 1
+    assert receipt["end_outcome_id"] == _finished_of_attempt(state_dir, 1)[0]["outcome_id"]
+
+
+# ---------------------------------------------------------------------------
+# Round 2, rule 4: a legacy report keeps its line, whatever it names
+# ---------------------------------------------------------------------------
+
+def test_a_legacy_report_naming_attempt_and_project_id_keeps_the_k8a_line(
+    state_dir, tmp_path
+):
+    _insert_row(state_dir)  # a legacy row: no lifecycle_mode marker
+    report = _write_report(tmp_path / "reports" / "named.md", DISPATCH, mtime=T1,
+                           attempt=1)
+    text = report.read_text(encoding="utf-8")
+    core = rtc._build_receipt_from_report_core(report, text, state_dir=state_dir)
+    merged = {**rtc._extract_body_fields(text), **rtc.parse_frontmatter(text)}
+
+    # The one shaping point hands a legacy receipt back untouched: the very
+    # same object, so no lifecycle key (and no project_id) can be added.
+    assert rtc._lifecycle_report_line(core, merged, state_dir=state_dir,
+                                      report_path=report) is core
+
+    built = rtc.build_receipt_from_report(report, text, state_dir=state_dir)
+    assert built["event_type"] == "task_complete"
+    for key, value in core.items():
+        assert built[key] == value, key
+    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id", "project_id"):
+        assert lifecycle_key not in built
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "appended"
+    line = _lines(state_dir)[0]
+    assert line["event_type"] == "task_complete"
+    assert line["dispatch_id"] == DISPATCH
+    assert line["status"] == core["status"]
+    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id", "project_id"):
+        assert lifecycle_key not in line
+
+
+def test_a_legacy_report_without_project_id_books_the_same_line_in_the_parser(
+    state_dir, tmp_path
+):
+    _insert_row(state_dir)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
+                           project_id=None, mtime=T1, attempt=1)
+
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data"))
+
+    assert run.returncode == 0, run.stderr
+    receipt = json.loads(run.stdout)
+    assert receipt["event_type"] == "task_complete"
+    assert receipt["dispatch_id"] == DISPATCH
+    for lifecycle_key in ("attempt", "end_pending", "end_outcome_id", "project_id"):
+        assert lifecycle_key not in receipt
+
+
+def test_the_parsers_legacy_shaping_point_returns_the_very_same_object(
+    state_dir, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    _insert_row(state_dir)
+    report = _write_report(tmp_path / "reports" / "named.md", DISPATCH, mtime=T1,
+                           attempt=1)
+    receipt = {"dispatch_id": DISPATCH, "event_type": "task_complete",
+               "receipt_kind": "dispatch"}
+
+    shaped = report_parser.ReportParser()._book_report_line(
+        receipt,
+        {"dispatch_id": DISPATCH, "project_id": PROJECT, "attempt": "1"},
+        str(report),
+    )
+
+    assert shaped is receipt
+
+
+def test_an_unresolvable_tenant_refuses_both_writers(state_dir, monkeypatch, tmp_path):
+    """No project_id in the report and no resolver: the named refusal, never a booking."""
+    _insert_row(state_dir)
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.chdir(tmp_path)
+    reports = tmp_path / "reports"
+    report = _write_report(reports / f"{DISPATCH}.md", DISPATCH, project_id=None, mtime=T1)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "error"
+    assert _of_type(state_dir, "task_complete") == []
+    assert _of_type(state_dir, "report_ingested") == []
+
+    env = _parser_env(state_dir, tmp_path / "data")
+    env.pop("VNX_PROJECT_ID", None)
+    run = _run_parser(report, env, cwd=tmp_path)
+
+    assert run.returncode != 0
+    assert run.stdout == ""
+    assert "lifecycle_mode_undecidable" in run.stderr
+    assert _of_type(state_dir, "task_complete") == []
+    assert _of_type(state_dir, "report_ingested") == []
+
+
+# ---------------------------------------------------------------------------
+# Round 2, rule 2: no tenant rule of their own in the writers
+# ---------------------------------------------------------------------------
+
+def test_no_local_tenant_rule_remains_in_the_writers():
+    files = ["scripts/lib/report_to_receipt_converter.py", "scripts/report_parser.py"]
+    run = subprocess.run(
+        ["git", "grep", "-n", "_resolve_project_id\\|_lifecycle_project_id", *files],
+        capture_output=True, text=True, cwd=VNX_ROOT,
+    )
+    assert run.returncode == 1, run.stdout  # 1 = no match
+    assert run.stdout == ""
