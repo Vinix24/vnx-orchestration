@@ -554,6 +554,9 @@ class SweepResult:
     in_flight: int = 0
     errors: Tuple[str, ...] = ()
     heartbeat_path: str = ""
+    # K-6b: a bounded run reports whether it stopped early and how much it left.
+    budget_exhausted: bool = False
+    budget_left: int = 0
 
 
 def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
@@ -649,12 +652,25 @@ def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optiona
     return dict(row) if row is not None else None
 
 
+def _valid_deadline(value: Any) -> bool:
+    """A legal ``deadline_seconds``: a plain int inside the spec's own bounds."""
+    return (isinstance(value, int) and not isinstance(value, bool)
+            and DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX)
+
+
 def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
                  row: Optional[Mapping[str, Any]]) -> Tuple[int, str]:
-    """``(deadline_seconds, source)``: row bundle, staged spec, else the constant.
+    """``(deadline_seconds, source)``: start line, row bundle, staged spec, else the constant.
 
-    A staged spec only counts when its bytes are the start line's ``spec_sha256``.
+    The start line's own field is read first (K-6b, OI-2522): the door stages
+    under ``pending/<staging_id>/``, which the staged-spec candidates cannot see
+    when the staging id differs from the dispatch id, so a valid 300-second spec
+    fell back to 14400. A staged spec only counts when its bytes are the start
+    line's ``spec_sha256``.
     """
+    own = start_line.get("deadline_seconds")
+    if _valid_deadline(own):
+        return own, "start_line"
     sha = start_line.get("spec_sha256")
     sha = sha.strip() if isinstance(sha, str) else None
     did = str(start_line.get("dispatch_id") or "")
@@ -669,9 +685,8 @@ def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
             value = json.loads(blob).get("deadline_seconds")
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             continue
-        if (not sha or hashlib.sha256(blob).hexdigest() != sha or isinstance(value, bool)
-                or not isinstance(value, int)
-                or not DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX):
+        if (not sha or hashlib.sha256(blob).hexdigest() != sha
+                or not _valid_deadline(value)):
             continue
         return value, f"{kind}:{path}"
     return FALLBACK_DEADLINE_SECONDS, "fallback:FALLBACK_DEADLINE_SECONDS"
@@ -785,19 +800,40 @@ def sweep_attempt(state_dir: Path, attempt: InFlightAttempt, now: datetime) -> T
     return ("abandoned" if booked.status == STATUS_FINALIZED else "open"), source, None
 
 
-def _collect(state_dir: Path, project_id: Optional[str], now: datetime) -> Dict[str, Any]:
-    """The sweep's work: recover the open intents, then decide every attempt."""
+def _monotonic() -> float:
+    """The budget's clock, in one place so a test can pin it without touching ``time``."""
+    return time.monotonic()
+
+
+def _budget_spent(budget_deadline: Optional[float]) -> bool:
+    """Between items only: a spent budget stops the sweep from taking a new one."""
+    return budget_deadline is not None and _monotonic() >= budget_deadline
+
+
+def _collect(state_dir: Path, project_id: Optional[str], now: datetime,
+             budget_seconds: Optional[float] = None) -> Dict[str, Any]:
+    """The sweep's work: recover the open intents, then decide every attempt.
+
+    A budget is read between items only: an item already started always finishes.
+    """
+    budget_deadline = (None if budget_seconds is None
+                       else _monotonic() + max(0.0, budget_seconds))
     intents, intent_errors = open_intents(state_dir, project_id)
     flights, flight_errors = v3_in_flight(state_dir, project_id)
     collected: Dict[str, Any] = {name: 0 for name in _THE_COUNTS}
     collected.update(errors=list(intent_errors) + list(flight_errors), sources=[],
-                     in_flight=len(flights), open_intents=len(intents), enabled=lifecycle_enabled())
+                     in_flight=len(flights), open_intents=len(intents), enabled=lifecycle_enabled(),
+                     budget_seconds=budget_seconds, budget_exhausted=False, budget_left=0)
     errors: List[str] = collected["errors"]
     if not collected["enabled"]:
         # ADR-045 §9: the brake refuses every append; write nothing, report them.
         collected["lifecycle_off_in_flight"] = len(flights)
         return collected
-    for project, dispatch, attempt_no, _path in intents:
+    for index, (project, dispatch, attempt_no, _path) in enumerate(intents):
+        if _budget_spent(budget_deadline):
+            collected.update(budget_exhausted=True,
+                             budget_left=len(intents) - index + len(flights))
+            return collected
         try:
             if recover(state_dir=state_dir, project_id=project, dispatch_id=dispatch,
                        attempt=attempt_no, actor="sweep",
@@ -806,7 +842,10 @@ def _collect(state_dir: Path, project_id: Optional[str], now: datetime) -> Dict[
                 collected["recovered"] += 1
         except Exception as exc:  # vnx-silent-except: one unreadable intent must not stop the other recoveries (it is counted)
             errors.append(f"recover {dispatch}#{attempt_no}: {type(exc).__name__}: {exc}")
-    for attempt in flights:
+    for index, attempt in enumerate(flights):
+        if _budget_spent(budget_deadline):
+            collected.update(budget_exhausted=True, budget_left=len(flights) - index)
+            return collected
         try:
             counter, source, error = sweep_attempt(state_dir, attempt, now)
         except Exception as exc:  # vnx-silent-except: one refused attempt is counted and reported, never silently dropped
@@ -822,7 +861,8 @@ def _collect(state_dir: Path, project_id: Optional[str], now: datetime) -> Dict[
 
 
 def _heartbeat(state_dir: Path, collected: Optional[Dict[str, Any]], *, project_id: Optional[str],
-               started_at: str, finished_at: str, evaluated: datetime, error: Optional[str]) -> str:
+               started_at: str, finished_at: str, evaluated: datetime, error: Optional[str],
+               budget_seconds: Optional[float] = None) -> str:
     """Write the one heartbeat of a run; a run that raised still calls this."""
     data = collected or {}
     errors = list(data.get("errors") or []) + ([error] if error else [])
@@ -837,6 +877,9 @@ def _heartbeat(state_dir: Path, collected: Optional[Dict[str, Any]], *, project_
         "deadline": {"grace_seconds": ABANDON_GRACE_SECONDS,
                      "fallback_seconds": FALLBACK_DEADLINE_SECONDS,
                      "sources": list(data.get("sources") or [])},
+        "budget": {"seconds": budget_seconds,
+                   "exhausted": bool(data.get("budget_exhausted", False)),
+                   "items_left": int(data.get("budget_left", 0))},
         "last_error": errors[-1] if errors else None,
         "error": error,
     })
@@ -844,27 +887,33 @@ def _heartbeat(state_dir: Path, collected: Optional[Dict[str, Any]], *, project_
 
 
 def sweep(*, state_dir: str | Path, project_id: Optional[str] = None,
-          now: Any = None) -> SweepResult:
+          now: Any = None, budget_seconds: Optional[float] = None) -> SweepResult:
     """One sweep run (ADR-045 §6): recover the open intents, abandon the dead.
 
     ``now`` is the evaluation instant (``datetime`` or ``...Z``), absent is the real
-    clock. Every run writes one heartbeat; a raised run writes it before raising.
+    clock. ``budget_seconds`` bounds the run between items (K-6b): what is left is
+    reported as ``budget_exhausted``/``budget_left`` and picked up by the next
+    sweep; without it the run is unbounded, as the runner's tick wants. Every run
+    writes one heartbeat; a raised run writes it before raising.
     """
     state_path, started_at = Path(state_dir), _now_utc()
     evaluated = _as_utc(now) or datetime.now(timezone.utc)
     try:
-        collected = _collect(state_path, project_id, evaluated)
+        collected = _collect(state_path, project_id, evaluated, budget_seconds)
     except Exception as exc:
         try:
             _heartbeat(state_path, None, project_id=project_id, started_at=started_at,
                        finished_at=_now_utc(), evaluated=evaluated,
-                       error=f"{type(exc).__name__}: {exc}")
+                       error=f"{type(exc).__name__}: {exc}", budget_seconds=budget_seconds)
         except OSError as write_exc:  # vnx-silent-except: the original failure is the one to raise; the heartbeat's own failure is only logged
             logger.warning("[dispatch_lifecycle] sweep heartbeat unwritable: %s", write_exc)
         raise
     heartbeat_path = _heartbeat(state_path, collected, project_id=project_id,
                                 started_at=started_at, finished_at=_now_utc(),
-                                evaluated=evaluated, error=None)
+                                evaluated=evaluated, error=None,
+                                budget_seconds=budget_seconds)
     return SweepResult(errors=tuple(collected["errors"]), heartbeat_path=heartbeat_path,
                        lifecycle_off=not collected["enabled"],
+                       budget_exhausted=collected["budget_exhausted"],
+                       budget_left=collected["budget_left"],
                        **{name: collected[name] for name in _THE_COUNTS})

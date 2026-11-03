@@ -229,8 +229,14 @@ def test_a_live_refire_is_refused_and_still_booked(tmp_path, monkeypatch, capsys
     assert receipt["failure_class"] in FAILURE_CLASSES
     assert receipt["failure_class"] not in {"auth_rejected", "credit_exhausted"}
 
-    # (b) the other door's live attempt is untouched — nothing was closed for it
-    assert _dispatch_row(state_dir, dispatch_id) == row_before
+    # (b) the other door's live attempt is untouched — nothing was closed for it.
+    # K-6b: the door's bounded sweep runs before this refusal and stamps the live
+    # v3 attempt's row with ``lifecycle_mode`` (ADR-045 §6); no other field moves.
+    row_after = _dispatch_row(state_dir, dispatch_id)
+    assert json.loads(row_after["metadata_json"]).get("lifecycle_mode") == "v3"
+    volatile = ("metadata_json", "updated_at")
+    assert {k: v for k, v in row_after.items() if k not in volatile} == {
+        k: v for k, v in row_before.items() if k not in volatile}
     assert _attempt_rows(state_dir, dispatch_id) == attempts_before
     assert list(_attempt_rows(state_dir, dispatch_id)) == [1], "no attempt was created"
     assert _attempt_rows(state_dir, dispatch_id)[1]["attempt_id"] == live_attempt_id

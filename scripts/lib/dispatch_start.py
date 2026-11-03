@@ -27,6 +27,7 @@ from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
 from coordination_db import db_path_from_state_dir, get_connection
+from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -251,13 +252,27 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt
         return MODE_WRITE_FAILED
 
 
+def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
+    """The spec's own legal integer ``deadline_seconds``, else None (K-6b/OI-2522)."""
+    try:
+        value = json.loads(blob).get("deadline_seconds")
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if not DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX:
+        return None
+    return value
+
+
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
                        target_slot: Optional[str], state_dir: Path) -> None:
     """Write the v3 start line; a ``duplicate`` verdict means another hand-over owns the key."""
     from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
     slot = (target_slot or "").strip()
     try:
-        spec_sha = hashlib.sha256(Path(spec_file).read_bytes()).hexdigest()
+        spec_bytes = Path(spec_file).read_bytes()
+        spec_sha = hashlib.sha256(spec_bytes).hexdigest()
     except OSError as exc:
         raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
     receipt = {
@@ -269,6 +284,9 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
         "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
             f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
     }
+    deadline_seconds = _spec_deadline_seconds(spec_bytes)
+    if deadline_seconds is not None:
+        receipt["deadline_seconds"] = deadline_seconds
     try:
         result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
     except AppendReceiptError as exc:

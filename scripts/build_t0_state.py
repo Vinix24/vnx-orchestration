@@ -2558,6 +2558,29 @@ def _is_plan_gated(result: Dict[str, Any]) -> bool:
 # Main builder
 # ---------------------------------------------------------------------------
 
+#: ADR-045 plan row 6 (K-6b): one bounded sweep per build; it never fails the build.
+LIFECYCLE_SWEEP_BUDGET_SECONDS = 2.0
+
+
+def _lifecycle_sweep_section(state_dir: Path) -> Dict[str, Any]:
+    """ADR-045 §6 + plan row 6: one bounded sweep per build, inside its own guard.
+
+    The runner tick and the door together still cannot promise ``abandoned`` at
+    deadline plus 30 minutes for an idle fabric, so every state build sweeps
+    too. The result lands in ``t0_state.json`` so a stalled sweep is visible; a
+    sweep that raises never fails the build and never changes its exit code.
+    """
+    try:
+        from dispatch_lifecycle import sweep  # noqa: PLC0415
+
+        result = sweep(state_dir=state_dir, budget_seconds=LIFECYCLE_SWEEP_BUDGET_SECONDS)
+    except Exception as exc:  # vnx-silent-except: the build's own exit code must not depend on the sweep
+        log.warning("lifecycle sweep failed (build continues): %s", exc)
+        return {"abandoned": 0, "errors": 1, "budget_exhausted": False}
+    return {"abandoned": result.abandoned, "errors": len(result.errors),
+            "budget_exhausted": result.budget_exhausted}
+
+
 def build_t0_state(
     state_dir: Path,
     dispatch_dir: Path,
@@ -2599,6 +2622,7 @@ def build_t0_state(
     live_work = _build_live_work(state_dir, project_id, pr_queue)  # D5: DB + occupancy flock
     strategic_state = _build_strategic_state(state_dir)
     strategic_state_heavy = _build_strategic_state_heavy(state_dir)
+    lifecycle_sweep = _lifecycle_sweep_section(state_dir)
     elapsed = time.monotonic() - start
     system_health = _build_system_health(
         state_dir, db_ok, db_health=db_health,
@@ -2625,6 +2649,7 @@ def build_t0_state(
         "system_health": system_health,
         "pr_queue": pr_queue,
         "strategic_state": strategic_state,
+        "lifecycle_sweep": lifecycle_sweep,
         "_strategic_state_heavy": strategic_state_heavy,
         "_build_seconds": round(elapsed, 2),
     }
