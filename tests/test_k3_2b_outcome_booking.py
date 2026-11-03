@@ -44,6 +44,7 @@ import review_stack_support  # noqa: E402
 GATE = "deepseek_gate"
 PROVIDER = "deepseek-harness"
 MODEL = "deepseek-flash"
+PROJECT = "vnx-dev"
 KIMI_GATE, KIMI_PROVIDER, KIMI_MODEL = "kimi_gate", "kimi", "kimi-k3"
 PR = 4242
 HEAD = "c" * 40
@@ -56,8 +57,17 @@ ENDED = datetime(2026, 10, 30, 10, 15, 0, tzinfo=timezone.utc)
 
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
-    """A throwaway project store whose cost ledger is a real file under ``data_dir/events``."""
+    """A throwaway project store whose cost ledger is a real file under ``data_dir/events``.
+
+    The tenant is pinned in the environment, the way ``tests/test_harness_run_cost.py``
+    and ``tests/test_k2b_b_gate_cost_lines.py`` pin it: this store's path names no
+    project (it is ``.vnx-data/state``, not ``.vnx-data/<project>/state``), so
+    ``harness_run_cost.ledger_project_id`` would otherwise fall back on the
+    warning at the store-path resolution. No test in this file may depend on
+    whether the ambient ``VNX_PROJECT_ID`` happens to be set.
+    """
     env = review_stack_support.build_project_store(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     env["ledger"] = env["data_dir"] / "events" / "provider_costs.ndjson"
     env["project"] = harness_run_cost.ledger_project_id(env["state_dir"])
     return env
@@ -329,18 +339,28 @@ def test_the_inherited_id_case_books_one_line_and_never_warns(store, caplog):
 def test_a_booking_the_ledger_refuses_leaves_the_outcome_unchanged(store, caplog):
     """The store's ``events`` path is a file, so no line can be written: the record lands and still decides."""
     store["ledger"].parent.write_text("this is not a directory")
+    record = _pass(EXEC_A)
 
     with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
-        stored, written = _commit(store, _pass(EXEC_A))
+        stored, written = _commit(store, record)
 
     assert written is True and stored["status"] == "pass"
     assert _slot(store)["status"] == "pass"
     assert _lines(store) == [], "nothing could be written, and the verdict stands"
-    refused = [
-        r for r in caplog.records if r.levelno == logging.WARNING and r.name == "harness_run_cost"
+    # Selected by content, never by position: this logger says other things too
+    # (a project-id fallback is one), so "a refused booking is never silent"
+    # means exactly one harness_run_cost warning names THIS refusal.
+    refusals = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and r.name == "harness_run_cost"
+        and "CostLedgerWriteError" in r.getMessage()
     ]
-    assert refused, "a refused booking is never silent"
-    assert "CostLedgerWriteError" in refused[0].getMessage()
+    emitted = [r.getMessage() for r in caplog.records if r.name == "harness_run_cost"]
+    assert len(refusals) == 1, f"one refused booking, one warning naming it: {emitted}"
+    assert record["dispatch_id"] in refusals[0].getMessage(), (
+        f"the warning names the run it could not book: {refusals[0].getMessage()}"
+    )
 
 
 # ---------------------------------------------------------------------------
