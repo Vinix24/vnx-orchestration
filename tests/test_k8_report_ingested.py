@@ -785,3 +785,98 @@ def test_report_parser_refuses_an_unreadable_row_with_a_readable_empty_ledger(
     assert "REFUSED (ledger lifecycle)" in capsys.readouterr().err
     assert _lines(state_dir) == []
     assert report.exists()
+
+
+# ---------------------------------------------------------------------------
+# 11. one tenant, and the write time of the file the caller actually read
+#     (K-8 round 3, OI-2516)
+# ---------------------------------------------------------------------------
+
+def _start_lines(state_dir: Path, *tenants: str,
+                 attempts: tuple = (1, 2)) -> Path:
+    """Hand-written ``dispatch_started`` lines, one per tenant.
+
+    Only a scan-level fixture can put TWO tenants on one dispatch, and the
+    tenant decision is what these tests measure; the hand-over itself still
+    writes one tenant (see ``v3_store`` / ``two_attempts`` for that path).
+    """
+    ledger = _ledger(state_dir)
+    ledger.write_text("".join(
+        json.dumps({
+            "timestamp": f"2026-11-03T0{8 + index}:00:00Z",
+            "event_type": "dispatch_started",
+            "dispatch_id": DISPATCH,
+            "project_id": tenant,
+            "attempt": attempts[index],
+            "lifecycle_mode": "v3",
+        }) + "\n"
+        for index, tenant in enumerate(tenants)
+    ), encoding="utf-8")
+    return ledger
+
+
+def test_two_tenants_on_the_start_lines_refuse_and_write_nothing(
+        report, tmp_path, monkeypatch, caplog):
+    """Two tenants on one dispatch's start lines: no tenant is picked, nothing
+    is booked, and the refusal names both tenants and the dispatch."""
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data-home"))
+    state = tmp_path / "two-tenants"
+    state.mkdir()
+    ledger = _start_lines(state, "proj-alpha", "proj-beta")
+    before = ledger.read_text(encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        result, outcome = _convert_one_detailed(report, receipts_file=str(ledger))
+
+    assert result is None and outcome == "error"
+    assert "project_ambiguous" in caplog.text
+    assert DISPATCH in caplog.text
+    assert "proj-alpha" in caplog.text and "proj-beta" in caplog.text
+    assert ledger.read_text(encoding="utf-8") == before  # nothing written
+    assert report.exists()  # retryable, still where the next scan looks
+
+
+def test_one_tenant_on_the_start_lines_is_that_tenant(report, tmp_path, monkeypatch):
+    """Exactly one tenant on the start lines: that one, no refusal."""
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data-home"))
+    state = tmp_path / "one-tenant"
+    state.mkdir()
+    _start_lines(state, "proj-beta", attempts=(1,))
+
+    line = build_receipt_from_report(
+        report, report.read_text(encoding="utf-8"), state_dir=state)
+
+    assert line["event_type"] == "report_ingested"
+    assert line["project_id"] == "proj-beta"
+    assert line["attempt"] == ATTEMPT
+    assert line["end_pending"] is True
+
+
+def test_the_attempt_follows_the_file_the_caller_read(two_attempts, tmp_path, monkeypatch):
+    """Attempt 2's report, written at 11:00, is attempt 2 even though the
+    canonical ``report_path`` for the dispatch was written at 09:00.
+
+    The converter reads the attempt-2 file and must hand ITS write time to the
+    decision; the canonical path the receipt records is a different file.
+    """
+    data_home = tmp_path / "data-home"
+    canonical = data_home / "unified_reports" / f"{DISPATCH}.md"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("canonical report, written at 09:00\n", encoding="utf-8")
+    _set_mtime(canonical, "2026-11-03T09:00:00Z")
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_home))
+
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    actual = _write_report(incoming, f"{DISPATCH}-late.md")
+    _set_mtime(actual, "2026-11-03T11:00:00Z")  # after start 2 (10:00)
+
+    result, tag = _convert_one_detailed(actual, receipts_file=str(_ledger(two_attempts)))
+
+    assert (result.status, tag) == ("appended", "appended")
+    booked = _booked(two_attempts, 2)
+    assert len(booked) == 1
+    assert booked[0]["end_pending"] is True
+    assert _booked(two_attempts, 1) == []

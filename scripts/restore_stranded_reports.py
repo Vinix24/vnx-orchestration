@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass
@@ -59,6 +60,9 @@ import report_to_receipt_converter as rc  # noqa: E402
 import append_receipt  # noqa: E402  — registers facade, exposes append_receipt_payload
 from append_receipt_internals.validation import _validate_model_present  # noqa: E402
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from report_lifecycle_mode import ReportPathRefused  # noqa: E402
+
+logger = logging.getLogger(__name__)
 
 _RESTORED_MARKER = "## Restored identity"
 _BAD_MODEL_SENTINELS = {"unknown", "none", "null", "n/a", "na", "unset", "-", ""}
@@ -98,11 +102,22 @@ class Resolution:
 
 
 @dataclass(frozen=True)
+class LifecycleRefusal:
+    """A report the lifecycle decision refused to book (never silently skipped)."""
+
+    path: Path
+    dispatch_id: str
+    code: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class ScanResult:
     total_scanned: int
     already_handled: int
     skipped_non_dispatch: int
     candidates: Tuple[Candidate, ...]
+    refused: Tuple[LifecycleRefusal, ...] = ()
 
 
 def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
@@ -118,6 +133,10 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
     gate obligation file as a side effect, and a scan (used by both --list
     and the detection half of --apply) must never mutate state — only an
     actual restoration should.
+
+    A report whose lifecycle decision refuses (``ReportPathRefused``) is
+    recorded in ``ScanResult.refused`` and logged with its dispatch id and
+    code; it is not a candidate and stays on disk for the next scan.
     """
     reports_dir = data_dir / "unified_reports"
     watermark = rc._load_watermark(state_dir / rc._WATERMARK_FILENAME)
@@ -127,6 +146,7 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
     already_handled = 0
     skipped_non_dispatch = 0
     candidates: List[Candidate] = []
+    refused: List[LifecycleRefusal] = []
 
     for path in sorted(reports_dir.glob("*.md")):
         if not path.is_file():
@@ -151,8 +171,20 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
             if receipt is not None:
                 # ADR-045 (K-8): the same routing the scan and the public
                 # builder apply, so a v3 dispatch never gets a task_complete
-                # from this third writer either.
-                receipt = rc.report_line(receipt, state_dir=state_dir)
+                # from this third writer either. ``path`` is the file this scan
+                # read — the worker's own write time.
+                receipt = rc.report_line(receipt, state_dir=state_dir, report_path=path)
+        except ReportPathRefused as exc:
+            # A refusal is a named decision, not an unreadable file: it is
+            # logged and counted, and the report stays where it is (retryable).
+            refused.append(LifecycleRefusal(
+                path=path, dispatch_id=exc.dispatch_id, code=exc.code, detail=exc.detail))
+            logger.warning(
+                "restore_stranded_reports: REFUSED (ledger lifecycle) dispatch=%s "
+                "file=%s code=%s: %s — nothing booked, report left in place",
+                exc.dispatch_id, path.name, exc.code, exc.detail,
+            )
+            continue
         except Exception:
             continue
         if receipt is None:
@@ -174,6 +206,7 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
         already_handled=already_handled,
         skipped_non_dispatch=skipped_non_dispatch,
         candidates=tuple(candidates),
+        refused=tuple(refused),
     )
 
 
@@ -361,8 +394,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"Scanned {scan.total_scanned} report file(s) in {data_dir / 'unified_reports'}: "
         f"{scan.skipped_non_dispatch} non-dispatch (skipped), "
         f"{scan.already_handled} already handled (watermarked), "
+        f"{len(scan.refused)} refused on the ledger lifecycle decision (left in place), "
         f"{len(scan.candidates)} stranded on model validation."
     )
+    for refusal in scan.refused:
+        print(
+            f"REFUSED       dispatch_id={refusal.dispatch_id} file={refusal.path.name} "
+            f"code={refusal.code}: {refusal.detail}"
+        )
 
     restorable: List[Tuple[Candidate, Resolution]] = []
     unrestorable: List[Candidate] = []
@@ -389,7 +428,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
 
     if args.list:
-        print(f"\n--list: {len(restorable)} restorable, {len(unrestorable)} unrestorable. Nothing changed.")
+        print(f"\n--list: {len(restorable)} restorable, {len(unrestorable)} unrestorable, "
+              f"{len(scan.refused)} refused. Nothing changed.")
         return 0
 
     restored = 0
@@ -409,7 +449,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print(
         f"\n--apply summary: {restored} restored, {already_restored} already restored, "
-        f"{failed} failed after a source was found, {len(unrestorable)} unrestorable (no source)."
+        f"{failed} failed after a source was found, {len(unrestorable)} unrestorable (no source), "
+        f"{len(scan.refused)} refused on the lifecycle decision (left in place)."
     )
     return 0
 

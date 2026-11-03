@@ -1481,7 +1481,9 @@ def build_receipt_from_report(
     # ``task_complete``, on any path) and raises ``ReportPathRefused`` when that
     # line cannot be established; a legacy dispatch's receipt passes through
     # untouched, byte for byte.
-    receipt = report_line(receipt, state_dir=state_dir)
+    # ``report_path`` is the file this caller read; the receipt's canonical
+    # ``report_path`` can be a different file, so its mtime is no evidence here.
+    receipt = report_line(receipt, state_dir=state_dir, report_path=report_path)
 
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)

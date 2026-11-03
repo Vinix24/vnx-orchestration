@@ -796,7 +796,8 @@ class ReportParser:
         except Exception:
             return _IDENTITY_UNRESOLVED
 
-    def _book_report_line(self, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    def _book_report_line(self, receipt: Dict[str, Any],
+                          report_path: str) -> Dict[str, Any]:
         """Book the report as the line the dispatch's lifecycle mode asks for.
 
         ADR-045 (audit-spoor-kern K-8): a report is not an end. For a v3
@@ -804,7 +805,8 @@ class ReportParser:
         payload, linked to the dispatch_finished when it is already there; a
         legacy dispatch keeps the task-shaped receipt byte for byte. The
         decision lives in report_lifecycle_mode, the same helper the converter
-        uses, so the two writers cannot drift.
+        uses, so the two writers cannot drift. ``report_path`` is the file this
+        parser read — the worker's own write time, not the canonical path.
 
         A refusal returns the ``error`` shape and writes nothing: no
         task_complete, no partial report_ingested. ``receipt_processor.sh``
@@ -814,7 +816,8 @@ class ReportParser:
         # cannot depend on the caller's environment.
         from report_lifecycle_mode import ReportPathRefused, report_line
         try:
-            return report_line(receipt, state_dir=self.state_dir)
+            return report_line(receipt, state_dir=self.state_dir,
+                               report_path=report_path)
         except ReportPathRefused as exc:
             sys.stderr.write(f"report_parser: REFUSED (ledger lifecycle) {exc}\n")
             return {
@@ -981,7 +984,7 @@ class ReportParser:
         if missing_fields:
             receipt['missing_fields'] = missing_fields
 
-        return self._book_report_line(receipt)
+        return self._book_report_line(receipt, report_path)
 
 
 def main():

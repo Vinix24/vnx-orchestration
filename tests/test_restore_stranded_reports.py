@@ -45,6 +45,7 @@ from restore_stranded_reports import (  # noqa: E402
     apply_restoration,
     build_ledger_model_index,
     find_stranded_reports,
+    main,
     resolve_identity,
 )
 
@@ -340,3 +341,69 @@ class TestApplyIsIdempotent:
         assert text_after_second == text_after_first  # byte-for-byte: no new block
         assert text_after_second.count(_RESTORED_MARKER) == 1
         assert len(_receipts(state_dir)) == 1  # no second receipt
+
+
+# ---------------------------------------------------------------------------
+# Part 6 (K-8 round 3): a lifecycle refusal is logged, counted, and left alone
+# ---------------------------------------------------------------------------
+
+class TestLifecycleRefusalIsVisible:
+    """``find_stranded_reports`` must not swallow ``ReportPathRefused``.
+
+    The report stays where it is — that is a refusal, not a failure and not a
+    silent skip — but it is logged per dispatch and counted in the summary.
+    """
+
+    def _seed_v3_starts(self, state_dir: Path, *dispatch_ids: str) -> Path:
+        """A v3 start line per dispatch, none carrying an attempt, and no row:
+        the decision refuses ``attempt_unknown`` for each of them."""
+        ledger = state_dir / "t0_receipts.ndjson"
+        ledger.write_text("".join(
+            json.dumps({
+                "timestamp": "2026-11-03T08:00:00Z",
+                "event_type": "dispatch_started",
+                "dispatch_id": dispatch_id,
+                "project_id": "proj-alpha",
+                "lifecycle_mode": "v3",
+            }) + "\n"
+            for dispatch_id in dispatch_ids
+        ), encoding="utf-8")
+        return ledger
+
+    def test_two_refusals_are_logged_counted_and_left_in_place(
+            self, data_dir, state_dir, reports_dir, caplog, capsys, monkeypatch):
+        monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+        monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+        dispatch_ids = ("20260906-refused-a", "20260906-refused-b")
+        for dispatch_id in dispatch_ids:
+            _write_stranded_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+        ledger = self._seed_v3_starts(state_dir, *dispatch_ids)
+        ledger_before = ledger.read_text(encoding="utf-8")
+        hashes_before = {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in reports_dir.glob("*.md")
+        }
+
+        with caplog.at_level("WARNING"):
+            scan = find_stranded_reports(data_dir, state_dir)
+
+        assert [refusal.dispatch_id for refusal in scan.refused] == list(dispatch_ids)
+        assert {refusal.code for refusal in scan.refused} == {"attempt_unknown"}
+        assert len(scan.candidates) == 0
+        warnings = [record for record in caplog.records if record.levelname == "WARNING"]
+        assert len(warnings) == 2
+        for dispatch_id, record in zip(dispatch_ids, warnings):
+            assert dispatch_id in record.getMessage()
+            assert "attempt_unknown" in record.getMessage()
+
+        assert main([
+            "--list", "--data-dir", str(data_dir), "--state-dir", str(state_dir),
+        ]) == 0
+        assert "2 refused" in capsys.readouterr().out
+
+        # The refusal books nothing and touches no report: both stay retryable.
+        assert ledger.read_text(encoding="utf-8") == ledger_before
+        assert {
+            p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in reports_dir.glob("*.md")
+        } == hashes_before

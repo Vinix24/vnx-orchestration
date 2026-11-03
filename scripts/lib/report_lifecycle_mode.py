@@ -23,8 +23,10 @@ builder, ``restore_stranded_reports``) and ``report_parser``.
    read) legacy, byte-identical to the pre-K-8 head.
 
 A v3 report belongs to the attempt the receipt names, else to the only started
-attempt, else to the start latest at or before the report's own write time (its
-file mtime, never the ingest time), else to the row's ``attempt_count``.
+attempt, else to the start latest at or before the report's own write time (the
+mtime of the file the caller read, never the ingest time), else to the row's
+``attempt_count``. A tenant is resolved once, before the attempt: two tenants on
+one dispatch's start lines refuse ``project_ambiguous``.
 
 Fail direction: when the mode cannot be decided, or a v3 dispatch has no usable
 attempt or end link, :func:`report_line` raises :class:`ReportPathRefused` with
@@ -255,6 +257,27 @@ def _resolve_attempt(did: str, starts: List[Dict[str, Any]], row: _Row,
     return chosen[1]
 
 
+def _tenant(did: str, project_id: Optional[str],
+            starts: List[Dict[str, Any]]) -> Optional[str]:
+    """The one tenant: the caller's, else the only one the start lines name.
+
+    Two different tenants on one dispatch's start lines are refused
+    (``project_ambiguous``): picking either would attribute the report — and
+    its end link — to a tenant that may belong to another store's dispatch.
+    The tenant is fixed here, before any attempt is chosen.
+    """
+    if project_id:
+        return project_id
+    found = {str(line.get("project_id") or "").strip() for line in starts}
+    found.discard("")
+    if len(found) > 1:
+        raise ReportPathRefused(did, "project_ambiguous",
+            "the dispatch_started lines of this dispatch name more than one tenant "
+            f"({', '.join(sorted(found))}), so the report cannot be attributed to one "
+            "of them")
+    return next(iter(found), None)
+
+
 def _require_readable_mode(did: str, records: Optional[List[Dict[str, Any]]],
                            ledger_error: Optional[str], row: _Row) -> None:
     """Refuse when either mode source is unreadable: either can hide a v3 start."""
@@ -300,11 +323,7 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
                       f"this dispatch is v3, but its ledger could not be read "
                       f"({ledger_error}), so neither its attempt nor its end link "
                       "can be established")
-    resolved_project = (project_id
-                        or next((str(line.get("project_id") or "").strip()
-                                 for line in reversed(starts)
-                                 if str(line.get("project_id") or "").strip()), "")
-                        or None)
+    resolved_project = _tenant(did, project_id, starts)
     if not resolved_project:
         raise ReportPathRefused(did, "project_unknown",
                       "this dispatch is v3, but no tenant could be resolved for the "
@@ -323,20 +342,25 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
                          end_outcome_id=outcome_id)
 
 
-def _report_time(receipt: Mapping[str, Any]) -> Optional[str]:
+def _report_time(receipt: Mapping[str, Any], report_path: object = None) -> Optional[str]:
     """When the worker WROTE the report (its file's mtime), never the ingest time.
 
-    A scan can run long after the worker finished, so "now" says nothing about the
-    attempt; a missing path yields ``None`` (a several-attempt decision refuses).
+    ``report_path`` is the file the CALLER actually read; the receipt's own
+    ``report_path`` (the canonical form the converter resolves, which can be a
+    different file) is only the fallback when a caller passes nothing. A scan can
+    run long after the worker finished, so "now" says nothing about the attempt; a
+    missing path yields ``None`` (a several-attempt decision refuses).
     """
+    path = report_path if report_path is not None else receipt.get("report_path")
     try:
-        return datetime.fromtimestamp(os.stat(str(receipt.get("report_path") or "")).st_mtime,
+        return datetime.fromtimestamp(os.stat(str(path or "")).st_mtime,
                                       tz=timezone.utc).isoformat()
     except OSError:
         return None
 
 
-def report_line(receipt: Dict[str, Any], *, state_dir: object) -> Dict[str, Any]:
+def report_line(receipt: Dict[str, Any], *, state_dir: object,
+                report_path: object = None) -> Dict[str, Any]:
     """The line to book: unchanged for legacy, one ``report_ingested`` for v3.
 
     The v3 line keeps every payload field the task-shaped receipt carries (model,
@@ -345,7 +369,8 @@ def report_line(receipt: Dict[str, Any], *, state_dir: object) -> Dict[str, Any]
     ``end_pending``, and is never rewritten later (ADR-045 §2): a second
     delivery dedups on the outcome identity. The receipt's own ``attempt`` (when
     it carries a usable one) decides which attempt the line belongs to; the
-    report's write time only breaks a tie between several started attempts.
+    report's write time — the mtime of ``report_path``, the file the caller
+    actually read — only breaks a tie between several started attempts.
     Raises :class:`ReportPathRefused` when the path cannot be decided; the
     caller books nothing and stays retryable.
     """
@@ -354,7 +379,7 @@ def report_line(receipt: Dict[str, Any], *, state_dir: object) -> Dict[str, Any]
                   or resolve_project_id(state_dir))
     path = decide(project_id=project_id, dispatch_id=dispatch_id, state_dir=state_dir,
                   attempt=_positive_int(receipt.get("attempt")),
-                  report_time=_report_time(receipt))
+                  report_time=_report_time(receipt, report_path))
     if not path.is_v3:
         return receipt
     line = dict(receipt)
