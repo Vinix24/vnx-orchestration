@@ -677,7 +677,7 @@ class TestKimiTimeout:
         monkeypatch.setenv("VNX_DREAM_KIMI_TIMEOUT", "42")
         captured = {}
 
-        def _capture_timeout(patterns, project_id, timeout=180.0):
+        def _capture_timeout(patterns, project_id, timeout=180.0, data_root=None):
             captured["timeout"] = timeout
             return _FAKE_CONSOLIDATION
 
@@ -721,7 +721,7 @@ class TestEntryPrint:
         def _record_print(*args, **kwargs):
             call_order.append("print")
 
-        def _fake_kimi(patterns, project_id, timeout=180.0):
+        def _fake_kimi(patterns, project_id, timeout=180.0, data_root=None):
             call_order.append("kimi")
             return _FAKE_CONSOLIDATION
 

@@ -172,9 +172,15 @@ def test_analyzer_argv_comes_from_the_shared_builder(lane, monkeypatch):
     run = MagicMock(return_value=MagicMock(returncode=0, stdout=json.dumps({"result": "{}"}), stderr=""))
     monkeypatch.setattr(da_module.subprocess, "run", run)
     DeepAnalyzer._try_deepseek_harness("prompt")
-    argv = run.call_args.args[0]
-    assert argv == build_harness_argv("claude", da_module.DEEPSEEK_HARNESS_MODEL,
-                                      output_format="json", print_flags=["--max-turns", "1"])
+    # The lane's own launch, not the last call: booking its ledger line resolves the
+    # project (a git call) after the child has run.
+    argv = next(call.args[0] for call in run.call_args_list
+                if call.args and os.path.basename(str(call.args[0][0])) == "claude")
+    # K4b: the lane starts the child under a fresh session id it generated, so the
+    # transcript of the call is findable for its cost-ledger line.
+    session_id = argv[argv.index("--session-id") + 1]
+    assert argv == build_harness_argv("claude", da_module.DEEPSEEK_HARNESS_MODEL, output_format="json",
+                                      print_flags=["--max-turns", "1"], session_id=session_id)
     assert argv[-len(build_harness_cli_args()):] == build_harness_cli_args()
     assert argv[argv.index("--model") + 1] == "deepseek-flash"
 

@@ -14,13 +14,21 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+for _import_dir in (str(SCRIPT_DIR), str(SCRIPT_DIR / "lib")):
+    if _import_dir not in sys.path:
+        sys.path.insert(0, _import_dir)
 
 try:
     from lib.vnx_paths import ensure_env
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
+
+from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
+
+# ADR-045 K-2c: a cost line is a completion of either shape. The excluded
+# ``subprocess_completion`` is the lane line of a dispatch that also writes a
+# carrying completion line (64 of 114 ids overlap): both would book tokens twice.
+COST_LINE_EVENT_TYPES = COMPLETION_EVENT_TYPES - {"subprocess_completion"}
 
 
 @dataclass(frozen=True)
@@ -440,7 +448,7 @@ def build_metrics(receipts: List[Dict[str, Any]], invalid_lines: int, state_dir:
     for receipt in receipts:
         event_type = str(receipt.get("event_type") or receipt.get("event") or "unknown")
         event_counts[event_type] += 1
-        if event_type != "task_complete":
+        if event_type not in COST_LINE_EVENT_TYPES:
             continue
 
         totals["events_analyzed"] += 1

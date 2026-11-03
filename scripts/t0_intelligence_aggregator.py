@@ -27,6 +27,22 @@ from typing import Dict, List, Any
 from collections import defaultdict, deque, Counter
 import hashlib
 
+def _count_completions(events: List[Dict[str, Any]]) -> int:
+    """How many dispatches ``events`` complete, in either ledger shape (K-2c).
+
+    ``dispatch_finished`` in a v3 ledger, ``task_complete`` in a legacy one; a
+    start line and a report line are not a completion. One dispatch attempt
+    that leaves both a ``task_complete`` and a ``subprocess_completion`` line
+    counts once (``completion_reading.count_completions`` keys it by
+    ``(dispatch_id, attempt)``): the legacy pair must read the same number it
+    read before. scripts/lib joins sys.path in
+    ``T0IntelligenceAggregator.__init__``, hence the import here.
+    """
+    from completion_reading import count_completions
+
+    return count_completions(events)
+
+
 class T0IntelligenceAggregator:
     """Core hub aggregating system state for T0 orchestration decisions"""
 
@@ -340,7 +356,7 @@ class T0IntelligenceAggregator:
             "critical_issues": critical_issues[:5],  # Top 5 critical issues
             "terminals_active": sum(1 for t, s in terminal_status.items() if s['status'] not in ['idle', 'offline']),
             "terminals_idle": sum(1 for t, s in terminal_status.items() if s['status'] == 'idle'),
-            "tasks_completed_1hr": sum(1 for e in recent if e.get('event_type') == 'task_complete'),
+            "tasks_completed_1hr": _count_completions(recent),
             "tasks_active": sum(1 for t, s in terminal_status.items() if s['status'] in ['working', 'in_progress'])
         }
 

@@ -9,7 +9,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+# scripts/lib on the path: the feed reads a completion via the shared semantics.
+_SCRIPTS_LIB = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
+if _SCRIPTS_LIB not in sys.path:
+    sys.path.insert(0, _SCRIPTS_LIB)
+
+from completion_reading import completion_outcome, is_completion  # noqa: E402
 
 
 def _sd():
@@ -69,10 +78,14 @@ def _parse_receipts_events(limit: int = 50) -> list[dict]:
             pr_id = record["type"].split()[0]
 
         mapped_type = event_type
-        if event_type == "task_complete":
-            if status == "success" and gate:
+        if is_completion(record):
+            # ADR-045 K-2c: a completion is either shape — a legacy
+            # task_complete or a v3 dispatch_finished — and its outcome is
+            # classify_event_outcome's answer, not a status literal.
+            outcome = completion_outcome(record)
+            if outcome == "success" and gate:
                 mapped_type = "gate_passed"
-            elif status in ("failure", "failed") and gate:
+            elif outcome == "failure" and gate:
                 mapped_type = "gate_failed"
             else:
                 mapped_type = "receipt_complete"
