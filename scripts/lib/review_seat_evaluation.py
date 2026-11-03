@@ -88,7 +88,9 @@ side needs (``closure_verifier``, ``gate_status``, ``review_seats``,
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -106,10 +108,28 @@ SEAT_RULE = "every_seat_distinct_reviewer"
 #: for the class of the merged head. A merge record under :data:`SEAT_RULE`
 #: keeps being judged by that older rule.
 RISK_SEAT_RULE = "first_seat_or_every_seat_by_risk"
+#: The rule of the signal seat (track ``tweede-stoel-op-signaal``, PR 2): after
+#: a clean PASS of seat 1, seat 2 is asked only when a signal fires; an
+#: ``UNKNOWN`` field, no outcome or a FAIL requires every seat. PR 2 computes it
+#: in shadow only (``pr_merge`` records the outcome, decides by RISK_SEAT_RULE).
+SIGNAL_SEAT_RULE = "first_seat_or_every_seat_on_signal"
 
 #: The classes at which only the first seat of the stack is required. Every
 #: other value, an unknown one or none at all included, requires every seat.
 _FIRST_SEAT_CLASSES = frozenset({"low", "medium"})
+
+#: The value every contract field of :class:`SeatSignalInput` carries when its
+#: source could not be read. It is never read as zero, ``False`` or "no signal".
+UNKNOWN = "unknown"
+
+#: The fixed names of the signals that ask the second seat (plan, Approach 1-5).
+SIGNAL_NAMES = ("real_warning", "security_path", "schema", "irreversible", "sample")
+
+_KNOWN_CLASSES = frozenset({"low", "medium", "high", "critical"})
+_PASS = "pass"
+_FAIL = "fail"
+_SAMPLE_MODULUS = 5
+_SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
 SOURCE_RECORDED = "config"
 SOURCE_FRESH = "config_fresh"
@@ -277,6 +297,143 @@ def seats_for_risk(stack: Sequence[str], risk: Any) -> Tuple[str, ...]:
     value = getattr(risk, "risk_class", risk)
     known = value.strip().lower() if isinstance(value, str) else ""
     return named[:1] if known in _FIRST_SEAT_CLASSES else named
+
+
+@dataclass(frozen=True)
+class SeatSignalInput:
+    """The one typed input of :func:`seats_for_signals` (plan, Invoercontract).
+
+    ``stack`` is the project's review stack in order. Every other field is a
+    row of the input contract and carries :data:`UNKNOWN` when its source could
+    not be read; a missing count is ``None`` and a missing boolean ``None``,
+    never zero or ``False``.
+
+    ``seat1_takeover_from`` is ``""`` for a seat 1 filled by its own reviewer,
+    the route or gate a takeover walked from when it was filled through another
+    reviewer, and :data:`UNKNOWN` when that cannot be told. ``risk_paths`` are
+    the ``(path, category)`` pairs the risk reading decided on; they are only
+    trusted when ``risk_class`` is a known class. ``head_sha`` is the exact
+    40-character head the outcome is bound to, and the sha the sample is drawn
+    from; a sha that is not one is :data:`UNKNOWN`.
+    """
+
+    stack: Tuple[str, ...] = ()
+    seat1_outcome: str = UNKNOWN
+    seat1_reviewer: str = UNKNOWN
+    seat1_takeover_from: str = UNKNOWN
+    real_warning_count: Optional[int] = None
+    prescan_count: Optional[int] = None
+    risk_class: str = UNKNOWN
+    risk_paths: Tuple[Tuple[str, str], ...] = ()
+    irreversible: Optional[bool] = None
+    head_sha: str = UNKNOWN
+
+    def unknown_fields(self) -> Tuple[str, ...]:
+        """The contract fields whose value is :data:`UNKNOWN`, by name, in contract order."""
+        checks = (
+            ("seat1_outcome", self.seat1_outcome in (_PASS, _FAIL)),
+            ("seat1_reviewer", bool(self.seat1_reviewer) and self.seat1_reviewer != UNKNOWN),
+            ("seat1_takeover_from", self.seat1_takeover_from != UNKNOWN),
+            ("real_warning_count", _is_count(self.real_warning_count)),
+            ("prescan_count", _is_count(self.prescan_count)),
+            ("risk_class", _known_class(self.risk_class)),
+            ("irreversible", isinstance(self.irreversible, bool)),
+            ("head_sha", _full_sha(self.head_sha)),
+        )
+        return tuple(name for name, known in checks if not known)
+
+
+@dataclass(frozen=True)
+class SignalSeatDecision:
+    """The output of :func:`seats_for_signals`: required seats, rule name, signals, unknown fields."""
+
+    rule: str
+    seats: Tuple[str, ...]
+    signals: Tuple[str, ...]
+    unknown: Tuple[str, ...]
+
+    def to_record(self) -> Dict[str, Any]:
+        """The shape the door's ``shadow_seat_rule`` carries."""
+        return {
+            "rule": self.rule, "seats": list(self.seats),
+            "signals": list(self.signals), "unknown": list(self.unknown),
+        }
+
+
+def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
+    """The seats a review needs on this head under the signal rule (the one copy of that rule).
+
+    Seat 1 only after a clean PASS of seat 1 on the exact head and no signal;
+    every seat of the stack when a signal fired. Fail-closed: every seat when
+    any contract field is :data:`UNKNOWN`, when seat 1 gave no outcome or a
+    FAIL, when seat 1 was filled through a takeover, or when the risk class is
+    unknown. A ``gate-merge`` path on its own is not a signal. Pure: no I/O here
+    — the caller reads the store and hands the result in.
+    """
+    stack = _seat_names(list(signal_input.stack))
+    signals = _fired_signals(signal_input)
+    unknown = signal_input.unknown_fields()
+    fail_closed = (
+        bool(unknown)
+        or signal_input.seat1_outcome != _PASS
+        or bool(signal_input.seat1_takeover_from)
+    )
+    seats = stack if fail_closed or signals else stack[:1]
+    return SignalSeatDecision(SIGNAL_SEAT_RULE, seats, signals, unknown)
+
+
+def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
+    """The signals that fired from the fields that are known, in :data:`SIGNAL_NAMES` order."""
+    fired: List[str] = []
+    if _is_count(signal_input.real_warning_count) and signal_input.real_warning_count > 0:
+        fired.append("real_warning")
+    if _known_class(signal_input.risk_class):
+        if any(_is_security_path(path, category) for path, category in signal_input.risk_paths):
+            fired.append("security_path")
+        if any(_is_category(category, "schema") for _path, category in signal_input.risk_paths):
+            fired.append("schema")
+    if signal_input.irreversible is True:
+        fired.append("irreversible")
+    if _sample_fires(signal_input.head_sha):
+        fired.append("sample")
+    return tuple(fired)
+
+
+def _is_security_path(path: Any, category: Any) -> bool:
+    """A security path by the risk category or by ``smart_router.security_path_kind``."""
+    if _is_category(category, "security"):
+        return True
+    text = str(path or "").strip()
+    if not text:
+        return False
+    import smart_router
+
+    return smart_router.security_path_kind(text) is not None
+
+
+def _is_category(category: Any, wanted: str) -> bool:
+    return str(category or "").strip().lower() == wanted
+
+
+def _sample_fires(head_sha: Any) -> bool:
+    """``int(sha256(head_sha), 16) % 5 == 0`` on the full 40-character head sha; ``False`` when it is not one."""
+    sha = str(head_sha or "").strip().lower()
+    if not _full_sha(sha):
+        return False
+    return int(hashlib.sha256(sha.encode("ascii")).hexdigest(), 16) % _SAMPLE_MODULUS == 0
+
+
+def _full_sha(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(_SHA40.fullmatch(text))
+
+
+def _known_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _KNOWN_CLASSES
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _seat_names(raw: Any) -> Tuple[str, ...]:
