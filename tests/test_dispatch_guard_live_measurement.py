@@ -70,7 +70,6 @@ def _store_with_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
     # gh, the DB migrations and the terminals are not under test.
     monkeypatch.setattr(bts, "_build_pr_queue_section", lambda _sd: {"open_prs": []})
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
-    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
     real_health = bts._build_system_health
 
     def _isolated_health(sd, db_initialized, **kwargs):

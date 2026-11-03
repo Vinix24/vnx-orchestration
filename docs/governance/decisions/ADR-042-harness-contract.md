@@ -72,6 +72,10 @@ Bouwt besluit 6 uit op het punt dat daar nog open stond ("de pool krijgt in golf
 - **De eigenaar van de lease-vernieuwing is de pool-worker.** De poolmanager schrijft de rij direct na de spawn (`PoolStateRepository.add_or_refresh_pool_lease`); daarna houdt de worker hem levend: `pool_worker_runner._PoolLease` ververst `last_heartbeat_at` zolang hij loopt en geeft de rij vrij aan zijn einde. `subprocess_dispatch._pool_heartbeat_loop` blijft voorlopig staan als vernieuwer van de rollback-route; T-G1 haalt hem weg zodra de test op deze route op main groen is.
 - **De lezers van `dispatches/active/` blijven ongewijzigd.** Dit amendement verandert geen lezer; die afstemming is T-G5, na K-7 van `audit-spoor-kern`.
 
+### Amendement 2026-10-28 — een receipt draagt geen `terminal_snapshot` meer (T-B2, dispatch `dlv-9cae7e00a9c2`)
+
+Bouwt de "Golf 2"-regel over het `terminals`-blok uit, met de beslissing die de plan-gate van 27-10 als punt 4 eiste: `terminal_snapshot` verdwijnt uit het receipt en wordt **niet** vervangen door een kopie van `live_work`. De identiteit van een receipt komt uit de dispatch-rij (audit-spoor groep 2), en "wat loopt er" is `live_work` in `t0_state.json`, op één plek gelezen in plaats van op elke receiptregel gekopieerd. Daarmee gaan in dezelfde golf `_enrich_terminal_snapshot` uit `append_receipt_internals/enrichment.py`, `is_headless_t0()` (de altijd-onware voorwaarde achter `VNX_ADAPTER_T0`), het `terminals`-blok van `t0_state.json` met zijn schrijver (`build_t0_state._build_terminals`) en zijn lezers, en de re-export van `collect_terminal_snapshot` uit `append_receipt.py`; `terminal_snapshot.py` zelf blijft, want `canonical_state_views.build_terminal_snapshot` en `terminal_state.json` zijn buiten deze taak.
+
 ## Gevolgen
 
 ### Golf 1
