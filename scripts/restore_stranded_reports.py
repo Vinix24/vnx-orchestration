@@ -369,6 +369,22 @@ def apply_restoration(
     return True, f"receipt booked (status={result.status}), restored from {resolution.source_kind}: {resolution.source_detail}"
 
 
+def _print_scan(scan: ScanResult, data_dir: Path) -> None:
+    """The scan headline and one line per lifecycle refusal (counted, not hidden)."""
+    print(
+        f"Scanned {scan.total_scanned} report file(s) in {data_dir / 'unified_reports'}: "
+        f"{scan.skipped_non_dispatch} non-dispatch (skipped), "
+        f"{scan.already_handled} already handled (watermarked), "
+        f"{len(scan.refused)} refused on the ledger lifecycle decision (left in place), "
+        f"{len(scan.candidates)} stranded on model validation."
+    )
+    for refusal in scan.refused:
+        print(
+            f"REFUSED       dispatch_id={refusal.dispatch_id} file={refusal.path.name} "
+            f"code={refusal.code}: {refusal.detail}"
+        )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--state-dir", default=None, help="Override $VNX_STATE_DIR")
@@ -390,18 +406,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     scan = find_stranded_reports(data_dir, state_dir)
     ledger_index = build_ledger_model_index(state_dir)
 
-    print(
-        f"Scanned {scan.total_scanned} report file(s) in {data_dir / 'unified_reports'}: "
-        f"{scan.skipped_non_dispatch} non-dispatch (skipped), "
-        f"{scan.already_handled} already handled (watermarked), "
-        f"{len(scan.refused)} refused on the ledger lifecycle decision (left in place), "
-        f"{len(scan.candidates)} stranded on model validation."
-    )
-    for refusal in scan.refused:
-        print(
-            f"REFUSED       dispatch_id={refusal.dispatch_id} file={refusal.path.name} "
-            f"code={refusal.code}: {refusal.detail}"
-        )
+    _print_scan(scan, data_dir)
 
     restorable: List[Tuple[Candidate, Resolution]] = []
     unrestorable: List[Candidate] = []
