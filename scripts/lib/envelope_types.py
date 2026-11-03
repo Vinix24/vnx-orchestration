@@ -121,3 +121,9 @@ class _AdapterResult:
     # down, Popen failed). GOVERN books such an attempt as a zero cost-ledger
     # line with unavailable:spawn_refused. None when the worker ran or may have.
     spawn_refused: Optional[str] = None
+    # OI-2519: the status GOVERN actually decided (``_effective_status`` in
+    # envelope_govern._govern), published as a separate field so the lane exit
+    # can publish the governed end line WITHOUT rewriting ``status`` above
+    # (OI-1179 forbids that). Remains None until GOVERN has run; a worker
+    # success whose report failed the body contract reads "contract_invalid".
+    governed_status: Optional[str] = None

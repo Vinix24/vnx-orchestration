@@ -1422,6 +1422,62 @@
       "symbol": "RECEIPT_MISSING_STATUS"
     },
     {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 53,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 233,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_prepare"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 234,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_record_integrity"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 235,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 236,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_enforce_push_pr"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 261,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_headless_plan"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 268,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_k5b_governed_end_state.py",
+      "line": 276,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "ProviderAdapter"
+    },
+    {
       "file": "tests/test_kimi_model_resolver.py",
       "line": 418,
       "mechanism": "direct-call",

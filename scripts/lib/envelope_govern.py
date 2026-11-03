@@ -422,7 +422,10 @@ def _govern(
                     "message": _violation_msg,
                 })
                 if adapter_result.status == "success":
-                    _effective_status = CONTRACT_INVALID_STATUS
+                    # OI-2519: publish the governed verdict as its own field
+                    # (``status`` above is never rewritten, OI-1179) so the lane
+                    # exit can publish the end line governance decided.
+                    _effective_status = adapter_result.governed_status = CONTRACT_INVALID_STATUS
         except OSError:
             pass  # can't read report file — skip validation, don't break receipt
 

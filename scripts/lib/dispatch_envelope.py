@@ -99,6 +99,9 @@ from dispatch_exit import (  # noqa: E402
     finalize_lane_exit,
     now_utc,
 )
+# OI-2519: the one receipt-status value GOVERN stamps when the report body fails
+# the contract. The lane exit maps it onto the end line; never a second literal.
+from report_body_contract import CONTRACT_INVALID_STATUS  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -587,6 +590,11 @@ class _LaneExit:
         self.spawn_marks: Dict[str, str] = {} if spawn_marks is None else spawn_marks
         self.result: "Optional[_AdapterResult]" = None
         self.status, self.reason, self._closed = None, None, False
+        # OI-2519: the status the END LINE carries. Equal to ``status`` except
+        # when GOVERN rejected the report: the caller-visible EnvelopeResult keeps
+        # the ``_envelope_outcome`` status while the frozen end line (§2/§5) says
+        # what governance decided.
+        self.exit_status: "Optional[str]" = None
         self.returncode, self.error = 1, None
 
     def govern(self, spec, result, start, end, *, phantom_diff=None, integrity=None,
@@ -603,6 +611,14 @@ class _LaneExit:
             raise
         self.status, self.returncode, self.error = _envelope_outcome(
             result.status, receipt_path, result.error)
+        # OI-2519: the end line follows the GOVERNED verdict. When the work
+        # succeeded (and only then) but governance rejected the report body, the
+        # attempt is `contract_invalid`, never `completed`; a non-success outcome
+        # of `_envelope_outcome` (failure/timeout/receipt_missing) wins unchanged.
+        self.exit_status = self.status
+        if (self.status == "success"
+                and getattr(result, "governed_status", None) == CONTRACT_INVALID_STATUS):
+            self.exit_status = CONTRACT_INVALID_STATUS
         self.close()
         return EnvelopeResult(
             status=self.status, returncode=self.returncode, report_path=report_path,
@@ -617,7 +633,7 @@ class _LaneExit:
         try:
             finalize_lane_exit(
                 self.handover, state_dir=self.state_dir, result=self.result,
-                status=self.status or "failure", reason=self.reason,
+                status=self.exit_status or self.status or "failure", reason=self.reason,
                 wt_path=self.wt_path, spawned_at=self.spawn_marks.get("spawned_at"))
         finally:
             from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
