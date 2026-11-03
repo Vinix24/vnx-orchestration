@@ -57,6 +57,7 @@ for _p in (_SCRIPT_DIR, _LIB_DIR):
         sys.path.insert(0, str(_p))
 
 import report_to_receipt_converter as rc  # noqa: E402
+from report_lifecycle_mode import ReportPathRefused  # noqa: E402
 import append_receipt  # noqa: E402  — registers facade, exposes append_receipt_payload
 from append_receipt_internals.validation import _validate_model_present  # noqa: E402
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
@@ -332,7 +333,12 @@ def apply_restoration(
     # the function the converter itself would call to book this report for
     # real; the core-only builder used for scanning deliberately skips the
     # PR-link side effect, which is appropriate for detection but not here.
-    receipt = rc.build_receipt_from_report(candidate.path, original_text, state_dir=state_dir)
+    try:
+        receipt = rc.build_receipt_from_report(candidate.path, original_text, state_dir=state_dir)
+    except ReportPathRefused as exc:
+        # ADR-045 (K-8b rule 7): the lifecycle decision refused the line. Book
+        # nothing and leave the report untouched; the message names the code.
+        return False, f"{exc.code}: {exc.detail}"
     if receipt is None:
         return False, "dispatch_id no longer resolvable — report changed since scan"
 

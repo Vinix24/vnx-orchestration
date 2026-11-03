@@ -2,18 +2,20 @@
 
 Legacy keeps the report-derived receipt byte for byte; v3 books one
 ``report_ingested`` that claims no outcome (ADR-045 §2), while the
-``dispatch_finished`` is the end. Nothing calls this module yet (K-8b wires the
-writers, K-8c the restore).
+``dispatch_finished`` is the end. Nothing calls it yet (K-8b wires the writers).
 
 The decision, fail-closed at every gap: v3 when ONE READABLE source says so (a
 this-dispatch ``dispatch_started`` with ``lifecycle_mode: v3``, or the row's
 ``metadata_json.lifecycle_mode``); otherwise EITHER unreadable source (ledger or
 row, an unaddressable tenant included) refuses ``lifecycle_mode_undecidable``;
 otherwise legacy (an absent DB file or row counts as read). The tenant is fixed
-before the row is read; the attempt is the receipt's own (with its own start
-line), else the only started one, else the latest at or before the caller's
-write time, else the row's ``attempt_count``; the end link is only an exact-key
-``dispatch_finished``, and no such line means ``end_pending``.
+before the row is read — the caller's, else the start lines' one, else the
+door's own ``project_root.resolve_project_id()`` (OI-2520, reused not copied);
+one tenant finding no v3 evidence while ANOTHER tenant holds it for the same
+dispatch refuses ``project_mismatch`` (OI-2515). The attempt is the receipt's
+own (with its own start line), else the only started one, else the latest at or
+before the write time, else the row's ``attempt_count``; the end link is only an
+exact-key ``dispatch_finished``; no such line means ``end_pending``.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ import logging
 import os
 import sqlite3
 from collections import namedtuple
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +33,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from coordination_db import db_path_from_state_dir
 from dispatch_start import MODE_LEGACY, MODE_V3
+from project_root import resolve_project_id
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE, REPORT_INGESTED_EVENT_TYPE
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -69,7 +73,6 @@ _Row = namedtuple("_Row", ("status", "metadata", "attempt", "detail"), defaults=
 def append_destination_state_dir() -> Path:
     """The destination the receipt APPEND layer resolves, env-first; reused, not copied."""
     from append_receipt_internals.idempotency import _resolve_state_dir_env_first  # noqa: PLC0415
-
     return _resolve_state_dir_env_first()
 
 
@@ -96,9 +99,7 @@ def _read_ledger(state_dir: Path) -> Tuple[Optional[List[Dict[str, Any]]], Optio
     except OSError as exc:
         return None, f"cannot read {path}: {exc}"
     records: List[Dict[str, Any]] = []
-    for raw in text.splitlines():
-        if not raw.strip():
-            continue
+    for raw in text.splitlines():  # a blank line is not JSON, so the loop skips it below
         try:
             record = json.loads(raw)
         except json.JSONDecodeError:
@@ -106,6 +107,23 @@ def _read_ledger(state_dir: Path) -> Tuple[Optional[List[Dict[str, Any]]], Optio
         if isinstance(record, dict):
             records.append(record)
     return records, None
+
+
+def _query_rows(db_path: Path, sql: str, params: tuple) -> List[sqlite3.Row]:
+    """Read-only rows from the store, one connection; the caller turns a raise into a refusal."""
+    with closing(sqlite3.connect(str(db_path), timeout=5.0)) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(sql, params).fetchall()
+
+
+def _parse_metadata(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
+    """The row's metadata OBJECT, or ``(None, reason)`` when it is not one."""
+    try:
+        metadata = json.loads(raw or "{}")
+    except (TypeError, ValueError) as exc:
+        return None, f"metadata_json is not JSON: {exc}"
+    return ((metadata, "") if isinstance(metadata, dict) else
+            (None, f"metadata_json is {type(metadata).__name__}, not an object"))
 
 
 def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "_Row":
@@ -116,24 +134,49 @@ def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "
     if not project_id:
         return _Row(ROW_UNREADABLE, detail="the tenant of the store could not be resolved")
     try:
-        conn = sqlite3.connect(str(db_path), timeout=5.0)
-        try:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute("SELECT metadata_json, attempt_count FROM dispatches "
-                               "WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id)).fetchone()
-        finally:
-            conn.close()
+        rows = _query_rows(db_path, "SELECT metadata_json, attempt_count FROM dispatches "
+                           "WHERE dispatch_id = ? AND project_id = ?", (dispatch_id, project_id))
     except Exception as exc:  # vnx-silent-except: the caller turns it into a refusal or a no-v3 answer
         return _Row(ROW_UNREADABLE, detail=f"cannot read {db_path}: {exc}")
-    if row is None:
+    if not rows:
         return _Row(ROW_ABSENT, detail="no row for this (project_id, dispatch_id)")
-    try:
-        metadata = json.loads(row["metadata_json"] or "{}")
-    except (TypeError, ValueError) as exc:
-        return _Row(ROW_UNREADABLE, detail=f"metadata_json is not JSON: {exc}")
-    if not isinstance(metadata, dict):
-        return _Row(ROW_UNREADABLE, detail=f"metadata_json is {type(metadata).__name__}, not an object")
-    return _Row(ROW_STORED, metadata=metadata, attempt=_positive_int(row["attempt_count"]))
+    metadata, reason = _parse_metadata(rows[0]["metadata_json"])
+    if metadata is None:
+        return _Row(ROW_UNREADABLE, detail=reason)
+    return _Row(ROW_STORED, metadata=metadata, attempt=_positive_int(rows[0]["attempt_count"]))
+
+
+def _other_tenant_v3(state_dir: Path, tenant: Optional[str], dispatch_id: str,
+                     starts: List[Dict[str, Any]]) -> List[str]:
+    """Tenants other than *tenant* that hold v3 evidence of *dispatch_id* (OI-2515).
+
+    The dispatch's own start lines are in hand; the store is read once, read-only,
+    and the tenant filter is here (``project_id != ?`` in SQL would drop a NULL
+    row). A row that cannot be parsed refuses: it could hide the marker. A row
+    that names no tenant names no OTHER tenant.
+    """
+    found = {str(line.get("project_id") or "").strip() for line in starts
+             if str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
+    db_path = Path(db_path_from_state_dir(state_dir))
+    if db_path.is_file():
+        try:
+            rows = _query_rows(db_path, "SELECT project_id, metadata_json FROM dispatches "
+                               "WHERE dispatch_id = ?", (dispatch_id,))
+        except Exception as exc:  # vnx-silent-except: an unreadable store cannot clear the mismatch, so it refuses
+            raise ReportPathRefused(dispatch_id, "lifecycle_mode_undecidable",
+                f"cannot look for this dispatch under another tenant: {exc}") from exc
+        for row in rows:
+            other = str(row["project_id"] or "").strip()
+            if not other or other == tenant:
+                continue
+            metadata, reason = _parse_metadata(row["metadata_json"])
+            if metadata is None:
+                raise ReportPathRefused(dispatch_id, "lifecycle_mode_undecidable",
+                    f"the row of tenant {other!r} for this dispatch cannot be read: {reason}")
+            if str(metadata.get("lifecycle_mode") or "").strip() == MODE_V3:
+                found.add(other)
+    found -= {"", tenant or ""}
+    return sorted(found)
 
 
 def _for_tenant(record: Mapping[str, Any], project_id: Optional[str]) -> bool:
@@ -144,15 +187,23 @@ def _for_tenant(record: Mapping[str, Any], project_id: Optional[str]) -> bool:
 
 def _resolve_tenant(dispatch_id: str, project_id: Optional[str],
                     starts: List[Dict[str, Any]]) -> Optional[str]:
-    """The given tenant, else the only one the start lines name; two refuse (finding 3)."""
+    """The given tenant, else the only one the start lines name, else the door's resolver.
+
+    Two tenants refuse; an unresolvable tenant stays unresolved, so the
+    unreadable-row refusal applies (finding 3, rule 1).
+    """
     if project_id:
         return project_id
-    found = {str(line.get("project_id") or "").strip() for line in starts}
-    found.discard("")
+    found = {str(line.get("project_id") or "").strip() for line in starts} - {""}
     if len(found) > 1:
         raise ReportPathRefused(dispatch_id, "project_ambiguous",
             f"the dispatch_started lines name more than one tenant ({', '.join(sorted(found))})")
-    return next(iter(found), None)
+    if found:
+        return next(iter(found))
+    try:
+        return str(resolve_project_id()).strip() or None
+    except Exception:  # vnx-silent-except: an unresolvable tenant is not legacy; the row read refuses it
+        return None
 
 
 def _to_utc(value: Any) -> Optional[datetime]:
@@ -241,6 +292,10 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
             row_state = row.status + (f" ({row.detail})" if row.detail else "")
             raise ReportPathRefused(did, "lifecycle_mode_undecidable",
                 f"one lifecycle source is unreadable (ledger: {ledger_state}; row: {row_state})")
+        elsewhere = _other_tenant_v3(state_path, tenant, did, starts_any)
+        if elsewhere:
+            raise ReportPathRefused(did, "project_mismatch", f"this dispatch is v3 under "
+                f"{', '.join(repr(t) for t in elsewhere)}, not {tenant or 'unresolved'!r}")
         return LifecyclePath(MODE_LEGACY, project_id=tenant)
     # An unreadable ledger cannot be papered over with end_pending: that claims "not ended"
     # without evidence of the attempt or of a missing end.

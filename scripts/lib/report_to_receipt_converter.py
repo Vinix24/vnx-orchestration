@@ -45,6 +45,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ADR-045 (K-8b): one decision, in report_lifecycle_mode. Imported as a MODULE so
+# `report_line` is not rebound here for other writers to reuse.
+import report_lifecycle_mode
+from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 # Canonical receipt status vocabulary (single generated source). The converter
 # no longer carries its own hand-copied terminal-status sets; it resolves every
@@ -657,10 +661,12 @@ def _resolve_report_role(
     role: Optional[str] = None
     try:
         from dispatch_identity import resolve_effective_role  # noqa: PLC0415
-        project_id = merged.get("project_id") or None
+        project_id = str(merged.get("project_id") or "").strip() or None
         if not project_id:
-            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-            project_id = _resolve_project_id()
+            # The report's role join still needs a tenant; reuse the door's
+            # canonical resolver rather than the door's private wrapper.
+            from project_root import resolve_project_id  # noqa: PLC0415
+            project_id = resolve_project_id()
         role = resolve_effective_role(
             merged.get("role"), dispatch_id, project_id, state_dir=state_dir,
         )
@@ -955,6 +961,107 @@ def _run_fail_closed_checks(
         violations.extend(_check_pr_delivery(dispatch_id, merged or {}))
 
     return violations
+
+
+def _read_report_mtime(report_path: Path) -> Optional[float]:
+    """When the worker WROTE the file this caller read — never the canonical path's.
+
+    The receipt's own ``report_path`` can be a different file (codex round 2,
+    advisory); a missing file yields ``None`` and the decision refuses instead.
+    """
+    try:
+        return report_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
+    """The report's own ``attempt`` when it names a positive integer; else ``None``.
+
+    THE one reader (K-8b round 3): ``report_parser.py`` imports this function
+    instead of carrying a copy, so the two writers can never disagree about the
+    same report. ``report_parser.extract_metadata`` reads frontmatter lines raw
+    and keeps ``attempt: '1'`` quoted, while ``parse_frontmatter`` here strips
+    the quotes; one layer of surrounding matching quotes is removed on both
+    paths so ``1``, ``'1'``, ``"1"`` and `` 1 `` all mean 1. An unmatched quote
+    (``'1``) or an empty value stays unparseable and names no attempt.
+
+    ``report_lifecycle_mode`` reads an attempt off the receipt and refuses
+    ``attempt_unknown`` for anything that is not a positive integer, so a
+    report naming ``"x"`` / ``0`` hands over nothing and the decision
+    attributes by write time as before (K-8b round 2, rule 3).
+    """
+    raw = merged.get("attempt")
+    if raw is None or isinstance(raw, bool):
+        return None
+    text = str(raw).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
+def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
+    """Name the dispatch and the reason; the caller books nothing (K-8b rule 4)."""
+    logger.warning(
+        "report_to_receipt_converter: REFUSED (ledger lifecycle) dispatch=%s "
+        "file=%s reason=%s: %s — nothing written, report stays for the next scan",
+        exc.dispatch_id, report_path.name, exc.code, exc.detail,
+    )
+
+
+def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
+    """True when *record* is the line *receipt* would book — attempt for attempt.
+
+    K-8b rule 5: a ``report_ingested`` may only be suppressed by an earlier one
+    with the same ``dispatch_id``, ``project_id`` and ``attempt``. Every legacy
+    shape keeps the plain ``dispatch_id`` + ``receipt_kind`` match, byte for byte.
+    """
+    if record.get("dispatch_id") != receipt.get("dispatch_id"):
+        return False
+    if record.get("receipt_kind") != receipt.get("receipt_kind"):
+        return False
+    if str(receipt.get("event_type") or "").strip() != REPORT_INGESTED_EVENT_TYPE:
+        return True
+    return (
+        str(record.get("event_type") or "").strip() == REPORT_INGESTED_EVENT_TYPE
+        and record.get("project_id") == receipt.get("project_id")
+        and record.get("attempt") == receipt.get("attempt")
+    )
+
+
+def _lifecycle_report_line(
+    receipt: Dict[str, Any], merged: Dict[str, Any], *, state_dir: Optional[Path],
+    report_path: Path,
+) -> Dict[str, Any]:
+    """The ONE shaping point: the line this dispatch's lifecycle mode asks for.
+
+    A legacy dispatch gets its receipt object back untouched; a v3 dispatch gets
+    one ``report_ingested`` copy. Only what the REPORT itself names goes on the
+    hint copy — its tenant and its attempt — so a legacy booking never gains a
+    field it did not have, and the tenant is resolved once, by K-8a.
+    """
+    hint = receipt
+    named: Dict[str, Any] = {}
+    if not receipt.get("project_id"):
+        tenant = str(merged.get("project_id") or "").strip()
+        if tenant:
+            named["project_id"] = tenant
+    attempt = _named_attempt(merged)
+    if attempt is not None:
+        named["attempt"] = attempt
+    if named:
+        hint = {**receipt, **named}
+    line = report_lifecycle_mode.report_line(
+        hint,
+        state_dir=(state_dir if state_dir is not None
+                   else report_lifecycle_mode.append_destination_state_dir()),
+        report_written_at=_read_report_mtime(report_path),
+    )
+    return receipt if line is hint else line
 
 
 def _build_receipt_from_report_core(
@@ -1434,6 +1541,12 @@ def build_receipt_from_report(
     suppressed) and into ``_resolve_pr_link`` (obligation write suppressed)
     so the function honours the scan-level dry-run contract "nothing on disk
     changes" end to end (OI-1744).
+
+    ADR-045 (K-8b): a ``v3`` dispatch returns one ``report_ingested`` instead of
+    a ``task_complete``; a legacy receipt passes through untouched. When the line
+    cannot be established this RAISES ``report_lifecycle_mode.ReportPathRefused``
+    (dispatch id + named reason) instead of returning a receipt: the caller must
+    book nothing and keep the report retryable.
     """
     receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir, dry_run=dry_run)
     if receipt is None:
@@ -1442,6 +1555,7 @@ def build_receipt_from_report(
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     merged: Dict[str, Any] = {**body, **fm}
+    receipt = _lifecycle_report_line(receipt, merged, state_dir=state_dir, report_path=report_path)
     pr_link, pr_link_reason = _resolve_pr_link(
         receipt.get("dispatch_id"), merged, state_dir, dry_run=dry_run,
     )
@@ -1606,11 +1720,17 @@ def _convert_one_detailed(
         logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
         return None, "malformed"
 
+    # The store the line is appended to (K-8b rule 2); a None state_dir is never "legacy".
     state_dir_for_route = Path(receipts_file).parent if receipts_file else None
     try:
         receipt = build_receipt_from_report(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
+    except report_lifecycle_mode.ReportPathRefused as exc:
+        # Named refusal (K-8b rule 4): book nothing, keep the report retryable.
+        # Caught BEFORE the generic handler so it can never be reported as a crash.
+        _log_refusal(exc, report_path)
+        return None, "error"
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1658,12 +1778,7 @@ def _convert_one_detailed(
     _guard_did = receipt.get("dispatch_id")
     _guard_kind = receipt.get("receipt_kind")
     _guard_matched = False
-    if (
-        _guard_did
-        and _guard_kind
-        and receipts_file
-        and Path(receipts_file).exists()
-    ):
+    if _guard_did and _guard_kind and receipts_file and Path(receipts_file).exists():
         try:
             _text = Path(receipts_file).read_text(encoding="utf-8", errors="replace")
             # Parse NDJSON lines: compare the parsed dispatch_id field
@@ -1678,10 +1793,7 @@ def _convert_one_detailed(
                     _rec = json.loads(_line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    _rec.get("dispatch_id") == _guard_did
-                    and _rec.get("receipt_kind") == _guard_kind
-                ):
+                if _same_booking(_rec, receipt):
                     logger.info(
                         "report_to_receipt_converter: skipping dispatch=%s — "
                         "completion receipt already exists (hot-path wrote first)",
