@@ -88,6 +88,18 @@ class EnvelopeGovernError(RuntimeError):
 
 
 # ---------------------------------------------------------------------------
+# Governed statuses
+# ---------------------------------------------------------------------------
+
+#: OI-2519 (K-5b r2): the governed status of a worker ``success`` whose delivery
+#: diff is empty — the phantom guard rejected the delivery. One named constant:
+#: ``envelope_govern`` stamps it on ``_AdapterResult.governed_status`` and
+#: ``dispatch_exit.GOVERNED_END_STATES`` keys its end-state row on it, so the
+#: value never lives as a second literal.
+PHANTOM_REJECTED_STATUS = "phantom_rejected"
+
+
+# ---------------------------------------------------------------------------
 # Internal adapter result
 # ---------------------------------------------------------------------------
 

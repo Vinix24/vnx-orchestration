@@ -99,9 +99,6 @@ from dispatch_exit import (  # noqa: E402
     finalize_lane_exit,
     now_utc,
 )
-# OI-2519: the one receipt-status value GOVERN stamps when the report body fails
-# the contract. The lane exit maps it onto the end line; never a second literal.
-from report_body_contract import CONTRACT_INVALID_STATUS  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -612,13 +609,16 @@ class _LaneExit:
         self.status, self.returncode, self.error = _envelope_outcome(
             result.status, receipt_path, result.error)
         # OI-2519: the end line follows the GOVERNED verdict. When the work
-        # succeeded (and only then) but governance rejected the report body, the
-        # attempt is `contract_invalid`, never `completed`; a non-success outcome
-        # of `_envelope_outcome` (failure/timeout/receipt_missing) wins unchanged.
+        # succeeded (and only then) but governance downgraded it — a report body
+        # that fails the contract, a phantom delivery — the attempt is that
+        # governed status, never `completed`; any governed downgrade counts, not
+        # one named value, and `dispatch_exit.GOVERNED_END_STATES` fails an
+        # unknown one closed. A non-success outcome of `_envelope_outcome`
+        # (failure/timeout/receipt_missing) wins unchanged.
         self.exit_status = self.status
-        if (self.status == "success"
-                and getattr(result, "governed_status", None) == CONTRACT_INVALID_STATUS):
-            self.exit_status = CONTRACT_INVALID_STATUS
+        _governed = getattr(result, "governed_status", None)
+        if self.status == "success" and _governed and _governed != "success":
+            self.exit_status = _governed
         self.close()
         return EnvelopeResult(
             status=self.status, returncode=self.returncode, report_path=report_path,

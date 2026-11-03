@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
-from envelope_types import EnvelopeSpec, _AdapterResult
+from envelope_types import EnvelopeSpec, PHANTOM_REJECTED_STATUS, _AdapterResult
 from envelope_prepare import _verify_role_application, _verify_skill_application
 from skill_application import skill_receipt_fields
 from envelope_govern_support import (
@@ -716,6 +716,7 @@ def _govern(
     # vector). A delivery worker that reports success with no worktree/branch diff is rejected via
     # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
     # the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
+    _phantom_verdict = None
     try:
         from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
         _tok = adapter_result.token_usage or {}
@@ -723,7 +724,7 @@ def _govern(
         # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
         # instead — resolve the pushed branch and use its diff when the own diff is empty.
         _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
-        record_phantom_if_any(
+        _phantom_verdict = record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
             context=PhantomDecisionContext(
                 role=spec.role,
@@ -738,7 +739,12 @@ def _govern(
                 # omitted keyword) records that this lane looked and found nothing,
                 # not that it forgot to ask (see PhantomDecisionContext docstring).
                 read_only=None,
-                status=_effective_status,
+                # OI-2519 (K-5b r2): the WORKER's own claim, never the
+                # downgraded ``_effective_status`` above — the guard's question
+                # is whether a completion claim is backed by a deliverable, so a
+                # body-contract refusal must not make it abstain from a diff
+                # that is equally empty.
+                status=adapter_result.status,
                 worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
             ),
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
@@ -767,4 +773,13 @@ def _govern(
             )
         except Exception:  # noqa: BLE001 — the guard-error audit signal must never make _govern fatal
             logger.error("envelope._govern: guard-error audit signal itself failed dispatch=%s", spec.dispatch_id)
+    # OI-2519 (K-5b r2): keep the verdict the guard just published. It is a
+    # governance downgrade of a worker success, exactly like the body-contract
+    # refusal above, and it WINS over ``contract_invalid`` when both apply: a
+    # delivery that fabricated its diff is the stronger finding. A guard that
+    # raised (the except branch above) published nothing — a guard ERROR is not
+    # a rejection, so the governed status keeps whatever the contract set.
+    if (_phantom_verdict is not None and _phantom_verdict.is_phantom
+            and adapter_result.status == "success"):
+        adapter_result.governed_status = PHANTOM_REJECTED_STATUS
     return report_path, receipt_path

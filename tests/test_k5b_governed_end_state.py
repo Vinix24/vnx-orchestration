@@ -15,6 +15,13 @@ K-5b publishes the governed verdict as its own field
 (``_AdapterResult.governed_status``) and the lane exit maps it onto the end line.
 The caller-visible ``EnvelopeResult`` is unchanged.
 
+K-5b round 2 (this file) closes the second governance downgrade of a worker
+success: the phantom guard at the end of ``_govern`` rejects a delivery whose
+diff is empty, but its ``PhantomVerdict`` was discarded. The verdict is now kept
+— and it wins over ``contract_invalid`` when both apply — so a dispatch the
+guard rejected never freezes its end line as ``completed``. A guard that raised
+is a guard ERROR, not a rejection: nothing is published then.
+
 Every case here runs the REAL lane and the REAL ``_govern``: only the worker
 child (the claude spawn or the provider adapter) is replaced, and the report is
 a real file on disk whose body really fails ``report_body_contract.validate_body``
@@ -23,7 +30,8 @@ a real file on disk whose body really fails ``report_body_contract.validate_body
 the cost ledger — is under ``tmp_path``.
 
 Red on the K-5 head (3b08f844): the invalid-report case published a
-``dispatch_finished`` with ``end_state: completed``.
+``dispatch_finished`` with ``end_state: completed``. Red on 26ab7b6b (K-5b
+round 1): every phantom case published ``end_state: completed``.
 """
 
 from __future__ import annotations
@@ -35,6 +43,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -129,6 +138,16 @@ def _finished(state_dir: Path, dispatch_id: str) -> "list[dict]":
             and line.get("dispatch_id") == dispatch_id]
 
 
+#: A delivery with a real deliverable: the pre-captured diff ``_govern`` hands
+#: the phantom guard. The guard reads a non-empty diff as "work is present".
+_REAL_DIFF = (
+    "diff --git a/scripts/lib/example.py b/scripts/lib/example.py\n"
+    "--- a/scripts/lib/example.py\n"
+    "+++ b/scripts/lib/example.py\n"
+    "@@ -0,0 +1 @@\n"
+    "+delivered change\n"
+)
+
 _VALID_BODY = (
     "## Summary\n\n"
     "The worker delivered the change and every required section is present here.\n\n"
@@ -166,7 +185,8 @@ def _git_repo(tmp_path: Path) -> "tuple[Path, str]":
     return repo, head
 
 
-def _make_plan(tmp_path: Path, dispatch_id: str, *, lane: str) -> ExecutionPlan:
+def _make_plan(tmp_path: Path, dispatch_id: str, *, lane: str,
+               task_class: Optional[str] = None) -> ExecutionPlan:
     work = tmp_path / "work" / dispatch_id
     work.mkdir(parents=True)
     instruction = work / "instruction.md"
@@ -198,6 +218,7 @@ def _make_plan(tmp_path: Path, dispatch_id: str, *, lane: str) -> ExecutionPlan:
         route_reason="test",
         instruction_sha256=digest,
         role="backend-developer",
+        task_class=task_class,
     )
 
 
@@ -222,17 +243,20 @@ class _ProviderStub:
 
 
 @contextlib.contextmanager
-def _lane_plumbing(tmp_path: Path, *, worktree: Path):
+def _lane_plumbing(tmp_path: Path, *, worktree: Path, phantom_diff: str = ""):
     """Patch everything a lane does NOT own — never ``_govern`` or ``validate_body``.
 
     The worktree is a real git repo so the exit's ``head_sha`` evidence is read;
-    the consumer root is this test's tmp tree so no path escapes it.
+    the consumer root is this test's tmp tree so no path escapes it. The
+    pre-captured phantom diff is the ONE lever each case uses to look like a
+    delivery with (``_REAL_DIFF``) or without (``""``) a deliverable — it is the
+    same evidence ``_govern`` hands the real phantom guard.
     """
     consumer = tmp_path / "consumer"
     consumer.mkdir(exist_ok=True)
     with patch("dispatch_envelope._prepare", side_effect=lambda spec: spec.instruction), \
          patch("dispatch_envelope._record_integrity", return_value=None), \
-         patch("dispatch_envelope._resolve_phantom_diff", return_value=None), \
+         patch("dispatch_envelope._resolve_phantom_diff", return_value=phantom_diff), \
          patch("dispatch_envelope._enforce_push_pr", side_effect=lambda **kw: kw["result"]), \
          patch("dispatch_worktree_isolation.resolve_consumer_project_root", return_value=consumer), \
          patch("dispatch_worktree_isolation.create_dispatch_worktree", return_value=worktree):
@@ -242,10 +266,10 @@ def _lane_plumbing(tmp_path: Path, *, worktree: Path):
 def _run_lane(
     lane: str, tmp_path: Path, state_dir: Path, data_dir: Path,
     dispatch_id: str, handover: dispatch_start.Handover, *, worker_status: str,
-    receipt_raises: bool = False,
+    receipt_raises: bool = False, phantom_diff: str = "", task_class: Optional[str] = None,
 ):
     """Run the REAL lane with the REAL ``_govern``; replace only the worker child."""
-    plan = _make_plan(tmp_path, dispatch_id, lane=lane)
+    plan = _make_plan(tmp_path, dispatch_id, lane=lane, task_class=task_class)
     repo, _head = _git_repo(tmp_path)
     govern = {}
     if receipt_raises:
@@ -256,7 +280,7 @@ def _run_lane(
     else:
         govern["patch"] = contextlib.nullcontext()
 
-    with _lane_plumbing(tmp_path, worktree=repo), govern["patch"]:
+    with _lane_plumbing(tmp_path, worktree=repo, phantom_diff=phantom_diff), govern["patch"]:
         if lane == "headless":
             from dispatch_envelope import run_envelope_headless_plan  # noqa: PLC0415
             spawn = _fake_spawn(0 if worker_status == "success" else 1)
@@ -282,18 +306,80 @@ def _run_lane(
 
 
 # ---------------------------------------------------------------------------
-# 1. A governed refusal is never `completed` — and the receipt still says so.
+# 1. A phantom-rejected delivery is never `completed` — the corrective receipt
+#    is still booked exactly as the guard books it.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("lane", LANES)
-def test_invalid_report_books_failed_contract_invalid(lane, tmp_path):
+def test_phantom_rejected_books_failed_phantom_rejected(lane, tmp_path):
+    dispatch_id = f"20261103-k5b-phantom-{lane}"
+    data_dir, state_dir = _stores(tmp_path)
+    handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
+    _write_report(data_dir, dispatch_id, valid=True)
+
+    # A worker success, a report body that passes the contract, and an EMPTY
+    # delivery diff on a task class the guard does not exempt: the exact shape
+    # the real phantom guard rejects.
+    result = _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
+                       worker_status="success", phantom_diff="")
+
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "failed", lines[0]
+    assert lines[0]["reason"] == "phantom_rejected", lines[0]
+    # The corrective receipt the guard books is unchanged (K-5b round 2 changes
+    # only what the END LINE says, never what the guard writes).
+    corrective = [line for line in _ledger_lines(state_dir)
+                  if line.get("dispatch_id") == dispatch_id
+                  and line.get("phantom_rejected") is True]
+    assert len(corrective) == 1, f"{lane}: corrective receipts {corrective}"
+    assert corrective[0]["status"] == "failed", corrective[0]
+    # K-5b round 2 leaves the caller-visible result exactly what 26ab7b6b returned
+    # for this case: the worker claim, success / 0. Only the end line changed.
+    assert result.status == "success", result
+    assert result.returncode == 0, result
+
+
+# ---------------------------------------------------------------------------
+# 2. An invalid report AND an empty diff: the phantom verdict wins.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("lane", LANES)
+def test_phantom_verdict_wins_over_contract_invalid(lane, tmp_path):
+    dispatch_id = f"20261103-k5b-phantom-invalid-{lane}"
+    data_dir, state_dir = _stores(tmp_path)
+    handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
+    _write_report(data_dir, dispatch_id, valid=False)
+
+    _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
+              worker_status="success", phantom_diff="")
+
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "failed", lines[0]
+    assert lines[0]["reason"] == "phantom_rejected", lines[0]
+    # Both governance findings were reached: the receipt carries contract_invalid,
+    # the corrective receipt the guard booked carries phantom_rejected.
+    statuses = [line.get("status") for line in _ledger_lines(state_dir)
+                if line.get("dispatch_id") == dispatch_id]
+    assert "contract_invalid" in statuses, f"{lane}: receipt statuses {statuses}"
+    assert any(line.get("phantom_rejected") is True for line in _ledger_lines(state_dir)
+               if line.get("dispatch_id") == dispatch_id), f"{lane}: no corrective receipt"
+
+
+# ---------------------------------------------------------------------------
+# 3. An invalid report with a REAL diff stays the contract verdict (K-5b r1).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("lane", LANES)
+def test_invalid_report_with_real_diff_books_contract_invalid(lane, tmp_path):
     dispatch_id = f"20261103-k5b-invalid-{lane}"
     data_dir, state_dir = _stores(tmp_path)
     handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
     _write_report(data_dir, dispatch_id, valid=False)
 
     result = _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
-                       worker_status="success")
+                       worker_status="success", phantom_diff=_REAL_DIFF)
 
     lines = _finished(state_dir, dispatch_id)
     assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
@@ -303,21 +389,26 @@ def test_invalid_report_books_failed_contract_invalid(lane, tmp_path):
     statuses = [line.get("status") for line in _ledger_lines(state_dir)
                 if line.get("dispatch_id") == dispatch_id]
     assert "contract_invalid" in statuses, f"{lane}: receipt statuses {statuses}"
+    assert not any(line.get("phantom_rejected") is True for line in _ledger_lines(state_dir)
+                   if line.get("dispatch_id") == dispatch_id), f"{lane}: false phantom"
+    # K-5 head (3b08f844) returned the work status: success / 0.
+    assert result.status == "success", result
+    assert result.returncode == 0, result
 
 
 # ---------------------------------------------------------------------------
-# 2. A valid report under a worker success still ends `completed`.
+# 4. A valid report with a real diff under a worker success ends `completed`.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("lane", LANES)
-def test_valid_report_stays_completed(lane, tmp_path):
+def test_valid_report_with_real_diff_stays_completed(lane, tmp_path):
     dispatch_id = f"20261103-k5b-valid-{lane}"
     data_dir, state_dir = _stores(tmp_path)
     handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
     _write_report(data_dir, dispatch_id, valid=True)
 
     _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
-              worker_status="success")
+              worker_status="success", phantom_diff=_REAL_DIFF)
 
     lines = _finished(state_dir, dispatch_id)
     assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
@@ -326,18 +417,38 @@ def test_valid_report_stays_completed(lane, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 3. A non-success worker outcome wins over the contract verdict.
+# 5. A task class the guard exempts (research/review) is not a rejection.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("lane", LANES)
-def test_worker_failure_wins_over_contract_invalid(lane, tmp_path):
+def test_exempt_task_class_with_empty_diff_stays_completed(lane, tmp_path):
+    dispatch_id = f"20261103-k5b-exempt-{lane}"
+    data_dir, state_dir = _stores(tmp_path)
+    handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
+    _write_report(data_dir, dispatch_id, valid=True)
+
+    _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
+              worker_status="success", phantom_diff="", task_class="research_structured")
+
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "completed", lines[0]
+    assert "reason" not in lines[0], lines[0]
+
+
+# ---------------------------------------------------------------------------
+# 6. A non-success worker outcome wins over both governance verdicts.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("lane", LANES)
+def test_worker_failure_wins_over_governance(lane, tmp_path):
     dispatch_id = f"20261103-k5b-worker-failed-{lane}"
     data_dir, state_dir = _stores(tmp_path)
     handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
     _write_report(data_dir, dispatch_id, valid=False)
 
     _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
-              worker_status="failure")
+              worker_status="failure", phantom_diff="")
 
     lines = _finished(state_dir, dispatch_id)
     assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
@@ -346,7 +457,7 @@ def test_worker_failure_wins_over_contract_invalid(lane, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 4. No ledger receipt: the non-success outcome (receipt_missing) still wins.
+# 7. No ledger receipt: the non-success outcome (receipt_missing) still wins.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("lane", LANES)
@@ -357,33 +468,12 @@ def test_invalid_report_without_receipt_books_failed(lane, tmp_path):
     _write_report(data_dir, dispatch_id, valid=False)
 
     result = _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
-                       worker_status="success", receipt_raises=True)
+                       worker_status="success", receipt_raises=True, phantom_diff="")
 
     lines = _finished(state_dir, dispatch_id)
     assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
     assert lines[0]["end_state"] == "failed", lines[0]
     # _envelope_outcome degrades a success with no receipt to receipt_missing; the
-    # end line must carry that, not contract_invalid (a non-success outcome wins).
-    assert lines[0]["reason"] in {"receipt_missing", "contract_invalid"}, lines[0]
+    # end line must carry that, not a governance verdict (a non-success wins).
     assert lines[0]["reason"] == "receipt_missing", lines[0]
     assert result.status == "receipt_missing", result
-
-
-# ---------------------------------------------------------------------------
-# 5. The caller-visible result does not change (K-5 head returned success/0).
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("lane", LANES)
-def test_caller_visible_result_is_unchanged(lane, tmp_path):
-    dispatch_id = f"20261103-k5b-caller-{lane}"
-    data_dir, state_dir = _stores(tmp_path)
-    handover = _begin(tmp_path, data_dir, state_dir, dispatch_id)
-    _write_report(data_dir, dispatch_id, valid=False)
-
-    result = _run_lane(lane, tmp_path, state_dir, data_dir, dispatch_id, handover,
-                       worker_status="success")
-
-    # K-5 head (3b08f844) returned the work status: success / 0, even though the
-    # end line is now contract_invalid. Only the end line changed.
-    assert result.status == "success", result
-    assert result.returncode == 0, result
