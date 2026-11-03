@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from adapter_types import (
     CAPABILITY_DELIVER,
@@ -200,6 +200,24 @@ def _reap_at_eof(process: "subprocess.Popen") -> Optional[int]:
         return process.wait(timeout=_EOF_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         return None
+
+
+def _notify_on_spawn(
+    on_spawn: Optional[Callable[[int], None]], child_pid: int, terminal_id: str,
+) -> None:
+    """K-4c (ADR-045 §5): hand the child's pid to the spawn-evidence hook, best-effort.
+
+    The spawn file feeds the refire liveness check, so a failing hook must never
+    turn a running child into a delivery failure. The hook itself logs with the
+    dispatch's own key; this is the last line of defence for any other caller.
+    """
+    if on_spawn is None:
+        return
+    try:
+        on_spawn(child_pid)
+    except Exception:  # vnx-silent-except: spawn-file evidence must not kill a spawned child
+        logger.warning("subprocess_adapter: on_spawn hook failed for %s", terminal_id,
+                       exc_info=True)
 
 
 @dataclass
@@ -406,7 +424,7 @@ class SubprocessAdapter:
         role: Optional[str] = None,
         requires_mcp: bool = False,
         scrub_env_keys: Optional[frozenset] = None,
-        scope_args: Optional[List[str]] = None,
+        scope_args: Optional[List[str]] = None, on_spawn: Optional[Callable[[int], None]] = None,
         **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
@@ -449,6 +467,11 @@ class SubprocessAdapter:
         the instruction in place of the role's scope (see _resolve_scope_args):
         no ``--dangerously-skip-permissions`` and no role allow-list is added.
         None (every caller but the claude review seat) keeps the role's scope.
+
+        on_spawn: optional ``(child_pid) -> None`` hook, called once immediately
+        after ``Popen`` returns and before the stream is read. Used to record
+        spawn-time evidence; a raising hook is logged and never fails the
+        delivery (ADR-045 §5). Default None adds nothing to the spawn.
         """
         config = self._configs.get(terminal_id, {})
         effective_instruction = instruction or config.get("instruction", dispatch_id)
@@ -523,8 +546,11 @@ class SubprocessAdapter:
             return _refused_delivery(terminal_id, dispatch_id, str(exc))
         finally:
             # Close our file descriptor; the child process inherits its own copy.
-            if stderr_file is not None:
-                stderr_file.close()
+            if stderr_file is not None: stderr_file.close()
+
+        # K-4c (ADR-045 §5): the earliest moment the child's pid exists, before
+        # anything (including the prior-process sweep below) waits on it.
+        _notify_on_spawn(on_spawn, process.pid, terminal_id)
 
         # Replace any prior process tracking (stop old one first).
         # Use SIGTERM then SIGKILL fallback so a non-responsive prior process

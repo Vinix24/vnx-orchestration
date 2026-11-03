@@ -2869,8 +2869,23 @@ def _execute_claude_headless(
         raise PermissionError(
             f"claude_headless lane blocked by default; set {override_env}=1 to opt in"
         )
+    # ADR-045 K-4c: only a v3 hand-over has a start line to attach spawn evidence to;
+    # a legacy fire (and every caller without a hand-over) gets no hook and no file.
+    on_spawn = None
+    if handover is not None and handover.is_v3:
+        def _record_spawn(child_pid: int) -> None:
+            """Record the child at the spawn; evidence for the refire check, never a gate."""
+            try:
+                dispatch_start.record_child(handover, state_dir=state_dir, child_pid=child_pid)
+            except Exception as exc:  # vnx-silent-except: spawn-file evidence must not kill a spawned worker
+                logger.warning(
+                    "[dispatch_cli] spawn-file record failed dispatch_id=%s attempt=%s: %r",
+                    handover.dispatch_id, handover.attempt, exc,
+                )
+        on_spawn = _record_spawn
+
     result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role,
-                                        handover=handover, base_sha=base_sha)
+                                        handover=handover, base_sha=base_sha, on_spawn=on_spawn)
     return result.returncode
 
 
