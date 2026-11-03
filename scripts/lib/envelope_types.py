@@ -87,15 +87,10 @@ class EnvelopeGovernError(RuntimeError):
     """Raised when GOVERN cannot emit or confirm a receipt (fail-closed contract)."""
 
 
-# ---------------------------------------------------------------------------
-# Governed statuses
-# ---------------------------------------------------------------------------
-
-#: OI-2519 (K-5b r2): the governed status of a worker ``success`` whose delivery
-#: diff is empty — the phantom guard rejected the delivery. One named constant:
-#: ``envelope_govern`` stamps it on ``_AdapterResult.governed_status`` and
-#: ``dispatch_exit.GOVERNED_END_STATES`` keys its end-state row on it, so the
-#: value never lives as a second literal.
+# OI-2519 (K-5b r2): the governed status of a worker success whose delivery diff
+# is empty — the phantom guard's rejection. One named constant, never a literal:
+# ``envelope_govern`` stamps it on ``governed_status``, ``dispatch_exit`` keys its
+# end-state row on it.
 PHANTOM_REJECTED_STATUS = "phantom_rejected"
 
 

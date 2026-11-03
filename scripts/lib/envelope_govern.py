@@ -724,9 +724,8 @@ def _govern(
         # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
         # instead — resolve the pushed branch and use its diff when the own diff is empty.
         _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
-        # OI-2519 (K-5b r2): the publish wraps the call, so a guard that raises
-        # publishes nothing and a phantom verdict about a worker success becomes
-        # the governed status the lane exit's end line carries.
+        # OI-2519 (K-5b r2): the publish wraps the call — a guard that raises
+        # publishes nothing, a phantom verdict becomes the governed status.
         _publish_phantom_verdict(record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
             context=PhantomDecisionContext(
@@ -742,11 +741,10 @@ def _govern(
                 # omitted keyword) records that this lane looked and found nothing,
                 # not that it forgot to ask (see PhantomDecisionContext docstring).
                 read_only=None,
-                # OI-2519 (K-5b r2): the WORKER's own claim, never the
-                # downgraded ``_effective_status`` above — the guard's question
-                # is whether a completion claim is backed by a deliverable, so a
-                # body-contract refusal must not make it abstain from a diff
-                # that is equally empty.
+                # OI-2519 (K-5b r2): the WORKER's own claim, never the downgraded
+                # ``_effective_status`` above — the guard asks whether a completion
+                # claim is backed by a deliverable, so a contract refusal must not
+                # make it abstain from an equally empty diff.
                 status=adapter_result.status,
                 worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
             ),
