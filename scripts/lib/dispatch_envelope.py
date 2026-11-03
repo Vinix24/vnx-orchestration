@@ -90,6 +90,14 @@ from paid_lane_budget import (  # noqa: E402
     PaidLaneBudgetExceededError,
     enforce_daily_budget,
 )
+# ADR-045 K-5: the one end line per lane exit, published BEFORE the occupancy
+# flock is released (remove_dispatch_worktree below).
+from dispatch_exit import (  # noqa: E402
+    REASON_PRE_SPAWN_ERROR,
+    finalize_exit,
+    finalize_lane_exit,
+    now_utc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -523,6 +531,45 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
 # ---------------------------------------------------------------------------
 
 
+def _pre_spawn_failure(
+    handover, state_dir: Path, *, reason: str, error: str,
+    report_path=None, receipt_path=None,
+) -> "EnvelopeResult":
+    """An exit BEFORE the spawn: the end line first, then the same failure result.
+
+    ADR-045 §1/§5: every exit after the hand-over becomes an end line. These
+    exits happen before any worktree exists, so ``finalize_exit`` writes
+    ``failed`` with the caller's reason (``pre_spawn_error``) and
+    ``no_push:no_worktree`` — it is a no-op for a legacy hand-over, which keeps
+    the K-4c result byte-for-byte. The returned ``EnvelopeResult`` is exactly
+    what each exit returned before K-5, so a caller cannot tell the difference.
+    """
+    finalize_exit(handover, state_dir=state_dir, status="failure", reason=reason)
+    return EnvelopeResult(
+        status="failure", returncode=1, report_path=report_path,
+        receipt_path=receipt_path, completion_text="", error=error,
+    )
+
+
+def _spawn_marker(handover, on_spawn, marks: Dict[str, str]):
+    """The lane's own ``on_spawn`` wrapper: stamp ``spawned_at`` for the end line.
+
+    Only a v3 hand-over gets one — a legacy fire passes the caller's hook
+    through untouched, so its spawn behaviour is exactly the K-4c one. The
+    caller's hook still runs (its failure policy is unchanged); the stamp is
+    taken first so a raising hook cannot cost the exit its ``spawned_at``.
+    """
+    if handover is None or not getattr(handover, "is_v3", False):
+        return on_spawn
+
+    def _mark_and_forward(child_pid: int) -> None:
+        marks.setdefault("spawned_at", now_utc())
+        if on_spawn is not None:
+            on_spawn(child_pid)
+
+    return _mark_and_forward
+
+
 def run_envelope_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
@@ -563,12 +610,8 @@ def run_envelope_plan(
     # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
     # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
     if not is_valid_instruction_hash(plan.instruction_sha256):
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"plan.instruction_sha256 is not a valid 64-hex digest "
                 f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
@@ -579,12 +622,8 @@ def run_envelope_plan(
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
     actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     if actual != plan.instruction_sha256:
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"instruction file mutated after permit: sha256 mismatch "
                 f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
@@ -662,13 +701,9 @@ def run_envelope_plan(
             enriched_spec, _budget_fail_result, _budget_fail_start, _budget_fail_end,
             integrity=integrity,
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=str(_budget_exc),
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=str(_budget_exc),
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     from dispatch_worktree_isolation import (  # noqa: PLC0415
@@ -713,13 +748,9 @@ def run_envelope_plan(
         report_path, receipt_path = _govern(
             enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=_isolation_error,
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
@@ -750,9 +781,15 @@ def run_envelope_plan(
     # preserving whatever the worker produced, and fall through to _govern.
     _phantom_diff: Optional[str] = None
     _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
+    # ADR-045 §8 ``spawned_at``: this lane never sees the child (K-4c writes no
+    # spawn file for it), so the hand-off to the provider adapter IS its spawn
+    # boundary; every exit before it leaves ``spawned_at`` absent.
+    _spawned_at: Optional[str] = None
     start = datetime.now(timezone.utc)
     end = start
     try:
+        _spawned_at = now_utc()
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
         _prior_result = result
         end = datetime.now(timezone.utc)
@@ -814,6 +851,9 @@ def run_envelope_plan(
             model=_prior_result.model if _prior_result is not None else None,
         )
     finally:
+        # ADR-045 §5: the one end line goes BEFORE remove_dispatch_worktree, whose
+        # first action releases the occupancy flock this lane's liveness rests on.
+        finalize_lane_exit(handover, state_dir=state_dir, result=result, wt_path=wt_path, spawned_at=_spawned_at)
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
@@ -880,12 +920,8 @@ def run_envelope_headless_plan(
 
     # P0-3: REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
     if not is_valid_instruction_hash(plan.instruction_sha256):
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"plan.instruction_sha256 is not a valid 64-hex digest "
                 f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
@@ -896,12 +932,8 @@ def run_envelope_headless_plan(
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
     actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     if actual != plan.instruction_sha256:
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"instruction file mutated after permit: sha256 mismatch "
                 f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
@@ -1018,13 +1050,9 @@ def run_envelope_headless_plan(
         report_path, receipt_path = _govern(
             enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=_isolation_error,
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
@@ -1061,10 +1089,13 @@ def run_envelope_headless_plan(
     # first.
     _phantom_diff: Optional[str] = None
     _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
+    _spawn_marks: Dict[str, str] = {}  # ADR-045 §8 spawned_at, stamped by the spawn hook
     start = datetime.now(timezone.utc)
     end = start
     try:
-        result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path, on_spawn=on_spawn)
+        result = ClaudeSubprocessAdapter().run(
+            enriched_spec, cwd=wt_path, on_spawn=_spawn_marker(handover, on_spawn, _spawn_marks))
         _prior_result = result
         end = datetime.now(timezone.utc)
         try:
@@ -1121,6 +1152,10 @@ def run_envelope_headless_plan(
             model=_prior_result.model if _prior_result is not None else None,
         )
     finally:
+        # ADR-045 §5: the one end line goes BEFORE remove_dispatch_worktree, whose
+        # first action releases the occupancy flock this lane's liveness rests on.
+        finalize_lane_exit(handover, state_dir=state_dir, result=result, wt_path=wt_path,
+                           spawned_at=_spawn_marks.get("spawned_at"))
         remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
 
     report_path, receipt_path = _govern(
