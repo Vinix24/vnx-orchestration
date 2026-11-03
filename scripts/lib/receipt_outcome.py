@@ -391,6 +391,7 @@ def summarize(
     ``cutoff`` scopes which dispatches are reported (any attributed receipt at
     or after it) and which lines are counted as bookkeeping/noise. A reported
     dispatch is always decided on its full history.
+    ``superseded_by`` maps a parent dispatch to the child ids that carry it.
     """
     in_window = _Window(cutoff)
     noise: Counter = Counter()
