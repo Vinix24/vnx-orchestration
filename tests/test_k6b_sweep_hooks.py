@@ -18,7 +18,10 @@ to 14400. This file covers plan row 6 and OI-2522:
    sweep at all);
 5. ``build_t0_state`` sweeps once per build, reports it in the state, and a
    raising sweep leaves the exit code unchanged;
-6. two overlapping sweeps on one dead attempt still give one end line.
+6. two overlapping sweeps on one dead attempt still give one end line;
+7. a bounded sweep that stops early leaves a continuation cursor, so repeated
+   bounded sweeps visit every attempt instead of restarting on the live prefix
+   (codex finding on the round-1 head).
 
 Every store is real (a real ledger, a real ``runtime_coordination.db``) under
 ``tmp_path``; only clocks and process liveness are pinned.
@@ -54,6 +57,12 @@ import dispatch_lifecycle as lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import project_id_migration  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
+from append_receipt_internals.lifecycle import (  # noqa: E402
+    build_end_intent,
+    end_intent_path,
+    prepare_end_line,
+    write_end_intent,
+)
 from append_receipt_internals.payload import append_receipt_payload  # noqa: E402
 from atomic_io import atomic_write_json  # noqa: E402
 from coordination_db import get_connection  # noqa: E402
@@ -173,13 +182,14 @@ def _staged_spec(data_dir: Path, *, dispatch_id: str, staging_id: str, deadline:
 
 def _start_line(state_dir: Path, *, project_id: str = PROJECT, dispatch_id: str = DISPATCH,
                 attempt: int = ATTEMPT, mode: str = "v3",
-                spec_sha: str = "0" * 64, timestamp: str = START) -> dict:
+                spec_sha: str = "0" * 64, timestamp: str = START,
+                door_pid: int = 0, door_started_at: str = _STALE_DOOR_START) -> dict:
     line = {
         "timestamp": timestamp, "event_type": "dispatch_started",
         "project_id": project_id, "dispatch_id": dispatch_id, "attempt": attempt,
         "role": ROLE, "base_sha": "a" * 40, "spec_sha256": spec_sha,
-        "lifecycle_mode": mode, "door_pid": 0,
-        "door_started_at": _STALE_DOOR_START, "requested_by": "terminal:T1",
+        "lifecycle_mode": mode, "door_pid": door_pid,
+        "door_started_at": door_started_at, "requested_by": "terminal:T1",
     }
     _append(state_dir, line)
     return line
@@ -221,6 +231,55 @@ def _seed_sweepable(state_dir: Path, *, dispatch_id: str = DISPATCH) -> None:
     _spec_path, spec_sha = _spec(state_dir, dispatch_id=dispatch_id)
     _insert_row(state_dir, dispatch_id=dispatch_id)
     _start_line(state_dir, dispatch_id=dispatch_id, spec_sha=spec_sha)
+
+
+def _attempt(state_dir: Path, dispatch_id: str, *, live: bool) -> None:
+    """One in-flight v3 attempt: live through this test's own pid, or dead.
+
+    A dead attempt carries a spec with the smallest legal deadline, so the
+    sweep abandons it; a live one is never past anything (liveness comes first).
+    """
+    spec_sha = "0" * 64
+    if live:
+        pid, door_started_at = os.getpid(), dispatch_start.process_started_at(os.getpid())
+        assert door_started_at, "ps reported no start time for this test's own pid"
+    else:
+        pid, door_started_at = 0, _STALE_DOOR_START
+        _spec_path, spec_sha = _spec(state_dir, dispatch_id=dispatch_id)
+    _insert_row(state_dir, dispatch_id=dispatch_id)
+    _start_line(state_dir, dispatch_id=dispatch_id, spec_sha=spec_sha,
+                door_pid=pid, door_started_at=door_started_at)
+
+
+def _finalize_line(state_dir: Path, dispatch_id: str) -> None:
+    """Another finalizer ended this attempt in between two sweeps (intent and all)."""
+    _open_intent(state_dir, dispatch_id, row=False)  # the attempt's row already exists
+    recovered = lifecycle.recover(state_dir=state_dir, project_id=PROJECT,
+                                  dispatch_id=dispatch_id, attempt=ATTEMPT, actor="door")
+    assert recovered.status == lifecycle.STATUS_RECOVERED, recovered
+
+
+def _open_intent(state_dir: Path, dispatch_id: str, *, row: bool = True) -> Path:
+    """An end intent frozen but never published, with a row for the projection."""
+    if row:
+        _insert_row(state_dir, dispatch_id=dispatch_id)
+    ledger = _ledger(state_dir)
+    prepared = prepare_end_line(
+        {"timestamp": START, "event_type": "dispatch_finished", "project_id": PROJECT,
+         "dispatch_id": dispatch_id, "attempt": ATTEMPT, "end_state": "completed",
+         "head_sha": "c" * 40, "model": "deepseek-flash"},
+        ledger_path=ledger)
+    path = end_intent_path(state_dir, PROJECT, dispatch_id, ATTEMPT)
+    document = build_end_intent(
+        project_id=PROJECT, dispatch_id=dispatch_id, attempt=ATTEMPT,
+        end_state=str(prepared["end_state"]), end_line=prepared, ledger_path=ledger,
+        ledger_offset=ledger.stat().st_size if ledger.exists() else 0)
+    assert write_end_intent(path, document) is True
+    return path
+
+
+def _cursor(state_dir: Path) -> dict | None:
+    return _heartbeat(state_dir).get("cursor")
 
 
 class _PinnedClock:
@@ -339,6 +398,142 @@ def test_a_spent_budget_stops_between_items_and_the_next_sweep_finishes(
     assert [len(_finished(state_dir, dispatch_id)) for dispatch_id in dispatch_ids] == [1, 1, 1]
     assert _heartbeat(state_dir)["budget"]["exhausted"] is False
     assert _heartbeat(state_dir)["budget"]["items_left"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 3b. K-6b round 2: the continuation cursor of a bounded sweep
+# ---------------------------------------------------------------------------
+
+def test_a_bounded_sweep_leaves_the_live_prefix_and_the_next_one_takes_the_dead(
+        state_dir, lifecycle_on, monkeypatch):
+    """Codex's reproduction: live attempts first, a dead one past its deadline after."""
+    live_ids, dead_id = ["d-k6b-c1", "d-k6b-c2"], "d-k6b-c3"
+    for dispatch_id in live_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    _attempt(state_dir, dead_id, live=False)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.live, first.abandoned, first.budget_exhausted) == (2, 0, True), first
+    assert first.budget_left == 1
+    assert _finished(state_dir, dead_id) == []
+    assert _cursor(state_dir) == {"project_id": PROJECT, "dispatch_id": dead_id,
+                                  "attempt": ATTEMPT, "offset": 2}
+
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.abandoned == 1, second
+    assert len(_finished(state_dir, dead_id)) == 1
+    assert second.budget_exhausted is False
+    assert _cursor(state_dir) is None
+
+
+def test_the_cursor_at_the_last_item_wraps_to_the_front(state_dir, lifecycle_on, monkeypatch):
+    dispatch_ids = ["d-k6b-w1", "d-k6b-w2", "d-k6b-w3"]
+    for dispatch_id in dispatch_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+    assert (first.live, first.budget_exhausted) == (2, True), first
+    assert _cursor(state_dir)["dispatch_id"] == dispatch_ids[-1]
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 0.0]))
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.live == 3, second  # the cursor's item, then the front, then the rest
+    assert second.budget_exhausted is False
+    assert _cursor(state_dir) is None
+
+
+def test_a_cursor_key_finalized_in_between_resumes_at_the_next_item(
+        state_dir, lifecycle_on, monkeypatch):
+    _attempt(state_dir, "d-k6b-f-live", live=True)
+    _attempt(state_dir, "d-k6b-f-one", live=False)
+    _attempt(state_dir, "d-k6b-f-two", live=False)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.live, first.abandoned, first.budget_exhausted) == (1, 0, True), first
+    assert _cursor(state_dir)["dispatch_id"] == "d-k6b-f-one"
+
+    _finalize_line(state_dir, "d-k6b-f-one")  # someone else ended it in between
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.abandoned == 1, second  # one item of budget, spent on f-two
+    assert len(_finished(state_dir, "d-k6b-f-two")) == 1
+    assert len(_finished(state_dir, "d-k6b-f-one")) == 1  # only the one written above
+
+
+def test_an_unbounded_sweep_ignores_the_cursor_and_clears_it(
+        state_dir, lifecycle_on, monkeypatch):
+    dispatch_ids = ["d-k6b-u1", "d-k6b-u2", "d-k6b-u3"]
+    for dispatch_id in dispatch_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    bounded = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+    assert bounded.budget_exhausted is True and _cursor(state_dir) is not None, bounded
+
+    unbounded = lifecycle.sweep(state_dir=state_dir, now=now)
+
+    assert unbounded.live == 3, unbounded
+    assert unbounded.budget_exhausted is False
+    assert _cursor(state_dir) is None
+
+
+@pytest.mark.parametrize("heartbeat", [
+    "{not json at all",
+    json.dumps({"cursor": "the front, please"}),
+    json.dumps({"cursor": {"project_id": PROJECT, "dispatch_id": "d-k6b-x",
+                           "attempt": "1", "offset": 0}}),
+    json.dumps({"cursor": {"project_id": PROJECT, "dispatch_id": "d-k6b-x",
+                           "attempt": 1}}),
+])
+def test_an_unreadable_cursor_starts_a_bounded_sweep_at_the_front(
+        state_dir, lifecycle_on, monkeypatch, heartbeat):
+    dispatch_ids = ["d-k6b-m1", "d-k6b-m2", "d-k6b-m3"]
+    for dispatch_id in dispatch_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    path = state_dir / "dispatch_end" / lifecycle.SWEEP_HEARTBEAT_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(heartbeat, encoding="utf-8")
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    result = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (result.live, result.budget_exhausted) == (1, True), result
+    # the front was taken and the item after it recorded: the run started at the front
+    assert _cursor(state_dir)["dispatch_id"] == dispatch_ids[1]
+
+
+def test_open_intents_keep_their_place_whatever_the_cursor_says(
+        state_dir, lifecycle_on, monkeypatch):
+    _open_intent(state_dir, "d-k6b-i-intent-1")
+    for dispatch_id in ["d-k6b-i1", "d-k6b-i2", "d-k6b-i3"]:
+        _attempt(state_dir, dispatch_id, live=True)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.recovered, first.live, first.budget_exhausted) == (1, 2, True), first
+    assert _cursor(state_dir)["dispatch_id"] == "d-k6b-i3"
+
+    _open_intent(state_dir, "d-k6b-i-intent-2")  # opened after the cursor was set
+
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.recovered == 1, second  # intents are never behind the cursor
 
 
 # ---------------------------------------------------------------------------

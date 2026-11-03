@@ -2565,20 +2565,16 @@ LIFECYCLE_SWEEP_BUDGET_SECONDS = 2.0
 def _lifecycle_sweep_section(state_dir: Path) -> Dict[str, Any]:
     """ADR-045 §6 + plan row 6: one bounded sweep per build, inside its own guard.
 
-    The runner tick and the door together still cannot promise ``abandoned`` at
-    deadline plus 30 minutes for an idle fabric, so every state build sweeps
-    too. The result lands in ``t0_state.json`` so a stalled sweep is visible; a
-    sweep that raises never fails the build and never changes its exit code.
+    The result lands in ``t0_state.json``; a sweep that raises never fails the
+    build and never changes its exit code.
     """
     try:
         from dispatch_lifecycle import sweep  # noqa: PLC0415
-
         result = sweep(state_dir=state_dir, budget_seconds=LIFECYCLE_SWEEP_BUDGET_SECONDS)
     except Exception as exc:  # vnx-silent-except: the build's own exit code must not depend on the sweep
         log.warning("lifecycle sweep failed (build continues): %s", exc)
         return {"abandoned": 0, "errors": 1, "budget_exhausted": False}
-    return {"abandoned": result.abandoned, "errors": len(result.errors),
-            "budget_exhausted": result.budget_exhausted}
+    return {"abandoned": result.abandoned, "errors": len(result.errors), "budget_exhausted": result.budget_exhausted}
 
 
 def build_t0_state(

@@ -27,7 +27,6 @@ from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
 from coordination_db import db_path_from_state_dir, get_connection
-from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -254,15 +253,12 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt
 
 def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
     """The spec's own legal integer ``deadline_seconds``, else None (K-6b/OI-2522)."""
+    from dispatch_lifecycle import _valid_deadline  # noqa: PLC0415
     try:
         value = json.loads(blob).get("deadline_seconds")
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    if not DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX:
-        return None
-    return value
+    return value if _valid_deadline(value) else None
 
 
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
@@ -284,8 +280,7 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
         "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
             f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
     }
-    deadline_seconds = _spec_deadline_seconds(spec_bytes)
-    if deadline_seconds is not None:
+    if (deadline_seconds := _spec_deadline_seconds(spec_bytes)) is not None:
         receipt["deadline_seconds"] = deadline_seconds
     try:
         result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
