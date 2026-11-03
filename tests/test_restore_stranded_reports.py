@@ -31,7 +31,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,7 @@ sys.path.insert(0, str(_SCRIPTS_LIB))
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import coordination_db  # noqa: E402
+import dispatch_lifecycle as lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import project_id_migration  # noqa: E402
 import report_to_receipt_converter as rc  # noqa: E402
@@ -541,3 +544,143 @@ class TestLifecycleRefusalIsVisible:
         assert scan.candidates == ()
         assert scan.refused == ()
         assert _warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------
+# Part 7 (K-8c round 2): the restore books what the converter books
+# ---------------------------------------------------------------------------
+
+T1 = "2026-11-03T09:00:00Z"
+T2 = "2026-11-03T10:00:00Z"
+T3 = "2026-11-03T11:00:00Z"
+
+
+@pytest.fixture(autouse=True)
+def _tenant(monkeypatch):
+    """The door exports VNX_PROJECT_ID; the decision resolves the tenant itself."""
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+
+
+def _epoch(zulu: str) -> float:
+    return datetime.fromisoformat(zulu.replace("Z", "+00:00")).timestamp()
+
+
+def _end_line(dispatch_id: str, *, attempt: int) -> dict:
+    return {
+        "timestamp": T2, "event_type": "dispatch_finished", "project_id": PROJECT,
+        "dispatch_id": dispatch_id, "attempt": attempt, "end_state": "completed",
+        "head_sha": "c" * 40, "model": "deepseek-flash",
+    }
+
+
+def _finalize(state_dir: Path, dispatch_id: str, *, attempt: int = 1) -> None:
+    lifecycle.finalize(
+        state_dir=state_dir, project_id=PROJECT, dispatch_id=dispatch_id, attempt=attempt,
+        end_state="completed", end_line=_end_line(dispatch_id, attempt=attempt),
+    )
+
+
+def _lines(state_dir: Path) -> list:
+    ledger = state_dir / "t0_receipts.ndjson"
+    if not ledger.exists():
+        return []
+    return [json.loads(raw) for raw in ledger.read_text(encoding="utf-8").splitlines() if raw.strip()]
+
+
+def _of_type(state_dir: Path, event_type: str, dispatch_id: str | None = None) -> list:
+    return [line for line in _lines(state_dir)
+            if line.get("event_type") == event_type
+            and (dispatch_id is None or line.get("dispatch_id") == dispatch_id)]
+
+
+class TestApplyBooksTheRoutedLine:
+    """Codex's blocker, end to end through ``main(["--apply", ...])``.
+
+    The scan converts the candidate, but ``apply_restoration`` used to rebuild
+    the receipt through ``rc.build_receipt_from_report``, which did not route on
+    the K-8a head: a v3 restore still appended ``task_complete``. K-8b wires the
+    builder; this proves the restore now books the same line the converter does.
+    """
+
+    def test_v3_apply_books_one_report_ingested_and_no_task_complete(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append, capsys):
+        dispatch_id = "20260906-v3-apply"
+        clock["now"] = T0
+        _insert_dispatch_row(state_dir, dispatch_id)
+        _begin(state_dir, spec_file, dispatch_id)  # the real writer stamps the v3 start
+        report = _write_stranded_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+        _write_dispatch_spec(data_dir, dispatch_id, model="sonnet", provider="claude")
+        os.utime(report, (_epoch(T1), _epoch(T1)))
+
+        exit_code = main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)])
+
+        assert exit_code == 0
+        assert "1 restored" in capsys.readouterr().out
+        ingested = _of_type(state_dir, "report_ingested", dispatch_id)
+        assert len(ingested) == 1
+        assert ingested[0]["attempt"] == 1
+        assert ingested[0]["end_pending"] is True
+        assert "end_outcome_id" not in ingested[0]
+        assert ingested[0]["identity_restored"] is True
+        assert _of_type(state_dir, "task_complete", dispatch_id) == []
+        assert _RESTORED_MARKER in report.read_text(encoding="utf-8")
+
+    def test_legacy_report_without_project_id_and_a_db_row_books_task_complete(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock,
+            hermetic_append, capsys):
+        """Codex's warning (OI-2520): a legacy report with no tenant and a live DB
+        must stay a candidate, and ``--apply`` books the same ``task_complete``."""
+        dispatch_id = "20260906-legacy-db"
+        clock["now"] = T0
+        _insert_dispatch_row(state_dir, dispatch_id)
+        _begin(state_dir, spec_file, dispatch_id)  # legacy: no v3 env, no ledger line
+        report = _write_stranded_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+        _write_dispatch_spec(data_dir, dispatch_id, model="sonnet", provider="claude")
+        assert "project_id" not in report.read_text(encoding="utf-8")
+
+        scan = find_stranded_reports(data_dir, state_dir)
+
+        assert scan.refused == ()
+        assert [candidate.dispatch_id for candidate in scan.candidates] == [dispatch_id]
+        assert scan.candidates[0].receipt["event_type"] == "task_complete"
+
+        exit_code = main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)])
+
+        assert exit_code == 0
+        assert "1 restored" in capsys.readouterr().out
+        completes = _of_type(state_dir, "task_complete", dispatch_id)
+        assert len(completes) == 1
+        assert completes[0]["identity_restored"] is True
+        assert _of_type(state_dir, "report_ingested", dispatch_id) == []
+
+
+class TestTheReportsOwnAttemptReachesTheScan:
+    """Rule 2: the scan hands the decision the report's own attempt through the
+    converter's single reader, exactly as the converter's writer does."""
+
+    def test_quoted_attempt_one_after_attempt_two_started(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append):
+        dispatch_id = "20260906-attempt-one"
+        clock["now"] = T0
+        _insert_dispatch_row(state_dir, dispatch_id)
+        _begin(state_dir, spec_file, dispatch_id)          # attempt 1
+        _finalize(state_dir, dispatch_id, attempt=1)       # attempt 1 ends
+        clock["now"] = T2
+        _begin(state_dir, spec_file, dispatch_id)          # attempt 2 starts
+
+        report = _write_stranded_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, extra_frontmatter="attempt: '1'\n",
+        )
+        os.utime(report, (_epoch(T3), _epoch(T3)))  # written after attempt 2 started
+
+        scan = find_stranded_reports(data_dir, state_dir)
+
+        assert len(scan.candidates) == 1
+        receipt = scan.candidates[0].receipt
+        assert receipt["event_type"] == "report_ingested"
+        assert receipt["attempt"] == 1
+        finished_one = [line for line in _of_type(state_dir, "dispatch_finished", dispatch_id)
+                        if line.get("attempt") == 1]
+        assert receipt["end_outcome_id"] == finished_one[0]["outcome_id"]

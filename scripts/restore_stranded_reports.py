@@ -57,7 +57,6 @@ for _p in (_SCRIPT_DIR, _LIB_DIR):
         sys.path.insert(0, str(_p))
 
 import report_to_receipt_converter as rc  # noqa: E402
-from report_lifecycle_mode import ReportPathRefused  # noqa: E402
 import append_receipt  # noqa: E402  — registers facade, exposes append_receipt_payload
 from append_receipt_internals.validation import _validate_model_present  # noqa: E402
 from append_receipt_internals.common import AppendReceiptError  # noqa: E402
@@ -175,11 +174,18 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
             if receipt is not None:
                 # ADR-045 (K-8): the same routing every writer applies, so this
                 # third writer never books a task_complete for a v3 dispatch.
-                # ``state_dir`` is the store this scan reads and the restore
-                # appends to; the write time is the file this scan read, not
-                # the canonical path the converter substituted.
-                receipt = report_line(receipt, state_dir=state_dir,
-                                      report_written_at=path.stat().st_mtime)
+                # The report's own attempt reaches the decision through the
+                # converter's single reader, on the merged frontmatter + body —
+                # never a tenant, which K-8a resolves itself. ``state_dir`` is
+                # the store this scan reads and the restore appends to; the
+                # write time is the file this scan read, not the canonical path
+                # the converter substituted.
+                merged = {**rc._extract_body_fields(text), **rc.parse_frontmatter(text)}
+                attempt = rc._named_attempt(merged)
+                hint = {**receipt, "attempt": attempt} if attempt is not None else receipt
+                routed = report_line(hint, state_dir=state_dir,
+                                     report_written_at=path.stat().st_mtime)
+                receipt = receipt if routed is hint else routed
         except ReportPathRefused as exc:
             refused.append(LifecycleRefusal(
                 path=path, dispatch_id=exc.dispatch_id, code=exc.code, detail=exc.detail))
