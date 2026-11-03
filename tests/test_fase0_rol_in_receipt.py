@@ -32,7 +32,10 @@ sys.path.insert(0, str(REPO / "scripts"))
 from append_receipt import append_receipt_payload  # noqa: E402
 from dispatch_identity import resolve_effective_role  # noqa: E402
 from envelope_govern import _govern  # noqa: E402
-from envelope_govern_support import _receipt_exists_for_dispatch  # noqa: E402
+from envelope_govern_support import (  # noqa: E402
+    _is_lane_completion_receipt,
+    _receipt_exists_for_dispatch,
+)
 from envelope_types import EnvelopeSpec, _AdapterResult  # noqa: E402
 
 DISPATCH_ID = "20261002-fase0-role-test"
@@ -238,6 +241,80 @@ class TestEnvelopeDedupNarrowed:
         v2 = [r for r in _ledger(store / "state") if "completion_pct" in r]
         assert len(v2) == 1
         assert v2[0]["status"] == "contract_invalid"
+
+
+# ---------------------------------------------------------------------------
+# Drop 1b (ADR-045 K-4c round 3): a refusal is a ledger line, never a completion
+# ---------------------------------------------------------------------------
+
+# The exact shape ``dispatch_cli._record_door_refusal_receipt`` writes for BOTH door
+# refusals (a refused start line, a switched-off provider family): a ReceiptV2
+# dispatch receipt — ``receipt_kind: dispatch``, no ``source``, carrying
+# ``completion_pct``/``risk``/``findings`` — marked ``blocked`` with
+# ``delivery_state: delivery_refused`` because nothing was delivered and nothing spent.
+DOOR_REFUSAL_RECEIPT = {
+    "dispatch_id": DISPATCH_ID,
+    "terminal_id": "T0",
+    "provider": "claude",
+    "model": "sonnet",
+    "status": "blocked",
+    "receipt_kind": "dispatch",
+    "delivery_state": "delivery_refused",
+    "completion_pct": 0,
+    "risk": 0.0,
+    "findings": [],
+    "failure_class": "base_ref_unresolved",
+    "failure_reason": "start-line-refused: base_ref_unresolved: the ref does not resolve",
+}
+
+
+class TestRefusalIsNotALaneCompletion:
+    """A refused fire keeps its own receipt, but it never stands in for the lane's.
+
+    Before this, ``GOVERN`` read the refusal as a completion and skipped its own
+    receipt: a refused start followed by a successful refire left the ``blocked``
+    refusal as the only completion evidence for that dispatch.
+    """
+
+    def test_door_refusal_is_not_a_lane_completion(self):
+        assert _is_lane_completion_receipt(DOOR_REFUSAL_RECEIPT, DISPATCH_ID) is False
+
+    def test_a_ledger_holding_only_the_refusal_does_not_dedup(self, store):
+        ledger = store / "state" / "t0_receipts.ndjson"
+        ledger.write_text(json.dumps(DOOR_REFUSAL_RECEIPT) + "\n", encoding="utf-8")
+        assert _receipt_exists_for_dispatch(ledger, DISPATCH_ID) is False
+
+    def test_govern_still_writes_its_own_receipt_after_a_refusal(self, store):
+        """End to end through the real GOVERN: the refusal must not suppress it."""
+        spec = _envelope_spec(store)
+        ledger = store / "state" / "t0_receipts.ndjson"
+        ledger.write_text(json.dumps(DOOR_REFUSAL_RECEIPT) + "\n", encoding="utf-8")
+
+        _run_govern(spec)
+
+        completions = [
+            r for r in _ledger(store / "state")
+            if r.get("dispatch_id") == DISPATCH_ID and r.get("status") == "success"
+        ]
+        assert len(completions) == 1, completions
+        assert completions[0].get("completion_pct") == 100
+        assert completions[0].get("role") == SPEC_ROLE
+
+    def test_receipt_v2_completion_still_counts(self):
+        assert _is_lane_completion_receipt({
+            "schema_version": 2, "dispatch_id": DISPATCH_ID, "receipt_kind": "dispatch",
+            "status": "success", "completion_pct": 100, "risk": 0.0, "findings": [],
+            "deadline_seconds": 900,
+        }, DISPATCH_ID) is True
+
+    def test_subprocess_safety_net_still_counts(self):
+        assert _is_lane_completion_receipt({
+            "dispatch_id": DISPATCH_ID, "receipt_kind": "dispatch", "source": "subprocess",
+        }, DISPATCH_ID) is True
+
+    @pytest.mark.parametrize("kind", sorted(UNRELATED_LINES))
+    def test_every_other_record_still_does_not_count(self, kind):
+        assert _is_lane_completion_receipt(UNRELATED_LINES[kind], DISPATCH_ID) is False
 
 
 # ---------------------------------------------------------------------------

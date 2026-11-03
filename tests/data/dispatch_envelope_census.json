@@ -940,49 +940,56 @@
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 35,
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_is_lane_completion_receipt"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 37,
       "mechanism": "direct-call",
       "module_target": "envelope_govern_support",
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 36,
+      "line": 39,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 36,
+      "line": 39,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 122,
+      "line": 125,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 123,
+      "line": 126,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 233,
+      "line": 236,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 234,
+      "line": 237,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
@@ -1273,6 +1280,41 @@
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 169,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 169,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 180,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 181,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 182,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
     },
     {
       "file": "tests/test_kimi_model_resolver.py",
