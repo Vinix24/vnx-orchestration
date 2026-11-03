@@ -51,23 +51,6 @@ _IDENTITY_LINE_RE = re.compile(
 )
 
 
-def _named_attempt(metadata: Dict[str, Any]) -> Optional[int]:
-    """The report's own ``attempt`` when it names a positive integer; else ``None``.
-
-    ``report_lifecycle_mode`` refuses anything on the receipt that is not a
-    positive integer, so a report naming ``"x"`` / ``0`` hands over nothing and
-    the decision attributes by write time as before (K-8b round 2, rule 3).
-    """
-    raw = metadata.get('attempt')
-    if raw is None or isinstance(raw, bool):
-        return None
-    try:
-        value = int(str(raw).strip())
-    except (TypeError, ValueError):
-        return None
-    return value if value >= 1 else None
-
-
 def _normalize_model_to_canonical(value: str) -> "Optional[str]":
     """Return the canonical registry key for *value*.
 
@@ -994,6 +977,9 @@ class ReportParser:
         from report_lifecycle_mode import (  # noqa: PLC0415
             ReportPathRefused, append_destination_state_dir, report_line,
         )
+        # ONE attempt reader for both writers (K-8b round 3): the converter's,
+        # so a quoted ``attempt: '1'`` is read the same way on both paths.
+        from report_to_receipt_converter import _named_attempt  # noqa: PLC0415
         hint = receipt
         named: Dict[str, Any] = {}
         if not receipt.get('project_id'):

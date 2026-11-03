@@ -694,6 +694,112 @@ def test_parser_ignores_a_named_attempt_that_is_not_a_positive_integer(
 
 
 # ---------------------------------------------------------------------------
+# Round 3: one attempt reader for both writers, a quoted value included
+# ---------------------------------------------------------------------------
+
+def _write_report_naming_attempt_literal(path: Path, literal: str, *, mtime: str) -> Path:
+    """A report whose frontmatter names ``attempt`` with *literal* verbatim ('1' / "1")."""
+    text = _report_text(DISPATCH, attempt=1).replace("attempt: 1", f"attempt: {literal}", 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    stamp = _epoch(mtime)
+    os.utime(path, (stamp, stamp))
+    return path
+
+
+@pytest.mark.parametrize("literal", ["'1'", '"1"'])
+def test_parser_books_a_quoted_attempt_the_report_names(
+    state_dir, spec_file, v3, clock, monkeypatch, tmp_path, literal
+):
+    """Codex's reproduction with the quote kept: attempt 1 named, file written after attempt 2.
+
+    ``ReportParser.extract_metadata`` reads the frontmatter line raw, so this is
+    the shape where the parser's own copy of the rule drifted from the
+    converter's: ``int("'1'")`` failed and the file's write time booked attempt 2.
+    """
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report_naming_attempt_literal(
+        tmp_path / "reports" / f"{DISPATCH}.md", literal, mtime=T3)
+    assert f"attempt: {literal}" in report.read_text(encoding="utf-8")
+    end_of_one = _finished_of_attempt(state_dir, 1)[0]["outcome_id"]
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+
+    # The real public entry point, in process.
+    receipt = report_parser.ReportParser().parse_report(str(report))
+    assert receipt["event_type"] == "report_ingested"
+    assert receipt["attempt"] == 1
+    assert receipt["end_outcome_id"] == end_of_one
+
+    # ... and the production entry point, as receipt_processor.sh runs it.
+    run = _run_parser(report, _parser_env(state_dir, tmp_path / "data", v3=True))
+    assert run.returncode == 0, run.stderr
+    subprocess_receipt = json.loads(run.stdout)
+    assert subprocess_receipt["attempt"] == 1
+    assert subprocess_receipt["end_outcome_id"] == end_of_one
+
+
+@pytest.mark.parametrize("literal", ["'1'", '"1"'])
+def test_converter_books_the_same_attempt_for_the_quoted_report(
+    state_dir, spec_file, v3, clock, tmp_path, literal
+):
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report_naming_attempt_literal(
+        tmp_path / "reports" / f"{DISPATCH}.md", literal, mtime=T3)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "appended"
+    ingested = _of_type(state_dir, "report_ingested")
+    assert [line["attempt"] for line in ingested] == [1]
+    assert ingested[0]["end_outcome_id"] == _finished_of_attempt(state_dir, 1)[0]["outcome_id"]
+
+
+@pytest.mark.parametrize("named, expected", [
+    (1, 1), ("1", 1), ("'1'", 1), ('"1"', 1), (" 1 ", 1),
+    ("'x'", None), (0, None), (-1, None), ("", None), ("''", None),
+    ("'1", None), ("1'", None), (True, None), (False, None), (None, None),
+])
+def test_the_one_attempt_reader_reads_the_value_table(named, expected):
+    """Rule 2 of round 3, on the single reader both writers use."""
+    assert rtc._named_attempt({"attempt": named}) == expected
+
+
+def test_exactly_one_attempt_reader_is_defined_in_the_production_tree():
+    """`git grep -n "def _named_attempt" scripts` — exactly one hit, the converter's."""
+    defined = sorted(
+        str(path.relative_to(VNX_ROOT))
+        for path in SCRIPT_DIR.rglob("*.py")
+        if "def _named_attempt" in path.read_text(encoding="utf-8")
+    )
+    assert defined == ["scripts/lib/report_to_receipt_converter.py"]
+
+
+def test_the_parser_routes_its_attempt_through_the_converters_reader(
+    state_dir, spec_file, v3, clock, monkeypatch, tmp_path
+):
+    """A spy on the one reader fires when the parser books a report: no second copy left."""
+    _two_started_attempts(state_dir, spec_file, clock)
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH, mtime=T3,
+                           attempt=1)
+    seen = []
+    real = rtc._named_attempt
+
+    def _spy(metadata):
+        seen.append(real(metadata))
+        return real(metadata)
+
+    monkeypatch.setattr(rtc, "_named_attempt", _spy)
+    monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+    monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data"))
+
+    receipt = report_parser.ReportParser().parse_report(str(report))
+
+    assert seen == [1], "the parser never reached the converter's attempt reader"
+    assert receipt["attempt"] == 1
+
+
+# ---------------------------------------------------------------------------
 # Round 2, rule 4: a legacy report keeps its line, whatever it names
 # ---------------------------------------------------------------------------
 

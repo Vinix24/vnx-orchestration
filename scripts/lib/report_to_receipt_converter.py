@@ -978,6 +978,14 @@ def _read_report_mtime(report_path: Path) -> Optional[float]:
 def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
     """The report's own ``attempt`` when it names a positive integer; else ``None``.
 
+    THE one reader (K-8b round 3): ``report_parser.py`` imports this function
+    instead of carrying a copy, so the two writers can never disagree about the
+    same report. ``report_parser.extract_metadata`` reads frontmatter lines raw
+    and keeps ``attempt: '1'`` quoted, while ``parse_frontmatter`` here strips
+    the quotes; one layer of surrounding matching quotes is removed on both
+    paths so ``1``, ``'1'``, ``"1"`` and `` 1 `` all mean 1. An unmatched quote
+    (``'1``) or an empty value stays unparseable and names no attempt.
+
     ``report_lifecycle_mode`` reads an attempt off the receipt and refuses
     ``attempt_unknown`` for anything that is not a positive integer, so a
     report naming ``"x"`` / ``0`` hands over nothing and the decision
@@ -986,8 +994,11 @@ def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
     raw = merged.get("attempt")
     if raw is None or isinstance(raw, bool):
         return None
+    text = str(raw).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
     try:
-        value = int(str(raw).strip())
+        value = int(text)
     except (TypeError, ValueError):
         return None
     return value if value >= 1 else None
