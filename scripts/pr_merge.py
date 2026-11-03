@@ -107,11 +107,16 @@ Receipt written to t0_receipts.ndjson:
                                  "Preflight ledger" below>
     review_seats: <dict — the seat rule the merge was judged under (OI-2058,
                                  R5b; since R3b rule
-                                 ``first_seat_or_every_seat_by_risk``):
+                                 ``first_seat_or_every_seat_by_risk``, and since
+                                 track tweede-stoel-op-signaal PR 4 the rule the
+                                 key ``VNX_REVIEW_SEAT_RULE`` named, with that raw
+                                 value in ``rule_value`` when the key was set):
                                  rule, pr_id, head_sha, the stack, the
                                  required seats and their source, the risk
                                  class with its reason and source, who
-                                 filled which seat; ``seats`` empty with ``verdict``
+                                 filled which seat; under the signal rule also
+                                 the signals that fired and every UNKNOWN input
+                                 field; ``seats`` empty with ``verdict``
                                  ``overridden`` or ``not_evaluated`` when the
                                  review gate did not judge. Always written,
                                  so track closure tells a merge under the
@@ -847,6 +852,7 @@ def _review_seats_verdict(
     if refusal is not None:
         return refusal
     from closure_verifier import check_review_gate_for_merge
+    from review_seat_evaluation import RISK_SEAT_RULE, active_seat_rule
 
     override_b3 = (
         {"b3_override": b3_override.strip(), "b3_override_carrier": b3_carrier} if b3_override else {}
@@ -854,9 +860,16 @@ def _review_seats_verdict(
     # R3b: the risk class is read in the checkout being merged into. Outside
     # main() no target is active and the evaluation reads the store's own checkout.
     checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
+    # PR 4: the one key, read through the one helper. A key-off call passes no
+    # keyword at all, so it is byte-for-byte the call on main.
+    seat_rule = active_seat_rule()
+    rule_kwargs = (
+        {"rule": seat_rule.rule, "rule_value": seat_rule.value}
+        if seat_rule.rule != RISK_SEAT_RULE or seat_rule.value else {}
+    )
     return check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
-        base_branch=base_branch, **override_b3, **checkout,
+        base_branch=base_branch, **rule_kwargs, **override_b3, **checkout,
     )
 
 
@@ -903,60 +916,15 @@ def _signal_evaluation(
     )
 
 
-def _seat1_lines(evaluation: Any, seat: str, head: str) -> Tuple[Any, ...]:
-    """The round-ledger lines of seat 1 on the exact head; ``()`` when no ledger was read."""
-    rounds = getattr(evaluation, "rounds", None)
-    lines = tuple(getattr(rounds, "lines", ()) or ())
-    return tuple(line for line in lines if seat and line.head_sha == head and line.seat == seat)
-
-
-def _accepted_seat_line(evaluation: Any, seat: str, head: str) -> Any:
-    """The ledger line of the record the door accepted for ``seat``; ``None`` when there is none.
-
-    Matched the way ``review_seat_evaluation.counted_fill`` matches it: the
-    exact head, the seat, the reviewer's gate, a PASS and the record's own
-    report. A seat that is not filled has no accepted line.
-    """
-    if not seat or getattr(evaluation, "rounds", None) is None:
-        return None
-    fill = evaluation.fill_for(seat)
-    if fill is None or not fill.filled or not isinstance(fill.record, dict):
-        return None
-    gate = str(fill.record.get("gate") or fill.reviewer or "")
-    report = Path(str(fill.record.get("report_path") or "")).name
-    matches = [
-        line for line in evaluation.rounds.lines
-        if line.head_sha == head and line.seat == seat and line.reviewer == gate
-        and line.verdict == "pass" and line.report_name == report
-    ]
-    return matches[-1] if matches else None
-
-
 def _signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
     """``(class, (path, category) pairs)`` from a recorded risk reading; ``UNKNOWN`` when it is unreadable.
 
-    A reading whose own diff could not be read is ``UNKNOWN``, never a known
-    ``high``: the plan sends an unreadable diff to ``UNKNOWN`` (every seat), and
-    ``high`` with a fail-closed reason and no deciding path is exactly that case.
+    Kept as a name for the shadow gatherer's callers; the one copy of the
+    reading is ``review_seat_evaluation.signal_risk``.
     """
-    from review_seat_evaluation import UNKNOWN
+    from review_seat_evaluation import signal_risk
 
-    if not isinstance(risk, dict):
-        return UNKNOWN, ()
-    deciding = risk.get("deciding")
-    paths = tuple(
-        (str(item.get("path") or ""), str(item.get("category") or ""))
-        for item in (deciding if isinstance(deciding, list) else ())
-        if isinstance(item, dict)
-    )
-    derived = str(risk.get("derived") or "").strip().lower()
-    reason = str(risk.get("reason") or "")
-    if derived not in ("low", "medium", "high", "critical"):
-        return UNKNOWN, paths
-    if derived == "high" and not paths and reason.startswith("fail-closed:"):
-        return UNKNOWN, paths
-    cls = str(risk.get("risk_class") or "").strip().lower()
-    return (cls if cls in ("low", "medium", "high", "critical") else UNKNOWN), paths
+    return signal_risk(risk)
 
 
 def _seat_signal_input(
@@ -989,33 +957,10 @@ def _seat_signal_input(
 
 
 def _signal_input_from_evaluation(evaluation: Any, head: str) -> Any:
-    """The typed input, from the seat evaluation and its round ledger."""
-    from review_seat_evaluation import ROUTE_DIRECT, SeatSignalInput, UNKNOWN
+    """The typed input, from the seat evaluation and its round ledger (one copy, in review_seat_evaluation)."""
+    from review_seat_evaluation import signal_input_for
 
-    stack = tuple(getattr(evaluation.required, "stack", ()) or ())
-    seat = stack[0] if stack else ""
-    on_head = _seat1_lines(evaluation, seat, head)
-    verdicts = {line.verdict for line in on_head}
-    accepted = _accepted_seat_line(evaluation, seat, head)
-    risk = evaluation.required.risk if isinstance(evaluation.required.risk, dict) else {}
-    risk_class, risk_paths = _signal_risk(risk)
-    takeover = UNKNOWN
-    if accepted is not None:
-        fill = evaluation.fill_for(seat)
-        route = fill.route if fill is not None else ""
-        takeover = accepted.takeover_from or ("" if route == ROUTE_DIRECT else (route or UNKNOWN))
-    return SeatSignalInput(
-        stack=stack,
-        seat1_outcome=next(iter(verdicts)) if len(verdicts) == 1 else UNKNOWN,
-        seat1_reviewer=(accepted.reviewer or UNKNOWN) if accepted is not None else UNKNOWN,
-        seat1_takeover_from=takeover,
-        real_warning_count=accepted.warning_count if accepted is not None else None,
-        prescan_count=accepted.prescan_notice_count if accepted is not None else None,
-        risk_class=risk_class,
-        risk_paths=risk_paths,
-        irreversible=risk.get("irreversible") if isinstance(risk.get("irreversible"), bool) else None,
-        head_sha=head,
-    )
+    return signal_input_for(evaluation.required, evaluation.fills, evaluation.rounds, head)
 
 
 def _shadow_seat_rule(
@@ -1066,12 +1011,31 @@ def _door_shadow_seat_rule(
     pr_data: Optional[Dict[str, Any]],
     review_gate: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """The shadow seat rule of one door run: gathered here, recorded, never acted on.
+    """The shadow seat rule of one door run: recorded, never acted on.
 
-    The door computes it on every dry run and every merge, next to the seat
-    record the review gate returned. A failure while gathering lands as
-    ``UNKNOWN`` fields inside ``_shadow_seat_rule`` and never blocks the merge.
+    When the key is on, the review gate already evaluated the seats under the
+    signal rule: that one evaluation feeds both the decision and this record
+    (PR 4 folds the duplicate seat evaluation PR 2 left). With the key off the
+    record stays exactly as PR 2 made it — a second, shadow-only reading. A
+    failure while gathering lands as ``UNKNOWN`` fields inside
+    ``_shadow_seat_rule`` and never blocks the merge.
     """
+    from review_seat_evaluation import SIGNAL_SEAT_RULE
+
+    record = (review_gate or {}).get("review_seats")
+    if (
+        isinstance(record, dict)
+        and record.get("rule") == SIGNAL_SEAT_RULE
+        and isinstance(record.get("signals"), list)
+        and isinstance(record.get("unknown"), list)
+    ):
+        return {
+            "rule": record["rule"],
+            "seats": list(record.get("seats") or []),
+            "signals": list(record["signals"]),
+            "unknown": list(record["unknown"]),
+            "head_sha": record.get("head_sha") or head_sha,
+        }
     return _shadow_seat_rule(
         args.pr, head_sha,
         branch=(pr_data or {}).get("headRefName") or "",
