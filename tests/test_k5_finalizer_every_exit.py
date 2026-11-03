@@ -231,11 +231,14 @@ class _ProviderStub:
 
 
 @contextlib.contextmanager
-def _lane_plumbing(tmp_path: Path, state_dir: Path, *, worktree, worktree_error=None):
+def _lane_plumbing(tmp_path: Path, state_dir: Path, *, worktree, worktree_error=None,
+                   govern=None):
     """Patch what a lane does NOT own: prompt assembly, integrity, GOVERN, worktree.
 
     ``_govern`` is the governed receipt writer (the forge stand-in K-4c uses): it
-    is stubbed so the test's ledger carries ONLY the lane's own end line.
+    is stubbed so the test's ledger carries ONLY the lane's own end line, unless
+    *govern* is given — then that callable stands in for it (it may raise, or
+    return no receipt path).
     """
     consumer = tmp_path / "consumer"
     consumer.mkdir(exist_ok=True)
@@ -247,9 +250,13 @@ def _lane_plumbing(tmp_path: Path, state_dir: Path, *, worktree, worktree_error=
     else:
         create = patch("dispatch_worktree_isolation.create_dispatch_worktree",
                        return_value=worktree)
+    if govern is None:
+        govern_patch = patch("dispatch_envelope._govern", return_value=(None, receipt))
+    else:
+        govern_patch = patch("dispatch_envelope._govern", side_effect=govern)
     with patch("dispatch_envelope._prepare", side_effect=lambda spec: spec.instruction), \
          patch("dispatch_envelope._record_integrity", return_value=None), \
-         patch("dispatch_envelope._govern", return_value=(None, receipt)), \
+         govern_patch, \
          patch("dispatch_envelope._resolve_phantom_diff", return_value=None), \
          patch("dispatch_worktree_isolation.resolve_consumer_project_root",
                return_value=consumer), \
@@ -309,7 +316,7 @@ CASE_IDS = [case["id"] for case in CASES]
 # Runners: the real lane (headless / provider) and the real door
 # ---------------------------------------------------------------------------
 
-def _run_headless(tmp_path, state_dir, dispatch_id, handover, case) -> int:
+def _run_headless(tmp_path, state_dir, dispatch_id, handover, case, govern=None) -> int:
     plan = _make_plan(tmp_path, dispatch_id,
                       sha256="0" * 64 if case["trigger"] == "toctou" else None)
     repo, _head = _git_repo(tmp_path)
@@ -324,7 +331,8 @@ def _run_headless(tmp_path, state_dir, dispatch_id, handover, case) -> int:
                      side_effect=RuntimeError("forge unreachable"))
                if case["trigger"] == "close_out_raised"
                else patch("dispatch_envelope._enforce_push_pr", side_effect=lambda **kw: kw["result"]))
-    with _lane_plumbing(tmp_path, state_dir, worktree=repo, worktree_error=wt_error), \
+    with _lane_plumbing(tmp_path, state_dir, worktree=repo, worktree_error=wt_error,
+                        govern=govern), \
          patch("provider_spawns.claude_spawn.spawn_claude", side_effect=spawn if spawn else _fake_spawn(0)), \
          enforce:
         return dispatch_cli._execute_claude_headless(
@@ -334,7 +342,7 @@ def _run_headless(tmp_path, state_dir, dispatch_id, handover, case) -> int:
         )
 
 
-def _run_provider(tmp_path, state_dir, dispatch_id, handover, case) -> int:
+def _run_provider(tmp_path, state_dir, dispatch_id, handover, case, govern=None) -> int:
     sha = "0" * 64 if case["trigger"] == "toctou" else None
     plan = _make_plan(tmp_path, dispatch_id, lane="provider", provider=Provider.CODEX, sha256=sha)
     repo, _head = _git_repo(tmp_path)
@@ -354,7 +362,8 @@ def _run_provider(tmp_path, state_dir, dispatch_id, handover, case) -> int:
                     side_effect=PaidLaneBudgetExceededError("codex", 9.0, 1.0))
               if case["trigger"] == "budget"
               else patch("dispatch_envelope.enforce_daily_budget", return_value=None))
-    with _lane_plumbing(tmp_path, state_dir, worktree=repo, worktree_error=wt_error), \
+    with _lane_plumbing(tmp_path, state_dir, worktree=repo, worktree_error=wt_error,
+                        govern=govern), \
          patch("dispatch_envelope.ProviderAdapter", side_effect=lambda: _ProviderStub(adapter)), \
          budget, enforce:
         from dispatch_envelope import run_envelope_plan
@@ -566,3 +575,202 @@ def test_a_hashless_plan_never_reaches_the_lane_exit(lane, tmp_path):
                       provider=Provider.CLAUDE if lane == "claude_headless" else Provider.CODEX)
     with pytest.raises(PermissionError, match="instruction_sha256"):
         require_permit(plan, issue_permit(good))
+
+
+# ---------------------------------------------------------------------------
+# 6. round 2 — the end line follows the GOVERNED outcome, not the worker's
+#
+# K-5's head published the line from the lane's ``finally`` BEFORE ``_govern``
+# ran, so a worker success whose governance raised (or whose receipt never
+# landed) was booked ``completed`` and could not be corrected. These cases fix
+# that outcome: the line is now the governed one, and the occupancy flock is
+# still held until it is on disk.
+# ---------------------------------------------------------------------------
+
+LANES = ["headless", "provider"]
+
+
+def _success_case(lane: str) -> dict:
+    return {"id": f"{lane}-governed", "lane": lane, "trigger": "ok",
+            "worktree": True, "spawned": True}
+
+
+def _run_lane(lane: str, tmp_path, state_dir, dispatch_id, handover, *, govern=None) -> int:
+    case = _success_case(lane)
+    if lane == "headless":
+        return _run_headless(tmp_path, state_dir, dispatch_id, handover, case, govern=govern)
+    return _run_provider(tmp_path, state_dir, dispatch_id, handover, case, govern=govern)
+
+
+@contextlib.contextmanager
+def _teardown_spy():
+    """Count the real teardown: ``remove_dispatch_worktree`` must run exactly once."""
+    seen: "list[str]" = []
+    real = isolation.remove_dispatch_worktree
+
+    def _spy(dispatch_id, **kwargs):
+        seen.append(dispatch_id)
+        return real(dispatch_id, **kwargs)
+
+    with patch.object(isolation, "remove_dispatch_worktree", _spy):
+        yield seen
+
+
+@contextlib.contextmanager
+def _release_snapshot(state_dir: Path, dispatch_id: str):
+    """What the ledger holds at the instant the occupancy flock is released.
+
+    The governed receipt and the one end line both have to be there already
+    (ADR-045 §5): the order is govern → line → release, never release first.
+    """
+    seen: "list[dict]" = []
+    real = isolation._release_occupancy
+
+    def _spy(wt_path):
+        lines = _ledger_lines(state_dir)
+        seen.append({
+            "end_lines": len([line for line in lines
+                              if line.get("event_type") == "dispatch_finished"
+                              and line.get("dispatch_id") == dispatch_id]),
+            "receipt": any(line.get("event_type") == "dispatch_completed"
+                           and line.get("dispatch_id") == dispatch_id for line in lines),
+        })
+        return real(wt_path)
+
+    with patch.object(isolation, "_release_occupancy", _spy):
+        yield seen
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_govern_that_raises_books_failed_and_propagates(lane, tmp_path, monkeypatch):
+    """A worker success whose GOVERN raised is a failed attempt, not `completed`."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = f"20261103-k5-r2-govern-raises-{lane}"
+    _data_dir, state_dir = _state_dirs(tmp_path)
+    handover = _v3_handover(dispatch_id)
+
+    def _govern_raises(*_args, **_kwargs):
+        raise RuntimeError("govern blew up")
+
+    with _teardown_spy() as torn_down, \
+         pytest.raises(RuntimeError, match="govern blew up"):
+        _run_lane(lane, tmp_path, state_dir, dispatch_id, handover, govern=_govern_raises)
+
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "failed", lines[0]
+    assert lines[0]["reason"] == "govern_error", lines[0]
+    assert torn_down == [dispatch_id], f"{lane}: teardown {torn_down}"
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_missing_receipt_books_failed(lane, tmp_path, monkeypatch):
+    """OI-1287: a worker success with no ledger receipt is not a completed attempt."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = f"20261103-k5-r2-receipt-missing-{lane}"
+    _data_dir, state_dir = _state_dirs(tmp_path)
+    handover = _v3_handover(dispatch_id)
+
+    def _govern_without_receipt(*_args, **_kwargs):
+        return None, None
+
+    with _teardown_spy() as torn_down, \
+         _release_order_spy(state_dir, dispatch_id) as released:
+        rc = _run_lane(lane, tmp_path, state_dir, dispatch_id, handover,
+                       govern=_govern_without_receipt)
+
+    assert rc != 0, f"{lane}: a missing receipt must not return a clean exit"
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "failed", lines[0]
+    assert lines[0]["reason"] == "receipt_missing", lines[0]
+    assert torn_down == [dispatch_id], f"{lane}: teardown {torn_down}"
+    assert released == [1], f"{lane}: released with {released} end lines on disk"
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_governed_success_publishes_before_the_release(lane, tmp_path, monkeypatch):
+    """The order is govern → end line → release: both are on disk at the release."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = f"20261103-k5-r2-governed-success-{lane}"
+    _data_dir, state_dir = _state_dirs(tmp_path)
+    handover = _v3_handover(dispatch_id)
+    receipt = state_dir / "t0_receipts.ndjson"
+
+    def _govern_writes_receipt(spec, result, _start, _end, **_kwargs):
+        with receipt.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({
+                "event_type": "dispatch_completed",
+                "dispatch_id": spec.dispatch_id,
+                "project_id": PROJECT,
+            }) + "\n")
+        return None, receipt
+
+    with _teardown_spy() as torn_down, \
+         _release_snapshot(state_dir, dispatch_id) as snapshots:
+        rc = _run_lane(lane, tmp_path, state_dir, dispatch_id, handover,
+                       govern=_govern_writes_receipt)
+
+    assert rc == 0, f"{lane}: a governed success must return a clean exit"
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert lines[0]["end_state"] == "completed", lines[0]
+    assert "reason" not in lines[0], lines[0]
+    assert torn_down == [dispatch_id], f"{lane}: teardown {torn_down}"
+    assert snapshots == [{"end_lines": 1, "receipt": True}], \
+        f"{lane}: the flock was released before the line and the receipt: {snapshots}"
+
+
+def test_a_keyboard_interrupt_in_govern_still_tears_down(tmp_path, monkeypatch):
+    """A BaseException out of GOVERN: the worktree still goes, at most one line."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k5-r2-keyboard-interrupt"
+    _data_dir, state_dir = _state_dirs(tmp_path)
+    handover = _v3_handover(dispatch_id)
+
+    def _govern_interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt()
+
+    with _teardown_spy() as torn_down, \
+         pytest.raises(KeyboardInterrupt):
+        _run_lane("headless", tmp_path, state_dir, dispatch_id, handover,
+                  govern=_govern_interrupted)
+
+    assert torn_down == [dispatch_id], f"teardown {torn_down}"
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) <= 1, f"at most one end line per attempt: {lines}"
+    if lines:
+        assert lines[0]["end_state"] == "failed", lines[0]
+
+
+# ---------------------------------------------------------------------------
+# 7. the one table: a GOVERNED status onto the end line (dispatch_exit)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status,timed_out,end_state,reason", [
+    ("success", False, "completed", None),
+    ("failure", False, "failed", "lane_failed"),
+    ("timeout", False, "timed_out", "timeout"),
+    ("timeout", True, "timed_out", "timeout"),
+    ("failure", True, "timed_out", "timeout"),
+    ("receipt_missing", False, "failed", "receipt_missing"),
+    # fail-closed: missing, empty and unknown statuses are failures, never a pass
+    (None, False, "failed", "lane_failed"),
+    ("", False, "failed", "lane_failed"),
+    ("   ", False, "failed", "lane_failed"),
+    ("completed", False, "failed", "lane_failed"),
+    ("SUCCESS", False, "failed", "lane_failed"),
+])
+def test_the_governed_status_table(status, timed_out, end_state, reason):
+    import dispatch_exit  # noqa: PLC0415 — the table under test
+
+    assert dispatch_exit.end_state_for(status, timed_out=timed_out) == (end_state, reason)
+
+
+def test_the_governed_table_keys_the_envelope_receipt_missing_status():
+    """One literal: the table's key IS the status ``_envelope_outcome`` stamps."""
+    import dispatch_envelope  # noqa: PLC0415
+    import dispatch_exit  # noqa: PLC0415
+
+    key = dispatch_envelope.RECEIPT_MISSING_STATUS
+    assert dispatch_exit.GOVERNED_END_STATES[key] == ("failed", key)

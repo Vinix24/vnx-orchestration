@@ -9,15 +9,16 @@ the frozen end line of ADR-045 §2/§8 (``end_state``, ``head_sha`` or an explic
 to the finalizer exactly once, BEFORE the lane releases its occupancy flock
 (§5 — the lane must keep proving it is alive until after its line is published).
 
-Two rules this module enforces for every caller:
+The end line follows the GOVERNED status (K-5 round 2): ``GOVERNED_END_STATES`` is
+the one table from what governance decided onto the end state and its reason — a
+worker ``success`` that governance could not prove is ``failed``, never ``completed``.
 
-* **A v3 hand-over only.** ``Handover.is_v3`` is fixed at the hand-over (§9), so
-  a legacy dispatch — and every caller that passes no hand-over — takes exactly
-  the K-4c path: no finalize, no line, no extra write.
-* **A finalizer failure never rewrites the outcome.** A raising ``finalize`` is
-  logged with the dispatch id and the exception and swallowed: the dispatch's
-  own success stands (the plan's risk row: "K-5 boekt een geslaagde dispatch als
-  failed"), and the lane still releases its flock.
+Two rules for every caller. **A v3 hand-over only**: ``Handover.is_v3`` is fixed at
+the hand-over (§9), so a legacy dispatch — and every caller that passes no
+hand-over — takes exactly the K-4c path: no finalize, no line, no extra write.
+**A finalizer failure never rewrites the outcome**: a raising ``finalize`` is logged
+with the dispatch id and swallowed, so the dispatch's own success stands and the
+lane still releases its flock.
 """
 
 from __future__ import annotations
@@ -39,6 +40,8 @@ REASON_PRE_SPAWN_ERROR = "pre_spawn_error"
 REASON_LANE_FAILED = "lane_failed"
 REASON_TIMEOUT = "timeout"
 REASON_DOOR_ERROR = "door_error"
+#: A ``_govern`` that raised: no report, no receipt — never the worker's outcome.
+REASON_GOVERN_ERROR = "govern_error"
 
 #: ``no_push:<reason>`` (ADR-045 §8): an end line without a ``head_sha`` names
 #: why there is none. Absence of both is not "no push" (receipt_schema refuses it).
@@ -49,37 +52,40 @@ NO_PUSH_HEAD_UNREADABLE = "head_unreadable"
 _LANE_SUCCESS = "success"
 _LANE_TIMEOUT = "timeout"
 
-#: What a non-completed exit says when its caller named no sharper reason, so a
-#: failed line is never written without one. ``lane_failed``, not ``worker_failed``:
-#: the lane can fail around a worker that did not (OI-1743's close-out raise).
-_DEFAULT_REASON = {
-    "timed_out": REASON_TIMEOUT,
-    "failed": REASON_LANE_FAILED,
+#: ADR-045 §2/§5 — THE table: a lane's GOVERNED status (what ``_envelope_outcome``
+#: decided AFTER GOVERN ran, never the worker's raw status) onto ``(end_state, the
+#: reason the line carries when the caller names none)``. ``lane_failed``, not
+#: ``worker_failed``: the lane can fail around a worker that did not (OI-1743).
+GOVERNED_END_STATES: Dict[str, Tuple[str, Optional[str]]] = {
+    _LANE_SUCCESS: ("completed", None),
+    "failure": ("failed", REASON_LANE_FAILED),
+    _LANE_TIMEOUT: ("timed_out", REASON_TIMEOUT),
+    # OI-1287: the work succeeded but GOVERN produced no receipt — never a pass.
+    "receipt_missing": ("failed", "receipt_missing"),
 }
-
 
 def now_utc() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def end_state_for(status: Any, *, timed_out: bool = False) -> str:
-    """The lane's status onto ADR-045 §2's closed set.
+def end_state_for(status: Any, *, timed_out: bool = False) -> Tuple[str, Optional[str]]:
+    """``(end_state, reason)`` for a lane's GOVERNED status, from the one table.
 
-    Fail-closed: only an exact ``success`` is ``completed``; an absent, empty or
-    unknown status is a failure, never a pass.
+    Fail-closed: only an exact ``success`` is ``completed`` and only a timeout (the
+    status or its own flag) is ``timed_out``; everything else is ``failed`` with a
+    reason that names the cause.
     """
-    if str(status or "").strip() == _LANE_SUCCESS:
-        return "completed"
-    if timed_out or str(status or "").strip() == _LANE_TIMEOUT:
-        return "timed_out"
-    return "failed"
+    key = str(status or "").strip()
+    if timed_out and key != _LANE_SUCCESS:
+        key = _LANE_TIMEOUT
+    return GOVERNED_END_STATES.get(key, ("failed", REASON_LANE_FAILED))
 
 
 def worktree_head(wt_path: Any) -> Tuple[Optional[str], Optional[str]]:
     """``(head_sha, None)`` or ``(None, why there is none)``. Never raises.
 
-    Called at the exit while the worktree still exists — the teardown that
-    releases the occupancy flock also deletes it (and with it this evidence).
+    Called at the exit while the worktree still exists: the teardown that releases
+    the occupancy flock deletes it, and this evidence with it.
     """
     if wt_path is None:
         return None, NO_PUSH_NO_WORKTREE
@@ -104,9 +110,9 @@ def build_end_line(
 ) -> Dict[str, Any]:
     """The end line for this attempt, keyed on the hand-over (ADR-045 §2/§8).
 
-    Optional fields are OMITTED when absent, never written as ``null``: the
-    frozen intent is compared field by field, and ``spawned_at`` before a spawn
-    must read as "there was none", not as an empty value.
+    Optional fields are OMITTED when absent, never written as ``null``: the frozen
+    intent is compared field by field, and a pre-spawn ``spawned_at`` must read as
+    "there was none", not as an empty value.
     """
     line: Dict[str, Any] = {
         "timestamp": timestamp or now_utc(),
@@ -131,19 +137,18 @@ def finalize_exit(
 ) -> Optional[LifecycleResult]:
     """Publish this exit's one end line; ``None`` means "nothing to finalize".
 
-    ``None`` is returned for a legacy hand-over (nothing may be written),
-    for a hand-over without a usable attempt (OI-2510 p. 7: no key, no line),
-    and for a finalizer that raised — which is logged, never raised, so it can
-    neither turn a successful dispatch into a failed one nor keep the lane's
-    occupancy flock from being released.
+    ``None`` means nothing may be written: a legacy hand-over, a hand-over without
+    a usable attempt (OI-2510 p. 7: no key, no line), or a finalizer that raised —
+    which is logged, never raised, so it can neither fail a successful dispatch nor
+    keep the lane's occupancy flock from being released.
     """
     if handover is None or not getattr(handover, "is_v3", False):
         return None
     attempt = getattr(handover, "attempt", 0)
     if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
         return None
-    end_state = end_state_for(status, timed_out=timed_out)
-    reason = reason or _DEFAULT_REASON.get(end_state)
+    end_state, default_reason = end_state_for(status, timed_out=timed_out)
+    reason = reason or default_reason
     head_sha, absent = worktree_head(wt_path)
     line = build_end_line(
         handover, end_state=end_state, reason=reason, head_sha=head_sha,
@@ -165,12 +170,17 @@ def finalize_exit(
 
 
 def finalize_lane_exit(
-    handover: Any, *, state_dir: Any, result: Any, wt_path: Any = None,
+    handover: Any, *, state_dir: Any, status: Any, result: Any, wt_path: Any = None,
     spawned_at: Optional[str] = None, reason: Optional[str] = None,
 ) -> Optional[LifecycleResult]:
-    """A lane's exit: the adapter result is the outcome, its session id the link."""
+    """A lane's exit: the GOVERNED status is the outcome, the worker's session id the link.
+
+    *status* is required: what ``_envelope_outcome`` decided after GOVERN ran,
+    never ``result.status`` itself, so an unproven worker success is never booked
+    ``completed`` (ADR-045 §2/§5). *result* supplies the session id and timer.
+    """
     return finalize_exit(
-        handover, state_dir=state_dir, status=getattr(result, "status", None),
+        handover, state_dir=state_dir, status=status,
         timed_out=bool(getattr(result, "timed_out", False)), reason=reason,
         wt_path=wt_path, spawned_at=spawned_at,
         session_id=getattr(result, "session_id", None),

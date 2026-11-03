@@ -940,49 +940,56 @@
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 35,
+      "line": 36,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern_support",
+      "symbol": "_is_lane_completion_receipt"
+    },
+    {
+      "file": "tests/test_fase0_rol_in_receipt.py",
+      "line": 37,
       "mechanism": "direct-call",
       "module_target": "envelope_govern_support",
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 36,
+      "line": 39,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 36,
+      "line": 39,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "_AdapterResult"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 122,
+      "line": 125,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 123,
+      "line": 126,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 233,
+      "line": 236,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_archive_dispatch_events"
     },
     {
       "file": "tests/test_fase0_rol_in_receipt.py",
-      "line": 234,
+      "line": 237,
       "mechanism": "patch-string",
       "module_target": "envelope_govern",
       "symbol": "_clear_dispatch_events"
@@ -1275,6 +1282,41 @@
       "symbol": "_resolve_phantom_diff"
     },
     {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 169,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 169,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 180,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 181,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_k4c_start_refusal_receipt.py",
+      "line": 182,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
       "file": "tests/test_k5_finalizer_every_exit.py",
       "line": 55,
       "mechanism": "direct-call",
@@ -1283,87 +1325,101 @@
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 250,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "_prepare"
-    },
-    {
-      "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 251,
-      "mechanism": "patch-string",
-      "module_target": "dispatch_envelope",
-      "symbol": "_record_integrity"
-    },
-    {
-      "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 252,
+      "line": 254,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_govern"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 253,
+      "line": 256,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_k5_finalizer_every_exit.py",
+      "line": 257,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_prepare"
+    },
+    {
+      "file": "tests/test_k5_finalizer_every_exit.py",
+      "line": 258,
+      "mechanism": "patch-string",
+      "module_target": "dispatch_envelope",
+      "symbol": "_record_integrity"
+    },
+    {
+      "file": "tests/test_k5_finalizer_every_exit.py",
+      "line": 260,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_resolve_phantom_diff"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 323,
+      "line": 330,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 326,
+      "line": 333,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 349,
+      "line": 357,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 352,
+      "line": 360,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "_enforce_push_pr"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 353,
+      "line": 361,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "enforce_daily_budget"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 356,
+      "line": 364,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "enforce_daily_budget"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 358,
+      "line": 367,
       "mechanism": "patch-string",
       "module_target": "dispatch_envelope",
       "symbol": "ProviderAdapter"
     },
     {
       "file": "tests/test_k5_finalizer_every_exit.py",
-      "line": 360,
+      "line": 369,
       "mechanism": "direct-call",
       "module_target": "dispatch_envelope",
       "symbol": "run_envelope_plan"
+    },
+    {
+      "file": "tests/test_k5_finalizer_every_exit.py",
+      "line": 775,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "RECEIPT_MISSING_STATUS"
     },
     {
       "file": "tests/test_kimi_model_resolver.py",
@@ -2140,6 +2196,7 @@
   ],
   "layer4_classes": [
     "dispatch_envelope::LaneRouter",
+    "dispatch_envelope::_LaneExit",
     "envelope_adapters_claude::ClaudeSubprocessAdapter",
     "envelope_adapters_claude::CodexAdapter",
     "envelope_adapters_provider::ProviderAdapter",
@@ -2150,6 +2207,9 @@
   ],
   "layer4_functions": [
     "dispatch_envelope.LaneRouter::get",
+    "dispatch_envelope._LaneExit::__init__",
+    "dispatch_envelope._LaneExit::close",
+    "dispatch_envelope._LaneExit::govern",
     "dispatch_envelope::_dispatch_branch_name",
     "dispatch_envelope::_enforce_push_pr",
     "dispatch_envelope::_envelope_outcome",
