@@ -52,6 +52,7 @@ _spec_0017.loader.exec_module(_mod_0017)
 sys.path.insert(0, str(_SCRIPTS_LIB))
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import append_receipt  # noqa: E402
 import coordination_db  # noqa: E402
 import dispatch_lifecycle as lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
@@ -92,15 +93,20 @@ def reports_dir(data_dir: Path) -> Path:
     return data_dir / "unified_reports"
 
 
-def _write_stranded_report(path: Path, dispatch_id: str, *, extra_frontmatter: str = "", extra_body: str = "") -> Path:
+def _write_stranded_report(
+    path: Path, dispatch_id: str, *, extra_frontmatter: str = "", extra_body: str = "",
+    model: str | None = "unknown",
+) -> Path:
     """A dispatch report whose frontmatter carries model: unknown — the
     real-world shape found in the live store (the emitter stamps the
-    sentinel rather than omitting the key). No status/exit_code (mirrors
+    sentinel rather than omitting the key). ``model=None`` omits the key
+    entirely (the other stranded shape). No status/exit_code (mirrors
     report_to_receipt_converter tests' own `_write_report_without_model`)
     so the fail-closed branch/PR-delivery checks — which shell out to git/gh
     — are never reached; only the model check matters here."""
+    model_line = f"model: {model}\n" if model is not None else ""
     path.write_text(
-        f"---\ndispatch_id: {dispatch_id}\nprovider: claude\nmodel: unknown\n"
+        f"---\ndispatch_id: {dispatch_id}\nprovider: claude\n{model_line}"
         f"{extra_frontmatter}---\n\n"
         "## Summary\n\nImplemented the feature per dispatch specification. "
         "All tests pass and coverage is at target.\n\n"
@@ -830,3 +836,112 @@ class TestTheScanTakesItsHintFromTheOneBuilder:
         )
         assert run.returncode == 1, run.stdout + run.stderr  # 1 = no match
         assert run.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# Part 9 (K-8c round 4): the restore must not move the report's write time
+# ---------------------------------------------------------------------------
+
+class TestTheRestoreKeepsTheWriteTime:
+    """Codex's blocker on 270ead47: the audit annotation advanced the mtime.
+
+    ``_lifecycle_report_line`` places a report that names no ``attempt`` by its
+    write time (ADR-045 K-8a). Appending the annotation after booking moved
+    that time past attempt 2's start, so the next converter scan of the same
+    file picked attempt 2 — ``_same_booking`` is attempt-exact by design (K-8b
+    rule 5) and did not suppress it: a second ``report_ingested``, wrong attempt.
+    """
+
+    def _restored_after_attempt_two(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+    ) -> tuple:
+        """Attempt 1 runs, the report lands inside it, then attempt 2 starts."""
+        dispatch_id = "20260906-mtime-attempt"
+        clock["now"] = T0
+        _insert_dispatch_row(state_dir, dispatch_id)
+        _begin(state_dir, spec_file, dispatch_id)          # attempt 1 starts (T0)
+        # No ``model:`` key at all: stranded on the missing model, and once the
+        # restore appends its ``**Model**: sonnet`` tail the converter's own
+        # parser resolves a real model — so the converter can actually re-book.
+        report = _write_stranded_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id, model=None)
+        _write_dispatch_spec(data_dir, dispatch_id, model="sonnet", provider="claude")
+        os.utime(report, (_epoch(T1), _epoch(T1)))         # written during attempt 1 (T1)
+        _finalize(state_dir, dispatch_id, attempt=1)       # attempt 1 ends (T2)
+        clock["now"] = T3
+        _begin(state_dir, spec_file, dispatch_id)          # attempt 2 starts (T3)
+        return dispatch_id, report
+
+    def test_the_converter_over_the_restored_file_books_nothing_new(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append, capsys):
+        dispatch_id, report = self._restored_after_attempt_two(
+            data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3)
+
+        assert main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)]) == 0
+        assert "1 restored" in capsys.readouterr().out
+        ingested = _of_type(state_dir, "report_ingested", dispatch_id)
+        assert len(ingested) == 1
+        assert ingested[0]["attempt"] == 1
+
+        # The converter's own build over the same (now annotated) file still
+        # reads attempt 1, and its booking is a duplicate: no second line.
+        built = rc.build_receipt_from_report(
+            report, report.read_text(encoding="utf-8"), state_dir=state_dir)
+        assert built is not None
+        assert built["event_type"] == "report_ingested"
+        assert built["attempt"] == 1
+        result = append_receipt.append_receipt_payload(
+            built, receipts_file=str(state_dir / "t0_receipts.ndjson"),
+            cache_window_seconds=300, skip_enrichment=True,
+        )
+        assert result.status == "duplicate"
+        ingested = _of_type(state_dir, "report_ingested", dispatch_id)
+        assert len(ingested) == 1
+        assert ingested[0]["attempt"] == 1
+
+    def test_the_exact_nanosecond_write_time_survives_and_the_annotation_lands(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append):
+        dispatch_id, report = self._restored_after_attempt_two(
+            data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3)
+        before = report.stat().st_mtime_ns
+
+        assert main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)]) == 0
+
+        assert report.stat().st_mtime_ns == before
+        assert _RESTORED_MARKER in report.read_text(encoding="utf-8")
+
+    def test_a_failing_utime_keeps_the_booking_and_names_the_failure(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append, monkeypatch, caplog):
+        dispatch_id, report = self._restored_after_attempt_two(
+            data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3)
+        scan = find_stranded_reports(data_dir, state_dir)
+        candidate = scan.candidates[0]
+        resolution = resolve_identity(
+            candidate, data_dir, build_ledger_model_index(state_dir),
+            report.read_text(encoding="utf-8"))
+        assert resolution is not None
+
+        def _boom(*args, **kwargs):
+            raise OSError("read-only file system")
+
+        monkeypatch.setattr(os, "utime", _boom)
+        with caplog.at_level(logging.WARNING):
+            ok, detail = apply_restoration(
+                candidate, resolution, data_dir=data_dir, state_dir=state_dir)
+
+        # The booking already stood when utime failed: it is kept, and the
+        # failure is named in the returned message and in exactly one warning.
+        assert ok is True
+        assert "write time not restored" in detail
+        assert "read-only file system" in detail
+        ingested = _of_type(state_dir, "report_ingested", dispatch_id)
+        assert len(ingested) == 1
+        assert ingested[0]["attempt"] == 1
+        assert _RESTORED_MARKER in report.read_text(encoding="utf-8")
+        warnings = _warnings(caplog)
+        assert len(warnings) == 1
+        assert report.name in warnings[0].getMessage()
+        assert "read-only file system" in warnings[0].getMessage()

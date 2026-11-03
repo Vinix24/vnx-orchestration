@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -174,10 +175,9 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
             if receipt is not None:
                 # ADR-045 (K-8): the same routing every writer applies, so this
                 # third writer never books a task_complete for a v3 dispatch.
-                # The report's own tenant and attempt come from the converter's
-                # one hint builder (K-8b round 4); ``state_dir`` is the store this
-                # scan reads and the restore appends to, and the write time is
-                # the file this scan read.
+                # Tenant and attempt come from the converter's one hint builder
+                # (K-8b round 4); ``state_dir`` is the store this scan reads and
+                # the restore appends to, and the write time is the file read.
                 named = rc.report_hint_fields(text, receipt)
                 hint = {**receipt, **named} if named else receipt
                 routed = report_line(hint, state_dir=state_dir,
@@ -332,6 +332,9 @@ def apply_restoration(
     if _RESTORED_MARKER in original_text:
         return False, "already restored (## Restored identity marker present) — skipped"
 
+    # ADR-045 K-8a: the write time is the attempt signal for a report that names no attempt.
+    before = candidate.path.stat()
+
     # Rebuild via the full converter pipeline (PR-link included) — this is
     # the function the converter itself would call to book this report for
     # real; the core-only builder used for scanning deliberately skips the
@@ -378,6 +381,11 @@ def apply_restoration(
     with candidate.path.open("a", encoding="utf-8") as fh:
         fh.write(annotation)
 
+    try:
+        os.utime(candidate.path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    except OSError as exc:
+        logger.warning("restore_stranded_reports: write time of %s not restored: %s", candidate.path, exc)
+        return True, f"receipt booked (status={result.status}), restored from {resolution.source_kind}: {resolution.source_detail}; WARNING: write time not restored: {exc}"
     return True, f"receipt booked (status={result.status}), restored from {resolution.source_kind}: {resolution.source_detail}"
 
 
