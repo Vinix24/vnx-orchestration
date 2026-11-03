@@ -28,13 +28,20 @@ One block per K-8 acceptance point:
    and the report left retryable;
 6. one ``report_ingested`` per report, also through the converter's hot-path
    guard;
-7. legacy dispatches keep the K-4c shape, field for field.
+7. legacy dispatches keep the K-4c shape, field for field;
+8. an unreadable source refuses (`lifecycle_mode_undecidable`) even when the
+   other one reads, because either can hide a v3 start behind a legacy answer;
+9. a late report keeps the attempt that was running when it was WRITTEN (its
+   file mtime, never the scan time), and an ambiguous attribution refuses;
+10. the same two answers through ``report_parser.py``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -49,7 +56,8 @@ import dispatch_start
 import report_parser
 import vnx_paths
 from append_receipt_internals import payload as payload_module
-from coordination_db import get_connection
+from coordination_db import db_path_from_state_dir, get_connection
+from report_lifecycle_mode import ReportPathRefused, decide, report_line
 from report_to_receipt_converter import (
     _convert_one_detailed,
     build_receipt_from_report,
@@ -179,6 +187,57 @@ def _expected(task_shaped: dict, **deltas) -> dict:
         expected["event"] = "report_ingested"
     expected.update(deltas)
     return expected
+
+
+def _set_mtime(path: Path, iso: str) -> None:
+    """Pin the report's write time: the clock the attempt rule reads (never "now")."""
+    stamp = datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    os.utime(path, (stamp, stamp))
+
+
+def _write_report(directory: Path, name: str) -> Path:
+    """A second contract-valid report for the same dispatch (another attempt's file)."""
+    path = directory / name
+    path.write_text(_BODY.format(dispatch_id=DISPATCH, status="unknown"), encoding="utf-8")
+    return path
+
+
+def _booked(state_dir: Path, attempt: int) -> list:
+    return [line for line in _events(state_dir, "report_ingested")
+            if line.get("attempt") == attempt]
+
+
+def _ended(state_dir: Path, attempt: int) -> dict:
+    endings = [line for line in _events(state_dir, "dispatch_finished")
+               if line.get("attempt") == attempt]
+    assert len(endings) == 1, endings
+    return endings[0]
+
+
+@pytest.fixture()
+def two_attempts(state_dir, spec_file, v3, monkeypatch):
+    """Attempt 1 started 08:00 and ended; attempt 2 started 10:00 (still running).
+
+    The real hand-over and the real finalizer write both lines; only the clock
+    they stamp them with is pinned, so the fixture does not hand-write a single
+    lifecycle line.
+    """
+    _insert_row(state_dir, dispatch_id=DISPATCH)
+
+    def _begin(clock: str) -> None:
+        monkeypatch.setattr(dispatch_start, "_now", lambda: clock)
+        dispatch_start.begin(
+            project_id=PROJECT, dispatch_id=DISPATCH, role=ROLE, base_sha=BASE_SHA,
+            spec_file=spec_file, target_slot="T1", state_dir=state_dir,
+        )
+
+    _begin("2026-11-03T08:00:00Z")
+    dispatch_lifecycle.finalize(
+        state_dir=state_dir, project_id=PROJECT, dispatch_id=DISPATCH, attempt=1,
+        end_state="completed", end_line=dict(_END_LINE),
+    )
+    _begin("2026-11-03T10:00:00Z")
+    return state_dir
 
 
 # ---------------------------------------------------------------------------
@@ -534,3 +593,195 @@ def test_without_a_store_the_public_builder_is_unchanged(report, legacy):
     assert shipped["event_type"] == "task_complete"
     assert shipped["dispatch_id"] == DISPATCH
     assert {"project_id", "attempt", "end_pending", "end_outcome_id"}.isdisjoint(shipped)
+
+
+def test_a_store_without_a_database_or_ledger_answers_legacy(report, tmp_path):
+    """An absent DB file and an absent row both count as READ: nothing hides v3."""
+    bare = tmp_path / "bare-state"
+    bare.mkdir()
+    text = report.read_text(encoding="utf-8")
+
+    with_row_or_not = build_receipt_from_report(report, text, state_dir=bare)
+
+    assert with_row_or_not["event_type"] == "task_complete"
+    assert with_row_or_not["status"] == "unknown"
+    assert {"project_id", "attempt", "end_pending", "end_outcome_id"}.isdisjoint(with_row_or_not)
+    assert not (bare / "t0_receipts.ndjson").exists()
+
+
+# ---------------------------------------------------------------------------
+# 8. an unreadable source refuses even when the other one reads (finding 1)
+# ---------------------------------------------------------------------------
+
+def test_an_unreadable_row_with_a_readable_empty_ledger_refuses(
+        report, state_dir, v3, caplog):
+    """An empty ledger reads as legacy, but an unreadable row could hide v3."""
+    _insert_row(state_dir, dispatch_id=DISPATCH, metadata="{not json")
+    assert _lines(state_dir) == []  # the ledger is readable and empty
+
+    with caplog.at_level("WARNING"):
+        result, outcome = _convert_one_detailed(
+            report, receipts_file=str(_ledger(state_dir)))
+
+    assert result is None and outcome == "error"
+    assert "lifecycle_mode_undecidable" in caplog.text and DISPATCH in caplog.text
+    assert _lines(state_dir) == []  # not a task_complete, not a partial line
+    assert report.exists()  # retryable
+
+
+def test_a_database_file_that_is_not_a_database_refuses(report, state_dir, v3):
+    """A present but corrupt store is an unreadable row, never a legacy answer."""
+    Path(db_path_from_state_dir(state_dir)).write_bytes(b"not a sqlite database")
+
+    with pytest.raises(ReportPathRefused) as exc:
+        build_receipt_from_report(report, report.read_text(encoding="utf-8"),
+                                  state_dir=state_dir)
+
+    assert exc.value.code == "lifecycle_mode_undecidable"
+    assert exc.value.dispatch_id == DISPATCH
+
+
+def test_an_unreadable_ledger_with_a_readable_legacy_row_refuses(
+        report, state_dir, v3, caplog):
+    """A readable legacy row cannot outvote a ledger that might hold a v3 start."""
+    _insert_row(state_dir, dispatch_id=DISPATCH,
+                metadata=json.dumps({"lifecycle_mode": "legacy"}))
+    ledger = _ledger(state_dir)
+    ledger.mkdir()
+
+    with caplog.at_level("WARNING"):
+        result, outcome = _convert_one_detailed(report, receipts_file=str(ledger))
+
+    assert result is None and outcome == "error"
+    assert "lifecycle_mode_undecidable" in caplog.text and DISPATCH in caplog.text
+    assert list(ledger.iterdir()) == []
+    assert report.exists()
+
+
+# ---------------------------------------------------------------------------
+# 9. the report belongs to the attempt that was running when it was WRITTEN
+# ---------------------------------------------------------------------------
+
+def test_a_late_report_of_attempt_one_stays_attempt_one(report, two_attempts):
+    """Attempt 1's report, ingested after attempt 2 started, is still attempt 1 —
+    and attempt 2's own report is a second line, never a duplicate of it."""
+    _set_mtime(report, "2026-11-03T09:00:00Z")  # between start 1 (08:00) and start 2 (10:00)
+    first, first_tag = _convert_one_detailed(
+        report, receipts_file=str(_ledger(two_attempts)))
+
+    assert (first.status, first_tag) == ("appended", "appended")
+    booked = _booked(two_attempts, 1)
+    assert len(booked) == 1
+    assert booked[0]["end_outcome_id"] == _ended(two_attempts, 1)["outcome_id"]
+    assert "end_pending" not in booked[0]
+
+    second_report = _write_report(report.parent, "d-k8-attempt2.md")
+    _set_mtime(second_report, "2026-11-03T11:00:00Z")  # after start 2
+    second, second_tag = _convert_one_detailed(
+        second_report, receipts_file=str(_ledger(two_attempts)))
+
+    assert (second.status, second_tag) == ("appended", "appended")
+    assert [line["attempt"] for line in _events(two_attempts, "report_ingested")] == [1, 2]
+    assert _booked(two_attempts, 2)[0]["end_pending"] is True
+
+
+def test_a_receipt_that_names_its_attempt_wins_over_the_latest_start(report, two_attempts):
+    """An explicit attempt on the receipt is used even when a later start exists."""
+    _set_mtime(report, "2026-11-03T11:00:00Z")  # the time rule alone would say attempt 2
+    receipt = {
+        "dispatch_id": DISPATCH, "project_id": PROJECT, "attempt": 1,
+        "event_type": "task_complete", "event": "task_complete", "status": "unknown",
+        "report_path": str(report), "model": "deepseek-flash",
+    }
+
+    line = report_line(receipt, state_dir=two_attempts)
+
+    assert line["event_type"] == "report_ingested"
+    assert line["attempt"] == 1
+    assert line["end_outcome_id"] == _ended(two_attempts, 1)["outcome_id"]
+
+
+def test_a_receipt_attempt_without_a_start_line_refuses(report, state_dir, v3):
+    """v3 from the row alone, but the receipt names an attempt nobody started."""
+    _insert_row(state_dir, dispatch_id=DISPATCH, attempt_count=2,
+                metadata=json.dumps({"lifecycle_mode": "v3"}))
+    receipt = {
+        "dispatch_id": DISPATCH, "project_id": PROJECT, "attempt": 2,
+        "event_type": "task_complete", "report_path": str(report),
+    }
+
+    with pytest.raises(ReportPathRefused) as exc:
+        report_line(receipt, state_dir=state_dir)
+
+    assert exc.value.code == "attempt_unknown"
+    assert _lines(state_dir) == []
+
+
+def test_several_starts_without_a_usable_report_time_refuse(two_attempts, report):
+    """Attempts 1 and 2 started; the report's own write time is unknown."""
+    with pytest.raises(ReportPathRefused) as direct:
+        decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=two_attempts)
+
+    assert direct.value.code == "attempt_ambiguous"
+
+    receipt = {
+        "dispatch_id": DISPATCH, "project_id": PROJECT,
+        "event_type": "task_complete", "report_path": str(report.with_name("gone.md")),
+    }
+
+    with pytest.raises(ReportPathRefused) as exc:
+        report_line(receipt, state_dir=two_attempts)
+
+    assert exc.value.code == "attempt_ambiguous"
+    assert not _events(two_attempts, "report_ingested")
+
+
+def test_a_report_written_before_every_start_refuses(two_attempts):
+    """A write time earlier than the first start belongs to no attempt."""
+    with pytest.raises(ReportPathRefused) as exc:
+        decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=two_attempts,
+               report_time="2026-11-03T07:00:00Z")
+
+    assert exc.value.code == "attempt_ambiguous"
+
+
+def test_the_single_started_attempt_needs_no_report_time(report, v3_store):
+    """One start: the answer is that attempt, whatever the report's time is."""
+    _set_mtime(report, "2026-11-03T23:59:00Z")
+
+    line = build_receipt_from_report(
+        report, report.read_text(encoding="utf-8"), state_dir=v3_store)
+
+    assert line["event_type"] == "report_ingested"
+    assert line["attempt"] == ATTEMPT
+    assert line["end_pending"] is True
+
+
+# ---------------------------------------------------------------------------
+# 10. the same two answers through report_parser
+# ---------------------------------------------------------------------------
+
+def test_report_parser_books_the_row_attempt_for_a_v3_dispatch(
+        report, state_dir, v3, parser):
+    _insert_row(state_dir, dispatch_id=DISPATCH, attempt_count=2,
+                metadata=json.dumps({"lifecycle_mode": "v3"}))
+
+    receipt = parser.parse_report(str(report))
+
+    assert receipt["event_type"] == "report_ingested"
+    assert receipt["attempt"] == 2
+    assert receipt["end_pending"] is True
+
+
+def test_report_parser_refuses_an_unreadable_row_with_a_readable_empty_ledger(
+        report, state_dir, v3, parser, capsys):
+    _insert_row(state_dir, dispatch_id=DISPATCH, metadata="{not json")
+    assert _lines(state_dir) == []
+
+    receipt = parser.parse_report(str(report))
+
+    assert receipt["lifecycle_refusal"] == "lifecycle_mode_undecidable"
+    assert receipt["dispatch_id"] == DISPATCH
+    assert "REFUSED (ledger lifecycle)" in capsys.readouterr().err
+    assert _lines(state_dir) == []
+    assert report.exists()

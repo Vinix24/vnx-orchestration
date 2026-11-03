@@ -8,27 +8,39 @@ outcome (ADR-045 §2), while the finalizer's ``dispatch_finished`` is the end.
 Both writers ask this module: ``report_to_receipt_converter`` (scan, public
 builder, ``restore_stranded_reports``) and ``report_parser``.
 
-:func:`decide` is the ONE decision: v3 when the dispatch row's
-``metadata_json.lifecycle_mode`` says so, or when the ledger holds a
-``dispatch_started`` of the dispatch with ``lifecycle_mode: v3``; legacy
-otherwise. A v3 answer is irreversible (ADR-045 §9): the mode is fixed at the
-hand-over and the current stand of the ``ledger_lifecycle`` setting is never
-consulted. The latest start line wins over the row for the attempt; the row's
-``attempt_count`` is the fallback.
+:func:`decide` is the ONE decision, in this order:
 
-Fail direction: when the mode cannot be decided (row and ledger both unreadable)
-or a v3 dispatch has no usable attempt or end link, :func:`report_line` raises
-:class:`ReportPathRefused` with the dispatch id and a named reason. The writer
-then books NOTHING — neither ``task_complete`` nor a partial
-``report_ingested`` — and the report stays for the next scan.
+1. v3 as soon as ONE READABLE source says so — the row's
+   ``metadata_json.lifecycle_mode``, or a ``dispatch_started`` with
+   ``lifecycle_mode: v3``. A v3 answer is irreversible (ADR-045 §9) and never
+   consults the current ``ledger_lifecycle`` setting.
+2. Otherwise, if EITHER source is unreadable — the ledger, or the row (an
+   unresolved tenant included) — the mode is undecidable and the decision
+   REFUSES: an unreadable row can hide a v3 mode behind an empty ledger, an
+   unreadable ledger a v3 start behind a stale legacy row; either books a
+   second end.
+3. Otherwise (both read, neither says v3; an absent DB file or row counts as
+   read) legacy, byte-identical to the pre-K-8 head.
+
+A v3 report belongs to the attempt the receipt names, else to the only started
+attempt, else to the start latest at or before the report's own write time (its
+file mtime, never the ingest time), else to the row's ``attempt_count``.
+
+Fail direction: when the mode cannot be decided, or a v3 dispatch has no usable
+attempt or end link, :func:`report_line` raises :class:`ReportPathRefused` with
+the dispatch id and a named reason. The writer then books NOTHING — neither
+``task_complete`` nor a partial ``report_ingested`` — and the report stays for
+the next scan.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -188,13 +200,81 @@ def _for_dispatch(record: Mapping[str, Any], project_id: Optional[str],
     return not (project_id and record_project and record_project != project_id)
 
 
-def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object) -> LifecyclePath:
+def _parse_time(value: Any) -> Optional[datetime]:
+    """*value* as an aware UTC datetime, or ``None`` — an unparseable time is no evidence."""
+    try:
+        parsed = datetime.fromisoformat(str(value or "").strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _resolve_attempt(did: str, starts: List[Dict[str, Any]], row: _Row,
+                     attempt: Any, report_time: Any) -> int:
+    """The attempt this report belongs to; refuses rather than guessing one.
+
+    The receipt's own positive attempt (which must have a start line), else the
+    only started attempt, else the start latest at or before the report's write
+    time, else — with no start line at all — the row's ``attempt_count``. A start
+    line without a positive attempt is no attempt; an unparseable start time stays
+    ``None`` and never wins the "latest start" comparison.
+    """
+    started = [(started_attempt, _parse_time(line.get("timestamp") or line.get("started_at")))
+               for line in starts
+               if (started_attempt := _positive_int(line.get("attempt"))) is not None]
+    supplied = _positive_int(attempt)
+    if supplied is not None:
+        if all(value != supplied for value, _ in started):
+            raise ReportPathRefused(did, "attempt_unknown",
+                f"the receipt carries attempt {supplied}, but no dispatch_started starts "
+                f"it (started attempts: {sorted({value for value, _ in started}) or 'none'})")
+        return supplied
+    distinct = {value for value, _ in started}
+    if len(distinct) == 1:
+        return next(iter(distinct))
+    if not distinct:
+        if row.attempt is None:
+            raise ReportPathRefused(did, "attempt_unknown",
+                "this dispatch is v3, but no dispatch_started has a usable attempt and "
+                f"the row has no readable attempt_count (row: {row.status}"
+                f"{'; ' + row.detail if row.detail else ''})")
+        return row.attempt
+    when = _parse_time(report_time)
+    if when is None:
+        raise ReportPathRefused(did, "attempt_ambiguous",
+            f"attempts {sorted(distinct)} have started and the report's own write "
+            "time is unknown, so the report cannot be attributed to one of them")
+    chosen: Optional[Tuple[datetime, int]] = None
+    for value, at in started:
+        if at is not None and at <= when and (chosen is None or (at, value) >= chosen):
+            chosen = (at, value)
+    if chosen is None:
+        raise ReportPathRefused(did, "attempt_ambiguous",
+            f"the report's write time ({when.isoformat()}) is earlier than every "
+            f"dispatch_started of attempts {sorted(distinct)}")
+    return chosen[1]
+
+
+def _require_readable_mode(did: str, records: Optional[List[Dict[str, Any]]],
+                           ledger_error: Optional[str], row: _Row) -> None:
+    """Refuse when either mode source is unreadable: either can hide a v3 start."""
+    if records is not None and row.status != ROW_UNREADABLE:
+        return
+    ledger_state = "readable" if records is not None else f"unreadable ({ledger_error})"
+    raise ReportPathRefused(did, "lifecycle_mode_undecidable",
+        f"one of the two lifecycle sources is unreadable (ledger: {ledger_state}; row: "
+        f"{row.status}{f' ({row.detail})' if row.detail else ''}), so a v3 dispatch could "
+        "be missed and end twice")
+
+
+def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
+           attempt: Optional[int] = None, report_time: object = None) -> LifecyclePath:
     """The one path decision for ``(project_id, dispatch_id)``.
 
-    v3 when the row or a ``dispatch_started`` of this dispatch says so, legacy
-    otherwise. Refuses when both stores are unreadable, when a v3 dispatch has
-    no usable attempt, no resolvable tenant, or an unreadable ledger.
-    ``state_dir=None`` means "no store to consult" — legacy, as before K-8.
+    One readable source saying v3 wins; otherwise an unreadable source refuses
+    (``lifecycle_mode_undecidable``); only two readable non-v3 sources stay
+    legacy. ``attempt`` / ``report_time`` (the report's file mtime) only matter
+    for a v3 answer; ``state_dir=None`` means "no store to consult", as before.
     """
     did = str(dispatch_id or "").strip()
     if not did:
@@ -202,26 +282,19 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object) ->
                       "the receipt carries no dispatch_id, so no path can be chosen")
     if state_dir is None:
         return LifecyclePath(MODE_LEGACY, project_id=project_id)
-
     state_path = Path(state_dir)
     records, ledger_error = _read_ledger(state_path)
     row = _read_row(state_path, project_id, did)
-
     starts = [record for record in (records or [])
               if _for_dispatch(record, project_id, did)
               and str(record.get("event_type") or "").strip() == DISPATCH_STARTED_EVENT_TYPE]
-    v3_starts = [line for line in starts
-                 if str(line.get("lifecycle_mode") or "").strip() == MODE_V3]
-    if not v3_starts and str((row.metadata or {}).get("lifecycle_mode") or "").strip() != MODE_V3:
-        if records is None and row.status == ROW_UNREADABLE:
-            raise ReportPathRefused(did, "lifecycle_mode_undecidable",
-                          f"neither the ledger ({ledger_error}) nor the dispatch row "
-                          f"({row.detail}) could be read, so a v3 dispatch could be missed")
+    v3_started = any(str(line.get("lifecycle_mode") or "").strip() == MODE_V3
+                     for line in starts)
+    if not v3_started and str((row.metadata or {}).get("lifecycle_mode") or "").strip() != MODE_V3:
+        _require_readable_mode(did, records, ledger_error, row)
         return LifecyclePath(MODE_LEGACY, project_id=project_id)
-
-    # A v3 key needs its attempt and end link from the ledger; an unreadable
-    # ledger cannot be papered over with ``end_pending`` (that would claim "not
-    # ended" without evidence).
+    # A v3 key needs its attempt and end link from the ledger; an unreadable ledger
+    # cannot be papered over with ``end_pending`` (that claims "not ended" without evidence).
     if records is None:
         raise ReportPathRefused(did, "ledger_unreadable",
                       f"this dispatch is v3, but its ledger could not be read "
@@ -236,26 +309,31 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object) ->
         raise ReportPathRefused(did, "project_unknown",
                       "this dispatch is v3, but no tenant could be resolved for the "
                       "store and no dispatch_started names one")
-    attempts = [value for value in (_positive_int(line.get("attempt")) for line in starts)
-                if value is not None]
-    attempt = max(attempts) if attempts else row.attempt
-    if attempt is None:
-        raise ReportPathRefused(did, "attempt_unknown",
-                      "this dispatch is v3, but neither a dispatch_started with a usable "
-                      f"attempt nor a readable attempt_count exists (row: {row.status}"
-                      f"{'; ' + row.detail if row.detail else ''})")
-
-    end = end_line(records, resolved_project, did, attempt)
+    chosen = _resolve_attempt(did, starts, row, attempt, report_time)
+    end = end_line(records, resolved_project, did, chosen)
     if end is None:
-        return LifecyclePath(MODE_V3, project_id=resolved_project, attempt=attempt,
+        return LifecyclePath(MODE_V3, project_id=resolved_project, attempt=chosen,
                              end_pending=True)
     outcome_id = str(end.get("outcome_id") or "").strip()
     if not outcome_id:
         raise ReportPathRefused(did, "end_outcome_id_missing",
-                      f"the end line of attempt {attempt} carries no outcome_id, so the "
+                      f"the end line of attempt {chosen} carries no outcome_id, so the "
                       "report line cannot link to it and must not claim end_pending either")
-    return LifecyclePath(MODE_V3, project_id=resolved_project, attempt=attempt,
+    return LifecyclePath(MODE_V3, project_id=resolved_project, attempt=chosen,
                          end_outcome_id=outcome_id)
+
+
+def _report_time(receipt: Mapping[str, Any]) -> Optional[str]:
+    """When the worker WROTE the report (its file's mtime), never the ingest time.
+
+    A scan can run long after the worker finished, so "now" says nothing about the
+    attempt; a missing path yields ``None`` (a several-attempt decision refuses).
+    """
+    try:
+        return datetime.fromtimestamp(os.stat(str(receipt.get("report_path") or "")).st_mtime,
+                                      tz=timezone.utc).isoformat()
+    except OSError:
+        return None
 
 
 def report_line(receipt: Dict[str, Any], *, state_dir: object) -> Dict[str, Any]:
@@ -265,13 +343,18 @@ def report_line(receipt: Dict[str, Any], *, state_dir: object) -> Dict[str, Any]
     provider, role, report path, verification, findings, status, ...), adds
     ``project_id``, ``attempt`` and exactly one of ``end_outcome_id`` /
     ``end_pending``, and is never rewritten later (ADR-045 §2): a second
-    delivery dedups on the outcome identity. Raises :class:`ReportPathRefused`
-    when the path cannot be decided; the caller books nothing and stays retryable.
+    delivery dedups on the outcome identity. The receipt's own ``attempt`` (when
+    it carries a usable one) decides which attempt the line belongs to; the
+    report's write time only breaks a tie between several started attempts.
+    Raises :class:`ReportPathRefused` when the path cannot be decided; the
+    caller books nothing and stays retryable.
     """
     dispatch_id = str(receipt.get("dispatch_id") or "").strip()
     project_id = (str(receipt.get("project_id") or "").strip()
                   or resolve_project_id(state_dir))
-    path = decide(project_id=project_id, dispatch_id=dispatch_id, state_dir=state_dir)
+    path = decide(project_id=project_id, dispatch_id=dispatch_id, state_dir=state_dir,
+                  attempt=_positive_int(receipt.get("attempt")),
+                  report_time=_report_time(receipt))
     if not path.is_v3:
         return receipt
     line = dict(receipt)
