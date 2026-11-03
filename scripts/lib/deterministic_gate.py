@@ -277,12 +277,25 @@ def ci_record(evidence: Dict[str, Any], ctx: LocalContext) -> Dict[str, Any]:
     }
 
 
+# The wiring gate's own verdict word, mapped onto ADR-046 §1's four statuses.
+# ``advisory`` (unwired symbols, gate in shadow mode) is NOT a fifth status: it is
+# the merge policy's decision about a finding, and that decision travels as
+# ``required: false``, which ``gate_executor``'s pre-booked branch reads. The check
+# found something and says ``fail`` (``pass`` would be green on a diff with
+# findings; ``unavailable``/``not_executable`` would be untrue and book no receipt).
+_WIRING_STATUS: Dict[str, str] = {"pass": "pass", "fail": "fail", "advisory": "fail"}
+
+
 def wiring_record(result: wiring_gate.WiringGateResult, ctx: LocalContext) -> Dict[str, Any]:
-    """The wiring gate's outcome record: the fields the request writer built before GE-6, plus ``kind``."""
+    """The wiring gate's outcome record: the fields the request writer built before GE-6, plus ``kind``.
+
+    ``status`` is one of the four ADR-046 statuses since GE-7 (:data:`_WIRING_STATUS`);
+    the findings keep the severity the gate's own posture gave them.
+    """
     blocking = result.status == "fail"
     return {
         "gate": "wiring_gate",
-        "status": result.status,
+        "status": _WIRING_STATUS.get(result.status, "fail"),
         "provider": "ast_grep",
         "kind": DETERMINISTIC_KIND,
         "required": bool(ctx.required),
@@ -321,10 +334,10 @@ DETERMINISTIC_GATES: Dict[str, DeterministicGate] = {
 }
 
 # A record status that is not an outcome: the ci gate's "running" snapshot is no
-# verdict at all (ADR-046 §1), so it has no GateOutcome. "advisory" is the
-# wiring gate's shadow-mode pass: the gate looked and did not reject, and the
-# record keeps its own status word (the four statuses do not change).
-_OUTCOME_STATUS: Dict[str, str] = {"pass": "pass", "fail": "fail", "advisory": "pass"}
+# verdict at all (ADR-046 §1), so it has no GateOutcome. Every other record
+# status a row's builder emits IS one of the four (``wiring_record`` maps its own
+# verdict word onto them, GE-7), so this is an identity for those.
+_OUTCOME_STATUS: Dict[str, str] = {"pass": "pass", "fail": "fail"}
 
 
 def _pr_ref(ctx: LocalContext) -> str:

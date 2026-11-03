@@ -28,7 +28,7 @@ from .outcome_identity import (
     write_outcome_index,
     _outcome_index_path_for,
 )
-from .lifecycle import check_end_line
+from .lifecycle import check_end_line, verify_final_end_line
 
 _log = logging.getLogger(__name__)
 
@@ -423,10 +423,13 @@ def _write_receipt_under_lock(
                     # sent the OI-1788 diagnosis after the lock path while the
                     # lock was held and the failing mkdir was the counter's.
                     raise AppendReceiptError(
-                        "pre_write_hook_failed",
-                        EXIT_IO_ERROR,
+                        "pre_write_hook_failed", EXIT_IO_ERROR,
                         f"Receipt pre-write hook failed (lock was held): {exc}",
                     ) from exc
+
+            # ADR-045 §3 (K-3b round 2): the hook above rewrote derived fields;
+            # re-check the FINAL line so what is persisted is what was frozen.
+            verify_final_end_line(receipt, ledger_path=receipt_path)
 
             # Hash-chain stamping (flag-gated). The read-tail + stamp happens
             # here, INSIDE the LOCK_EX block and BEFORE the receipt write, so

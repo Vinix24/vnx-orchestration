@@ -45,6 +45,8 @@ except ImportError as e:
     print(f"ERROR: Could not import required modules: {e}", file=sys.stderr)
     sys.exit(1)
 
+from completion_reading import completion_outcome, is_v3_end_line  # noqa: E402
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +55,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 ROLLBACK_ENV_FLAG = "VNX_STATE_SIMPLIFICATION_ROLLBACK"
+
+
+def _end_line_gate_result(receipt: Dict, gate: str) -> Optional[Dict]:
+    """The gate result a v3 end line carries, or None when it has no governed outcome.
+
+    An end line without a gate, or whose ``end_state`` is absent/unknown, is no
+    gate result: never a fixed "pass" (ADR-045 §4, K-2c).
+    """
+    outcome = completion_outcome(receipt) if gate else None
+    if outcome is None:
+        return None
+    return {
+        "gate_id": gate,
+        "status": "pass" if outcome == "success" else "fail",
+        "feature_id": receipt.get("feature_id", ""),
+        "pr_id": receipt.get("pr", receipt.get("pr_id", "")),
+        "dispatch_id": receipt.get("dispatch_id", ""),
+        "reason": receipt.get("error", receipt.get("reason", "")),
+    }
 
 
 def _env_flag(name: str) -> Optional[bool]:
@@ -149,6 +170,14 @@ class GovernanceDigestRunner:
                             "dispatch_id": receipt.get("dispatch_id", ""),
                             "reason": receipt.get("error", receipt.get("reason", receipt.get("summary", ""))),
                         })
+                        continue
+
+                    if is_v3_end_line(receipt):
+                        # K-2c: the v3 end line's pass/fail is its end_state,
+                        # classified — never a fixed "pass", never the status.
+                        end_result = _end_line_gate_result(receipt, gate)
+                        if end_result is not None:
+                            results.append(end_result)
                         continue
 
                     if not gate or event_type not in gate_event_map:

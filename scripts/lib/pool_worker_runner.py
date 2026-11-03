@@ -9,7 +9,8 @@ default and delivers through the single-entry door. From the moment the pool man
 the `terminal_leases` row for a worker, THIS worker owns it: it renews
 `last_heartbeat_at` while it runs (``_PoolLease``) and releases the row when it ends. The
 legacy ``subprocess_dispatch._pool_heartbeat_loop`` still renews for the rollback route
-(``VNX_SINGLE_ENTRY_DISPATCH=0``); T-G1 removes it once this path is green on main.
+(``VNX_SINGLE_ENTRY_DISPATCH=0`` / ``VNX_DISPATCH_LEGACY=1``); T-G1 keeps it because that
+rollback net is hard-parked (plan-gate point 1, 2026-10-27).
 """
 from __future__ import annotations
 import logging, os, re, sys, threading, time

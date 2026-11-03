@@ -16,7 +16,7 @@ import os
 import shutil
 import stat
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 
 def register_engine(home: Path, engine: Path, project_id: str) -> Path:
@@ -80,21 +80,27 @@ def pinned_store(
     releases: Sequence[str],
     script: Optional[str] = None,
     current: Optional[str] = None,
+    scripts: Optional[Mapping[str, str]] = None,
 ) -> Path:
     """A central store at ``<home>/.vnx-system``: one dir per release, ``current`` link.
 
     ``script`` (when given) is written to ``<release>/scripts/gate_obligation_runner.py``
     of every release, so a test can tell from the output which tree a start picked.
+    ``scripts`` maps further relative paths (``scripts/x.sh``, ``scripts/y.py``) to
+    bodies written into every release, for jobs that start a different script.
     Returns the ``versions/`` dir.
     """
     versions = home / ".vnx-system" / "versions"
+    contents = dict(scripts or {})
+    if script is not None:
+        contents["scripts/gate_obligation_runner.py"] = script
     for name in releases:
         release = versions / name
         release.mkdir(parents=True, exist_ok=True)
-        if script is not None:
-            stub = release / "scripts" / "gate_obligation_runner.py"
+        for relative, body in contents.items():
+            stub = release / relative
             stub.parent.mkdir(parents=True, exist_ok=True)
-            stub.write_text(script, encoding="utf-8")
+            stub.write_text(body, encoding="utf-8")
     if current is not None:
         os.symlink(versions / current, home / ".vnx-system" / "current")
     return versions

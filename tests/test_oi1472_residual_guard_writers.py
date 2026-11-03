@@ -372,6 +372,11 @@ _WRITER_MODULES = (
     # ci_gate and wiring_gate and writes their report, and it must never write a
     # result record itself — the one writer does that (commit_gate_outcome).
     "scripts/lib/deterministic_gate.py",
+    # GE-8: the orphan-request cleanup. It resolved an orphan with a bare
+    # write_text and the non-canonical status "abandoned"; it now books its
+    # outcome through commit_gate_outcome and must never write a result or a
+    # request record itself.
+    "scripts/cleanup_orphan_gates.py",
 )
 
 

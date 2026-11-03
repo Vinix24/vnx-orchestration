@@ -51,8 +51,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
+import uuid
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,6 +66,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import plan_gate_panel as pgp  # noqa: PLC0415  (sibling module, on sys.path)
 import final_answer_verdict  # noqa: PLC0415  (sibling module, on sys.path)
 import provider_switch
+
+logger = logging.getLogger(__name__)
 
 # The round-counter record type, appended to the SAME seat ledger as the
 # per-seat verdicts (SEAT_LEDGER_RELPATH). One ``plan_gate_round`` record per
@@ -962,12 +966,67 @@ def _default_tiebreaker_dispatcher(
     return pgp._make_default_dispatcher(data_dir, timeout_seconds, role="plan-reviewer")
 
 
+def _book_tiebreaker_attempt(
+    provider: str,
+    requested_model: Optional[str],
+    *,
+    execution_id: str,
+    dispatch_id: str,
+    started: datetime,
+    ended: datetime,
+    error: Optional[BaseException],
+    data_dir: Optional[str],
+    project_id: Optional[str] = None,
+    producer: str = "plan_gate_tiebreaker",
+) -> None:
+    """Book this tiebreaker call as one cost-ledger line (K3-1b), or none with no store.
+
+    The tiebreaker's run ends here: one governed dispatch, one report, and no
+    usage accounting anywhere below it. Its identity is the run's own
+    ``execution_id``, minted before the call; provider and model come from what
+    the runner launched (the registry-resolved lane model, ADR-036), never a
+    model named in the decision text. A raised call is a door refusal when its
+    text carries the door's code (books zero); any other raised call started and
+    lost its answer (books unknown). Best-effort: a decision is never the
+    ledger's to lose (one WARNING, never a raise).
+
+    No ``project_id`` means the tenant of the store the line is written INTO —
+    ``Path(data_dir) / "state"`` — never the ambient ``VNX_PROJECT_ID``
+    (ADR-007, the resolution ``panel_leg_cost.project_id_for`` uses).
+    """
+    if not data_dir:
+        return
+    try:
+        import harness_run_cost  # sibling module
+        from provider_costs import costs_path_in
+
+        refusal = harness_run_cost.door_refusal_reason(error) if error is not None else None
+        run = harness_run_cost.AttemptRun(
+            provider=provider,
+            model=harness_run_cost.lane_model(provider, requested_model),
+            execution_id=execution_id, started=started, ended=ended,
+            outcome=(harness_run_cost.ATTEMPT_REFUSED if refusal else harness_run_cost.ATTEMPT_RAN),
+            reason=refusal or ("tiebreaker_dispatch_error" if error is not None else ""),
+        )
+        harness_run_cost.record_attempt_run(
+            run,
+            project_id=project_id or harness_run_cost.ledger_project_id(Path(data_dir) / "state"),
+            producer=producer, ref=dispatch_id, role="tiebreaker",
+            ledger_path=costs_path_in(Path(data_dir)),
+        )
+    except Exception as exc:  # vnx-silent-except: a tiebreaker's cost line never fails the tiebreaker
+        logger.warning(
+            "plan_gate_tiebreaker: attempt %s not booked (%s): %s",
+            dispatch_id, type(exc).__name__, exc,
+        )
+
+
 def run_tiebreaker(
     doc_path: str | Path | None = None,
     *,
     doc_text: Optional[str] = None,
     track_id: str,
-    project_id: str = "vnx-dev",
+    project_id: Optional[str] = None,
     round_number: int,
     seat_verdicts: Optional[List[Dict[str, Any]]] = None,
     dispatcher: Optional[DispatcherFn] = None,
@@ -1011,8 +1070,9 @@ def run_tiebreaker(
     lane's provider family off for ``project_id``: before any dispatcher is built or
     called, and never a decision either.
     """
-    import uuid  # noqa: PLC0415
-
+    # ADR-007 / K3-1b: an unnamed project is the STORE's tenant, resolved before
+    # the provider switch decides and before any line is booked.
+    project_id = project_id or pgp._store_project_id(data_dir)
     # Registry-sourced model identity (ADR-036): no literal on the dispatch path.
     # When the caller passes an explicit model_arg (a test injecting a
     # dispatcher does not need a real registry resolution), it wins; otherwise
@@ -1044,9 +1104,25 @@ def run_tiebreaker(
         seat_verdicts=list(seat_verdicts or []),
     )
     did = f"plan-tiebreak-{track_id}-{uuid.uuid4().hex[:8]}"
+    # K3-1b: one execution, one id — minted before the door is asked, so a
+    # second tiebreaker attempt is a new run with a new id and a re-read of this
+    # run's report books nothing.
+    execution_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc)
+    dispatch_exc: Optional[BaseException] = None
+    report_text = ""
     try:
         report_text = disp(dispatch_provider, resolved_model, instruction, did)
     except Exception as exc:  # vnx-silent-except: a raised lane is a NO-ANSWER, not a crash
+        dispatch_exc = exc
+    # The one model call ended (answered or raised); its line is booked before
+    # the answer is read and never changes the outcome.
+    _book_tiebreaker_attempt(
+        dispatch_provider, resolved_model, execution_id=execution_id, dispatch_id=did,
+        started=started, ended=datetime.now(timezone.utc), error=dispatch_exc,
+        data_dir=data_dir, project_id=project_id,
+    )
+    if dispatch_exc is not None:
         # Punt 17 — "proces dat wegvalt zonder uitvoer": the lane dropped without
         # authoring a report (the real dispatcher raises RuntimeError when
         # _read_report finds no report file, or TimeoutExpired when the lane
@@ -1055,8 +1131,8 @@ def run_tiebreaker(
         # decision. The status names the lane state so the caller reports the
         # cause, not the parser.
         raise TiebreakerNoAnswerError(
-            status=_raised_lane_status(exc), raw=str(exc),
-        ) from exc
+            status=_raised_lane_status(dispatch_exc), raw=str(dispatch_exc),
+        ) from dispatch_exc
     # OI-1219: a synthesized report is by definition NOT a model answer — the
     # lane never delivered a verdict, so the governance layer fabricated the
     # body (SYNTHESIZED_REPORT_MARKER). Detect the marker BEFORE parse_tiebreaker

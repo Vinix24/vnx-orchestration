@@ -241,20 +241,25 @@ _pdp_resolve_target() {
 
     log "V8 DISPATCH: Routing to terminal $target_pane (Track: $track, Role: $agent_role)"
 
-    # Detect subprocess-routed terminals; skip tmux MODE_CONTROL pre-flight for them.
-    # Uses same adapter resolution logic as deliver_dispatch_to_terminal().
+    # Detect subprocess-routed terminals; skip the tmux MODE_CONTROL pre-flight for them.
+    # T-G1: T1-T3 are always headless and no longer read VNX_ADAPTER_T{n}; other terminals
+    # keep the explicit opt-in (T0: VNX_ADAPTER_T0=subprocess).
     local _rt_terminal_id
     _rt_terminal_id=$(get_terminal_from_pane "$target_pane" "$STATE_DIR/panes.json" 2>/dev/null || true)
     if [ -z "$_rt_terminal_id" ] || [ "$_rt_terminal_id" = "UNKNOWN" ]; then
         _rt_terminal_id="$(track_to_terminal "$track")"
     fi
-    local _rt_adapter_var="VNX_ADAPTER_${_rt_terminal_id}"
-    local _rt_adapter_type="${!_rt_adapter_var:-tmux}"
-    if [[ "$_rt_terminal_id" == "T1" && "$_rt_adapter_type" == "tmux" && -z "${!_rt_adapter_var:-}" ]]; then
-        _rt_adapter_type="subprocess"
+    local _rt_headless=0
+    if [[ "$_rt_terminal_id" =~ ^T[123]$ ]]; then
+        _rt_headless=1
+    else
+        local _rt_adapter_var="VNX_ADAPTER_${_rt_terminal_id}"
+        if [[ "${!_rt_adapter_var:-tmux}" == "subprocess" ]]; then
+            _rt_headless=1
+        fi
     fi
 
-    if [[ "$_rt_adapter_type" == "subprocess" ]]; then
+    if [[ "$_rt_headless" == "1" ]]; then
         log "V8 DISPATCH: subprocess adapter — skipping tmux MODE_CONTROL pre-flight terminal=$_rt_terminal_id"
         # mode_pre_check sets _CTM_REQUIRES_MODEL and other globals consumed by deliver_dispatch_to_terminal.
         mode_pre_check "$target_pane" "$dispatch_file" || return 1

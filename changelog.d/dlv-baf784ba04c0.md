@@ -1,0 +1,1 @@
+- Backfill ledger (K6b-3b, OI-2455): `BackfillTranscriptBooked` compares with the effective line of the `supersedes` chain, in the ledger and in the spool, so a repeated backfill of a grown transcript adds no second correction and a transcript back at an older usage is corrected back instead of reported as booked.

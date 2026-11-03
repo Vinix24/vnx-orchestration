@@ -14,7 +14,7 @@
   "provider": "ast_grep",
   "required": false,
   "skipped_symbols": [],
-  "status": "advisory",
+  "status": "fail",
   "summary": "1 unwired symbol(s): orphan_symbol",
   "total_checked": 2
 }

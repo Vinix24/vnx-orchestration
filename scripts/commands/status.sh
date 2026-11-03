@@ -84,29 +84,44 @@ print(json.dumps(results))
 
 # ── Section printers ───────────────────────────────────────────────────────
 
+# T-B2 (terminal-binding-afbouwen): the t0_state terminals block is gone. The
+# legacy `--terminals` view reads live_work instead — what is running, measured
+# from the dispatches rows plus the occupancy flock (D5), not per-terminal
+# bookkeeping the headless lane never fills.
 _s_print_terminals() {
-  _s_header "Terminals"
+  _s_header "Live Work"
   local state
   state=$(_s_t0_state)
 
   python3 -c "
 import json, sys
 state = json.loads('''$state''')
-terminals = state.get('terminals', {})
-if not terminals:
-    print('  (no terminal data — run vnx start first)')
+live = state.get('live_work') or {}
+if not live.get('available', False):
+    print('  (live_work unavailable: %s)' % (live.get('reason') or 'no reason given'))
     sys.exit(0)
 
-fmt = '  {:<4} {:<8} {:<10} {:<20} {:<12} {}'
-print(fmt.format('ID', 'Track', 'Lease', 'Dispatch', 'Status', 'Last Update'))
+rows = []
+for bucket in ('live', 'starting', 'unmeasured', 'stale'):
+    for item in live.get(bucket) or []:
+        rows.append((bucket, item))
+if not rows:
+    print('  (no dispatch in flight)')
+    sys.exit(0)
+
+fmt = '  {:<11} {:<22} {:<10} {:<8} {}'
+print(fmt.format('Bucket', 'Dispatch', 'Track', 'Age (s)', 'Lock'))
 print('  ' + '-'*70)
-for tid, t in sorted(terminals.items()):
-    lease = t.get('lease_state', 'idle')
-    status = t.get('status', 'unknown')
-    dispatch = (t.get('current_dispatch') or '')[:19]
-    last_update = t.get('last_update', 'never')[:19]
-    track = t.get('track', '?')
-    print(fmt.format(tid, track, lease, dispatch, status, last_update))
+for bucket, item in rows:
+    age = item.get('age_seconds')
+    age = '?' if age is None else age
+    print(fmt.format(
+        bucket,
+        (item.get('dispatch_id') or '')[:21],
+        (item.get('track') or '?')[:9],
+        age,
+        item.get('lock') or '?',
+    ))
 "
   printf '\n'
 }
@@ -297,7 +312,7 @@ Usage: vnx status [OPTIONS]
 Show VNX operator status dashboard: strategic overview + live terminal health.
 
 Options:
-  --terminals   Show only terminal health (legacy view)
+  --terminals   Show only in-flight work (live_work; the terminal block is gone)
   --dispatches  Show only dispatch queue (legacy view)
   --gates       Show only gate results (legacy view)
   --workers     Show live worker health (subprocess dispatches)

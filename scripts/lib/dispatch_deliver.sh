@@ -371,8 +371,9 @@ _ddt_subprocess_delivery() {
 }
 
 # deliver_dispatch_to_terminal — input-mode guard, worktree path resolution, delivery.
-# Checks VNX_ADAPTER_T{n} env var: if "subprocess", routes via SubprocessAdapter.
-# T0 defaults to tmux; T1/T2/T3 default to subprocess (set VNX_ADAPTER_Tx=tmux to opt-out).
+# T-G1: the worker terminals (T1, T2, T3) always deliver on the subprocess branch; their
+# VNX_ADAPTER_T{n} selector is gone and no value opts a worker back into tmux. Other
+# terminals keep the explicit opt-in (T0: VNX_ADAPTER_T0=subprocess routes it headless).
 # Params: dispatch_file track agent_role dispatch_id target_pane terminal_id
 #         provider complete_prompt skill_command
 # Reads globals: _DL_RC_GENERATION _DL_RC_ATTEMPT_ID
@@ -381,16 +382,17 @@ deliver_dispatch_to_terminal() {
     local target_pane="$5" terminal_id="$6" provider="$7"
     local complete_prompt="$8" skill_command="$9"
 
-    # Resolve per-terminal adapter: VNX_ADAPTER_T0, VNX_ADAPTER_T1, VNX_ADAPTER_T2, etc.
-    # T0: set VNX_ADAPTER_T0=subprocess to route T0 via SubprocessAdapter (not default).
-    # T1/T2/T3 default to subprocess (headless workers) since F32; set VNX_ADAPTER_Tx=tmux to opt-out.
-    local adapter_var="VNX_ADAPTER_${terminal_id}"
-    local adapter_type="${!adapter_var:-tmux}"
-    if [[ "$terminal_id" =~ ^T[123]$ && "$adapter_type" == "tmux" && -z "${!adapter_var:-}" ]]; then
-        adapter_type="subprocess"
+    local _ddt_headless=0
+    if [[ "$terminal_id" =~ ^T[123]$ ]]; then
+        _ddt_headless=1
+    else
+        local _ddt_adapter_var="VNX_ADAPTER_${terminal_id}"
+        if [[ "${!_ddt_adapter_var:-tmux}" == "subprocess" ]]; then
+            _ddt_headless=1
+        fi
     fi
 
-    if [[ "$adapter_type" == "subprocess" ]]; then
+    if [[ "$_ddt_headless" == "1" ]]; then
         local model="${_CTM_REQUIRES_MODEL:-sonnet}"
         # provider ($7) is forwarded so the door bridge keeps a non-claude worker on its lane.
         _ddt_subprocess_delivery "$terminal_id" "$dispatch_id" "$complete_prompt" "$model" "$dispatch_file" "$agent_role" "$provider"

@@ -89,7 +89,10 @@ echo "rc=$?"
 def _delivery_harness(bin_dir: Path, tmp_path: Path) -> str:
     """The tmux delivery path with its outside world stubbed: a dispatch file,
     an empty VNX_DIR (so no worktree resolves and no `cd` is sent), a state dir
-    and the lifecycle hooks the failure handler calls."""
+    and the lifecycle hooks the failure handler calls.
+
+    T-G1 made T1/T2/T3 always headless, so the tmux branch is T0's.
+    """
     dispatch_file = tmp_path / "dispatch.md"
     dispatch_file.write_text("# dispatch\n", encoding="utf-8")
     vnx_dir = tmp_path / "vnxdir"
@@ -100,7 +103,7 @@ def _delivery_harness(bin_dir: Path, tmp_path: Path) -> str:
     state_dir.mkdir()
     return f"""set -uo pipefail
 export PATH={shlex.quote(str(bin_dir))}:$PATH
-export VNX_ADAPTER_T1=tmux
+export VNX_ADAPTER_T0=tmux
 STATE_DIR={shlex.quote(str(state_dir))}
 VNX_DIR={shlex.quote(str(vnx_dir))}
 PROJECT_ROOT={shlex.quote(str(project_root))}
@@ -116,7 +119,7 @@ check_pane_input_ready() {{ return 0; }}
 rc_release_on_failure() {{ :; }}
 release_terminal_claim() {{ return 0; }}
 deliver_dispatch_to_terminal {shlex.quote(str(dispatch_file))} "A" "backend-developer" \\
-    "dispatch-1" "pane1" "T1" "claude_code" "body" "/skill"
+    "dispatch-1" "pane1" "T0" "claude_code" "body" "/skill"
 echo "rc=$?"
 echo "_DDT_FAILED_SUBSTEP=$_DDT_FAILED_SUBSTEP"
 """

@@ -9,6 +9,9 @@
 # must only carry <relative-script>. A run in progress is never switched: it finishes on
 # the tree it started from, and only the NEXT launchd start picks up a changed pin.
 #
+# The interpreter comes from the script's own extension: *.py runs python3, *.sh runs
+# bash, anything else exits 78 with one line naming the script.
+#
 # No pin or a resolvable pin -> that tree. A dead pin, an unreadable/malformed/escaping
 # pin, an unregistered project or a pinned tree without <relative-script> -> exit 78
 # (EX_CONFIG) with one stderr line from the resolver. There is no fallback to another
@@ -26,6 +29,18 @@ fi
 PROJECT_ID="$1"
 RELATIVE_SCRIPT="$2"
 shift 2
+
+# The interpreter is the script's own extension, never a guess: a `*.sh` job (the
+# receipt-processor supervisor) cannot be started by python3, and a `*.py` job must not
+# be handed to bash. Anything else is refused before a tree is resolved at all.
+case "$RELATIVE_SCRIPT" in
+    *.py) INTERPRETER=python3 ;;
+    *.sh) INTERPRETER=bash ;;
+    *)
+        echo "ERROR: cannot start $RELATIVE_SCRIPT: only *.py and *.sh scripts are supported" >&2
+        exit 78
+        ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESOLVER="$SCRIPT_DIR/../lib/pinned_engine.py"
@@ -51,4 +66,4 @@ export VNX_HOME="$ENGINE_ROOT"
 # python3 this job depends on.
 export PATH="$PATH:${HOME:?HOME is not set}/.local/bin"
 
-exec python3 "$RELATIVE_SCRIPT" "$@"
+exec "$INTERPRETER" "$RELATIVE_SCRIPT" "$@"

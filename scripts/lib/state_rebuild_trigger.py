@@ -17,12 +17,16 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from event_outcome_semantics import COMPLETION_EVENT_TYPES
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_THROTTLE_SECONDS = 30
 
-CRITICAL_EVENTS = {
-    "task_complete", "task_completed", "completion", "complete",
-    "task_failed", "task_timeout",
+# The completion family (ADR-045 §2: dispatch_finished next to task_complete)
+# plus the legacy literals this trigger has always honoured and the two failure
+# types. A start or report line is not here: neither ends a dispatch.
+CRITICAL_EVENTS = set(COMPLETION_EVENT_TYPES) | {
+    "completion", "complete", "task_failed", "task_timeout",
 }
 
 

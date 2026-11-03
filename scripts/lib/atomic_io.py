@@ -28,10 +28,12 @@ import os
 import re
 import stat
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, TextIO
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,52 @@ logger = logging.getLogger(__name__)
 TEMP_PREFIX, TEMP_SUFFIX = tempfile.gettempprefix(), ".tmp"
 
 _EVENT_TYPE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,63}$")
+
+
+class _SlotLockEntry:
+    """One process's hold on one lock file: how deep it is taken, and the description it holds.
+
+    ``reentry`` serialises the threads of the process on this lock; ``depth``
+    says how many nested ``slot_lock`` blocks the thread inside it has open.
+    """
+
+    __slots__ = ("pid", "reentry", "depth", "handle")
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self.reentry = threading.RLock()
+        self.depth = 0
+        self.handle: Optional[TextIO] = None
+
+
+# ``flock`` belongs to the open file description, so a second acquisition of the
+# same lock inside one process blocks on the first: ``dispatch_serialization``
+# documents exactly that and tells its callers not to nest. ``slot_lock`` does
+# nest, in one place that must hold a slot's lock ACROSS a call into another
+# lock-taking writer: the orphan cleanup holds a request's lock while
+# ``gate_outcome.commit_gate_outcome`` ends that request (step 7 takes the same
+# lock again), so the identity check and the write are one critical section.
+# This table is what makes that inner acquisition a no-op instead of a
+# self-deadlock. It is per process (``pid``) and per thread (``reentry``), so
+# every other process still queues on the flock exactly as before.
+_SLOT_LOCK_ENTRIES: "dict[str, _SlotLockEntry]" = {}
+_SLOT_LOCK_ENTRIES_MUTEX = threading.Lock()
+
+
+def _slot_lock_entry(key: str) -> _SlotLockEntry:
+    """This process's entry for one lock file, rebuilt when a ``fork`` inherited the table.
+
+    A child inherits a copy of the table, and with it the parent's depth: its
+    own acquisition must queue on the parent's flock like any other process, so
+    an entry another process created is dropped and taken fresh.
+    """
+    pid = os.getpid()
+    with _SLOT_LOCK_ENTRIES_MUTEX:
+        entry = _SLOT_LOCK_ENTRIES.get(key)
+        if entry is None or entry.pid != pid:
+            entry = _SlotLockEntry(pid)
+            _SLOT_LOCK_ENTRIES[key] = entry
+        return entry
 
 
 @contextmanager
@@ -60,17 +108,39 @@ def slot_lock(path: Path) -> Iterator[None]:
     longer at that path.
 
     ``flock`` is advisory: it holds between callers that take it, and it holds
-    equally between threads of one process and between processes, because the
-    lock belongs to the open file description and each caller opens its own.
+    equally between processes, because the lock belongs to the open file
+    description and each caller opens its own. Within ONE process the lock is
+    reentrant (see :data:`_SLOT_LOCK_ENTRIES`): a nested ``slot_lock`` on the
+    same path by the thread that already holds it is granted, and every other
+    thread waits for the outermost block to close.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.parent / f".{path.name}.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock_fh:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+    entry = _slot_lock_entry(str(lock_path))
+    entry.reentry.acquire()
+    try:
+        if entry.depth == 0:
+            handle = lock_path.open("a+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            except BaseException:
+                handle.close()
+                raise
+            entry.handle = handle
+        entry.depth += 1
         try:
             yield
         finally:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+            entry.depth -= 1
+            if entry.depth == 0:
+                handle, entry.handle = entry.handle, None
+                if handle is not None:
+                    try:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                    finally:
+                        handle.close()
+    finally:
+        entry.reentry.release()
 
 
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:

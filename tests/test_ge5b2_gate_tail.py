@@ -31,7 +31,12 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures" / "governed_lane"
 PROVIDERS = {"glm": glm_gate, "kimi": kimi_gate}
 SCENARIOS = ("fail", "unavailable", "reprocess-stale")
 # Same set as GE-5b-1, deliberately: a new random field must still fail the comparison.
-VOLATILE_KEYS = frozenset({"recorded_at", "dispatch_id", "duration_seconds", "report_path", "report_path_informational"})
+# ``execution_id`` (K3-2a) is random per run by construction — the goldens were recorded before it
+# existed, and two runs of one seat must never share it.
+VOLATILE_KEYS = frozenset({
+    "recorded_at", "dispatch_id", "duration_seconds", "report_path", "report_path_informational",
+    "execution_id",
+})
 
 _DIFF = (
     "diff --git a/scripts/lib/example.py b/scripts/lib/example.py\n--- a/scripts/lib/example.py\n"

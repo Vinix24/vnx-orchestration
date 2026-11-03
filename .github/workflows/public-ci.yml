@@ -8,7 +8,11 @@ on:
 jobs:
   smoke:
     name: vnx doctor smoke
-    runs-on: ubuntu-latest
+    # Pinned to the 24.04 image for the same reason as vnx-ci.yml (2026-10-30):
+    # the moving `latest` runner label now points at the 26.04 image, which
+    # broke main (run 41079080194). OI "Main-CI rood door runner-image"
+    # holds the way back to the moving label.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout
@@ -17,7 +21,7 @@ jobs:
       - name: Install ripgrep
         run: |
           # Strip the flaky packages.microsoft.com (azure-cli) apt source that intermittently
-          # breaks apt-get update on ubuntu-latest with a NOSPLIT/hash-sum mismatch.
+          # breaks apt-get update on the ubuntu runner image with a NOSPLIT/hash-sum mismatch.
           sudo rm -f /etc/apt/sources.list.d/microsoft*.list /etc/apt/sources.list.d/*microsoft*.sources 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y ripgrep
@@ -46,7 +50,7 @@ jobs:
 
   secret-scan:
     name: secret scan (gitleaks)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout

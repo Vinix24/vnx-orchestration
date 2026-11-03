@@ -265,18 +265,25 @@ class TestOrphanLogTracksResolvedItemsNotSlice:
 
         write_calls: list[str] = []
 
-        def fake_write(orphan: dict, dry_run: bool) -> bool:
+        def fake_write(
+            orphan: dict,
+            dry_run: bool = False,
+            requests_dir: Path | None = None,
+            *,
+            max_age_hours: float = 24.0,
+        ) -> m.OrphanResolution:
             # First call fails, second succeeds.
             if not write_calls:
                 write_calls.append(orphan["stem"])
-                return False
+                return m.OrphanResolution(m.FAILED, "simulated write failure")
             write_calls.append(orphan["stem"])
-            return True
+            return m.OrphanResolution(m.RESOLVED)
 
         audit_calls: list[list[dict]] = []
 
         with (
             patch.object(m, "_find_orphans", return_value=[orphan_a, orphan_b]),
+            patch.object(m, "_find_unfinished", return_value=[]),
             patch.object(m, "_write_abandoned_result", side_effect=fake_write),
             patch.object(m, "_log_to_audit", side_effect=lambda lst: audit_calls.append(list(lst))),
         ):
@@ -303,7 +310,8 @@ class TestOrphanLogTracksResolvedItemsNotSlice:
 
         with (
             patch.object(m, "_find_orphans", return_value=orphans),
-            patch.object(m, "_write_abandoned_result", return_value=True),
+            patch.object(m, "_find_unfinished", return_value=[]),
+            patch.object(m, "_write_abandoned_result", return_value=m.OrphanResolution(m.RESOLVED)),
             patch.object(m, "_log_to_audit", side_effect=lambda lst: audit_calls.append(list(lst))),
         ):
             ret = m.main([])

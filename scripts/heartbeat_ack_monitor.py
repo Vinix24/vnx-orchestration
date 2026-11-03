@@ -50,6 +50,11 @@ except Exception as exc:
     raise SystemExit(f"Failed to load project_scope: {exc}")
 
 try:
+    from terminal_lane import is_headless_terminal
+except Exception as exc:
+    raise SystemExit(f"Failed to load terminal_lane: {exc}")
+
+try:
     from terminal_state_core import TerminalUpdate, default_lease_expires, update_terminal_state
     SHADOW_TERMINAL_STATE_AVAILABLE = True
 except Exception as exc:
@@ -212,14 +217,12 @@ class HeartbeatACKMonitor:
     def _is_subprocess_terminal(self, terminal: str) -> bool:
         """Check if terminal uses subprocess adapter (not tmux).
 
-        VNX_ADAPTER_T{n}=subprocess skips tmux-based monitoring because the
-        subprocess adapter has its own event pipeline and any tmux pane
-        activity reflects the subprocess launcher, not the actual worker.
-        Applies to any terminal (T0, T1, T2, T3) via VNX_ADAPTER_{terminal}.
-        T0 subprocess mode is enabled by VNX_ADAPTER_T0=subprocess (F36).
+        A subprocess terminal skips tmux monitoring: the adapter has its own event
+        pipeline, so pane activity only reflects the launcher. T-G1: T1-T3 are
+        always headless and their VNX_ADAPTER_{terminal} is not read; T0 still
+        opts in with VNX_ADAPTER_T0=subprocess (F36).
         """
-        env_key = f"VNX_ADAPTER_{terminal}"
-        return os.environ.get(env_key, "tmux").lower() == "subprocess"
+        return is_headless_terminal(terminal)
 
     def _monitor_dispatch(self, dispatch_id: str):
         """Dedicated monitoring thread for a specific dispatch"""

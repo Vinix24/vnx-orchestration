@@ -1,0 +1,1 @@
+- Release and rollout docs (fleet-release-and-rollout PR-9): the install-central runbook now uses `vnx regen-settings --merge` for an existing project and gains a "Before a rollout" section for `vnx preflight`, `vnx release verify` and the `release:main-drift` doctor check; `docs/core/LOCKS_AND_RELEASES.md` gains rows for those controls and the pinned launcher refusal.

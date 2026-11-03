@@ -41,12 +41,27 @@
     see com.vnx.gate-obligation-runner.plist's comment for the matching
     destination-path gap in vnx_cli/commands/init_cmd.py):
       bash scripts/launchd/reload_plist.sh com.vnx.receipt-processor
+
+    Pinned start (fleet-release-and-rollout PR-4): this job no longer starts
+    from the tree the plist was rendered in. Each start runs
+    scripts/launchd/vnx_pinned_launcher.sh from ${VNX_HOME}; that launcher
+    resolves the project's .vnx-version (via ~/.vnx/projects.json) and
+    starts scripts/receipt_processor_supervisor.sh from the pinned release
+    instead — only a project with no pin keeps running ${VNX_HOME}. This is
+    the first bash job on the launcher: the interpreter comes from the
+    script's own extension (*.sh -> bash, *.py -> python3). A run in
+    progress is never switched: it finishes on the tree it started from, and
+    only the next start picks up a changed pin. A pin that is not installed
+    exits 78 with one stderr line naming project, pin and the directory
+    searched; there is no silent fallback. Undo: revert the commit and run
+    `bash scripts/launchd/reload_plist.sh com.vnx.receipt-processor`.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec bash scripts/receipt_processor_supervisor.sh</string>
+    <string>${VNX_HOME}/scripts/launchd/vnx_pinned_launcher.sh</string>
+    <string>${VNX_PROJECT_ID}</string>
+    <string>scripts/receipt_processor_supervisor.sh</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

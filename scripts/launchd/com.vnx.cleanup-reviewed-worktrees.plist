@@ -42,12 +42,32 @@
     Installed by vnx init (_install_cleanup_reviewed_worktrees_runner in
     vnx_cli/commands/init_cmd.py), or manually via reload_plist.sh:
       bash scripts/launchd/reload_plist.sh com.vnx.cleanup-reviewed-worktrees
+
+    Pinned start (fleet-release-and-rollout PR-4): this job no longer starts
+    from the tree the plist was rendered in. Each start runs
+    scripts/launchd/vnx_pinned_launcher.sh from ${VNX_HOME}; that launcher
+    resolves the project's .vnx-version (via ~/.vnx/projects.json) and
+    starts scripts/cleanup_reviewed_worktrees.py from the pinned release
+    instead — only a project with no pin keeps running ${VNX_HOME}. The
+    script's own arguments below (the repo-root flag, the resolved
+    ${VNX_PROJECT_ROOT} and the apply flag) are passed through unchanged, so
+    the sweep still targets the project checkout, never the engine. A run in
+    progress is never switched: it
+    finishes on the tree it started from, and only the next start picks up a
+    changed pin. A pin that is not installed exits 78 with one stderr line
+    naming project, pin and the directory searched; there is no silent
+    fallback. Undo: revert the commit and run
+    `bash scripts/launchd/reload_plist.sh com.vnx.cleanup-reviewed-worktrees`.
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/cleanup_reviewed_worktrees.py --repo-root ${VNX_PROJECT_ROOT} --apply</string>
+    <string>${VNX_HOME}/scripts/launchd/vnx_pinned_launcher.sh</string>
+    <string>${VNX_PROJECT_ID}</string>
+    <string>scripts/cleanup_reviewed_worktrees.py</string>
+    <string>--repo-root</string>
+    <string>${VNX_PROJECT_ROOT}</string>
+    <string>--apply</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>

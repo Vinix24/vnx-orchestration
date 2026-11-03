@@ -496,26 +496,24 @@ def _stamp_ingested_at(receipt: Dict[str, Any]) -> None:
     receipt["ingested_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def append_receipt_payload(
+def _prepare_receipt(
     receipt: Dict[str, Any],
+    receipt_path: Path,
     *,
     receipts_file: Optional[str] = None,
-    cache_window_seconds: int = 300,
     skip_enrichment: bool = False,
-    lock_timeout: Optional[float] = None,
-) -> AppendResult:
-    """Validate, enrich and append one receipt under the append lock; the result says appended or duplicate.
+) -> tuple:
+    """The line-only half of the append: every stamp and validation of ONE receipt.
 
-    ``lock_timeout`` bounds, in seconds from this call, every wait on the
-    append lock: a lock still taken then raises ``AppendReceiptError`` with
-    code ``lock_timeout`` and nothing written, and the central mirror is
-    queued rather than written (:func:`_queue_the_mirror`). Without it every
-    wait is unbounded, as it always was.
+    ``receipt_path`` is the resolved ledger; ``receipts_file`` is the caller's
+    original argument, because a ghost gate receipt may be rerouted before the
+    path is final. The append below and ``lifecycle.prepare_end_line`` share
+    this call, so a frozen intent is produced by the exact stamps and
+    validation the write applies (ADR-045 §3, K-3b).
+
+    Returns the prepared mapping (enrichment may replace it), the event name and
+    the effective receipt path. Nothing is written here.
     """
-    lock_deadline = None if lock_timeout is None else time.monotonic() + max(0.0, lock_timeout)
-    if not isinstance(receipt, dict):
-        raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
-
     # ADR-035 §9 PR-5 (HIGH-6): stamped atomically with the trimmed v2 shape
     # in this same PR, on the one shared Path-2 entry point every writer
     # (report_parser.py output, governance_receipts.py, state_mutation.py,
@@ -529,8 +527,6 @@ def append_receipt_payload(
     # byte-for-byte. Path 1 (governance_emit) builds a ReceiptV2, which forces
     # its own v2 stamp and can never carry a lifecycle type.
     stamp_lifecycle(receipt)
-
-    receipt_path = _resolve_receipts_file(receipts_file).expanduser().resolve()
 
     _stamp_identity(receipt, identity_cwd=receipt_path.parent)
     _stamp_observability_tier(receipt)
@@ -564,6 +560,35 @@ def append_receipt_payload(
     classify_receipt_v2_warnings(receipt, counter_path=counter_path)
 
     event_name = _validate_receipt(receipt)
+    return receipt, event_name, receipt_path
+
+
+def append_receipt_payload(
+    receipt: Dict[str, Any],
+    *,
+    receipts_file: Optional[str] = None,
+    cache_window_seconds: int = 300,
+    skip_enrichment: bool = False,
+    lock_timeout: Optional[float] = None,
+) -> AppendResult:
+    """Validate, enrich and append one receipt under the append lock; the result says appended or duplicate.
+
+    ``lock_timeout`` bounds, in seconds from this call, every wait on the
+    append lock: a lock still taken then raises ``AppendReceiptError`` with
+    code ``lock_timeout`` and nothing written, and the central mirror is
+    queued rather than written (:func:`_queue_the_mirror`). Without it every
+    wait is unbounded, as it always was.
+    """
+    lock_deadline = None if lock_timeout is None else time.monotonic() + max(0.0, lock_timeout)
+    if not isinstance(receipt, dict):
+        raise AppendReceiptError("invalid_receipt_type", EXIT_INVALID_INPUT, "Receipt payload must be a JSON object")
+
+    receipt, event_name, receipt_path = _prepare_receipt(
+        receipt,
+        _resolve_receipts_file(receipts_file).expanduser().resolve(),
+        receipts_file=receipts_file,
+        skip_enrichment=skip_enrichment,
+    )
     idempotency_key = _compute_idempotency_key(receipt, event_name)
 
     # Stamped AFTER the idempotency key so a fresh ingest time never perturbs
@@ -579,6 +604,10 @@ def append_receipt_payload(
 
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path = _cache_file_for(receipt_path)
+    # OI-1788: the same counter file `_prepare_receipt` classified warnings
+    # against — beside the ledger this receipt is appended to, after any
+    # gate-stream reroute.
+    counter_path = counter_path_beside(receipt_path)
 
     result = _write_receipt_under_lock(
         receipt,

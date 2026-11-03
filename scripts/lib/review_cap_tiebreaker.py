@@ -40,6 +40,7 @@ import subprocess
 import uuid
 import warnings
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
@@ -240,10 +241,27 @@ def ask(
     provider, model_key, cli_arg = resolve_model(config)
     disp = dispatcher or _default_dispatcher(data_dir, pgp._seat_timeout(timeout_seconds))
     did = f"review-cap-tiebreak-{uuid.uuid4().hex[:8]}"
+    # K3-1b: one execution, one id — minted before the door is asked, so a second
+    # attempt is a new run and a re-read of this answer books nothing new.
+    execution_id = uuid.uuid4().hex
+    started = datetime.now(timezone.utc)
+    dispatch_exc: Optional[BaseException] = None
+    report = ""
     try:
         report = disp(provider, cli_arg, instruction, did)
     except Exception as exc:  # vnx-silent-except: a raised lane is a no-answer, re-raised as one
-        raise TiebreakerNoAnswerError(status=pgt._raised_lane_status(exc), raw=str(exc)) from exc
+        dispatch_exc = exc
+    # The one model call ended (answered or raised); its line is booked before
+    # the answer is read and never changes the outcome.
+    pgt._book_tiebreaker_attempt(
+        provider, model_key, execution_id=execution_id, dispatch_id=did, started=started,
+        ended=datetime.now(timezone.utc), error=dispatch_exc,
+        data_dir=data_dir, producer="review_cap_tiebreaker",
+    )
+    if dispatch_exc is not None:
+        raise TiebreakerNoAnswerError(
+            status=pgt._raised_lane_status(dispatch_exc), raw=str(dispatch_exc),
+        ) from dispatch_exc
     if pgp.SYNTHESIZED_REPORT_MARKER in (report or ""):
         raise TiebreakerNoAnswerError(status=pgt._extract_synthesized_status(report), raw=report)
     if pgp.lane_deadline_detail(report) is not None:

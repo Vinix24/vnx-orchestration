@@ -31,6 +31,7 @@ from governance_receipts import utc_now_iso
 from headless_adapter import gate_timeout, gate_stall_threshold
 from unified_report_schema import SchemaViolation, extract_frontmatter, parse_frontmatter
 import gate_recorder as _rec
+import gate_status
 from failure_classification import find_codex_model_refusal
 from providers import provider_registry
 import gate_artifacts as _art
@@ -674,6 +675,10 @@ def _book_gate_run_cost(
     run = harness_run_cost.cli_run(
         provider=harness_run_cost.CODEX_PROVIDER, model=model, started=started, ended=ended,
         depth=depth, spawn_refused=refused,
+        # K3-2a: the run's own id, so the ledger line says which execution it
+        # books and a later commit of the same run finds it instead of booking
+        # a second line.
+        execution_id=request_payload.get(gate_status.EXECUTION_ID_FIELD),
     )
     harness_run_cost.record_codex_run(
         run, project_id=harness_run_cost.ledger_project_id(state_dir), producer=producer, ref=run_ref,
@@ -735,6 +740,15 @@ class GateRunner:
 
         requested -> executing -> completed|failed
         """
+        # K3-2a: the payload a caller reuses for a retry is the request record an
+        # earlier run left behind on disk, and it still carries the id that run
+        # minted. This run has not started, so it has no id yet: drop the
+        # inherited one before the first refusal below, so no refusal path can
+        # stamp a previous run's identity on a run that never began (the cost
+        # ledger is keyed by execution_id, so a refusal must never look like the
+        # earlier execution). ``_mark_executing`` remains the only minter, at the
+        # transition to ``executing``; every record after it carries this run's id.
+        request_payload.pop(gate_status.EXECUTION_ID_FIELD, None)
         provider = _rec.resolve_gate_provider(gate)
         using_vertex = gate == "gemini_review" and os.environ.get("VNX_GEMINI_ROUTING", "oauth") == "vertex"
         # Harness-lane gates (C6 step 1) delegate to the governed dispatcher
@@ -747,8 +761,7 @@ class GateRunner:
         # or launched, on every path (subprocess, vertex, harness lane), with the gate name as
         # the identifier. An unregistered gate keeps its unsupported_gate_type answer below.
         switched_off = self._refuse_if_switched_off(
-            gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-        )
+            gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload)
         if switched_off is not None:
             return switched_off
 
@@ -972,8 +985,18 @@ class GateRunner:
         A request booked ``unavailable`` can run again. The codex launch record
         of the run before (OI-2288) is dropped here, so a run that never
         launches codex does not carry that model and effort as its own.
+
+        K3-2a: the run's ``execution_id`` is minted HERE, at the transition to
+        ``executing`` — after every "this gate will not run" refusal, and
+        before the first model call of any of the three paths below. It is
+        persisted on the request so every record of this run carries it.
+        ``run`` drops an id inherited from an earlier run's request payload
+        before its first refusal, so a request payload left over from an
+        earlier run can never hand its id to this one: this mint is the only
+        place a run gets an id.
         """
         request_payload.pop("codex_launch", None)
+        request_payload[gate_status.EXECUTION_ID_FIELD] = gate_status.new_execution_id()
         request_payload["status"] = "executing"
         request_payload["started_at"] = utc_now_iso()
         request_payload["runner_pid"] = os.getpid()

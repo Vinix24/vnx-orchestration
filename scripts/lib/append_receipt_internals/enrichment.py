@@ -150,28 +150,6 @@ def _register_provenance_link(enriched: Dict[str, Any], state_dir: Path) -> None
         _emit("WARN", "provenance_register_failed", error=str(exc))
 
 
-def _enrich_terminal_snapshot(enriched: Dict[str, Any], state_dir: Path) -> None:
-    try:
-        snapshot = facade.collect_terminal_snapshot(state_dir)
-        enriched["terminal_snapshot"] = snapshot.to_dict()
-    except Exception as exc:
-        _emit("WARN", "terminal_snapshot_failed", error=str(exc))
-        enriched["terminal_snapshot"] = {
-            "status": "unavailable",
-            "error": str(exc),
-        }
-
-    if facade.is_headless_t0():
-        snapshot_data = enriched.get("terminal_snapshot") or {}
-        terminals = snapshot_data.get("terminals") or {}
-        t0_entry = dict(terminals.get("T0") or {})
-        t0_entry["adapter"] = "subprocess"
-        t0_entry["headless"] = True
-        terminals["T0"] = t0_entry
-        snapshot_data["terminals"] = terminals
-        enriched["terminal_snapshot"] = snapshot_data
-
-
 def _enrich_oi_delta(enriched: Dict[str, Any], state_dir: Path) -> None:
     try:
         dispatch_id_for_oi = enriched.get("dispatch_id") or enriched.get("metadata", {}).get("dispatch_id")
@@ -307,10 +285,14 @@ def _enrich_toolcall_signals(enriched: Dict[str, Any]) -> None:
 
 
 def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path] = None) -> Dict[str, Any]:
-    """Enrich completion receipts with provenance, session, and terminal snapshot.
+    """Enrich completion receipts with provenance and session metadata.
 
     This is best-effort - failures will result in status="unavailable" markers
     rather than crashing the receipt append flow.
+
+    T-B2: a receipt no longer carries ``terminal_snapshot``. A receipt's
+    identity comes from its dispatch row; "what is running" is ``live_work``
+    in t0_state.json, not a copy on every receipt line.
 
     ADR-035 §3.3/§9 PR-5: quality_advisory{} is no longer generated here —
     superseded by verdict{}/warnings[] (§6), which the shared append
@@ -328,7 +310,6 @@ def _enrich_completion_receipt(receipt: Dict[str, Any], repo_root: Optional[Path
     _enrich_project_id_and_git(enriched, paths, repo_root)
     _enrich_session_metadata(enriched, state_dir)
     _enrich_provenance_linkage(enriched, state_dir)
-    _enrich_terminal_snapshot(enriched, state_dir)
     _enrich_toolcall_signals(enriched)
 
     if _is_subprocess_intermediate_completion(receipt):

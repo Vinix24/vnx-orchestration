@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
-from atomic_io import atomic_write_text, audit_event_append
+from atomic_io import atomic_write_text, audit_event_append, slot_lock
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +181,51 @@ def test_the_scratch_name_constants_match_a_real_atomic_write_temp_name(tmp_path
     assert seen[0].startswith(atomic_io.TEMP_PREFIX)
     assert seen[0].endswith(atomic_io.TEMP_SUFFIX)
     assert seen[0] not in {"target.json"}
+
+
+# ---------------------------------------------------------------------------
+# slot_lock: exclusive across processes, reentrant within one
+# ---------------------------------------------------------------------------
+
+
+def test_slot_lock_is_reentrant_in_one_process(tmp_path: Path) -> None:
+    """A nested acquisition of the same lock by the holder is granted, not a self-deadlock.
+
+    ``gate_outcome.commit_gate_outcome`` ends a request under the request's
+    lock, and the orphan cleanup holds that same lock across the whole commit
+    so the identity check and the write are one critical section (GE-8 round 2).
+    """
+    target = tmp_path / "record.json"
+
+    with slot_lock(target):
+        with slot_lock(target):
+            pass
+        # The inner exit must not have released the outer hold.
+        with slot_lock(target):
+            pass
+
+    assert (tmp_path / ".record.json.lock").exists()
+
+
+def test_slot_lock_reentrancy_leaves_nothing_held_after_an_exception(tmp_path: Path) -> None:
+    """A nested block that raises unwinds both levels; the lock is takeable again afterwards."""
+    target = tmp_path / "record.json"
+
+    with slot_lock(target):
+        with pytest.raises(RuntimeError, match="boom"):
+            with slot_lock(target):
+                raise RuntimeError("boom")
+        with slot_lock(target):
+            pass
+
+    taken = []
+
+    def take() -> None:
+        with slot_lock(target):
+            taken.append(True)
+
+    worker = threading.Thread(target=take)
+    worker.start()
+    worker.join(timeout=10)
+    assert taken == [True], "the outermost block released the lock"
+    assert not worker.is_alive()
