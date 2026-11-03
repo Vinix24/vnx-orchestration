@@ -292,7 +292,7 @@ def begin(
     state_path = Path(state_dir)
     door_pid = os.getpid()
     # Only a v3 line needs the door's kernel start time; a legacy fire is never refused
-    # (or delayed) by an unreadable or slow ``ps`` (OI-2510 point 3).
+    # (or delayed) by an unreadable or slow ``ps`` (OI-2510 point 3), so it never probes.
     mode = MODE_V3 if lifecycle_enabled() else MODE_LEGACY
     if mode == MODE_V3:
         door_started = process_started_at(door_pid)
@@ -314,10 +314,11 @@ def begin(
                            "project_id=%s: %s; no attempt will be projected",
                            dispatch_id, project_id, state.detail)
         attempt = state.count if state.status == ATTEMPT_STORED else (1 if state.status == ATTEMPT_NO_ROW else 0)
-        # A legacy hand-over records what it can; it needs no door identity.
+        # A legacy hand-over records what it can; it needs no door identity, and probing
+        # ``ps`` here would only delay the fire on a slow host.
         handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
                             lifecycle_mode=mode, door_pid=door_pid,
-                            door_started_at=process_started_at(door_pid) or "", started_at=_now())
+                            door_started_at="", started_at=_now())
     projection = _record_lifecycle_mode(handover, state_dir=state_path,
                                         write_attempt=handover.attempt >= 1)
     if projection == MODE_WRITE_FAILED or handover.attempt < 1:

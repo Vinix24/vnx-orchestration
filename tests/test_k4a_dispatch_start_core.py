@@ -354,6 +354,27 @@ def test_legacy_without_ps_writes_no_lock_and_no_line(state_dir, spec_file, lega
     assert row["attempt_count"] == 2 and _metadata(row)["lifecycle_mode"] == "legacy"
 
 
+def test_legacy_handover_never_probes_ps(state_dir, spec_file, legacy, monkeypatch):
+    """Legacy needs no door identity, so it must not pay for the probe at all (OI-2510 p. 3):
+    zero ``process_started_at`` calls, an empty ``door_started_at`` and the door's own pid."""
+    calls: list[object] = []
+
+    def _spy(pid):
+        calls.append(pid)
+        return "Mon Nov  3 10:00:00 2026"
+
+    monkeypatch.setattr(dispatch_start, "process_started_at", _spy)
+    _insert_row(state_dir, attempt_count=2)
+    handover = _begin(state_dir, spec_file)
+    assert calls == [], f"the legacy hand-over probed ps {len(calls)} time(s)"
+    assert handover.lifecycle_mode == "legacy" and handover.is_v3 is False
+    assert handover.door_started_at == ""
+    assert handover.door_pid == os.getpid()
+    assert handover.attempt == 2 and handover.mode_write == "ok"
+    assert not _ledger(state_dir).exists()
+    assert _metadata(_row(state_dir))["lifecycle_mode"] == "legacy"
+
+
 def test_v3_without_ps_refuses_without_writing(state_dir, spec_file, v3, monkeypatch):
     monkeypatch.setattr(dispatch_start, "process_started_at", lambda pid: None)
     with pytest.raises(dispatch_start.StartRefused) as excinfo:
