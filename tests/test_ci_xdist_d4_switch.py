@@ -1,0 +1,439 @@
+"""Tests for D4 of track ci-profile-a-xdist: Profile A switches to the two-phase xdist shape.
+
+The switch (plan, "D4 — switch Profile A"): Profile A runs the serial list
+under `-p no:xdist` and the rest under xdist; a required completeness step
+reads the collection manifests and `xdist_expected_skips.txt`; the per-PR
+shadow and parity jobs are gone (the nightly `vnx-ci-serial-truth.yml` keeps
+the comparison); `vars.VNX_CI_XDIST=0` is the one-variable way back to a
+fully serial Profile A. These tests hold each of those to the behaviour.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from importlib import metadata
+from pathlib import Path
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PARITY = REPO_ROOT / "scripts" / "ci" / "check_xdist_parity.py"
+ARGS_SCRIPT = REPO_ROOT / "scripts" / "ci" / "profile_a_pytest_args.sh"
+CONSTRAINTS = REPO_ROOT / "scripts" / "ci" / "profile_a_constraints.txt"
+EXPECTED_SKIPS = REPO_ROOT / "scripts" / "ci" / "xdist_expected_skips.txt"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci.yml"
+NIGHTLY = REPO_ROOT / ".github" / "workflows" / "vnx-ci-serial-truth.yml"
+WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+
+
+def _load(name: str, path: Path):
+    if name in sys.modules:
+        return sys.modules[name]
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+cxp = _load("check_xdist_parity", PARITY)
+KEY = cxp.junit_key_function()
+
+# The installed pytest derives the JUnit keys; the constraints must pin it
+# (own_tool_problems), so a temp constraints file pins what is installed.
+PINS = {"pytest": metadata.version("pytest"), "pytest-xdist": "3.8.0", "pytest-timeout": "2.4.0"}
+RUN = {"run_id": "41119890499", "run_attempt": "1"}
+
+A = "tests/test_a.py::test_one"
+B = "tests/test_a.py::TestK::test_two"
+C = "tests/test_b.py::test_param[1-x y]"
+D = "tests/test_b.py::test_skipped"
+E = "tests/test_c.py::test_three"
+ALL = [A, B, C, D, E]
+PASS: tuple = ()
+
+
+def skip(reason: str) -> tuple:
+    return (("skipped", "pytest.skip", reason),)
+
+
+def _testcase(nodeid: str, children: tuple) -> ET.Element:
+    classname, name = KEY(nodeid)
+    element = ET.Element("testcase", classname=classname, name=name, time="0.001")
+    for tag, kind, message in children:
+        child = ET.SubElement(element, tag, message=message)
+        if kind is not None:
+            child.set("type", kind)
+        child.text = message
+    return element
+
+
+def write_xml(path: Path, testcases: list, stamp: dict | None = None) -> None:
+    suite = ET.Element("testsuite", name="pytest", tests=str(len(testcases)))
+    properties = {f"vnx_{k}": v for k, v in (stamp or {}).items() if v is not None}
+    if properties:
+        props = ET.SubElement(suite, "properties")
+        for name, value in properties.items():
+            ET.SubElement(props, "property", name=name, value=str(value))
+    for nodeid, children in testcases:
+        suite.append(_testcase(nodeid, children))
+    root = ET.Element("testsuites", name="pytest tests")
+    root.append(suite)
+    path.write_text('<?xml version="1.0" encoding="utf-8"?>' + ET.tostring(root, encoding="unicode"), encoding="utf-8")
+
+
+def manifest(phase: str, nodeids: list, *, versions: dict | None = None, workers: int = 2) -> dict:
+    mode = cxp.PHASE_MODES[phase]
+    xdist = None
+    if mode == "xdist":
+        xdist = {"dist": "loadfile", "workers_reported": workers, "workers_agree": True, "workers": {}}
+    return {
+        "schema": cxp.MANIFEST_SCHEMA, "phase": phase, "phase_active": True, "mode": mode,
+        "tool_versions": dict(versions or PINS), "worker_count": workers if mode == "xdist" else 0,
+        "xdist": xdist, "collection_finished": True, "exitstatus": 0,
+        "nodeid_count": len(nodeids), "nodeids": list(nodeids), "collection_outcomes": [],
+    }
+
+
+def inactive(phase: str = "serial") -> dict:
+    return {"schema": cxp.MANIFEST_SCHEMA, "phase": phase, "phase_active": False, "tool_versions": dict(PINS),
+            "worker_count": 0, "nodeid_count": 0, "nodeids": [], "collection_outcomes": []}
+
+
+class Completeness:
+    """A candidate evidence dir, a constraints file and a skip set, in the shape a Profile A run leaves."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp = tmp_path
+        self.candidate = tmp_path / "candidate"
+        self.constraints = tmp_path / "constraints.txt"
+        self.constraints.write_text("".join(f"{k}=={v}\n" for k, v in PINS.items()), encoding="utf-8")
+        self.expected = tmp_path / "expected.txt"
+        self.expected.write_text(f"# recorded from run 41119890499\n{D}  # not here\n", encoding="utf-8")
+        self.serial_manifest = inactive()
+        self.serial_cases = None
+        self.parallel_manifest = manifest("parallel", ALL)
+        self.parallel_cases = [(A, PASS), (B, PASS), (C, PASS), (D, skip("not here")), (E, PASS)]
+        self.stamp = {**RUN}
+        self.constraints_text = None
+
+    def write(self) -> None:
+        self.candidate.mkdir(parents=True, exist_ok=True)
+        stamp = self.stamp
+        for name, document in (("serial", self.serial_manifest), ("parallel", self.parallel_manifest)):
+            if document is not None:
+                (self.candidate / f"manifest-{name}.json").write_text(
+                    json.dumps({**document, **stamp}), encoding="utf-8")
+        if self.serial_cases is not None:
+            write_xml(self.candidate / "junit-serial.xml", self.serial_cases, stamp=stamp)
+        if self.parallel_cases is not None:
+            write_xml(self.candidate / "junit-parallel.xml", self.parallel_cases, stamp=stamp)
+        if self.constraints_text is not None:
+            self.constraints.write_text(self.constraints_text, encoding="utf-8")
+
+    def run(self, *extra: str, write: bool = True) -> tuple:
+        if write:
+            self.write()
+        output = self.tmp / "verdict.json"
+        argv = [sys.executable, str(PARITY), "completeness",
+                "--candidate", str(self.candidate), "--constraints", str(self.constraints),
+                "--expected-skips", str(self.expected), "--output", str(output),
+                "--run-id", RUN["run_id"], "--run-attempt", RUN["run_attempt"], *extra]
+        proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(REPO_ROOT))
+        return proc, (json.loads(output.read_text(encoding="utf-8")) if output.is_file() else None)
+
+
+@pytest.fixture
+def ev(tmp_path) -> Completeness:
+    return Completeness(tmp_path)
+
+
+def _reasons(verdict: dict) -> set:
+    return {problem["reason"] for problem in verdict["invalid_evidence"]}
+
+
+# --- the skip set: recorded keys pass, an unrecorded one fails -------------------------------
+
+
+def test_a_run_whose_only_skip_is_recorded_is_complete(ev):
+    proc, verdict = ev.run()
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert verdict["verdict"] == "complete" and verdict["exit"] == 0
+    assert verdict["expected_skips"]["entries"] == 1
+    assert all(not entries for entries in verdict["differences"].values()), verdict["differences"]
+
+
+def test_a_skip_that_is_not_in_the_skip_set_fails_the_run(ev):
+    ev.expected.write_text(f"{D}  # not here\n", encoding="utf-8")
+    ev.parallel_cases = [(A, PASS), (B, PASS), (C, PASS), (D, skip("not here")), (E, skip("new skip"))]
+    proc, verdict = ev.run()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert verdict["verdict"] == "incomplete" and verdict["exit"] == 1
+    [entry] = verdict["differences"]["unexpected_skip"]
+    assert (entry["nodeid"], entry["reason"]) == (E, "new skip")
+    assert not any(verdict["differences"][k] for k in cxp.COMPLETENESS_KINDS if k != "unexpected_skip")
+
+
+def test_the_check_reads_a_key_as_a_set_not_as_a_prefix(ev):
+    ev.expected.write_text(f"{A}\n", encoding="utf-8")
+    ev.parallel_cases = [(A, PASS), (B, PASS), (C, PASS), (D, skip("not here")), (E, PASS)]
+    proc, verdict = ev.run()
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert [entry["nodeid"] for entry in verdict["differences"]["unexpected_skip"]] == [D]
+
+
+# --- fail-closed: missing, absent, malformed and unknown evidence never passes ----------------
+
+
+def test_a_missing_skip_set_is_invalid_evidence(ev):
+    ev.expected.unlink()
+    proc, verdict = ev.run()
+    assert proc.returncode == 2 and verdict["verdict"] == "invalid_evidence"
+    assert "missing_expected_skips" in _reasons(verdict)
+
+
+@pytest.mark.parametrize("line, problem", [
+    ("tests/test_a.txt", "not a test file"),
+    ("not-tests/test_a.py::test_one", "not a path under tests/"),
+    ("tests/../test_a.py::test_one", "plain"),
+    ("tests//test_a.py::test_one", "plain"),
+    ("tests\\test_a.py::test_one", "not a path under tests/"),
+])
+def test_a_malformed_skip_entry_is_invalid_evidence(ev, line, problem):
+    ev.expected.write_text(line + "\n", encoding="utf-8")
+    proc, verdict = ev.run()
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "malformed_expected_skips" in _reasons(verdict)
+    assert problem in verdict["invalid_evidence"][0]["detail"]
+
+
+def test_a_missing_manifest_is_invalid_evidence(ev):
+    ev.parallel_manifest = None
+    proc, verdict = ev.run()
+    assert proc.returncode == 2 and "missing_manifest" in _reasons(verdict)
+
+
+def test_an_unparsable_manifest_is_invalid_evidence(ev):
+    ev.write()
+    (ev.candidate / "manifest-parallel.json").write_text("{not json", encoding="utf-8")
+    proc, verdict = ev.run(write=False)
+    assert proc.returncode == 2 and "unparsable_manifest" in _reasons(verdict)
+
+
+def test_evidence_with_no_run_stamp_is_invalid(ev):
+    ev.stamp = {}
+    proc, verdict = ev.run()
+    assert proc.returncode == 2 and "stale_evidence" in _reasons(verdict)
+
+
+def test_evidence_of_another_attempt_is_invalid(ev):
+    ev.stamp = {"run_id": RUN["run_id"], "run_attempt": "2"}
+    proc, verdict = ev.run()
+    assert proc.returncode == 2 and "stale_evidence" in _reasons(verdict)
+
+
+def test_without_a_run_to_hold_the_evidence_against_nothing_passes(ev):
+    ev.write()
+    output = ev.tmp / "verdict.json"
+    argv = [sys.executable, str(PARITY), "completeness",
+            "--candidate", str(ev.candidate), "--constraints", str(ev.constraints),
+            "--expected-skips", str(ev.expected), "--output", str(output)]
+    proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(REPO_ROOT))
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    verdict = json.loads(output.read_text(encoding="utf-8"))
+    assert "stale_evidence" in _reasons(verdict)
+
+
+def test_an_unreadable_constraints_file_is_invalid_evidence(ev):
+    ev.constraints_text = "this is not a constraints file\n"
+    proc, verdict = ev.run()
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "parity_tool_version_mismatch" in _reasons(verdict)
+
+
+def test_a_pinned_pytest_that_is_not_the_installed_one_is_invalid_evidence(ev):
+    ev.constraints_text = "".join(f"{k}=={v}\n" for k, v in PINS.items()).replace(
+        f"pytest=={PINS['pytest']}", "pytest==99.0.0")
+    ev.parallel_manifest = manifest("parallel", ALL, versions={**PINS, "pytest": "99.0.0"})
+    proc, verdict = ev.run()
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "parity_tool_version_mismatch" in _reasons(verdict)
+
+
+# --- the committed skip set -------------------------------------------------------------------
+
+
+def test_the_committed_skip_set_names_the_run_it_was_measured_on():
+    text = EXPECTED_SKIPS.read_text(encoding="utf-8")
+    header = "\n".join(text.splitlines()[:12])
+    assert "41119890499" in header and "75011469" in header
+    assert "50 skips" in header
+    entries, problems = cxp.read_expected_skips(EXPECTED_SKIPS)
+    assert problems == []
+    assert len(entries) == 50
+    for line in text.splitlines():
+        if line.strip() and not line.startswith("#"):
+            assert "  # " in line, line
+            assert cxp.expected_skip_entry_problem(line.split("  # ", 1)[0]) is None
+
+
+# --- the emission: unset means xdist, VNX_CI_XDIST=0 is the way back ---------------------------
+
+
+def _emit(tmp_path: Path, xdist: str | None) -> Path:
+    out = tmp_path / ("unset" if xdist is None else f"xdist-{xdist}")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
+    if xdist is not None:
+        env["VNX_CI_XDIST"] = xdist
+    proc = subprocess.run(["bash", str(ARGS_SCRIPT), str(out)], env=env, capture_output=True, text=True,
+                          cwd=str(REPO_ROOT))
+    assert proc.returncode == 0, proc.stderr
+    return out
+
+
+def _read_vector(path: Path) -> list:
+    return path.read_bytes().rstrip(b"\0").decode("utf-8").split("\0")
+
+
+def test_unset_emits_the_xdist_shape_and_vnx_ci_xdist_0_the_serial_one(tmp_path):
+    xdist = _emit(tmp_path, None)
+    assert (xdist / "parallel.args").is_file()
+    assert not (xdist / "full.args").exists()
+    parallel = _read_vector(xdist / "parallel.args")
+    assert parallel[-6:] == ["-n", "4", "--dist", "loadfile", "--no-loadscope-reorder", "--max-worker-restart=0"]
+
+    serial = _emit(tmp_path, "0")
+    assert (serial / "full.args").is_file()
+    assert not (serial / "parallel.args").exists() and not (serial / "serial.args").exists()
+    full = _read_vector(serial / "full.args")
+    assert "-n" not in full and "--dist" not in full
+    assert full[:2] == ["-q", str(REPO_ROOT / "tests")]
+
+
+def test_the_xdist_selection_fingerprint_is_the_pre_d4_one(tmp_path):
+    """Source: origin/main @ cac71ef3 (before D4), `VNX_CI_XDIST=1`, the committed constraints.
+
+    It is the same emission Profile A makes with the variable unset after D4:
+    the default emission, not the switch, is what has to reproduce it.
+    """
+    out = _emit(tmp_path, None)
+    assert (out / "parallel.args").is_file(), "the default emission is the xdist shape"
+    assert not (out / "serial.args").exists(), "the committed serial list is empty"
+    fingerprint = cxp.fingerprint_of_args_dir(out, CONSTRAINTS, str(REPO_ROOT))
+    assert fingerprint == "0ffd56308105e4ee3a6ed04cb5891e8d1fe1edf0804cefe8f336652356f72f37"
+
+
+# --- the workflows ----------------------------------------------------------------------------
+
+
+def _jobs(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+
+
+def _step(job: dict, step_id: str) -> dict:
+    [step] = [s for s in job["steps"] if s.get("id") == step_id]
+    return step
+
+
+def test_the_per_pr_workflow_no_longer_runs_a_shadow_or_parity_job():
+    jobs = _jobs(WORKFLOW)
+    assert "profile-a-xdist-shadow" not in jobs
+    assert "xdist-parity" not in jobs
+    assert "profile-a" in jobs
+
+
+def test_profile_a_allows_thirty_five_minutes():
+    profile_a = _jobs(WORKFLOW)["profile-a"]
+    assert profile_a["timeout-minutes"] == 35
+    # Twice the largest shadow wall time (1033 s), rounded up to whole minutes.
+    assert profile_a["timeout-minutes"] >= 2 * 1033 / 60
+
+
+def test_the_completeness_check_is_a_required_step_after_both_phases():
+    profile_a = _jobs(WORKFLOW)["profile-a"]
+    step = _step(profile_a, "completeness")
+    assert not step.get("continue-on-error"), "a failing completeness check must fail the job"
+    assert not profile_a.get("continue-on-error")
+    run = step["run"]
+    assert "check_xdist_parity.py\" completeness" in run or "check_xdist_parity.py completeness" in run
+    assert "xdist_expected_skips.txt" in run and "xdist-completeness-verdict.json" in run
+    assert "steps.suite.outputs.mode == 'xdist'" in step["if"]
+    ids = [s.get("id") for s in profile_a["steps"]]
+    assert ids.index("serial") < ids.index("completeness")
+    assert ids.index("parallel") < ids.index("completeness")
+
+
+def test_profile_a_reads_the_switch_from_the_repository_variable():
+    profile_a = _jobs(WORKFLOW)["profile-a"]
+    suite = _step(profile_a, "suite")
+    assert suite["env"]["VNX_CI_XDIST"] == "${{ vars.VNX_CI_XDIST }}"
+    assert "profile_a_pytest_args.sh" in suite["run"]
+
+
+def test_the_nightly_is_not_named_vnx_ci():
+    nightly = yaml.safe_load(NIGHTLY.read_text(encoding="utf-8"))
+    assert nightly["name"] == "VNX CI serial truth"
+    assert nightly["name"] != "VNX CI"
+    assert "schedule" in nightly[True] and "workflow_dispatch" in nightly[True]
+    assert nightly[True]["schedule"][0]["cron"] == "23 3 * * *"
+
+
+def test_only_one_workflow_is_named_vnx_ci():
+    """The merge readers select by the exact name "VNX CI"; a second workflow of that name breaks them."""
+    names = []
+    for path in sorted(WORKFLOW_DIR.glob("*.yml")) + sorted(WORKFLOW_DIR.glob("*.yaml")):
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(document, dict) and document.get("name"):
+            names.append(document["name"])
+    assert names.count("VNX CI") == 1, names
+
+
+def test_the_nightly_keeps_the_full_serial_truth_and_the_comparison():
+    jobs = _jobs(NIGHTLY)
+    truth = jobs["serial-truth"]
+    emit = [s for s in truth["steps"] if "profile_a_pytest_args.sh" in (s.get("run") or "")][0]
+    assert emit["env"]["VNX_CI_XDIST"] == "0"
+    assert any("profile_a_run_phase.sh\" full" in (s.get("run") or "")
+               or "profile_a_run_phase.sh full" in (s.get("run") or "") for s in truth["steps"])
+
+    parity = jobs["parity"]
+    assert set(parity["needs"]) == {"serial-truth", "xdist-shape"}
+    assert "check_xdist_parity.py\" compare" in _step(parity, "compare")["run"]
+    assert "record_xdist_parity_verdict.py" in _step(parity, "record")["run"]
+    assert _step(parity, "report")["run"].rstrip().endswith("exit 1")
+
+
+def test_the_merge_readers_see_every_check_run_not_only_the_vnx_ci_workflow():
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    try:
+        preflight = _load("merge_preflight_ci_check", REPO_ROOT / "scripts" / "lib" / "merge_preflight_ci_check.py")
+        gate = _load("deterministic_gate", REPO_ROOT / "scripts" / "lib" / "deterministic_gate.py")
+        pre_merge = _load("pre_merge_gate", REPO_ROOT / "scripts" / "pre_merge_gate.py")
+    finally:
+        sys.path.pop(0)
+        sys.path.pop(0)
+    assert preflight.DEFAULT_CI_WORKFLOW_NAME == "VNX CI"
+    assert preflight._resolve_workflow_name(None) == "VNX CI"
+    assert pre_merge.DEFAULT_CI_WORKFLOW_NAME == "VNX CI"
+    assert pre_merge._resolve_ci_workflow_name(None) == "VNX CI"
+
+    closure = _load("closure_verifier", REPO_ROOT / "scripts" / "closure_verifier.py")
+    assert closure._rollup_all_green([
+        {"__typename": "CheckRun", "name": "VNX CI", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"__typename": "CheckRun", "name": "Serial truth (full serial sweep)",
+         "status": "COMPLETED", "conclusion": "FAILURE"},
+    ]) is False
+
+    context = gate.LocalContext(checks=[
+        {"name": "VNX CI", "bucket": "pass"},
+        {"name": "Serial truth vs xdist shape", "bucket": "fail"},
+    ])
+    assert gate.ci_classification(context)["verdict"] == "fail"
+    assert gate.ci_classification(gate.LocalContext(checks=[{"name": "VNX CI", "bucket": "pass"}]))["verdict"] == "pass"

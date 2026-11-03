@@ -1,11 +1,12 @@
 """Tests for scripts/ci/record_xdist_parity_verdict.py (track ci-profile-a-xdist, D2b): the record step's decision.
 
-The record step runs after the comparison in the job "xdist parity". It adds
+The record step runs after the comparison in the parity job of the nightly
+`vnx-ci-serial-truth.yml` (it moved there in D4, when the per-PR shadow and
+parity jobs were removed from `vnx-ci.yml`). It adds
 the comparison step's own outcome to the verdict that step wrote (OI-2145),
 or writes an exit-2 verdict with every field of a normal one when it wrote
 none (OI-2147). The workflow-level counterpart, which runs the step itself and
-holds its bash fallback equal to this script, is
-tests/test_ci_xdist_parity_workflow.py.
+holds its bash fallback equal to this script, is the nightly parity job below.
 
 The second half pins the verdict fixtures in tests/fixtures/xdist_parity_verdicts/
 to what the pipeline writes today, so the history tests read the real schema:
@@ -27,7 +28,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "record_xdist_parity_verdict.py"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "xdist_parity_verdicts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci-serial-truth.yml"
 
 
 def _load(name: str, path: Path):
@@ -199,8 +200,11 @@ def test_every_fixture_carries_one_field_set():
 
 
 def _workflow_step(step_id: str) -> str:
+    # The nightly job names the comparison step "compare"; the record step's
+    # env keeps the recorded step name "parity" (cxp.RECORDED_STEPS).
+    job_id = "compare" if step_id == "parity" else step_id
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    [step] = [s for s in jobs["xdist-parity"]["steps"] if s.get("id") == step_id]
+    [step] = [s for s in jobs["parity"]["steps"] if s.get("id") == job_id]
     return step["run"]
 
 
@@ -223,7 +227,7 @@ def _uploaded(tmp_path: Path) -> dict:
     return json.loads((tmp_path / "work" / "verdict" / cxp.VERDICT_FILE).read_text(encoding="utf-8"))
 
 
-def test_the_light_fixture_is_what_the_parity_and_record_steps_write_on_a_light_run(tmp_path):
+def test_the_light_fixture_is_what_the_parity_steps_write_on_a_light_run(tmp_path):
     outcomes = {**ALL_SUCCESS, "selection": "skipped", "download_reference": "skipped", "download_candidate": "skipped"}
     env = _step_env(tmp_path, "light", outcomes)
     _run_step("parity", env)
