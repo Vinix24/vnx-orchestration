@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from envelope_types import EnvelopeSpec
+from envelope_types import PHANTOM_REJECTED_STATUS, EnvelopeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +162,23 @@ def _resolve_fix_forward_diff(
         )
         return own_diff
     return pushed_diff if pushed_diff.strip() else own_diff
+
+
+def _publish_phantom_verdict(verdict: Any, adapter_result: Any) -> None:
+    """Keep the phantom guard's verdict as the governed status (OI-2519, K-5b r2).
+
+    ``record_phantom_if_any`` books the corrective failed receipt for a delivery
+    whose diff is empty and returns its ``PhantomVerdict``; before this, ``_govern``
+    discarded that verdict, so ``adapter_result.status`` stayed ``success``
+    (OI-1179 forbids rewriting it), ``governed_status`` stayed unset and the lane
+    exit froze the end line ``completed`` for a dispatch the guard had rejected.
+    Only a phantom verdict about a worker ``success`` publishes anything — the
+    guard abstains on every other claim — and it WINS over ``contract_invalid``:
+    a fabricated delivery is the stronger finding. A guard that raised never
+    reaches here (the caller's ``try``), which is a guard ERROR, not a rejection.
+    """
+    if verdict is not None and verdict.is_phantom and adapter_result.status == "success":
+        adapter_result.governed_status = PHANTOM_REJECTED_STATUS
 
 
 def _resolve_phantom_diff(

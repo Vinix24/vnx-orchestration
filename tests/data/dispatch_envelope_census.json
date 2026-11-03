@@ -2293,6 +2293,7 @@
     "envelope_govern_support::_archive_dispatch_events",
     "envelope_govern_support::_clear_dispatch_events",
     "envelope_govern_support::_is_lane_completion_receipt",
+    "envelope_govern_support::_publish_phantom_verdict",
     "envelope_govern_support::_receipt_exists_for_dispatch",
     "envelope_govern_support::_resolve_fix_forward_diff",
     "envelope_govern_support::_resolve_phantom_diff",
