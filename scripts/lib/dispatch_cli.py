@@ -3539,8 +3539,8 @@ def _door_lifecycle_sweep(state_dir: Path, project_id: str) -> None:
               f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return
     if result.budget_exhausted:
-        print("[dispatch_cli] [WARN] lifecycle sweep spent its "
-              f"{DOOR_SWEEP_BUDGET_SECONDS:g}s budget with {result.budget_left} item(s) left", file=sys.stderr)
+        print(f"[dispatch_cli] [WARN] lifecycle sweep left {result.budget_left} item(s); "
+              "the next sweep continues", file=sys.stderr)
 
 
 def _owner_hand_over(
@@ -4008,10 +4008,8 @@ def run_dispatch(
         # permit check all passed, and before the lane is invoked. Fail-closed:
         # a ledger write failure refuses the fire here with nothing dispatched.
         if not dry_run:
-            if _commit_fire(
-                plan, permit, vspec.spec, snapshot, state_dir=state_dir,
-                headless_isolation_warning=headless_isolation_warning,
-            ):
+            if _commit_fire(plan, permit, vspec.spec, snapshot, state_dir=state_dir,
+                            headless_isolation_warning=headless_isolation_warning):
                 return 1
 
         if dry_run:

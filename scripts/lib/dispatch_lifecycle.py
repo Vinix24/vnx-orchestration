@@ -653,8 +653,7 @@ def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optiona
 
 def _valid_deadline(value: Any) -> bool:
     """A legal ``deadline_seconds``: a plain int inside the spec's own bounds."""
-    return (not isinstance(value, bool) and isinstance(value, int)
-            and DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX)
+    return (not isinstance(value, bool) and isinstance(value, int) and DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX)
 
 
 def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
@@ -804,8 +803,7 @@ def _monotonic() -> float:
 
 def _cursor_key(attempt: InFlightAttempt, offset: int) -> Dict[str, Any]:
     """K-6b r2: where a bounded sweep stopped — its first attempt not taken."""
-    return {"project_id": attempt.project_id, "dispatch_id": attempt.dispatch_id,
-            "attempt": attempt.attempt, "offset": offset}
+    return {"project_id": attempt.project_id, "dispatch_id": attempt.dispatch_id, "attempt": attempt.attempt, "offset": offset}
 
 
 def _read_cursor(state_dir: Path, project_id: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -817,8 +815,7 @@ def _read_cursor(state_dir: Path, project_id: Optional[str]) -> Optional[Dict[st
         return None
     okay = (isinstance(cursor, dict) and isinstance(cursor.get("dispatch_id"), str)
             and isinstance(cursor.get("attempt"), int) and not isinstance(cursor.get("attempt"), bool)
-            and isinstance(cursor.get("offset"), int) and cursor["offset"] >= 0
-            and project_id in (None, cursor.get("project_id")))
+            and isinstance(cursor.get("offset"), int) and cursor["offset"] >= 0 and project_id in (None, cursor.get("project_id")))
     return cursor if okay else None
 
 
@@ -827,8 +824,7 @@ def _resume_at(flights: Tuple[InFlightAttempt, ...], cursor: Optional[Dict[str, 
     if not cursor or not flights: return 0
     key = (cursor["project_id"], cursor["dispatch_id"], cursor["attempt"])
     found = next((index for index, attempt in enumerate(flights)
-                  if (attempt.project_id, attempt.dispatch_id, attempt.attempt) == key),
-                 cursor["offset"])
+                  if (attempt.project_id, attempt.dispatch_id, attempt.attempt) == key), cursor["offset"])
     return found % len(flights)
 
 
@@ -918,11 +914,10 @@ def sweep(*, state_dir: str | Path, project_id: Optional[str] = None,
     """One sweep run (ADR-045 §6): recover the open intents, abandon the dead.
 
     ``now`` is the evaluation instant (``datetime`` or ``...Z``), absent is the real
-    clock. ``budget_seconds`` bounds the run between items (K-6b): what is left is
-    reported as ``budget_exhausted``/``budget_left`` and the first item not taken
-    becomes the heartbeat's ``cursor``, which the next bounded run resumes from and
-    wraps; without a budget the run ignores and clears it. Every run writes one
-    heartbeat; a raised run writes it before raising.
+    clock. ``budget_seconds`` bounds the run between items (K-6b): what is left and
+    the first item not taken (the heartbeat's ``cursor``, resumed by the next bounded
+    run and cleared by an unbounded one) are reported. A raised run still writes the
+    heartbeat before raising.
     """
     state_path, started_at = Path(state_dir), _now_utc()
     evaluated = _as_utc(now) or datetime.now(timezone.utc)

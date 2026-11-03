@@ -256,9 +256,9 @@ def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
     from dispatch_lifecycle import _valid_deadline  # noqa: PLC0415
     try:
         value = json.loads(blob).get("deadline_seconds")
+        return value if _valid_deadline(value) else None
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
         return None
-    return value if _valid_deadline(value) else None
 
 
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
