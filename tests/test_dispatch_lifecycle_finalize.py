@@ -205,6 +205,34 @@ def test_finalize_writes_one_intent_one_line_and_projects_the_row(state_dir, lif
     assert end_line_matches_intent(_lines(state_dir)[0], intent)
 
 
+#: The two legal ways to lose the exclusive freeze. Which one the loser reports
+#: is timing: ``intent_lost`` when the winner had not published yet,
+#: ``already_published`` when it had.
+LOSING_FREEZE_STATUSES = (lifecycle.STATUS_INTENT_LOST, lifecycle.STATUS_ALREADY_PUBLISHED)
+
+
+def _one_finalized_and_one_loser(statuses) -> bool:
+    """The order-independent rule for two ``finalize`` calls racing one attempt.
+
+    Exactly one call reports ``STATUS_FINALIZED``; the other lost the freeze and
+    reports one of ``LOSING_FREEZE_STATUSES``. Counting, not sorting, is the
+    rule: the constants are strings, and ``"already_published"`` sorts before
+    ``"finalized"`` while ``"intent_lost"`` sorts after it, so an assertion on
+    the sorted position only holds for one of the two legal losers (K-3c r3).
+
+    Everything else stays a failure: a missing or unknown outcome, a ``None``
+    where a status belongs, or anything that is not exactly two outcomes.
+    """
+    if not isinstance(statuses, (list, tuple)):
+        return False
+    if len(statuses) != 2:
+        return False
+    if list(statuses).count(lifecycle.STATUS_FINALIZED) != 1:
+        return False
+    loser = next(status for status in statuses if status != lifecycle.STATUS_FINALIZED)
+    return loser in LOSING_FREEZE_STATUSES
+
+
 def _finalize_in_a_child(state_dir: str, results) -> None:
     try:
         result = lifecycle.finalize(
@@ -229,14 +257,56 @@ def test_two_processes_on_one_dispatch_freeze_one_intent_and_write_one_line(stat
 
     outcomes = [results.get(timeout=5) for _ in children]
     assert [kind for kind, _ in outcomes] == ["ok", "ok"], outcomes
-    statuses = sorted(status for _, status in outcomes)
-    assert statuses[0] == lifecycle.STATUS_FINALIZED
-    assert statuses[1] in (lifecycle.STATUS_INTENT_LOST, lifecycle.STATUS_ALREADY_PUBLISHED)
+    statuses = [status for _, status in outcomes]
+    assert _one_finalized_and_one_loser(statuses), statuses
 
     intents = list((state_dir / "dispatch_end" / PROJECT).glob("*.json"))
     assert len(intents) == 1
     assert len(_lines(state_dir)) == 1
     assert _row(state_dir)["state"] == "completed"
+
+
+@pytest.mark.parametrize("statuses", [
+    pytest.param([lifecycle.STATUS_FINALIZED, lifecycle.STATUS_ALREADY_PUBLISHED],
+                 id="winner-then-already-published"),
+    pytest.param([lifecycle.STATUS_ALREADY_PUBLISHED, lifecycle.STATUS_FINALIZED],
+                 id="already-published-then-winner"),
+    pytest.param([lifecycle.STATUS_INTENT_LOST, lifecycle.STATUS_FINALIZED],
+                 id="intent-lost-then-winner"),
+])
+def test_the_race_rule_accepts_one_finalizer_and_its_loser(statuses):
+    """Both losers are legal, whatever order the two outcomes arrive in."""
+    assert _one_finalized_and_one_loser(statuses) is True
+
+
+@pytest.mark.parametrize("statuses", [
+    pytest.param([lifecycle.STATUS_FINALIZED, lifecycle.STATUS_FINALIZED],
+                 id="two-finalizers"),
+    pytest.param([lifecycle.STATUS_ALREADY_PUBLISHED, lifecycle.STATUS_INTENT_LOST],
+                 id="two-losers-and-no-winner"),
+])
+def test_the_race_rule_rejects_two_winners_or_two_losers(statuses):
+    assert _one_finalized_and_one_loser(statuses) is False
+
+
+@pytest.mark.parametrize("statuses", [
+    pytest.param([], id="missing-both-outcomes"),
+    pytest.param([lifecycle.STATUS_FINALIZED], id="missing-the-loser"),
+    pytest.param(None, id="no-outcome-list-at-all"),
+    pytest.param("finalized", id="a-bare-status-instead-of-a-list"),
+    pytest.param([lifecycle.STATUS_FINALIZED, None], id="loser-is-none"),
+    pytest.param([None, lifecycle.STATUS_FINALIZED], id="winner-is-none"),
+    pytest.param([lifecycle.STATUS_FINALIZED, lifecycle.STATUS_RECOVERED],
+                 id="unknown-loser-status"),
+    pytest.param([lifecycle.STATUS_FINALIZED, lifecycle.STATUS_NO_INTENT],
+                 id="no-intent-is-not-a-race-outcome"),
+    pytest.param([lifecycle.STATUS_FINALIZED, "not_a_status"], id="malformed-loser-status"),
+    pytest.param([lifecycle.STATUS_FINALIZED, lifecycle.STATUS_ALREADY_PUBLISHED,
+                  lifecycle.STATUS_INTENT_LOST], id="three-outcomes"),
+])
+def test_the_race_rule_stays_blocking_when_an_outcome_is_missing_or_unknown(statuses):
+    """Fail-closed on evidence: an outcome the rule cannot vouch for is never a pass."""
+    assert _one_finalized_and_one_loser(statuses) is False
 
 
 def test_the_intent_is_frozen_before_the_append_runs(state_dir, lifecycle_on, monkeypatch):
