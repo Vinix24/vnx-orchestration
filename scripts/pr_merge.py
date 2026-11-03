@@ -224,7 +224,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 log = logging.getLogger(__name__)
@@ -1058,6 +1058,28 @@ def _unknown_shadow_record(review_seats: Any, head: str) -> Dict[str, Any]:
             "rule": SIGNAL_SEAT_RULE, "seats": [], "signals": [],
             "unknown": list(signal_input.unknown_fields()), "head_sha": head,
         }
+
+
+def _door_shadow_seat_rule(
+    args: argparse.Namespace,
+    head_sha: str,
+    pr_data: Optional[Dict[str, Any]],
+    review_gate: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The shadow seat rule of one door run: gathered here, recorded, never acted on.
+
+    The door computes it on every dry run and every merge, next to the seat
+    record the review gate returned. A failure while gathering lands as
+    ``UNKNOWN`` fields inside ``_shadow_seat_rule`` and never blocks the merge.
+    """
+    return _shadow_seat_rule(
+        args.pr, head_sha,
+        branch=(pr_data or {}).get("headRefName") or "",
+        base_branch=(pr_data or {}).get("baseRefName"),
+        state_dir=Path(ensure_env()["VNX_STATE_DIR"]),
+        b3_override=_b3_override_arg(args) or "", b3_carrier=_b3_override_carrier(args),
+        review_seats=review_gate.get("review_seats"),
+    )
 
 
 def _run_adr_gate(pr_number: int, *, pr_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2079,6 +2101,20 @@ def _emit_register_event(
         return False
 
 
+def _branch_overlaps(pr_number: int, branch: str) -> list[Dict[str, Any]]:
+    """OI-1091: other OPEN dispatch branches touching the files of ``branch``; ``[]`` when unreadable.
+
+    Best-effort by contract: a git/network failure degrades to no warning,
+    never to a blocked merge.
+    """
+    try:
+        from file_scope_overlap import warn_overlaps
+        return warn_overlaps(branch, repo=_target_root())
+    except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
+        log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
+        return []
+
+
 def merge_pr(
     pr_number: int,
     *,
@@ -2145,6 +2181,7 @@ def merge_pr(
         "error": "",
         "dry_run": dry_run,
         "overlaps": [],
+        "shadow_seat_rule": shadow_seat_rule,
     }
 
     # PR metadata for the receipt (title/branch). Reuse what the caller
@@ -2162,11 +2199,7 @@ def merge_pr(
     # fetch/gh-call per branch, plus a per-command timeout and a wall-clock scan ceiling) so it
     # can no longer turn into minutes of serial network round-trips on every merge.
     if result["branch"]:
-        try:
-            from file_scope_overlap import warn_overlaps  # noqa: PLC0415
-            result["overlaps"] = warn_overlaps(result["branch"], repo=_target_root())
-        except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
-            log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
+        result["overlaps"] = _branch_overlaps(pr_number, result["branch"])
 
     if dry_run:
         result["success"] = True
@@ -2331,6 +2364,31 @@ def _run_with_target(args: argparse.Namespace) -> int:
         _ACTIVE_TARGET = None
 
 
+def _door_refuser(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+) -> Callable[[str, Dict[str, Any], str], int]:
+    """The door's ``refuse(gate_name, gate_result, json_key)``, bound to one run's state.
+
+    Every preflight NO-GO goes through it, so the ledger it names, the head it
+    pins and the CLI shape it answers in stay those of the door that decided
+    the refusal.
+    """
+    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
+        return _refuse_merge(
+            pr_number=args.pr,
+            dispatch_id=args.dispatch_id or "",
+            gate_name=gate_name,
+            gate=gate_result,
+            evaluated=evaluated,
+            head_sha=head_sha,
+            json_output=args.json,
+            json_key=json_key,
+            dry_run=args.dry_run,
+        )
+
+    return refuse
+
+
 def _run_door(args: argparse.Namespace) -> int:
     """The five preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
@@ -2348,18 +2406,7 @@ def _run_door(args: argparse.Namespace) -> int:
     head_sha = (pr_data or {}).get("headRefOid") or ""
     evaluated.append(_preflight_record("ci", gate, head_sha))
 
-    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
-        return _refuse_merge(
-            pr_number=args.pr,
-            dispatch_id=args.dispatch_id or "",
-            gate_name=gate_name,
-            gate=gate_result,
-            evaluated=evaluated,
-            head_sha=head_sha,
-            json_output=args.json,
-            json_key=json_key,
-            dry_run=args.dry_run,
-        )
+    refuse = _door_refuser(args, evaluated, head_sha)
 
     if gate["verdict"] != "GO":
         return refuse("ci", gate, "ci_gate")
@@ -2430,18 +2477,10 @@ def _run_door(args: argparse.Namespace) -> int:
     )
 
     # ── Shadow seat rule (track tweede-stoel-op-signaal, PR 2) ─────────────
-    # Computed on every dry run and every merge, recorded next to the seat
-    # record; nothing in this door reads it. A failure while gathering lands
-    # as UNKNOWN fields and never blocks the merge.
-    b3_override = _b3_override_arg(args)
-    shadow_seat_rule = _shadow_seat_rule(
-        args.pr, head_sha,
-        branch=(pr_data or {}).get("headRefName") or "",
-        base_branch=(pr_data or {}).get("baseRefName"),
-        state_dir=Path(ensure_env()["VNX_STATE_DIR"]),
-        b3_override=b3_override or "", b3_carrier=_b3_override_carrier(args),
-        review_seats=review_gate.get("review_seats"),
-    )
+    # Gathered in one helper and handed to merge_pr, which records it in its
+    # result: nothing in this door reads it, and a failure while gathering
+    # lands as UNKNOWN fields inside it.
+    shadow_seat_rule = _door_shadow_seat_rule(args, head_sha, pr_data, review_gate)
 
     result = merge_pr(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
@@ -2452,7 +2491,6 @@ def _run_door(args: argparse.Namespace) -> int:
         shadow_seat_rule=shadow_seat_rule,
     )
 
-    result["shadow_seat_rule"] = shadow_seat_rule
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""
 
     if args.json:
