@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from adapter_types import (
     CAPABILITY_DELIVER,
@@ -200,6 +200,21 @@ def _reap_at_eof(process: "subprocess.Popen") -> Optional[int]:
         return process.wait(timeout=_EOF_REAP_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
         return None
+
+
+def _notify_on_spawn(
+    on_spawn: Optional[Callable[[int], None]], child_pid: int, terminal_id: str,
+) -> None:
+    """K-4 (ADR-045 §5): hand the child's pid to the spawn-evidence hook, best-effort —
+    the spawn file feeds the refire liveness check and must never turn a running child
+    into a delivery failure."""
+    if on_spawn is None:
+        return
+    try:
+        on_spawn(child_pid)
+    except Exception:  # vnx-silent-except: spawn-file evidence must not kill a spawned child
+        logger.warning("subprocess_adapter: on_spawn hook failed for %s", terminal_id,
+                       exc_info=True)
 
 
 @dataclass
@@ -405,9 +420,8 @@ class SubprocessAdapter:
         extra_cli_args: Optional[List[str]] = None,
         role: Optional[str] = None,
         requires_mcp: bool = False,
-        scrub_env_keys: Optional[frozenset] = None,
-        scope_args: Optional[List[str]] = None,
-        **kwargs: Any,
+        scrub_env_keys: Optional[frozenset] = None, scope_args: Optional[List[str]] = None,
+        on_spawn: Optional[Callable[[int], None]] = None, **kwargs: Any,
     ) -> DeliveryResult:
         """Spawn a claude subprocess with the dispatch instruction.
 
@@ -525,6 +539,9 @@ class SubprocessAdapter:
             # Close our file descriptor; the child process inherits its own copy.
             if stderr_file is not None:
                 stderr_file.close()
+
+        # K-4 (ADR-045 §5): the earliest moment the child's pid exists.
+        _notify_on_spawn(on_spawn, process.pid, terminal_id)
 
         # Replace any prior process tracking (stop old one first).
         # Use SIGTERM then SIGKILL fallback so a non-responsive prior process

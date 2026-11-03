@@ -20,7 +20,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Optional, Set
+from typing import Callable, Optional, Set
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -57,6 +57,7 @@ from dispatch_internal import (  # noqa: E402
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
 from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
+import dispatch_start  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
 from receipt_verdict import (  # noqa: E402
     HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
@@ -2839,6 +2840,7 @@ def _execute_claude_headless(
     state_dir: Path,
     data_dir: Path,
     role: Optional[str] = None,
+    handover: Optional[dispatch_start.Handover] = None,
 ) -> int:
     """Execute a validated claude_headless plan via ClaudeSubprocessAdapter.
 
@@ -2862,7 +2864,18 @@ def _execute_claude_headless(
         raise PermissionError(
             f"claude_headless lane blocked by default; set {override_env}=1 to opt in"
         )
-    result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role)
+
+    # K-4 (ADR-045 §5): only a v3 hand-over asks for the spawn file, written from the
+    # child's own pid and start time so a refire can tell a live child from a reused pid.
+    on_spawn: Optional[Callable[[int], None]] = None
+    if handover is not None and handover.is_v3:
+        def _record_child(child_pid: int) -> None:
+            dispatch_start.record_child(handover, state_dir=state_dir, child_pid=child_pid)
+        on_spawn = _record_child
+
+    result = run_envelope_headless_plan(
+        plan, permit, state_dir=state_dir, data_dir=data_dir, role=role, on_spawn=on_spawn,
+    )
     return result.returncode
 
 
@@ -3380,6 +3393,31 @@ def _owner_transition(
         )
 
 
+def _owner_hand_over(
+    plan, spec, *, project_id: str, spec_file: Optional[Path], state_dir: Path,
+    repo_root: Path,
+) -> Optional[dispatch_start.Handover]:
+    """Point 3 + K-4: claimed -> delivering, then the start line at the hand-over.
+
+    The ledger line precedes the row's ``lifecycle_mode`` stamp, the slot and the spawn
+    (ADR-045 §1). Returns None — after naming the refusal — when the line cannot be
+    written, so the fail-closed path never reaches the lane executor.
+    """
+    _owner_transition(
+        spec.dispatch_id, "delivering", state_dir=state_dir,
+        reason="handing off to lane executor",
+    )
+    try:
+        return dispatch_start.begin(
+            project_id=project_id, dispatch_id=spec.dispatch_id, role=spec.role,
+            base_ref=plan.base_ref or "origin/main", spec_file=spec_file,
+            target_slot=plan.target_id, state_dir=state_dir, project_root=repo_root)
+    except dispatch_start.StartRefused as exc:
+        print(f"[dispatch_cli] REJECT [{dispatch_start.REFUSAL_CODE}]: {exc.code}: {exc.detail}",
+              file=sys.stderr)
+        return None
+
+
 def _owner_update_attempt(
     attempt_id: Optional[str], state: str, *, dispatch_id: str, state_dir: Path,
     failure_reason: Optional[str] = None,
@@ -3801,13 +3839,12 @@ def run_dispatch(
             _print_plan(plan, fp, spec=vspec.spec)
             return 0
 
-        # Point 3 (golf 1A): claimed -> delivering — the door is about to
-        # hand off to the lane executor. Best-effort, no-op when attempt_id
-        # is None (registration/claim did not produce a door-owned row).
-        _owner_transition(
-            vspec.spec.dispatch_id, "delivering", state_dir=state_dir,
-            reason="handing off to lane executor",
-        )
+        # Point 3 (golf 1A) + K-4 (ADR-045 §1/§5): claimed -> delivering, then the
+        # dispatch_started line at the hand-over, before the slot and the spawn.
+        handover = _owner_hand_over(
+            plan, vspec.spec, project_id=project_id, spec_file=spec_file, state_dir=state_dir, repo_root=repo_root)
+        if handover is None:
+            return 1
 
         with serialize_lane(plan.serialization_class, dispatch_id=vspec.spec.dispatch_id):
             if plan.lane == "provider":
@@ -3854,7 +3891,7 @@ def run_dispatch(
                     permit,
                     state_dir=state_dir,
                     data_dir=data_dir,
-                    role=vspec.spec.role,
+                    role=vspec.spec.role, handover=handover,
                 )
                 _owner_finish(
                     vspec.spec.dispatch_id, attempt_id, state_dir=state_dir,

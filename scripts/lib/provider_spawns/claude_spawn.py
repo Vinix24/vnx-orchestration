@@ -203,8 +203,8 @@ def spawn_claude(
     role: Optional[str] = None,
     requires_mcp: bool = False,
     scrub_env_keys: frozenset,
-    base_url_family: Optional[str] = None,
-    scope_args: Optional[List[str]] = None,
+    base_url_family: Optional[str] = None, scope_args: Optional[List[str]] = None,
+    on_spawn: Optional[Callable[[int], None]] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -329,7 +329,8 @@ def spawn_claude(
         role=role,
         requires_mcp=requires_mcp,
         scrub_env_keys=scrub_env_keys,
-        scope_args=scope_args,
+        # K-4 (ADR-045 §5): the child's pid, the moment it exists.
+        scope_args=scope_args, on_spawn=on_spawn,
     )
 
     if not deliver_result.success:

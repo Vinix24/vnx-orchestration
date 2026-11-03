@@ -43,7 +43,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -829,9 +829,9 @@ def run_envelope_headless_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
     *,
-    state_dir: Path,
-    data_dir: Path,
+    state_dir: Path, data_dir: Path,
     role: Optional[str] = None,
+    on_spawn: "Optional[Callable[[int], None]]" = None,
 ) -> EnvelopeResult:
     """Execute a validated ExecutionPlan for the claude_headless lane.
 
@@ -1044,7 +1044,7 @@ def run_envelope_headless_plan(
     start = datetime.now(timezone.utc)
     end = start
     try:
-        result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path)
+        result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path, on_spawn=on_spawn)
         _prior_result = result
         end = datetime.now(timezone.utc)
         try:

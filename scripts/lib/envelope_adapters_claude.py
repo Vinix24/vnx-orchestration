@@ -130,7 +130,7 @@ class ClaudeSubprocessAdapter:
         self,
         spec: EnvelopeSpec,
         event_writer: Optional[Callable] = None,
-        cwd: Optional[Path] = None,
+        cwd: Optional[Path] = None, on_spawn: Optional[Callable[[int], None]] = None,
     ) -> _AdapterResult:
         from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS  # noqa: PLC0415
         from provider_spawns.claude_spawn import spawn_claude  # noqa: PLC0415
@@ -181,7 +181,9 @@ class ClaudeSubprocessAdapter:
                 role=spec.role, requires_mcp=spec.requires_mcp,
                 total_deadline=float(spec.deadline_seconds),
                 scrub_env_keys=DEFAULT_SCRUB_KEY_PATTERNS,
-                extra_env=extra_env,
+                # K-4 (ADR-045 §5): hands the caller the child's pid the moment
+                # claude actually spawned, so it can record start-time evidence.
+                extra_env=extra_env, on_spawn=on_spawn,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
