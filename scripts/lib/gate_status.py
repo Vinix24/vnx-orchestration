@@ -32,6 +32,11 @@ import gate_depth
 # the same run committed twice got two numbers, and two runs with a refused
 # write got none.
 EVIDENCE_SOURCE_FIELD = "evidence_source"
+# The one ``evidence_source`` value that says the record was REBUILT from a
+# report an earlier run wrote (``--reprocess``): no model was called for it, so
+# it books no cost line (K3-2b). The writer is ``governed_lane._build_record``;
+# the reader here is ``gate_outcome``.
+EVIDENCE_SOURCE_REPROCESSED = "reprocessed"
 EXECUTION_ID_FIELD = "execution_id"
 
 # ``uuid4().hex``: 32 characters, lower-case hexadecimal, nothing else.

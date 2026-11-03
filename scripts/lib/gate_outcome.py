@@ -90,12 +90,31 @@ keeps its own writer, ``gate_obligations.update_obligation``.
 A ``claude_github_optional`` record carries no head of its own (its receipt
 reads the head off the request), so it is never a repeat: an identical retry
 lands as the next attempt, and the key returns its receipt as a duplicate.
+
+**The cost line (K3-2b).** After the slot lock, on EVERY end — a new record, a
+repeat and a refused overwrite alike — :func:`commit_gate_outcome` books the
+one ``cost_ledger`` line of the execution the record names
+(:data:`gate_status.EXECUTION_ID_FIELD`, validated with
+``gate_status.is_execution_id``) through
+:func:`harness_run_cost.record_attempt_run`. The execution id IS the identity
+(K3-1a): the same record committed twice is one line whether or not the slot
+took it, and a separate run whose record the guard refused gets its own. The
+slot's ``attempt_seq`` is never consulted — it counts slot writes, not
+executions, which is the round-4 duplicate of K3 (#2329, OI-2444). A booking
+never changes the verdict, the receipt, the request end or the obligation.
+Three records are not booked: ``--reprocess`` evidence (it calls no model),
+a run that provably never started (it was not a run), and an execution K2b
+already measured at its lane's own end. A run that did start and still names
+no valid execution id books nothing, logs one WARNING and is counted as
+``harness_run_cost.UNBOOKED_NO_EXECUTION_ID``: a record from before K3-2a is
+never booked under a guessed identity.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
@@ -103,8 +122,9 @@ import gate_obligations
 import gate_recorder
 from atomic_io import slot_lock
 from gate_status import (
+    EVIDENCE_SOURCE_FIELD, EVIDENCE_SOURCE_REPROCESSED, EXECUTION_ID_FIELD,
     FAIL_STATES, PARTIAL_REVIEW_STATES, PASS_STATES, REQUEST_TERMINAL_STATUSES, UNAVAILABLE_STATES,
-    canonical_status, is_pass,
+    canonical_status, is_execution_id, is_pass,
 )
 
 logger = logging.getLogger(__name__)
@@ -324,6 +344,11 @@ def commit_gate_outcome(
     ``obligation`` (step 8) are booked on a repeat too, so a caller that decides
     them after the record landed can hand them to a commit that rewrites nothing.
 
+    K3-2b: the run's one cost line is booked after the slot lock on every end —
+    a new record, a repeat and a guard refusal alike — keyed on the record's
+    ``execution_id`` (:func:`_book_gate_attempt`), because a run that called a
+    model cost money whether or not its record replaced the slot.
+
     Raises :class:`RequestWriteFailed` when the record and receipt landed but
     the request write did not (step 7), after the bundle archive: the caller
     sees the failure instead of a status the request on disk never reached.
@@ -384,6 +409,12 @@ def commit_gate_outcome(
             if isinstance(request_end, RequestWriteFailed):
                 request_failure = request_end
     gate_recorder._archive_finished_gate_bundle(record, gate=gate, result_path=path)
+    # K3-2b: the run ended here, whatever the slot did with its record. Booked
+    # AFTER the slot lock and after the record, its receipt, its request end and
+    # its obligation landed, so a slow or broken ledger can neither delay nor
+    # undo a verdict; keyed on the record's own execution id, so a repeat and a
+    # refused write are the same run's one line and a separate attempt is its own.
+    _book_gate_attempt(gate=gate, record=record, result_path=path, pr_ref=pr_ref)
     if request_failure is not None:
         raise request_failure
     if refusal is not None:
@@ -395,6 +426,185 @@ def commit_gate_outcome(
     gate_recorder.publish_forge_check_run(record, gate=gate, result_path=path)
     gate_recorder._feed_provider_reachability(record, gate=gate, result_path=path)
     return record, True
+
+
+# K3-2b: the execution-failure reasons that PROVE no model call happened — the
+# door refused the run before it was spawned, or the gate never reached the
+# door. Positive evidence only, so this is NOT
+# ``gate_recorder.EXECUTION_FAILURE_REASONS``: that set also holds ``timeout``,
+# ``stall`` and ``exit_nonzero``, whose run DID start and whose usage is
+# unknown, and dropping those would make a real cost invisible — the one
+# direction a booking must never fail in.
+_NEVER_STARTED_REASONS = frozenset({
+    # the door refused before anything was spawned
+    "spawn_refused", "lane_exhausted", "provider_switched_off", "provider_disabled",
+    "provider_not_installed", "binary_not_found",
+    # the gate never reached the door at all
+    "gate_runner_missing", "gate_not_subprocess_routable", "unsupported_gate_type",
+    # a launch prerequisite failed, so no process (and no model call) ever started
+    "worktree_checkout_failed", "gate_dispatch_identity_invalid", "harness_lane_branch_unavailable",
+    "harness_lane_no_model_response",
+    # not a run at all: ``cleanup_orphan_gates`` ends a stale request it found
+    # in a scan (GE-8), so nothing was spawned and nothing was spent
+    "abandoned_orphan_request",
+})
+
+
+def _never_started(record: Mapping[str, Any]) -> bool:
+    """True only on positive evidence that this record's run reached no model call (K3-2b).
+
+    A ``not_executable`` status, a reason in :data:`_NEVER_STARTED_REASONS`, or
+    a ``spawn_refused`` mark (``gate_runner``'s own word for a launch that did
+    not happen). Everything else may be a run that started, so it is booked —
+    as an unknown when its usage is missing, never silently dropped.
+    """
+    if canonical_status(dict(record)) == "not_executable":
+        return True
+    if record.get("spawn_refused"):
+        return True
+    return str(record.get("reason") or "").strip() in _NEVER_STARTED_REASONS
+
+
+def _gate_attempt_identity(record: Mapping[str, Any], gate: str) -> Optional[Tuple[str, str]]:
+    """``(provider, model)`` as the runner stamped them, or from the registry, or ``None``.
+
+    The identity is the one the RUN held: ``provider``/``model`` land on the
+    record when the runner stamped them (``gate_artifacts._stamp_run_settings``,
+    ``governed_lane._build_record``, ``gate_recorder._failure_payload``). A
+    record that carries none — a ``not_executable`` gate, a record written
+    before the stamp existed — falls back to the registered provider and the
+    gate's own model resolution (``gate_lane_contract.gate_model``), which is
+    the identity the runner WOULD have launched (ADR-036). A provider outside
+    the model lanes (``ci_gate``, ``wiring_gate``, a ``gh`` read, a gemini PATH
+    binary) names no model run: ``None``, no line. The model is never read from
+    the model's own report text.
+    """
+    import gate_lane_contract  # noqa: PLC0415 — sibling module
+    import harness_run_cost  # noqa: PLC0415 — sibling module
+
+    provider_row = gate_recorder.resolve_gate_provider(gate)
+    provider = str(record.get("provider") or "").strip()
+    model = str(record.get("model") or "").strip()
+    if not provider:
+        if provider_row is None:
+            return None
+        provider = provider_row[1]
+    if provider not in harness_run_cost.LANE_BILLING:
+        return None
+    if not model:
+        model = (gate_lane_contract.gate_model(gate) or "").strip()
+    if not model:
+        return None
+    return provider, model
+
+
+def _attempt_window(record: Mapping[str, Any]) -> Tuple[datetime, datetime]:
+    """``(started, ended)`` of the run this record ends, from its own timestamps and duration."""
+    ended = datetime.now(timezone.utc)
+    recorded = str(record.get("recorded_at") or record.get("completed_at") or "").strip()
+    if recorded:
+        try:
+            moment = datetime.fromisoformat(recorded.replace("Z", "+00:00"))
+        except ValueError:
+            moment = None
+        if moment is not None and moment.tzinfo is not None:
+            ended = moment
+    started = ended
+    duration = record.get("duration_seconds")
+    if isinstance(duration, (int, float)) and not isinstance(duration, bool) and duration >= 0:
+        started = ended - timedelta(seconds=float(duration))
+    return started, ended
+
+
+def _attempt_ref(record: Mapping[str, Any], pr_ref: str) -> str:
+    """The ref the booking is logged under: the run's dispatch id, else the PR it reviewed."""
+    dispatch_id = str(record.get("dispatch_id") or "").strip()
+    if dispatch_id:
+        return dispatch_id
+    number = record.get("pr_number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return f"pr-{number}"
+    return pr_ref or "pr-unknown"
+
+
+def _book_gate_attempt(*, gate: str, record: Mapping[str, Any], result_path: Path, pr_ref: str) -> None:
+    """Book the one ledger line of the execution this gate outcome ends (K3-2b), or none.
+
+    The identity is the record's own ``execution_id``, minted once before the
+    run's first model call (K3-2a): the SAME execution committed again finds its
+    line and writes nothing (:func:`cost_ledger.record_once`), and a separate
+    run whose record the guard refused books its own. ``attempt_seq`` is never
+    read — it numbers slot writes, and the ledger numbers executions.
+
+    Four records book nothing, each for its own reason: ``--reprocess`` evidence
+    (it rebuilt a report an earlier run wrote and called no model); a run that
+    provably never started (:func:`_never_started` — a refused retry carries no
+    id by design, and that is not an anomaly); an execution K2b already booked
+    at its lane's own measured end (``record_once`` finds that line by its
+    ``execution_id``); and a record that names no model run (``ci_gate``, a
+    ``gh`` read).
+
+    A run that DID start and still names no valid id books nothing either, but
+    never silently: one WARNING naming the dispatch and the count
+    ``harness_run_cost.UNBOOKED_NO_EXECUTION_ID``. No identity is ever guessed.
+
+    Fail-open by construction: ``record_attempt_run`` logs its own refusals and
+    returns them, so a broken ledger leaves the verdict, its receipt, the
+    request end and this caller exactly as they were.
+    """
+    if record.get(EVIDENCE_SOURCE_FIELD) == EVIDENCE_SOURCE_REPROCESSED:
+        logger.debug("gate_outcome: %s at %s is reprocessed evidence; no cost line", gate, result_path)
+        return
+    if _never_started(record):
+        logger.debug("gate_outcome: %s at %s names a run that never started; no cost line", gate, result_path)
+        return
+    state_dir = gate_recorder._state_dir_from_result_path(result_path)
+    if state_dir is None:
+        # An ad-hoc fixture (or a caller writing straight into a tmp dir) has no
+        # store to book into. Production result paths always do.
+        logger.debug("gate_outcome: %s at %s has no store; no cost line", gate, result_path)
+        return
+    identity = _gate_attempt_identity(record, gate)
+    if identity is None:
+        logger.debug("gate_outcome: %s at %s names no model run; no cost line", gate, result_path)
+        return
+    execution_id = record.get(EXECUTION_ID_FIELD)
+    if not is_execution_id(execution_id):
+        _count_unbooked(gate=gate, record=record, pr_ref=pr_ref, result_path=result_path)
+        return
+    import provider_costs  # noqa: PLC0415 — sibling module
+    import harness_run_cost  # noqa: PLC0415 — sibling module
+
+    provider, model = identity
+    started, ended = _attempt_window(record)
+    harness_run_cost.record_attempt_run(
+        harness_run_cost.AttemptRun(
+            provider=provider, model=model, execution_id=execution_id,
+            started=started, ended=ended,
+        ),
+        project_id=harness_run_cost.ledger_project_id(state_dir),
+        producer=gate, ref=_attempt_ref(record, pr_ref), role=harness_run_cost.GATE_ROLE,
+        # The store this record landed in, never the ambient env.
+        ledger_path=provider_costs.costs_path_in(state_dir.parent),
+    )
+
+
+def _count_unbooked(*, gate: str, record: Mapping[str, Any], pr_ref: str, result_path: Path) -> None:
+    """One WARNING and one count for a run that started and names no execution id (K3-2b).
+
+    Never silent and never guessed: without an id there is no line that a
+    re-commit can find, so the honest outcome is no line at all, said out loud
+    with the dispatch id a reader can go and look at.
+    """
+    import harness_run_cost  # noqa: PLC0415 — sibling module
+
+    harness_run_cost.count_booking_refusal(harness_run_cost.UNBOOKED_NO_EXECUTION_ID)
+    logger.warning(
+        "gate_outcome: %s pr=%s dispatch=%s head=%s at %s committed WITHOUT a valid execution id "
+        "(%r): no cost line booked, counted %s",
+        gate, pr_ref, record.get("dispatch_id") or "?", record.get("commit_sha") or "?",
+        result_path, record.get(EXECUTION_ID_FIELD), harness_run_cost.UNBOOKED_NO_EXECUTION_ID,
+    )
 
 
 def _pay_outstanding_receipt(path: Path, existing: Any, *, gate: str, pr_ref: str) -> None:

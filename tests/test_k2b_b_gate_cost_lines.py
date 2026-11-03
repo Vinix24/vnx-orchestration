@@ -365,7 +365,14 @@ def test_a_refused_spawn_is_one_zero_line_with_spawn_refused(store, monkeypatch)
 
 
 def test_a_ledger_write_that_raises_does_not_change_the_gate_verdict(store, monkeypatch, caplog):
-    """The verdict and the exit code are identical with and without a broken ledger."""
+    """The verdict and the exit code are identical with and without a broken ledger.
+
+    Two doors book this run: K2b at the lane's measured end
+    (``cost_ledger.record_next_attempt``) and, since K3-2b, the outcome commit
+    as a fallback (``cost_ledger.record_once``). Both are broken here, so the
+    test still measures what it always measured — a ledger that cannot be
+    written never costs a verdict — across the whole booking surface.
+    """
     rc_healthy, healthy = _run_kimi_gate(store, monkeypatch, _kimi_report(measured=False))
     assert rc_healthy == 0 and healthy["status"] == "pass"
     store.ledger.unlink()
@@ -374,20 +381,23 @@ def test_a_ledger_write_that_raises_does_not_change_the_gate_verdict(store, monk
         raise cost_ledger.CostLedgerWriteError("the ledger and its spool are both gone")
 
     monkeypatch.setattr(cost_ledger, "record_next_attempt", _explode)
+    monkeypatch.setattr(cost_ledger, "record_once", _explode)
     with caplog.at_level(logging.WARNING, logger="harness_run_cost"):
         rc_broken, broken = _run_kimi_gate(store, monkeypatch, _kimi_report(measured=False))
 
     assert rc_broken == rc_healthy == 0
     assert broken["status"] == "pass" and broken["reason"] == healthy["reason"]
     assert _lines(store) == [], "nothing was written, and the gate still decided"
-    (warning,) = [
+    warnings_ = [
         r for r in caplog.records
         if r.levelno == logging.WARNING and r.name == "harness_run_cost"
     ]
-    message = warning.getMessage()
-    assert "kimi" in message and "review" in message
-    assert "CostLedgerWriteError" in message, "a failed booking is never silent"
-    assert "kimi-gate-pr0-" in message, "the warning names the run it could not book"
+    assert warnings_, "a failed booking is never silent"
+    for warning in warnings_:
+        message = warning.getMessage()
+        assert "kimi" in message and "review" in message
+        assert "CostLedgerWriteError" in message, "a failed booking is never silent"
+        assert "kimi-gate-pr0-" in message, "the warning names the run it could not book"
 
 
 # ---------------------------------------------------------------------------
