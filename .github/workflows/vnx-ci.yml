@@ -27,7 +27,9 @@ jobs:
     # 34.43 min, rounded up to whole minutes: 35. Still the vangnet for
     # whatever hangs next, not a fix for the apt-mirror hang fixed in the
     # prelude.
-    timeout-minutes: 35
+    # VNX_CI_XDIST=0 is the way back to the serial sweep; on main that shape
+    # takes 52 to 54.8 minutes (OI-2523), so that branch gets 80 (OI-2525).
+    timeout-minutes: ${{ vars.VNX_CI_XDIST == '0' && 80 || 35 }}
 
     steps:
       - name: Checkout

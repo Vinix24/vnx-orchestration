@@ -13,6 +13,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -351,11 +352,176 @@ def test_the_per_pr_workflow_no_longer_runs_a_shadow_or_parity_job():
     assert "profile-a" in jobs
 
 
-def test_profile_a_allows_thirty_five_minutes():
-    profile_a = _jobs(WORKFLOW)["profile-a"]
-    assert profile_a["timeout-minutes"] == 35
+def _profile_a_job_text() -> str:
+    """The `profile-a` job block of the workflow as text — the comments included, the steps too."""
+    lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index("  profile-a:")
+    except ValueError:
+        raise AssertionError("vnx-ci.yml has no `profile-a` job") from None
+    body = lines[start + 1:]
+    end = next((i for i, line in enumerate(body) if line.strip() and not line.startswith("    ")), len(body))
+    return "\n".join(body[:end])
+
+
+def _timeout_index() -> list:
+    """(lines, index) of the job-level `timeout-minutes` line: 4 spaces, not a step's 8."""
+    lines = _profile_a_job_text().splitlines()
+    [index] = [i for i, line in enumerate(lines) if line.startswith("    timeout-minutes:")]
+    return lines, index
+
+
+def _timeout_expression() -> str:
+    lines, index = _timeout_index()
+    return lines[index].split("timeout-minutes:", 1)[1].strip()
+
+
+def _timeout_comment() -> str:
+    """The comment block directly above the job-level timeout — where its sizing is argued."""
+    lines, index = _timeout_index()
+    comment = []
+    for line in reversed(lines[:index]):
+        if not line.strip().startswith("#"):
+            break
+        comment.append(line.strip())
+    return "\n".join(reversed(comment))
+
+
+_ACTIONS_TOKEN = re.compile(r"(?P<space>\s+)|(?P<string>'(?:[^']|'')*')|(?P<number>\d+)"
+                            r"|(?P<name>[A-Za-z_][A-Za-z0-9_.]*)|(?P<operator>&&|\|\||==|\(|\))")
+
+
+class ActionsExpression:
+    """The subset of the GitHub Actions expression language a job timeout uses.
+
+    `||`, `&&` and `==` over string and number literals, `vars.<name>` and
+    parentheses, with GitHub's operand-returning `&&`/`||` and its truthiness
+    (null, 0 and the empty string are false, every other value — `'0'` included —
+    is true). A token or a form it does not know raises, so a rewritten
+    expression can never be read as a number it does not produce.
+    """
+
+    def __init__(self, expression: str, variables: dict) -> None:
+        match = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", expression, re.DOTALL)
+        if match is None:
+            raise AssertionError(f"not one `${{{{ ... }}}}` expression: {expression!r}")
+        self.variables = variables
+        self.tokens = self._tokenize(match.group(1))
+        self.position = 0
+
+    @staticmethod
+    def _tokenize(source: str) -> list:
+        tokens, position = [], 0
+        while position < len(source):
+            token = _ACTIONS_TOKEN.match(source, position)
+            if token is None:
+                raise AssertionError(f"unsupported expression syntax: {source[position:]!r}")
+            position = token.end()
+            if token.lastgroup != "space":
+                tokens.append((token.lastgroup, token.group()))
+        return tokens
+
+    def value(self):
+        result = self._parse_or()
+        if self.position != len(self.tokens):
+            raise AssertionError(f"trailing tokens: {self.tokens[self.position:]}")
+        return result
+
+    def _peek(self) -> tuple:
+        return self.tokens[self.position] if self.position < len(self.tokens) else (None, None)
+
+    def _take(self) -> tuple:
+        token = self._peek()
+        if token == (None, None):
+            raise AssertionError("the expression ended early")
+        self.position += 1
+        return token
+
+    def _parse_or(self):
+        value = self._parse_and()
+        while self._peek() == ("operator", "||"):
+            self._take()
+            right = self._parse_and()
+            value = value if self._truthy(value) else right
+        return value
+
+    def _parse_and(self):
+        value = self._parse_comparison()
+        while self._peek() == ("operator", "&&"):
+            self._take()
+            right = self._parse_comparison()
+            value = right if self._truthy(value) else value
+        return value
+
+    def _parse_comparison(self):
+        left = self._parse_primary()
+        if self._peek() == ("operator", "=="):
+            self._take()
+            return self._equal(left, self._parse_primary())
+        return left
+
+    def _parse_primary(self):
+        kind, text = self._take()
+        if (kind, text) == ("operator", "("):
+            value = self._parse_or()
+            if self._take() != ("operator", ")"):
+                raise AssertionError("unbalanced parenthesis")
+            return value
+        if kind == "string":
+            return text[1:-1].replace("''", "'")
+        if kind == "number":
+            return int(text)
+        if kind == "name":
+            scope, _, name = text.partition(".")
+            if scope != "vars" or not name:
+                raise AssertionError(f"only `vars.<name>` is supported, not {text!r}")
+            return self.variables.get(name)
+        raise AssertionError(f"unexpected token {text!r}")
+
+    @staticmethod
+    def _truthy(value) -> bool:
+        if value is None or value is False:
+            return False
+        if isinstance(value, int) and value == 0:
+            return False
+        return value != ""
+
+    @staticmethod
+    def _equal(left, right) -> bool:
+        if left is None or right is None:
+            return left is right
+        return str(left) == str(right)
+
+
+def test_profile_a_timeout_follows_the_switch_on_every_branch():
+    """The serial shape needs 80; the two-phase shape keeps 35 (OI-2523, OI-2525)."""
+    expression = _timeout_expression()
+    xdist = ActionsExpression(expression, {}).value()
+    serial = ActionsExpression(expression, {"VNX_CI_XDIST": "0"}).value()
+    assert xdist == 35, f"xdist branch of {expression!r} is {xdist!r}"
     # Twice the largest shadow wall time (1033 s), rounded up to whole minutes.
-    assert profile_a["timeout-minutes"] >= 2 * 1033 / 60
+    assert xdist >= 2 * 1033 / 60
+    assert serial == 80, f"serial branch of {expression!r} is {serial!r}"
+    # The serial Profile A takes 52, 52 and 54.8 minutes on main (OI-2523).
+    assert serial >= 55
+    assert ActionsExpression(expression, {"VNX_CI_XDIST": "1"}).value() == xdist
+
+
+def test_the_timeout_reads_the_same_variable_the_switch_reads():
+    """One variable answers both questions: which shape runs, and how long the job may take."""
+    timeout = _timeout_expression()
+    switch = re.fullmatch(r"\$\{\{\s*vars\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+                          _step(_jobs(WORKFLOW)["profile-a"], "suite")["env"]["VNX_CI_XDIST"])
+    assert switch is not None, "the suite step no longer reads its switch from vars.<name>"
+    read = set(re.findall(r"\bvars\.([A-Za-z_][A-Za-z0-9_]*)", timeout))
+    assert read == {switch.group(1)}
+
+
+def test_the_profile_a_timeout_comment_names_the_serial_wall_time():
+    comment = _timeout_comment()
+    assert "1033" in comment, "the xdist sizing argument (2 x 1033 s) is gone"
+    assert "52" in comment and "54.8" in comment, comment
+    assert "OI-2523" in comment and "OI-2525" in comment, comment
 
 
 def test_the_completeness_check_is_a_required_step_after_both_phases():
