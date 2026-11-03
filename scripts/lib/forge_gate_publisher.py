@@ -463,6 +463,7 @@ def review_verdict(
     checkout: Optional[Path] = None,
     base_branch: Optional[str] = None,
     b3_override: str = "",
+    b3_override_label: str = "B3 override",
 ) -> ForgeVerdict:
     """Is every required review seat filled on THIS head? One verdict for the whole review.
 
@@ -534,7 +535,7 @@ def review_verdict(
         str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
         checkout=checkout, base_branch=base_branch, b3_override=b3_override,
     )
-    note = _b3_override_note(b3_override, evaluation)
+    note = _b3_override_note(b3_override, evaluation, label=b3_override_label)
 
     def verdict(conclusion: str, reason: str) -> ForgeVerdict:
         return ForgeVerdict(conclusion, f"{reason}\n\n{note}" if note else reason)
@@ -564,11 +565,14 @@ def review_verdict(
     return verdict(CONCLUSION_SUCCESS, f"geldig review-akkoord op deze kop: {evaluation.message()}")
 
 
-def _b3_override_note(b3_override: str, evaluation: Any) -> str:
-    """The override line a reviewer reads: reason, cap rule, and the cap record's threshold.
+def _b3_override_note(b3_override: str, evaluation: Any, *, label: str = "B3 override") -> str:
+    """The evidence line a reviewer reads: label, reason, cap rule, and the cap record's threshold.
 
-    ``""`` without an override. The threshold (RG-1's ``blockers`` or
-    ``rounds``) is named only when the cap record carries one.
+    ``""`` without a reason. ``label`` says what the evidence is: ``B3 override``
+    for an actual ``--override-b3``, the verdict's own name when the merge door
+    refreshed the check under a standing ``mergen-met-OI`` verdict (RG-4 round 3,
+    OI-2506). The threshold (RG-1's ``blockers`` or ``rounds``) is named only
+    when the cap record carries one.
     """
     reason = (b3_override or "").strip()
     if not reason:
@@ -577,11 +581,11 @@ def _b3_override_note(b3_override: str, evaluation: Any) -> str:
     cap = getattr(rounds, "cap", None)
     if cap is None or not cap.capped:
         return (
-            f"B3 override: {reason}. Deze kop staat niet op de B3-cap, dus de override "
+            f"{label}: {reason}. Deze kop staat niet op de B3-cap, dus de override "
             "verandert hier niets aan de telling"
         )
     threshold = str(cap.to_record().get("threshold") or "").strip()
-    line = f"B3 override: {reason}. De kop staat op de {cap.rule}-cap"
+    line = f"{label}: {reason}. De kop staat op de {cap.rule}-cap"
     if threshold:
         line += f" (drempel: {threshold})"
     return f"{line}. {cap.summary()}"
@@ -596,10 +600,20 @@ def _unproven_fills(evaluation, head_sha: str) -> List[str]:
     pointed at. The door accepts it, this layer does not. Never silent: the two
     disagreeing is exactly the state an operator has to see, because the merge
     would go through while the check stays red.
+
+    The codex seat filled by a standing ``mergen-met-OI`` verdict (RG-4) has no
+    pass to prove: its evidence is the verdict, the operator's per-use approval
+    and a complete aftermath, all of which ``evaluate_review_seats`` re-read for
+    this head above. The record beside it is the FAIL round the OIs came from,
+    which the per-gate predicate rightly refuses — so it is not asked.
     """
+    from review_seat_evaluation import ROUTE_MERGE_WITH_OI
+
     reasons: List[str] = []
     for fill in evaluation.fills:
         if not fill.filled:
+            continue
+        if fill.route == ROUTE_MERGE_WITH_OI:
             continue
         proven, why = _proven_pass_on_head(fill.record, head_sha)
         if proven:
@@ -1156,6 +1170,7 @@ def publish_review_summary(
     dry_run: bool = False,
     base_branch: Optional[str] = None,
     b3_override: str = "",
+    b3_override_label: str = "B3 override",
 ) -> Dict[str, Any]:
     """Publish ``vnx-gate/review`` for one head. Returns the payload sent.
 
@@ -1180,7 +1195,9 @@ def publish_review_summary(
     ``b3_override`` is the ``--override-b3`` reason the merge door used, or
     ``""`` (RG-2): a capped head the door merges under an override gets a green
     required check with the reason on it, not the red one branch protection
-    keeps blocking (OI-2143).
+    keeps blocking (OI-2143). ``b3_override_label`` names the evidence: the
+    override itself, or the ``mergen-met-OI`` verdict the door acted on
+    (RG-4 round 3, OI-2506).
     """
     resolved_head = _require_head(head_sha)
 
@@ -1197,6 +1214,7 @@ def publish_review_summary(
         verdict = review_verdict(
             pr_number, resolved_head, results_dir=results_dir, branch=branch,
             project_id=project_id, base_branch=base, b3_override=b3_override,
+            b3_override_label=b3_override_label,
         )
         if verdict.conclusion == CONCLUSION_SUCCESS:
             refuse_if_auto_merge_is_armed(pr_number, target.owner_repo)
@@ -1260,19 +1278,35 @@ def refresh_review_summary(
     branch: Optional[str] = None,
     project_id: Optional[str] = None,
     base_branch: Optional[str] = None,
-) -> bool:
+    b3_override_label: str = "B3 override",
+    dry_run: bool = False,
+) -> Optional[Dict[str, Any]]:
     """Republish ``vnx-gate/review`` for one head with an explicit override reason (RG-2).
 
     The entry point the merge door uses (RG-4) when it merges under
-    ``--override-b3``: that override writes no gate record, so the required check
-    would stay red on a head the door is about to merge. This republishes from
-    the records already on disk, and returns whether the check-run went out.
+    ``--override-b3`` or the verdict allowed a merge with too few PASSes: that
+    path writes no gate record, so the required check would stay red on a head
+    the door is about to merge. This republishes from the records already on
+    disk and returns the payload that went out — including its ``conclusion``,
+    which is not necessarily ``success`` (RG-4 round 2: publishing a red
+    summary is still a publication). ``None`` when nothing went out at all.
+
+    The caller must read ``conclusion``: a check-run that went out red is not a
+    green door. Treating "published" as "passed" is exactly the hole this
+    return value closes.
+
+    ``b3_override_label`` says what the evidence is: the merge door passes
+    ``B3 override`` for an actual ``--override-b3`` and the verdict's own name
+    for a standing ``mergen-met-OI`` verdict (RG-4 round 3, OI-2506).
+    ``dry_run`` rehearses the same mapping — ``publish_review_summary`` returns
+    the payload it would have sent and no check-run leaves the machine, so a
+    ``--dry-run`` merge never touches the forge.
 
     **A head that moved publishes nothing.** The check is bound to one commit;
     the PR's current head is read first (:func:`_resolve_head_sha`) and when it
     cannot be read, or differs from ``head_sha``, nothing is published and the
     reason is logged. The reason is required: an override without one is not an
-    override. Every way the publication can fail is a logged ``False``, never an
+    override. Every way the publication can fail is a logged ``None``, never an
     exception — the caller is mid-merge and needs an answer.
     """
     reason = (b3_override or "").strip()
@@ -1292,19 +1326,20 @@ def refresh_review_summary(
                 "niets gepubliceerd voor %s en de check blijft zoals hij staat",
                 pr_number, resolved_head[:12],
             )
-            return False
+            return None
         if current_head != resolved_head:
             logger.warning(
                 "forge_gate_publisher: de kop van PR #%s is verschoven (%s -> %s); er wordt "
                 "niets gepubliceerd voor de gevraagde kop — ververs de check voor de nieuwe kop",
                 pr_number, resolved_head[:12], current_head[:12],
             )
-            return False
-        publish_review_summary(
+            return None
+        payload = publish_review_summary(
             pr_number, resolved_head, results_dir=results_dir, branch=branch,
             project_id=project_id, base_branch=base_branch, b3_override=reason,
+            b3_override_label=b3_override_label, dry_run=dry_run,
         )
-    # vnx-silent-except: the caller is mid-merge and needs true/false, not a
+    # vnx-silent-except: the caller is mid-merge and needs an answer, not a
     # traceback; the failure is logged loudly and every one of them leaves the
     # check unpublished, which the caller must treat as a refusal.
     except Exception as exc:  # noqa: BLE001
@@ -1314,8 +1349,8 @@ def refresh_review_summary(
             REVIEW_SUMMARY_CHECK_NAME, pr_number, resolved_head[:12], type(exc).__name__, exc,
             REVIEW_RECOVERY_COMMAND_TEMPLATE.format(pr=pr_number),
         )
-        return False
-    return True
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 # ---------------------------------------------------------------------------
