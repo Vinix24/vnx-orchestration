@@ -1004,6 +1004,20 @@ def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
     return value if value >= 1 else None
 
 
+def report_hint_fields(text: str, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """The hint fields the REPORT itself names — THE one hint builder (K-8b round 4)."""
+    merged: Dict[str, Any] = {**_extract_body_fields(text), **parse_frontmatter(text)}
+    named: Dict[str, Any] = {}
+    tenant = re.sub(r"^(['\"])(.*)\1$", r"\2",
+                    str(merged.get("project_id") or "").strip()).strip()
+    if tenant and not receipt.get("project_id"):
+        named["project_id"] = tenant
+    attempt = _named_attempt(merged)
+    if attempt is not None:
+        named["attempt"] = attempt
+    return named
+
+
 def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
     """Name the dispatch and the reason; the caller books nothing (K-8b rule 4)."""
     logger.warning(
@@ -1034,7 +1048,7 @@ def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
 
 
 def _lifecycle_report_line(
-    receipt: Dict[str, Any], merged: Dict[str, Any], *, state_dir: Optional[Path],
+    receipt: Dict[str, Any], text: str, *, state_dir: Optional[Path],
     report_path: Path,
 ) -> Dict[str, Any]:
     """The ONE shaping point: the line this dispatch's lifecycle mode asks for.
@@ -1044,17 +1058,8 @@ def _lifecycle_report_line(
     hint copy — its tenant and its attempt — so a legacy booking never gains a
     field it did not have, and the tenant is resolved once, by K-8a.
     """
-    hint = receipt
-    named: Dict[str, Any] = {}
-    if not receipt.get("project_id"):
-        tenant = str(merged.get("project_id") or "").strip()
-        if tenant:
-            named["project_id"] = tenant
-    attempt = _named_attempt(merged)
-    if attempt is not None:
-        named["attempt"] = attempt
-    if named:
-        hint = {**receipt, **named}
+    named = report_hint_fields(text, receipt)
+    hint = {**receipt, **named} if named else receipt
     line = report_lifecycle_mode.report_line(
         hint,
         state_dir=(state_dir if state_dir is not None
@@ -1555,7 +1560,7 @@ def build_receipt_from_report(
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     merged: Dict[str, Any] = {**body, **fm}
-    receipt = _lifecycle_report_line(receipt, merged, state_dir=state_dir, report_path=report_path)
+    receipt = _lifecycle_report_line(receipt, text, state_dir=state_dir, report_path=report_path)
     pr_link, pr_link_reason = _resolve_pr_link(
         receipt.get("dispatch_id"), merged, state_dir, dry_run=dry_run,
     )
