@@ -23,11 +23,14 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
+from completion_reading import dedupe_completions  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 
 # ADR-045 K-2c: a cost line is a completion of either shape. The excluded
 # ``subprocess_completion`` is the lane line of a dispatch that also writes a
 # carrying completion line (64 of 114 ids overlap): both would book tokens twice.
+# OI-2468: the lines are deduplicated per dispatch attempt (``_cost_lines``)
+# before this set decides whether the one witness books.
 COST_LINE_EVENT_TYPES = COMPLETION_EVENT_TYPES - {"subprocess_completion"}
 
 
@@ -414,6 +417,34 @@ def resolve_usage_for_receipt(receipt: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def _raw_event_type(receipt: Dict[str, Any]) -> str:
+    """The line's own event type, spelled the way this reader has always read it."""
+    return str(receipt.get("event_type") or receipt.get("event") or "unknown")
+
+
+def _cost_lines(receipts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The lines of ``receipts`` that book tokens: one witness per attempt.
+
+    OI-2468: one dispatch attempt may leave several completion lines -- a legacy
+    ``task_complete`` next to the v3 ``dispatch_finished``, or next to the
+    synthesized ``subprocess_completion`` lane line -- and booking each of them
+    books the attempt's tokens once per line. ``dedupe_completions`` picks the
+    strongest line of each ``(dispatch_id, attempt)`` instead, so the attempt is
+    booked once, from the line that witnesses it.
+
+    A lane line that is the only witness of its attempt stays excluded from
+    booking: of the 114 dispatch ids the lane fallback ever touched, 64 also
+    carry a completion line and the other 50 carry only the lane line, which
+    this reader has never booked. Booking those 50 now would move every legacy
+    ``events_analyzed`` count for a line synthesized from the report contract,
+    not from a usage record.
+    """
+    return [
+        receipt for receipt in dedupe_completions(receipts)
+        if _raw_event_type(receipt) in COST_LINE_EVENT_TYPES
+    ]
+
+
 def build_metrics(receipts: List[Dict[str, Any]], invalid_lines: int, state_dir: Path, source_path: Path) -> Dict[str, Any]:
     terminal_map = _resolve_terminal_map(state_dir)
     by_model: Dict[str, Dict[str, Any]] = defaultdict(_new_usage_bucket)
@@ -445,12 +476,12 @@ def build_metrics(receipts: List[Dict[str, Any]], invalid_lines: int, state_dir:
         }
     }
 
+    # The census counts every raw line; the booking below counts one witness per
+    # dispatch attempt (OI-2468).
     for receipt in receipts:
-        event_type = str(receipt.get("event_type") or receipt.get("event") or "unknown")
-        event_counts[event_type] += 1
-        if event_type not in COST_LINE_EVENT_TYPES:
-            continue
+        event_counts[_raw_event_type(receipt)] += 1
 
+    for receipt in _cost_lines(receipts):
         totals["events_analyzed"] += 1
         terminal = str(receipt.get("terminal") or "unknown").strip().upper() or "UNKNOWN"
         provider = str(receipt.get("provider") or _infer_provider(terminal, terminal_map)).strip().lower() or "unknown"
