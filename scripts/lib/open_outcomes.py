@@ -870,30 +870,41 @@ def open_outcome_items(
     A ``v3`` dispatch is decided on its attempt verdict: the end line or, without
     one, liveness (``_verdict_destination``). A ``legacy`` dispatch keeps
     ``summarize``'s outcome, unchanged.
+
+    A ``v3`` end state other than ``completed`` stays an open point until a T0
+    ``accept``/``reject`` decides it, whatever ``summarize`` folded its receipts
+    to: an implicit supersession never closes it.
     """
     summary = summarize(receipts, project_id=project_id, cutoff=_parse_ts(since))
     last_seen = _last_seen(receipts, project_id)
     items: List[Dict[str, Any]] = []
     for outcome in summary["outcomes"]:
         did = outcome["dispatch_id"]
-        if outcome["decision"] not in OPEN_DECISIONS or did in decisions:
-            continue
         open_as, reason = outcome["decision"], outcome.get("reason")
-        if state_dir is not None:
-            verdict = attempt_verdict(Path(state_dir), project_id, did, records=receipts)
-            if not verdict.is_legacy:
-                _, reason, open_as = _verdict_destination(verdict)
-                if open_as is None:
-                    continue  # a completed or live v3 attempt is no open point
+        verdict = (attempt_verdict(Path(state_dir), project_id, did, records=receipts)
+                   if state_dir is not None else None)
+        v3 = verdict is not None and not verdict.is_legacy
+        if v3:
+            # only a T0 decision or a no-open-point destination closes a v3 end
+            if did in decisions:
+                continue
+            _, reason, open_as = _verdict_destination(verdict)
+            if open_as is None:
+                continue  # a completed, live or unknown v3 attempt is no open point
+        elif outcome["decision"] not in OPEN_DECISIONS or did in decisions:
+            continue
         seen = last_seen.get(did)
-        items.append({
+        item = {
             "kind": KIND_RECEIPT_OUTCOME,
             "dispatch_id": did,
             "outcome": open_as,
             "status": outcome.get("status"),
             "reason": reason,
             "last_seen": seen.isoformat() if seen else None,
-        })
+        }
+        if v3 and outcome["decision"] == "superseded":
+            item["superseded_by"] = list(summary["superseded_by"].get(did, []))
+        items.append(item)
     items.sort(key=lambda i: i["dispatch_id"])
     items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
     return items

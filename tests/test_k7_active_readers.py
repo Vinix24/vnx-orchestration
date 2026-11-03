@@ -39,6 +39,7 @@ import dispatch_start  # noqa: E402
 import dispatch_worktree_isolation  # noqa: E402
 import open_outcomes as oo  # noqa: E402
 import project_id_migration  # noqa: E402
+import receipt_outcome as ro  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
 from check_active_drain import drain_active  # noqa: E402
 from coordination_db import get_connection  # noqa: E402
@@ -439,3 +440,85 @@ def test_only_the_own_projects_lines_decide(
     assert _drain(data_dir)["d-shared"].action == "completed"
     assert (data_dir / "dispatches" / "completed" / "d-shared").is_dir()
     assert read_ledger(state_dir), "the shared ledger must carry both projects' lines"
+
+
+# ---------------------------------------------------------------------------
+# 9. A v3 end that is not completed stays open, superseded or not. The explicit
+#    T0 decision closes it; an implicit supersession (a child naming it as
+#    ``parent_dispatch``) does not (operator decision 03-11-2026, K-7 round 2).
+# ---------------------------------------------------------------------------
+
+def _ledger_line(state_dir: Path, **fields: Any) -> None:
+    line = {"timestamp": "2026-11-03T13:00:00Z", "project_id": PROJECT, **fields}
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line) + "\n")
+
+
+def _child(state_dir: Path, parent: str, child: str) -> None:
+    """A later dispatch whose receipt names ``parent`` as its ``parent_dispatch``."""
+    _ledger_line(state_dir, event_type="task_complete", dispatch_id=child,
+                 parent_dispatch=parent, status="done", verification=GOOD)
+
+
+def _fold(state_dir: Path, dispatch_id: str) -> str:
+    summary = ro.summarize(read_ledger(state_dir), project_id=PROJECT)
+    return next(o for o in summary["outcomes"] if o["dispatch_id"] == dispatch_id)["decision"]
+
+
+def test_a_superseded_failed_end_stays_open_until_a_t0_decision(
+        data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    """Codex's reproduction: the failed end vanished once a child named it."""
+    _finalize(state_dir, _v3(state_dir, spec_file, "d-parent"), "failed")
+    _child(state_dir, "d-parent", "d-child")
+    assert _fold(state_dir, "d-parent") == "superseded"
+
+    item = _items(data_dir)["d-parent"]
+    assert item["outcome"] == "failed"
+    assert item["superseded_by"] == ["d-child"]
+
+    _decide(data_dir, "d-parent", "reject")
+    assert "d-parent" not in _items(data_dir)
+
+
+@pytest.mark.parametrize("end_state", ["abandoned", "timed_out"])
+def test_another_superseded_open_end_is_listed_too(
+        data_dir: Path, state_dir: Path, spec_file: Path, end_state: str) -> None:
+    _finalize(state_dir, _v3(state_dir, spec_file, f"d-parent-{end_state}"), end_state)
+    _child(state_dir, f"d-parent-{end_state}", f"d-child-{end_state}")
+    assert _fold(state_dir, f"d-parent-{end_state}") == "superseded"
+
+    item = _items(data_dir)[f"d-parent-{end_state}"]
+    assert item["outcome"] == end_state
+    assert item["superseded_by"] == [f"d-child-{end_state}"]
+
+
+def test_a_superseded_completed_end_is_no_open_point(
+        data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    _finalize(state_dir, _v3(state_dir, spec_file, "d-done"), "completed")
+    _child(state_dir, "d-done", "d-done-child")
+    assert _fold(state_dir, "d-done") == "superseded"
+    assert "d-done" not in _items(data_dir)
+
+
+def test_an_accept_fold_does_not_hide_a_failed_end(
+        data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    _finalize(state_dir, _v3(state_dir, spec_file, "d-late-accept"), "failed")
+    _ledger_line(state_dir, event_type="task_complete", dispatch_id="d-late-accept",
+                 status="success")
+    _ledger_line(state_dir, event_type="task_complete", dispatch_id="d-late-accept",
+                 status="done", report_file="d-late-accept.md", verification=GOOD)
+    assert _fold(state_dir, "d-late-accept") == "accept"
+
+    item = _items(data_dir)["d-late-accept"]
+    assert item["outcome"] == "failed"
+    assert "superseded_by" not in item
+
+
+def test_a_legacy_superseded_dispatch_is_still_no_open_point(
+        data_dir: Path, state_dir: Path) -> None:
+    _ledger_line(state_dir, event_type="task_complete", dispatch_id="d-legacy-super",
+                 status="failure")
+    _child(state_dir, "d-legacy-super", "d-legacy-child")
+    assert attempt_verdict(state_dir, PROJECT, "d-legacy-super").is_legacy
+    assert _fold(state_dir, "d-legacy-super") == "superseded"
+    assert "d-legacy-super" not in _items(data_dir)
