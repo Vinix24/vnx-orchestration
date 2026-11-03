@@ -32,6 +32,7 @@ REASON_LIVENESS_UNKNOWN = "liveness_unknown"
 REASON_DIRTY = "dirty"
 REASON_HEAD_MOVED = "head_moved"
 REASON_GIT_UNMEASURABLE = "git_unmeasurable"
+REASON_SALVAGE_UNPROVEN = "salvage_unproven"
 REASON_REMOVE_FAILED = "remove_failed"
 REASON_DECISION_UNRECORDED = "decision_unrecorded"
 
@@ -59,19 +60,38 @@ def _git(cwd: Path, args: "list[str]") -> "tuple[bool, str]":
     return True, p.stdout
 
 
-def _evidence(wt: Path) -> "tuple[Optional[str], str, str]":
+def _evidence(
+    wt: Path, dirty_proof: "Optional[Callable[[], str]]" = None,
+) -> "tuple[Optional[str], str, str]":
+    """HEAD plus, when a salvage proof is supplied, that proof's verdict.
+
+    ``dirty_proof`` is only set by a caller that wrote and verified a salvage
+    (``--include-dirty``); it is re-run here on every sample, including the one
+    under the repository lock right before the removal. It runs whether or not
+    the ordinary status is clean: ``git status --porcelain`` does not list
+    ignored files, yet the salvage archives them, so a clean status is no
+    evidence that the archived ignored content is still the content on disk.
+    Without a proof nothing changes: a change is ``dirty``, never a pass."""
     ok, head = _git(wt, ["rev-parse", "HEAD"])
     if not ok or not head.strip():
         return None, REASON_GIT_UNMEASURABLE, f"HEAD: {head}"
     ok, status = _git(wt, ["status", "--porcelain"])
     if not ok:
         return None, REASON_GIT_UNMEASURABLE, f"status: {status}"
-    if status.strip():
+    if dirty_proof is not None:
+        problem = dirty_proof()
+        if problem:
+            return None, REASON_SALVAGE_UNPROVEN, problem
+    elif status.strip():
         return None, REASON_DIRTY, "uncommitted or untracked changes"
     return head.strip(), "", ""
 
 
-def _liveness_refusal(dispatch_id: str, root: Path) -> "tuple[str, str]":
+def liveness_refusal(dispatch_id: str, root: Path) -> "tuple[str, str]":
+    """``(reason, detail)`` when a live or unmeasurable holder keeps the tree.
+
+    Public because the sweep gates on this before it salvages: a tree with a
+    live holder is kept with this reason, never salvaged first."""
     if not dispatch_id:
         return "", ""
     from dispatch_process_registry import live_process_groups
@@ -139,7 +159,8 @@ def _dispatch_slot(
     return fh, None
 
 
-def _record_removal_decision(dispatch_id: str, wt: Path, head: str) -> str:
+def _record_removal_decision(dispatch_id: str, wt: Path, head: str, *,
+                            evidence: str = "clean status") -> str:
     """Persist the removal decision before the tree is removed (ADR-005).
 
     Returns ``""`` only when the line actually landed in the ledger; anything
@@ -153,7 +174,7 @@ def _record_removal_decision(dispatch_id: str, wt: Path, head: str) -> str:
     # dispatch, the tree and the evidence that cleared it.
     section = (
         f"head={head} dispatch_id={dispatch_id or '-'} "
-        "evidence=clean status, HEAD unchanged under the repository lock"
+        f"evidence={evidence}, HEAD unchanged under the repository lock"
     )
     try:
         result = emit_state_mutation(
@@ -182,21 +203,28 @@ def _assess(
     wt: Path, root: Path, dispatch_id: str, expected_head: str, *, dry_run: bool,
     pause_hook: "Optional[Callable[[str], None]]",
     before_remove: "Optional[Callable[[str], None]]" = None,
+    dirty_proof: "Optional[Callable[[], str]]" = None,
 ) -> GuardResult:
     """Judge and (unless dry_run) remove, while the caller holds the slot.
 
     ``before_remove`` runs last among the steps that can refuse: under the
     repository lock, after the revalidation and after the removal decision is
     persisted, immediately before ``git worktree remove``. A result that keeps
-    the tree therefore never had its lock dropped."""
-    reason, detail = _liveness_refusal(dispatch_id, root)
+    the tree therefore never had its lock dropped.
+
+    ``dirty_proof`` (``--include-dirty``) lets a tree through only while it
+    keeps returning "": it runs on every evidence sample, including the one
+    under the repository lock, and also when the ordinary status is clean (a
+    changed ignored file is invisible to ``git status --porcelain`` but not to
+    the salvage's ``verify``), so later work keeps the tree."""
+    reason, detail = liveness_refusal(dispatch_id, root)
     if not reason:
-        head, reason, detail = _evidence(wt)
+        head, reason, detail = _evidence(wt, dirty_proof)
     if not reason and head != expected_head:
         reason, detail = _head_moved(expected_head, head, "")
     if not reason and pause_hook is not None:
         pause_hook("before_revalidation")
-        again, reason, detail = _evidence(wt)
+        again, reason, detail = _evidence(wt, dirty_proof)
         if not reason and again != head:
             reason, detail = REASON_HEAD_MOVED, f"HEAD moved {head[:12]} -> {again[:12]}"
     if reason:
@@ -209,12 +237,15 @@ def _assess(
         # Revalidate every call, not only with a pause_hook: taking the
         # repository lock can block, and anything written into the tree or
         # committed there during that wait must be seen before it is deleted.
-        again, reason, detail = _evidence(wt)
+        again, reason, detail = _evidence(wt, dirty_proof)
         if not reason and again != expected_head:
             reason, detail = _head_moved(expected_head, again, " under the repository lock")
         if reason:
             return GuardResult(False, reason, detail, dry_run)
-        failure = _record_removal_decision(dispatch_id, wt, again)
+        failure = _record_removal_decision(
+            dispatch_id, wt, again,
+            evidence="verified salvage" if dirty_proof is not None else "clean status",
+        )
         if failure:
             return GuardResult(False, REASON_DECISION_UNRECORDED, failure, dry_run)
         # Every refusal is behind us now, so this is the first point at which
@@ -236,6 +267,7 @@ def guarded_remove(
     dry_run: bool = True,
     pause_hook: "Optional[Callable[[str], None]]" = None,
     before_remove: "Optional[Callable[[str], None]]" = None,
+    dirty_proof: "Optional[Callable[[], str]]" = None,
 ) -> GuardResult:
     """Remove only on evidence measured under the held slot; ``dry_run`` removes nothing.
 
@@ -253,6 +285,12 @@ def guarded_remove(
     so a hook that drops a lock can never unlock a tree the guard keeps.  The
     removal decision is persisted to the state-mutation ledger before
     ``git worktree remove``; if that write does not land, nothing is removed.
+    *dirty_proof* is only passed by a caller that has written and verified a
+    salvage (the sweep's ``--include-dirty``): it re-proves that state on every
+    evidence sample, including the one under the repository lock and also when
+    the ordinary status is clean (ignored files are archived too, and status
+    does not list them), and any problem it returns refuses the removal with
+    ``salvage_unproven``.
     """
     wt, root = Path(worktree_path), Path(repo_root)
     if not wt.exists():
@@ -270,7 +308,7 @@ def guarded_remove(
         try:
             return _assess(
                 wt, root, dispatch_id, expected_head, dry_run=dry_run,
-                pause_hook=pause_hook, before_remove=before_remove,
+                pause_hook=pause_hook, before_remove=before_remove, dirty_proof=dirty_proof,
             )
         finally:
             os.close(fd)
@@ -286,7 +324,7 @@ def guarded_remove(
     try:
         return _assess(
             wt, root, dispatch_id, expected_head, dry_run=dry_run,
-            pause_hook=pause_hook, before_remove=before_remove,
+            pause_hook=pause_hook, before_remove=before_remove, dirty_proof=dirty_proof,
         )
     finally:
         import dispatch_worktree_isolation as dwi
