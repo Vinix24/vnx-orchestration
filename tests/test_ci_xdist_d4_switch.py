@@ -440,3 +440,38 @@ def test_the_merge_readers_see_every_check_run_not_only_the_vnx_ci_workflow():
     ])
     assert gate.ci_classification(context)["verdict"] == "fail"
     assert gate.ci_classification(gate.LocalContext(checks=[{"name": "VNX CI", "bucket": "pass"}]))["verdict"] == "pass"
+
+
+# --- the nightly runs only on main, and the serial truth gets room for its measured wall time (OI-2521, OI-2523)
+
+
+def _nightly_text() -> str:
+    return NIGHTLY.read_text(encoding="utf-8")
+
+
+def test_every_nightly_job_runs_only_on_main():
+    """A workflow_dispatch on a PR head would put these check runs on that SHA, where the merge readers look (OI-2521)."""
+    jobs = _jobs(NIGHTLY)
+    for job_id in ("serial-truth", "xdist-shape", "parity"):
+        assert "github.ref == 'refs/heads/main'" in (jobs[job_id].get("if") or ""), job_id
+    assert "!cancelled()" in jobs["parity"]["if"], "the parity job still runs when a needed job failed"
+
+
+def test_the_nightly_header_says_why_the_main_guard_exists():
+    header = _nightly_text().split("\non:\n", 1)[0]
+    assert "workflow_dispatch" in header and "refs/heads/main" in header
+
+
+def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs():
+    jobs = _jobs(NIGHTLY)
+    assert jobs["serial-truth"]["timeout-minutes"] == 80
+    assert jobs["xdist-shape"]["timeout-minutes"] == 35
+    assert jobs["parity"]["timeout-minutes"] == 20
+
+
+def test_the_serial_truth_timeout_comment_names_the_measured_wall_time():
+    text = _nightly_text()
+    job = text.split("  serial-truth:\n", 1)[1].split("\n  xdist-shape:\n", 1)[0]
+    assert "52" in job and "54.8" in job, job
+    assert "OI-2523" in job
+    assert "35.4" not in job, "the comment still cites the pre-switch measurement"

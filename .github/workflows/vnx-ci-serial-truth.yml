@@ -12,6 +12,9 @@ name: VNX CI serial truth
 # run of a PR's head. This workflow's check runs attach to main's commit (a
 # scheduled or dispatched run on main, a SHA no PR has as its head), so they
 # never become merge evidence. tests/test_ci_xdist_d4_switch.py pins that.
+# Every job carries `if: github.ref == 'refs/heads/main'` because a manual
+# workflow_dispatch could otherwise be pointed at a PR head and put these check
+# runs on that SHA, where the merge readers look (OI-2521).
 #
 # It always runs the full sweep: no light/heavy classifier here.
 
@@ -32,9 +35,11 @@ jobs:
   serial-truth:
     name: Serial truth (full serial sweep)
     runs-on: ubuntu-24.04
-    # The serial Profile A ran at 35.4 minutes before the switch; this job runs
-    # the same sweep with the same evidence writes.
-    timeout-minutes: 55
+    if: ${{ github.ref == 'refs/heads/main' }}
+    # On main the serial Profile A now runs 52, 52 and 54.8 minutes (03-11,
+    # runs 41635101067, 41644670004, 41676693958); the 55-minute timeout cut
+    # every stacked run at exactly 55 (OI-2523). 80 leaves room for that spread.
+    timeout-minutes: 80
 
     steps:
       - name: Checkout
@@ -75,6 +80,7 @@ jobs:
   xdist-shape:
     name: Xdist shape (the two phases)
     runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' }}
     timeout-minutes: 35
 
     steps:
@@ -187,7 +193,7 @@ jobs:
     name: Serial truth vs xdist shape
     runs-on: ubuntu-24.04
     needs: [serial-truth, xdist-shape]
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     timeout-minutes: 20
     permissions:
       contents: read
@@ -383,8 +389,9 @@ jobs:
         run: |
           set -euo pipefail
           V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
-          exit_code="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("exit"))' "$V")"
-          if [ "$exit_code" = "0" ]; then
+          RECORD="$GITHUB_WORKSPACE/scripts/ci/record_xdist_parity_verdict.py"
+          # exit 0 alone is not clean: the script reads step_failures too (OI-2521).
+          if python3 "$RECORD" --report-clean --verdict "$V"; then
             echo "serial truth vs xdist shape: parity holds"
             exit 0
           fi
