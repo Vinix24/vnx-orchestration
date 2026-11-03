@@ -320,7 +320,12 @@ def test_missing_key_is_a_failed_attempt_in_the_digest(tmp_path):
     jsonl = tmp_path / "s.jsonl"
     jsonl.write_text('{"type":"user","message":{"role":"user","content":"hi"}}\n')
 
-    with patch.dict(os.environ, {}, clear=True), \
+    # K4b: the analyzer books a ledger line even for a refused spawn, so the store pins the
+    # conftest fixture set must survive the "no key in the env" clear (or the line resolves
+    # to the real central store and the test-isolation guard refuses the write).
+    store_pins = {key: os.environ[key] for key in
+                  ("VNX_DATA_DIR", "VNX_DATA_DIR_EXPLICIT", "VNX_STATE_DIR") if key in os.environ}
+    with patch.dict(os.environ, store_pins, clear=True), \
          patch.object(da_module, "LLM_STRATEGY", "deepseek-harness"), \
          patch("subprocess.run") as run:
         result = analyzer.analyze_session(jsonl, metrics, SessionFlags())

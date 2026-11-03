@@ -430,8 +430,35 @@ Patterns to consolidate:
 """
 
 
+def _book_kimi_call(
+    stdout: "str | None", *, ref: str, project_id: str, started: datetime,
+    ended: datetime, data_root: "Path | None",
+) -> None:
+    """Book one dream kimi call's ledger line (K4b), fail-open.
+
+    Role ``intelligence`` through K2b-a's kimi booker; a kimi that reported no usage
+    books ``unknown:kimi_cli_no_usage`` instead of zeros, and a refused write is the
+    booker's own WARNING — never the consolidation's to fail.
+    """
+    import harness_run_cost  # noqa: PLC0415
+    from kimi_wrapper import kimi_token_usage  # noqa: PLC0415
+    from provider_costs import costs_path_in  # noqa: PLC0415
+
+    harness_run_cost.record_kimi_run(
+        harness_run_cost.cli_run(
+            provider="kimi", model=harness_run_cost.lane_model("kimi", None),
+            started=started, ended=ended,
+            token_usage=kimi_token_usage(stdout) if stdout else None,
+        ),
+        project_id=project_id, producer=harness_run_cost.DREAM_PRODUCER, ref=ref,
+        role=harness_run_cost.INTELLIGENCE_ROLE,
+        ledger_path=costs_path_in(data_root) if data_root is not None else None,
+    )
+
+
 def _dispatch_kimi_consolidation(
-    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT,
+    data_root: "Path | None" = None,
 ) -> dict:
     """Dispatch the kimi cheap-lane for pattern consolidation and parse the result.
 
@@ -440,6 +467,8 @@ def _dispatch_kimi_consolidation(
     pins it via ``-m`` — what runs is recorded in VNX, not left to whatever
     ``~/.kimi/config.toml`` defaults to (OI-1077).
 
+    Every call that was made books one ledger line (K4b) in the store of
+    ``data_root`` — also a call that timed out or exited non-zero, because it ran.
     Raises subprocess.TimeoutExpired if kimi does not respond within ``timeout`` seconds.
     """
     from kimi_wrapper import kimi_exec  # noqa: PLC0415
@@ -447,14 +476,20 @@ def _dispatch_kimi_consolidation(
     batches, shrunk_rows = _split_patterns(patterns_input)
     merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
     summaries: list[str] = []
+    ref = f"dream-{project_id}"
     for index, batch in enumerate(batches, start=1):
         prompt = _build_consolidation_prompt(batch, project_id, (index, len(batches)))
-        stdout = kimi_exec(
-            prompt,
-            dispatch_id=f"dream-{project_id}",
-            project_id=project_id,
-            timeout=timeout,
-        )
+        started = datetime.now(timezone.utc)
+        try:
+            stdout = kimi_exec(prompt, dispatch_id=ref, project_id=project_id, timeout=timeout)
+        except (subprocess.TimeoutExpired, RuntimeError):
+            # The CLI ran and reported nothing usable: the line says unknown, never zero,
+            # and the outcome (the raise) is unchanged.
+            _book_kimi_call(None, ref=ref, project_id=project_id, started=started,
+                            ended=datetime.now(timezone.utc), data_root=data_root)
+            raise
+        _book_kimi_call(stdout, ref=ref, project_id=project_id, started=started,
+                        ended=datetime.now(timezone.utc), data_root=data_root)
         result = _parse_kimi_response(_extract_kimi_text(stdout) or stdout)
         for key in merged:
             merged[key].extend(result.get(key) or [])
@@ -596,7 +631,7 @@ def run_dream_cycle(
 
         try:
             consolidation = _dispatch_kimi_consolidation(
-                patterns, project_id, timeout=kimi_timeout
+                patterns, project_id, timeout=kimi_timeout, data_root=_data_root
             )
         except subprocess.TimeoutExpired:
             _emit_dream_event(
