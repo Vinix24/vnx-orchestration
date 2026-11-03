@@ -29,17 +29,26 @@ Covers:
 from __future__ import annotations
 
 import hashlib
+import importlib.util as _ilu
 import json
 import logging
 import os
+import sqlite3
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
+VNX_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 _SCRIPTS_LIB = _SCRIPTS_DIR / "lib"
+
+_RUNNER_PATH_0017 = _SCRIPTS_LIB / "migrations" / "apply_0017.py"
+_spec_0017 = _ilu.spec_from_file_location("apply_0017_k8c", _RUNNER_PATH_0017)
+_mod_0017 = _ilu.module_from_spec(_spec_0017)
+_spec_0017.loader.exec_module(_mod_0017)
 sys.path.insert(0, str(_SCRIPTS_LIB))
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
@@ -365,6 +374,13 @@ def lifecycle_db(state_dir: Path) -> Path:
     coordination_db.init_schema(state_dir)
     db_path = coordination_db.db_path_from_state_dir(state_dir)
     project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute("BEGIN")
+        _mod_0017._rebuild_dispatches(conn)
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
     return state_dir
 
 
@@ -401,12 +417,14 @@ def hermetic_append(monkeypatch):
     monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
 
 
-def _insert_dispatch_row(state_dir: Path, dispatch_id: str, *, attempt_count: int = 1) -> None:
+def _insert_dispatch_row(
+    state_dir: Path, dispatch_id: str, *, attempt_count: int = 1, project_id: str = PROJECT,
+) -> None:
     with coordination_db.get_connection(state_dir) as conn:
         conn.execute(
             "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, metadata_json) "
             "VALUES (?, ?, 'running', ?, '{}')",
-            (dispatch_id, PROJECT, attempt_count),
+            (dispatch_id, project_id, attempt_count),
         )
         conn.commit()
 
@@ -422,9 +440,11 @@ def _corrupt_row_metadata(state_dir: Path, dispatch_id: str) -> None:
         conn.commit()
 
 
-def _begin(state_dir: Path, spec_file: Path, dispatch_id: str) -> dispatch_start.Handover:
+def _begin(
+    state_dir: Path, spec_file: Path, dispatch_id: str, *, project_id: str = PROJECT,
+) -> dispatch_start.Handover:
     return dispatch_start.begin(
-        project_id=PROJECT, dispatch_id=dispatch_id, role=ROLE, base_sha="a" * 40,
+        project_id=project_id, dispatch_id=dispatch_id, role=ROLE, base_sha="a" * 40,
         spec_file=spec_file, target_slot="T1", state_dir=state_dir,
     )
 
@@ -684,3 +704,129 @@ class TestTheReportsOwnAttemptReachesTheScan:
         finished_one = [line for line in _of_type(state_dir, "dispatch_finished", dispatch_id)
                         if line.get("attempt") == 1]
         assert receipt["end_outcome_id"] == finished_one[0]["outcome_id"]
+
+
+# ---------------------------------------------------------------------------
+# Part 8 (K-8c round 3): the scan takes its hint from the converter's one builder
+# ---------------------------------------------------------------------------
+
+OTHER_PROJECT = "proj-beta"
+
+
+def _two_tenant_starts(state_dir: Path, spec_file: Path, dispatch_id: str) -> None:
+    """A real v3 start for the SAME dispatch_id under two tenants (composite key)."""
+    _insert_dispatch_row(state_dir, dispatch_id)
+    _insert_dispatch_row(state_dir, dispatch_id, project_id=OTHER_PROJECT)
+    _begin(state_dir, spec_file, dispatch_id)
+    _begin(state_dir, spec_file, dispatch_id, project_id=OTHER_PROJECT)
+
+
+class TestTheScanTakesItsHintFromTheOneBuilder:
+    """Codex's warning on 06425353: the restore's local hint copied only ``attempt``.
+
+    The core receipt names no tenant, so with starts under two tenants the
+    decision refused ``project_ambiguous`` while the converter — which forwards
+    the report's own ``project_id`` through ``report_hint_fields`` — routed the
+    same report. This round makes the restore call that one builder too.
+    """
+
+    @pytest.mark.parametrize("tenant_line", [
+        "project_id: proj-alpha",
+        "project_id: 'proj-alpha'",
+        'project_id: "proj-alpha"',
+    ])
+    def test_two_tenant_starts_the_report_naming_its_tenant_is_routed(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append, capsys, tenant_line):
+        dispatch_id = "20260906-two-tenants"
+        clock["now"] = T0
+        _two_tenant_starts(state_dir, spec_file, dispatch_id)
+        report = _write_stranded_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id,
+            extra_frontmatter=f"{tenant_line}\n",
+        )
+        _write_dispatch_spec(data_dir, dispatch_id, model="sonnet", provider="claude")
+        os.utime(report, (_epoch(T1), _epoch(T1)))
+
+        scan = find_stranded_reports(data_dir, state_dir)
+
+        # Routed, not refused: the tenant the report names reaches the decision.
+        assert scan.refused == ()
+        assert [candidate.dispatch_id for candidate in scan.candidates] == [dispatch_id]
+        receipt = scan.candidates[0].receipt
+        assert receipt["event_type"] == "report_ingested"
+        assert receipt["project_id"] == PROJECT
+        assert receipt["attempt"] == 1
+
+        exit_code = main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)])
+
+        assert exit_code == 0
+        assert "1 restored" in capsys.readouterr().out
+        ingested = _of_type(state_dir, "report_ingested", dispatch_id)
+        assert len(ingested) == 1
+        assert ingested[0]["project_id"] == PROJECT
+        assert ingested[0]["attempt"] == 1
+        assert ingested[0]["identity_restored"] is True
+        assert _of_type(state_dir, "task_complete", dispatch_id) == []
+        assert [line for line in _lines(state_dir)
+                if line.get("dispatch_id") == dispatch_id
+                and line.get("project_id") == OTHER_PROJECT
+                and line.get("event_type") == "report_ingested"] == []
+
+    def test_the_scan_line_equals_the_converter_line(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append):
+        """Parity: for one report file, scan and converter book the same identity."""
+        dispatch_id = "20260906-parity"
+        clock["now"] = T0
+        _two_tenant_starts(state_dir, spec_file, dispatch_id)
+        report = _write_stranded_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id,
+            extra_frontmatter="project_id: 'proj-alpha'\nattempt: '1'\n",
+        )
+        os.utime(report, (_epoch(T1), _epoch(T1)))
+        text = report.read_text(encoding="utf-8")
+
+        scan = find_stranded_reports(data_dir, state_dir)
+        assert scan.refused == ()
+        scan_line = scan.candidates[0].receipt
+
+        built = rc.build_receipt_from_report(report, text, state_dir=state_dir)
+        assert built is not None
+        for key in ("dispatch_id", "project_id", "attempt", "event_type"):
+            assert scan_line[key] == built[key], key
+
+    def test_the_scan_asks_the_converters_one_builder(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append, monkeypatch):
+        """A spy on ``report_hint_fields`` fires: the restore keeps no hint code of its own."""
+        dispatch_id = "20260906-spy"
+        clock["now"] = T0
+        _two_tenant_starts(state_dir, spec_file, dispatch_id)
+        report = _write_stranded_report(
+            reports_dir / f"{dispatch_id}.md", dispatch_id,
+            extra_frontmatter="project_id: proj-alpha\n",
+        )
+        os.utime(report, (_epoch(T1), _epoch(T1)))
+        seen = []
+        real = rc.report_hint_fields
+
+        def _spy(text, receipt):
+            named = real(text, receipt)
+            seen.append(named)
+            return named
+
+        monkeypatch.setattr(rc, "report_hint_fields", _spy)
+
+        find_stranded_reports(data_dir, state_dir)
+
+        assert seen and seen[0]["project_id"] == PROJECT
+
+    def test_the_restore_scan_keeps_no_attempt_reader_of_its_own(self):
+        """A guard: `git grep -n "_named_attempt" scripts/restore_stranded_reports.py` is empty."""
+        run = subprocess.run(
+            ["git", "grep", "-n", "_named_attempt", "scripts/restore_stranded_reports.py"],
+            capture_output=True, text=True, cwd=VNX_ROOT,
+        )
+        assert run.returncode == 1, run.stdout + run.stderr  # 1 = no match
+        assert run.stdout == ""

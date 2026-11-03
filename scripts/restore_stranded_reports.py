@@ -174,15 +174,12 @@ def find_stranded_reports(data_dir: Path, state_dir: Path) -> ScanResult:
             if receipt is not None:
                 # ADR-045 (K-8): the same routing every writer applies, so this
                 # third writer never books a task_complete for a v3 dispatch.
-                # The report's own attempt reaches the decision through the
-                # converter's single reader, on the merged frontmatter + body —
-                # never a tenant, which K-8a resolves itself. ``state_dir`` is
-                # the store this scan reads and the restore appends to; the
-                # write time is the file this scan read, not the canonical path
-                # the converter substituted.
-                merged = {**rc._extract_body_fields(text), **rc.parse_frontmatter(text)}
-                attempt = rc._named_attempt(merged)
-                hint = {**receipt, "attempt": attempt} if attempt is not None else receipt
+                # The report's own tenant and attempt come from the converter's
+                # one hint builder (K-8b round 4); ``state_dir`` is the store this
+                # scan reads and the restore appends to, and the write time is
+                # the file this scan read.
+                named = rc.report_hint_fields(text, receipt)
+                hint = {**receipt, **named} if named else receipt
                 routed = report_line(hint, state_dir=state_dir,
                                      report_written_at=path.stat().st_mtime)
                 receipt = receipt if routed is hint else routed
