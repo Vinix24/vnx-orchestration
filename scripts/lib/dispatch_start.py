@@ -9,15 +9,18 @@ a line that cannot be written refuses the dispatch rather than running it untrac
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import subprocess
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
@@ -31,6 +34,9 @@ MODE_LEGACY = "legacy"
 REFUSAL_CODE = "start-line-refused"
 MODE_WRITE_OK = "ok"
 MODE_WRITE_FAILED = "write_failed"
+# A hand-over waits at most this long for the per-dispatch lock before refusing.
+HANDOVER_LOCK_TIMEOUT_SECONDS = 5.0
+_HANDOVER_LOCK_POLL_SECONDS = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +142,51 @@ def spawn_file_path(state_dir: str | Path, project_id: str, dispatch_id: str,
         return end_intent_path(state_dir, project_id, dispatch_id, attempt).with_suffix(".spawn.json")
     except AppendReceiptError as exc:
         raise StartRefused(exc.code, str(exc)) from exc
+
+
+def handover_lock_path(state_dir: str | Path, project_id: str, dispatch_id: str) -> Path:
+    """``<state>/dispatch_end/<project_id>/<dispatch_id>.handover.lock`` — beside the
+    intents, so the identifier rules of ``end_intent_path`` validate it too."""
+    try:
+        parent = end_intent_path(state_dir, project_id, dispatch_id, 1).parent
+    except AppendReceiptError as exc:
+        raise StartRefused(exc.code, str(exc)) from exc
+    return parent / f"{dispatch_id}.handover.lock"
+
+
+@contextmanager
+def _handover_lock(state_dir: Path, project_id: str, dispatch_id: str) -> Iterator[None]:
+    """Hold the per-dispatch lock across the attempt choice, the liveness check and
+    the append. Two concurrent hand-overs must not both pick the same attempt: the
+    append layer deduplicates their identical lifecycle key, and the loser would go
+    on under an identity it does not own. A lock still taken at the bound is a
+    refusal (``handover_lock_timeout``), never a guess."""
+    path = handover_lock_path(state_dir, project_id, dispatch_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = path.open("a+", encoding="utf-8")
+    except OSError as exc:
+        raise StartRefused("handover_lock_unavailable", f"cannot open {path}: {exc}") from exc
+    try:
+        deadline = time.monotonic() + HANDOVER_LOCK_TIMEOUT_SECONDS
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise StartRefused(
+                        "handover_lock_timeout",
+                        f"{path} stayed taken for {HANDOVER_LOCK_TIMEOUT_SECONDS:g}s; "
+                        "refusing the hand-over rather than sharing an attempt")
+                time.sleep(min(_HANDOVER_LOCK_POLL_SECONDS, left))
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
 
 
 def _live(pid: object, started_at: object) -> bool:
@@ -251,6 +302,51 @@ def _base_sha(repo_root: Path, base_ref: str) -> str:
     return probe.stdout.strip()
 
 
+def _append_start_line(handover: Handover, *, role: str, base_ref: str, spec_file: str | Path,
+                       target_slot: Optional[str], state_dir: Path,
+                       project_root: Path) -> None:
+    """Write the v3 start line and refuse unless the append layer confirms it.
+
+    A ``duplicate`` verdict means another hand-over already owns this
+    ``(project_id, dispatch_id, attempt)``: this one has no identity of its own,
+    so it refuses (``start_line_duplicate``) instead of proceeding. Any other
+    non-``appended`` status is equally not a written line (``start_line_unconfirmed``).
+    """
+    from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
+
+    slot = (target_slot or "").strip()
+    try:
+        spec_sha = hashlib.sha256(Path(spec_file).read_bytes()).hexdigest()
+    except OSError as exc:
+        raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
+    receipt = {
+        "timestamp": handover.started_at, "event_type": DISPATCH_STARTED_EVENT_TYPE,
+        "project_id": handover.project_id, "dispatch_id": handover.dispatch_id,
+        "attempt": handover.attempt, "role": role,
+        "base_sha": _base_sha(project_root, base_ref), "spec_sha256": spec_sha,
+        "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip()
+        or (f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
+        "lifecycle_mode": handover.lifecycle_mode, "door_pid": handover.door_pid,
+        "door_started_at": handover.door_started_at,
+    }
+    try:
+        result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
+    except AppendReceiptError as exc:
+        raise StartRefused(exc.code, str(exc)) from exc
+    status = getattr(result, "status", None)
+    if status == "appended":
+        return
+    if status == "duplicate":
+        raise StartRefused(
+            "start_line_duplicate",
+            f"the append layer already holds a start line for (project_id={handover.project_id!r}, "
+            f"dispatch_id={handover.dispatch_id!r}, attempt={handover.attempt}); this hand-over "
+            "does not own that attempt")
+    raise StartRefused(
+        "start_line_unconfirmed",
+        f"the append layer reported status {status!r}; the start line is not confirmed on disk")
+
+
 def begin(
     *, project_id: str, dispatch_id: str, role: str, base_ref: str, spec_file: str | Path,
     target_slot: Optional[str], state_dir: str | Path, project_root: Path,
@@ -259,7 +355,8 @@ def begin(
 
     On the shipped default (``ledger_lifecycle`` off) nothing reaches the ledger and the row
     only learns ``lifecycle_mode: legacy``; with it on, a refusal means the door wrote no DB
-    mode, took no slot and spawned nothing.
+    mode, took no slot and spawned nothing. The v3 attempt choice, liveness check and
+    append run under one per-dispatch lock (ADR-045 §3).
     """
     state_path = Path(state_dir)
     door_pid = os.getpid()
@@ -274,35 +371,23 @@ def begin(
                 "door_identity_unresolved",
                 f"the door process {door_pid} has no readable start time; a start line "
                 "cannot record liveness (ADR-045 §5)")
+        with _handover_lock(state_path, project_id, dispatch_id):
+            attempt = _plan_attempt(state_dir=state_path, project_id=project_id,
+                                    dispatch_id=dispatch_id)
+            handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
+                                lifecycle_mode=mode, door_pid=door_pid,
+                                door_started_at=door_started,
+                                started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            _append_start_line(handover, role=role, base_ref=base_ref, spec_file=spec_file,
+                               target_slot=target_slot, state_dir=state_path,
+                               project_root=project_root)
     else:
         door_started = ""  # a legacy hand-over records the pid, not a start time it did not need
-    if mode == MODE_V3:
-        attempt = _plan_attempt(state_dir=state_path, project_id=project_id, dispatch_id=dispatch_id)
-    else:
         attempt = read_attempt_count(state_path, project_id, dispatch_id) or 1
-    handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
-                        lifecycle_mode=mode, door_pid=door_pid, door_started_at=door_started,
-                        started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    if mode == MODE_V3:
-        from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
-        slot = (target_slot or "").strip()
-        try:
-            spec_sha = hashlib.sha256(Path(spec_file).read_bytes()).hexdigest()
-        except OSError as exc:
-            raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
-        receipt = {
-            "timestamp": handover.started_at, "event_type": DISPATCH_STARTED_EVENT_TYPE,
-            "project_id": project_id, "dispatch_id": dispatch_id, "attempt": attempt,
-            "role": role, "base_sha": _base_sha(project_root, base_ref),
-            "spec_sha256": spec_sha,
-            "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip()
-            or (f"terminal:{slot}" if slot else f"door:{door_pid}"),
-            "lifecycle_mode": mode, "door_pid": door_pid, "door_started_at": door_started,
-        }
-        try:
-            append_receipt_payload(receipt, receipts_file=str(state_path / LEDGER_FILENAME))
-        except AppendReceiptError as exc:
-            raise StartRefused(exc.code, str(exc)) from exc
+        handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
+                            lifecycle_mode=mode, door_pid=door_pid,
+                            door_started_at=door_started,
+                            started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     mode_write = _record_lifecycle_mode(handover, state_dir=state_path)
     if mode_write == MODE_WRITE_FAILED:
         return replace(handover, mode_write=MODE_WRITE_FAILED)

@@ -26,6 +26,8 @@ import logging
 import os
 import subprocess
 import sys
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List
@@ -37,9 +39,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib
 
 import config_registry  # noqa: E402
 from append_receipt_internals import payload as append_payload  # noqa: E402
-from append_receipt_internals.common import AppendReceiptError  # noqa: E402
+from append_receipt_internals.common import AppendReceiptError, AppendResult  # noqa: E402
 from dispatch_cli import run_dispatch  # noqa: E402
-from test_dispatch_door_row import _make_bundle, _make_coordination_db, _read_row  # noqa: E402
+from test_dispatch_door_row import (  # noqa: E402
+    _make_bundle,
+    _make_coordination_db,
+    _read_attempts,
+    _read_row,
+)
 
 PROJECT_ID = "vnx-dev"
 START = "dispatch_started"
@@ -142,10 +149,12 @@ class DoorRun:
     """One door fire with the lane faked and the ordering facts recorded."""
 
     def __init__(self, tmp_path: Path, monkeypatch, *, lifecycle: bool, dispatch_id: str):
-        # The door's own checkout is the repo root it hands to the start line;
-        # ``base_ref: HEAD`` keeps the test independent of a fetched origin/main
-        # while still exercising the real ``git rev-parse`` resolution.
-        self.repo = Path(__file__).resolve().parents[1]
+        # The start line resolves its base in the CONSUMER root, the checkout the
+        # lane builds in (``resolve_consumer_project_root``); ``base_ref: HEAD``
+        # keeps the test independent of a fetched origin/main while still
+        # exercising the real ``git rev-parse`` resolution.
+        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+        self.repo = resolve_consumer_project_root()
         self.data_dir, self.spec_file = _make_bundle(
             tmp_path, staging_id=f"staging-{dispatch_id}", dispatch_id=dispatch_id,
         )
@@ -342,6 +351,23 @@ def test_legacy_decision_is_main_behaviour(tmp_path, monkeypatch):
         "the shipped (off) path must not change what the door decides")
 
 
+def test_legacy_hand_over_end_to_end_takes_no_lock_and_writes_no_line(tmp_path, monkeypatch):
+    """With the setting off the hand-over is main's: no lock, no line, no spawn
+    file, the row marked legacy and the lane still reached."""
+    run = DoorRun(tmp_path, monkeypatch, lifecycle=False,
+                  dispatch_id="20261103-k4-legacy-pin")
+    assert run.fire() == 0
+
+    assert run.lane_calls == 1, "the lane must still be reached"
+    assert _starts(run.state_dir, run.dispatch_id) == []
+    assert not _spawn_path(run.state_dir, run.dispatch_id, 1).exists()
+    assert not (run.state_dir / "dispatch_end" / PROJECT_ID
+                / f"{run.dispatch_id}.handover.lock").exists(), (
+        "a legacy hand-over must take no per-dispatch lock")
+    assert run.row_metadata()["lifecycle_mode"] == "legacy"
+    assert _read_row(run.db_path, run.dispatch_id)["state"] == "completed"
+
+
 # ---------------------------------------------------------------------------
 # (d) Two attempts on one id: attempt 1 and attempt 2
 # ---------------------------------------------------------------------------
@@ -499,6 +525,229 @@ def test_a_start_of_a_longer_id_does_not_block_this_dispatch(tmp_path, monkeypat
     assert _begin(state_dir, repo, dispatch_id).attempt == 1, (
         "another dispatch's live start must not refuse this one")
     assert [line["attempt"] for line in _starts(state_dir, dispatch_id)] == [1]
+
+
+# ---------------------------------------------------------------------------
+# (e3) One locked attempt choice: concurrent hand-overs cannot share an attempt
+# ---------------------------------------------------------------------------
+
+def test_concurrent_handovers_choose_exactly_one_attempt(tmp_path, monkeypatch):
+    """Two hand-overs of one dispatch, released together: exactly one start line,
+    exactly one Handover, the other refused; never two hand-overs on one attempt.
+
+    ``_base_sha`` is slowed just enough that both hand-overs have chosen their
+    attempt before either appends — the race the per-dispatch lock must close.
+    Repeated 20 times so a lucky schedule cannot pass it.
+    """
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    repo = _git_repo(tmp_path)
+    real_base_sha = dispatch_start._base_sha
+
+    def slow_base_sha(root, ref):
+        time.sleep(0.1)
+        return real_base_sha(root, ref)
+
+    monkeypatch.setattr(dispatch_start, "_base_sha", slow_base_sha)
+
+    for round_no in range(20):
+        dispatch_id = f"20261103-k4-race-{round_no}"
+        state_dir = tmp_path / f"race-{round_no}" / "state"
+        _seed_row(state_dir, dispatch_id, attempts=1)
+        barrier = threading.Barrier(2)
+        outcomes: List[tuple] = []
+
+        def hand_over():
+            try:
+                barrier.wait(timeout=10)
+                outcomes.append(("handover", _begin(state_dir, repo, dispatch_id)))
+            except dispatch_start.StartRefused as exc:
+                outcomes.append(("refused", exc))
+            except BaseException as exc:  # recorded and asserted below, never swallowed
+                outcomes.append(("error", exc))
+
+        threads = [threading.Thread(target=hand_over) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads), (
+            f"round {round_no}: a hand-over hung on the lock")
+
+        errors = [value for kind, value in outcomes if kind == "error"]
+        assert errors == [], f"round {round_no}: unexpected hand-over errors: {errors}"
+        handovers = [value for kind, value in outcomes if kind == "handover"]
+        refusals = [value for kind, value in outcomes if kind == "refused"]
+        starts = _starts(state_dir, dispatch_id)
+
+        assert len(starts) == 1, f"round {round_no}: exactly one start line, got {starts}"
+        assert len(handovers) == 1, (
+            f"round {round_no}: exactly one hand-over may win an attempt, got {len(handovers)}")
+        assert len(refusals) == 1, (
+            f"round {round_no}: the loser must be refused, got {[r.code for r in refusals]}")
+        assert refusals[0].code in ("refire_attempt_live", "handover_lock_timeout"), (
+            f"round {round_no}: the refusal must be named, got {refusals[0].code!r}")
+        assert starts[0]["attempt"] == handovers[0].attempt, (
+            f"round {round_no}: the returned attempt must own the only start line")
+
+
+def test_a_duplicate_start_line_is_refused(tmp_path, monkeypatch):
+    """The append layer calling the line a duplicate means this hand-over does not
+    own the identity: ``begin`` refuses with ``start_line_duplicate``."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-dup"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+
+    def duplicate(receipt, **kwargs):
+        return AppendResult(status="duplicate",
+                            receipts_file=Path(kwargs["receipts_file"]), idempotency_key="dup")
+
+    with patch.object(append_payload, "append_receipt_payload", duplicate):
+        with pytest.raises(dispatch_start.StartRefused) as refused:
+            _begin(state_dir, repo, dispatch_id)
+
+    assert refused.value.code == "start_line_duplicate"
+    assert _starts(state_dir, dispatch_id) == [], (
+        "a hand-over the append layer deduplicated may not report a line of its own")
+
+
+def test_an_unconfirmed_start_line_is_refused(tmp_path, monkeypatch):
+    """Any other non-``appended`` verdict is not a written line: fail closed."""
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = "20261103-k4-unconfirmed"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+
+    def strange(receipt, **kwargs):
+        return AppendResult(status="queued_elsewhere",
+                            receipts_file=Path(kwargs["receipts_file"]), idempotency_key="x")
+
+    with patch.object(append_payload, "append_receipt_payload", strange):
+        with pytest.raises(dispatch_start.StartRefused) as refused:
+            _begin(state_dir, repo, dispatch_id)
+
+    assert refused.value.code == "start_line_unconfirmed"
+    assert _starts(state_dir, dispatch_id) == []
+
+
+def test_a_taken_handover_lock_refuses_with_a_named_timeout(tmp_path, monkeypatch):
+    """A lock another hand-over still holds past the bound is a named refusal, not a wait."""
+    import fcntl  # noqa: PLC0415
+
+    dispatch_start = importlib.import_module("dispatch_start")
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    monkeypatch.setattr(dispatch_start, "HANDOVER_LOCK_TIMEOUT_SECONDS", 0.2)
+    dispatch_id = "20261103-k4-lock-timeout"
+    state_dir = tmp_path / "state"
+    _seed_row(state_dir, dispatch_id, attempts=1)
+    repo = _git_repo(tmp_path)
+    lock_path = dispatch_start.handover_lock_path(state_dir, PROJECT_ID, dispatch_id)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+", encoding="utf-8")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    try:
+        with pytest.raises(dispatch_start.StartRefused) as refused:
+            _begin(state_dir, repo, dispatch_id)
+    finally:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+    assert refused.value.code == "handover_lock_timeout"
+    assert _starts(state_dir, dispatch_id) == [], "a timed-out hand-over writes nothing"
+
+
+# ---------------------------------------------------------------------------
+# (e4) The base SHA is the consumer repo's, the one the lane builds in
+# ---------------------------------------------------------------------------
+
+def test_hand_over_resolves_the_base_in_the_consumer_repo(tmp_path, monkeypatch):
+    """A branch that exists only in the consumer repo must resolve, and its sha
+    must be what the start line carries — not the engine checkout's."""
+    import dispatch_worktree_isolation  # noqa: PLC0415
+
+    run = DoorRun(tmp_path, monkeypatch, lifecycle=True,
+                  dispatch_id="20261103-k4-consumer-base")
+    consumer = _git_repo(tmp_path)
+    branch = f"consumer-only-{run.dispatch_id}"
+    subprocess.run(["git", "-C", str(consumer), "branch", branch], check=True)
+    consumer_sha = _head_sha(consumer)
+    spec = json.loads(run.spec_file.read_text(encoding="utf-8"))
+    spec["base_ref"] = branch
+    run.spec_file.write_text(json.dumps(spec), encoding="utf-8")
+    monkeypatch.setattr(dispatch_worktree_isolation, "resolve_consumer_project_root",
+                        lambda: consumer)
+
+    assert run.fire() == 0, "the door must resolve the consumer-only branch"
+
+    starts = _starts(run.state_dir, run.dispatch_id)
+    assert len(starts) == 1
+    assert starts[0]["base_sha"] == consumer_sha, (
+        "the start line must record the consumer repo's base, not the engine checkout's")
+
+
+# ---------------------------------------------------------------------------
+# (e5) A refused start leaves no dispatch in delivering
+# ---------------------------------------------------------------------------
+
+def _seed_live_attempt(db_path: Path, dispatch_id: str) -> str:
+    """The door's fixture: a claimable row plus one already-live attempt."""
+    from coordination_db import get_connection  # noqa: PLC0415
+    from runtime_coordination import (  # noqa: PLC0415
+        create_attempt, increment_attempt_count, register_dispatch, update_attempt,
+    )
+
+    with get_connection(db_path.parent) as conn:
+        register_dispatch(
+            conn, dispatch_id=dispatch_id, project_id=PROJECT_ID, terminal_id=None,
+            track=None, priority="P2", pr_ref=None, gate=None, bundle_path=None,
+            metadata={"target_slot": "T0"}, actor="test",
+        )
+        increment_attempt_count(conn, dispatch_id)
+        attempt = create_attempt(
+            conn, dispatch_id=dispatch_id, project_id=PROJECT_ID, terminal_id="T0",
+            attempt_number=1, actor="test",
+        )
+        update_attempt(conn, attempt_id=attempt["attempt_id"], state="running", actor="test")
+        conn.commit()
+    return attempt["attempt_id"]
+
+
+def test_a_refused_start_closes_only_the_door_owned_attempt(tmp_path, monkeypatch, capsys):
+    """A refused begin must not leave the door-owned row in ``delivering`` with no
+    worker: its own attempt is closed with the refusal as reason, and an attempt
+    belonging to someone else is untouched."""
+    run = DoorRun(tmp_path, monkeypatch, lifecycle=True,
+                  dispatch_id="20261103-k4-refused-close")
+    _seed_live_attempt(run.db_path, run.dispatch_id)
+    real_append = append_payload.append_receipt_payload
+
+    def refuse(receipt, **kwargs):
+        if str(receipt.get("event_type")) == START:
+            raise AppendReceiptError("ledger_start_unwritable", 4, "simulated append failure")
+        return real_append(receipt, **kwargs)
+
+    with patch.object(append_payload, "append_receipt_payload", refuse):
+        assert run.fire() == 1
+
+    assert "REJECT [start-line-refused]" in capsys.readouterr().err
+    row = _read_row(run.db_path, run.dispatch_id)
+    assert row["state"] == "failed_delivery", (
+        f"a refused start must close the door-owned row, got {row['state']!r}")
+
+    attempts = {attempt["attempt_number"]: attempt
+                for attempt in _read_attempts(run.db_path, run.dispatch_id)}
+    assert sorted(attempts) == [1, 2], f"the fixture must leave two attempts: {attempts}"
+    assert attempts[1]["state"] == "running", (
+        "another attempt of the same dispatch must be left alone")
+    assert attempts[1]["failure_reason"] is None
+    assert attempts[2]["state"] == "failed", (
+        "the door-owned attempt must be closed on the refusal")
+    assert "ledger_start_unwritable" in (attempts[2]["failure_reason"] or "")
 
 
 # ---------------------------------------------------------------------------

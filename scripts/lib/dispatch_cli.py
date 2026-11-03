@@ -3395,12 +3395,13 @@ def _owner_transition(
 
 def _owner_hand_over(
     plan, spec, *, project_id: str, spec_file: Optional[Path], state_dir: Path,
-    repo_root: Path,
+    attempt_id: Optional[str],
 ) -> Optional[dispatch_start.Handover]:
     """Point 3 + K-4: claimed -> delivering, then the start line at the hand-over.
 
     The ledger line precedes the row's ``lifecycle_mode`` stamp, the slot and the spawn
-    (ADR-045 §1). Returns None — after naming the refusal — when the line cannot be
+    (ADR-045 §1). Returns None — after naming the refusal and closing the attempt this
+    door owns, exactly as a pre-spawn failure is closed — when the line cannot be
     written, so the fail-closed path never reaches the lane executor.
     """
     _owner_transition(
@@ -3408,13 +3409,32 @@ def _owner_hand_over(
         reason="handing off to lane executor",
     )
     try:
+        # The base sha must come from the checkout the lane builds in — the same
+        # consumer root the worktree allocator uses, never the engine checkout
+        # resolved from this module's own ``__file__`` (central install).
+        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+
+        try:
+            consumer_root = resolve_consumer_project_root()
+        except Exception as exc:  # fail closed: a base that cannot be located refuses the start
+            raise dispatch_start.StartRefused(
+                "consumer_root_unresolved",
+                f"cannot resolve the consumer project root for the start line: {exc}") from exc
         handover = dispatch_start.begin(
             project_id=project_id, dispatch_id=spec.dispatch_id, role=spec.role,
             base_ref=plan.base_ref or "origin/main", spec_file=spec_file,
-            target_slot=plan.target_id, state_dir=state_dir, project_root=repo_root)
+            target_slot=plan.target_id, state_dir=state_dir, project_root=consumer_root)
     except dispatch_start.StartRefused as exc:
         print(f"[dispatch_cli] REJECT [{dispatch_start.REFUSAL_CODE}]: {exc.code}: {exc.detail}",
               file=sys.stderr)
+        # A refused start must not leave this dispatch in ``delivering`` with no
+        # slot and no worker: end the attempt THIS door owns (never another
+        # attempt of the same id) with the refusal as its reason. No attempt_id
+        # means this fire produced no attempt of its own — a refire of a live
+        # dispatch — so its row and attempts stay untouched.
+        if attempt_id is not None:
+            _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
+                          success=False, failure_reason=exc.code)
         return None
     if handover.mode_write != dispatch_start.MODE_WRITE_OK:
         # The ledger line landed (the dispatch_start module already logged the
@@ -3853,7 +3873,8 @@ def run_dispatch(
         # Point 3 (golf 1A) + K-4 (ADR-045 §1/§5): claimed -> delivering, then the
         # dispatch_started line at the hand-over, before the slot and the spawn.
         handover = _owner_hand_over(
-            plan, vspec.spec, project_id=project_id, spec_file=spec_file, state_dir=state_dir, repo_root=repo_root)
+            plan, vspec.spec, project_id=project_id, spec_file=spec_file,
+            state_dir=state_dir, attempt_id=attempt_id)
         if handover is None:
             return 1
 
