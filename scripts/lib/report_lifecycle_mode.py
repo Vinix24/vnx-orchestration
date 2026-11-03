@@ -147,18 +147,16 @@ def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "
 
 
 def _other_tenant_v3(state_dir: Path, tenant: Optional[str], dispatch_id: str,
-                     records: List[Dict[str, Any]]) -> List[str]:
+                     starts: List[Dict[str, Any]]) -> List[str]:
     """Tenants other than *tenant* that hold v3 evidence of *dispatch_id* (OI-2515).
 
-    The ledger lines are in hand; the store is read once, read-only, and the
-    tenant filter is here (``project_id != ?`` in SQL would drop a NULL row). A
-    row that cannot be parsed refuses: it could hide the marker. A row that
-    names no tenant names no OTHER tenant.
+    The dispatch's own start lines are in hand; the store is read once, read-only,
+    and the tenant filter is here (``project_id != ?`` in SQL would drop a NULL
+    row). A row that cannot be parsed refuses: it could hide the marker. A row
+    that names no tenant names no OTHER tenant.
     """
-    found = {str(line.get("project_id") or "").strip() for line in records
-             if str(line.get("event_type") or line.get("event") or "").strip() == DISPATCH_STARTED_EVENT_TYPE
-             and str(line.get("dispatch_id") or "").strip() == dispatch_id
-             and str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
+    found = {str(line.get("project_id") or "").strip() for line in starts
+             if str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
     db_path = Path(db_path_from_state_dir(state_dir))
     if db_path.is_file():
         try:
@@ -294,7 +292,7 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
             row_state = row.status + (f" ({row.detail})" if row.detail else "")
             raise ReportPathRefused(did, "lifecycle_mode_undecidable",
                 f"one lifecycle source is unreadable (ledger: {ledger_state}; row: {row_state})")
-        elsewhere = _other_tenant_v3(state_path, tenant, did, records)
+        elsewhere = _other_tenant_v3(state_path, tenant, did, starts_any)
         if elsewhere:
             raise ReportPathRefused(did, "project_mismatch", f"this dispatch is v3 under "
                 f"{', '.join(repr(t) for t in elsewhere)}, not {tenant or 'unresolved'!r}")
