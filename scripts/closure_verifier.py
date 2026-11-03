@@ -2045,6 +2045,22 @@ def _merge_record_seats(merge_record: Optional[Dict[str, Any]]) -> Optional[Dict
     return None
 
 
+def _recorded_merge_with_oi(seat_record: Dict[str, Any]) -> Any:
+    """The ``mergen-met-OI`` block the seat record carries, or ``None`` (RG-4 round 3, OI-2506).
+
+    Read from ``round_ledger.merge_with_oi``: the verdict the door counted when
+    it merged. A record without the block — an older merge, or one merged
+    without a verdict — returns ``None`` and is judged exactly as before. A key
+    that is present is passed on as read, whatever its value: the evaluation
+    refuses a block it cannot use, and never turns a malformed one into "no
+    verdict" (fail-closed, not fail-open).
+    """
+    ledger = seat_record.get("round_ledger")
+    if not isinstance(ledger, dict) or "merge_with_oi" not in ledger:
+        return None
+    return ledger.get("merge_with_oi")
+
+
 def _seat_rule_checks(
     contract: ReviewContract,
     results_dir: Path,
@@ -2076,21 +2092,33 @@ def _seat_rule_checks(
     them, so neither do the per-gate checks. A rejection by one of them on the
     merged head still fails closure here (``evaluation.blocking``), as it
     refuses the door.
+
+    A record that carries the door's ``mergen-met-OI`` verdict
+    (``round_ledger.merge_with_oi``, RG-4 round 3 / OI-2506) is judged with it:
+    the same evaluation fills the codex seat and lifts its veto on the head the
+    verdict names, so a merge the door allowed can close. The verdict is never
+    re-read or re-judged; a block that names another head, or cannot be read,
+    is a FAIL of its own that says why.
     """
     from review_seat_evaluation import RISK_SEAT_RULE, SOURCE_MERGE_RECORD, evaluate_review_seats
 
     seats = [str(seat) for seat in seat_record.get("seats") or [] if str(seat).strip()]
     # round_ledger=False: the door counted the round ledger when it merged (R1);
     # closure judges the merge under the rule it merged under, as for the seats.
+    # The verdict the door counted rides along when the record carries it.
     evaluation = evaluate_review_seats(
         str(seat_record.get("pr_id") or contract.pr_id), results_dir,
         branch=contract.branch or None, head_sha=str(seat_record.get("head_sha") or ""),
         seats=seats or None, seats_source=SOURCE_MERGE_RECORD, round_ledger=False,
+        merge_with_oi=_recorded_merge_with_oi(seat_record),
         by_risk=seat_record.get("rule") == RISK_SEAT_RULE, base_branch=seat_record.get("base_branch"),
     )
     checks: List[CheckResult] = []
     if evaluation.required.error:
         checks.append(CheckResult("review_seats", "FAIL", evaluation.message()))
+    recorded_refusal = evaluation.rounds.merge_refusal if evaluation.rounds is not None else ""
+    if recorded_refusal:
+        checks.append(CheckResult("seat_merge_with_oi", "FAIL", recorded_refusal))
     for rejection in evaluation.blocking:
         checks.append(CheckResult("review_seats_blocking", "FAIL", f"gemergde kop: {rejection.text()}"))
     for fill in evaluation.fills:

@@ -469,3 +469,190 @@ class TestThePublishedConclusionMustBeGreen:
         assert gate["verdict"] == "NO-GO", gate["message"]
         assert fgp.REVIEW_SUMMARY_CHECK_NAME in gate["message"]
         assert "failure" in gate["message"]
+
+
+# ---------------------------------------------------------------------------
+# RG-4 round 3 (OI-2506): closure judges a mergen-met-OI merge the way the door did
+# ---------------------------------------------------------------------------
+
+
+def _merge_record(seat_record: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``pr_merged`` receipt the door writes: its seat record, round ledger and all."""
+    return {"event_type": "pr_merged", "pr_number": PR, "conclusion": "merged", "review_seats": seat_record}
+
+
+def _contract():
+    from review_contract import Deliverable, ReviewContract
+
+    return ReviewContract(
+        pr_id=str(PR), pr_title="RG-4", feature_title="rg4", branch=BRANCH, track="A",
+        risk_class="high", merge_policy="standard", closure_stage="ready",
+        deliverables=[Deliverable(category="impl", description="RG-4 closure")],
+        review_stack=["codex_gate", "kimi_gate"], content_hash="",
+    )
+
+
+def _closure_checks(env, seat_record: Dict[str, Any]):
+    import closure_verifier
+
+    return closure_verifier._validate_review_evidence(
+        _contract(), env["results_dir"], branch=BRANCH, merge_record=_merge_record(seat_record),
+    )
+
+
+def _seat_record(env, monkeypatch) -> Dict[str, Any]:
+    gate = _review_gate(env, monkeypatch)
+    assert gate["verdict"] == "GO", gate["message"]
+    return gate["review_seats"]
+
+
+def _resolve_open_items(env) -> None:
+    """Every remaining blocker is an open item of the verdict; resolve them all before closure."""
+    path = env["state_dir"] / "open_items.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["items"] = [
+        {**item, "status": "done"} if item.get("source") == "review_cap_tiebreaker" else item
+        for item in data["items"]
+    ]
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+class TestClosureJudgesTheMergeUnderItsVerdict:
+    def test_a_merge_under_the_verdict_closes_with_the_seat_the_door_filled(self, env, monkeypatch):
+        _capped_world(env)
+        _book(env)
+        seat_record = _seat_record(env, monkeypatch)
+        _resolve_open_items(env)
+
+        checks = _closure_checks(env, seat_record)
+        by_name = {check.name: check for check in checks}
+
+        assert by_name["seat_codex_gate"].status == "PASS", by_name["seat_codex_gate"].detail
+        assert by_name["seat_kimi_gate"].status == "PASS", by_name["seat_kimi_gate"].detail
+        assert "review_seats_blocking" not in by_name, [
+            check.detail for check in checks if check.name == "review_seats_blocking"
+        ]
+
+    def test_a_verdict_on_another_head_fails_closure_and_says_which_heads(self, env, monkeypatch):
+        _capped_world(env)
+        _book(env)
+        seat_record = _seat_record(env, monkeypatch)
+        assert seat_record["round_ledger"]["merge_with_oi"]["head_sha"] == HEAD
+        seat_record["round_ledger"]["merge_with_oi"]["head_sha"] = NEW_HEAD
+
+        checks = _closure_checks(env, seat_record)
+        by_name = {check.name: check for check in checks}
+
+        assert by_name["seat_codex_gate"].status == "FAIL"
+        assert by_name["seat_merge_with_oi"].status == "FAIL"
+        detail = by_name["seat_merge_with_oi"].detail
+        assert NEW_HEAD[:12] in detail and HEAD[:12] in detail
+        assert "kop" in detail
+
+    def test_a_record_without_the_block_judges_as_on_main(self, env, monkeypatch):
+        _capped_world(env)
+        _book(env)
+        seat_record = _seat_record(env, monkeypatch)
+        ledger = dict(seat_record["round_ledger"])
+        ledger.pop("merge_with_oi")
+        no_block = {**seat_record, "round_ledger": ledger}
+
+        by_name = {check.name: check for check in _closure_checks(env, no_block)}
+
+        # Pinned: without the verdict the codex seat keeps the FAIL it was merged past,
+        # and that rejection still blocks — exactly the pre-OI-2506 reading.
+        assert by_name["seat_codex_gate"].status == "FAIL"
+        assert by_name["review_seats_blocking"].status == "FAIL"
+        assert by_name["seat_kimi_gate"].status == "PASS"
+        assert "seat_merge_with_oi" not in by_name
+
+
+class _RealPublisher:
+    """The real ``publish_review_summary`` beside the forge edge stubbed out.
+
+    ``build_project_store`` replaces the summary publisher with a stub so nothing
+    leaves the machine. These tests need the real mapping (its ``dry_run`` and
+    its label), so the real one is restored and only ``publish_check_run`` — the
+    one call that writes to GitHub — is replaced by a spy.
+    """
+
+    def _install(self, env, monkeypatch) -> List[Any]:
+        import forge_gate_publisher as fgp
+
+        _door_edges(monkeypatch, env)
+        monkeypatch.setattr(fgp, "publish_review_summary", env["publish_review_summary"])
+        published: List[Any] = []
+
+        def spy(head_sha, name, conclusion, summary, **kwargs):
+            published.append(summary)
+            return {"id": 7}
+
+        monkeypatch.setattr(fgp, "publish_check_run", spy)
+        monkeypatch.setattr(fgp, "auto_merge_is_armed", lambda *a, **k: False)
+        monkeypatch.setattr(fgp, "load_app_config", lambda *a, **k: fgp.AppConfig("vnx-gate", 1))
+        monkeypatch.setattr(fgp, "_emit_publication_event", lambda **kw: None)
+        return published
+
+
+class TestADryRunWritesNothing(_RealPublisher):
+    def _dry_run(self, capsys, extra: List[str]) -> tuple[int, Dict[str, Any]]:
+        import pr_merge
+
+        rc = pr_merge.main(["--pr", str(PR), "--dispatch-id", "2026-10-28-rg4", "--dry-run", "--json", *extra])
+        text = capsys.readouterr().out
+        return rc, json.loads(text[text.index("{"):])
+
+    def test_a_dry_run_under_a_standing_verdict_publishes_nothing(self, env, monkeypatch, capsys):
+        _capped_world(env)
+        _book(env)
+        published = self._install(env, monkeypatch)
+
+        rc, payload = self._dry_run(capsys, [])
+
+        assert published == [], "a dry run never calls the publisher"
+        assert rc == 0
+        assert (payload["dry_run"], payload["success"], payload["error"]) == (
+            True, True, "dry_run: no merge executed")
+
+    def test_a_dry_run_under_an_override_publishes_nothing_too(self, env, monkeypatch, capsys):
+        _capped_world(env)
+        _book(env)
+        published = self._install(env, monkeypatch)
+
+        rc, payload = self._dry_run(capsys, ["--override-b3", "--reason", "de cap is te oud"])
+
+        assert published == [], "a dry run never calls the publisher"
+        assert rc == 0
+        assert (payload["dry_run"], payload["success"], payload["error"]) == (
+            True, True, "dry_run: no merge executed")
+
+
+class TestTheRefreshLabelsItsEvidence(_RealPublisher):
+    def test_a_verdict_driven_refresh_is_labelled_as_the_verdict(self, env, monkeypatch):
+        import pr_merge
+
+        _capped_world(env)
+        verdict = _book(env)
+        published = self._install(env, monkeypatch)
+
+        gate, _pr_data = pr_merge._run_review_gate(PR)
+
+        assert gate["verdict"] == "GO", gate["message"]
+        assert len(published) == 1, published
+        (summary,) = published
+        assert "B3 override" not in summary
+        assert "mergen-met-OI" in summary and verdict.verdict_id in summary and HEAD[:12] in summary
+
+    def test_an_override_refresh_keeps_its_own_label(self, env, monkeypatch):
+        import pr_merge
+
+        _capped_world(env)
+        _book(env)
+        published = self._install(env, monkeypatch)
+
+        gate, _pr_data = pr_merge._run_review_gate(PR, b3_override="de cap is te oud")
+
+        assert gate["verdict"] == "GO", gate["message"]
+        assert len(published) == 1, published
+        (summary,) = published
+        assert "B3 override: de cap is te oud" in summary

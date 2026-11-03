@@ -842,6 +842,23 @@ def could_fill(seat: str, excluded: frozenset) -> Tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class RecordedMerge:
+    """The ``mergen-met-OI`` verdict a merge record carries (RG-4 round 3, OI-2506).
+
+    Read back from ``review_seats.round_ledger.merge_with_oi`` on the
+    ``pr_merged`` receipt: the verdict the door counted when it merged, with the
+    head it was given for. Closure fills the codex seat with it and lifts that
+    seat's veto on that head only — the same judgement the door made, never a
+    second one.
+    """
+
+    verdict_id: str
+    head_sha: str
+    cap_rule: str
+    oi_ids: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DoorRounds:
     """The round ledger as the door reads it for one PR (``review_rounds``).
 
@@ -856,7 +873,10 @@ class DoorRounds:
     ``verkleinen`` granted past the cap (R2a); ``merge_with_oi`` the standing
     ``mergen-met-OI`` verdict that lets the codex seat count on this head
     without a PASS, with ``merge_refusal`` saying why a verdict that stands
-    here does not count (R2c, RG-4).
+    here does not count (R2c, RG-4). ``recorded`` (RG-4 round 3) says the
+    ledger was read from a merge record, not from the live ledger: track
+    closure judges the merge under the verdict it merged with, and the PASSes
+    it merged past are not counted again (:func:`merge_record_rounds`).
     """
 
     path: str
@@ -869,6 +889,7 @@ class DoorRounds:
     grant: Any = None
     merge_with_oi: Any = None
     merge_refusal: str = ""
+    recorded: bool = False
 
     @property
     def capped(self) -> bool:
@@ -952,6 +973,51 @@ def door_rounds(
         override_carrier=b3_override_carrier, grant=grant, merge_with_oi=merge_with_oi,
         merge_refusal=merge_refusal,
     )
+
+
+def merge_record_rounds(scope: SeatScope, recorded: Any) -> Optional[DoorRounds]:
+    """The round ledger as a merge record carries it, for track closure (RG-4 round 3, OI-2506).
+
+    ``recorded`` is the ``merge_with_oi`` block of the record's
+    ``review_seats.round_ledger``, read as the door wrote it. ``None`` — a
+    merge without a verdict, or a record from before RG-4 — keeps closure
+    judging exactly as it did: no fill, no veto lift.
+
+    A block that cannot be read, does not say the operator approved it, or
+    names another head than the one the merge record carries, fills and lifts
+    nothing and puts the reason in ``merge_refusal``. The head is the binding:
+    a verdict counts on the head it names and on no other, at the door and at
+    closure alike.
+    """
+    if recorded is None:
+        return None
+    pr_number = int(scope.pr_id) if scope.pr_id.isdigit() else 0
+
+    def refusal(message: str) -> DoorRounds:
+        return DoorRounds("", pr_number, recorded=True, merge_refusal=message)
+
+    if not isinstance(recorded, dict):
+        return refusal(
+            f"het merge-record draagt een mergen-met-OI-blok dat geen object is ({recorded!r}): "
+            "het oordeel telt hier niet")
+    verdict_id = str(recorded.get("verdict_id") or "").strip()
+    head = str(recorded.get("head_sha") or "").strip()
+    cap_rule = str(recorded.get("cap_rule") or "").strip()
+    oi_ids = recorded.get("oi_ids")
+    if not verdict_id or not head or not isinstance(oi_ids, list) or not all(isinstance(i, str) for i in oi_ids):
+        return refusal(
+            f"het mergen-met-OI-blok op het merge-record is onvolledig (verdict_id {verdict_id or 'geen'}, "
+            f"kop {head[:12] or 'geen'}, oi_ids {oi_ids!r}): het oordeel telt hier niet")
+    if recorded.get("approved") is not True:
+        return refusal(
+            f"het merge-record draagt {verdict_id} zonder akkoord van de operator (approved is niet true): "
+            "het oordeel telt hier niet")
+    record_head = scope.head_sha or ""
+    if head != record_head:
+        return refusal(
+            f"het merge-record draagt het mergen-met-OI-oordeel {verdict_id} op kop {head[:12]}, maar deze "
+            f"merge ging over kop {record_head[:12] or 'onbekend'}: een oordeel telt alleen op de kop die het noemt")
+    return DoorRounds("", pr_number, recorded=True, merge_with_oi=RecordedMerge(verdict_id, head, cap_rule, tuple(oi_ids)))
 
 
 def _door_grant(state_dir: Path, cap: Any, since: str) -> Any:
@@ -1065,7 +1131,9 @@ def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: D
 
     The codex seat of a PR at the cap is filled by a standing
     ``mergen-met-OI`` verdict instead of a PASS (:func:`_filled_by_merge`), on
-    that head only (R2c, RG-4).
+    that head only (R2c, RG-4). A ledger read from a merge record
+    (``rounds.recorded``) counts no PASS again: the door counted them when it
+    merged, and closure judges the merge under that count.
     """
     import review_rounds
 
@@ -1078,6 +1146,8 @@ def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: D
         # complete) speaks for itself; the generic "seat unfilled" does not.
         if fill.seat == review_rounds.CODEX_SEAT and rounds.merge_refusal and not rounds.override:
             return replace(fill, message=rounds.merge_refusal)
+        return fill
+    if rounds.recorded:
         return fill
     record = fill.record or {}
     head_sha = scope.head_sha or str(record.get("commit_sha") or "")
@@ -1294,6 +1364,7 @@ def evaluate_review_seats(
     b3_override: str = "",
     b3_override_carrier: str = "",
     round_ledger: bool = True,
+    merge_with_oi: Any = None,
     checkout: Optional[Path] = None,
     by_risk: bool = True,
     base_branch: Optional[str] = None,
@@ -1318,6 +1389,13 @@ def evaluate_review_seats(
     (the door's ``--override-b3`` reason) says why. ``b3_override_carrier``
     (``flag`` or ``env``, RG-5) is recorded with it. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
+
+    ``merge_with_oi`` (RG-4 round 3, OI-2506) is the ``merge_with_oi`` block of
+    the merge record closure is judging. With ``round_ledger=False`` it is read
+    through :func:`merge_record_rounds`: the codex seat is filled and its veto
+    lifted exactly as the door did on that head, and a block that names another
+    head (or cannot be read) refuses instead. ``None`` — every other caller,
+    and every merge record without the block — changes nothing.
     """
     scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
     by_risk = by_risk and seats is None
@@ -1332,7 +1410,10 @@ def evaluate_review_seats(
     fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
     import review_rounds
 
-    rounds = door_rounds(scope, b3_override, b3_override_carrier) if round_ledger else None
+    rounds = (
+        door_rounds(scope, b3_override, b3_override_carrier) if round_ledger
+        else merge_record_rounds(scope, merge_with_oi)
+    )
     blocking = blocking_records(on_head)
     if rounds is not None and rounds.merge_with_oi is not None:
         # The verdict lifts the codex seat's veto on this head only (revision 1b

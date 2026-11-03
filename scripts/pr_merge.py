@@ -678,6 +678,11 @@ B3_OVERRIDE_ENV = "VNX_OVERRIDE_B3"
 B3_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_B3_REASON"
 B3_OVERRIDE_CARRIER_FLAG = "flag"
 B3_OVERRIDE_CARRIER_ENV = "env"
+#: The label the refreshed ``vnx-gate/review`` summary gives its evidence (RG-4 round 3,
+#: OI-2506): an actual ``--override-b3`` says so, a standing ``mergen-met-OI`` verdict
+#: names itself instead of borrowing the override's words.
+B3_OVERRIDE_LABEL = "B3 override"
+VERDICT_EVIDENCE_LABEL = "mergen-met-OI"
 
 
 def _b3_override_env_on() -> bool:
@@ -721,7 +726,7 @@ def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
-    b3_override: Optional[str] = None, b3_carrier: str = "",
+    b3_override: Optional[str] = None, b3_carrier: str = "", dry_run: bool = False,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Fail-closed review-gate check: every review seat of the project is filled
     on this PR head before merge (OI-2058, R5b).
@@ -750,7 +755,8 @@ def _run_review_gate(
     only lets the codex seat of a PR at the B3 cap count, and the merge record
     carries it with its reason (``review_seats.round_ledger.override``).
     ``b3_carrier`` (``flag`` or ``env``, RG-5) says which carrier supplied it
-    and lands in the same record.
+    and lands in the same record. ``dry_run`` (RG-4 round 3) is the door's own
+    ``--dry-run``: the required check is then only rehearsed, never published.
     """
     pr_data = _query_pr(pr_number)
     if pr_data is None:
@@ -827,13 +833,13 @@ def _run_review_gate(
     # as read: a missing or malformed base makes the class high, never main.
     return _review_seats_verdict(
         pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
-        b3_carrier=b3_carrier, base_branch=pr_data.get("baseRefName"),
+        b3_carrier=b3_carrier, base_branch=pr_data.get("baseRefName"), dry_run=dry_run,
     ), pr_data
 
 
 def _review_seats_verdict(
     pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
-    b3_carrier: str = "", base_branch: Any = None,
+    b3_carrier: str = "", base_branch: Any = None, dry_run: bool = False,
 ) -> Dict[str, Any]:
     """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
 
@@ -860,7 +866,7 @@ def _review_seats_verdict(
     )
     return _refreshed_review_gate(
         gate, pr_number, head_sha, b3_override=b3_override or "", branch=branch, base_branch=base_branch,
-        results_dir=state_dir / "review_gates" / "results",
+        results_dir=state_dir / "review_gates" / "results", dry_run=dry_run,
     )
 
 
@@ -876,7 +882,7 @@ def _merge_evidence_reason(gate: Dict[str, Any]) -> str:
 
 def _refreshed_review_gate(
     gate: Dict[str, Any], pr_number: int, head_sha: str, *, b3_override: str, branch: str, base_branch: Any,
-    results_dir: Path,
+    results_dir: Path, dry_run: bool = False,
 ) -> Dict[str, Any]:
     """``gate`` GO with ``vnx-gate/review`` republished for this head first; NO-GO when that did not go out (RG-4).
 
@@ -886,6 +892,12 @@ def _refreshed_review_gate(
     calls RG-2's ``refresh_review_summary`` with the override reason or the
     verdict as evidence and refuses, naming the check, when nothing went out or
     what went out is not green.
+
+    The evidence says what it is: an actual ``--override-b3`` keeps the
+    ``B3 override`` label, and a verdict-driven refresh is labelled with the
+    verdict (RG-4 round 3, OI-2506). A ``dry_run`` rehearses the same refresh —
+    the publisher is not called, so no check-run leaves the machine, and the
+    gate keeps the verdict it already had.
 
     A publication that went out is not a pass (RG-4 round 2): the required check
     can be republished red (``conclusion`` ``failure``/``action_required`` — the
@@ -897,16 +909,18 @@ def _refreshed_review_gate(
     """
     if gate.get("verdict") != "GO":
         return gate
-    reason = (b3_override or "").strip() or _merge_evidence_reason(gate)
+    override = (b3_override or "").strip()
+    reason = override or _merge_evidence_reason(gate)
     if not reason:
         return gate
+    label = B3_OVERRIDE_LABEL if override else VERDICT_EVIDENCE_LABEL
     from forge_gate_publisher import CONCLUSION_SUCCESS, REVIEW_SUMMARY_CHECK_NAME, refresh_review_summary
 
     why = "de publicatie ging niet uit"
     try:
         publication = refresh_review_summary(
             pr_number, head_sha, b3_override=reason, results_dir=results_dir, branch=branch,
-            base_branch=base_branch,
+            base_branch=base_branch, b3_override_label=label, dry_run=dry_run,
         )
     # vnx-silent-except: a forge failure mid-merge is a refusal that names the
     # check, never a traceback that leaves the door without a verdict.
@@ -2225,7 +2239,7 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"CI gate: {gate['message']}")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
-    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, **_b3_override_kwargs(args))
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, dry_run=args.dry_run, **_b3_override_kwargs(args))
     evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
         return refuse("review", review_gate, "review_gate")
