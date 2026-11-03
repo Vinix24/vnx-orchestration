@@ -274,9 +274,12 @@ def test_the_committed_skip_set_names_the_run_it_was_measured_on():
     header = "\n".join(text.splitlines()[:12])
     assert "41119890499" in header and "75011469" in header
     assert "50 skips" in header
+    assert "OI-2518" in header  # the one key added after that run
     entries, problems = cxp.read_expected_skips(EXPECTED_SKIPS)
     assert problems == []
-    assert len(entries) == 50
+    assert len(entries) == 51
+    assert ("tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin"
+            "::test_existing_branch_passes_check") in entries
     for line in text.splitlines():
         if line.strip() and not line.startswith("#"):
             assert "  # " in line, line

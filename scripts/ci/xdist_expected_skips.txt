@@ -5,7 +5,10 @@
 # 2026-10-30, artifact `profile-a-evidence` of its serial Profile A
 # (junit-full.xml + manifest-full.json, phase `full`, run attempt 1). That run
 # recorded 50 skips and no collection-time skip; every one is listed below with
-# the reason it carried.
+# the reason it carried. One key was added after that run by the D4 round of
+# OI-2518 (2026-11-03): the positive control of the branch-on-origin check now
+# skips when its precondition listing cannot answer under xdist, so that skip
+# is accepted here with the reason it carries.
 #
 # ENTRY RULE. One key per line: a test nodeid
 # (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
@@ -69,5 +72,6 @@ tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed:
 tests/test_launchd_subsystem_probe_driver.py::TestTemplateIsWellFormed::test_plutil_lint_passes  # plutil is macOS only
 tests/test_learning_d3_proposal.py::test_real_history_produces_at_least_one_proposal  # real receipt trail not found at /tmp/vnx_conftest_q47sxiqe/state/t0_receipts.ndjson
 tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_lane_log_stamp_failure_reason_on_copy  # real PR #1677 kimi_gate report/lane-log not present under /home/runner/.vnx-data/vnx-dev — this verification only runs on the operator's own local central store
+tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass
 tests/test_report_to_receipt_converter_staleness.py::TestConverterBeaconFreshnessLiveStore::test_converter_beacon_is_fresh_on_the_live_store  # no live VNX store resolvable — no store with a booked receipt (state/t0_receipts.ndjson) was found, so the tripwire has nothing to measure (CI runner / fresh machine)
 tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # actionlint not installed

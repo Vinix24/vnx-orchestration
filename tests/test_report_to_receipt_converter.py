@@ -1913,14 +1913,26 @@ class TestFailClosedBranchNotOnOrigin:
         Finds any dispatch branch on origin via ``git ls-remote`` as a
         positive control — no hardcoded branch name, no assumption that
         the current worktree has been pushed.
+
+        The listing is a precondition, not the thing under test (OI-2518:
+        under xdist it can hit the 10 s timeout and fail the run). Narrowed
+        to ``dispatch/*``, and a timeout or a non-zero exit of it skips with
+        the reason instead of failing; the check under test keeps its real
+        call and its real assertion.
         """
         from report_to_receipt_converter import _check_branch_on_origin
 
         cwd = str(Path(__file__).resolve().parent.parent)
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", "origin"],
-            capture_output=True, text=True, timeout=10, cwd=cwd,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin", "dispatch/*"],
+                capture_output=True, text=True, timeout=10, cwd=cwd,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.skip(
+                "precondition `git ls-remote --heads origin dispatch/*` timed "
+                "out after 10 s — no positive control available (OI-2518)"
+            )
         if result.returncode != 0 or not result.stdout.strip():
             pytest.skip("git ls-remote origin returned nothing — cannot run positive test")
 
@@ -1942,6 +1954,31 @@ class TestFailClosedBranchNotOnOrigin:
             return  # Found one — test passes
 
         pytest.skip("No dispatch/* branch found on origin for positive control")
+
+    @pytest.mark.parametrize(
+        "precondition",
+        ["timeout", "nonzero_exit", "empty_output"],
+        ids=["timeout", "nonzero-exit", "empty-output"],
+    )
+    def test_no_positive_control_skips_instead_of_failing(self, monkeypatch, precondition):
+        """A precondition listing that cannot answer skips, never fails.
+
+        Only the precondition's ``git ls-remote`` is patched here; the call
+        under test is not reached, because the skip fires first (OI-2518).
+        Before the fix a ``TimeoutExpired`` of this listing failed the run.
+        """
+        def _fake_run(argv, **kwargs):
+            if precondition == "timeout":
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 10))
+            if precondition == "nonzero_exit":
+                return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            self.test_existing_branch_passes_check()
+        expected = "timed out" if precondition == "timeout" else "returned nothing"
+        assert expected in str(excinfo.value), str(excinfo.value)
 
     def test_non_terminal_status_skips_branch_check(self, tmp_path, state_dir):
         """Reports with status='unknown' skip the fail-closed gate entirely,
