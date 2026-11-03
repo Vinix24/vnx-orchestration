@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -40,11 +41,17 @@ _SCRIPTS_LIB = _SCRIPTS_DIR / "lib"
 sys.path.insert(0, str(_SCRIPTS_LIB))
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
+import coordination_db  # noqa: E402
+import dispatch_start  # noqa: E402
+import project_id_migration  # noqa: E402
+import report_to_receipt_converter as rc  # noqa: E402
+from append_receipt_internals import payload as payload_module  # noqa: E402
 from restore_stranded_reports import (  # noqa: E402
     _RESTORED_MARKER,
     apply_restoration,
     build_ledger_model_index,
     find_stranded_reports,
+    main,
     resolve_identity,
 )
 
@@ -165,8 +172,6 @@ class TestFindStrandedReports:
         assert len(scan.candidates) == 0
 
     def test_skips_already_watermarked_report(self, data_dir, state_dir, reports_dir):
-        import report_to_receipt_converter as rc
-
         report = _write_stranded_report(reports_dir / "20260906-b.md", "20260906-b")
         file_hash = rc._compute_sha256(report)
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -340,3 +345,199 @@ class TestApplyIsIdempotent:
         assert text_after_second == text_after_first  # byte-for-byte: no new block
         assert text_after_second.count(_RESTORED_MARKER) == 1
         assert len(_receipts(state_dir)) == 1  # no second receipt
+
+
+# ---------------------------------------------------------------------------
+# Part 6 (K-8c): the scan routes through the lifecycle decision
+# ---------------------------------------------------------------------------
+
+PROJECT = "proj-alpha"
+ROLE = "backend-developer"
+T0 = "2026-11-03T08:00:00Z"
+
+
+@pytest.fixture()
+def lifecycle_db(state_dir: Path) -> Path:
+    """A real coordination store at the production shape (project_id + composite UNIQUE)."""
+    coordination_db.init_schema(state_dir)
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
+    return state_dir
+
+
+@pytest.fixture()
+def spec_file(tmp_path: Path) -> Path:
+    path = tmp_path / "SPEC.md"
+    path.write_text("# staged spec\n\nbody\n", encoding="utf-8")
+    return path
+
+
+@pytest.fixture()
+def v3(monkeypatch):
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+
+
+@pytest.fixture()
+def clock(monkeypatch):
+    """Only ``_now`` is pinned; every lifecycle line is still written by ``begin``."""
+    state = {"now": T0}
+    monkeypatch.setattr(dispatch_start, "_now", lambda: state["now"])
+    return state
+
+
+@pytest.fixture()
+def hermetic_append(monkeypatch):
+    """Keep the append layer real, but never fire its process-spawning hooks."""
+    real = payload_module.append_receipt_payload
+
+    def _append(receipt, **kwargs):
+        kwargs.setdefault("skip_enrichment", True)
+        return real(receipt, **kwargs)
+
+    monkeypatch.setattr(payload_module, "append_receipt_payload", _append)
+    monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
+
+
+def _insert_dispatch_row(state_dir: Path, dispatch_id: str, *, attempt_count: int = 1) -> None:
+    with coordination_db.get_connection(state_dir) as conn:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, metadata_json) "
+            "VALUES (?, ?, 'running', ?, '{}')",
+            (dispatch_id, PROJECT, attempt_count),
+        )
+        conn.commit()
+
+
+def _corrupt_row_metadata(state_dir: Path, dispatch_id: str) -> None:
+    """The row exists but is unreadable: ``metadata_json`` is not JSON."""
+    with coordination_db.get_connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE dispatches SET metadata_json = 'this is not json' "
+            "WHERE dispatch_id = ? AND project_id = ?",
+            (dispatch_id, PROJECT),
+        )
+        conn.commit()
+
+
+def _begin(state_dir: Path, spec_file: Path, dispatch_id: str) -> dispatch_start.Handover:
+    return dispatch_start.begin(
+        project_id=PROJECT, dispatch_id=dispatch_id, role=ROLE, base_sha="a" * 40,
+        spec_file=spec_file, target_slot="T1", state_dir=state_dir,
+    )
+
+
+def _warnings(caplog) -> list:
+    return [record for record in caplog.records
+            if record.levelname == "WARNING" and record.name == "restore_stranded_reports"]
+
+
+class TestLifecycleRefusalIsVisible:
+    """``find_stranded_reports`` must not swallow ``ReportPathRefused``.
+
+    The report stays where it is — a refusal is a named decision, not a
+    failure and not a silent skip — but it is logged per dispatch and counted.
+    """
+
+    def test_two_refusals_are_logged_counted_and_left_in_place(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock,
+            hermetic_append, caplog, capsys, tmp_path):
+        dispatch_ids = ("20260906-refused-a", "20260906-refused-b")
+        for dispatch_id in dispatch_ids:
+            _insert_dispatch_row(state_dir, dispatch_id)
+            _begin(state_dir, spec_file, dispatch_id)  # the real writer stamps the row
+            _corrupt_row_metadata(state_dir, dispatch_id)  # the row is unreadable from here on
+            _write_stranded_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+        hashes_before = {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in reports_dir.glob("*.md")
+        }
+
+        with caplog.at_level(logging.WARNING):
+            scan = find_stranded_reports(data_dir, state_dir)
+
+        assert [refusal.dispatch_id for refusal in scan.refused] == list(dispatch_ids)
+        assert {refusal.code for refusal in scan.refused} == {"lifecycle_mode_undecidable"}
+        assert [refusal.path.name for refusal in scan.refused] == [
+            f"{dispatch_id}.md" for dispatch_id in dispatch_ids
+        ]
+        # The unreadable dispatch ROW is the named reason, and it is carried
+        # through to the log and to the refusal line (never dropped).
+        assert all("row: unreadable" in refusal.detail for refusal in scan.refused)
+        assert scan.candidates == ()
+        warnings = _warnings(caplog)
+        assert len(warnings) == 2
+        for dispatch_id, record in zip(dispatch_ids, warnings):
+            message = record.getMessage()
+            assert dispatch_id in message
+            assert "lifecycle_mode_undecidable" in message
+            assert "nothing was booked" in message
+
+        # Nothing was booked and neither report was touched: both stay retryable.
+        assert _receipts(state_dir) == []
+        assert {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in reports_dir.glob("*.md")
+        } == hashes_before
+
+        # The headline names the count, and every refusal gets one line, in
+        # --list and in --apply; the exit code does not change because of them.
+        exit_list = main(["--list", "--data-dir", str(data_dir), "--state-dir", str(state_dir)])
+        listing = capsys.readouterr().out
+        assert "2 refused on the ledger lifecycle decision" in listing
+        assert listing.count("REFUSED dispatch_id=") == 2
+        for dispatch_id in dispatch_ids:
+            assert f"dispatch_id={dispatch_id} file={dispatch_id}.md code=lifecycle_mode_undecidable" in listing
+
+        other = tmp_path / "no-refusals"
+        (other / "unified_reports").mkdir(parents=True)
+        (other / "state").mkdir()
+        exit_clean = main(["--list", "--data-dir", str(other), "--state-dir", str(other / "state")])
+        assert exit_list == exit_clean == 0
+
+        exit_apply = main(["--apply", "--data-dir", str(data_dir), "--state-dir", str(state_dir)])
+        applying = capsys.readouterr().out
+        assert applying.count("REFUSED dispatch_id=") == 2
+        assert "2 refused on the lifecycle decision" in applying
+        assert exit_apply == 0
+
+    def test_a_legacy_stranded_report_is_still_a_candidate(self, data_dir, state_dir, reports_dir):
+        """The legacy branch is untouched: no lifecycle line, no store DB → a candidate."""
+        _write_stranded_report(reports_dir / "20260906-legacy.md", "20260906-legacy")
+
+        scan = find_stranded_reports(data_dir, state_dir)
+
+        assert scan.refused == ()
+        assert [candidate.dispatch_id for candidate in scan.candidates] == ["20260906-legacy"]
+        assert scan.candidates[0].receipt["event_type"] == "task_complete"
+
+    def test_a_v3_stranded_report_is_booked_as_report_ingested(
+            self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock, v3,
+            hermetic_append):
+        dispatch_id = "20260906-v3"
+        _insert_dispatch_row(state_dir, dispatch_id)
+        _begin(state_dir, spec_file, dispatch_id)
+        _write_stranded_report(reports_dir / f"{dispatch_id}.md", dispatch_id)
+
+        scan = find_stranded_reports(data_dir, state_dir)
+
+        assert len(scan.candidates) == 1
+        receipt = scan.candidates[0].receipt
+        assert receipt["event_type"] == "report_ingested"
+        assert receipt["event_type"] != "task_complete"
+        assert receipt["attempt"] == 1
+        assert receipt["end_pending"] is True
+
+    def test_a_non_refusal_exception_from_the_core_builder_is_still_skipped_silently(
+            self, data_dir, state_dir, reports_dir, monkeypatch, caplog):
+        _write_stranded_report(reports_dir / "20260906-boom.md", "20260906-boom")
+
+        def _explode(*args, **kwargs):
+            raise ValueError("the core builder cannot parse this report")
+
+        monkeypatch.setattr(rc, "_build_receipt_from_report_core", _explode)
+        with caplog.at_level(logging.WARNING):
+            scan = find_stranded_reports(data_dir, state_dir)
+
+        assert scan.candidates == ()
+        assert scan.refused == ()
+        assert _warnings(caplog) == []
