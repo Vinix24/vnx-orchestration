@@ -87,11 +87,15 @@ def _positive_int(value: Any) -> Optional[int]:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 1 else None
 
 
-def _read_ledger(state_dir: Path) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Every record, or ``(None, reason)``; only the torn tail may be a broken line."""
+def _read_ledger(state_dir: Path, dispatch_id: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """Every record, or ``(None, reason)``; only the torn tail may be a broken line.
+
+    An interior break refuses only when its raw text carries this dispatch id (OI-2528);
+    another dispatch's broken line is skipped with a WARNING.
+    """
     path = state_dir / LEDGER_FILENAME
     try:
-        records = read_ndjson_strict(path)
+        records = read_ndjson_strict(path, lambda raw: dispatch_id in raw)
     except NdjsonCorruptionError as exc:
         return None, f"ledger_corrupt: {exc}"
     except OSError as exc:
@@ -119,8 +123,10 @@ def _parse_metadata(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
 def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "_Row":
     """``dispatches`` for this key, read-only; an unaddressable tenant is unreadable."""
     db_path = Path(db_path_from_state_dir(state_dir))
-    if not db_path.is_file():
+    if not db_path.exists():
         return _Row(ROW_ABSENT, detail=f"{db_path} does not exist")
+    if not db_path.is_file():
+        return _Row(ROW_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
     if not project_id: return _Row(ROW_UNREADABLE, detail="the tenant of the store could not be resolved")
     try:
         rows = _query_rows(db_path, "SELECT metadata_json, attempt_count FROM dispatches "
@@ -255,7 +261,7 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
     if not did:
         raise ReportPathRefused(did, "missing_dispatch_id", "the receipt carries no dispatch_id")
     state_path = _require_state_dir(state_dir)
-    records, ledger_error = _read_ledger(state_path)
+    records, ledger_error = _read_ledger(state_path, did)
     starts_any = [] if records is None else [r for r in records if str(r.get("dispatch_id") or "").strip()
         == did and str(r.get("event_type") or r.get("event") or "").strip() == DISPATCH_STARTED_EVENT_TYPE]
     tenant = _resolve_tenant(did, str(project_id or "").strip() or None, starts_any)

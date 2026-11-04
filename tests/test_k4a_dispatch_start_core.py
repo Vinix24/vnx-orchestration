@@ -475,3 +475,55 @@ def test_record_child_without_a_child_start_time_writes_nothing(
     monkeypatch.setattr(dispatch_start, "process_started_at", lambda pid: None)
     assert dispatch_start.record_child(handover, state_dir=state_dir, child_pid=os.getpid()) is None
     assert not dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1).exists()
+
+
+# --- OI-2528 (K-8a r5): the door refuses only on its OWN broken evidence -------
+
+def _raw_lines(state_dir: Path) -> list:
+    ledger = _ledger(state_dir)
+    return ledger.read_text(encoding="utf-8").splitlines() if ledger.exists() else []
+
+
+def _replace_line(state_dir: Path, index: int, fragment: str) -> None:
+    lines = _raw_lines(state_dir)
+    lines[index] = fragment
+    _ledger(state_dir).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_a_corrupt_unfinished_start_refuses_the_next_handover(state_dir, spec_file, v3):
+    """Codex's reproduction: with the unfinished start unparseable, the refire must not pass."""
+    _begin(state_dir, spec_file)  # attempt 1 starts, door pid = this live process
+    _replace_line(state_dir, 0, f'{{"event_type": "dispatch_started", "dispatch_id": "{DISPATCH}", '
+                                f'"attempt": 1, "proj')
+
+    with pytest.raises(dispatch_start.StartRefused) as excinfo:
+        _begin(state_dir, spec_file)
+
+    assert excinfo.value.code == "ledger_corrupt"
+    assert "line 1" in excinfo.value.detail
+    assert len(_raw_lines(state_dir)) == 1  # no attempt-2 line was written
+
+
+def test_a_corrupt_line_of_another_dispatch_is_skipped_at_the_door(state_dir, spec_file, v3):
+    _ledger(state_dir).write_text(
+        '{"event_type": "dispatch_started", "dispatch_id": "d-other", "att\n', encoding="utf-8")
+
+    handover = _begin(state_dir, spec_file)
+
+    assert handover.attempt == 1
+    own = json.loads(_raw_lines(state_dir)[-1])
+    assert own["dispatch_id"] == DISPATCH and own["attempt"] == 1
+
+
+def test_a_torn_final_fragment_is_tolerated_at_the_door(state_dir, spec_file, v3):
+    """An unterminated final fragment is a crash mid-append: the records before it count."""
+    _seed_line(state_dir, _start_line(attempt=1, door_pid=999999, door_started_at="long gone"))
+    with _ledger(state_dir).open("a", encoding="utf-8") as handle:
+        handle.write(f'{{"event_type": "dispatch_started", "dispatch_id": "{DISPATCH}", '
+                     f'"attempt": 1, "proj')
+
+    handover = _begin(state_dir, spec_file)
+
+    assert handover.attempt == 2
+    appended = json.loads(_raw_lines(state_dir)[-1])
+    assert appended["dispatch_id"] == DISPATCH and appended["attempt"] == 2
