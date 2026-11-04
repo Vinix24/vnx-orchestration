@@ -57,6 +57,7 @@ from dispatch_internal import (  # noqa: E402
 )
 from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # noqa: E402
 from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
+import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
 from receipt_verdict import (  # noqa: E402
@@ -3497,6 +3498,27 @@ def _resolve_start_base_sha(plan: ExecutionPlan) -> "tuple[Path, str]":
     return consumer_root, sha
 
 
+def _warn_refire(refire_reason: Optional[str], dispatch_id: str) -> None:
+    """The explicit ``--refire`` reason, logged once at the door."""
+    if refire_reason and refire_reason.strip():
+        logger.warning(
+            "[dispatch_cli] REFIRE dispatch_id=%s reason=%s",
+            dispatch_id, refire_reason.strip(),
+        )
+
+
+def _finalize_door_exit(handover, *, state_dir: Path, reason: str) -> None:
+    """ADR-045 (K-5): the door's own exit publishes its end line too.
+
+    The lanes finalize every exit they reach; this covers what escapes them — a
+    lock-wait timeout before the slot, a violated invariant, any uncaught error
+    — and is a no-op without a v3 hand-over, so a legacy fire behaves exactly as
+    it did on the K-4c head. Never raises (``finalize_exit`` logs and swallows a
+    finalizer failure): a door-side end line must not change the exit code.
+    """
+    dispatch_exit.finalize_exit(handover, state_dir=state_dir, status="failure", reason=reason)
+
+
 def _owner_hand_over(
     plan: ExecutionPlan, spec: DispatchSpec, *, project_id: str, spec_file: Path,
     state_dir: Path, attempt_id: Optional[str],
@@ -3696,11 +3718,7 @@ def run_dispatch(
             f"{refire_block}; pass --refire REASON to override",
         ))
         return 1
-    if refire_reason and refire_reason.strip():
-        logger.warning(
-            "[dispatch_cli] REFIRE dispatch_id=%s reason=%s",
-            spec.dispatch_id, refire_reason.strip(),
-        )
+    _warn_refire(refire_reason, spec.dispatch_id)
 
     # OI-962: resolve provider+model via smart router BEFORE validate().
     # The router fills in provider+model when the spec carries none (AUTO),
@@ -3802,6 +3820,9 @@ def run_dispatch(
     # or None when registration/claim did not produce one (best-effort —
     # see _persist_dispatch_row). None for dry_run (that block never runs).
     attempt_id: Optional[str] = None
+    # ADR-045 (K-5): the hand-over this fire owns, once it has one. Bound here so
+    # the outer handlers below can finalize an exit that never reached the lane.
+    handover: Optional[dispatch_start.Handover] = None
 
     # P1-#1: wrap everything after validate in try/except — door never panics
     try:
@@ -4041,6 +4062,7 @@ def run_dispatch(
                 )
 
     except _InvariantViolation as exc:
+        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_PRE_SPAWN_ERROR)
         logger.error(
             "[dispatch_cli] INVARIANT VIOLATION dispatch=%s: %s",
             getattr(getattr(vspec, "spec", None), "dispatch_id", "?"), exc,
@@ -4057,6 +4079,9 @@ def run_dispatch(
         # bare REJECT [runtime-error] path below (which never touched the
         # door-owned row's state at all).
         dispatch_id = getattr(getattr(vspec, "spec", None), "dispatch_id", None)
+        # ADR-045 §1: the slot never opened, so this exit is a failed end line
+        # with the plan's own reason — before the door-owned row is closed out.
+        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_SLOT_TIMEOUT)
         if dispatch_id:
             _owner_finish(
                 dispatch_id, attempt_id, state_dir=state_dir,
@@ -4068,6 +4093,7 @@ def run_dispatch(
         print(f"[dispatch_cli] REJECT [lock-wait-timeout]: {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
+        _finalize_door_exit(handover, state_dir=state_dir, reason=dispatch_exit.REASON_DOOR_ERROR)
         print(f"[dispatch_cli] REJECT [runtime-error]: {exc}", file=sys.stderr)
         return 1
 

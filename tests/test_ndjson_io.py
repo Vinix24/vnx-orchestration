@@ -3,6 +3,12 @@
 Covers scripts/lib/ndjson_io.py:
   - read_ndjson / iter_ndjson skip a torn/partial final line from a crash
     mid-append instead of raising, and read every complete record otherwise.
+    Their lenient mid-file skip is pinned here: other callers rely on it.
+  - read_ndjson_strict tolerates only the torn tail: the final fragment of a
+    file that does not end in a newline. Any other unparseable line — including
+    a newline-terminated final one — is interior corruption and refuses with
+    ``NdjsonCorruptionError`` naming the line and the file. An optional
+    predicate scopes that refusal to raw lines a caller can own.
   - fsync_fileno is best-effort: it syncs a healthy handle and degrades to a
     logged warning (returns False, never raises) when the fs rejects fsync.
 """
@@ -19,7 +25,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 import ndjson_io
-from ndjson_io import fsync_fileno, iter_ndjson, read_ndjson
+from ndjson_io import (NdjsonCorruptionError, fsync_fileno, iter_ndjson, read_ndjson,
+                       read_ndjson_strict)
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +110,219 @@ def test_iter_ndjson_is_lazy(tmp_path):
     path.write_text(json.dumps({"dispatch_id": "d-0"}) + "\n", encoding="utf-8")
     it = iter_ndjson(path)
     assert iter(it) is it  # a generator/iterator, not a materialized list
+
+
+# ---------------------------------------------------------------------------
+# strict reader: the torn tail is tolerated, an interior hole refuses
+# ---------------------------------------------------------------------------
+
+def test_strict_reader_matches_read_ndjson_on_a_clean_file(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    records = [{"dispatch_id": f"d-{i}", "status": "success"} for i in range(3)]
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+
+    assert read_ndjson_strict(path) == read_ndjson(path) == records
+
+
+def test_strict_reader_matches_read_ndjson_on_a_torn_tail(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    good = [{"dispatch_id": "d-0"}, {"dispatch_id": "d-1"}]
+    path.write_text(
+        json.dumps(good[0]) + "\n" + json.dumps(good[1]) + "\n" + '{"dispatch_id": "d-2", "par',
+        encoding="utf-8",
+    )
+
+    assert read_ndjson_strict(path) == read_ndjson(path) == good
+
+
+def test_strict_reader_skips_blank_lines(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n\n   \n" + json.dumps({"dispatch_id": "d-1"}) + "\n",
+        encoding="utf-8",
+    )
+    assert read_ndjson_strict(path) == [{"dispatch_id": "d-0"}, {"dispatch_id": "d-1"}]
+
+
+def test_strict_reader_keeps_a_final_record_without_a_trailing_newline(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n" + json.dumps({"dispatch_id": "d-1"}),
+        encoding="utf-8",
+    )
+    assert read_ndjson_strict(path) == [{"dispatch_id": "d-0"}, {"dispatch_id": "d-1"}]
+
+
+def test_strict_reader_refuses_an_interior_broken_line_with_its_number(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + '{"dispatch_id": "d-1", "event_ty\n'   # line 2: interior corruption
+        + json.dumps({"dispatch_id": "d-2"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+    assert exc.value.path == path
+    assert "line 2" in str(exc.value)
+    assert str(path) in str(exc.value)
+
+
+def test_strict_reader_refuses_a_broken_first_line_when_another_follows(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text("{broken\n" + json.dumps({"dispatch_id": "d-1"}) + "\n", encoding="utf-8")
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 1
+
+
+def test_strict_reader_refuses_an_undecodable_interior_byte(tmp_path):
+    """A byte that is not UTF-8 is unparseable too — never papered over with U+FFFD."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-\xff1"}\n'
+        + json.dumps({"dispatch_id": "d-2"}).encode("utf-8") + b"\n"
+    )
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+
+
+def test_strict_reader_refuses_a_broken_final_line_that_ends_in_a_newline(tmp_path):
+    """A newline-terminated final line was written completely: committed, not torn."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + '{"dispatch_id": "d-1", "event_ty\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+
+
+def test_strict_reader_refuses_an_undecodable_final_line_that_ends_in_a_newline(tmp_path):
+    """Codex's reproduction: a newline-terminated final byte break is interior corruption."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-\xff1"}\n'
+    )
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+
+
+def test_strict_reader_refuses_a_committed_break_before_a_whitespace_only_tail(tmp_path):
+    """Only the final physical fragment can be torn: trailing spaces never rescue a break."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"dispatch_id":"d-own", broken\n   ', encoding="utf-8")
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 1
+
+    terminated = tmp_path / "terminated.ndjson"
+    terminated.write_text('{"dispatch_id":"d-own", broken\n', encoding="utf-8")
+    with pytest.raises(NdjsonCorruptionError) as terminated_exc:
+        read_ndjson_strict(terminated)
+    assert terminated_exc.value.line_number == 1
+
+
+def test_strict_reader_skips_a_real_torn_tail(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n{"dispatch_id": "x", brok', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}]
+
+
+def test_strict_reader_keeps_records_before_a_whitespace_only_final_fragment(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n   ', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}]
+
+
+def test_strict_reader_reads_an_unterminated_valid_final_line(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n{"b": 2}', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}, {"b": 2}]
+
+
+def test_strict_reader_with_a_predicate_skips_another_dispatches_broken_line(
+        tmp_path, caplog):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + '{"dispatch_id": "d-other", "event_ty\n'
+        + json.dumps({"dispatch_id": "d-2"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="ndjson_io"):
+        out = read_ndjson_strict(path, lambda raw: "d-0" in raw)
+
+    assert out == [{"dispatch_id": "d-0"}, {"dispatch_id": "d-2"}]
+    assert any("malformed" in record.message.lower() for record in caplog.records)
+
+
+def test_strict_reader_with_a_predicate_refuses_when_the_raw_line_holds(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + '{"dispatch_id": "d-1", "event_ty\n'
+        + json.dumps({"dispatch_id": "d-2"}) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path, lambda raw: "d-1" in raw)
+
+    assert exc.value.line_number == 2
+
+
+def test_strict_reader_predicate_never_rescues_a_torn_tail(tmp_path):
+    """The predicate scopes interior corruption only; the unterminated tail stays skipped."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + '{"dispatch_id": "d-1", "event_ty',
+        encoding="utf-8",
+    )
+
+    assert read_ndjson_strict(path, lambda raw: "d-1" in raw) == [{"dispatch_id": "d-0"}]
+
+
+def test_strict_reader_missing_file_yields_nothing(tmp_path):
+    assert read_ndjson_strict(tmp_path / "does-not-exist.ndjson") == []
+
+
+def test_iter_ndjson_still_skips_an_interior_broken_line_unchanged(tmp_path):
+    """Pinned: the lenient reader keeps its mid-file skip; only the strict one refuses."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text(
+        json.dumps({"dispatch_id": "d-0"}) + "\n"
+        + "{not valid json\n"
+        + json.dumps({"dispatch_id": "d-2"}) + "\n",
+        encoding="utf-8",
+    )
+    assert read_ndjson(path) == [{"dispatch_id": "d-0"}, {"dispatch_id": "d-2"}]
+    with pytest.raises(NdjsonCorruptionError):
+        read_ndjson_strict(path)
 
 
 # ---------------------------------------------------------------------------
