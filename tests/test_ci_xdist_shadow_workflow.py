@@ -5,8 +5,10 @@ instead of a merge:
 
 * Profile A runs its selection from scripts/ci/profile_a_pytest_args.sh (the
   -k quarantine and the exclusion loop no longer live in the workflow), calls
-  the prelude fatally, uploads its evidence with if: always(), and has a 55
-  minute timeout (risk R9);
+  the prelude fatally, uploads its evidence with if: always(), and has an 80
+  minute timeout — the bridge until D4 sets it again from the measured
+  parallel time, because risk R9 (the serial job crosses its 55 min bound)
+  came true on 2026-11-03;
 * the shadow job "Profile A (xdist shadow)" follows every rule of "Shadow
   evidence never fails a check": every step non-fatal, every step with its
   own timeout and their sum under the job's, the record and the upload with
@@ -50,9 +52,13 @@ def _step_by_id(job: dict, step_id: str) -> dict:
 # --- Profile A ----------------------------------------------------------------
 
 
-def test_profile_a_keeps_its_required_name_and_gets_55_minutes(jobs):
-    assert jobs["profile-a"]["name"] == "Profile A (doctor + core tests)"
-    assert jobs["profile-a"]["timeout-minutes"] == 55
+def test_profile_a_keeps_its_required_name_and_gets_80_minutes(jobs):
+    job = jobs["profile-a"]
+    assert job["name"] == "Profile A (doctor + core tests)"
+    assert job["timeout-minutes"] == 80
+    bounded = [step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step]
+    assert bounded and all(isinstance(bound, int) for bound in bounded), bounded
+    assert sum(bounded) < job["timeout-minutes"], "a step timeout must fire before the job timeout"
 
 
 def test_profile_a_calls_the_prelude_fatally(jobs):

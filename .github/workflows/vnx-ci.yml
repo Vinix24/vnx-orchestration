@@ -18,15 +18,25 @@ jobs:
     # moving label.
     runs-on: ubuntu-24.04
     # Bounds a hung job to minutes instead of GitHub's 6-hour hard runner
-    # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
-    # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
-    # 38911196655 on b39838cf: 35.4 min, pytest 2089 s). 55 min (was 45) for
-    # the shadow period of track ci-profile-a-xdist (risk R9): the job ran at
-    # 35.4 of its 45 minutes and now also writes a JUnit XML and a collection
-    # manifest. The switch to xdist (D4) sets it again from the measured
-    # parallel time. Still the vangnet for whatever hangs next, not a fix for
-    # the apt-mirror hang fixed in the prelude.
-    timeout-minutes: 55
+    # limit. 55 min (was 45) was the shadow-period bound of track
+    # ci-profile-a-xdist (risk R9) because the suite had grown: 35.4 min on
+    # run 38911196655 (2026-10-16) against 16-21 min over 6 runs on 18-08/19-08
+    # 2026. R9 came true on 2026-11-03. Measured with `gh run view <id>
+    # --json jobs` on that day: the last three main runs finished the job in
+    # 52, 52 and 54.8 min (runs 41635101067, 41644670004, 41676693958, all
+    # success — the last one 12 s under the limit), while all 13 stacked
+    # dispatch branches since 17:28Z ended at exactly 55 min with conclusion
+    # `cancelled` (runs 41684592554, 41687396152, 41690829008, 41694042318,
+    # 41695532547, 41697184654, 41699575938, 41703043400, 41703351990,
+    # 41704305851, 41706334385, 41707709832, 41707921645); GitHub reports a
+    # job timeout as `cancelled`, so no PR of the stack could get a green VNX
+    # CI and the D4 cutover rule could not hold (`every_run_clean` fails on
+    # `reference.job=cancelled`). 80 min (was 55) is the bridge until D4
+    # (#2361), which runs the same suite in the xdist shape in 17-24 min and
+    # sets this bound again from that measured parallel time. Still the
+    # vangnet for whatever hangs next, not a fix for the apt-mirror hang fixed
+    # in the prelude.
+    timeout-minutes: 80
 
     steps:
       - name: Checkout

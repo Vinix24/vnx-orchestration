@@ -68,6 +68,20 @@ def is_non_outcome_lifecycle(record: Mapping[str, Any]) -> bool:
     return event_type_of(record) in NON_OUTCOME_EVENT_TYPES
 
 
+# The door's refusal marker (OI-2524): a refusal is booked as a completion-shaped
+# line (``task_complete`` with ``status: blocked``) that carries no attempt.
+REFUSAL_DELIVERY_STATE = "delivery_refused"
+
+
+def is_refusal(record: Mapping[str, Any]) -> bool:
+    """True when the line is a door refusal (``delivery_state: delivery_refused``).
+
+    Only that exact positive value counts. A refusal ends no started attempt
+    and ranks below every real completion line (OI-2524).
+    """
+    return record.get("delivery_state") == REFUSAL_DELIVERY_STATE
+
+
 def completion_status(record: Mapping[str, Any]) -> Optional[str]:
     """The status a completion line's outcome is read under, or None.
 
@@ -135,6 +149,18 @@ def _completion_witness_rank(record: Mapping[str, Any]) -> int:
     return _COMPLETION_WITNESS_RANK.get(event_type_of(record), 0)
 
 
+def _completion_witness_key(record: Mapping[str, Any]) -> Tuple[int, int]:
+    """The rank of a completion line within its attempt key.
+
+    A refusal is no outcome of the attempt (OI-2524), so it ranks below every
+    non-refusal line; all refusals tie with each other, leaving the first one
+    the witness of its attempt.
+    """
+    if is_refusal(record):
+        return (0, 0)
+    return (1, _completion_witness_rank(record))
+
+
 def dedupe_completions(
     events: Iterable[Mapping[str, Any]],
 ) -> List[Mapping[str, Any]]:
@@ -146,7 +172,9 @@ def dedupe_completions(
     counting each of them would count one dispatch twice. The witness for an
     attempt is the strongest line present (see ``_COMPLETION_WITNESS_RANK``);
     among equals the first line wins, and a line without a dispatch id is never
-    merged with another. Order follows the input.
+    merged with another. Order follows the input. A door refusal ranks below
+    every non-refusal line of its attempt (OI-2524), so it can never hide the
+    real completion that follows it.
     """
     chosen: Dict[Tuple[str, str], Mapping[str, Any]] = {}
     for index, record in enumerate(events):
@@ -156,7 +184,7 @@ def dedupe_completions(
         # A line without a dispatch id gets a unique slot so it is kept once.
         slot = key if key is not None else ("", f"line:{index}")
         current = chosen.get(slot)
-        if current is None or _completion_witness_rank(record) > _completion_witness_rank(current):
+        if current is None or _completion_witness_key(record) > _completion_witness_key(current):
             chosen[slot] = record
     return list(chosen.values())
 
@@ -186,7 +214,8 @@ def completion_matches_outcome(
 
 __all__ = (
     "COMPLETION_TYPES", "DISPATCH_FINISHED_EVENT_TYPE", "NON_OUTCOME_EVENT_TYPES",
-    "completion_attempt_key", "completion_matches_outcome", "completion_outcome",
-    "completion_status", "count_completions", "dedupe_completions", "event_type_of",
-    "is_completion", "is_non_outcome_lifecycle", "is_v3_end_line",
+    "REFUSAL_DELIVERY_STATE", "completion_attempt_key", "completion_matches_outcome",
+    "completion_outcome", "completion_status", "count_completions", "dedupe_completions",
+    "event_type_of", "is_completion", "is_non_outcome_lifecycle", "is_refusal",
+    "is_v3_end_line",
 )
