@@ -703,23 +703,13 @@ def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
 
 def _pid_state(pid: Any, started_at: Any) -> str:
     """Live only when *pid* is alive with the recorded kernel start time."""
-    from dispatch_start import process_started_at  # noqa: PLC0415
+    from dispatch_start import pid_verdict  # noqa: PLC0415
 
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0: return LIVENESS_DEAD
-    if not isinstance(started_at, str) or not started_at.strip(): return LIVENESS_UNKNOWN
     try:
-        actual = process_started_at(pid)
+        verdict = pid_verdict(pid, started_at)
     except Exception:  # vnx-silent-except: an unmeasurable pid is unknown, and unknown never abandons
         return LIVENESS_UNKNOWN
-    if actual is not None:
-        return LIVENESS_LIVE if actual == started_at else LIVENESS_DEAD
-    try:  # no start time, but the pid answers: alive and not ours to read
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return LIVENESS_DEAD
-    except OSError:
-        pass
-    return LIVENESS_UNKNOWN
+    return {True: LIVENESS_LIVE, False: LIVENESS_DEAD, None: LIVENESS_UNKNOWN}[verdict]
 
 
 def liveness(state_dir: str | Path, attempt: InFlightAttempt) -> Tuple[str, Optional[str]]:

@@ -80,13 +80,25 @@ def _now() -> str: return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S
 
 def process_started_at(pid: object) -> Optional[str]:
     """The kernel start time for *pid*, else None. Uncached: a reused pid is no evidence."""
-    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0: return None
+    return probe_process_started_at(pid)[1]
+
+
+PROBE_ALIVE, PROBE_DEAD, PROBE_UNKNOWN = "alive", "dead", "unknown"
+
+
+def probe_process_started_at(pid: object) -> Tuple[str, Optional[str]]:
+    """Alive with its kernel start time, dead, or unknown; unknown is never dead (K-9d r2)."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0: return PROBE_DEAD, None
     try:
         probe = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True,
                                text=True, timeout=10, env=dict(os.environ, LC_ALL="C"), check=False)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return probe.stdout.strip() if probe.returncode == 0 and probe.stdout.strip() else None
+    except (OSError, subprocess.SubprocessError): return PROBE_UNKNOWN, None
+    started = probe.stdout.strip()
+    if probe.returncode == 0 and started: return PROBE_ALIVE, started
+    # Measured on this Mac 2026-11-04: a missing pid exits 1 with BOTH streams empty,
+    # while every real ``ps`` failure writes to stderr — so only that is "dead".
+    if probe.returncode == 1 and not started and not probe.stderr.strip(): return PROBE_DEAD, None
+    return PROBE_UNKNOWN, None
 
 
 def read_attempt_state(state_dir: str | Path, project_id: str, dispatch_id: str) -> AttemptState:
@@ -185,27 +197,32 @@ def _handover_lock(state_dir: Path, project_id: str, dispatch_id: str) -> Iterat
         handle.close()
 
 
-def _live(pid: object, started_at: object) -> bool:
-    """True only when *pid* is alive AND carries the recorded start time."""
-    return (isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
-            and isinstance(started_at, str) and bool(started_at.strip())
-            and process_started_at(pid) == started_at)
+def pid_verdict(pid: object, started_at: object) -> Optional[bool]:
+    """True alive, False dead, None unmeasurable — unknown is never dead (K-9d rule 3)."""
+    state, actual = probe_process_started_at(pid)
+    if state != PROBE_ALIVE or not isinstance(started_at, str) or not started_at.strip():
+        return False if state == PROBE_DEAD else None
+    return actual == started_at
 
 
 def _liveness(start_line: Dict[str, Any], *, state_dir: Path, dispatch_id: str) -> Optional[str]:
-    """The first of §5's three liveness signals that holds, else None."""
-    if _live(start_line.get("door_pid"), start_line.get("door_started_at")): return "door_pid"
+    """The first of §5's signals that holds, else ``PROBE_UNKNOWN`` if one could not be
+    measured, else None (K-9d rule 3)."""
+    signals = {"door_pid": pid_verdict(start_line.get("door_pid"), start_line.get("door_started_at"))}
     try:
         spawn = json.loads(spawn_file_path(state_dir, start_line["project_id"], dispatch_id,
                                            int(start_line["attempt"])).read_text(encoding="utf-8"))
     except (KeyError, TypeError, ValueError, OSError, StartRefused, json.JSONDecodeError):
         spawn = None
-    if isinstance(spawn, dict) and _live(spawn.get("child_pid"), spawn.get("child_started_at")): return "child_pid"
+    if isinstance(spawn, dict):
+        signals["child_pid"] = pid_verdict(spawn.get("child_pid"), spawn.get("child_started_at"))
     from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
     try:
-        held = probe_occupancy(claims_dir_for_state_dir(state_dir), dispatch_id) == "held"
-    except OSError: held = True  # unmeasurable counts as held (fail closed)
-    return "occupancy_flock" if held else None
+        held = probe_occupancy(claims_dir_for_state_dir(state_dir), dispatch_id)
+        signals["occupancy_flock"] = {"held": True, "released": False, "absent": False}.get(held)
+    except OSError: signals["occupancy_flock"] = True  # unmeasurable counts as held (fail closed)
+    return next((name for name, verdict in signals.items() if verdict),
+                PROBE_UNKNOWN if None in signals.values() else None)
 
 
 def _plan_attempt(*, state_dir: Path, project_id: str, dispatch_id: str) -> int:
@@ -221,6 +238,9 @@ def _plan_attempt(*, state_dir: Path, project_id: str, dispatch_id: str) -> int:
     last = max(starts, key=lambda line: line["attempt"])
     if last["attempt"] not in ends:
         alive = _liveness(last, state_dir=state_dir, dispatch_id=dispatch_id)
+        if alive == PROBE_UNKNOWN:
+            raise StartRefused("refire_liveness_unknown", f"attempt {last['attempt']} has an "
+                "unfinished dispatch_started with unmeasurable liveness; refusing the refire")
         if alive is not None:
             raise StartRefused("refire_attempt_live", f"attempt {last['attempt']} has a "
                 f"dispatch_started without a dispatch_finished and is live ({alive}); refusing the refire")

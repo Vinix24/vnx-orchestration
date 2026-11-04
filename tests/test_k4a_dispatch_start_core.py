@@ -256,7 +256,7 @@ def test_live_job_start_refuses_the_refire(state_dir, spec_file, v3):
 
 
 def test_liveness_from_the_spawn_file(state_dir, spec_file, v3):
-    _seed_line(state_dir, _start_line(attempt=1, door_pid=999999, door_started_at="long gone"))
+    _seed_line(state_dir, _start_line(attempt=1, door_pid=99998, door_started_at="long gone"))
     spawn = dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1)
     spawn.parent.mkdir(parents=True, exist_ok=True)
     spawn.write_text(json.dumps({"child_pid": os.getpid(),
@@ -268,7 +268,7 @@ def test_liveness_from_the_spawn_file(state_dir, spec_file, v3):
 
 
 def test_liveness_from_the_occupancy_flock(state_dir, spec_file, v3):
-    _seed_line(state_dir, _start_line(attempt=1, door_pid=999999, door_started_at="long gone"))
+    _seed_line(state_dir, _start_line(attempt=1, door_pid=99998, door_started_at="long gone"))
     claims = claims_dir_for_state_dir(state_dir)
     claims.mkdir(parents=True, exist_ok=True)
     with (claims / f"{DISPATCH}.occupancy").open("a") as handle:
@@ -517,7 +517,7 @@ def test_a_corrupt_line_of_another_dispatch_is_skipped_at_the_door(state_dir, sp
 
 def test_a_torn_final_fragment_is_tolerated_at_the_door(state_dir, spec_file, v3):
     """An unterminated final fragment is a crash mid-append: the records before it count."""
-    _seed_line(state_dir, _start_line(attempt=1, door_pid=999999, door_started_at="long gone"))
+    _seed_line(state_dir, _start_line(attempt=1, door_pid=99998, door_started_at="long gone"))
     with _ledger(state_dir).open("a", encoding="utf-8") as handle:
         handle.write(f'{{"event_type": "dispatch_started", "dispatch_id": "{DISPATCH}", '
                      f'"attempt": 1, "proj')

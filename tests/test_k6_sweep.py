@@ -430,7 +430,7 @@ def test_an_unmeasurable_liveness_probe_never_abandons(state_dir, lifecycle_on, 
     def _boom(pid):
         raise RuntimeError("ps is not readable")
 
-    monkeypatch.setattr(dispatch_start, "process_started_at", _boom)
+    monkeypatch.setattr(dispatch_start, "probe_process_started_at", _boom)
 
     result = lifecycle.sweep(state_dir=state_dir,
                              now=_now_after(START_DT, 10 * 3600))
