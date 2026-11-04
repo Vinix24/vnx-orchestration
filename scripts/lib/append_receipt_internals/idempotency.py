@@ -29,6 +29,7 @@ from .outcome_identity import (
     _outcome_index_path_for,
 )
 from .lifecycle import check_end_line, verify_final_end_line
+from ndjson_io import TORN_TAIL_CLOSED
 
 _log = logging.getLogger(__name__)
 
@@ -94,8 +95,8 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
     the fragment, so the new record itself is unparseable — and a caller that
     trusted its own ``appended`` status would publish a loss no later recovery
     can see. This ledger is append-only: the fragment stays on disk
-    byte-for-byte and exactly one ``\\n`` is written so the new line starts on
-    its own line. ``True`` when a terminator was written.
+    byte-for-byte; ``TORN_TAIL_CLOSED`` and one ``\\n`` follow — debris, never corruption
+    to any reader (K-9c rule 1). ``True`` when a terminator was written.
 
     MUST be called while holding the append lock.
     """
@@ -115,7 +116,7 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
             f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
     try:
         with receipt_path.open("ab") as writer:
-            writer.write(b"\n")
+            writer.write(TORN_TAIL_CLOSED + b"\n")
             writer.flush()
             _fsync_receipt_append(writer, context=f"torn tail of {receipt_path}")
     except OSError as exc:

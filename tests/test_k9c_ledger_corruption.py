@@ -38,6 +38,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 import coordination_db  # noqa: E402
 import dispatch_lifecycle as lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
+import ndjson_io  # noqa: E402
 import project_id_migration  # noqa: E402
 import report_lifecycle_mode as rlm  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
@@ -535,3 +536,93 @@ def test_a_missing_database_path_still_answers_legacy(tmp_path):
     path = rlm.decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=state)
 
     assert path.mode == rlm.MODE_LEGACY
+
+
+# ---------------------------------------------------------------------------
+# 8. round 3: a closed crash fragment is debris, not corruption
+# ---------------------------------------------------------------------------
+
+FRAGMENT = b'{"event_type": "dispatch_finished", "dispatch_id": "d-k9c", "att'
+
+
+def _close_the_tail_with_the_real_append(state_dir: Path) -> None:
+    """The real append path: the closer seals the torn fragment, then its record lands."""
+    result = payload_module.append_receipt_payload(
+        {"timestamp": T0, "event_type": "task_complete", "project_id": OTHER_PROJECT,
+         "dispatch_id": OTHER_DISPATCH, "terminal": "T1", "status": "success"},
+        receipts_file=str(_ledger(state_dir)))
+    assert result.status == "appended", result
+
+
+def test_the_closer_seals_the_fragment_with_the_sentinel_and_one_newline(state_dir):
+    _append_raw(state_dir, FRAGMENT)
+
+    _close_the_tail_with_the_real_append(state_dir)
+
+    data = _ledger(state_dir).read_bytes()
+    assert data.startswith(FRAGMENT + ndjson_io.TORN_TAIL_CLOSED + b"\n")
+    assert data.count(ndjson_io.TORN_TAIL_CLOSED) == 1
+    assert data.split(ndjson_io.TORN_TAIL_CLOSED)[0] == FRAGMENT  # its own bytes, untouched
+
+
+def test_the_door_reads_a_closed_fragment_of_this_dispatch_as_debris(
+        state_dir, spec_file, v3, clock):
+    _append_raw(state_dir, FRAGMENT)
+    _close_the_tail_with_the_real_append(state_dir)
+
+    handover = _begin(state_dir, spec_file)
+
+    assert handover.attempt == 1
+    assert handover.lifecycle_mode == "v3"
+
+
+def test_the_finalizer_writes_its_end_line_past_a_closed_fragment_of_this_dispatch(
+        state_dir, spec_file, v3, clock):
+    _begin(state_dir, spec_file)
+    _freeze_intent(state_dir)
+    _append_raw(state_dir, FRAGMENT)
+    _close_the_tail_with_the_real_append(state_dir)
+
+    result = lifecycle.recover(state_dir=state_dir, project_id=PROJECT, dispatch_id=DISPATCH,
+                               attempt=1)
+
+    assert result.status == lifecycle.STATUS_RECOVERED
+    assert [(line["project_id"], line["dispatch_id"]) for line in _parsed_end_lines(state_dir)] == [
+        (PROJECT, DISPATCH)]  # exactly ours, once
+
+
+def test_the_report_decision_reads_a_closed_fragment_of_this_dispatch_as_debris(
+        state_dir, spec_file, v3, clock):
+    _begin(state_dir, spec_file)
+    _finalize(state_dir)
+    ended = [json.loads(raw) for raw in _ledger(state_dir).read_bytes().split(b"\n")
+             if b"dispatch_finished" in raw][0]
+    _append_raw(state_dir, FRAGMENT)
+    _close_the_tail_with_the_real_append(state_dir)
+
+    path = rlm.decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=state_dir, attempt=1)
+
+    assert path.mode == rlm.MODE_V3
+    assert path.end_outcome_id == ended["outcome_id"]
+
+
+def test_the_sweep_reports_no_corruption_for_a_closed_fragment(state_dir, spec_file, v3, clock):
+    _begin(state_dir, spec_file)
+    _append_raw(state_dir, FRAGMENT)
+    _close_the_tail_with_the_real_append(state_dir)
+
+    flights, errors = lifecycle.v3_in_flight(state_dir)
+
+    assert [(attempt.dispatch_id, attempt.attempt) for attempt in flights] == [(DISPATCH, 1)]
+    assert errors == ()
+
+
+def test_a_broken_line_of_this_dispatch_without_the_exact_sentinel_still_refuses(
+        state_dir, spec_file, v3, clock):
+    """Only the closer's exact seal is debris; bytes after it leave the line corrupt."""
+    _append_raw(state_dir, FRAGMENT + ndjson_io.TORN_TAIL_CLOSED + b" x\n")
+
+    with pytest.raises(dispatch_start.StartRefused) as exc:
+        _begin(state_dir, spec_file)
+
+    assert exc.value.code == "ledger_corrupt"

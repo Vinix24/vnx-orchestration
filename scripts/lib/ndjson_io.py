@@ -40,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 PathLike = Union[str, "os.PathLike[str]", Path]
 
+# The append closer's seal on a crash fragment: the only line ending in this is debris.
+TORN_TAIL_CLOSED = b"\t#vnx-torn-tail-closed"
+
 
 def fsync_fileno(fh: Any, *, context: str = "") -> bool:
     """Best-effort ``os.fsync`` of an open file handle.
@@ -85,13 +88,10 @@ def iter_ndjson(path: PathLike) -> Iterator[Any]:
 
     lines = text.splitlines()
 
-    # Index of the final non-blank line. A crash mid-append leaves its partial
-    # record here, so this is the only line permitted to be unparseable.
+    # Only the final element after the last newline may be unparseable (K-9c rule 2).
     last_content_idx = -1
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].strip():
-            last_content_idx = i
-            break
+    if not text.endswith("\n") and text.rsplit("\n", 1)[-1].strip():
+        last_content_idx = len(lines) - 1
 
     for idx, raw in enumerate(lines):
         line = raw.strip()
@@ -100,7 +100,9 @@ def iter_ndjson(path: PathLike) -> Iterator[Any]:
         try:
             yield json.loads(line)
         except json.JSONDecodeError:
-            if idx == last_content_idx:
+            if line.endswith(TORN_TAIL_CLOSED.decode()):
+                logger.warning("ndjson_io: closed torn fragment on line %d in %s", idx + 1, p)
+            elif idx == last_content_idx:
                 # Torn tail — expected after a crash mid-append. Skip quietly.
                 logger.debug("ndjson_io: skipping torn tail line in %s", p)
             else:
@@ -129,11 +131,11 @@ def scan_ndjson_lines(data: bytes) -> Iterator[Tuple[int, bytes, Any, Optional[E
     ``torn`` is only the final fragment of a blob that does not end in a newline:
     such a fragment was never written completely by a crash mid-append. A broken
     final line that DOES end in a newline was committed whole, so it is interior
-    corruption, exactly like any broken line before it.
+    corruption, exactly like any broken line before it. Decided on the blob's last
+    split element, never on the last non-blank line (K-9c rule 2).
     """
     parts = data.split(b"\n")
-    last_content_idx = max((i for i, raw in enumerate(parts) if raw.strip()), default=-1)
-    torn_idx = last_content_idx if last_content_idx >= 0 and not data.endswith(b"\n") else -1
+    torn_idx = len(parts) - 1 if not data.endswith(b"\n") else -1
     for index, raw in enumerate(parts):
         if not raw.strip():
             continue
@@ -153,12 +155,15 @@ def read_ndjson_strict_bytes(
 
     ``predicate`` scopes the refusal: an interior break raises only when it holds for
     that line's raw text (decoded with ``errors="replace"``, never U+FFFD silently lost),
-    and is otherwise skipped with a WARNING.
+    and is otherwise skipped with a WARNING. A broken line ending in ``TORN_TAIL_CLOSED`` is
+    debris: skipped with a WARNING whatever the predicate says.
     """
     records: List[Any] = []
     for number, raw, record, error, torn in scan_ndjson_lines(data):
         if error is None:
             records.append(record)
+        elif raw.endswith(TORN_TAIL_CLOSED):
+            logger.warning("ndjson_io: closed torn fragment on line %d of %s", number, source)
         elif torn:
             logger.debug("ndjson_io: skipping torn tail line %d in %s", number, source)
         elif predicate is None or predicate(raw.decode("utf-8", errors="replace")):
@@ -174,7 +179,7 @@ def read_ndjson_strict(
     """Parsed records; only an unterminated final fragment (torn) may be unparseable.
 
     A broken final line that ends in a newline was written completely, so it is
-    interior corruption. A line that is not UTF-8 is unparseable too — never U+FFFD.
+    interior corruption; so is one that is not UTF-8. ``TORN_TAIL_CLOSED`` debris is skipped.
     ``predicate`` scopes the refusal: an interior break raises only when it holds for
     that line's raw text, and is otherwise skipped with a WARNING.
     """
@@ -185,5 +190,5 @@ def read_ndjson_strict(
     return read_ndjson_strict_bytes(data, source=path, predicate=predicate)
 
 
-__all__ = ["NdjsonCorruptionError", "fsync_fileno", "iter_ndjson", "read_ndjson",
-           "read_ndjson_strict", "read_ndjson_strict_bytes", "scan_ndjson_lines"]
+__all__ = ["NdjsonCorruptionError", "TORN_TAIL_CLOSED", "fsync_fileno", "iter_ndjson",
+           "read_ndjson", "read_ndjson_strict", "read_ndjson_strict_bytes", "scan_ndjson_lines"]

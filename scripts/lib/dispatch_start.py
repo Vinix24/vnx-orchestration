@@ -90,8 +90,14 @@ def process_started_at(pid: object) -> Optional[str]:
 
 
 def read_attempt_state(state_dir: str | Path, project_id: str, dispatch_id: str) -> AttemptState:
-    """Stored count, no row yet, or a read failure; a malformed count is not stored."""
-    if not Path(db_path_from_state_dir(state_dir)).is_file(): return AttemptState(ATTEMPT_NO_ROW)
+    """Stored count, no row yet, or a read failure; a malformed count is not stored.
+
+    Only a missing path is "no row"; an existing non-file path is unreadable (K-9c rule 3).
+    """
+    db_path = Path(db_path_from_state_dir(state_dir))
+    if not db_path.exists(): return AttemptState(ATTEMPT_NO_ROW)
+    if not db_path.is_file():
+        return AttemptState(ATTEMPT_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
     try:
         with get_connection(state_dir) as conn:
             row = conn.execute(

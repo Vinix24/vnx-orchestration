@@ -354,6 +354,95 @@ def test_iter_ndjson_still_skips_an_interior_broken_line_unchanged(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# K-9c round 3: a closed crash fragment is debris; torn is the last fragment
+# ---------------------------------------------------------------------------
+
+def _closed(fragment: bytes = b'{"dispatch_id": "d-1", "event_ty') -> bytes:
+    """A fragment the append closer sealed: its own bytes, the sentinel, one newline."""
+    return fragment + ndjson_io.TORN_TAIL_CLOSED + b"\n"
+
+
+def test_the_strict_reader_skips_a_closed_fragment_instead_of_refusing(tmp_path, caplog):
+    """A write that never completed is no evidence, even when it names this dispatch."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+                     + _closed() + json.dumps({"dispatch_id": "d-2"}).encode("utf-8") + b"\n")
+
+    with caplog.at_level(logging.WARNING, logger="ndjson_io"):
+        assert read_ndjson_strict(path, predicate=lambda raw: "d-1" in raw) == [
+            {"dispatch_id": "d-0"}, {"dispatch_id": "d-2"}]
+    assert any("closed torn fragment" in record.message for record in caplog.records)
+
+
+def test_the_bytes_form_reads_a_closed_fragment_as_debris():
+    good = json.dumps({"dispatch_id": "d-0"}).encode("utf-8")
+    blob = good + b"\n" + _closed() + good + b"\n"
+
+    assert ndjson_io.read_ndjson_strict_bytes(blob, predicate=lambda raw: "d-1" in raw) == [
+        {"dispatch_id": "d-0"}, {"dispatch_id": "d-0"}]
+
+
+def test_the_tolerant_reader_skips_a_closed_fragment_with_a_warning(tmp_path, caplog):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n" + _closed())
+
+    with caplog.at_level(logging.WARNING, logger="ndjson_io"):
+        assert read_ndjson(path) == [{"dispatch_id": "d-0"}]
+    assert any("closed torn fragment" in record.message for record in caplog.records)
+
+
+def test_only_a_line_ending_in_exactly_the_sentinel_is_debris(tmp_path):
+    """Bytes after the marker are not the closer's seal: that line stays corruption."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+                     + b'{"dispatch_id": "d-1", "event_ty' + ndjson_io.TORN_TAIL_CLOSED
+                     + b" x\n" + json.dumps({"dispatch_id": "d-2"}).encode("utf-8") + b"\n")
+
+    with pytest.raises(NdjsonCorruptionError):
+        read_ndjson_strict(path, predicate=lambda raw: "d-1" in raw)
+
+
+def test_a_newline_followed_by_whitespace_terminated_the_broken_record(tmp_path):
+    """Rule 2: only the last split element can be torn; whitespace is no torn fragment."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+                     + b'{"dispatch_id": "d-1", "event_ty\n   ')
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path, predicate=lambda raw: "d-1" in raw)
+
+    assert exc.value.line_number == 2
+
+
+def test_the_same_broken_record_with_no_newline_at_all_is_torn(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+                     + b'{"dispatch_id": "d-1", "event_ty')
+
+    assert read_ndjson_strict(path, predicate=lambda raw: "d-1" in raw) == [
+        {"dispatch_id": "d-0"}]
+
+
+def test_the_bytes_form_makes_the_same_whitespace_tail_decision():
+    good = json.dumps({"dispatch_id": "d-0"}).encode("utf-8")
+    broken = b'{"dispatch_id": "d-1", "event_ty'
+
+    with pytest.raises(NdjsonCorruptionError):
+        ndjson_io.read_ndjson_strict_bytes(good + b"\n" + broken + b"\n   ")
+    assert ndjson_io.read_ndjson_strict_bytes(good + b"\n" + broken) == [{"dispatch_id": "d-0"}]
+
+
+def test_the_tolerant_reader_makes_the_same_whitespace_tail_decision(tmp_path, caplog):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+                     + b'{"dispatch_id": "d-1", "event_ty\n   ')
+
+    with caplog.at_level(logging.WARNING, logger="ndjson_io"):
+        assert read_ndjson(path) == [{"dispatch_id": "d-0"}]
+    assert any("malformed" in record.message.lower() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # fsync helper
 # ---------------------------------------------------------------------------
 

@@ -51,7 +51,7 @@ from append_receipt_internals.lifecycle import (
 from atomic_io import atomic_write_json
 from coordination_db import TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection
 from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
-from ndjson_io import NdjsonCorruptionError, read_ndjson_strict_bytes, scan_ndjson_lines
+from ndjson_io import NdjsonCorruptionError, TORN_TAIL_CLOSED, read_ndjson_strict_bytes, scan_ndjson_lines
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from runtime_state_machine import transition_dispatch_idempotent
 
@@ -583,7 +583,8 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     with handle:
         for number, raw, line, error, torn in scan_ndjson_lines(handle.read()):
             if error is not None:
-                if not torn: errors.append(f"ledger_corrupt line {number}")
+                if not torn and not raw.endswith(TORN_TAIL_CLOSED):  # sealed debris, not a hole
+                    errors.append(f"ledger_corrupt line {number}")
                 continue
             if not isinstance(line, dict):
                 continue

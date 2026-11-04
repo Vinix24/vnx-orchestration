@@ -527,3 +527,39 @@ def test_a_torn_final_fragment_is_tolerated_at_the_door(state_dir, spec_file, v3
     assert handover.attempt == 2
     appended = json.loads(_raw_lines(state_dir)[-1])
     assert appended["dispatch_id"] == DISPATCH and appended["attempt"] == 2
+
+
+# --- K-9c rule 3 (round 3): a path that exists is never read as "no row" ------
+
+def test_a_database_that_is_a_directory_is_unreadable_never_no_row(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    coordination_db.db_path_from_state_dir(state).mkdir()
+
+    attempt = dispatch_start.read_attempt_state(state, PROJECT, DISPATCH)
+
+    assert attempt.status == dispatch_start.ATTEMPT_UNREADABLE
+    assert "exists but is not a regular file" in attempt.detail
+
+
+def test_a_database_that_is_a_directory_refuses_the_door(tmp_path, spec_file, v3):
+    state = tmp_path / "state"
+    state.mkdir()
+    coordination_db.db_path_from_state_dir(state).mkdir()
+
+    with pytest.raises(dispatch_start.StartRefused) as excinfo:
+        _begin(state, spec_file)
+
+    assert excinfo.value.code == "start_attempt_unreadable"
+    assert "exists but is not a regular file" in excinfo.value.detail
+    assert not _ledger(state).exists()  # a refused hand-over writes no start line
+
+
+def test_a_missing_database_path_is_still_no_row(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+
+    attempt = dispatch_start.read_attempt_state(state, PROJECT, DISPATCH)
+
+    assert attempt.status == dispatch_start.ATTEMPT_NO_ROW
+    assert attempt.count == 0

@@ -138,6 +138,8 @@ def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated
     found = {name: [] for name in DEFECTS}  # rule 3: a list of keys per defect
 
     rows, db_path, pairs = {}, db_path_from_state_dir(state_dir), {k[:2] for k in [*starts, *ends]}
+    if pairs and db_path.exists() and not db_path.is_file():  # K-9c rule 4: never "no database"
+        raise Unmeasured(f"{db_path} exists but is not a regular file; the count is not measurable")
     try:
         if pairs and db_path.is_file():
             with get_connection(state_dir) as conn:
