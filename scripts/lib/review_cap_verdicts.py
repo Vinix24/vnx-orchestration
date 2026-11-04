@@ -383,11 +383,17 @@ def standing_verdicts(state_dir: Path, pr_number: int, *, since: str = "") -> Tu
     is the canonical record and the row its projection (ADR-005): a booking
     whose receipt landed and whose row commit did not still decided the PR, and
     an interrupted projection never erases that. Where both stand, the row is
-    returned (it carries the aftermath's ``oi_ids``). Oldest first. Raises
-    :class:`CapVerdictError` as :func:`read_verdicts` and
+    returned (it carries the aftermath's ``oi_ids``). Oldest first.
+
+    ``since`` is the PR's current count (its last attested ``opened`` line): a
+    verdict created before it belongs to a count that no longer stands, for a
+    database row exactly as for a receipt-only verdict (OI-2207). A row is not
+    privileged by having landed; an attested reopening resets it too.
+
+    Raises :class:`CapVerdictError` as :func:`read_verdicts` and
     :func:`receipted_verdicts` do.
     """
-    rows = read_verdicts(state_dir, pr_number)
+    rows = tuple(verdict for verdict in read_verdicts(state_dir, pr_number) if verdict.created_at >= since)
     booked = {verdict.verdict_id for verdict in rows}
     landed = [verdict for verdict in receipted_verdicts(state_dir, pr_number, since=since) if verdict.verdict_id not in booked]
     return tuple(sorted((*rows, *landed), key=lambda verdict: (verdict.created_at, verdict.verdict_id)))
@@ -793,6 +799,53 @@ def door_grant(state_dir: Path, cap: review_rounds.CapState, *, since: str = "")
     except CapVerdictError as exc:
         logger.warning("review_cap_verdicts: the door finds no granted round for PR #%s: %s", cap.pr_number, exc)
         return None
+
+
+@dataclass(frozen=True)
+class StandingMerge:
+    """The standing ``mergen-met-OI`` verdict that lifts the codex seat on one head, or ``refusal`` saying why none does."""
+
+    verdict: Optional[CapVerdict] = None
+    refusal: str = ""
+
+
+def standing_merge(
+    state_dir: Path, cap: review_rounds.CapState, head_sha: str, *, since: str = "",
+) -> StandingMerge:
+    """The ``mergen-met-OI`` verdict that lets the codex seat count on ``head_sha`` (R2c, RG-4).
+
+    Three conditions, each read fresh at the door (revision 1b points 3-5): the
+    verdict stands on this head; an ``operator_approval`` names this verdict id,
+    this PR and this head; the aftermath is booked complete. A store that cannot
+    be read raises :class:`CapVerdictError`: whether a verdict stands cannot be
+    told, so nothing counts.
+    """
+    if not cap.capped or not head_sha:
+        return StandingMerge()
+    verdict = next(
+        (
+            standing for standing in standing_verdicts(state_dir, cap.pr_number, since=since)
+            if standing.head_sha == head_sha and standing.outcome == MERGEN_MET_OI
+        ),
+        None,
+    )
+    if verdict is None:
+        return StandingMerge()
+    if merge_approval(state_dir, verdict) is None:
+        return StandingMerge(refusal=(
+            f"PR #{cap.pr_number} op kop {head_sha[:12]}: de tiebreaker koos mergen-met-OI ({verdict.verdict_id}), "
+            f"maar geen operator_approval noemt verdict {verdict.verdict_id}, PR #{cap.pr_number} én deze kop "
+            f"(één akkoord per gebruik)"
+        ))
+    from review_cap_aftermath import merge_aftermath_complete
+
+    incomplete = merge_aftermath_complete(state_dir, verdict)
+    if incomplete:
+        return StandingMerge(refusal=(
+            f"PR #{cap.pr_number} op kop {head_sha[:12]}: het mergen-met-OI-oordeel {verdict.verdict_id} heeft een "
+            f"akkoord, maar de nasleep is niet als voltooid geboekt: {incomplete}"
+        ))
+    return StandingMerge(verdict=verdict)
 
 
 def round_open_for(state_dir: Path, cap: review_rounds.CapState, dispatch_id: str, *, since: str = "") -> bool:

@@ -211,6 +211,88 @@ def test_cost_tracker_does_not_book_the_lane_line_twice(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# OI-2468: one attempt is one booking and one recommendation
+# ---------------------------------------------------------------------------
+
+def _lane_line(status: str = "done", **extra) -> dict:
+    """The synthesized lane line: the same attempt reported a second time."""
+    line = {
+        "event_type": "subprocess_completion",
+        "status": status,
+        "dispatch_id": DISPATCH_ID,
+        "terminal": "T1",
+        "timestamp": NOW_Z,
+    }
+    line.update(extra)
+    return line
+
+
+def test_cost_tracker_books_a_two_shape_attempt_once(tmp_path):
+    """A ``task_complete`` and the ``dispatch_finished`` of its attempt: 150, not 300."""
+    cost_tracker = _cost_tracker_cli()
+
+    records = [
+        _legacy_line(attempt=1, input_tokens=100, output_tokens=50),
+        _end_line("completed", attempt=1, input_tokens=100, output_tokens=50),
+    ]
+    metrics = cost_tracker.build_metrics(records, 0, tmp_path, tmp_path / "l.ndjson")
+
+    assert metrics["totals"]["events_analyzed"] == 1
+    assert metrics["totals"]["total_tokens"] == 150
+    # The census still counts every raw line: it counts, it books nothing.
+    assert metrics["event_counts"] == {"dispatch_finished": 1, "task_complete": 1}
+
+
+def test_cost_tracker_books_a_two_shape_attempt_with_its_lane_line_once(tmp_path):
+    cost_tracker = _cost_tracker_cli()
+
+    records = [
+        _legacy_line(attempt=1, input_tokens=100, output_tokens=50),
+        _lane_line(attempt=1, input_tokens=100, output_tokens=50),
+        _end_line("completed", attempt=1, input_tokens=100, output_tokens=50),
+    ]
+    metrics = cost_tracker.build_metrics(records, 0, tmp_path, tmp_path / "l.ndjson")
+
+    assert metrics["totals"]["events_analyzed"] == 1
+    assert metrics["totals"]["total_tokens"] == 150
+    assert metrics["event_counts"]["subprocess_completion"] == 1
+
+
+def test_cost_tracker_books_two_attempts_of_one_dispatch_twice(tmp_path):
+    cost_tracker = _cost_tracker_cli()
+
+    records = []
+    for attempt in (1, 2):
+        records.append(_legacy_line(attempt=attempt, input_tokens=100, output_tokens=50))
+        records.append(_end_line("completed", attempt=attempt,
+                                 input_tokens=100, output_tokens=50))
+    metrics = cost_tracker.build_metrics(records, 0, tmp_path, tmp_path / "l.ndjson")
+
+    assert metrics["totals"]["events_analyzed"] == 2
+    assert metrics["totals"]["total_tokens"] == 300
+
+
+def test_cost_tracker_legacy_ledger_keeps_the_numbers_it_had(tmp_path):
+    """Legacy-only ledger: the totals this reader produced before OI-2468."""
+    cost_tracker = _cost_tracker_cli()
+
+    records = [
+        _legacy_line(dispatch_id="20260101-d1", input_tokens=100, output_tokens=50),
+        _lane_line(dispatch_id="20260101-d1", input_tokens=100, output_tokens=50),
+        _legacy_line(dispatch_id="20260101-d2", input_tokens=200, output_tokens=100),
+        # A lone lane line: the only witness of its attempt, and a line this
+        # reader has never booked.
+        _lane_line(dispatch_id="20260101-d3", input_tokens=10, output_tokens=5),
+    ]
+    metrics = cost_tracker.build_metrics(records, 0, tmp_path, tmp_path / "l.ndjson")
+
+    assert metrics["totals"]["receipts_total"] == 4
+    assert metrics["totals"]["events_analyzed"] == 2
+    assert metrics["totals"]["total_tokens"] == 450
+    assert metrics["event_counts"] == {"subprocess_completion": 2, "task_complete": 2}
+
+
+# ---------------------------------------------------------------------------
 # scripts/traceability_audit.py — completion receipts per dispatch
 # ---------------------------------------------------------------------------
 
@@ -578,6 +660,79 @@ def test_recommendations_end_line_without_end_state_claims_nothing(
 def test_recommendations_start_line_generates_nothing(recommendation_engine):
     start = {"event_type": "dispatch_started", "status": "success", "dispatch_id": DISPATCH_ID}
     assert _recommendation_keys(recommendation_engine, start) == []
+
+
+def _run_engine(tmp_path: Path, monkeypatch, records: list[dict], dispatches: list[tuple]):
+    """Run the engine end to end over a ``tmp_path`` ledger and return what it emitted.
+
+    ``dispatches`` is ``(dispatch_id, gate, on_success)`` per completed dispatch
+    file. Only paths are patched; the engine code under test is untouched.
+    """
+    import generate_t0_recommendations as gtr
+
+    completed = tmp_path / "completed"
+    completed.mkdir(exist_ok=True)
+    for dispatch_id, gate, on_success in dispatches:
+        (completed / f"{dispatch_id}.md").write_text(
+            f"Program: test\nGate: {gate}\nOn-Success: {on_success}\n"
+            "On-Failure: investigation\n",
+            encoding="utf-8",
+        )
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir(exist_ok=True)
+    ledger = _write_ledger(state_dir / "t0_receipts.ndjson", records)
+    monkeypatch.setattr(gtr, "_dispatch_roots", lambda: [tmp_path])
+    monkeypatch.setattr(gtr, "RECEIPTS_FILE", ledger)
+    monkeypatch.setattr(gtr, "RECOMMENDATIONS_FILE", state_dir / "t0_recommendations.json")
+    monkeypatch.setattr(gtr, "STAGING_SEEN_FILE", state_dir / "staging_seen.json")
+    monkeypatch.setattr(gtr, "PR_QUEUE_STATE_FILE", state_dir / "pr_queue_state.yaml")
+    monkeypatch.setattr(gtr, "OPEN_ITEMS_DIGEST_FILE", state_dir / "open_items_digest.json")
+    monkeypatch.setattr(gtr, "_rollback_mode_enabled", lambda: False)
+
+    engine = gtr.RecommendationEngine()
+    engine.run()
+    return [(rec.get("trigger"), rec.get("dispatch_id"), rec.get("gate"))
+            for rec in engine.recommendations]
+
+
+def test_recommendations_read_a_lane_line_attempt_once(tmp_path, monkeypatch):
+    """A ``task_complete`` next to its lane line is one attempt, one recommendation."""
+    records = [
+        _legacy_line(status="success"),
+        _lane_line(status="failed"),
+    ]
+    keys = _run_engine(tmp_path, monkeypatch, records,
+                       [(DISPATCH_ID, "implementation", "review")])
+    assert keys == [("task_success", DISPATCH_ID, "review")]
+
+
+def test_recommendations_read_a_two_shape_attempt_once(tmp_path, monkeypatch):
+    """A ``task_complete`` next to its ``dispatch_finished``: the end line wins."""
+    records = [
+        _legacy_line(status="success"),
+        _end_line("failed"),
+    ]
+    keys = _run_engine(tmp_path, monkeypatch, records,
+                       [(DISPATCH_ID, "implementation", "review")])
+    assert keys == [("task_failure", DISPATCH_ID, "investigation")]
+
+
+def test_recommendations_legacy_ledger_keeps_the_recommendations_it_had(tmp_path, monkeypatch):
+    """Legacy-only ledger: the recommendations this engine produced before OI-2468."""
+    d1, d2, d3 = "20260101-d1", "20260101-d2", "20260101-d3"
+    records = [
+        _legacy_line(dispatch_id=d1),
+        _lane_line(dispatch_id=d1, status="done"),
+        _legacy_line(dispatch_id=d2, gate="review"),
+        _lane_line(dispatch_id=d3, status="done"),
+    ]
+    keys = _run_engine(
+        tmp_path, monkeypatch, records,
+        [(d1, "implementation", "review"), (d2, "review", "testing"),
+         (d3, "implementation", "review")],
+    )
+    assert keys == [("task_success", d1, "review"), ("task_success", d2, "testing")]
 
 
 # ---------------------------------------------------------------------------

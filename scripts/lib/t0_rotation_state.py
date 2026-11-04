@@ -96,6 +96,18 @@ RECEIPTS_FILE_ENV = "VNX_T0_ROTATION_RECEIPTS_FILE"
 LATCH_TTL_SECONDS = 30 * 60
 # The hard limit Claude Code puts on a /goal directive (see the goal-prompting skill).
 GOAL_MAX_CHARS = 4000
+# How much one `tmux send-keys -l` burst may carry before Claude Code reads it as a paste instead
+# of as a typed command. Measured in the receipts (dispatch dlv-64f31bed2871): every
+# t0_context_rotation_goal_followup that booked `confirmed` carried a goal.txt of at most 785
+# bytes (15 of 15, 582 to 785, vnx-dev 27-10 to 03-11); every one that booked `unconfirmed`
+# carried 841 bytes or more (10 of 10; 841 vnx-dev 28-10 01:01Z, 862 to 3690 seocrawler-v2 28-10
+# and 29-10); the 913-byte follow-up of 03-11 13:17Z was stored as `<pasted_content>`, ran no
+# /goal and booked unconfirmed. Bytes are UTF-8 bytes, not characters: the handoffs are Dutch and
+# carry accents. A longer line is typed in pieces of at most TYPED_CHUNK_MAX_BYTES.
+GOAL_TYPED_MAX_BYTES = 780
+# The piece size for a line over GOAL_TYPED_MAX_BYTES: send-keys calls this long still arrive as
+# typing, so the pieces land in the input box and one Enter submits the whole line.
+TYPED_CHUNK_MAX_BYTES = 200
 
 WRAP_START_FILE = "wrap-start.json"
 WRAP_SKIPPED_TRIGGER = "t0_context_rotation_wrap_skipped"
@@ -409,18 +421,68 @@ def parse_handoff(path: Path) -> Handoff:
     )
 
 
+def utf8_len(text: str) -> int:
+    """The size of ``text`` as the terminal sends it: UTF-8 bytes, not characters."""
+    return len(text.encode("utf-8"))
+
+
+def split_typed_line(text: str, *, typed_max_bytes: int = GOAL_TYPED_MAX_BYTES,
+                     chunk_bytes: int = TYPED_CHUNK_MAX_BYTES) -> List[str]:
+    """The pieces one typed line must go in, in order.
+
+    A line of at most ``typed_max_bytes`` UTF-8 bytes is one piece: it is typed as one burst and
+    Claude Code reads it as typing (the shape the spawner always had). A longer line is split
+    into pieces of at most ``chunk_bytes``, never in the middle of a character, so the
+    concatenation of the pieces is the line byte for byte. The split lives in Python because
+    bash under the tmux server's locale slices bytes and can cut a multibyte character in half.
+
+    ``type_line`` types one line: a line break is refused, not silently split on. An empty line
+    yields no piece, and the caller types no Enter over an empty input box.
+    """
+    if chunk_bytes <= 0:
+        raise ValueError(f"the piece size must be more than 0, got {chunk_bytes}")
+    if "\n" in text:
+        raise ValueError("a line with a line break is refused: type_line types one line")
+    if utf8_len(text) <= typed_max_bytes:
+        return [text] if text else []
+    pieces: List[str] = []
+    piece, size = "", 0
+    for char in text:
+        char_bytes = utf8_len(char)
+        if char_bytes > chunk_bytes:
+            raise ValueError(f"one character of {char_bytes} UTF-8 bytes does not fit a "
+                             f"{chunk_bytes}-byte piece")
+        if size + char_bytes > chunk_bytes:
+            pieces.append(piece)
+            piece, size = "", 0
+        piece += char
+        size += char_bytes
+    if piece:
+        pieces.append(piece)
+    return pieces
+
+
 def goal_followup_text(goal: ActiveGoal, handoff_path: str) -> str:
-    """The /goal line the spawner types into the successor, within Claude Code's limit."""
+    """The /goal line the spawner types into the successor.
+
+    Order: first a line the successor reads as typing in one burst, at most
+    GOAL_TYPED_MAX_BYTES UTF-8 bytes — the full line (directive plus remaining), else the
+    shortened line that points at the handoff. Else the same two lines under Claude Code's
+    directive limit GOAL_MAX_CHARS, typed in pieces by the spawner. Else the generic line. The
+    directive itself (the KLAAR condition) is never cut.
+    """
     base = f"/goal {goal.directive}, hervat na context-rotatie"
     if goal.remaining:
-        full = f"{base}; resterend: {'; '.join(goal.remaining)}"
-        if len(full) <= GOAL_MAX_CHARS:
-            return full
-        shortened = f"{base}; resterend: zie ## Actief /goal in {handoff_path}"
-        if len(shortened) <= GOAL_MAX_CHARS:
-            return shortened
-    elif len(base) <= GOAL_MAX_CHARS:
-        return base
+        lines = [f"{base}; resterend: {'; '.join(goal.remaining)}",
+                 f"{base}; resterend: zie ## Actief /goal in {handoff_path}"]
+    else:
+        lines = [base]
+    for line in lines:
+        if utf8_len(line) <= GOAL_TYPED_MAX_BYTES:
+            return line
+    for line in lines:
+        if len(line) <= GOAL_MAX_CHARS:
+            return line
     return (f"/goal Hervat de /goal uit {handoff_path} (sectie ## Actief /goal) na "
             "context-rotatie en werk de resterende taken daar af.")
 
@@ -1504,6 +1566,47 @@ def _cmd_event(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_stdin_line() -> str:
+    """The one line on stdin, as UTF-8 bytes: the locale of the caller (the tmux server) decides
+    nothing about what a Dutch handoff line contains."""
+    raw = sys.stdin.buffer.read()
+    return raw.decode("utf-8")
+
+
+def _cmd_split_line(args: argparse.Namespace) -> int:
+    """The pieces ``type_line`` must type, one per output line, UTF-8 and LF.
+
+    stdout carries the pieces and nothing else; a line that cannot be split (a line break, a
+    character larger than a piece, invalid UTF-8) exits 2 with the reason on stderr, so the
+    spawner types nothing at all rather than an Enter over a half-typed line.
+    """
+    try:
+        text = _read_stdin_line()
+        pieces = split_typed_line(text, typed_max_bytes=args.typed_max_bytes,
+                                  chunk_bytes=args.chunk_bytes)
+    except UnicodeDecodeError as exc:
+        sys.stderr.write(f"split-line: the line is not UTF-8: {exc}\n")
+        return 2
+    except ValueError as exc:
+        sys.stderr.write(f"split-line: {exc}\n")
+        return 2
+    for piece in pieces:
+        sys.stdout.buffer.write(piece.encode("utf-8") + b"\n")
+    sys.stdout.buffer.flush()
+    return 0
+
+
+def _cmd_utf8_bytes(_args: argparse.Namespace) -> int:
+    """The UTF-8 byte size of the one line on stdin: the unit GOAL_TYPED_MAX_BYTES counts in."""
+    try:
+        text = _read_stdin_line()
+    except UnicodeDecodeError as exc:
+        sys.stderr.write(f"utf8-bytes: the line is not UTF-8: {exc}\n")
+        return 2
+    sys.stdout.write(f"{utf8_len(text)}\n")
+    return 0
+
+
 def _non_negative_int(value: str) -> int:
     number = int(value)
     if number < 0:
@@ -1611,6 +1714,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     latch.add_argument("--handoff", default=None)
     latch.add_argument("--goal-followup", action="store_true")
     latch.set_defaults(func=_cmd_latch)
+
+    split = sub.add_parser("split-line", help="split one typed line into send-keys pieces")
+    split.add_argument("--typed-max-bytes", type=_positive_int, default=GOAL_TYPED_MAX_BYTES,
+                       help="a line up to this many UTF-8 bytes is one piece (default %(default)s)")
+    split.add_argument("--chunk-bytes", type=_positive_int, default=TYPED_CHUNK_MAX_BYTES,
+                       help="piece size for a longer line (default %(default)s)")
+    split.set_defaults(func=_cmd_split_line)
+
+    measure = sub.add_parser("utf8-bytes", help="print the UTF-8 byte size of the line on stdin")
+    measure.set_defaults(func=_cmd_utf8_bytes)
 
     event = sub.add_parser("event", help="append one rotation state_mutation receipt")
     event.add_argument("--trigger", required=True)

@@ -78,9 +78,16 @@ def build_project_store(tmp_path, monkeypatch):
     import gate_result_parser
     # A recorded verdict is normally copied to the forge as a check-run. Not here: the
     # record on disk is what these tests read, and nothing may leave the machine.
+    # The summary stub keeps the payload shape of the real publisher (its
+    # ``conclusion``), because RG-4's door reads that field; a test that needs the
+    # real mapping restores ``publish_review_summary`` from the returned store.
     import forge_gate_publisher
+    real_publish_review_summary = forge_gate_publisher.publish_review_summary
     monkeypatch.setattr(forge_gate_publisher, "publish_for_record", lambda *a, **kw: None)
-    monkeypatch.setattr(forge_gate_publisher, "publish_review_summary", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        forge_gate_publisher, "publish_review_summary",
+        lambda *a, **kw: {"conclusion": forge_gate_publisher.CONCLUSION_SUCCESS, "dry_run": False},
+    )
     monkeypatch.setattr(gate_recorder, "get_pr_head_sha", lambda _pr: HEAD_SHA)
     monkeypatch.setattr(gate_request_handler, "get_pr_head_sha", lambda _pr: HEAD_SHA)
     monkeypatch.setattr(gate_result_parser, "get_pr_head_sha", lambda _pr: HEAD_SHA)
@@ -92,4 +99,5 @@ def build_project_store(tmp_path, monkeypatch):
         "reports_dir": reports_dir,
         "requests_dir": state_dir / "review_gates" / "requests",
         "results_dir": state_dir / "review_gates" / "results",
+        "publish_review_summary": real_publish_review_summary,
     }

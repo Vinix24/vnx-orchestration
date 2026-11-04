@@ -57,13 +57,15 @@ def calls():
         return [json.loads(l) for l in fh if l.strip()]
 
 def submitted(upto=None):
-    """Texts followed by a separate Enter keystroke, in order (over the first `upto` calls)."""
+    """Texts followed by a separate Enter keystroke, in order (over the first `upto` calls).
+    Each `send-keys -l` appends to the input box, as the real one does: a line typed in pieces
+    submits the concatenation of its pieces."""
     out, pending, eaten = [], None, False
     for c in calls()[:upto]:
         if c[:1] != ["send-keys"]:
             continue
         if "-l" in c:
-            pending = c[-1]
+            pending = (pending or "") + c[-1]
         elif c[-1] == "Enter":
             if (os.environ.get("STUB_EAT_FIRST_GOAL_ENTER") and not eaten
                     and pending and pending.startswith("/goal ")):
@@ -334,6 +336,7 @@ def rig(tmp_path):
         "VNX_T0_ROTATION_RECEIPTS_FILE": str(tmp_path / "receipts" / "t0_receipts.ndjson"),
         "VNX_T0_ROTATE_POLL_SECONDS": "0",
         "VNX_T0_ROTATE_SETTLE_SECONDS": "0",
+        "VNX_T0_ROTATE_CHUNK_PAUSE": "0",
         "VNX_T0_ROTATE_FOOTER_TIMEOUT": "5",
         "VNX_T0_ROTATE_TURN_TIMEOUT": "20",
         "VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT": "3",
@@ -732,10 +735,97 @@ def test_goal_text_stays_within_the_limit():
     assert len(text) <= rotation_state.GOAL_MAX_CHARS
     assert text.startswith("/goal " + "d" * 100)
     assert "zie ## Actief /goal in daily-log/handoff.md" in text
+    # the new first branch: the line it returns goes in as one burst
+    assert len(text.encode("utf-8")) <= rotation_state.GOAL_TYPED_MAX_BYTES
+    # a shortened line that already fits in one burst is never shortened further
+    short = rotation_state.ActiveGoal(directive="d" * 100, remaining=["t" * 60])
+    line = rotation_state.goal_followup_text(short, "daily-log/handoff.md")
+    assert line == ("/goal " + "d" * 100 + ", hervat na context-rotatie; resterend: " + "t" * 60)
+    assert len(line.encode("utf-8")) <= rotation_state.GOAL_TYPED_MAX_BYTES
     huge = rotation_state.ActiveGoal(directive="d" * 5000)
     text = rotation_state.goal_followup_text(huge, "daily-log/handoff.md")
     assert len(text) <= rotation_state.GOAL_MAX_CHARS
     assert "daily-log/handoff.md" in text
+    assert text.startswith("/goal Hervat de /goal uit"), "the generic line is the last resort"
+
+
+# ── one burst or pieces (dispatch dlv-64f31bed2871) ─────────────────────────
+# Measured in the receipts on 03-11: every confirmed follow-up carried <= 785 bytes, every
+# unconfirmed one >= 841 bytes, and the 913-byte line of 03-11 13:17Z was stored as
+# <pasted_content> and ran no /goal. A line over GOAL_TYPED_MAX_BYTES is typed in pieces.
+
+FULL_PREFIX = ", hervat na context-rotatie; resterend: "
+
+
+def _full_line(directive: str, item: str) -> str:
+    return f"/goal {directive}{FULL_PREFIX}{item}"
+
+
+def test_a_followup_line_of_913_bytes_is_shortened_to_one_burst():
+    directive = "werk alle open blockers af tot de lijst leeg is"
+    item = "x" * (913 - len(f"/goal {directive}{FULL_PREFIX}"))
+    assert len(_full_line(directive, item).encode("utf-8")) == 913
+    goal = rotation_state.ActiveGoal(directive=directive, remaining=[item])
+    text = rotation_state.goal_followup_text(goal, "daily-log/handoff.md")
+    assert text == (f"/goal {directive}, hervat na context-rotatie; resterend: "
+                    "zie ## Actief /goal in daily-log/handoff.md")
+    assert len(text.encode("utf-8")) <= rotation_state.GOAL_TYPED_MAX_BYTES
+    assert text.startswith("/goal " + directive)
+
+
+def test_a_full_line_of_700_bytes_is_returned_whole():
+    directive = "werk alle open blockers af"
+    item = "x" * (700 - len(f"/goal {directive}{FULL_PREFIX}"))
+    line = _full_line(directive, item)
+    assert len(line.encode("utf-8")) == 700
+    goal = rotation_state.ActiveGoal(directive=directive, remaining=[item])
+    assert rotation_state.goal_followup_text(goal, "daily-log/handoff.md") == line
+
+
+def test_a_long_directive_is_kept_whole_and_never_replaced_by_the_generic_line():
+    directive = "a" + "é" * 733  # 1467 UTF-8 bytes
+    goal = rotation_state.ActiveGoal(directive=directive)
+    text = rotation_state.goal_followup_text(goal, "daily-log/handoff.md")
+    assert text == f"/goal {directive}, hervat na context-rotatie"
+    assert len(text.encode("utf-8")) == 1500
+    assert len(text.encode("utf-8")) > rotation_state.GOAL_TYPED_MAX_BYTES
+    assert len(text) <= rotation_state.GOAL_MAX_CHARS
+    assert not text.startswith("/goal Hervat de /goal uit")
+
+
+def test_the_threshold_counts_utf8_bytes_not_characters():
+    directive = "werk de accenten af"
+    item = "é" * 400  # 400 characters, 800 UTF-8 bytes
+    line = _full_line(directive, item)
+    assert len(line) < rotation_state.GOAL_TYPED_MAX_BYTES
+    assert len(line.encode("utf-8")) > rotation_state.GOAL_TYPED_MAX_BYTES
+    goal = rotation_state.ActiveGoal(directive=directive, remaining=[item])
+    text = rotation_state.goal_followup_text(goal, "daily-log/handoff.md")
+    assert text == (f"/goal {directive}, hervat na context-rotatie; resterend: "
+                    "zie ## Actief /goal in daily-log/handoff.md")
+    assert len(text.encode("utf-8")) <= rotation_state.GOAL_TYPED_MAX_BYTES
+
+
+def test_the_splitter_keeps_a_short_line_in_one_piece():
+    assert rotation_state.split_typed_line("x" * 582) == ["x" * 582]
+    assert rotation_state.split_typed_line("x" * 780) == ["x" * 780]
+
+
+def test_the_splitter_cuts_a_long_line_into_pieces_of_at_most_200_bytes():
+    line = "/goal " + "é" * 700
+    pieces = rotation_state.split_typed_line(line)
+    assert "".join(pieces) == line
+    assert all(len(p.encode("utf-8")) <= 200 for p in pieces)
+    assert all(p.encode("utf-8").decode("utf-8") == p for p in pieces)
+
+
+@pytest.mark.parametrize("text", ["", "een regel\nmet een regeleinde", "x" * 900 + "\n"])
+def test_the_splitter_refuses_an_empty_line_and_a_line_break(text):
+    if text == "":
+        assert rotation_state.split_typed_line(text) == []
+        return
+    with pytest.raises(ValueError, match="line break"):
+        rotation_state.split_typed_line(text)
 
 
 def test_spawn_script_passes_bash_syntax_check():
@@ -1796,3 +1886,114 @@ def test_the_followup_without_a_transcript_types_nothing(rig):
     assert "--transcript" in proc.stderr
     assert not any(c[0] == "send-keys" for c in _calls(rig))
     assert _goal_outcomes(rig) == []
+
+
+# ── a follow-up line over the burst limit is typed in pieces (dispatch dlv-64f31bed2871) ──
+# The threshold is measured, not guessed: on 03-11 every confirmed follow-up carried <= 785 bytes
+# and every unconfirmed one >= 841 bytes, and the 913-byte line of 13:17Z arrived as a
+# <pasted_content> record, so no /goal ran. A line over GOAL_TYPED_MAX_BYTES is typed in pieces;
+# the concatenation of the pieces is the line, and one Enter submits it.
+
+
+def _long_goal_section() -> tuple:
+    """A ``## Actief /goal`` section whose follow-up line is 1500 UTF-8 bytes: 1467 bytes of
+    directive (one ASCII byte and 733 two-byte characters) plus the 33 bytes the follow-up adds.
+    A byte-wise split would cut a character in half here."""
+    directive = "a" + "é" * 733
+    return directive, f"\n## Actief /goal\nDirective: `/goal {directive}`\n"
+
+
+def _goal_file(rig) -> str:
+    return (_run_dir(rig) / "goal.txt").read_text(encoding="utf-8")
+
+
+def _typed_pieces(rig, prefix: str):
+    """The ``send-keys -l`` arguments that together type the one line starting with ``prefix``,
+    and the call indexes of the first piece and of the Enter that submits the line."""
+    calls = _calls(rig)
+    start = next(i for i, c in enumerate(calls)
+                 if c[:1] == ["send-keys"] and "-l" in c and c[-1].startswith(prefix))
+    pieces = []
+    for idx in range(start, len(calls)):
+        call = calls[idx]
+        if call[:1] != ["send-keys"]:
+            continue
+        if "-l" in call:
+            pieces.append(call[-1])
+            continue
+        assert call[-1] == "Enter", call
+        return pieces, (start, idx)
+    raise AssertionError(f"no Enter after the line starting with {prefix!r}")
+
+
+def test_a_goal_of_1500_bytes_is_typed_in_pieces_and_one_enter_submits_it(rig):
+    """Red run on origin/main: one 1500-byte `send-keys -l`, which Claude Code stores as a paste."""
+    _handoff(rig, HANDOFF_BASE + _long_goal_section()[1])
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
+    assert proc.returncode == 0, proc.stderr
+
+    goal = _goal_file(rig)
+    assert len(goal.encode("utf-8")) == 1500
+    pieces, (start, enter_idx) = _typed_pieces(rig, "/goal ")
+    sizes = [len(piece.encode("utf-8")) for piece in pieces]
+    # a piece cut in the middle of a character has no UTF-8 encoding: this raises here
+    assert len(pieces) > 1, "the 1500-byte line went in as one burst"
+    assert sum(sizes) == 1500 and all(size <= 200 for size in sizes), sizes
+    assert "".join(pieces) == goal, "the pieces do not concatenate to the line"
+    assert all("-l" in c for c in _calls(rig)[start:enter_idx] if c[:1] == ["send-keys"]), \
+        "an Enter landed between the pieces"
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+    assert len(_goal_entries(rig)) == 1
+
+
+def test_a_goal_of_582_bytes_is_still_one_burst_then_enter(rig):
+    directive = "werk alle open blockers af tot de lijst leeg is"
+    item = "x" * (582 - len(f"/goal {directive}{FULL_PREFIX}"))
+    _handoff(rig, HANDOFF_BASE + f"\n## Actief /goal\nDirective: `/goal {directive}`\n"
+                                 f"Resterend:\n- {item}\n")
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
+    assert proc.returncode == 0, proc.stderr
+
+    goal = _goal_file(rig)
+    assert len(goal.encode("utf-8")) == 582
+    pieces, (start, enter_idx) = _typed_pieces(rig, "/goal ")
+    assert pieces == [goal], "a line under the burst limit must not be split"
+    assert enter_idx == start + 1, "Enter must be the next keystroke, as before"
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+
+
+@pytest.mark.parametrize("section,typed_in_pieces", [
+    (GOAL_SECTION, "0"),
+    (_long_goal_section()[1], "1"),
+])
+def test_the_followup_event_carries_goal_bytes_and_typed_in_pieces(rig, section, typed_in_pieces):
+    _handoff(rig, HANDOFF_BASE + section)
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
+    assert proc.returncode == 0, proc.stderr
+    goal = _goal_file(rig)
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "confirmed"
+    assert int(outcome["goal_bytes"]) == len(goal.encode("utf-8"))
+    assert outcome["typed_in_pieces"] == typed_in_pieces
+
+
+def test_the_let_op_line_repeats_a_long_goal_in_pieces_too(rig):
+    """The LET OP line carries the goal and is always long: it goes through type_line like every
+    other line, so it is typed in pieces as well."""
+    _handoff(rig, HANDOFF_BASE + _long_goal_section()[1])
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_GOAL_NEVER": "1"})
+    assert proc.returncode == 0, proc.stderr
+
+    goal = _goal_file(rig)
+    pieces, (start, enter_idx) = _typed_pieces(rig, "LET OP: ")
+    assert len(pieces) > 1
+    assert all(len(piece.encode("utf-8")) <= 200 for piece in pieces)
+    let_op = "".join(pieces)
+    assert let_op.startswith("LET OP: het automatische /goal-vervolg")
+    assert let_op.endswith(goal)
+    assert all("-l" in c for c in _calls(rig)[start:enter_idx] if c[:1] == ["send-keys"])
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "unconfirmed" and outcome["fallback"] == "typed"
+    # the receipt measures the /goal line, not the LET OP line that repeats it
+    assert int(outcome["goal_bytes"]) == len(goal.encode("utf-8"))
+    assert outcome["typed_in_pieces"] == "1"
