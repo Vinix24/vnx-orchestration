@@ -648,23 +648,26 @@ def _provider_switch_verdict(plan: "ExecutionPlan", *, project_id: Optional[str]
     return Reject("provider-disabled", decision.detail())
 
 
-_SWITCH_REFUSAL_STATUS = "blocked"
-_SWITCH_REFUSAL_DELIVERY_STATE = "delivery_refused"
+# The shape of every door refusal receipt (ADR-005): nothing was delivered and nothing was
+# spent, whether the door refused a switched-off family or a start line it could not own.
+_REFUSAL_RECEIPT_STATUS = "blocked"
+_REFUSAL_RECEIPT_DELIVERY_STATE = "delivery_refused"
 
 
-def _record_switch_refusal(
-    plan: "ExecutionPlan", spec: "DispatchSpec", reject: Reject, *, state_dir: Path,
+def _record_door_refusal_receipt(
+    plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Path, error: str,
+    failure_reason: Optional[str] = None, booked_as: str,
 ) -> None:
-    """Book the door's provider-switch refusal of a fire as a dispatch receipt (ADR-005).
+    """Book a door refusal of a fire as ONE ``receipt_kind="dispatch"`` receipt (ADR-005).
 
-    One ``receipt_kind="dispatch"`` receipt in the dispatch's own store, through the canonical
-    dispatch-receipt writer (``governance_emit.emit_dispatch_receipt``), shaped like
-    provider_dispatch's refusal: status ``blocked``, delivery_state ``delivery_refused``, nothing
-    spent. Its failure_class comes from ``classify_failure_safe`` on the decision detail and is
-    ``provider_switched_off``, never an auth/credit class: ``_recent_blocking_rejection`` does
-    not read it as known-rejected, no lane cooldown or reachability record is written, and the
-    refire guard passes over it, so the same dispatch fires once the family is back on. A write
-    failure is recorded as door bookkeeping; the door refuses all the same.
+    The single writer both door refusals share, through the canonical dispatch-receipt writer
+    (``governance_emit.emit_dispatch_receipt``), shaped like provider_dispatch's refusal: status
+    ``blocked``, delivery_state ``delivery_refused``, nothing spent. ``error`` is what
+    ``classify_failure_safe`` sees — the caller keeps it free of arbitrary provider/git text so
+    the class stays deterministic — and ``failure_reason`` (default: the classified reason)
+    is the operator-facing detail. A write failure is booked via ``_record_bookkeeping_failure``
+    under ``booked_as``; the door refuses all the same, and ``TestIsolationGuardError`` is
+    re-raised (OI-1079: a test must fail loudly, never be swallowed here).
     """
     from failure_classification import classify_failure_safe
     from governance_emit import emit_dispatch_receipt
@@ -672,28 +675,45 @@ def _record_switch_refusal(
 
     provider = plan.provider.value
     classified = classify_failure_safe(
-        status=_SWITCH_REFUSAL_STATUS, error=reject.reason, provider=provider,
+        status=_REFUSAL_RECEIPT_STATUS, error=error, provider=provider,
         dispatch_id=plan.dispatch_id,
     )
     try:
         emit_dispatch_receipt(
             dispatch_id=plan.dispatch_id, terminal_id=plan.target_id, provider=provider,
-            model=plan.model, pr_id=plan.pr_id, status=_SWITCH_REFUSAL_STATUS, completion_pct=0,
+            model=plan.model, pr_id=plan.pr_id, status=_REFUSAL_RECEIPT_STATUS, completion_pct=0,
             risk=0.0, findings=[], duration_seconds=0.0,
             token_usage={"input": 0, "output": 0, "cache_read": 0}, cost_usd=0.0,
             state_dir=state_dir, role=spec.role, receipt_kind="dispatch",
             deadline_seconds=plan.deadline_seconds,
-            failure_reason=classified.get("failure_reason"),
+            failure_reason=(
+                failure_reason if failure_reason is not None
+                else classified.get("failure_reason")),
             failure_class=classified.get("failure_class"),
-            delivery_state=_SWITCH_REFUSAL_DELIVERY_STATE,
+            delivery_state=_REFUSAL_RECEIPT_DELIVERY_STATE,
             parent_dispatch=plan.parent_dispatch, task_class=plan.task_class,
             tier_from=plan.tier_from, tier_to=plan.tier_to,
         )
     except TestIsolationGuardError:  # vnx-silent-except: OI-1079 — must fail the test loudly, never swallowed here
         raise
     except Exception as exc:  # vnx-silent-except: recorded as door bookkeeping; the door still refuses the fire
-        _record_bookkeeping_failure("provider_switch_refusal_receipt", plan.dispatch_id, exc,
-                                    state_dir=state_dir)
+        _record_bookkeeping_failure(booked_as, plan.dispatch_id, exc, state_dir=state_dir)
+
+
+def _record_switch_refusal(
+    plan: "ExecutionPlan", spec: "DispatchSpec", reject: Reject, *, state_dir: Path,
+) -> None:
+    """Book the door's provider-switch refusal of a fire as a dispatch receipt (ADR-005).
+
+    Its failure_class comes from ``classify_failure_safe`` on the decision detail and is
+    ``provider_switched_off``, never an auth/credit class: ``_recent_blocking_rejection`` does
+    not read it as known-rejected, no lane cooldown or reachability record is written, and the
+    refire guard passes over it, so the same dispatch fires once the family is back on.
+    """
+    _record_door_refusal_receipt(
+        plan, spec, state_dir=state_dir, error=reject.reason,
+        booked_as="provider_switch_refusal_receipt",
+    )
 
 
 def _lane_verdict(
@@ -2869,8 +2889,23 @@ def _execute_claude_headless(
         raise PermissionError(
             f"claude_headless lane blocked by default; set {override_env}=1 to opt in"
         )
+    # ADR-045 K-4c: only a v3 hand-over has a start line to attach spawn evidence to;
+    # a legacy fire (and every caller without a hand-over) gets no hook and no file.
+    on_spawn = None
+    if handover is not None and handover.is_v3:
+        def _record_spawn(child_pid: int) -> None:
+            """Record the child at the spawn; evidence for the refire check, never a gate."""
+            try:
+                dispatch_start.record_child(handover, state_dir=state_dir, child_pid=child_pid)
+            except Exception as exc:  # vnx-silent-except: spawn-file evidence must not kill a spawned worker
+                logger.warning(
+                    "[dispatch_cli] spawn-file record failed dispatch_id=%s attempt=%s: %r",
+                    handover.dispatch_id, handover.attempt, exc,
+                )
+        on_spawn = _record_spawn
+
     result = run_envelope_headless_plan(plan, permit, state_dir=state_dir, data_dir=data_dir, role=role,
-                                        handover=handover, base_sha=base_sha)
+                                        handover=handover, base_sha=base_sha, on_spawn=on_spawn)
     return result.returncode
 
 
@@ -3229,7 +3264,9 @@ def _find_terminal_receipt_status(dispatch_id: str, *, state_dir: Path) -> Optio
 
     A provider-switch refusal (failure_class ``provider_switched_off``) is passed over: the
     dispatch never ran, so it is no evidence that it already did, and the same dispatch_id
-    fires once the operator switches the family back on.
+    fires once the operator switches the family back on. The door's refused-start receipt
+    (``_is_start_refusal``, K-4c) is passed over for the same reason: ``blocked`` is a hard
+    failure status, but the refire never reached a worker.
     """
     receipts_path = state_dir / _RECEIPTS_FILENAME_REFIRE
     if not receipts_path.exists():
@@ -3248,11 +3285,23 @@ def _find_terminal_receipt_status(dispatch_id: str, *, state_dir: Path) -> Optio
                 if rec.get("dispatch_id") != dispatch_id:
                     continue
                 status = rec.get("status")
-                if status in _TERMINAL_RECEIPT_STATUSES and rec.get("failure_class") != _SWITCHED_OFF_CLASS:
+                if (status in _TERMINAL_RECEIPT_STATUSES
+                        and rec.get("failure_class") != _SWITCHED_OFF_CLASS
+                        and not _is_start_refusal(rec)):
                     last_status = status
     except OSError:
         return None
     return last_status
+
+
+def _is_start_refusal(receipt: dict) -> bool:
+    """True only for the door's refused-start receipt (``_owner_hand_over``, K-4c).
+
+    Identified by the ``start-line-refused`` prefix the door stamps on ``failure_reason``
+    (plus the refusal code); anything missing that prefix — including a receipt with no
+    reason at all — is not a start refusal and stays evidence of a run (fail closed).
+    """
+    return str(receipt.get("failure_reason") or "").startswith(dispatch_start.REFUSAL_CODE)
 
 
 def _route_decision_exists(dispatch_id: str, *, state_dir: Path) -> bool:
@@ -3460,6 +3509,9 @@ def _owner_hand_over(
     door owns is closed the same way a caught-before-spawn failure already is
     (``_owner_finish``, as the lock-wait timeout path does), with the refusal code
     as its reason; another live attempt of the same dispatch is never touched.
+    Every refusal is booked as ONE ``blocked``/``delivery_refused`` receipt
+    (``_record_door_refusal_receipt``, K-4c), owned attempt or not: ADR-005 keeps
+    the decision in the ledger even when no row may be touched.
     Returns ``(None, None)`` after printing ``REJECT [start-line-refused]`` so the
     caller returns without entering the slot or the lane.
 
@@ -3479,6 +3531,11 @@ def _owner_hand_over(
     except dispatch_start.StartRefused as exc:
         print(f"[dispatch_cli] REJECT [{dispatch_start.REFUSAL_CODE}]: {exc.code}: {exc.detail}",
               file=sys.stderr)
+        label = f"{dispatch_start.REFUSAL_CODE}: {exc.code}"
+        _record_door_refusal_receipt(
+            plan, spec, state_dir=state_dir, error=label,
+            failure_reason=" ".join(f"{label}: {exc.detail}".split())[:300],
+            booked_as="start_line_refusal_receipt")
         if attempt_id is not None:
             _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
                           success=False, failure_reason=exc.code)
