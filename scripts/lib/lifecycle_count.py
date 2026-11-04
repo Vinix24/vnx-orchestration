@@ -89,8 +89,9 @@ def _key(line: dict, loose: bool = False):
 def _records(state_dir: Path, repo: str, activation, project: str):
     """In-scope v3 starts and ends by key, the unknown-provenance keys, the problems.
 
-    Records come back grouped by dispatch id, so an attempt's one end is read
-    through ``ledger_end_line.end_line`` without rescanning the ledger.
+    Records come back grouped by dispatch id and hold only lines the cohort keeps,
+    so an attempt's one end is read through ``ledger_end_line.end_line`` without
+    rescanning the ledger and without an excluded line deciding it.
     """
     path = state_dir / LEDGER_FILENAME
     try:
@@ -103,11 +104,14 @@ def _records(state_dir: Path, repo: str, activation, project: str):
     for line in lines:
         if not isinstance(line, dict):
             continue
-        records.setdefault(str(line.get("dispatch_id") or "").strip(), []).append(line)
         version = line.get("schema_version")
         if isinstance(version, bool) or version != 3:
+            records.setdefault(str(line.get("dispatch_id") or "").strip(), []).append(line)
             continue  # no backfill: a legacy line is never paired and never counted
         verdict = _verdict(line, repo, activation, project)
+        if verdict == "out":
+            continue  # the activation commit left it out: no attempt's end is read from here
+        records.setdefault(str(line.get("dispatch_id") or "").strip(), []).append(line)
         if verdict is None:
             continue  # another project's line, whatever its event type
         if verdict == "unknown":  # every v3 line of this project carries its provenance
