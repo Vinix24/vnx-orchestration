@@ -836,8 +836,7 @@ def run_envelope_headless_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
     *,
-    state_dir: Path,
-    data_dir: Path,
+    state_dir: Path, data_dir: Path,
     role: Optional[str] = None, handover: "Optional[Any]" = None, base_sha: Optional[str] = None,
     on_spawn: "Optional[Callable[[int], None]]" = None,
 ) -> EnvelopeResult:
