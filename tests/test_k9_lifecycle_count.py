@@ -464,3 +464,98 @@ def test_the_sessionstart_hook_prints_the_lifecycle_line(tmp_path, state_dir, da
     context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
     assert ("lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
             "1 provenance-unknown; sweep 600s") in context, context
+
+
+# ---------------------------------------------------------------------------
+# 6. round 2 (OI-2528): what the count cannot measure is unmeasured, never zero
+# ---------------------------------------------------------------------------
+
+def _append_text(state_dir: Path, text: str) -> None:
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def test_an_activation_commit_that_does_not_resolve_is_unmeasured(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Warning 1: a git that fails is never a "no", so nothing falls out of a false cohort."""
+    _begin(state_dir, "d-k9-swe")
+    missing = "0" * 40
+
+    count = _count(state_dir, git_repo, activation_commit=missing)
+
+    assert count["status"] == "unmeasured", count
+    assert count["counts"] == {name: None for name in lifecycle_count.DEFECTS}
+    assert missing in count["reason"] and "does not resolve" in count["reason"]
+
+
+def test_an_unparseable_start_timestamp_is_unmeasured_and_the_beacon_fails(
+        state_dir, data_dir, git_repo, writer_sha, lifecycle_on, monkeypatch):
+    """Warning 2: a problem is not a measurement — no zero may stand for it."""
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    _append_raw(state_dir, {"timestamp": "not-a-date", "event_type": "dispatch_started",
+                            "schema_version": 3, "project_id": PROJECT,
+                            "dispatch_id": "d-k9-date", "attempt": 1, "base_sha": "a" * 40,
+                            "deadline_seconds": DEADLINE, "writer_sha": writer_sha["value"]})
+
+    lh.main(["--data-dir", str(data_dir), "--state-dir", str(state_dir), "--json"])
+    beacon = json.loads((data_dir / "health" / "lifecycle_count.json").read_text(encoding="utf-8"))
+    line = build_t0_state._lifecycle_count_index_summary(state_dir)["line"]
+
+    assert beacon["status"] == "fail", beacon
+    assert beacon["details"]["status"] == "unmeasured"
+    assert beacon["details"]["counts"][lifecycle_count.DEFECTS[0]] is None, beacon
+    assert line.startswith("lifecycle: unmeasured"), line
+
+
+def test_an_unknown_writer_on_a_report_ingested_line_is_provenance_unknown(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Warning 3: every v3 line of this project carries provenance, whatever its event."""
+    _begin(state_dir, "d-k9-ingest")
+    _append_raw(state_dir, {"timestamp": START, "event_type": "report_ingested",
+                            "schema_version": 3, "project_id": PROJECT,
+                            "dispatch_id": "d-k9-ingest", "attempt": 1,
+                            "writer_sha": "f" * 40})
+
+    count = _count(state_dir, git_repo)
+
+    assert count["counts"]["provenance_unknown"] == 1, count
+    assert count["findings"]["provenance_unknown"] == [("vnx-dev", "d-k9-ingest", 1)]
+
+
+def test_an_unknown_writer_on_a_line_without_an_attempt_reports_attempt_none(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Rule 4's key choice: the attempt the line names, else ``None`` — never a guess."""
+    _append_raw(state_dir, {"timestamp": START, "event_type": "report_ingested",
+                            "schema_version": 3, "project_id": PROJECT,
+                            "dispatch_id": "d-k9-no-attempt", "writer_sha": "f" * 40})
+
+    count = _count(state_dir, git_repo)
+
+    assert count["findings"]["provenance_unknown"] == [("vnx-dev", "d-k9-no-attempt", None)]
+
+
+def test_an_interior_broken_line_makes_the_count_unmeasured(state_dir, git_repo, writer_sha,
+                                                            lifecycle_on):
+    """Rule 1: a hole in the ledger is no evidence; only the torn tail is read past."""
+    _begin(state_dir, "d-k9-hole")
+    broken_at = len(_ledger(state_dir).read_text(encoding="utf-8").splitlines()) + 1
+    _append_text(state_dir, '{"timestamp": "2026-11-01T10:00:00Z", "event_type"\n')
+    _begin(state_dir, "d-k9-after")
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == "unmeasured", count
+    assert count["counts"] == {name: None for name in lifecycle_count.DEFECTS}
+    assert f"line {broken_at}" in count["reason"], count["reason"]
+
+
+def test_a_torn_final_line_is_no_record_and_no_defect(state_dir, git_repo, writer_sha,
+                                                      lifecycle_on):
+    _finish(state_dir, _begin(state_dir, "d-k9-torn"))
+    _append_text(state_dir, '{"event_type": "dispatch_finished", "schema_ver')
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == "measured", count
+    assert count["counts"]["total"] == 0, count
+    assert count["problems"] == []

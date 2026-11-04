@@ -23,7 +23,7 @@ from dispatch_lifecycle import (  # its table, its grace, its parser: never a co
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
 )
 from ledger_end_line import end_line
-from ndjson_io import read_ndjson
+from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from vnx_paths import project_id_from_state_dir
 
@@ -40,23 +40,27 @@ class Unmeasured(Exception):
     """This store, or the git it needs, cannot be measured; the reason travels on."""
 
 
-def _git(repo: Path, *args: str) -> bool:
+def _git(repo: Path, *args: str) -> int:
+    """The exit code: ``0`` yes, ``1`` no, anything else is not an answer (never a guessed no)."""
     try:  # one helper, one timeout: a git that hangs must never hang the count
         probe = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
                                timeout=GIT_TIMEOUT_SECONDS, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         raise Unmeasured(f"git could not run in {repo}: {exc}") from exc
-    return probe.returncode == 0
+    return probe.returncode
 
 
 @lru_cache(maxsize=None)
 def _known(repo: str, sha: str) -> bool:
-    return _git(Path(repo), "cat-file", "-e", f"{sha}^{{commit}}")
+    return _git(Path(repo), "cat-file", "-e", f"{sha}^{{commit}}") == 0
 
 
 @lru_cache(maxsize=None)
 def _in_cohort(repo: str, activation: str, sha: str) -> bool:
-    return _git(Path(repo), "merge-base", "--is-ancestor", activation, sha)
+    code = _git(Path(repo), "merge-base", "--is-ancestor", activation, sha)
+    if code not in (0, 1):
+        raise Unmeasured(f"git merge-base {activation} {sha} answered {code}: not an answer")
+    return code == 0
 
 
 def _verdict(line: dict, repo: str, activation, project: str):
@@ -72,11 +76,14 @@ def _verdict(line: dict, repo: str, activation, project: str):
     return "out" if activation and not _in_cohort(repo, activation, sha.strip()) else "in"
 
 
-def _key(line: dict):
-    pid, did, attempt = (line.get(name) for name in KEY_FIELDS)
-    keyed = (isinstance(pid, str) and pid.strip() and isinstance(did, str) and did.strip()
-             and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1)
-    return (pid.strip(), did.strip(), attempt) if keyed else None
+def _key(line: dict, loose: bool = False):
+    """``(project_id, dispatch_id, attempt)``; ``None`` when unpairable, unless ``loose``."""
+    values = [line.get(name) for name in KEY_FIELDS]
+    pid = values[0].strip() if isinstance(values[0], str) and values[0].strip() else None
+    did = values[1].strip() if isinstance(values[1], str) and values[1].strip() else None
+    attempt = (values[2] if isinstance(values[2], int) and not isinstance(values[2], bool)
+               and values[2] >= 1 else None)
+    return (pid, did, attempt) if loose or (pid and did and attempt) else None
 
 
 def _records(state_dir: Path, repo: str, activation, project: str):
@@ -87,7 +94,9 @@ def _records(state_dir: Path, repo: str, activation, project: str):
     """
     path = state_dir / LEDGER_FILENAME
     try:
-        lines = read_ndjson(path)  # torn-tail-safe: a torn line is no record, and no defect
+        lines = read_ndjson_strict(path)  # a torn tail is no record; a hole is no evidence
+    except NdjsonCorruptionError as exc:
+        raise Unmeasured(f"{exc}; the count is not measurable") from exc
     except OSError as exc:
         raise Unmeasured(f"cannot read {path}: {exc}") from exc
     starts, ends, unknown, problems, records = {}, {}, [], [], {}
@@ -98,16 +107,21 @@ def _records(state_dir: Path, repo: str, activation, project: str):
         version = line.get("schema_version")
         if isinstance(version, bool) or version != 3:
             continue  # no backfill: a legacy line is never paired and never counted
+        verdict = _verdict(line, repo, activation, project)
+        if verdict is None:
+            continue  # another project's line, whatever its event type
+        if verdict == "unknown":  # every v3 line of this project carries its provenance
+            key = _key(line, loose=True)  # the attempt it names, else None: never a guess
+            if key not in unknown:
+                unknown.append(key)
         event = str(line.get("event_type") or "").strip()
-        if event not in (DISPATCH_STARTED_EVENT_TYPE, DISPATCH_FINISHED_EVENT_TYPE):
-            continue
-        verdict, key = _verdict(line, repo, activation, project), _key(line)
-        if verdict in (None, "out"):
-            continue
+        if verdict == "out" or event not in (DISPATCH_STARTED_EVENT_TYPE,
+                                             DISPATCH_FINISHED_EVENT_TYPE):
+            continue  # pairing is start/end only; "out" already left the cohort
+        key = _key(line)
         if key is None:
             problems.append(f"unkeyable {event}: dispatch_id={line.get('dispatch_id')!r}")
             continue
-        if verdict == "unknown": unknown.append(key)  # counted, and named by its key
         if event == DISPATCH_STARTED_EVENT_TYPE:
             starts.setdefault(key, line)
         else:
@@ -208,11 +222,16 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
     activation = (activation_commit or "").strip() or None
     repo = str(Path(repo) if repo is not None else DEFAULT_REPO)
     try:
-        if not _git(Path(repo), "rev-parse", "--git-dir"):
+        if _git(Path(repo), "rev-parse", "--git-dir"):
             return _unmeasured(f"{repo} is not a git repository: provenance cannot be measured")
+        if activation and _git(Path(repo), "rev-parse", "--verify", "--quiet",
+                               f"{activation}^{{commit}}"):
+            return _unmeasured(f"activation commit {activation} does not resolve")
         starts, ends, unknown, problems, records = _records(
             state_path, repo, activation, project)
         found = _defects(state_path, starts, ends, records, evaluated, problems)
+        if problems:  # a problem is not a measurement: no zero may stand for it
+            raise Unmeasured("; ".join(problems))
     except Unmeasured as exc:
         return _unmeasured(str(exc))
     found["provenance_unknown"] = unknown
