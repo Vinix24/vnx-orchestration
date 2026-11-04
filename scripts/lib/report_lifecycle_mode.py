@@ -268,7 +268,7 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
             row_state = row.status + (f" ({row.detail})" if row.detail else "")
             ledger_state = ledger_error if records is None else "the ledger is readable"
             raise ReportPathRefused(did, "lifecycle_mode_undecidable",
-                f"{ledger_state}; the row is {row_state}, so the lifecycle mode cannot be decided")
+                f"one lifecycle source is unreadable (ledger: {ledger_state}; row: {row_state})")
         elsewhere = _other_tenant_v3(state_path, tenant, did, starts_any)
         if elsewhere:
             raise ReportPathRefused(did, "project_mismatch", f"this dispatch is v3 under "

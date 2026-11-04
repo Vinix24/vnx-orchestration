@@ -22,7 +22,9 @@ acceptance rule of the dispatch:
 6. the v3 line is a copy with exactly one end link and every payload field;
 7. no writer changes — this file imports no writer;
 8. round 3 (OI-2528): the ledger is read strictly — only the torn tail may be
-   unparseable, an interior break refuses ``lifecycle_mode_undecidable``.
+   unparseable, an interior break refuses ``lifecycle_mode_undecidable``;
+9. round 4: that refusal keeps the ``ledger: …; row: …`` wording the restore scan
+   (K-8c) reads out of ``detail``, with the ledger's reason in full on its side.
 """
 
 from __future__ import annotations
@@ -66,11 +68,11 @@ _mod_0017 = _ilu.module_from_spec(_spec_0017)
 _spec_0017.loader.exec_module(_mod_0017)
 
 
-@pytest.fixture()
-def state_dir(tmp_path: Path) -> Path:
+def _make_state_dir(root: Path) -> Path:
     """A real coordination store at the production shape (project_id + composite UNIQUE)."""
-    sd = tmp_path / "state"
-    sd.mkdir()
+    sd = root / "state"
+    sd.mkdir(parents=True)
+
     coordination_db.init_schema(sd)
     db_path = coordination_db.db_path_from_state_dir(sd)
     project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
@@ -82,6 +84,11 @@ def state_dir(tmp_path: Path) -> Path:
     finally:
         conn.close()
     return sd
+
+
+@pytest.fixture()
+def state_dir(tmp_path: Path) -> Path:
+    return _make_state_dir(tmp_path)
 
 
 @pytest.fixture()
@@ -650,7 +657,7 @@ def test_an_interior_broken_start_line_refuses_never_books_a_completion(
         rlm.report_line(_receipt(), state_dir=state_dir)
 
     assert exc.value.code == "lifecycle_mode_undecidable"
-    assert exc.value.detail.startswith("ledger_corrupt")
+    assert "ledger: ledger_corrupt" in exc.value.detail
     assert f"line {line_number}" in exc.value.detail
 
 
@@ -676,3 +683,36 @@ def test_a_torn_final_line_on_another_dispatch_is_no_refusal(state_dir, spec_fil
 
     assert path.mode == rlm.MODE_V3
     assert path.end_pending is True
+
+
+# ---------------------------------------------------------------------------
+# Rule 10 (K-8a r4): the refusal keeps the ``ledger: …; row: …`` wording K-8c reads
+# ---------------------------------------------------------------------------
+
+def test_the_undecidable_refusal_names_both_sources_for_the_restore_scan(
+        state_dir, tmp_path, spec_file, v3, clock):
+    """K-8c's restore scan asserts ``"row: unreadable" in refusal.detail`` and carries the
+    detail to its log line, so the shape is a contract between the two modules. The ledger
+    side keeps round 3's reason in full, line number included, when it is the broken one.
+    """
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    line_number = _corrupt_ledger_line(state_dir, "dispatch_started")
+
+    with pytest.raises(rlm.ReportPathRefused) as ledger_exc:
+        rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert ledger_exc.value.code == "lifecycle_mode_undecidable"
+    assert "one lifecycle source is unreadable" in ledger_exc.value.detail
+    assert "ledger: ledger_corrupt" in ledger_exc.value.detail
+    assert f"line {line_number}" in ledger_exc.value.detail
+
+    row_state = _make_state_dir(tmp_path / "row-only")
+    coordination_db.db_path_from_state_dir(row_state).write_bytes(b"not a database\n")
+
+    with pytest.raises(rlm.ReportPathRefused) as row_exc:
+        rlm.report_line(_receipt(), state_dir=row_state)
+
+    assert row_exc.value.code == "lifecycle_mode_undecidable"
+    assert "one lifecycle source is unreadable" in row_exc.value.detail
+    assert "row: unreadable" in row_exc.value.detail
