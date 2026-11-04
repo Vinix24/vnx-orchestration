@@ -368,9 +368,12 @@ class SeatSignalInput:
     the route or gate a takeover walked from when it was filled through another
     reviewer, and :data:`UNKNOWN` when that cannot be told. ``risk_paths`` are
     the ``(path, category)`` pairs the risk reading decided on; they are only
-    trusted when ``risk_class`` is a known class. ``head_sha`` is the exact
-    40-character head the outcome is bound to, and the sha the sample is drawn
-    from; a sha that is not one is :data:`UNKNOWN`.
+    trusted when ``risk_class`` is a known class. ``path_signal`` is ``""``
+    when every deciding path can be classified and :data:`UNKNOWN` when one
+    cannot (an unnormalisable path, a blank path or category): the signal such
+    a path would fire cannot be told, so the rule keeps every seat. ``head_sha``
+    is the exact 40-character head the outcome is bound to, and the sha the
+    sample is drawn from; a sha that is not one is :data:`UNKNOWN`.
     """
 
     stack: Tuple[str, ...] = ()
@@ -381,6 +384,7 @@ class SeatSignalInput:
     prescan_count: Optional[int] = None
     risk_class: str = UNKNOWN
     risk_paths: Tuple[Tuple[str, str], ...] = ()
+    path_signal: str = ""
     irreversible: Optional[bool] = None
     head_sha: str = UNKNOWN
 
@@ -393,6 +397,7 @@ class SeatSignalInput:
             ("real_warning_count", _is_count(self.real_warning_count)),
             ("prescan_count", _is_count(self.prescan_count)),
             ("risk_class", _known_class(self.risk_class)),
+            ("path_signal", self.path_signal != UNKNOWN),
             ("irreversible", isinstance(self.irreversible, bool)),
             ("head_sha", _full_sha(self.head_sha)),
         )
@@ -497,7 +502,10 @@ def signal_input_for(
 
     The first seat of the stack supplies outcome, reviewer, warning counts and
     route; the risk reading supplies class, paths and ``irreversible``. Every
-    field the store cannot answer stays :data:`UNKNOWN`.
+    field the store cannot answer stays :data:`UNKNOWN`. A deciding path the
+    classifier could not read makes the path signal :data:`UNKNOWN`: whether it
+    fires a security or schema signal cannot be told, so the rule keeps every
+    seat instead of reading "no signal".
     """
     stack = tuple(required.stack)
     seat = stack[0] if stack else ""
@@ -505,6 +513,7 @@ def signal_input_for(
     verdicts = {line.verdict for line in _rounds_lines(rounds) if seat and line.head_sha == head_sha and line.seat == seat}
     risk = required.risk if isinstance(required.risk, dict) else {}
     risk_class, risk_paths = signal_risk(risk)
+    path_signal = "" if all(_path_classifiable(path, kind) for path, kind in risk_paths) else UNKNOWN
     takeover = UNKNOWN
     if accepted is not None:
         fill = next((item for item in fills if item.seat == seat), None)
@@ -519,9 +528,19 @@ def signal_input_for(
         prescan_count=accepted.prescan_notice_count if accepted is not None else None,
         risk_class=risk_class,
         risk_paths=risk_paths,
+        path_signal=path_signal,
         irreversible=risk.get("irreversible") if isinstance(risk.get("irreversible"), bool) else None,
         head_sha=head_sha or UNKNOWN,
     )
+
+
+def _path_classifiable(path: Any, category: Any) -> bool:
+    """Whether one deciding path can be classified: a blank path or category, or an
+    unnormalisable path, cannot, and no signal can be read from such a pair."""
+    from review_risk_class import CATEGORY_UNNORMALISABLE, path_is_unnormalisable
+
+    kind = str(category or "").strip().lower()
+    return bool(kind) and kind != CATEGORY_UNNORMALISABLE and not path_is_unnormalisable(path)
 
 
 def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
@@ -530,9 +549,12 @@ def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
     if _is_count(signal_input.real_warning_count) and signal_input.real_warning_count > 0:
         fired.append("real_warning")
     if _known_class(signal_input.risk_class):
-        if any(_is_security_path(path, category) for path, category in signal_input.risk_paths):
+        # Only pairs that can be classified may fire a path signal; an
+        # unclassifiable one is reported through ``path_signal`` instead.
+        paths = [(path, kind) for path, kind in signal_input.risk_paths if _path_classifiable(path, kind)]
+        if any(_is_security_path(path, category) for path, category in paths):
             fired.append("security_path")
-        if any(_is_category(category, "schema") for _path, category in signal_input.risk_paths):
+        if any(_is_category(category, "schema") for _path, category in paths):
             fired.append("schema")
     if signal_input.irreversible is True:
         fired.append("irreversible")

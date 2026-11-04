@@ -32,6 +32,7 @@ for _p in (str(VNX_ROOT / "scripts"), str(VNX_ROOT / "scripts" / "lib")):
         sys.path.insert(0, _p)
 
 import closure_verifier
+import forge_gate_publisher as fgp
 import gate_obligations
 import pr_merge
 import review_risk_class
@@ -367,6 +368,142 @@ def test_key_on_a_seat2_fail_on_the_head_blocks_without_a_signal(tmp_path, monke
     assert gate["review_seats"]["seats"] == ["codex_gate"]
     assert gate["review_seats"]["blocking"] == ["kimi_gate"]
     assert "kimi_gate" in gate["message"]
+
+
+# ---------------------------------------------------------------------------
+# Key on: an unclassifiable deciding path is UNKNOWN, never a known signal
+# ---------------------------------------------------------------------------
+
+#: What the classifier records for a path it cannot read as one repository path.
+ODD_PATH = "src/odd\nname.py"
+
+
+def test_key_on_an_unnormalisable_path_keeps_every_seat(tmp_path, monkeypatch):
+    """Codex round 2: an unnormalisable path must not read as "no signal".
+
+    The classification says ``high`` with no readable deciding path; the signal
+    input used to take that as a known high class with no path signal, so a
+    clean codex PASS narrowed the review to codex alone. It is UNKNOWN instead,
+    and every seat of the stack stays required.
+    """
+    store = _store(tmp_path, monkeypatch)
+    _write(store, "codex_gate")
+    _write_ledger(store, codex=(0, 0))
+    _obligation(store)
+    _pin_risk(monkeypatch, HEAD, risk_class="high", paths=[(ODD_PATH, review_risk_class.CATEGORY_UNNORMALISABLE)])
+    _key(monkeypatch, _signal())
+
+    gate, _ = _gate(store, monkeypatch)
+
+    record = gate["review_seats"]
+    assert gate["verdict"] == "NO-GO"
+    assert record["rule"] == rse.SIGNAL_SEAT_RULE
+    assert record["seats"] == list(STACK)
+    assert record["signals"] == []
+    assert "path_signal" in record["unknown"]
+    assert "kimi_gate" in gate["message"]
+
+    evaluation = rse.evaluate_review_seats(
+        PR_ID, store["results"], branch=BRANCH, head_sha=HEAD,
+        rule=rse.SIGNAL_SEAT_RULE, rule_value=rse.SIGNAL_SEAT_RULE,
+    )
+    assert evaluation.seats == STACK
+    assert evaluation.signal is not None and "path_signal" in evaluation.signal.unknown
+
+
+def test_key_on_a_classifiable_high_path_keeps_todays_outcome(tmp_path, monkeypatch):
+    """Control: a normal high-risk path that fires no signal still asks seat 1 only."""
+    store = _store(tmp_path, monkeypatch)
+    _write(store, "codex_gate")
+    _write_ledger(store, codex=(0, 0))
+    _obligation(store)
+    _pin_risk(monkeypatch, HEAD, risk_class="high", paths=[("scripts/lib/plan_gate_panel.py", "gate-merge")])
+    _key(monkeypatch, _signal())
+
+    gate, _ = _gate(store, monkeypatch)
+
+    record = gate["review_seats"]
+    assert gate["verdict"] == "GO", gate["message"]
+    assert record["seats"] == ["codex_gate"]
+    assert record["signals"] == []
+    assert record["unknown"] == []
+
+
+def test_the_classifiers_own_unreadable_path_marks_the_path_signal_unknown():
+    """The signal input reads the classifier's own rule, not a second copy of it."""
+    reading = review_risk_class.DiffReading((ODD_PATH,), merge_base="a" * 40, base_ref="origin/main")
+    risk = review_risk_class.derive_risk_class(reading, head_sha=HEAD)
+    assert risk.risk_class == review_risk_class.HIGH
+    assert risk.deciding == ((ODD_PATH, review_risk_class.CATEGORY_UNNORMALISABLE),)
+    required = rse.RequiredSeats(
+        seats=STACK, source=rse.SOURCE_RECORDED, stack=STACK, risk=risk.to_record(),
+    )
+
+    assert rse.signal_input_for(required, (), None, HEAD).path_signal == rse.UNKNOWN
+
+    normal = review_risk_class.derive_risk_class(
+        review_risk_class.DiffReading(("scripts/lib/auth_store.py",), merge_base="a" * 40, base_ref="origin/main"),
+        head_sha=HEAD,
+    )
+    readable = rse.signal_input_for(
+        rse.RequiredSeats(seats=STACK, source=rse.SOURCE_RECORDED, stack=STACK, risk=normal.to_record()),
+        (), None, HEAD,
+    )
+    assert normal.deciding == (("scripts/lib/auth_store.py", "security"),)
+    assert readable.path_signal == ""
+
+
+# ---------------------------------------------------------------------------
+# The forge review check reads the same rule as the merge door
+# ---------------------------------------------------------------------------
+
+#: GO on the door and success on the check are the same answer; a missing seat
+#: is a NO-GO at the door and ``action_required`` on the check.
+DOOR_TO_FORGE = {"GO": fgp.CONCLUSION_SUCCESS, "NO-GO": fgp.CONCLUSION_ACTION_REQUIRED}
+
+
+def _check(store) -> Any:
+    return fgp.review_verdict(
+        PR, store["head"], results_dir=store["results"], branch=BRANCH, base_branch="main",
+    )
+
+
+def test_the_forge_check_and_the_door_read_the_same_rule_with_the_key_on(tmp_path, monkeypatch):
+    store = _store(tmp_path, monkeypatch)
+    _write(store, "codex_gate")  # a clean codex PASS on the head, kimi never ran
+    _write_ledger(store, codex=(0, 0))
+    _obligation(store)
+    _pin_risk(monkeypatch, HEAD, risk_class="high")
+    _key(monkeypatch, _signal())
+
+    gate, _ = _gate(store, monkeypatch)
+    check = _check(store)
+
+    assert gate["verdict"] == "GO", gate["message"]
+    assert gate["review_seats"]["seats"] == ["codex_gate"]
+    assert check.conclusion == DOOR_TO_FORGE[gate["verdict"]]
+    # The seat list the check judged: a risk-rule reading would have demanded
+    # kimi_gate on this high-class head and said so.
+    assert "kimi_gate" not in check.reason
+
+
+def test_the_forge_check_and_the_door_are_main_with_the_key_off(tmp_path, monkeypatch):
+    store = _store(tmp_path, monkeypatch)
+    _write(store, "codex_gate")
+    _write_ledger(store, codex=(0, 0))
+    _obligation(store)
+    _pin_risk(monkeypatch, HEAD, risk_class="high")
+    _key(monkeypatch, None)
+
+    gate, _ = _gate(store, monkeypatch)
+    check = _check(store)
+
+    assert gate["verdict"] == "NO-GO"
+    assert gate["review_seats"]["rule"] == rse.RISK_SEAT_RULE
+    assert gate["review_seats"]["seats"] == list(STACK)
+    assert check.conclusion == DOOR_TO_FORGE[gate["verdict"]]
+    # The same two required seats the door names, in the check's own words.
+    assert "seats: codex_gate, kimi_gate" in check.reason
 
 
 # ---------------------------------------------------------------------------
