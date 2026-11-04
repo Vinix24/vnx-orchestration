@@ -405,6 +405,39 @@ def _archive_dispatch_events(
         return None, False
 
 
+def _archive_late_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
+    """Archive the events written AFTER the end-of-dispatch archive (ADR-045 K-5).
+
+    The lane's exit order is ``_govern`` → end line → teardown, because the
+    teardown releases the occupancy flock and must carry the governed outcome.
+    The ``provider_teardown_worktree`` event the teardown emits therefore lands
+    in the live stream after ``_archive_dispatch_events`` archived it. This
+    pass adds those late events to the archive the dispatch already has and
+    leaves no live stream of this dispatch behind, so a per-run terminal does
+    not accumulate one stale live file per dispatch and the archive carries the
+    teardown event a reader expects last.
+
+    Best effort, like ``_archive_dispatch_events``: a failure is logged with the
+    dispatch id and terminal and never changes the governed status, the end
+    line or the ``EnvelopeResult``. The caller runs this after the teardown
+    returned or raised, so it can never keep the occupancy flock from being
+    released. A live stream holding another dispatch's events is never touched.
+    """
+    if not terminal or not dispatch_id:
+        return
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        archived = EventStore().archive_late_events(terminal, dispatch_id)
+        if archived is not None:
+            logger.info("envelope: late event archive dispatch=%s -> %s", dispatch_id, archived)
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: late event archive failed terminal=%s dispatch=%s (non-fatal): %s",
+            terminal, dispatch_id, exc,
+        )
+
+
 def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
     """Truncate the live event stream after the receipt is written (end-of-dispatch).
 
