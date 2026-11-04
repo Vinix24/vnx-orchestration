@@ -904,7 +904,7 @@ class ReportParser:
         # extract_metadata() already captures the `**Model**:`/`**Provider**:`
         # bold fields, but the hand-picked key list above used to drop them —
         # which made every report-derived receipt (receipt_kind='dispatch',
-        # no exempt source) fail append_receipt's fail-closed missing_model
+        # no exempt source) fail the receipt appender's fail-closed missing_model
         # check (#1338) and put the receipt processor into a permanent
         # reject-retry loop.
         #
@@ -967,7 +967,7 @@ class ReportParser:
         ``report_ingested`` (linked to the ``dispatch_finished`` when it is
         already there); a legacy dispatch keeps the task-shaped receipt byte for
         byte. The decision lives in ``report_lifecycle_mode``, is handed the store
-        ``append_receipt.py`` writes to and the write time of the file READ here,
+        the receipt appender writes to and the write time of the file READ here,
         and gets on a copy only what the REPORT itself names — its tenant and its
         attempt (a legacy receipt stays untouched). The tenant is resolved once,
         by K-8a. A refusal returns the ``error`` shape and books nothing;
