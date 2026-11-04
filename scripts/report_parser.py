@@ -904,7 +904,7 @@ class ReportParser:
         # extract_metadata() already captures the `**Model**:`/`**Provider**:`
         # bold fields, but the hand-picked key list above used to drop them —
         # which made every report-derived receipt (receipt_kind='dispatch',
-        # no exempt source) fail the receipt appender's fail-closed missing_model
+        # no exempt source) fail append_receipt's fail-closed missing_model
         # check (#1338) and put the receipt processor into a permanent
         # reject-retry loop.
         #
