@@ -391,6 +391,7 @@ def summarize(
     ``cutoff`` scopes which dispatches are reported (any attributed receipt at
     or after it) and which lines are counted as bookkeeping/noise. A reported
     dispatch is always decided on its full history.
+    ``superseded_by`` maps a parent dispatch to the child ids that carry it.
     """
     in_window = _Window(cutoff)
     noise: Counter = Counter()
@@ -412,9 +413,11 @@ def summarize(
         _fold(record, receipt, pos, did)
 
     superseded_by: Dict[str, str] = {}
+    child_ids: Dict[str, List[str]] = {}
     for did, record in records.items():
         for parent in record["children_of"]:
             superseded_by.setdefault(parent, did)
+            child_ids.setdefault(parent, []).append(did)
 
     outcomes = [_outcome_of(did, record, superseded_by)
                 for did, record in records.items() if record["in_window"]]
@@ -424,6 +427,7 @@ def summarize(
     return {
         "verdict_counts": counts,
         "outcomes": outcomes,
+        "superseded_by": child_ids,
         "bookkeeping_counts": {k: v for k, v in bookkeeping.items() if v},
         "noise_counts": {k: v for k, v in noise.items() if v},
         "unlinked_gate_evidence": unlinked_gate_evidence,

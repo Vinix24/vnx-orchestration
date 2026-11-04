@@ -111,6 +111,10 @@ runtime objects persist forever:
    dead-orchestrator orphans (dead_letter promotion + failed receipt) with a
    flood cap, idempotency, and PID liveness.
 
+**``v3`` dispatches (ADR-045 §7).** One ledger read per run decides every v3
+dispatch (kind 1b, kind 2 and, via ``crash_recovery_sweep``, kind 3); a dispatch
+with no start line is ``legacy`` and keeps every path below unchanged.
+
 Safety (both requirements from the dispatch):
   * **Idempotent** — every action is a no-op on a second run: kill-session on a
     missing session is a no-op; reap on a missing worktree is a no-op; the
@@ -135,6 +139,9 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+from ledger_attempt_state import (KIND_ENDED, KIND_LIVE, KIND_UNKNOWN, LEDGER_FILENAME,
+                                  AttemptVerdict, attempt_verdict, read_ledger)
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +178,21 @@ def _session_name(dispatch_id: str) -> str:
     return "vnx-" + dispatch_id
 
 
+class _LedgerView:
+    """The one ledger read of a sweep (ADR-045 §7); ``verdict`` is ``None`` when it failed."""
+
+    def __init__(self, state_dir: Path, project_id: str) -> None:
+        self._state_dir, self._project_id = state_dir, project_id
+        try:
+            self.records, self.error = read_ledger(state_dir), None
+        except OSError as exc:
+            self.records, self.error = None, f"cannot read {LEDGER_FILENAME}: {exc}"
+
+    def verdict(self, dispatch_id: str) -> "Optional[AttemptVerdict]":
+        return None if self.error is not None else attempt_verdict(
+            self._state_dir, self._project_id, dispatch_id, records=self.records)
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -204,6 +226,7 @@ class OrphanSweepResult:
     active_skipped_no_pid: list = field(default_factory=list)
     active_skipped_protected: list = field(default_factory=list)
     active_capped: bool = False
+    active_v3: dict = field(default_factory=dict)  # kind 3's v3 counts (ADR-045 §7)
     errors: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -224,6 +247,7 @@ class OrphanSweepResult:
             "active_skipped_alive": list(self.active_skipped_alive),
             "active_skipped_no_pid": list(self.active_skipped_no_pid),
             "active_skipped_protected": list(self.active_skipped_protected),
+            "active_v3": {k: list(v) for k, v in self.active_v3.items()},
             "active_capped": self.active_capped,
             "errors": list(self.errors),
         }
@@ -497,6 +521,7 @@ def _evaluate_completed_orphan(
     other_project_state_dirs: "list[Path] | None" = None,
     cross_project_cache: "dict[Path, tuple] | None" = None,
     cross_project_errors: "list[dict] | None" = None,
+    ledger: "Optional[_LedgerView]" = None,
 ) -> "tuple[bool, str]":
     """Evaluate the completed-dispatch/still-alive-pane orphan conjunction.
 
@@ -517,6 +542,10 @@ def _evaluate_completed_orphan(
     which reproduces the exact pre-OI-1424 behavior (a session unknown to
     this project's own register is always ``unknown_project``) — existing
     callers that never pass them are unaffected.
+
+    ``ledger`` (ADR-045 §7): for a ``v3`` dispatch the completed-check is its
+    attempt verdict (only ``ended`` is a proven outcome); a ``legacy`` dispatch
+    keeps (c) below unchanged.
     """
     # (b) the dispatch id must be known to THIS project's own register, or —
     # since the tmux session listing is account-wide while each register is
@@ -546,7 +575,14 @@ def _evaluate_completed_orphan(
     # register event, or a terminal (success/failure) receipt — read from
     # whichever register claimed it in (b) above.
     evidence: "str | None" = None
-    if completed_ids is not None and dispatch_id in completed_ids:
+    verdict = ledger.verdict(dispatch_id) if ledger is not None else None
+    if ledger is not None and verdict is None:
+        return False, "ledger_unmeasurable"
+    if verdict is not None and not verdict.is_legacy:
+        if verdict.kind != KIND_ENDED:
+            return False, f"v3_{verdict.kind}"
+        evidence = "ledger:dispatch_finished"
+    if evidence is None and completed_ids is not None and dispatch_id in completed_ids:
         evidence = "register:dispatch_completed"
     if evidence is None:
         if owner_receipts_index is None:
@@ -589,11 +625,16 @@ def _dispatch_known_inflight(
     register_known_ids: "set[str] | None",
     register_completed_ids: "set[str] | None",
     receipts_index: "dict[str, list] | None",
+    ledger: "Optional[_LedgerView]" = None,
 ) -> "bool | None":
     """Could ``dispatch_id`` still be a live, tmux-less (headless/provider)
     dispatch? A second, tmux-independent life-sign for kind 2 — see the
     OI-1427 paragraph in the module docstring for why this exists and why the
     lock-based and cwd-scanning alternatives were rejected.
+
+    ``ledger`` (ADR-045 §7) comes first for a ``v3`` dispatch: ``ended`` is
+    terminal (False), ``live``/``unknown`` are in flight (True) and a start
+    without an end is neither; a ``legacy`` dispatch keeps the logic below.
 
     True  -> the register KNOWS this dispatch id and nothing PROVES it has
              reached a terminal outcome (no ``dispatch_completed`` register
@@ -614,6 +655,12 @@ def _dispatch_known_inflight(
     forcing one shape onto both would either lose kind 1b's reason
     granularity or make kind 2 carry reason strings it never uses.
     """
+    if ledger is not None:
+        verdict = ledger.verdict(dispatch_id)
+        if verdict is None:
+            return True
+        if not verdict.is_legacy:
+            return verdict.kind in (KIND_LIVE, KIND_UNKNOWN)
     if register_known_ids is None:
         return None
     if dispatch_id not in register_known_ids:
@@ -710,6 +757,9 @@ def sweep(
                             Tests pin this explicitly rather than touching
                             the real account-wide store.
 
+    A ``v3`` dispatch is decided on the ledger read once at the top (kind 1b, kind
+    2 and the kind-3 delegation, ADR-045 §7); a ``legacy`` one keeps today's paths.
+
     Returns:
         :class:`OrphanSweepResult` — per-object failures are recorded in
         ``errors`` and never abort the run.
@@ -756,6 +806,11 @@ def sweep(
         logger.warning("orphan_sweep: %s", central_resolve_error)
     protected: set[str] = {current_dispatch_id} if current_dispatch_id else set()
     worktrees_dir = root / ".vnx-data" / "worktrees"
+
+    # ── the ledger, read once for the whole run (ADR-045 §7) ────────────────
+    ledger = _LedgerView(state_dir, project_id)
+    if ledger.error is not None:
+        result.errors.append({"kind": "ledger", "error": ledger.error})
 
     # ── kind 1b evidence, preloaded once (bounded — one file read each) ─────
     # register_known_ids / register_completed_ids: None means the register
@@ -838,6 +893,7 @@ def sweep(
                 other_project_state_dirs=other_project_state_dirs,
                 cross_project_cache=cross_project_cache,
                 cross_project_errors=result.errors,
+                ledger=ledger,
             )
             entry = {"session": name, "dispatch_id": sid, "reason": reason}
             if is_orphan:
@@ -925,6 +981,7 @@ def sweep(
                 register_known_ids=register_known_ids,
                 register_completed_ids=register_completed_ids,
                 receipts_index=receipts_index,
+                ledger=ledger,
             )
             if inflight is not False:
                 result.worktrees_skipped_live.append(str(entry))
@@ -984,21 +1041,14 @@ def sweep(
         dry_run=dry_run,
         pid_alive=pid_fn,
         exclude_ids=protected,
+        ledger=ledger.records,
     )
-    result.active_scanned = active.scanned
-    result.active_recovered = list(active.recovered)
-    result.active_skipped_alive = list(active.skipped_alive)
-    result.active_skipped_no_pid = list(active.skipped_no_pid)
-    result.active_skipped_protected = list(active.skipped_protected)
-    result.active_capped = active.capped
-    for e in active.errors:
-        result.errors.append({"kind": "active", **e})
-
+    _absorb_active(result, active)
     logger.info(
         "orphan_sweep: complete — tmux killed=%d skipped=%d protected=%d "
         "completed_orphans_killed=%d completed_orphans_preserved=%d; "
         "worktrees removed=%d preserved=%d skipped_live=%d; active recovered=%d "
-        "scanned=%d capped=%s; dry_run=%s; errors=%d",
+        "scanned=%d capped=%s; active v3 counts=%s; dry_run=%s; errors=%d",
         len(result.tmux_killed), len(result.tmux_skipped_alive),
         len(result.tmux_skipped_protected),
         len(result.tmux_completed_orphans_killed),
@@ -1006,9 +1056,21 @@ def sweep(
         len(result.worktrees_removed),
         len(result.worktrees_preserved), len(result.worktrees_skipped_live),
         len(result.active_recovered), result.active_scanned, result.active_capped,
-        result.dry_run, len(result.errors),
+        result.active_v3, result.dry_run, len(result.errors),
     )
     return result
+
+
+def _absorb_active(result: "OrphanSweepResult", active) -> None:
+    """Fold the delegated active sweep in, kind 3's ``v3`` counts included."""
+    result.active_scanned = active.scanned
+    result.active_recovered = list(active.recovered)
+    result.active_skipped_alive = list(active.skipped_alive)
+    result.active_skipped_no_pid = list(active.skipped_no_pid)
+    result.active_skipped_protected = list(active.skipped_protected)
+    result.active_capped = active.capped
+    result.active_v3 = {k: v for k, v in active.to_dict().items() if k.startswith("v3_")}
+    result.errors.extend({"kind": "active", **error} for error in active.errors)
 
 
 def _resolve_central_paths(repo_root: Path) -> "tuple[Path, Path, str | None]":
