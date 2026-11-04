@@ -132,8 +132,10 @@ def read_ndjson_strict(
     except FileNotFoundError:
         return []
     lines = data.split(b"\n")
-    last_content_idx = max((i for i, raw in enumerate(lines) if raw.strip()), default=-1)
-    torn_idx = last_content_idx if last_content_idx >= 0 and not data.endswith(b"\n") else -1
+    # Only the final physical fragment — the bytes after the last "\n" — can be torn.
+    # A whitespace-only fragment is no line at all, so a break before it is interior.
+    final_idx = len(lines) - 1
+    torn_idx = final_idx if not data.endswith(b"\n") and lines[final_idx].strip() else -1
     records: List[Any] = []
     for idx, raw in enumerate(lines):
         if not raw.strip():
