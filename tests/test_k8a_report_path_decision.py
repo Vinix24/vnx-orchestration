@@ -108,7 +108,7 @@ def v3(monkeypatch):
 
 @pytest.fixture()
 def legacy(monkeypatch):
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
 
 @pytest.fixture(autouse=True)

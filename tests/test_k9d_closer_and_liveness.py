@@ -289,6 +289,43 @@ def test_a_refire_over_a_real_dead_door_goes_ahead(state_dir, spec_file, v3, clo
 
 
 # ---------------------------------------------------------------------------
+# rule 3 (K-act): a spawn file that exists but cannot be trusted is UNKNOWN, never
+# "no child" — a dead door plus a released lock must not start a second attempt
+# while the previous child may still run (codex finding on #2385, ce4a41a0).
+# ---------------------------------------------------------------------------
+
+def _seed_spawn_debris(state_dir: Path, *, directory: bool = False,
+                       text: str | None = None) -> Path:
+    path = dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if directory:
+        path.mkdir()
+    else:
+        path.write_text(text or "", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("case", ["directory", "invalid-json", "missing-child-pid"])
+def test_an_untrusted_spawn_file_refuses_the_refire(
+        state_dir, spec_file, v3, clock, case):
+    pid, started = _dead_pid()
+    _seed_start(state_dir, door_pid=pid, door_started_at=started)
+    if case == "directory":
+        _seed_spawn_debris(state_dir, directory=True)
+    elif case == "invalid-json":
+        _seed_spawn_debris(state_dir, text='{"child_pid": 123,')
+    else:
+        _seed_spawn_debris(
+            state_dir, text=json.dumps({"child_started_at": started, "spawned_at": T0}))
+
+    with pytest.raises(dispatch_start.StartRefused) as excinfo:
+        _begin(state_dir, spec_file)
+
+    assert excinfo.value.code == "refire_liveness_unknown"
+    assert len(_starts(state_dir)) == 1, "an attempt-2 line was written over an unknown child"
+
+
+# ---------------------------------------------------------------------------
 # rule 4: the sweep keeps its unknown state with the same unavailable ps
 # ---------------------------------------------------------------------------
 

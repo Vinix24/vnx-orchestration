@@ -126,7 +126,7 @@ def lifecycle_on(monkeypatch):
 
 @pytest.fixture()
 def lifecycle_off(monkeypatch):
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
 
 # ---------------------------------------------------------------------------
@@ -575,7 +575,7 @@ def test_with_the_lifecycle_off_the_sweep_counts_and_writes_nothing(
     _insert_row(state_dir)
     _start_line(state_dir)
     before = _lines(state_dir)
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
     result = lifecycle.sweep(state_dir=state_dir,
                              now=_now_after(START_DT, 10 * 3600))
@@ -704,7 +704,7 @@ def test_the_count_command_reports_the_lifecycle_off_in_flight(
         state_dir, lifecycle_on, monkeypatch):
     _insert_row(state_dir)
     _start_line(state_dir)
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
     code, report = _count(state_dir)
 

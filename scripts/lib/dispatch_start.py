@@ -205,17 +205,51 @@ def pid_verdict(pid: object, started_at: object) -> Optional[bool]:
     return actual == started_at
 
 
+def _spawn_child_verdict(raw: str) -> Optional[bool]:
+    """The spawn file's own liveness verdict, or ``None`` when it cannot be trusted.
+
+    A decoded value that is not a JSON object, a ``child_pid`` that is not a
+    positive ``int`` (a ``bool`` is not an int here) or a ``child_started_at`` that
+    is not a non-empty ``str`` is UNKNOWN, never "no child": the file exists, so
+    its unreadability says nothing about whether the child ran.
+    """
+    try:
+        spawn = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(spawn, dict):
+        return None
+    child_pid = spawn.get("child_pid")
+    child_started_at = spawn.get("child_started_at")
+    if not (isinstance(child_pid, int) and not isinstance(child_pid, bool) and child_pid > 0):
+        return None
+    if not (isinstance(child_started_at, str) and child_started_at.strip()):
+        return None
+    return pid_verdict(child_pid, child_started_at)
+
+
 def _liveness(start_line: Dict[str, Any], *, state_dir: Path, dispatch_id: str) -> Optional[str]:
     """The first of §5's signals that holds, else ``PROBE_UNKNOWN`` if one could not be
-    measured, else None (K-9d rule 3)."""
+    measured, else None (K-9d rule 3).
+
+    Only ``FileNotFoundError`` means "no spawn file" and adds no ``child_pid``
+    signal. Any other failure to read or decode the file, and a value it cannot
+    vouch for, sets ``child_pid`` to ``None`` (UNKNOWN): a dead door plus a
+    released lock must never read an unreadable file as "no child" and start a
+    second attempt while the previous child may still run (K-9d codex finding,
+    ``ce4a41a0``).
+    """
     signals = {"door_pid": pid_verdict(start_line.get("door_pid"), start_line.get("door_started_at"))}
     try:
-        spawn = json.loads(spawn_file_path(state_dir, start_line["project_id"], dispatch_id,
-                                           int(start_line["attempt"])).read_text(encoding="utf-8"))
-    except (KeyError, TypeError, ValueError, OSError, StartRefused, json.JSONDecodeError):
-        spawn = None
-    if isinstance(spawn, dict):
-        signals["child_pid"] = pid_verdict(spawn.get("child_pid"), spawn.get("child_started_at"))
+        spawn_path = spawn_file_path(state_dir, start_line["project_id"], dispatch_id,
+                                     int(start_line["attempt"]))
+        raw = spawn_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        pass  # no spawn file: the §5 hook never fired, so child_pid says nothing
+    except (OSError, ValueError, StartRefused, KeyError, TypeError):
+        signals["child_pid"] = None  # exists but unreadable/undecodable: UNKNOWN, never absent
+    else:
+        signals["child_pid"] = _spawn_child_verdict(raw)
     from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
     try:
         held = probe_occupancy(claims_dir_for_state_dir(state_dir), dispatch_id)

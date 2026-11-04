@@ -407,7 +407,7 @@ def _run_door(tmp_path, state_dir, dispatch_id, case, monkeypatch, *, lifecycle_
     if lifecycle_on:
         monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
     else:
-        monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+        monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
     ok = _AdapterResult(returncode=0, completion_text="door done", status="success")
 
@@ -479,7 +479,7 @@ def test_v3_exit_writes_exactly_one_end_line_before_the_release(case, tmp_path, 
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
 def test_legacy_exit_writes_no_end_line_and_keeps_the_k4c_outcome(case, tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
     dispatch_id = f"20261103-k5-legacy-{case['id']}"
     _data_dir, state_dir = _state_dirs(tmp_path)
     handover = _legacy_handover(dispatch_id)

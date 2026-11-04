@@ -49,8 +49,9 @@ from receipt_schema import (
     lifecycle_end_key,
 )
 
-# ADR-045 §9: the setting and its single default. Off is the shipped state and
-# the emergency brake — with it off no lifecycle line is written at all.
+# ADR-045 §9: the setting and its single default. On by default since the
+# activation delivery (K-act, ADR-045 §9/§10); 0 is the emergency brake — with
+# it off no lifecycle writer emits a line at all.
 LIFECYCLE_SETTING_KEY = "VNX_LEDGER_LIFECYCLE"
 
 # The fallback scan reads only the last 256 KiB of the ledger: an end line for
@@ -63,7 +64,8 @@ END_LINE_ACCEPTED = "accept"
 
 
 def lifecycle_enabled() -> bool:
-    """True when ``ledger_lifecycle`` is on (ADR-045 §9, default off)."""
+    """True when ``ledger_lifecycle`` is on (ADR-045 §9; on by default since K-act,
+    ``0`` is the emergency brake)."""
     return get_bool(LIFECYCLE_SETTING_KEY)
 
 

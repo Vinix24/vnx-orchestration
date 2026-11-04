@@ -95,6 +95,13 @@ def probe(monkeypatch: pytest.MonkeyPatch) -> Dict[str, Any]:
         return str(box["door_clock"])
 
     monkeypatch.setattr(dispatch_start, "process_started_at", _started)
+
+    def _probe(pid: object) -> tuple:
+        if box["unmeasurable"]:
+            return dispatch_start.PROBE_UNKNOWN, None
+        return dispatch_start.PROBE_ALIVE, str(box["door_clock"])
+
+    monkeypatch.setattr(dispatch_start, "probe_process_started_at", _probe)
     return box
 
 

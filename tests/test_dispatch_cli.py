@@ -62,6 +62,15 @@ from dispatch_spec import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _legacy_ledger_lifecycle(monkeypatch):
+    """These door tests predate the K-act activation and use a fresh, un-migrated
+    store (``init_schema`` only, no project_id on ``dispatches``), so they run the
+    door in the legacy lifecycle mode they always exercised. The on-by-default
+    setting is proven end to end in ``tests/test_k_act_activation.py``."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
