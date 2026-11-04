@@ -49,7 +49,7 @@ from append_receipt_internals.lifecycle import (
     write_end_intent,
 )
 from atomic_io import atomic_write_json
-from coordination_db import TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection
+from coordination_db import STORE_ABSENT, STORE_UNREADABLE, TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection, store_state
 from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
 from ndjson_io import NdjsonCorruptionError, TORN_TAIL_CLOSED, read_ndjson_strict_bytes, scan_ndjson_lines
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
@@ -338,8 +338,13 @@ def _project(state_dir: Path, document: Mapping[str, Any], *,
     refused transition rolls the step back and leaves the intent unpublished
     for ``recover`` to retry.
     """
-    if not Path(db_path_from_state_dir(state_dir)).is_file():
-        return {"action": PROJECTION_NO_STORE}
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_ABSENT: return {"action": PROJECTION_NO_STORE}
+    # K-9c rule 2: an unreadable store fails the step (never "no store"); the intent stays
+    # unpublished for ``recover``.
+    if store == STORE_UNREADABLE: raise AppendReceiptError("store_unreadable", EXIT_IO_ERROR,
+        f"{db_path} exists but is not a regular file; the end state cannot be projected")
     with get_connection(state_dir) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -642,7 +647,12 @@ def in_flight_counts(state_dir: str | Path) -> Dict[str, Any]:
 
 def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optional[Dict[str, Any]]:
     """The attempt's row: ``None`` for no store and no row, raised when the store cannot be read."""
-    if not Path(db_path_from_state_dir(state_dir)).is_file(): return None
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_ABSENT: return None
+    if store == STORE_UNREADABLE:  # K-9c rule 2: a directory is unreadable, never "no store"
+        raise AppendReceiptError("store_unreadable", EXIT_IO_ERROR,
+                                 f"{db_path} exists but is not a regular file")
     try:
         with get_connection(state_dir) as conn:
             row = conn.execute("SELECT bundle_path, metadata_json FROM dispatches "
@@ -650,7 +660,7 @@ def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optiona
                                (dispatch_id, project_id)).fetchone()
     except Exception as exc:  # vnx-silent-except: raised to the caller as the store's refusal, never "no row"
         raise AppendReceiptError("store_unreadable", EXIT_IO_ERROR,
-                                 f"cannot read {db_path_from_state_dir(state_dir)}: {exc}") from exc
+                                 f"cannot read {db_path}: {exc}") from exc
     return dict(row) if row is not None else None
 
 

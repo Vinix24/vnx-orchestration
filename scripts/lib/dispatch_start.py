@@ -26,7 +26,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
-from coordination_db import db_path_from_state_dir, get_connection
+from coordination_db import STORE_ABSENT, STORE_UNREADABLE, db_path_from_state_dir, get_connection, store_state
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
@@ -95,9 +95,9 @@ def read_attempt_state(state_dir: str | Path, project_id: str, dispatch_id: str)
     Only a missing path is "no row"; an existing non-file path is unreadable (K-9c rule 3).
     """
     db_path = Path(db_path_from_state_dir(state_dir))
-    if not db_path.exists(): return AttemptState(ATTEMPT_NO_ROW)
-    if not db_path.is_file():
-        return AttemptState(ATTEMPT_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
+    store = store_state(db_path)
+    if store == STORE_ABSENT: return AttemptState(ATTEMPT_NO_ROW)
+    if store == STORE_UNREADABLE: return AttemptState(ATTEMPT_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
     try:
         with get_connection(state_dir) as conn:
             row = conn.execute(
@@ -230,8 +230,12 @@ def _plan_attempt(*, state_dir: Path, project_id: str, dispatch_id: str) -> int:
 def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt: bool) -> str:
     """Step 2: mode (and the attempt, when known) into ``dispatches`` after the line is on
     disk. A failure is logged with key, attempt and exception and is loud (OI-2510 p. 2/7)."""
-    if not Path(db_path_from_state_dir(state_dir)).is_file(): return MODE_WRITE_OK
+    db_path = Path(db_path_from_state_dir(state_dir))
+    store = store_state(db_path)
+    if store == STORE_ABSENT: return MODE_WRITE_OK
     try:
+        if store == STORE_UNREADABLE:  # K-9c rule 2: the loud failure path below, never "write ok"
+            raise OSError(f"{db_path} exists but is not a regular file")
         with get_connection(state_dir) as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(

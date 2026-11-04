@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from coordination_db import db_path_from_state_dir, get_connection
+from coordination_db import STORE_PRESENT, STORE_UNREADABLE, db_path_from_state_dir, get_connection, store_state
 from dispatch_lifecycle import (  # its table, its grace, its parser: never a copy
     ABANDON_GRACE_SECONDS, END_INTENT_DIRNAME, END_STATE_TARGET, PROJECTION_ROUTES,
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
@@ -138,10 +138,11 @@ def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated
     found = {name: [] for name in DEFECTS}  # rule 3: a list of keys per defect
 
     rows, db_path, pairs = {}, db_path_from_state_dir(state_dir), {k[:2] for k in [*starts, *ends]}
-    if pairs and db_path.exists() and not db_path.is_file():  # K-9c rule 4: never "no database"
+    store = store_state(db_path)
+    if pairs and store == STORE_UNREADABLE:  # K-9c rule 4: never "no database"
         raise Unmeasured(f"{db_path} exists but is not a regular file; the count is not measurable")
     try:
-        if pairs and db_path.is_file():
+        if pairs and store == STORE_PRESENT:
             with get_connection(state_dir) as conn:
                 for project, dispatch in sorted(pairs):
                     row = conn.execute("SELECT * FROM dispatches WHERE dispatch_id = ? "

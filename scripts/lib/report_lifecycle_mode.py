@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from coordination_db import db_path_from_state_dir
+from coordination_db import STORE_ABSENT, STORE_PRESENT, STORE_UNREADABLE, db_path_from_state_dir, store_state
 from dispatch_start import MODE_LEGACY, MODE_V3
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from project_root import resolve_project_id
@@ -123,10 +123,9 @@ def _parse_metadata(raw: Any) -> Tuple[Optional[Dict[str, Any]], str]:
 def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "_Row":
     """``dispatches`` for this key, read-only; an unaddressable tenant is unreadable."""
     db_path = Path(db_path_from_state_dir(state_dir))
-    if not db_path.exists():
-        return _Row(ROW_ABSENT, detail=f"{db_path} does not exist")
-    if not db_path.is_file():
-        return _Row(ROW_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
+    store = store_state(db_path)
+    if store == STORE_ABSENT: return _Row(ROW_ABSENT, detail=f"{db_path} does not exist")
+    if store == STORE_UNREADABLE: return _Row(ROW_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
     if not project_id: return _Row(ROW_UNREADABLE, detail="the tenant of the store could not be resolved")
     try:
         rows = _query_rows(db_path, "SELECT metadata_json, attempt_count FROM dispatches "
@@ -150,7 +149,11 @@ def _other_tenant_v3(state_dir: Path, tenant: Optional[str], dispatch_id: str,
     found = {str(line.get("project_id") or "").strip() for line in starts
              if str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
     db_path = Path(db_path_from_state_dir(state_dir))
-    if db_path.is_file():
+    store = store_state(db_path)
+    if store == STORE_UNREADABLE:  # K-9c rule 2: a store we cannot read cannot clear the mismatch
+        raise ReportPathRefused(dispatch_id, "lifecycle_mode_undecidable",
+            f"cannot look for this dispatch under another tenant: {db_path} is not a regular file")
+    if store == STORE_PRESENT:
         try:
             rows = _query_rows(db_path, "SELECT project_id, metadata_json FROM dispatches "
                                "WHERE dispatch_id = ?", (dispatch_id,))
