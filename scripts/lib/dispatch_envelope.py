@@ -73,6 +73,7 @@ from envelope_prepare import (  # noqa: E402
 )
 from envelope_govern_support import (  # noqa: E402
     _archive_dispatch_events,
+    _archive_late_dispatch_events,
     _clear_dispatch_events,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
@@ -621,8 +622,15 @@ class _LaneExit:
                 wt_path=self.wt_path, spawned_at=self.spawn_marks.get("spawned_at"))
         finally:
             from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
-            remove_dispatch_worktree(self.dispatch_id, project_root=self.project_root,
-                                     terminal_id=self.terminal_id)
+            try:
+                remove_dispatch_worktree(self.dispatch_id, project_root=self.project_root,
+                                         terminal_id=self.terminal_id)
+            finally:
+                # K-5 r3: the teardown event is written AFTER _govern archived
+                # the stream (the teardown releases the occupancy flock, so it
+                # stays last), so the events it wrote are appended to the
+                # dispatch's archive here, with no live stream left behind.
+                _archive_late_dispatch_events(self.terminal_id, self.dispatch_id)
 
 
 def run_envelope_plan(
