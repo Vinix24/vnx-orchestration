@@ -101,6 +101,7 @@ from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 from gate_obligations import OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, STATUS_PENDING
 from ledger_attempt_state import (AttemptVerdict, KIND_ENDED, KIND_LEGACY, KIND_LIVE,  # noqa: E501
                                   KIND_UNKNOWN, LEDGER_FILENAME, attempt_verdict, read_ledger)
+from ndjson_io import NdjsonCorruptionError
 from receipt_outcome import (
     BOOKKEEPING_EVENT_TYPES,
     INVALID_DISPATCH_IDS,
@@ -634,6 +635,13 @@ def _directory_dispatch(entry_dir: Path, bucket: str = "active") -> DispatchEntr
                          bucket=bucket)
 
 
+def _unreadable_item(dispatch_id: str, reason: str, last_seen: Optional[str],
+                     kind: str = KIND_ACTIVE_DISPATCH) -> Dict[str, Any]:
+    """The one open point a dispatch whose ledger evidence cannot be read gets."""
+    return {"kind": kind, "dispatch_id": dispatch_id, "outcome": OUTCOME_LEDGER_UNREADABLE,
+            "status": None, "reason": f"open point: {reason}", "last_seen": last_seen}
+
+
 def active_dispatch_items(
     data_dir: Path,
     decisions: Dict[str, Dict[str, Any]],
@@ -664,7 +672,9 @@ def active_dispatch_items(
     now = now or datetime.now(timezone.utc)
     state_dir = data_dir / "state"
     ledger_error: Optional[str] = None
-    ledger_records = list(records) if records is not None else None
+    # keep the caller's read as-is: a LedgerRecords carries the raw text of the
+    # lines that did not parse, which `list()` would drop (K-act r2)
+    ledger_records = records if records is not None else None
     if ledger_records is None:
         try:
             ledger_records = read_ledger(state_dir)
@@ -679,22 +689,22 @@ def active_dispatch_items(
         if did in seen:
             continue
         seen.add(did)
+        stamp = entry.timestamp.isoformat() if entry.timestamp else None
         if ledger_error is not None:
             # fail-closed: without the ledger nothing proves the dispatch done
-            items.append({
-                "kind": KIND_ACTIVE_DISPATCH,
-                "dispatch_id": did,
-                "outcome": OUTCOME_LEDGER_UNREADABLE,
-                "status": None,
-                "reason": f"open point: {ledger_error}",
-                "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
-            })
+            items.append(_unreadable_item(did, ledger_error, stamp))
             continue
         age = (now - entry.timestamp).total_seconds() if entry.timestamp else None
         status = status_index.get(did)
         has_receipt = did in presence
         decision = (decisions.get(did) or {}).get("decision")
-        verdict = attempt_verdict(state_dir, project_id, did, records=ledger_records)
+        try:
+            verdict = attempt_verdict(state_dir, project_id, did, records=ledger_records)
+        except NdjsonCorruptionError as exc:
+            # the broken line names THIS dispatch: it stays an open point, never a move
+            items.append(_unreadable_item(
+                did, f"unreadable ledger line for this dispatch: {exc}", stamp))
+            continue
         _, reason, open_as = active_destination(
             receipt_status=status, has_receipt=has_receipt,
             decision=decision, age_seconds=age,
@@ -715,7 +725,7 @@ def active_dispatch_items(
             "outcome": open_as,
             "status": status_index.get(did),
             "reason": reason,
-            "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
+            "last_seen": stamp,
         })
     return items
 
@@ -879,8 +889,21 @@ def open_outcome_items(
     for outcome in summary["outcomes"]:
         did = outcome["dispatch_id"]
         open_as, reason = outcome["decision"], outcome.get("reason")
-        verdict = (attempt_verdict(Path(state_dir), project_id, did, records=receipts)
-                   if state_dir is not None else None)
+        try:
+            verdict = (attempt_verdict(Path(state_dir), project_id, did, records=receipts)
+                       if state_dir is not None else None)
+        except NdjsonCorruptionError as exc:
+            # the broken line names THIS dispatch: report it, never treat it as done
+            seen = last_seen.get(did)
+            items.append({
+                "kind": KIND_RECEIPT_OUTCOME,
+                "dispatch_id": did,
+                "outcome": OUTCOME_LEDGER_UNREADABLE,
+                "status": outcome.get("status"),
+                "reason": f"open point: unreadable ledger line for this dispatch: {exc}",
+                "last_seen": seen.isoformat() if seen else None,
+            })
+            continue
         v3 = verdict is not None and not verdict.is_legacy
         if v3:
             # only a T0 decision or a no-open-point destination closes a v3 end
@@ -943,7 +966,10 @@ def build_open_outcomes(
     ledger = Path(ledger_path) if ledger_path else state_dir / LEDGER_NAME
     log = Path(decision_log_path) if decision_log_path else state_dir / DECISION_LOG_NAME
     try:
-        receipts = list(iter_complete_lines(ledger))
+        # read_ledger keeps the raw text of an unparsed line, so attempt_verdict
+        # can refuse the dispatch that line names (K-act r2) instead of reading
+        # a damaged start line as "legacy".
+        receipts = read_ledger(state_dir, path=ledger)
         decisions = read_outcome_decisions(log, project_id)
     except OSError as exc:
         return {"available": False, "reason": f"could not read {ledger.name} or {log.name}: {exc}"}

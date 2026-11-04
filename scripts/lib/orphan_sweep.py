@@ -142,6 +142,7 @@ from typing import Callable, Optional
 
 from ledger_attempt_state import (KIND_ENDED, KIND_LIVE, KIND_UNKNOWN, LEDGER_FILENAME,
                                   AttemptVerdict, attempt_verdict, read_ledger)
+from ndjson_io import NdjsonCorruptionError
 
 logger = logging.getLogger(__name__)
 
@@ -189,8 +190,17 @@ class _LedgerView:
             self.records, self.error = None, f"cannot read {LEDGER_FILENAME}: {exc}"
 
     def verdict(self, dispatch_id: str) -> "Optional[AttemptVerdict]":
-        return None if self.error is not None else attempt_verdict(
-            self._state_dir, self._project_id, dispatch_id, records=self.records)
+        """``None`` when the ledger (or this dispatch's own line in it) is unreadable:
+        the callers read ``None`` as "cannot prove it dead", never as terminal."""
+        if self.error is not None:
+            return None
+        try:
+            return attempt_verdict(self._state_dir, self._project_id, dispatch_id,
+                                   records=self.records)
+        except NdjsonCorruptionError as exc:
+            logger.error("orphan_sweep: no verdict for %s — its ledger line did not parse: %s",
+                         dispatch_id, exc)
+            return None
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
 from ledger_attempt_state import (LEDGER_FILENAME, AttemptVerdict,  # noqa: E402, E501
                                   attempt_verdict, read_ledger)
+from ndjson_io import NdjsonCorruptionError  # noqa: E402
 from open_outcomes import (  # noqa: E402
     DECISION_LOG_NAME,
     NO_RECEIPT_THRESHOLD_HOURS,
@@ -279,6 +280,16 @@ def drain_active(
             results.append(DrainResult(dispatch_id=entry.dispatch_id, action="skipped",
                                        reason=f"open point: {ledger_error}", dry_run=dry_run))
             continue
+        try:
+            verdict = attempt_verdict(data_dir / "state", ledger_project, entry.dispatch_id,
+                                      records=ledger_records)
+        except NdjsonCorruptionError as exc:
+            # the broken line names THIS dispatch: nothing proves it done, never move it
+            results.append(DrainResult(
+                dispatch_id=entry.dispatch_id, action="skipped",
+                reason=f"open point: unreadable ledger line for this dispatch: {exc}",
+                dry_run=dry_run))
+            continue
         result = drain_one(
             entry=entry,
             receipt_index=receipt_index,
@@ -288,8 +299,7 @@ def drain_active(
             dry_run=dry_run,
             receipt_present=receipt_present,
             decisions=decisions,
-            verdict=attempt_verdict(data_dir / "state", ledger_project, entry.dispatch_id,
-                                    records=ledger_records),
+            verdict=verdict,
         )
         results.append(result)
     return results

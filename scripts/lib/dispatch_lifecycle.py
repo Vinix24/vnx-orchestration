@@ -713,8 +713,13 @@ def _pid_state(pid: Any, started_at: Any) -> str:
 
 
 def liveness(state_dir: str | Path, attempt: InFlightAttempt) -> Tuple[str, Optional[str]]:
-    """ADR-045 §5: the flock, the door pid or the child pid; unknown beats dead."""
-    from dispatch_start import spawn_file_path  # noqa: PLC0415
+    """ADR-045 §5: the flock, the door pid or the child pid; unknown beats dead.
+
+    The spawn file is judged by ``dispatch_start.spawn_child_verdict`` — the same
+    validation the door uses — so ``{}`` or ``[]`` is UNKNOWN, never "no child":
+    the file exists, and an untrustworthy one says nothing about the child.
+    """
+    from dispatch_start import StartRefused, spawn_child_verdict, spawn_file_path  # noqa: PLC0415
     from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
 
     verdicts: List[str] = []
@@ -727,14 +732,16 @@ def liveness(state_dir: str | Path, attempt: InFlightAttempt) -> Tuple[str, Opti
     verdicts.append(_pid_state(attempt.start_line.get("door_pid"),
                                attempt.start_line.get("door_started_at")))
     try:
-        spawn = json.loads(spawn_file_path(
+        raw = spawn_file_path(
             Path(state_dir), attempt.project_id, attempt.dispatch_id, attempt.attempt
-        ).read_text(encoding="utf-8"))
-        verdicts.append(_pid_state(spawn.get("child_pid"), spawn.get("child_started_at")))
+        ).read_text(encoding="utf-8")
     except FileNotFoundError:
         verdicts.append(LIVENESS_DEAD)  # no spawn file: this attempt recorded no child
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AppendReceiptError):
-        verdicts.append(LIVENESS_UNKNOWN)
+    except (OSError, UnicodeDecodeError, AppendReceiptError, StartRefused):
+        verdicts.append(LIVENESS_UNKNOWN)  # exists but unreadable: UNKNOWN, never absent
+    else:
+        verdicts.append({True: LIVENESS_LIVE, False: LIVENESS_DEAD,
+                         None: LIVENESS_UNKNOWN}[spawn_child_verdict(raw)])
     if LIVENESS_LIVE in verdicts:
         return LIVENESS_LIVE, ("occupancy_flock", "door_pid", "child_pid")[
             verdicts.index(LIVENESS_LIVE)]

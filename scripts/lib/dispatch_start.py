@@ -205,13 +205,16 @@ def pid_verdict(pid: object, started_at: object) -> Optional[bool]:
     return actual == started_at
 
 
-def _spawn_child_verdict(raw: str) -> Optional[bool]:
+def spawn_child_verdict(raw: str) -> Optional[bool]:
     """The spawn file's own liveness verdict, or ``None`` when it cannot be trusted.
 
     A decoded value that is not a JSON object, a ``child_pid`` that is not a
     positive ``int`` (a ``bool`` is not an int here) or a ``child_started_at`` that
     is not a non-empty ``str`` is UNKNOWN, never "no child": the file exists, so
     its unreadability says nothing about whether the child ran.
+
+    Public because ``dispatch_lifecycle.liveness`` (the sweep) and the door
+    (``_liveness``) must judge the same file the same way.
     """
     try:
         spawn = json.loads(raw)
@@ -249,7 +252,7 @@ def _liveness(start_line: Dict[str, Any], *, state_dir: Path, dispatch_id: str) 
     except (OSError, ValueError, StartRefused, KeyError, TypeError):
         signals["child_pid"] = None  # exists but unreadable/undecodable: UNKNOWN, never absent
     else:
-        signals["child_pid"] = _spawn_child_verdict(raw)
+        signals["child_pid"] = spawn_child_verdict(raw)
     from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
     try:
         held = probe_occupancy(claims_dir_for_state_dir(state_dir), dispatch_id)

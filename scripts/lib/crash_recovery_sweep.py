@@ -58,6 +58,7 @@ from typing import Callable, Optional
 
 from ledger_attempt_state import (AttemptVerdict, LEDGER_FILENAME,
                                   attempt_verdict, read_ledger)
+from ndjson_io import NdjsonCorruptionError
 
 logger = logging.getLogger(__name__)
 
@@ -262,31 +263,50 @@ def discover_orphans(data_dir: Path, state_dir: Path, project_id: str) -> list[O
 
 
 def _ledger_verdicts(state_dir: Path, project_id: str, orphans: "list[Orphan]",
-                     records: "Optional[list]" = None
+                     records: "Optional[list]" = None,
+                     errors: "Optional[list]" = None,
                      ) -> "tuple[dict[str, AttemptVerdict], Optional[str]]":
     """Read the ledger once (ADR-045 §7) and judge every orphan; ``({}, reason)``
     for an unreadable ledger, since it cannot tell a ``v3`` orphan from a legacy one.
+
+    A line that did not parse and carries ONE orphan's id makes that dispatch
+    unreadable only: it gets no verdict (so it is never recovered) and the
+    reason is recorded in ``errors``; the other orphans keep their verdicts.
     """
     if records is None:
         try:
             records = read_ledger(state_dir)
         except OSError as exc:
             return {}, f"cannot read {LEDGER_FILENAME} to decide a v3 dispatch: {exc}"
-    return ({orphan.dispatch_id: attempt_verdict(state_dir, project_id,
-                                                 orphan.dispatch_id, records=records)
-             for orphan in orphans}, None)
+    verdicts: "dict[str, AttemptVerdict]" = {}
+    for orphan in orphans:
+        try:
+            verdicts[orphan.dispatch_id] = attempt_verdict(
+                state_dir, project_id, orphan.dispatch_id, records=records)
+        except NdjsonCorruptionError as exc:
+            if errors is not None:
+                errors.append({"dispatch_id": orphan.dispatch_id,
+                               "error": f"unreadable ledger line for this dispatch: {exc}"})
+            logger.error("crash_recovery: LEAVE %s — its ledger line did not parse: %s",
+                         orphan.dispatch_id, exc)
+    return verdicts, None
 
 
 def _skip_not_recoverable(orphans: "list[Orphan]", verdicts: "dict[str, AttemptVerdict]",
                           protected: "set[str]", result: SweepResult) -> "list[Orphan]":
-    """Return the ``legacy`` orphans only; a ``v3`` attempt is never recovered here."""
+    """Return the ``legacy`` orphans only; a ``v3`` attempt or an unreadable one
+    is never recovered here."""
     # A v3 attempt is ended by the finalizer/K-6 sweep and moved only by the K-7 drain.
     legacy = []
     for orphan in orphans:
-        verdict = verdicts[orphan.dispatch_id]
+        verdict = verdicts.get(orphan.dispatch_id)
         if orphan.dispatch_id in protected:
             result.skipped_protected.append(orphan.dispatch_id)
             logger.info("crash_recovery: SKIP %s — excluded by caller", orphan.dispatch_id)
+        elif verdict is None:
+            # no verdict: its own ledger line did not parse and was recorded in errors
+            logger.info("crash_recovery: LEAVE %s — unreadable ledger line for it",
+                        orphan.dispatch_id)
         elif verdict.is_legacy:
             legacy.append(orphan)
         else:
@@ -443,7 +463,8 @@ def sweep(
 
     orphans = discover_orphans(data_dir, state_dir, project_id)
     result.scanned = len(orphans)
-    verdicts, result.ledger_error = _ledger_verdicts(state_dir, project_id, orphans, ledger)
+    verdicts, result.ledger_error = _ledger_verdicts(
+        state_dir, project_id, orphans, ledger, result.errors)
     if result.ledger_error is not None:
         result.errors.append({"dispatch_id": None, "error": result.ledger_error})
         logger.error("crash_recovery: %s — no orphan recovered this run", result.ledger_error)
