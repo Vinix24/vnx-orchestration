@@ -13,6 +13,10 @@ its sibling gate/event NDJSON streams):
   read_ndjson(path)     line left by a crash mid-append instead of raising. A
                         partial last record must never break the reader.
 
+  read_ndjson_strict    Same parsing, but only the torn tail may be unparseable:
+                        any other broken line raises ``NdjsonCorruptionError``,
+                        since a file with a hole in it is not evidence.
+
 Posix-only paths (the audit trail is written with ``fcntl.flock`` on posix);
 ``os.fsync`` is available on every platform this repo targets.
 """
@@ -103,4 +107,38 @@ def read_ndjson(path: PathLike) -> List[Any]:
     return list(iter_ndjson(path))
 
 
-__all__ = ["fsync_fileno", "iter_ndjson", "read_ndjson"]
+class NdjsonCorruptionError(ValueError):
+    """An unparseable line that is NOT the torn tail: the file cannot be read as evidence."""
+
+    def __init__(self, path: PathLike, line_number: int, detail: str):
+        self.path, self.line_number, self.detail = path, line_number, detail
+        super().__init__(f"unparseable line {line_number} of {path} "
+                         f"(interior corruption, not a torn tail): {detail}")
+
+
+def read_ndjson_strict(path: PathLike) -> List[Any]:
+    """Parsed records; only the torn tail may be unparseable — an interior break raises.
+
+    A line that is not UTF-8 is unparseable too, so a byte-level break refuses, never U+FFFD.
+    """
+    p = Path(path)
+    try:
+        lines = p.read_bytes().split(b"\n")
+    except FileNotFoundError:
+        return []
+    last_content_idx = max((i for i, raw in enumerate(lines) if raw.strip()), default=-1)
+    records: List[Any] = []
+    for idx, raw in enumerate(lines):
+        if not raw.strip():
+            continue
+        try:
+            records.append(json.loads(raw.decode("utf-8").strip()))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if idx != last_content_idx:
+                raise NdjsonCorruptionError(p, idx + 1, str(exc)) from exc
+            logger.debug("ndjson_io: skipping torn tail line in %s", p)
+    return records
+
+
+__all__ = ["NdjsonCorruptionError", "fsync_fileno", "iter_ndjson", "read_ndjson",
+           "read_ndjson_strict"]

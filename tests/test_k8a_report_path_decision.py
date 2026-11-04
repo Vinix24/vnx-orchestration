@@ -20,7 +20,9 @@ acceptance rule of the dispatch:
 5. the end link: only an exact-key ``dispatch_finished``; a legacy completion
    never links;
 6. the v3 line is a copy with exactly one end link and every payload field;
-7. no writer changes — this file imports no writer.
+7. no writer changes — this file imports no writer;
+8. round 3 (OI-2528): the ledger is read strictly — only the torn tail may be
+   unparseable, an interior break refuses ``lifecycle_mode_undecidable``.
 """
 
 from __future__ import annotations
@@ -190,6 +192,27 @@ def _set_row_metadata(state_dir: Path, metadata: dict, *, project_id: str = PROJ
 
 def _make_ledger_unreadable(state_dir: Path) -> None:
     _ledger(state_dir).mkdir(parents=True, exist_ok=True)
+
+
+def _corrupt_ledger_line(state_dir: Path, event_type: str) -> int:
+    """Rewrite the first *event_type* line as an unparseable fragment; return its 1-based line.
+
+    Byte-level damage on a whole line, the shape a bad write leaves in the interior of
+    the file: the line count is unchanged, so the reading that follows is well defined.
+    """
+    ledger = _ledger(state_dir)
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    index = next(i for i, raw in enumerate(lines)
+                 if raw.strip() and json.loads(raw).get("event_type") == event_type)
+    lines[index] = '{"event_type": "dispatch_star'
+    ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return index + 1
+
+
+def _append_torn_tail(state_dir: Path, fragment: str) -> None:
+    """Append an unterminated partial record: exactly what a crash mid-append leaves."""
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(fragment)
 
 
 def _receipt(**overrides) -> dict:
@@ -606,3 +629,50 @@ def test_an_unresolvable_tenant_with_a_db_refuses_never_legacy(
         rlm.report_line(receipt, state_dir=state_dir)
 
     assert exc.value.code == "lifecycle_mode_undecidable"
+
+
+# ---------------------------------------------------------------------------
+# Rule 9 (K-8a r3, OI-2528): a hole in the ledger refuses, only the torn tail is read past
+# ---------------------------------------------------------------------------
+
+def test_an_interior_broken_start_line_refuses_never_books_a_completion(
+        state_dir, spec_file, v3, clock):
+    """Codex K-9: the broken line carried the v3 marker and a valid end followed it.
+
+    The v3 evidence vanishes with the unreadable line, so a lenient reader answers
+    legacy and books a second completion. Nothing is booked here: the call raises.
+    """
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    line_number = _corrupt_ledger_line(state_dir, "dispatch_started")
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert exc.value.code == "lifecycle_mode_undecidable"
+    assert exc.value.detail.startswith("ledger_corrupt")
+    assert f"line {line_number}" in exc.value.detail
+
+
+def test_a_torn_tail_behind_an_intact_start_line_still_books_the_v3_report(
+        state_dir, spec_file, v3, clock):
+    """The same damage on the FINAL line is a crash mid-append: the records before it count."""
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    ended = _completed_line(state_dir, attempt=1)
+    _append_torn_tail(state_dir, '{"event_type": "dispatch_started", "dispatch_id": "d-k8a", "life')
+
+    line = rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert line["event_type"] == "report_ingested"
+    assert line["end_outcome_id"] == ended["outcome_id"]
+
+
+def test_a_torn_final_line_on_another_dispatch_is_no_refusal(state_dir, spec_file, v3, clock):
+    _begin(state_dir, spec_file)
+    _append_torn_tail(state_dir, '{"event_type": "task_complete", "dispatch_id": "d-other", "sta')
+
+    path = rlm.decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=state_dir)
+
+    assert path.mode == rlm.MODE_V3
+    assert path.end_pending is True
