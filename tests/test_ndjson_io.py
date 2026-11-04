@@ -198,6 +198,72 @@ def test_strict_reader_missing_file_yields_nothing(tmp_path):
     assert read_ndjson_strict(tmp_path / "does-not-exist.ndjson") == []
 
 
+def test_strict_reader_refuses_a_final_broken_line_that_ends_in_a_newline(tmp_path):
+    """A final line written completely is committed corruption, not a torn tail."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-1", "event_type"\n')  # line 2, terminated by a newline
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+
+
+def test_strict_reader_refuses_a_final_undecodable_line_that_ends_in_a_newline(tmp_path):
+    """Codex on #2373: a complete final record carrying invalid UTF-8 is corruption."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-\xff1", "event_type": "dispatch_started"}\n')
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 2
+
+
+def test_tolerates_an_unterminated_final_fragment_that_names_a_dispatch(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-1", "event_ty')  # no trailing newline: torn
+
+    assert read_ndjson_strict(
+        path, relevance=lambda raw: b"d-1" in raw) == [{"dispatch_id": "d-0"}]
+
+
+def test_the_relevance_predicate_raises_only_for_the_line_it_names(tmp_path, caplog):
+    """The hot-path scope: a broken line of this dispatch refuses; another's is skipped."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_bytes(
+        json.dumps({"dispatch_id": "d-0"}).encode("utf-8") + b"\n"
+        + b'{"dispatch_id": "d-1", "event_type\n'  # interior, carries d-1
+        + json.dumps({"dispatch_id": "d-2"}).encode("utf-8") + b"\n")
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path, relevance=lambda raw: b"d-1" in raw)
+    assert exc.value.line_number == 2
+
+    with caplog.at_level(logging.WARNING, logger="ndjson_io"):
+        assert read_ndjson_strict(
+            path, relevance=lambda raw: b"d-9" in raw) == [
+            {"dispatch_id": "d-0"}, {"dispatch_id": "d-2"}]
+    assert any("malformed" in record.message.lower() for record in caplog.records)
+
+
+def test_the_bytes_form_applies_the_same_rule(tmp_path):
+    good = json.dumps({"dispatch_id": "d-0"}).encode("utf-8")
+    broken = b'{"dispatch_id": "d-1", "event_type'
+
+    assert ndjson_io.read_ndjson_strict_bytes(good + b"\n" + broken) == [{"dispatch_id": "d-0"}]
+    with pytest.raises(NdjsonCorruptionError):
+        ndjson_io.read_ndjson_strict_bytes(good + b"\n" + broken + b"\n")
+    assert ndjson_io.read_ndjson_strict_bytes(good + b"\n" + broken, source="blob",
+        relevance=lambda raw: b"d-9" in raw) == [{"dispatch_id": "d-0"}]
+
+
 def test_iter_ndjson_still_skips_an_interior_broken_line_unchanged(tmp_path):
     """Pinned: the lenient reader keeps its mid-file skip; only the strict one refuses."""
     path = tmp_path / "t0_receipts.ndjson"

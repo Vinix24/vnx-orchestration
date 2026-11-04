@@ -27,6 +27,7 @@ from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
 from coordination_db import db_path_from_state_dir, get_connection
+from ndjson_io import scan_ndjson_lines
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -106,20 +107,24 @@ def read_attempt_state(state_dir: str | Path, project_id: str, dispatch_id: str)
 
 
 def _lifecycle_lines(state_dir, project_id: str, dispatch_id: str) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
-    """This exact key's start lines (file order) and its end lines, by attempt."""
+    """This exact key's lines; an interior break carrying this id refuses (OI-2528)."""
     ledger = Path(state_dir) / LEDGER_FILENAME
+    needle = str(dispatch_id).encode("utf-8")
     try:
-        text = ledger.read_text(encoding="utf-8", errors="replace")
+        data = ledger.read_bytes()
     except FileNotFoundError: return [], {}
     except OSError as exc:
         raise StartRefused("ledger_unreadable", f"cannot read {ledger}: {exc}") from exc
     starts, ends = [], {}
-    for raw in text.splitlines():
-        if dispatch_id not in raw: continue  # format-agnostic prefilter; the separators are not ours
-        try:
-            line = json.loads(raw)
-        except json.JSONDecodeError:
-            continue  # a torn line is not evidence of a completed record
+    for number, raw, line, error, torn in scan_ndjson_lines(data):
+        if error is not None:
+            if torn: continue  # a crash mid-append is no record and no evidence
+            if needle in raw:
+                raise StartRefused("ledger_corrupt", f"unparseable line {number} of "
+                    f"{ledger} carries dispatch_id {dispatch_id!r}: {error}")
+            logger.warning("[dispatch_start] skipping malformed ledger line %d in %s", number, ledger)
+            continue
+        if needle not in raw: continue  # format-agnostic prefilter; the separators are not ours
         # The prefilter admits ids that merely CONTAIN this one (``job-extra`` for
         # ``job``); only the exact key counts (ADR-045 §3).
         attempt = line.get("attempt") if isinstance(line, dict) else None

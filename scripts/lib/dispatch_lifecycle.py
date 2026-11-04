@@ -51,6 +51,7 @@ from append_receipt_internals.lifecycle import (
 from atomic_io import atomic_write_json
 from coordination_db import TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection
 from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
+from ndjson_io import NdjsonCorruptionError, read_ndjson_strict_bytes, scan_ndjson_lines
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from runtime_state_machine import transition_dispatch_idempotent
 
@@ -154,8 +155,9 @@ def _ledger_size(ledger: Path) -> int:
 def _end_lines_from_offset(ledger: Path, document: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """Every parseable end record for this intent's key at or after its offset.
 
-    A torn line (a crash mid-append) is not evidence that a complete end line
-    exists, so it is skipped and the append layer decides (ADR-045 §3).
+    The blob is read strictly: the torn tail is skipped, and an interior broken
+    line carrying this ``dispatch_id`` refuses ``ledger_corrupt`` (it may be the
+    end line itself, OI-2528); the append layer decides otherwise.
     """
     offset = int(document["ledger_offset"])
     try:
@@ -169,18 +171,18 @@ def _end_lines_from_offset(ledger: Path, document: Mapping[str, Any]) -> List[Di
     except OSError as exc:
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read the ledger {ledger}: {exc}") from exc
-    key = (document["project_id"], document["dispatch_id"], document["attempt"])
-    found: List[Dict[str, Any]] = []
-    for raw in blob.split(b"\n"):
-        try:
-            line = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
-        if (isinstance(line, dict)
-                and str(line.get("event_type") or "").strip() == DISPATCH_FINISHED_EVENT_TYPE
-                and (line.get("project_id"), line.get("dispatch_id"), line.get("attempt")) == key):
-            found.append(line)
-    return found
+    dispatch_id = str(document["dispatch_id"])
+    needle = dispatch_id.encode("utf-8")
+    try:
+        records = read_ndjson_strict_bytes(blob, source=ledger, relevance=lambda raw: needle in raw)
+    except NdjsonCorruptionError as exc:
+        raise AppendReceiptError("ledger_corrupt", EXIT_IO_ERROR,
+            f"the ledger {ledger} has unparseable line {exc.line_number} carrying "
+            f"{dispatch_id!r}: {exc.detail}") from exc
+    key = (document["project_id"], dispatch_id, document["attempt"])
+    return [line for line in records if isinstance(line, dict)
+            and str(line.get("event_type") or "").strip() == DISPATCH_FINISHED_EVENT_TYPE
+            and (line.get("project_id"), line.get("dispatch_id"), line.get("attempt")) == key]
 
 
 def _find_end_line(ledger: Path, document: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
@@ -579,10 +581,10 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read {ledger}: {exc}") from exc
     with handle:
-        for raw in handle:
-            try:
-                line = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError): continue  # a torn line is no record
+        for number, raw, line, error, torn in scan_ndjson_lines(handle.read()):
+            if error is not None:
+                if not torn: errors.append(f"ledger_corrupt line {number}")
+                continue
             if not isinstance(line, dict):
                 continue
             key = (line.get("project_id"), line.get("dispatch_id"))
@@ -838,6 +840,10 @@ def _collect(state_dir: Path, project_id: Optional[str], now: datetime,
     budget_deadline = None if budget_seconds is None else _monotonic() + max(0.0, budget_seconds)
     intents, intent_errors = open_intents(state_dir, project_id)
     flights, flight_errors = v3_in_flight(state_dir, project_id)
+    corrupt = [error for error in flight_errors if error.startswith("ledger_corrupt")]
+    if corrupt:  # the broken line may be an attempt's end: no abandoned end, fail the run
+        raise AppendReceiptError("ledger_corrupt", EXIT_IO_ERROR,
+            f"no abandoned end is written over interior corruption: {'; '.join(corrupt)}")
     start = _resume_at(flights, cursor) if budget_seconds is not None else 0
     order = list(range(start, len(flights))) + list(range(0, start))
     collected: Dict[str, Any] = {name: 0 for name in _THE_COUNTS}

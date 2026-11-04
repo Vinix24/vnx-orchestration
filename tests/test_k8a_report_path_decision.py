@@ -22,7 +22,8 @@ acceptance rule of the dispatch:
 6. the v3 line is a copy with exactly one end link and every payload field;
 7. no writer changes — this file imports no writer;
 8. round 3 (OI-2528): the ledger is read strictly — only the torn tail may be
-   unparseable, an interior break refuses ``lifecycle_mode_undecidable``.
+   unparseable; an interior break carrying this dispatch's id refuses
+   ``lifecycle_mode_undecidable`` (K-9c rule 6 scopes it to the dispatch).
 """
 
 from __future__ import annotations
@@ -199,12 +200,14 @@ def _corrupt_ledger_line(state_dir: Path, event_type: str) -> int:
 
     Byte-level damage on a whole line, the shape a bad write leaves in the interior of
     the file: the line count is unchanged, so the reading that follows is well defined.
+    The fragment keeps the dispatch id: since K-9c (rule 6) only a broken line that
+    carries this dispatch's id is that dispatch's evidence and refuses.
     """
     ledger = _ledger(state_dir)
     lines = ledger.read_text(encoding="utf-8").splitlines()
     index = next(i for i, raw in enumerate(lines)
                  if raw.strip() and json.loads(raw).get("event_type") == event_type)
-    lines[index] = '{"event_type": "dispatch_star'
+    lines[index] = f'{{"event_type": "{event_type}", "dispatch_id": "{DISPATCH}", "att'
     ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return index + 1
 
