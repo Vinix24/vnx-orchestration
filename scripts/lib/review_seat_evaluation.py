@@ -38,6 +38,14 @@ from the PR (``baseRefName``) as ``base_branch``; without one the class is
 (``seats=``) keeps every seat at every class, and a merge record under the
 older :data:`SEAT_RULE` is judged without a class (``by_risk=False``).
 
+**One key switches the rule (track ``tweede-stoel-op-signaal``, PR 4).**
+:func:`active_seat_rule` reads ``VNX_REVIEW_SEAT_RULE`` through the same
+``config_runtime`` path as the stack: unset or ``first_seat_or_every_seat_by_risk``
+keep :func:`seats_for_risk`, ``first_seat_or_every_seat_on_signal`` narrows a
+resolved stack with :func:`seats_for_signals`, and an unknown value fails
+closed to the risk rule and is recorded by name. A receipt is judged under the
+rule its own record names, never under the key.
+
 **Which seat a record answers for** (:func:`seat_for`). The ``seat`` its own
 request on this head states (stamped since R5a), else ``takeover_path[0]``
 (the seat the takeover walk started from), else its own gate.
@@ -90,6 +98,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sys
 from dataclasses import dataclass, field, replace
@@ -99,6 +108,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 REVIEW_STACK_KEY = "VNX_DEFAULT_REVIEW_STACK"
 REVIEW_STACK_OVERRIDE_KEY = "VNX_OVERRIDE_DEFAULT_REVIEW_STACK"
 TAKEOVER_CHAIN_KEY = "VNX_REVIEW_GATE_TAKEOVER_CHAIN"
+#: The one key that switches the seat rule (track ``tweede-stoel-op-signaal``, PR 4).
+SEAT_RULE_KEY = "VNX_REVIEW_SEAT_RULE"
+
+logger = logging.getLogger(__name__)
 
 #: The rule a merge record was judged under. Its presence on a ``pr_merged``
 #: receipt is how track closure tells a PR merged under the seat rule from one
@@ -124,6 +137,44 @@ UNKNOWN = "unknown"
 
 #: The fixed names of the signals that ask the second seat (plan, Approach 1-5).
 SIGNAL_NAMES = ("real_warning", "security_path", "schema", "irreversible", "sample")
+
+
+@dataclass(frozen=True)
+class ActiveSeatRule:
+    """The rule :data:`SEAT_RULE_KEY` names now, the raw value, and whether it was understood.
+
+    ``rule`` is the rule to decide by (fail-closed to :data:`RISK_SEAT_RULE` for
+    every value nobody understands), ``value`` is the configured value verbatim
+    so a record can name an unknown one, and ``recognised`` is False exactly for
+    that unknown value.
+    """
+
+    rule: str
+    value: str
+    recognised: bool
+
+
+def active_seat_rule() -> ActiveSeatRule:
+    """The seat rule this project's key names (the one reader of :data:`SEAT_RULE_KEY`).
+
+    Read through ``config_runtime.get``, never a second config reader. Only the
+    door calls this; closure and enforcement judge a receipt under the rule its
+    own record names.
+    """
+    import config_runtime
+
+    raw = config_runtime.get(SEAT_RULE_KEY)
+    value = (raw or "").strip()
+    if value == SIGNAL_SEAT_RULE:
+        return ActiveSeatRule(SIGNAL_SEAT_RULE, value, True)
+    if value in ("", RISK_SEAT_RULE):
+        return ActiveSeatRule(RISK_SEAT_RULE, value, True)
+    logger.warning(
+        "review seat rule: %s=%r is not a known rule; keeping %s (fail-closed)",
+        SEAT_RULE_KEY, raw, RISK_SEAT_RULE,
+    )
+    return ActiveSeatRule(RISK_SEAT_RULE, value, False)
+
 
 _KNOWN_CLASSES = frozenset({"low", "medium", "high", "critical"})
 _PASS = "pass"
@@ -272,6 +323,9 @@ class RequiredSeats:
     stack: Tuple[str, ...] = ()
     risk: Optional[Dict[str, Any]] = None
     rule: str = SEAT_RULE
+    #: The raw :data:`SEAT_RULE_KEY` value this decision was made under; empty
+    #: when the key was unset (the default, and every merge before PR 4).
+    rule_value: str = ""
 
     def risk_text(self) -> str:
         """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
@@ -314,9 +368,12 @@ class SeatSignalInput:
     the route or gate a takeover walked from when it was filled through another
     reviewer, and :data:`UNKNOWN` when that cannot be told. ``risk_paths`` are
     the ``(path, category)`` pairs the risk reading decided on; they are only
-    trusted when ``risk_class`` is a known class. ``head_sha`` is the exact
-    40-character head the outcome is bound to, and the sha the sample is drawn
-    from; a sha that is not one is :data:`UNKNOWN`.
+    trusted when ``risk_class`` is a known class. ``path_signal`` is ``""``
+    when every deciding path can be classified and :data:`UNKNOWN` when one
+    cannot (an unnormalisable path, a blank path or category): the signal such
+    a path would fire cannot be told, so the rule keeps every seat. ``head_sha``
+    is the exact 40-character head the outcome is bound to, and the sha the
+    sample is drawn from; a sha that is not one is :data:`UNKNOWN`.
     """
 
     stack: Tuple[str, ...] = ()
@@ -327,6 +384,7 @@ class SeatSignalInput:
     prescan_count: Optional[int] = None
     risk_class: str = UNKNOWN
     risk_paths: Tuple[Tuple[str, str], ...] = ()
+    path_signal: str = ""
     irreversible: Optional[bool] = None
     head_sha: str = UNKNOWN
 
@@ -339,6 +397,7 @@ class SeatSignalInput:
             ("real_warning_count", _is_count(self.real_warning_count)),
             ("prescan_count", _is_count(self.prescan_count)),
             ("risk_class", _known_class(self.risk_class)),
+            ("path_signal", self.path_signal != UNKNOWN),
             ("irreversible", isinstance(self.irreversible, bool)),
             ("head_sha", _full_sha(self.head_sha)),
         )
@@ -384,15 +443,118 @@ def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
     return SignalSeatDecision(SIGNAL_SEAT_RULE, seats, signals, unknown)
 
 
+def signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    """``(class, (path, category) pairs)`` from a recorded risk reading; ``UNKNOWN`` when it is unreadable.
+
+    A reading whose own diff could not be read is ``UNKNOWN``, never a known
+    ``high``: that is exactly ``high`` with a fail-closed reason and no deciding
+    path.
+    """
+    if not isinstance(risk, dict):
+        return UNKNOWN, ()
+    deciding = risk.get("deciding")
+    paths = tuple(
+        (str(item.get("path") or ""), str(item.get("category") or ""))
+        for item in (deciding if isinstance(deciding, list) else ())
+        if isinstance(item, dict)
+    )
+    derived = str(risk.get("derived") or "").strip().lower()
+    reason = str(risk.get("reason") or "")
+    if derived not in _KNOWN_CLASSES:
+        return UNKNOWN, paths
+    if derived == "high" and not paths and reason.startswith("fail-closed:"):
+        return UNKNOWN, paths
+    cls = str(risk.get("risk_class") or "").strip().lower()
+    return (cls if cls in _KNOWN_CLASSES else UNKNOWN), paths
+
+
+def _rounds_lines(rounds: Any) -> Tuple[Any, ...]:
+    return tuple(getattr(rounds, "lines", ()) or ()) if rounds is not None else ()
+
+
+def _accepted_seat_line(
+    fills: Sequence[Any], seat: str, head: str, rounds: Any,
+) -> Any:
+    """The ledger line of the record the door accepted for ``seat``; ``None`` when there is none.
+
+    Matched the way :func:`counted_fill` matches it: exact head, seat, the
+    reviewer's gate, a PASS and the record's own report.
+    """
+    if not seat or rounds is None:
+        return None
+    fill = next((item for item in fills if item.seat == seat), None)
+    if fill is None or not fill.filled or not isinstance(fill.record, dict):
+        return None
+    gate = str(fill.record.get("gate") or fill.reviewer or "")
+    report = Path(str(fill.record.get("report_path") or "")).name
+    matches = [
+        line for line in _rounds_lines(rounds)
+        if line.head_sha == head and line.seat == seat and line.reviewer == gate
+        and line.verdict == "pass" and line.report_name == report
+    ]
+    return matches[-1] if matches else None
+
+
+def signal_input_for(
+    required: RequiredSeats, fills: Sequence[Any], rounds: Any, head_sha: str,
+) -> SeatSignalInput:
+    """The typed input of :func:`seats_for_signals` from one seat evaluation.
+
+    The first seat of the stack supplies outcome, reviewer, warning counts and
+    route; the risk reading supplies class, paths and ``irreversible``. Every
+    field the store cannot answer stays :data:`UNKNOWN`. A deciding path the
+    classifier could not read makes the path signal :data:`UNKNOWN`: whether it
+    fires a security or schema signal cannot be told, so the rule keeps every
+    seat instead of reading "no signal".
+    """
+    stack = tuple(required.stack)
+    seat = stack[0] if stack else ""
+    accepted = _accepted_seat_line(fills, seat, head_sha, rounds)
+    verdicts = {line.verdict for line in _rounds_lines(rounds) if seat and line.head_sha == head_sha and line.seat == seat}
+    risk = required.risk if isinstance(required.risk, dict) else {}
+    risk_class, risk_paths = signal_risk(risk)
+    path_signal = "" if all(_path_classifiable(path, kind) for path, kind in risk_paths) else UNKNOWN
+    takeover = UNKNOWN
+    if accepted is not None:
+        fill = next((item for item in fills if item.seat == seat), None)
+        route = fill.route if fill is not None else ""
+        takeover = accepted.takeover_from or ("" if route == ROUTE_DIRECT else (route or UNKNOWN))
+    return SeatSignalInput(
+        stack=stack,
+        seat1_outcome=next(iter(verdicts)) if len(verdicts) == 1 else UNKNOWN,
+        seat1_reviewer=(accepted.reviewer or UNKNOWN) if accepted is not None else UNKNOWN,
+        seat1_takeover_from=takeover,
+        real_warning_count=accepted.warning_count if accepted is not None else None,
+        prescan_count=accepted.prescan_notice_count if accepted is not None else None,
+        risk_class=risk_class,
+        risk_paths=risk_paths,
+        path_signal=path_signal,
+        irreversible=risk.get("irreversible") if isinstance(risk.get("irreversible"), bool) else None,
+        head_sha=head_sha or UNKNOWN,
+    )
+
+
+def _path_classifiable(path: Any, category: Any) -> bool:
+    """Whether one deciding path can be classified: a blank path or category, or an
+    unnormalisable path, cannot, and no signal can be read from such a pair."""
+    from review_risk_class import CATEGORY_UNNORMALISABLE, path_is_unnormalisable
+
+    kind = str(category or "").strip().lower()
+    return bool(kind) and kind != CATEGORY_UNNORMALISABLE and not path_is_unnormalisable(path)
+
+
 def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
     """The signals that fired from the fields that are known, in :data:`SIGNAL_NAMES` order."""
     fired: List[str] = []
     if _is_count(signal_input.real_warning_count) and signal_input.real_warning_count > 0:
         fired.append("real_warning")
     if _known_class(signal_input.risk_class):
-        if any(_is_security_path(path, category) for path, category in signal_input.risk_paths):
+        # Only pairs that can be classified may fire a path signal; an
+        # unclassifiable one is reported through ``path_signal`` instead.
+        paths = [(path, kind) for path, kind in signal_input.risk_paths if _path_classifiable(path, kind)]
+        if any(_is_security_path(path, category) for path, category in paths):
             fired.append("security_path")
-        if any(_is_category(category, "schema") for _path, category in signal_input.risk_paths):
+        if any(_is_category(category, "schema") for _path, category in paths):
             fired.append("schema")
     if signal_input.irreversible is True:
         fired.append("irreversible")
@@ -1346,6 +1508,9 @@ class SeatEvaluation:
     blocking: Tuple[Rejection, ...]
     hints: Dict[str, str]
     rounds: Optional[DoorRounds] = None
+    #: The signal decision this evaluation was narrowed by, under
+    #: :data:`SIGNAL_SEAT_RULE`; ``None`` for every other rule.
+    signal: Optional[SignalSeatDecision] = None
 
     @property
     def seats(self) -> Tuple[str, ...]:
@@ -1371,6 +1536,10 @@ class SeatEvaluation:
             parts = [_filled_text(self)]
         if self.required.risk_text():
             parts.insert(0, self.required.risk_text())
+        if self.required.rule == SIGNAL_SEAT_RULE and self.signal is not None:
+            signals = ", ".join(self.signal.signals) or "geen"
+            unknown = ", ".join(self.signal.unknown)
+            parts.insert(0, f"signaalregel: signalen {signals}" + (f"; onbekend: {unknown}" if unknown else ""))
         if self.required.note:
             parts.append(self.required.note)
         if self.rounds is not None and self.rounds.override and self.rounds.capped:
@@ -1399,6 +1568,8 @@ class SeatEvaluation:
             "blocking": [rejection.gate for rejection in self.blocking],
             "verdict": "GO" if self.go else "NO-GO",
         }
+        if self.required.rule_value:
+            record["rule_value"] = self.required.rule_value
         if self.required.rule == RISK_SEAT_RULE:
             risk = self.required.risk or {}
             record.update({
@@ -1409,6 +1580,17 @@ class SeatEvaluation:
                 "risk_reason": risk.get("reason") or "geen risicoklasse vastgesteld (fail-closed)",
                 "risk_source": risk.get("source") or "",
                 "risk": risk or None,
+            })
+        if self.required.rule == SIGNAL_SEAT_RULE:
+            decision = self.signal
+            risk = self.required.risk or {}
+            record.update({
+                "base_branch": self.scope.base_branch,
+                "stack": list(self.required.stack),
+                "required_seats": list(self.seats),
+                "signals": list(decision.signals) if decision is not None else [],
+                "unknown": list(decision.unknown) if decision is not None else [],
+                "risk_class": risk.get("risk_class") or "high",
             })
         if self.rounds is not None:
             record["round_ledger"] = self.rounds.to_record()
@@ -1525,6 +1707,8 @@ def evaluate_review_seats(
     checkout: Optional[Path] = None,
     by_risk: bool = True,
     base_branch: Optional[str] = None,
+    rule: str = RISK_SEAT_RULE,
+    rule_value: str = "",
 ) -> SeatEvaluation:
     """The seat answer for ``pr_id`` on ``head_sha``: the one function every evaluator calls.
 
@@ -1547,6 +1731,13 @@ def evaluate_review_seats(
     (``flag`` or ``env``, RG-5) is recorded with it. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
 
+    ``rule`` (track ``tweede-stoel-op-signaal``, PR 4) is the rule the door
+    reads through :func:`active_seat_rule`; :data:`SIGNAL_SEAT_RULE` narrows a
+    resolved stack with :func:`seats_for_signals` and records the rule, the
+    signals and every ``UNKNOWN`` field. An explicit ``seats`` list is judged
+    as named, and any other value keeps the risk rule. ``rule_value`` is the raw
+    key value, recorded so an unknown one is named rather than read as "off".
+
     ``merge_with_oi`` (RG-4 round 3, OI-2506) is the ``merge_with_oi`` block of
     the merge record closure is judging. With ``round_ledger=False`` it is read
     through :func:`merge_record_rounds`: the codex seat is filled and its veto
@@ -1555,16 +1746,22 @@ def evaluate_review_seats(
     and every merge record without the block — changes nothing.
     """
     scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
+    signal_rule = rule == SIGNAL_SEAT_RULE and seats is None
     by_risk = by_risk and seats is None
     required = required_seats(
         requests_dir_for(scope.results_dir), scope.pr_id, head_sha, seats=seats, seats_source=seats_source,
-        risk=head_risk(scope, checkout) if by_risk else None, by_risk=by_risk,
+        risk=head_risk(scope, checkout) if (by_risk or signal_rule) else None, by_risk=by_risk,
     )
-    gates = reviewer_gates(required.seats)
+    if rule_value:
+        required = replace(required, rule_value=rule_value)
+    # Under the signal rule every seat of the stack must be read before the
+    # rule can narrow; the decision then keeps the fills of the seats it names.
+    fill_seats_for = required.stack if signal_rule else required.seats
+    gates = reviewer_gates(fill_seats_for)
     stated = stated_seats_on_head(scope, gates)
     on_head = records_on_head(scope, stated, gates)
     seated = seated_records(on_head)
-    fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
+    fills = fill_seats(scope, fill_seats_for, seated, stated) if fill_seats_for else ()
     import review_rounds
 
     rounds = (
@@ -1578,5 +1775,13 @@ def evaluate_review_seats(
         blocking = tuple(rejection for rejection in blocking if rejection.seat != review_rounds.CODEX_SEAT)
     if rounds is not None:
         fills = tuple(counted_fill(fill, rounds, scope, stated) for fill in fills)
+    decision: Optional[SignalSeatDecision] = None
+    if signal_rule:
+        if required.stack:
+            decision = seats_for_signals(signal_input_for(required, fills, rounds, scope.head_sha or UNKNOWN))
+            required = replace(required, seats=decision.seats, rule=SIGNAL_SEAT_RULE)
+            fills = tuple(fill for fill in fills if fill.seat in decision.seats)
+        else:
+            required = replace(required, rule=SIGNAL_SEAT_RULE)
     hints = {fill.seat: _unfilled_hint(scope, fill.seat, seated) for fill in fills if not fill.filled}
-    return SeatEvaluation(scope, required, fills, blocking, hints, rounds)
+    return SeatEvaluation(scope, required, fills, blocking, hints, rounds, decision)
