@@ -478,7 +478,9 @@ def test_the_report_decision_refuses_an_interior_broken_line_of_this_dispatch(
     with pytest.raises(rlm.ReportPathRefused) as exc:
         rlm.decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=state_dir, attempt=1)
 
-    assert exc.value.detail.startswith("ledger_corrupt")
+    # K-8a round 4's wording (the form test_restore_stranded_reports reads out of
+    # ``detail``) carries the ledger's own reason in full on its side.
+    assert exc.value.detail.startswith("one lifecycle source is unreadable (ledger: ledger_corrupt:")
     assert f"line {line_number}" in exc.value.detail
 
 

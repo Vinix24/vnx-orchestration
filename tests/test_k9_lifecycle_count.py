@@ -559,3 +559,46 @@ def test_a_torn_final_line_is_no_record_and_no_defect(state_dir, git_repo, write
     assert count["status"] == "measured", count
     assert count["counts"]["total"] == 0, count
     assert count["problems"] == []
+
+
+# ---------------------------------------------------------------------------
+# 7. round 3 (codex on c0c92a8e): the end of an attempt comes from the cohort
+# ---------------------------------------------------------------------------
+
+def _excluded_end(state_dir: Path, dispatch_id: str, old_sha: str) -> None:
+    """An end for the same attempt, written before the activation commit."""
+    _append_raw(state_dir, {"timestamp": START, "event_type": "dispatch_finished",
+                            "schema_version": 3, "project_id": PROJECT,
+                            "dispatch_id": dispatch_id, "attempt": 1,
+                            "end_state": "timed_out", "head_sha": "d" * 40,
+                            "writer_sha": old_sha})
+
+
+def test_an_excluded_end_does_not_decide_the_end_the_cohort_counts(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Codex's reproduction: the excluded ``timed_out`` end must not clear the conflict."""
+    _insert_row(state_dir, "d-k9-cohort", state="timed_out")
+    writer_sha["value"] = git_repo["new"]
+    _finish(state_dir, _begin(state_dir, "d-k9-cohort"))  # an included completed end
+
+    without = _count(state_dir, git_repo, activation_commit=git_repo["new"])
+    _excluded_end(state_dir, "d-k9-cohort", git_repo["old"])
+    with_excluded = _count(state_dir, git_repo, activation_commit=git_repo["new"])
+
+    assert without["counts"]["provenance_unknown"] == 0, without  # both real lines carry one
+    assert without["counts"]["projection_conflict"] == 1, without
+    assert with_excluded["counts"]["projection_conflict"] == 1, with_excluded
+    assert with_excluded["findings"]["projection_conflict"] == [("vnx-dev", "d-k9-cohort", 1)]
+
+
+def test_an_excluded_end_is_not_a_second_end_inside_the_cohort(state_dir, git_repo, writer_sha,
+                                                               lifecycle_on):
+    _insert_row(state_dir, "d-k9-cohort", state="timed_out")
+    writer_sha["value"] = git_repo["new"]
+    _finish(state_dir, _begin(state_dir, "d-k9-cohort"))
+    _excluded_end(state_dir, "d-k9-cohort", git_repo["old"])
+
+    count = _count(state_dir, git_repo, activation_commit=git_repo["new"])
+
+    assert count["counts"]["double_end"] == 0, count
+    assert count["findings"]["double_end"] == []

@@ -22,8 +22,12 @@ acceptance rule of the dispatch:
 6. the v3 line is a copy with exactly one end link and every payload field;
 7. no writer changes — this file imports no writer;
 8. round 3 (OI-2528): the ledger is read strictly — only the torn tail may be
-   unparseable; an interior break carrying this dispatch's id refuses
-   ``lifecycle_mode_undecidable`` (K-9c rule 6 scopes it to the dispatch).
+   unparseable, an interior break refuses ``lifecycle_mode_undecidable``;
+9. round 4: that refusal keeps the ``ledger: …; row: …`` wording the restore scan
+   (K-8c) reads out of ``detail``, with the ledger's reason in full on its side;
+10. round 5 (OI-2528/OI-2529): the refusal is scoped to this dispatch's own broken
+   lines (another dispatch's is skipped), a newline-terminated final break refuses,
+   and a database path that is not a regular file is unreadable, never legacy.
 """
 
 from __future__ import annotations
@@ -67,11 +71,11 @@ _mod_0017 = _ilu.module_from_spec(_spec_0017)
 _spec_0017.loader.exec_module(_mod_0017)
 
 
-@pytest.fixture()
-def state_dir(tmp_path: Path) -> Path:
+def _make_state_dir(root: Path) -> Path:
     """A real coordination store at the production shape (project_id + composite UNIQUE)."""
-    sd = tmp_path / "state"
-    sd.mkdir()
+    sd = root / "state"
+    sd.mkdir(parents=True)
+
     coordination_db.init_schema(sd)
     db_path = coordination_db.db_path_from_state_dir(sd)
     project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=PROJECT)
@@ -83,6 +87,11 @@ def state_dir(tmp_path: Path) -> Path:
     finally:
         conn.close()
     return sd
+
+
+@pytest.fixture()
+def state_dir(tmp_path: Path) -> Path:
+    return _make_state_dir(tmp_path)
 
 
 @pytest.fixture()
@@ -200,8 +209,8 @@ def _corrupt_ledger_line(state_dir: Path, event_type: str) -> int:
 
     Byte-level damage on a whole line, the shape a bad write leaves in the interior of
     the file: the line count is unchanged, so the reading that follows is well defined.
-    The fragment keeps the dispatch id: since K-9c (rule 6) only a broken line that
-    carries this dispatch's id is that dispatch's evidence and refuses.
+    The fragment keeps this dispatch's id — an interior break only refuses when its raw
+    text carries the id (OI-2528), so a fragment without it is another dispatch's damage.
     """
     ledger = _ledger(state_dir)
     lines = ledger.read_text(encoding="utf-8").splitlines()
@@ -210,6 +219,20 @@ def _corrupt_ledger_line(state_dir: Path, event_type: str) -> int:
     lines[index] = f'{{"event_type": "{event_type}", "dispatch_id": "{DISPATCH}", "att'
     ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return index + 1
+
+
+def _insert_broken_line(state_dir: Path, fragment: str, index: int) -> None:
+    """Insert an unparseable line at *index*, leaving the file newline-terminated."""
+    ledger = _ledger(state_dir)
+    lines = ledger.read_text(encoding="utf-8").splitlines()
+    lines.insert(index, fragment)
+    ledger.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _append_broken_line(state_dir: Path, fragment: str) -> None:
+    """Append an unparseable line WITH its newline: a committed broken record."""
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(fragment + "\n")
 
 
 def _append_torn_tail(state_dir: Path, fragment: str) -> None:
@@ -337,6 +360,20 @@ def test_a_store_file_that_is_not_a_database_refuses(state_dir, v3):
         rlm.decide(project_id=PROJECT, dispatch_id=DISPATCH, state_dir=state_dir)
 
     assert exc.value.code == "lifecycle_mode_undecidable"
+
+
+def test_a_database_path_that_is_a_directory_refuses_never_legacy(state_dir, legacy):
+    """OI-2529: only a path that does not exist is ``ROW_ABSENT``; a directory is unreadable."""
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    db_path.unlink()
+    db_path.mkdir()
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert exc.value.code == "lifecycle_mode_undecidable"
+    assert "row: unreadable" in exc.value.detail
+    assert "is not a regular file" in exc.value.detail
 
 
 def test_unreadable_ledger_with_a_readable_legacy_row_refuses(state_dir, v3):
@@ -653,7 +690,7 @@ def test_an_interior_broken_start_line_refuses_never_books_a_completion(
         rlm.report_line(_receipt(), state_dir=state_dir)
 
     assert exc.value.code == "lifecycle_mode_undecidable"
-    assert exc.value.detail.startswith("ledger_corrupt")
+    assert "ledger: ledger_corrupt" in exc.value.detail
     assert f"line {line_number}" in exc.value.detail
 
 
@@ -679,3 +716,66 @@ def test_a_torn_final_line_on_another_dispatch_is_no_refusal(state_dir, spec_fil
 
     assert path.mode == rlm.MODE_V3
     assert path.end_pending is True
+
+
+def test_an_interior_broken_line_of_another_dispatch_is_no_refusal(state_dir, spec_file, v3,
+                                                                   clock):
+    """The scope (OI-2528): another dispatch's broken line is not this dispatch's evidence."""
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    ended = _completed_line(state_dir, attempt=1)
+    _insert_broken_line(state_dir, '{"event_type": "task_complete", "dispatch_id": "d-other", "sta', 1)
+
+    line = rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert line["event_type"] == "report_ingested"
+    assert line["end_outcome_id"] == ended["outcome_id"]
+
+
+def test_a_broken_final_line_that_ends_in_a_newline_of_this_dispatch_refuses(
+        state_dir, spec_file, v3, clock):
+    """A newline-terminated final line was written completely: committed corruption, not a tear."""
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    _append_broken_line(
+        state_dir, f'{{"event_type": "dispatch_started", "dispatch_id": "{DISPATCH}", "att')
+
+    with pytest.raises(rlm.ReportPathRefused) as exc:
+        rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert exc.value.code == "lifecycle_mode_undecidable"
+    assert "ledger: ledger_corrupt" in exc.value.detail
+    assert "line 3" in exc.value.detail
+
+
+# ---------------------------------------------------------------------------
+# Rule 10 (K-8a r4): the refusal keeps the ``ledger: …; row: …`` wording K-8c reads
+# ---------------------------------------------------------------------------
+
+def test_the_undecidable_refusal_names_both_sources_for_the_restore_scan(
+        state_dir, tmp_path, spec_file, v3, clock):
+    """K-8c's restore scan asserts ``"row: unreadable" in refusal.detail`` and carries the
+    detail to its log line, so the shape is a contract between the two modules. The ledger
+    side keeps round 3's reason in full, line number included, when it is the broken one.
+    """
+    _begin(state_dir, spec_file)
+    _finalize(state_dir, attempt=1)
+    line_number = _corrupt_ledger_line(state_dir, "dispatch_started")
+
+    with pytest.raises(rlm.ReportPathRefused) as ledger_exc:
+        rlm.report_line(_receipt(), state_dir=state_dir)
+
+    assert ledger_exc.value.code == "lifecycle_mode_undecidable"
+    assert "one lifecycle source is unreadable" in ledger_exc.value.detail
+    assert "ledger: ledger_corrupt" in ledger_exc.value.detail
+    assert f"line {line_number}" in ledger_exc.value.detail
+
+    row_state = _make_state_dir(tmp_path / "row-only")
+    coordination_db.db_path_from_state_dir(row_state).write_bytes(b"not a database\n")
+
+    with pytest.raises(rlm.ReportPathRefused) as row_exc:
+        rlm.report_line(_receipt(), state_dir=row_state)
+
+    assert row_exc.value.code == "lifecycle_mode_undecidable"
+    assert "one lifecycle source is unreadable" in row_exc.value.detail
+    assert "row: unreadable" in row_exc.value.detail

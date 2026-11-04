@@ -172,9 +172,9 @@ def _end_lines_from_offset(ledger: Path, document: Mapping[str, Any]) -> List[Di
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read the ledger {ledger}: {exc}") from exc
     dispatch_id = str(document["dispatch_id"])
-    needle = dispatch_id.encode("utf-8")
     try:
-        records = read_ndjson_strict_bytes(blob, source=ledger, relevance=lambda raw: needle in raw)
+        records = read_ndjson_strict_bytes(
+            blob, source=ledger, predicate=lambda raw: dispatch_id in raw)
     except NdjsonCorruptionError as exc:
         raise AppendReceiptError("ledger_corrupt", EXIT_IO_ERROR,
             f"the ledger {ledger} has unparseable line {exc.line_number} carrying "

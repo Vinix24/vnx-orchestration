@@ -41,7 +41,7 @@ from .warning_destination import reapply_frozen_classification
 from config_registry import get_bool
 from event_outcome_semantics import end_state_status
 from ledger_schema_version import CURRENT_SCHEMA_VERSION, LIFECYCLE_SCHEMA_VERSION
-from ndjson_io import scan_ndjson_lines
+from ndjson_io import NdjsonCorruptionError, read_ndjson_strict_bytes
 from receipt_schema import (
     DISPATCH_FINISHED_EVENT_TYPE,
     LIFECYCLE_END_STATES,
@@ -171,16 +171,16 @@ def find_prior_end_line(
     lifecycle_index = (index_data or {}).get("lifecycle_index")
     if isinstance(lifecycle_index, dict) and lifecycle_index.get(key):
         return str(lifecycle_index[key])
-    needle = str(receipt.get("dispatch_id") or "").encode("utf-8")
-    lines = list(scan_ndjson_lines(_tail_blob(ledger_path)))
-    for number, raw, _record, error, torn in lines:
-        if error is not None and not torn and needle in raw:
-            raise AppendReceiptError("lifecycle_end_lookup_failed", EXIT_IO_ERROR,
-                f"ledger_corrupt: unparseable ledger line {number} of the tail at "
-                f"{ledger_path}: {error}")
-    for _number, _raw, line, error, _torn in reversed(lines):
-        if error is not None:
-            continue  # torn or another dispatch's line: neither is this key's end
+    dispatch_id = str(receipt.get("dispatch_id") or "")
+    try:
+        records = read_ndjson_strict_bytes(
+            _tail_blob(ledger_path), source=f"{ledger_path} (tail)",
+            predicate=lambda raw: dispatch_id in raw)
+    except NdjsonCorruptionError as exc:
+        raise AppendReceiptError("lifecycle_end_lookup_failed", EXIT_IO_ERROR,
+            f"ledger_corrupt: unparseable ledger line {exc.line_number} of the tail at "
+            f"{ledger_path}: {exc.detail}") from exc
+    for line in reversed(records):
         if (isinstance(line, dict) and line.get("event_type") == DISPATCH_FINISHED_EVENT_TYPE
                 and lifecycle_end_key(line) == key):
             return "ledger_tail"

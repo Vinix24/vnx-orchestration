@@ -88,11 +88,14 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def _read_ledger(state_dir: Path, dispatch_id: str) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    """Every record, or ``(None, reason)``; an interior break refuses only for this id."""
+    """Every record, or ``(None, reason)``; only the torn tail may be a broken line.
+
+    An interior break refuses only when its raw text carries this dispatch id (OI-2528);
+    another dispatch's broken line is skipped with a WARNING.
+    """
     path = state_dir / LEDGER_FILENAME
     try:
-        needle = dispatch_id.encode("utf-8")
-        records = read_ndjson_strict(path, relevance=lambda raw: needle in raw)
+        records = read_ndjson_strict(path, lambda raw: dispatch_id in raw)
     except NdjsonCorruptionError as exc:
         return None, f"ledger_corrupt: {exc}"
     except OSError as exc:
@@ -123,7 +126,7 @@ def _read_row(state_dir: Path, project_id: Optional[str], dispatch_id: str) -> "
     if not db_path.exists():
         return _Row(ROW_ABSENT, detail=f"{db_path} does not exist")
     if not db_path.is_file():
-        return _Row(ROW_UNREADABLE, detail=f"{db_path} is not a regular file")  # OI-2529
+        return _Row(ROW_UNREADABLE, detail=f"{db_path} exists but is not a regular file")
     if not project_id: return _Row(ROW_UNREADABLE, detail="the tenant of the store could not be resolved")
     try:
         rows = _query_rows(db_path, "SELECT metadata_json, attempt_count FROM dispatches "
@@ -271,7 +274,7 @@ def decide(*, project_id: Optional[str], dispatch_id: str, state_dir: object,
             row_state = row.status + (f" ({row.detail})" if row.detail else "")
             ledger_state = ledger_error if records is None else "the ledger is readable"
             raise ReportPathRefused(did, "lifecycle_mode_undecidable",
-                f"{ledger_state}; the row is {row_state}, so the lifecycle mode cannot be decided")
+                f"one lifecycle source is unreadable (ledger: {ledger_state}; row: {row_state})")
         elsewhere = _other_tenant_v3(state_path, tenant, did, starts_any)
         if elsewhere:
             raise ReportPathRefused(did, "project_mismatch", f"this dispatch is v3 under "
