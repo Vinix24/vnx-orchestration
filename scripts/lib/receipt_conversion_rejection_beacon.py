@@ -17,7 +17,8 @@ converter: ``receipt_processor.sh`` now captures the converter's stderr (see
 converter's refusal log shapes —
 
     "REJECTED (fail-closed) dispatch=<id> file=<name> reason=<msg>"
-    "REFUSED (ledger lifecycle) dispatch=<id> file=<name> reason=<code>: <detail>"
+    "REFUSED (ledger lifecycle) dispatch=<id> file=<name> reason=<reason>"
+    (the same ``ledger lifecycle <code>: <detail>`` text as the history entry)
 
 (``_convert_one_detailed``: REJECTED for ``MODEL_REFUSAL_CODES`` and for
 dead-lettered lifecycle refusals, REFUSED for the young or transient ones) —
@@ -162,6 +163,15 @@ def first_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, fi
               for entry in history if (entry.get("dispatch_id"), entry.get("file"),
                                        entry.get("reason")) == (dispatch_id, file_name, reason)]
     return min((stamp for stamp in stamps if stamp is not None), default=None)
+
+
+def last_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
+                        reason: str) -> Optional[float]:
+    """Epoch of the LATEST sighting of this exact refusal; None is no sighting."""
+    stamps = [_rejected_at_epoch(entry.get("rejected_at")) for entry in history
+              if (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
+              == (dispatch_id, file_name, reason)]
+    return max((stamp for stamp in stamps if stamp is not None), default=None)
 
 
 def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

@@ -36,8 +36,8 @@ _REAL_REJECTED_LINE = (
 _REAL_LIFECYCLE_REFUSED_LINE = (
     "WARNING report_to_receipt_converter: report_to_receipt_converter: REFUSED "
     "(ledger lifecycle) dispatch=DISP-20260905-lifecycle file=20260905-lifecycle.md "
-    "reason=attempt_unknown: the receipt carries attempt 3, but no dispatch_started "
-    "starts it — nothing written, report stays for the next scan"
+    "reason=ledger lifecycle attempt_unknown: the receipt carries attempt 3, but no "
+    "dispatch_started starts it"
 )
 
 
@@ -59,7 +59,7 @@ class TestParseRejections:
         [rejection] = rejections
         assert rejection["dispatch_id"] == "DISP-20260905-lifecycle"
         assert rejection["file"] == "20260905-lifecycle.md"
-        assert rejection["reason"].startswith("attempt_unknown: ")
+        assert rejection["reason"].startswith("ledger lifecycle attempt_unknown: ")
         assert rejection["kind"] == "lifecycle_refusal"
 
     def test_both_kinds_in_one_scan_are_both_captured_and_keep_running(self, tmp_path: Path) -> None:
@@ -493,7 +493,7 @@ class TestBothBeaconsAgreeOnTheSameScan:
         self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog)
         assert report.is_file()
         [entry] = beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT)
-        _seed_converter_history(tmp_path, {**entry, "rejected_at": _iso(25),
+        _seed_converter_history(tmp_path, {**entry, "rejected_at": _iso(1),
                                            "first_rejected_at": _iso(25)})
 
         caplog.clear()

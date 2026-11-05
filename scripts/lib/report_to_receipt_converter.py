@@ -19,7 +19,8 @@ Idempotency layers:
      concurrent calls and same-cycle races.
 
 Wired into receipt_processor.sh poll loop — NOT a competing daemon.
-Called every ~30 s (every 6 poll cycles); non-fatal on any error.
+Called every ~30 s (every 6 poll cycles); non-fatal on any error. Past the Bash
+lane's VNX_MAX_AGE_HOURS cutoff, only this converter's hash scan retries.
 
 Report format support:
   - YAML frontmatter (--- key: value --- blocks) written by governance_emit.py
@@ -72,7 +73,9 @@ from provider_identity import ProviderIdentity, UnrecognizedProviderError, norma
 # both beacons judge the same accumulated history by the same window.
 from receipt_conversion_rejection_beacon import (
     REJECTION_ALARM_WINDOW_SECONDS,
+    _rejected_at_epoch,  # canonical stamp parse, never a second copy
     first_rejected_epoch,
+    last_rejected_epoch,
     load_rejected_history,
     recent_rejections,
 )
@@ -1022,17 +1025,18 @@ def report_hint_fields(text: str, receipt: Dict[str, Any]) -> Dict[str, Any]:
 
 def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
     """Name the dispatch and the reason; the caller books nothing (K-8b rule 4)."""
+    reason = f"ledger lifecycle {exc.code}: {exc.detail}"
     logger.warning(
         "report_to_receipt_converter: REFUSED (ledger lifecycle) dispatch=%s "
-        "file=%s reason=%s: %s — nothing written, report stays for the next scan",
-        exc.dispatch_id, report_path.name, exc.code, exc.detail,
+        "file=%s reason=%s",
+        exc.dispatch_id, report_path.name, reason,
     )
 
 
 def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
                                report_path: Path, state_dir: Optional[Path], dry_run: bool,
                                rejected_detail_sink: Optional[List[Dict[str, Any]]]) -> str:
-    """``rejected`` for a permanent refusal the history carried for a day (OI-2542):
+    """``rejected`` for a permanent refusal the history carried for a CONTINUOUS day (OI-2542):
     it takes the model refusal's path. A transient or younger refusal is logged,
     stays ``error`` (booked nothing, retried) and is named in *rejected_detail_sink*
     as ``kind="lifecycle_refusal"`` either way.
@@ -1044,10 +1048,15 @@ def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
             "kind": "lifecycle_refusal",
             "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     # Deadline on the REFUSAL (r3), not the report's mtime: an outage-returnee still waits a day.
+    did, file_name = str(exc.dispatch_id or ""), report_path.name
     history = _load_prior_rejected_history(state_dir) if state_dir is not None else []
-    first_seen = first_rejected_epoch(history, str(exc.dispatch_id or ""), report_path.name, reason)
+    first_seen = first_rejected_epoch(history, did, file_name, reason)
+    last_seen = last_rejected_epoch(history, did, file_name, reason)
+    # An unbroken day: a last sighting older than the continuity gap is an outage.
+    continuous = (last_seen is not None
+                  and time.time() - last_seen <= _REJECTION_CONTINUITY_GAP_SECONDS)
     if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and first_seen is not None
-            and time.time() - first_seen > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
+            and continuous and time.time() - first_seen > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
         _log_refusal(exc, report_path)
         return "error"
     logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
@@ -1641,7 +1650,7 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 #   "duplicate" — idempotent re-send, no new receipt.
 #   "rejected"  — fail-closed refusal of the report's bytes: the model check in
 #                 append_receipt_payload (MODEL_REFUSAL_CODES below), or a permanent
-#                 ReportPathRefused code on a report older than a day (OI-2542).
+#                 ReportPathRefused code the refusal history carried unbroken for a day (OI-2542).
 #                 A WARNING is logged here with dispatch_id + reason so the
 #                 refusal is loud, not silent. The report is quarantined into
 #                 receipt_deadletter/ (reason code = the refusal's own code)
@@ -2041,6 +2050,8 @@ def convert_report_to_receipt(
 
 _HEALTH_COMPONENT = "report_to_receipt_converter"
 _HEALTH_EXPECTED_INTERVAL_SECONDS = 3600
+# Twice the expected scan interval: a longer silence is an outage, and the deadline restarts.
+_REJECTION_CONTINUITY_GAP_SECONDS = 2 * _HEALTH_EXPECTED_INTERVAL_SECONDS
 # F1-3: bound on details.rejected history carried on this beacon (below) —
 # the oldest entries are evicted once the accumulated history exceeds this,
 # so the file never grows without bound across an unattended fleet.
@@ -2121,12 +2132,17 @@ def _merge_rejected_history(prior: List[Dict[str, Any]],
     Appended raw, ONE young refusal filled the 200-entry history in ~100 min and
     evicted every model rejection: dedupe BEFORE the cap. ``rejected_at`` = newest
     sighting (the alarm); ``first_rejected_at`` = earliest (the dead-letter deadline).
+    A gap over ``_REJECTION_CONTINUITY_GAP_SECONDS`` is an outage: the deadline restarts.
     """
     merged: Dict[tuple, Dict[str, Any]] = {}
     for entry in [*prior, *fresh]:
         key = (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
         held = merged.get(key, {**entry, "first_rejected_at": entry.get("rejected_at")})
         newest = max((held, entry), key=lambda held_or_new: held_or_new.get("rejected_at") or "")
+        last = _rejected_at_epoch(held.get("rejected_at"))
+        now = _rejected_at_epoch(entry.get("rejected_at"))
+        if last is not None and now is not None and now - last > _REJECTION_CONTINUITY_GAP_SECONDS:
+            held = {**held, "first_rejected_at": entry.get("rejected_at")}
         first = min(held["first_rejected_at"],
                     entry.get("first_rejected_at") or entry.get("rejected_at"),
                     key=lambda stamp: stamp or "")
@@ -2185,8 +2201,14 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     # detail across scans (bounded, oldest evicted) so the identity of every
     # rejection survives on this beacon, not just its count. One entry per key.
     rejected_history = _merge_rejected_history(_load_prior_rejected_history(state_dir), stats.rejected)
-    if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
-        rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
+    # Never evict what this scan just saw: it would return with a fresh
+    # first_rejected_at and never reach its day. The cap bounds the rest only.
+    sighted = {(e.get("dispatch_id"), e.get("file"), e.get("reason")) for e in stats.rejected}
+    kept = [e for e in rejected_history
+            if (e.get("dispatch_id"), e.get("file"), e.get("reason")) in sighted]
+    rest = [e for e in rejected_history
+            if (e.get("dispatch_id"), e.get("file"), e.get("reason")) not in sighted]
+    rejected_history = kept + rest[-_HEALTH_REJECTED_HISTORY_MAX:]
 
     recent_rejected = recent_rejections(rejected_history)
     if recent_rejected:
