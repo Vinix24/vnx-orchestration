@@ -253,13 +253,24 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt
         return MODE_WRITE_FAILED
 
 
+def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
+    """The spec's own legal integer ``deadline_seconds``, else None (K-6b/OI-2522)."""
+    from dispatch_lifecycle import _valid_deadline  # noqa: PLC0415
+    try:
+        value = json.loads(blob).get("deadline_seconds")
+        return value if _valid_deadline(value) else None
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return None
+
+
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
                        target_slot: Optional[str], state_dir: Path) -> None:
     """Write the v3 start line; a ``duplicate`` verdict means another hand-over owns the key."""
     from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
     slot = (target_slot or "").strip()
     try:
-        spec_sha = hashlib.sha256(Path(spec_file).read_bytes()).hexdigest()
+        spec_bytes = Path(spec_file).read_bytes()
+        spec_sha = hashlib.sha256(spec_bytes).hexdigest()
     except OSError as exc:
         raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
     receipt = {
@@ -271,6 +282,8 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
         "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
             f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
     }
+    if (deadline_seconds := _spec_deadline_seconds(spec_bytes)) is not None:
+        receipt["deadline_seconds"] = deadline_seconds
     try:
         result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
     except AppendReceiptError as exc:
