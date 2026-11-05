@@ -533,24 +533,41 @@ def test_an_unreadable_cursor_starts_a_bounded_sweep_at_the_front(
     assert _cursor(state_dir)["dispatch_id"] == dispatch_ids[1]
 
 
-def test_open_intents_keep_their_place_whatever_the_cursor_says(
+def test_a_bounded_run_takes_the_cursors_attempt_and_the_next_one_wraps_to_the_intent(
         state_dir, lifecycle_on, monkeypatch):
-    _open_intent(state_dir, "d-k6b-i-intent-1")
-    for dispatch_id in ["d-k6b-i1", "d-k6b-i2", "d-k6b-i3"]:
-        _attempt(state_dir, dispatch_id, live=True)
+    """K-6b r4 (OI-2527, OI-2530): one sequence — intents then attempts — walked from the cursor.
+
+    The intent is before the attempt in the combined sequence, so the cursor's item,
+    not the front, decides: a run that can take exactly one item takes the attempt the
+    cursor names and leaves the intent frozen. The cursor then wraps past the end to
+    that intent, and the next bounded run resumes there and recovers it.
+    """
+    intent_id, dead_id = "d-k6b-i-intent-1", "d-k6b-i1"
+    _open_intent(state_dir, intent_id)
+    _attempt(state_dir, dead_id, live=False)
+    # offset 0 alone is the front (the intent); the cursor's own item is the attempt
+    _write_heartbeat(state_dir, {"kind": "attempt", "project_id": PROJECT,
+                                 "dispatch_id": dead_id, "attempt": ATTEMPT, "offset": 0})
     now = _now_after(START_DT, DEADLINE + GRACE + 60)
 
-    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 0.0, 0.0, 2.0]))
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
     first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
 
-    assert (first.recovered, first.live, first.budget_exhausted) == (1, 2, True), first
-    assert _cursor(state_dir)["dispatch_id"] == "d-k6b-i3"
+    assert (first.recovered, first.abandoned, first.budget_exhausted) == (0, 1, True), first
+    assert first.budget_left == 1
+    ended = _finished(state_dir, dead_id)
+    assert len(ended) == 1 and ended[0]["end_state"] == "abandoned", ended
+    assert _finished(state_dir, intent_id) == []  # before the cursor's item: not taken
+    assert _cursor(state_dir) == {"kind": "intent", "project_id": PROJECT,
+                                  "dispatch_id": intent_id, "attempt": ATTEMPT, "offset": 0}
 
-    _open_intent(state_dir, "d-k6b-i-intent-2")  # opened after the cursor was set
-
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
     second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
 
-    assert second.recovered == 1, second  # intents are never behind the cursor
+    assert (second.recovered, second.budget_exhausted) == (1, False), second
+    recovered = _finished(state_dir, intent_id)
+    assert len(recovered) == 1 and recovered[0]["end_state"] == "completed", recovered
+    assert _cursor(state_dir) is None
 
 
 # ---------------------------------------------------------------------------
