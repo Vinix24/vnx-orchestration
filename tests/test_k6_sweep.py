@@ -27,6 +27,7 @@ short-lived ``sleep`` processes.
 from __future__ import annotations
 
 import fcntl
+import gzip
 import importlib.util as _ilu
 import json
 import os
@@ -64,6 +65,7 @@ from append_receipt_internals.lifecycle import (  # noqa: E402
 from append_receipt_internals.payload import append_receipt_payload  # noqa: E402
 from atomic_io import atomic_write_json  # noqa: E402
 from coordination_db import get_connection  # noqa: E402
+from dispatch_spec import DEADLINE_SECONDS_MAX  # noqa: E402
 from dispatch_worktree_isolation import claims_dir_for_state_dir  # noqa: E402
 
 PROJECT = "vnx-dev"
@@ -943,3 +945,95 @@ def test_the_dispatch_row_read_raises_on_an_unreadable_store(state_dir):
     with pytest.raises(AppendReceiptError) as raised:
         lifecycle._dispatch_row(state_dir, PROJECT, DISPATCH)
     assert "is not a database" in str(raised.value), raised.value
+
+
+# ---------------------------------------------------------------------------
+# 13. K-6 follow-up (OI-2537): compaction keeps an unfinished v3 start live
+# ---------------------------------------------------------------------------
+
+def _append_plain_records(state_dir: Path, count: int) -> None:
+    with _ledger(state_dir).open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps({"seq": i, "timestamp": i}) + "\n"
+                             for i in range(count)))
+
+
+def test_compaction_keeps_an_unfinished_v3_start_in_the_live_ledger(state_dir, lifecycle_on):
+    """OI-2537: one unfinished start before 10,000 records must count 1 before AND after."""
+    import compact_state
+
+    _start_line(state_dir)
+    _append_plain_records(state_dir, 10_000)
+    assert len(_lines(state_dir)) == 10_001
+
+    before, before_errors = lifecycle.v3_in_flight(state_dir)
+    assert len(before) == 1 and before_errors == ()
+    assert lifecycle.in_flight_counts(state_dir)["v3_in_flight"] == 1
+
+    assert compact_state.compact_receipts(state_dir) == 0
+
+    after, after_errors = lifecycle.v3_in_flight(state_dir)
+    assert len(after) == 1, "the unfinished start must survive compaction"
+    assert after_errors == ()
+    assert lifecycle.in_flight_counts(state_dir)["v3_in_flight"] == 1
+    assert lifecycle.in_flight_counts(state_dir)["unreadable"] == []
+
+    archive = next((state_dir / "archive").glob("t0_receipts_*.ndjson.gz"))
+    with gzip.open(archive, "rt", encoding="utf-8") as handle:
+        archived = [json.loads(raw) for raw in handle.read().splitlines() if raw.strip()]
+    assert not [line for line in archived if line.get("event_type") == "dispatch_started"], \
+        "the unfinished start must not be archived"
+
+
+# ---------------------------------------------------------------------------
+# 14. K-6 follow-up (OI-2538): an unreadable intent directory is not zero
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a 0o000 directory")
+def test_an_unreadable_intent_project_dir_fails_the_count(state_dir, lifecycle_on):
+    """OI-2538: a valid intent in a mode-0000 project dir must not read as zero intents."""
+    _freeze_intent(state_dir, _end_line(dispatch_id="d-k6-hidden"), dispatch_id="d-k6-hidden")
+    project_dir = state_dir / "dispatch_end" / PROJECT
+    assert list(project_dir.glob("*.json")), "the fixture must hold a real intent"
+    os.chmod(project_dir, 0o000)
+    try:
+        intents, errors = lifecycle.open_intents(state_dir)
+        code, report = _count(state_dir)
+    finally:
+        os.chmod(project_dir, 0o755)
+
+    assert errors, "an unreadable intent dir must be reported"
+    assert any(str(project_dir) in problem for problem in errors), errors
+    assert intents == ()
+    assert code != 0
+    assert report["unreadable"]
+    assert report["open_intents"] == 0
+
+
+def test_a_missing_intent_root_and_project_dir_are_no_intents_and_no_error(
+        state_dir, lifecycle_on):
+    assert not (state_dir / "dispatch_end").exists()
+
+    assert lifecycle.open_intents(state_dir) == ((), ())
+    code, report = _count(state_dir)
+    assert code == 0
+    assert report["open_intents"] == 0
+    assert report["unreadable"] == []
+
+    (state_dir / "dispatch_end").mkdir()
+    assert lifecycle.open_intents(state_dir, PROJECT) == ((), ())
+    code, report = _count(state_dir)
+    assert code == 0 and report["unreadable"] == []
+
+
+# ---------------------------------------------------------------------------
+# 15. K-6 follow-up (OI-2539): the start line's own deadline is the first source
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [DEADLINE_SECONDS_MAX + 1, 299, True, "1800"])
+def test_an_invalid_start_line_deadline_falls_through_to_the_fallback(
+        state_dir, lifecycle_on, value):
+    start = _start_line(state_dir, spec_sha="f" * 64)
+    start["deadline_seconds"] = value
+
+    assert lifecycle.deadline_for(state_dir, start, None) == (
+        lifecycle.FALLBACK_DEADLINE_SECONDS, "fallback:FALLBACK_DEADLINE_SECONDS")
