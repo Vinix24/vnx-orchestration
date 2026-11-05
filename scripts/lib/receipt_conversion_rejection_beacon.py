@@ -21,7 +21,7 @@ line matching the converter's own fail-closed log format —
 (``report_to_receipt_converter.py``'s ``_convert_one_detailed``, logged via
 ``logger.warning`` on every ``AppendReceiptError`` whose code is in
 ``MODEL_REFUSAL_CODES``: ``missing_model`` and ``invalid_model_shape``) — is
-parsed into a ``{dispatch_id, file, reason}`` record and written as this
+parsed into a ``{dispatch_id, file, reason, kind}`` record and written as this
 scan's beacon detail. Any other line (INFO chatter, the per-scan summary
 line, a different WARNING) is ignored: it is not this beacon's job to
 duplicate the processing log, only to make the REJECTED reason traceable.
@@ -84,30 +84,38 @@ REJECTION_ALARM_WINDOW_SECONDS = 24 * 3600
 
 _REJECTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Mirrors report_to_receipt_converter.py's own log line exactly:
-#   "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s"
+# Mirrors report_to_receipt_converter.py's own log lines exactly:
+#   "REJECTED (fail-closed) dispatch=%s file=%s reason=%s"
+#   "REFUSED (ledger lifecycle) dispatch=%s file=%s reason=%s: %s"  (OI-2541)
 _REJECTED_PATTERN = re.compile(
     r"REJECTED \(fail-closed\) dispatch=(\S+) file=(\S+) reason=(.*)$"
 )
+_LIFECYCLE_REFUSED_PATTERN = re.compile(
+    r"REFUSED \(ledger lifecycle\) dispatch=(\S+) file=(\S+) reason=(.*)$"
+)
+# ``kind`` tells a dead-lettered verdict from one still retried every scan.
+_PATTERNS_BY_KIND = (("fail_closed", _REJECTED_PATTERN), ("lifecycle_refusal", _LIFECYCLE_REFUSED_PATTERN))
 
 
 def parse_rejections(raw_stderr: str) -> List[Dict[str, str]]:
-    """Extract ``{dispatch_id, file, reason}`` records from raw stderr text.
+    """Extract ``{dispatch_id, file, reason, kind}`` records from raw stderr text.
 
-    Never raises on malformed input — a line that doesn't match the pattern
+    Never raises on malformed input — a line that doesn't match a pattern
     is simply not a rejection line and is skipped, not an error.
     """
     rejections: List[Dict[str, str]] = []
     for line in raw_stderr.splitlines():
-        match = _REJECTED_PATTERN.search(line)
-        if not match:
-            continue
-        dispatch_id, file_name, reason = match.groups()
-        rejections.append({
-            "dispatch_id": dispatch_id,
-            "file": file_name,
-            "reason": reason.strip(),
-        })
+        for kind, pattern in _PATTERNS_BY_KIND:
+            match = pattern.search(line)
+            if match:
+                dispatch_id, file_name, reason = match.groups()
+                rejections.append({
+                    "dispatch_id": dispatch_id,
+                    "file": file_name,
+                    "reason": reason.strip(),
+                    "kind": kind,
+                })
+                break
     return rejections
 
 

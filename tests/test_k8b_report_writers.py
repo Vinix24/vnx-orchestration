@@ -29,6 +29,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -635,8 +636,10 @@ def test_a_named_attempt_with_no_start_refuses_the_converter(
 ):
     clock["now"] = T0
     _begin(state_dir, spec_file)
+    # A report younger than the dead-letter age: a permanent refusal still
+    # retries (the aged-report case — OI-2542's quarantine — is tested separately).
     report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH,
-                           mtime=T1, attempt=3)
+                           mtime=time.time(), attempt=3)
     caplog.set_level(logging.WARNING, logger=rtc.logger.name)
 
     _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
@@ -1042,3 +1045,115 @@ def test_the_parser_keeps_no_hint_code_of_its_own():
     )
     assert run.returncode == 1, run.stdout + run.stderr  # 1 = no match
     assert run.stdout == ""
+
+
+# ---------------------------------------------------------------------------
+# K-act pre-work (OI-2542): a permanent lifecycle refusal is dead-lettered once
+# the report it refuses is older than a day; everything else keeps retrying.
+# ---------------------------------------------------------------------------
+
+_DAY = 24 * 3600
+
+
+def _aged_report(tmp_path: Path, *, age_seconds: float, attempt: int = 3) -> Path:
+    report = _write_report(tmp_path / "reports" / f"{DISPATCH}.md", DISPATCH, attempt=attempt)
+    stamp = time.time() - age_seconds
+    os.utime(report, (stamp, stamp))
+    return report
+
+
+def _deadletter_index(state_dir: Path) -> list:
+    index = state_dir / "receipt_deadletter" / "INDEX.txt"
+    return index.read_text(encoding="utf-8").splitlines() if index.is_file() else []
+
+
+def test_a_permanent_lifecycle_refusal_older_than_a_day_is_dead_lettered(
+    state_dir, spec_file, v3, clock, caplog, tmp_path
+):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)  # attempt 1 starts; the report names attempt 3
+    report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "rejected"
+    assert not report.exists()
+    assert (state_dir / "receipt_deadletter" / f"{DISPATCH}.md").is_file()
+    [index_line] = _deadletter_index(state_dir)
+    assert index_line.split(" ")[2] == "lifecycle_attempt_unknown"
+    assert "REJECTED (fail-closed)" in caplog.text
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
+
+
+def test_the_same_refusal_on_a_young_report_keeps_todays_retry_behaviour(
+    state_dir, spec_file, v3, clock, caplog, tmp_path
+):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _aged_report(tmp_path, age_seconds=3600)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "error"
+    assert report.is_file()
+    assert not (state_dir / "receipt_deadletter").exists()
+    assert "REFUSED (ledger lifecycle)" in caplog.text
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
+
+
+def test_a_transient_refusal_on_an_old_report_is_never_dead_lettered(
+    state_dir, v3, caplog, tmp_path
+):
+    """``ledger_unreadable`` resolves on the first readable scan, so age alone
+    must not quarantine it — the same rule for ``lifecycle_mode_undecidable``."""
+    _insert_row(state_dir, metadata=json.dumps({"lifecycle_mode": "v3"}))
+    _ledger(state_dir).mkdir(parents=True, exist_ok=True)  # a store that cannot be read
+    report = _aged_report(tmp_path, age_seconds=_DAY + 3600, attempt=1)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "error"
+    assert report.is_file()
+    assert not (state_dir / "receipt_deadletter").exists()
+    assert "ledger_unreadable" in caplog.text
+
+
+def test_a_dry_run_of_the_dead_letter_case_moves_nothing(
+    state_dir, spec_file, v3, clock, caplog, tmp_path
+):
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(
+        report, receipts_file=str(_ledger(state_dir)), dry_run=True,
+    )
+
+    assert outcome == "rejected"
+    assert report.is_file()
+    assert not (state_dir / "receipt_deadletter").exists()
+    assert "[dry-run] REJECTED (fail-closed)" in caplog.text
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
+
+
+def test_a_dead_lettered_lifecycle_refusal_is_not_retried_on_the_next_scan(
+    state_dir, spec_file, v3, clock, tmp_path
+):
+    """OI-2542: the refusal used to be re-read and re-logged on every scan,
+    growing error_count without bound. Once dead-lettered, the next scan sees
+    no report at all."""
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+
+    first = rtc.scan_and_convert([tmp_path / "reports"], state_dir=state_dir)
+    second = rtc.scan_and_convert([tmp_path / "reports"], state_dir=state_dir)
+
+    assert (first.rejected_count, first.error_count) == (1, 0)
+    assert (second.attempted_count, second.error_count, second.rejected_count) == (0, 0, 0)
+    assert not report.exists()
+    assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]

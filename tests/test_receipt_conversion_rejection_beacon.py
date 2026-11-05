@@ -33,6 +33,13 @@ _REAL_REJECTED_LINE = (
     "20260905-golf3b-receipt-refusals-visible.md reason=missing model"
 )
 
+_REAL_LIFECYCLE_REFUSED_LINE = (
+    "WARNING report_to_receipt_converter: report_to_receipt_converter: REFUSED "
+    "(ledger lifecycle) dispatch=DISP-20260905-lifecycle file=20260905-lifecycle.md "
+    "reason=attempt_unknown: the receipt carries attempt 3, but no dispatch_started "
+    "starts it — nothing written, report stays for the next scan"
+)
+
 
 class TestParseRejections:
     def test_extracts_dispatch_file_and_reason_from_a_real_shaped_line(self) -> None:
@@ -41,7 +48,37 @@ class TestParseRejections:
             "dispatch_id": "DISP-20260905-golf3b",
             "file": "20260905-golf3b-receipt-refusals-visible.md",
             "reason": "missing model",
+            "kind": "fail_closed",
         }]
+
+    def test_a_lifecycle_refusal_is_counted_with_its_own_kind(self) -> None:
+        """OI-2541: the converter logged this line, but the beacon matched only
+        ``REJECTED (fail-closed)``, so a refusal retried on every scan was a
+        WARNING in a log and nothing in any health file."""
+        rejections = beacon_mod.parse_rejections(_REAL_LIFECYCLE_REFUSED_LINE)
+        [rejection] = rejections
+        assert rejection["dispatch_id"] == "DISP-20260905-lifecycle"
+        assert rejection["file"] == "20260905-lifecycle.md"
+        assert rejection["reason"].startswith("attempt_unknown: ")
+        assert rejection["kind"] == "lifecycle_refusal"
+
+    def test_both_kinds_in_one_scan_are_both_captured_and_keep_running(self, tmp_path: Path) -> None:
+        raw = "\n".join([_REAL_REJECTED_LINE, _REAL_LIFECYCLE_REFUSED_LINE])
+        rejections = beacon_mod.parse_rejections(raw)
+        assert [r["kind"] for r in rejections] == ["fail_closed", "lifecycle_refusal"]
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        beacon_mod.record_rejections(state_dir, rejections)
+
+        payload = json.loads(
+            (tmp_path / "health" / "receipt_conversion_rejections.json").read_text(encoding="utf-8")
+        )
+        assert payload["status"] == "fail"
+        assert payload["details"]["count"] == 2
+        assert [r["kind"] for r in payload["details"]["rejections"]] == [
+            "fail_closed", "lifecycle_refusal",
+        ]
 
     def test_multiple_rejections_in_one_scan_are_all_captured(self) -> None:
         raw = "\n".join([

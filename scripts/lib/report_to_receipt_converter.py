@@ -38,6 +38,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1027,6 +1028,30 @@ def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Pa
     )
 
 
+def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
+                               report_path: Path, state_dir: Optional[Path], dry_run: bool,
+                               rejected_detail_sink: Optional[List[Dict[str, Any]]]) -> str:
+    """``rejected`` for a permanent, aged refusal (OI-2542): it takes the model
+    refusal's path. A transient code, a young report or an unreadable mtime is
+    logged and stays ``error`` — booked nothing, retried on the next scan.
+    """
+    mtime = _read_report_mtime(report_path)
+    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and mtime is not None
+            and time.time() - mtime > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
+        _log_refusal(exc, report_path)
+        return "error"
+    reason = f"ledger lifecycle {exc.code}: {exc.detail}"
+    logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                   "[dry-run] " if dry_run else "", exc.dispatch_id, report_path.name, reason)
+    if rejected_detail_sink is not None:
+        rejected_detail_sink.append({
+            "dispatch_id": str(exc.dispatch_id or ""), "file": report_path.name, "reason": reason,
+            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    if not dry_run and state_dir is not None:
+        _deadletter_report(report_path, f"lifecycle_{exc.code}", state_dir)
+    return "rejected"
+
+
 def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
     """True when *record* is the line *receipt* would book — attempt for attempt.
 
@@ -1641,6 +1666,14 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 # an "error" and is retried. A test pins this set to what the validator raises.
 MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
 
+# The ReportPathRefused codes no later read of the append-only ledger can undo (OI-2542): a
+# start line precedes its attempt's report and one end line per attempt is final. Transient
+# codes (ledger_unreadable, lifecycle_mode_undecidable) are absent; one day of age is the line.
+PERMANENT_LIFECYCLE_REFUSALS = frozenset({"attempt_unknown", "attempt_ambiguous", "project_mismatch",
+                                          "project_ambiguous", "project_unknown", "missing_dispatch_id",
+                                          "end_outcome_id_missing"})
+LIFECYCLE_REFUSAL_DEADLETTER_SECONDS = 24 * 3600
+
 
 def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
     """Best-effort: push *text*'s ``## Open Items`` entries into the ledger.
@@ -1732,10 +1765,10 @@ def _convert_one_detailed(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
     except report_lifecycle_mode.ReportPathRefused as exc:
-        # Named refusal (K-8b rule 4): book nothing, keep the report retryable.
-        # Caught BEFORE the generic handler so it can never be reported as a crash.
-        _log_refusal(exc, report_path)
-        return None, "error"
+        # Named refusal (K-8b rule 4): book nothing — or dead-letter when permanent
+        # and aged (OI-2542). Caught BEFORE the generic handler: never a crash.
+        return None, _lifecycle_refusal_outcome(
+            exc, report_path, state_dir_for_route, dry_run, rejected_detail_sink)
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
