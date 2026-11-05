@@ -352,6 +352,11 @@ def test_the_per_pr_workflow_no_longer_runs_a_shadow_or_parity_job():
     assert "profile-a" in jobs
 
 
+def test_the_shadow_job_and_the_test_of_it_are_gone_together():
+    """D4 removes the shadow job, so D3c's test of it goes too; its step-sum rule lives here now."""
+    assert not (REPO_ROOT / "tests" / "test_ci_xdist_shadow_workflow.py").exists()
+
+
 def _profile_a_job_text() -> str:
     """The `profile-a` job block of the workflow as text — the comments included, the steps too."""
     lines = WORKFLOW.read_text(encoding="utf-8").splitlines()
@@ -493,18 +498,45 @@ class ActionsExpression:
         return str(left) == str(right)
 
 
+# The merge window D4 round 5 sizes the xdist bound from: the runs
+# `xdist_parity_history.py --last-d3-merge 983c944f` reads on 2026-11-05.
+WINDOW_LONGEST_WALL_S = 1134
+
+
 def test_profile_a_timeout_follows_the_switch_on_every_branch():
-    """The serial shape needs 80; the two-phase shape keeps 35 (OI-2523, OI-2525)."""
+    """The serial shape needs 80; the two-phase shape gets 38 (OI-2523, OI-2525)."""
     expression = _timeout_expression()
     xdist = ActionsExpression(expression, {}).value()
     serial = ActionsExpression(expression, {"VNX_CI_XDIST": "0"}).value()
-    assert xdist == 35, f"xdist branch of {expression!r} is {xdist!r}"
-    # Twice the largest shadow wall time (1033 s), rounded up to whole minutes.
-    assert xdist >= 2 * 1033 / 60
+    assert xdist == 38, f"xdist branch of {expression!r} is {xdist!r}"
+    # Twice the longest shadow suite wall time of the merge window (1134 s, run
+    # 41827919472 on 2026-11-04), rounded up to whole minutes.
+    assert xdist >= 2 * WINDOW_LONGEST_WALL_S / 60
     assert serial == 80, f"serial branch of {expression!r} is {serial!r}"
     # The serial Profile A takes 52, 52 and 54.8 minutes on main (OI-2523).
     assert serial >= 55
     assert ActionsExpression(expression, {"VNX_CI_XDIST": "1"}).value() == xdist
+
+
+def test_every_profile_a_step_timeout_fires_inside_both_job_bounds():
+    """D3c's rule (#2378), carried into D4: a step timeout must fire before the job's.
+
+    The two job bounds are read out of the workflow's own expression, so a
+    branch whose number is edited shows up here without a second copy of it.
+    """
+    expression = _timeout_expression()
+    bounds = {branch: ActionsExpression(expression, variables).value()
+              for branch, variables in (("xdist", {}), ("serial", {"VNX_CI_XDIST": "0"}))}
+    job = _jobs(WORKFLOW)["profile-a"]
+    bounded = [step["timeout-minutes"] for step in job["steps"] if "timeout-minutes" in step]
+    assert bounded, "no step of profile-a carries its own timeout"
+    assert all(isinstance(bound, int) for bound in bounded), bounded
+    step_sum = sum(bounded)
+    for branch, bound in bounds.items():
+        assert isinstance(bound, int), f"the {branch} branch of {expression!r} is not a number: {bound!r}"
+        assert step_sum < bound, f"{step_sum} min of step timeouts cannot fire inside the {branch} bound {bound}"
+    # A bound that does not even cover the window it was sized on guards nothing.
+    assert bounds["xdist"] >= 2 * WINDOW_LONGEST_WALL_S / 60, bounds
 
 
 def test_the_timeout_reads_the_same_variable_the_switch_reads():
@@ -519,9 +551,12 @@ def test_the_timeout_reads_the_same_variable_the_switch_reads():
 
 def test_the_profile_a_timeout_comment_names_the_serial_wall_time():
     comment = _timeout_comment()
-    assert "1033" in comment, "the xdist sizing argument (2 x 1033 s) is gone"
+    assert "1134" in comment, "the xdist sizing argument (2 x 1134 s) is gone"
+    assert "41827919472" in comment, "the window's longest run is gone from the comment"
+    assert "37.8" in comment and "983c944f" in comment, comment
     assert "52" in comment and "54.8" in comment, comment
     assert "OI-2523" in comment and "OI-2525" in comment, comment
+    assert "#2378" in comment, "the comment no longer says who set the 80-minute bridge"
 
 
 def test_the_completeness_check_is_a_required_step_after_both_phases():
