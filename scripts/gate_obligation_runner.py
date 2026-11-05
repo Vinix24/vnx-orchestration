@@ -4682,6 +4682,26 @@ def fulfill_obligation(
 # ---------------------------------------------------------------------------
 
 
+def _lifecycle_sweep_step(state_dir: Path, *, write: bool) -> Dict[str, Any]:
+    """ADR-045 §6: the sweep's own run on this tick, inside its own guard.
+
+    One run per ``StartInterval`` 900 tick (this runner's plist; no new
+    LaunchAgent). A sweep that raises is logged and in the heartbeat, and can
+    never change this run's exit code or skip an obligation. A dry run
+    (``write=False``) never sweeps: the sweep writes end lines.
+    """
+    if not write:
+        return {"ran": False, "reason": "dry_run"}
+    try:
+        from dispatch_lifecycle import sweep  # noqa: PLC0415
+        result = sweep(state_dir=state_dir)
+    except Exception as exc:  # vnx-silent-except: the sweep's heartbeat carries the failure and this tick's own obligations must still run
+        _LOG.warning("[gate_obligation_runner] dispatch sweep failed: %r", exc)
+        return {"ran": True, "error": f"{type(exc).__name__}: {exc}"}
+    return {"ran": True, "abandoned": result.abandoned, "errors": len(result.errors),
+            "lifecycle_off": result.lifecycle_off, "heartbeat": result.heartbeat_path}
+
+
 def run(
     state_dir: Path,
     *,
@@ -4763,17 +4783,14 @@ def run(
     state_dir = Path(state_dir)
     outcomes: List[Dict[str, Any]] = []
     pending_after = 0
+    lifecycle_sweep = _lifecycle_sweep_step(state_dir, write=write)
     try:
         obligations = list(iter_obligations(state_dir))
     except ValueError as exc:
         # An unreadable obligation is surfaced, not skipped — same contract
         # as the freshness monitor's source_unreadable finding.
-        return {
-            "state_dir": str(state_dir),
-            "error": str(exc),
-            "outcomes": [],
-            "pending_after": -1,
-        }
+        return {"state_dir": str(state_dir), "error": str(exc), "outcomes": [],
+                "pending_after": -1, "lifecycle_sweep": lifecycle_sweep}
     scoped: List[Tuple[Path, Dict[str, Any]]] = [
         (path, record)
         for path, record in obligations
@@ -4882,6 +4899,7 @@ def run(
     return {
         "state_dir": str(state_dir),
         "timestamp": utc_now_iso(),
+        "lifecycle_sweep": lifecycle_sweep,
         "obligations_seen": len(obligations),
         "obligations_in_scope": len(scoped),
         "since": since,

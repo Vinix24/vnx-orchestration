@@ -2,9 +2,9 @@
 """ADR-045 (audit-spoor-kern K-3c): the finalizer and the recovery of one end.
 
 ``finalize`` owns steps 1 to 5 of the plan's "Einde en herstel", ``recover``
-steps 2 to 5 for an intent that never published. Nothing calls either yet:
-K-5 wires the lanes, K-6 the sweep (ADR-045 §9 — the writers land behind
-``ledger_lifecycle``, which K-act turns on).
+steps 2 to 5 for an intent that never published, and ``sweep`` (K-6) runs both
+unattended: every open intent, and ``abandoned`` for a ``v3`` attempt past its
+deadline plus the grace without liveness (ADR-045 §5/§6). K-act turns it on.
 
 What the line SAYS is not decided here. The K-3b contract in
 ``append_receipt_internals.lifecycle`` owns the canonical form, the intent
@@ -19,15 +19,17 @@ accept rule resolves it from the ledger it appends to.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
+import logging
 import os
 import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from append_receipt_internals.common import (
     EXIT_IO_ERROR,
@@ -36,17 +38,23 @@ from append_receipt_internals.common import (
     AppendReceiptError,
 )
 from append_receipt_internals.lifecycle import (
+    END_INTENT_DIRNAME,
     EndIntentMalformed,
     build_end_intent,
     end_intent_path,
     end_line_matches_intent,
+    lifecycle_enabled,
     load_end_intent,
     prepare_end_line,
     write_end_intent,
 )
+from atomic_io import atomic_write_json
 from coordination_db import TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection
-from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE
+from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
+from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from runtime_state_machine import transition_dispatch_idempotent
+
+logger = logging.getLogger(__name__)
 
 #: The ledger of one store; the intent directory sits beside it (ADR-045 §3).
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -505,3 +513,358 @@ def recover(
         intent_path=intent_path, state_dir=Path(state_dir), actor=actor,
         reason=reason, lock_timeout=lock_timeout, status=STATUS_RECOVERED,
     )
+
+
+
+# K-6: the sweep — recover open intents, abandon a dead attempt, heartbeat
+
+#: ADR-045 §6: deadline plus this grace, no margin added and none subtracted (15-10).
+ABANDON_GRACE_SECONDS = 30 * 60
+#: No readable deadline: the largest legal one, so an unknown deadline never abandons
+#: early; named in the heartbeat and the report rather than left implicit.
+FALLBACK_DEADLINE_SECONDS = DEADLINE_SECONDS_MAX
+SWEEP_HEARTBEAT_FILENAME = "sweep_heartbeat.json"
+SWEEP_LOCK_TIMEOUT_SECONDS = 5.0  # a taken publication lock must not stall the tick
+REASON_SWEEP_ABANDONED = "deadline_passed_no_liveness"
+NO_PUSH_ABANDONED = f"no_push:{REASON_SWEEP_ABANDONED}"
+MODE_V3 = "v3"
+SPEC_DIRS = ("pending", "completed", "failed")  # where a staged bundle may sit
+LIVENESS_LIVE, LIVENESS_DEAD, LIVENESS_UNKNOWN = "live", "dead", "unknown"
+_LEDGER_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+_THE_COUNTS = ("recovered", "abandoned", "live", "unknown_liveness", "lifecycle_off_in_flight", "in_flight")
+
+
+class InFlightAttempt(NamedTuple):
+    """One ``v3`` start line without its end line."""
+    project_id: str
+    dispatch_id: str
+    attempt: int
+    start_line: Dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """One run, in the counts the heartbeat and the count command read back."""
+    recovered: int = 0
+    abandoned: int = 0
+    live: int = 0
+    unknown_liveness: int = 0
+    lifecycle_off: bool = False
+    lifecycle_off_in_flight: int = 0
+    in_flight: int = 0
+    errors: Tuple[str, ...] = ()
+    heartbeat_path: str = ""
+
+
+def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
+                 ) -> Tuple[Tuple[InFlightAttempt, ...], Tuple[str, ...]]:
+    """The ``v3`` attempts with a start line and no end line, plus unkeyable starts.
+
+    An attempt ends only on its own lifecycle end: a ``dispatch_finished`` whose
+    ``project_id``, ``dispatch_id`` and ``attempt`` are exactly its key. A legacy
+    ``task_complete`` (also one refusing delivery), another completion type or a
+    line without an ``attempt`` is no end for it (ADR-045 §2).
+    """
+    ledger = Path(state_dir) / LEDGER_FILENAME
+    starts: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
+    finished: set = set()
+    errors: List[str] = []
+    try:
+        handle = ledger.open("rb")
+    except FileNotFoundError:
+        return (), ()
+    except OSError as exc:
+        raise AppendReceiptError(
+            "ledger_unreadable", EXIT_IO_ERROR, f"cannot read {ledger}: {exc}") from exc
+    with handle:
+        for raw in handle:
+            try:
+                line = json.loads(raw)
+            except (json.JSONDecodeError, UnicodeDecodeError): continue  # a torn line is no record
+            if not isinstance(line, dict):
+                continue
+            key = (line.get("project_id"), line.get("dispatch_id"))
+            attempt = line.get("attempt")
+            keyed = (all(isinstance(part, str) and part.strip() for part in key)
+                     and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1)
+            kind = str(line.get("event_type") or "").strip()
+            if kind == DISPATCH_FINISHED_EVENT_TYPE:
+                if keyed: finished.add((key[0], key[1], attempt))
+            elif kind == DISPATCH_STARTED_EVENT_TYPE and \
+                    str(line.get("lifecycle_mode") or "").strip() == MODE_V3:
+                if not keyed:
+                    errors.append(f"unkeyable dispatch_started: {key!r} attempt={attempt!r}")
+                elif (key[0], key[1], attempt) not in starts:
+                    starts[(key[0], key[1], attempt)] = line
+    return tuple(
+        InFlightAttempt(pid, did, attempt, start)
+        for (pid, did, attempt), start in starts.items()
+        if (project_id is None or pid == project_id) and (pid, did, attempt) not in finished
+    ), tuple(errors)
+
+
+def open_intents(state_dir: str | Path, project_id: Optional[str] = None
+                 ) -> Tuple[Tuple[Tuple[str, str, int, Path], ...], Tuple[str, ...]]:
+    """The readable intents without ``published_at``, plus the unreadable ones."""
+    root = Path(state_dir) / END_INTENT_DIRNAME
+    places = [root / project_id] if project_id is not None else sorted(root.glob("*/"))
+    intents: List[Tuple[str, str, int, Path]] = []
+    errors: List[str] = []
+    for path in (found for place in places for found in sorted(place.glob("*.json"))
+                 if not found.name.endswith(".spawn.json")):
+        try:
+            document = load_end_intent(path)
+        except (AppendReceiptError, EndIntentMalformed) as exc:
+            errors.append(f"unreadable intent {path}: {exc}")
+            continue
+        if document is not None and not document.get("published_at"):
+            intents.append((document["project_id"], document["dispatch_id"],
+                            document["attempt"], path))
+    return tuple(intents), tuple(errors)
+
+
+def in_flight_counts(state_dir: str | Path) -> Dict[str, Any]:
+    """The rollback counts of one store, read-only (the plan's "Code terug" gate)."""
+    intents, intent_errors = open_intents(state_dir)
+    flights, flight_errors = v3_in_flight(state_dir)
+    off = not lifecycle_enabled()
+    unreadable = list(intent_errors) + list(flight_errors)
+    try: _dispatch_row(Path(state_dir), "", "")  # no ids: no row wanted, only whether the store answers
+    except AppendReceiptError as exc: unreadable.append(str(exc))
+    return {"v3_in_flight": len(flights), "open_intents": len(intents), "lifecycle_off": off,
+            "v3_in_flight_lifecycle_off": len(flights) if off else 0, "unreadable": unreadable}
+
+
+def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optional[Dict[str, Any]]:
+    """The attempt's row: ``None`` for no store and no row, raised when the store cannot be read."""
+    if not Path(db_path_from_state_dir(state_dir)).is_file(): return None
+    try:
+        with get_connection(state_dir) as conn:
+            row = conn.execute("SELECT bundle_path, metadata_json FROM dispatches "
+                               "WHERE dispatch_id = ? AND project_id = ?",
+                               (dispatch_id, project_id)).fetchone()
+    except Exception as exc:  # vnx-silent-except: raised to the caller as the store's refusal, never "no row"
+        raise AppendReceiptError("store_unreadable", EXIT_IO_ERROR,
+                                 f"cannot read {db_path_from_state_dir(state_dir)}: {exc}") from exc
+    return dict(row) if row is not None else None
+
+
+def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
+                 row: Optional[Mapping[str, Any]]) -> Tuple[int, str]:
+    """``(deadline_seconds, source)``: row bundle, staged spec, else the constant.
+
+    A staged spec only counts when its bytes are the start line's ``spec_sha256``.
+    """
+    sha = start_line.get("spec_sha256")
+    sha = sha.strip() if isinstance(sha, str) else None
+    did = str(start_line.get("dispatch_id") or "")
+    bundle = row.get("bundle_path") if row is not None else None
+    candidates = ([(Path(bundle.strip()) / "dispatch-spec.json", "row:bundle_path")]
+                  if isinstance(bundle, str) and bundle.strip() else [])
+    candidates += [(Path(state_dir).parent / "dispatches" / name / did / "dispatch-spec.json",
+                    "spec") for name in SPEC_DIRS]
+    for path, kind in candidates:
+        try:
+            blob = path.read_bytes()
+            value = json.loads(blob).get("deadline_seconds")
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+            continue
+        if (not sha or hashlib.sha256(blob).hexdigest() != sha or isinstance(value, bool)
+                or not isinstance(value, int)
+                or not DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX):
+            continue
+        return value, f"{kind}:{path}"
+    return FALLBACK_DEADLINE_SECONDS, "fallback:FALLBACK_DEADLINE_SECONDS"
+
+
+def _pid_state(pid: Any, started_at: Any) -> str:
+    """Live only when *pid* is alive with the recorded kernel start time."""
+    from dispatch_start import process_started_at  # noqa: PLC0415
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0: return LIVENESS_DEAD
+    if not isinstance(started_at, str) or not started_at.strip(): return LIVENESS_UNKNOWN
+    try:
+        actual = process_started_at(pid)
+    except Exception:  # vnx-silent-except: an unmeasurable pid is unknown, and unknown never abandons
+        return LIVENESS_UNKNOWN
+    if actual is not None:
+        return LIVENESS_LIVE if actual == started_at else LIVENESS_DEAD
+    try:  # no start time, but the pid answers: alive and not ours to read
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return LIVENESS_DEAD
+    except OSError:
+        pass
+    return LIVENESS_UNKNOWN
+
+
+def liveness(state_dir: str | Path, attempt: InFlightAttempt) -> Tuple[str, Optional[str]]:
+    """ADR-045 §5: the flock, the door pid or the child pid; unknown beats dead."""
+    from dispatch_start import spawn_file_path  # noqa: PLC0415
+    from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
+
+    verdicts: List[str] = []
+    try:
+        held = probe_occupancy(claims_dir_for_state_dir(Path(state_dir)), attempt.dispatch_id)
+        verdicts.append({"held": LIVENESS_LIVE, "released": LIVENESS_DEAD,
+                         "absent": LIVENESS_DEAD}.get(held, LIVENESS_UNKNOWN))
+    except Exception:  # vnx-silent-except: an unmeasurable lock is unknown, and unknown never abandons
+        verdicts.append(LIVENESS_UNKNOWN)
+    verdicts.append(_pid_state(attempt.start_line.get("door_pid"),
+                               attempt.start_line.get("door_started_at")))
+    try:
+        spawn = json.loads(spawn_file_path(
+            Path(state_dir), attempt.project_id, attempt.dispatch_id, attempt.attempt
+        ).read_text(encoding="utf-8"))
+        verdicts.append(_pid_state(spawn.get("child_pid"), spawn.get("child_started_at")))
+    except FileNotFoundError:
+        verdicts.append(LIVENESS_DEAD)  # no spawn file: this attempt recorded no child
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, AppendReceiptError):
+        verdicts.append(LIVENESS_UNKNOWN)
+    if LIVENESS_LIVE in verdicts:
+        return LIVENESS_LIVE, ("occupancy_flock", "door_pid", "child_pid")[
+            verdicts.index(LIVENESS_LIVE)]
+    return (LIVENESS_UNKNOWN if LIVENESS_UNKNOWN in verdicts else LIVENESS_DEAD), None
+
+
+def _as_utc(value: Any) -> Optional[datetime]:
+    if value is None: return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        return datetime.strptime(str(value).strip(), _LEDGER_TS_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise ValueError(f"now={value!r} is not a datetime or {_LEDGER_TS_FORMAT}") from exc
+
+
+def _stamp_lifecycle_mode(state_dir: Path, row: Optional[Mapping[str, Any]],
+                          attempt: InFlightAttempt) -> None:
+    """ADR-045 §6: the start line is the source; the sweep writes the row's mode.
+
+    One statement: SQLite merges the field under whatever ``metadata_json`` holds
+    when it runs, so a key committed after this tick read the row survives; a row
+    whose metadata is not an object, or is already ``v3``, is not matched at all.
+    """
+    if row is None:
+        return
+    with get_connection(state_dir) as conn:
+        conn.execute(
+            "UPDATE dispatches SET metadata_json = "
+            "json_set(COALESCE(metadata_json, '{}'), '$.lifecycle_mode', ?), updated_at = ? "
+            "WHERE dispatch_id = ? AND project_id = ? "
+            "AND json_valid(COALESCE(metadata_json, '{}')) "
+            "AND json_type(COALESCE(metadata_json, '{}')) = 'object' "
+            "AND json_extract(COALESCE(metadata_json, '{}'), '$.lifecycle_mode') IS NOT ?",
+            (MODE_V3, _now_utc(), attempt.dispatch_id, attempt.project_id, MODE_V3))
+        conn.commit()
+
+
+def sweep_attempt(state_dir: Path, attempt: InFlightAttempt, now: datetime) -> Tuple[str, Optional[str], Optional[str]]:
+    """Decide and book one in-flight attempt as ``(counter, source, error)``."""
+    from dispatch_exit import build_end_line  # noqa: PLC0415
+
+    row = _dispatch_row(state_dir, attempt.project_id, attempt.dispatch_id)
+    _stamp_lifecycle_mode(state_dir, row, attempt)
+    verdict, _signal = liveness(state_dir, attempt)
+    if verdict != LIVENESS_DEAD:
+        return ("unknown_liveness" if verdict == LIVENESS_UNKNOWN else "live"), None, None
+    deadline, source = deadline_for(state_dir, attempt.start_line, row)
+    started = _as_utc(attempt.start_line.get("timestamp"))
+    if started is None:
+        return "open", source, f"{attempt.dispatch_id}#{attempt.attempt}: start line has no timestamp"
+    if now <= started + timedelta(seconds=deadline + ABANDON_GRACE_SECONDS):
+        return "open", source, None
+    # K-3c's intent is exclusive: a sweep that loses the race books nothing.
+    booked = finalize(state_dir=state_dir, project_id=attempt.project_id, dispatch_id=attempt.dispatch_id,
+             attempt=attempt.attempt, end_state="abandoned", actor="sweep",
+             end_line=build_end_line(attempt, end_state="abandoned",
+                                     reason=REASON_SWEEP_ABANDONED,
+                                     no_push=NO_PUSH_ABANDONED),
+             reason=f"{REASON_SWEEP_ABANDONED} (deadline {deadline}s from {source})",
+             lock_timeout=SWEEP_LOCK_TIMEOUT_SECONDS)
+    return ("abandoned" if booked.status == STATUS_FINALIZED else "open"), source, None
+
+
+def _collect(state_dir: Path, project_id: Optional[str], now: datetime) -> Dict[str, Any]:
+    """The sweep's work: recover the open intents, then decide every attempt."""
+    intents, intent_errors = open_intents(state_dir, project_id)
+    flights, flight_errors = v3_in_flight(state_dir, project_id)
+    collected: Dict[str, Any] = {name: 0 for name in _THE_COUNTS}
+    collected.update(errors=list(intent_errors) + list(flight_errors), sources=[],
+                     in_flight=len(flights), open_intents=len(intents), enabled=lifecycle_enabled())
+    errors: List[str] = collected["errors"]
+    if not collected["enabled"]:
+        # ADR-045 §9: the brake refuses every append; write nothing, report them.
+        collected["lifecycle_off_in_flight"] = len(flights)
+        return collected
+    for project, dispatch, attempt_no, _path in intents:
+        try:
+            if recover(state_dir=state_dir, project_id=project, dispatch_id=dispatch,
+                       attempt=attempt_no, actor="sweep",
+                       reason="recover an unpublished end intent",
+                       lock_timeout=SWEEP_LOCK_TIMEOUT_SECONDS).status == STATUS_RECOVERED:
+                collected["recovered"] += 1
+        except Exception as exc:  # vnx-silent-except: one unreadable intent must not stop the other recoveries (it is counted)
+            errors.append(f"recover {dispatch}#{attempt_no}: {type(exc).__name__}: {exc}")
+    for attempt in flights:
+        try:
+            counter, source, error = sweep_attempt(state_dir, attempt, now)
+        except Exception as exc:  # vnx-silent-except: one refused attempt is counted and reported, never silently dropped
+            errors.append(f"sweep {attempt.dispatch_id}#{attempt.attempt}: {type(exc).__name__}: {exc}")
+            continue
+        if counter in _THE_COUNTS:
+            collected[counter] += 1
+        if source:
+            collected["sources"].append(f"{attempt.dispatch_id}#{attempt.attempt}:{source}")
+        if error:
+            errors.append(error)
+    return collected
+
+
+def _heartbeat(state_dir: Path, collected: Optional[Dict[str, Any]], *, project_id: Optional[str],
+               started_at: str, finished_at: str, evaluated: datetime, error: Optional[str]) -> str:
+    """Write the one heartbeat of a run; a run that raised still calls this."""
+    data = collected or {}
+    errors = list(data.get("errors") or []) + ([error] if error else [])
+    path = Path(state_dir) / END_INTENT_DIRNAME / SWEEP_HEARTBEAT_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, {
+        "project_id": project_id, "started_at": started_at, "finished_at": finished_at,
+        "evaluated_at": evaluated.strftime(_LEDGER_TS_FORMAT),
+        "lifecycle_off": None if collected is None else not collected["enabled"],
+        "counts": dict({name: data.get(name, 0) for name in _THE_COUNTS},
+                       open_intents=data.get("open_intents", 0), errors=len(errors)),
+        "deadline": {"grace_seconds": ABANDON_GRACE_SECONDS,
+                     "fallback_seconds": FALLBACK_DEADLINE_SECONDS,
+                     "sources": list(data.get("sources") or [])},
+        "last_error": errors[-1] if errors else None,
+        "error": error,
+    })
+    return str(path)
+
+
+def sweep(*, state_dir: str | Path, project_id: Optional[str] = None,
+          now: Any = None) -> SweepResult:
+    """One sweep run (ADR-045 §6): recover the open intents, abandon the dead.
+
+    ``now`` is the evaluation instant (``datetime`` or ``...Z``), absent is the real
+    clock. Every run writes one heartbeat; a raised run writes it before raising.
+    """
+    state_path, started_at = Path(state_dir), _now_utc()
+    evaluated = _as_utc(now) or datetime.now(timezone.utc)
+    try:
+        collected = _collect(state_path, project_id, evaluated)
+    except Exception as exc:
+        try:
+            _heartbeat(state_path, None, project_id=project_id, started_at=started_at,
+                       finished_at=_now_utc(), evaluated=evaluated,
+                       error=f"{type(exc).__name__}: {exc}")
+        except OSError as write_exc:  # vnx-silent-except: the original failure is the one to raise; the heartbeat's own failure is only logged
+            logger.warning("[dispatch_lifecycle] sweep heartbeat unwritable: %s", write_exc)
+        raise
+    heartbeat_path = _heartbeat(state_path, collected, project_id=project_id,
+                                started_at=started_at, finished_at=_now_utc(),
+                                evaluated=evaluated, error=None)
+    return SweepResult(errors=tuple(collected["errors"]), heartbeat_path=heartbeat_path,
+                       lifecycle_off=not collected["enabled"],
+                       **{name: collected[name] for name in _THE_COUNTS})
