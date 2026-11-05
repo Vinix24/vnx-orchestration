@@ -1,7 +1,7 @@
 """K-act pre-work (OI-2552, OI-2541): the dead-letter deadline survives the
 history cap and needs an unbroken day. Driven through the real entry point,
-``scan_and_convert``: ``first_rejected_at`` is the deadline, ``rejected_at``
-the newest sighting.
+``scan_and_convert``: ``alarm_seconds`` is the deadline (``first_rejected_at``
+is the start of the run, informative), ``rejected_at`` the newest sighting.
 """
 from __future__ import annotations
 
@@ -107,7 +107,8 @@ def test_the_cap_never_evicts_a_refusal_sighted_in_this_scan(
     ]
     # Ours first: among equal stamps the stable sort drops the first entry.
     _seed_history(state_dir, [{**ours, "first_rejected_at": first_stamp,
-                               "rejected_at": now_stamp}, *others])
+                               "rejected_at": now_stamp,
+                               "alarm_seconds": 25 * 3600}, *others])
 
     stats = rtc.scan_and_convert([reports_dir], state_dir)
 
@@ -152,7 +153,8 @@ def test_a_permanent_refusal_seen_hourly_for_a_day_is_dead_lettered(
     report, ours = _refuse_once(reports_dir, state_dir, did)
     _seed_history(state_dir, [{**ours,
                                "first_rejected_at": _stamp_at(clock["epoch"] - 25 * 3600),
-                               "rejected_at": _stamp_at(clock["epoch"] - 3600)}])
+                               "rejected_at": _stamp_at(clock["epoch"] - 3600),
+                               "alarm_seconds": 25 * 3600}])
 
     stats = rtc.scan_and_convert([reports_dir], state_dir)
 

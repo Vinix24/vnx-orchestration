@@ -87,7 +87,7 @@ _REJECTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # Mirrors report_to_receipt_converter.py's own log lines exactly:
 #   "REJECTED (fail-closed) dispatch=%s file=%s reason=%s"
-#   "REFUSED (ledger lifecycle) dispatch=%s file=%s reason=%s: %s"  (OI-2541)
+#   "REFUSED (ledger lifecycle) dispatch=%s file=%s reason=%s"  (OI-2541: reason is the lifecycle text)
 _REJECTED_PATTERN = re.compile(
     r"REJECTED \(fail-closed\) dispatch=(\S+) file=(\S+) reason=(.*)$"
 )
@@ -172,6 +172,25 @@ def last_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, fil
               if (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
               == (dispatch_id, file_name, reason)]
     return max((stamp for stamp in stamps if stamp is not None), default=None)
+
+
+def latest_rejected_entry(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
+                          reason: str) -> Optional[Dict[str, Any]]:
+    """The NEWEST sighting of this exact refusal in *history*; None is no sighting."""
+    key = (dispatch_id, file_name, reason)
+    return max((e for e in history if (e.get("dispatch_id"), e.get("file"), e.get("reason")) == key),
+               key=lambda e: e.get("rejected_at") or "", default=None)
+
+
+def alarm_after_sighting(entry: Optional[Dict[str, Any]], sighting_epoch: Optional[float],
+                         continuity_gap_seconds: float) -> float:
+    """The OBSERVED alarm *entry* carries after a sighting at *sighting_epoch* (OI-2565): its
+    ``alarm_seconds`` (0 when absent or unreadable) plus the gap, when the gap is continuous."""
+    held = (entry or {}).get("alarm_seconds")
+    held = held if isinstance(held, (int, float)) and not isinstance(held, bool) else 0
+    last = _rejected_at_epoch((entry or {}).get("rejected_at"))
+    gap = None if last is None or sighting_epoch is None else sighting_epoch - last
+    return max(held + gap if gap is not None and 0 <= gap <= continuity_gap_seconds else held, 0)
 
 
 def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

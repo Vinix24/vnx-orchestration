@@ -1869,9 +1869,10 @@ class TestLifecycleRefusalQuarantine:
         assert entry["reason"].startswith("ledger lifecycle attempt_unknown: ")
         assert entry["first_rejected_at"] == entry["rejected_at"]
 
-        # Seen every hour since: the last sighting is recent, so the day is unbroken.
+        # Seen every hour since: a day of observed alarm, the last sighting an hour ago.
         _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(1),
-                                          "first_rejected_at": _stamp_hours_ago(25)})
+                                          "first_rejected_at": _stamp_hours_ago(25),
+                                          "alarm_seconds": 25 * 3600})
         stats = scan_and_convert([reports_dir], state_dir)
 
         assert stats.rejected_count == 1
@@ -1911,7 +1912,8 @@ class TestLifecycleRefusalQuarantine:
         assert entry["reason"].startswith("ledger lifecycle project_mismatch: ")
 
         _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(25),
-                                          "first_rejected_at": _stamp_hours_ago(25)})
+                                          "first_rejected_at": _stamp_hours_ago(25),
+                                          "alarm_seconds": 25 * 3600})
         stats = scan_and_convert([reports_dir], state_dir)
 
         assert (stats.error_count, stats.rejected_count) == (1, 0)
@@ -1930,10 +1932,12 @@ class TestLifecycleRefusalQuarantine:
         scan_and_convert([reports_dir], state_dir)
         entry = _history_dispatch(state_dir, "20260601-legacy-entry")
         legacy = {key: entry[key] for key in ("dispatch_id", "file", "reason", "kind")}
-        # A pre-field entry, sighted hourly for the whole day (no gap).
+        # A pre-first_rejected_at entry, sighted hourly for the whole day (no gap):
+        # the day of alarm has to be seeded, since #2395 counts observed alarm.
         _seed_history_entries(
             state_dir,
-            *[{**legacy, "rejected_at": _stamp_hours_ago(hours)} for hours in range(25, 0, -1)],
+            *[{**legacy, "rejected_at": _stamp_hours_ago(hours),
+               "alarm_seconds": 25 * 3600} for hours in range(25, 0, -1)],
         )
 
         stats = scan_and_convert([reports_dir], state_dir)
@@ -1984,6 +1988,8 @@ class TestMergeRejectedHistory:
             "dispatch_id": "d", "file": "f.md", "reason": "r",
             "rejected_at": "2026-06-01T12:00:00Z",
             "first_rejected_at": "2026-05-01T10:00:00Z",
+            # a two-hour gap is inside the continuity window: it is observed alarm
+            "alarm_seconds": 2 * 3600,
         }]
 
     def test_an_older_sighting_never_moves_rejected_at_backwards(self):
