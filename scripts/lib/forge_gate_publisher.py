@@ -515,6 +515,12 @@ def review_verdict(
     ``""``. It reaches :func:`evaluate_review_seats`, so a capped PR the door may
     merge publishes the verdict the door gives (OI-2143), with the reason, the
     cap rule and the threshold named in the verdict a reviewer reads (RG-2).
+
+    ``VNX_REVIEW_SEAT_RULE`` is read here through
+    ``review_seat_evaluation.active_seat_rule`` — the same reader the merge door
+    uses — so the published check and the door decide by the same rule for the
+    same inputs (track ``tweede-stoel-op-signaal``, PR 4). With the key off no
+    rule keyword reaches the evaluation at all, so the call is the one on main.
     """
     resolved_head = _require_head(head_sha)
     directory = results_dir if results_dir is not None else _default_results_dir()
@@ -529,11 +535,16 @@ def review_verdict(
     # Imported at call time: closure_verifier's import tail (which the
     # evaluation reaches) has no business loading on every gate run that
     # merely records a result.
-    from review_seat_evaluation import evaluate_review_seats
+    from review_seat_evaluation import RISK_SEAT_RULE, active_seat_rule, evaluate_review_seats
 
+    seat_rule = active_seat_rule()
+    rule_kwargs = (
+        {"rule": seat_rule.rule, "rule_value": seat_rule.value}
+        if seat_rule.rule != RISK_SEAT_RULE or seat_rule.value else {}
+    )
     evaluation = evaluate_review_seats(
         str(pr_number), directory, branch=branch, project_id=project_id, head_sha=resolved_head,
-        checkout=checkout, base_branch=base_branch, b3_override=b3_override,
+        checkout=checkout, base_branch=base_branch, b3_override=b3_override, **rule_kwargs,
     )
     note = _b3_override_note(b3_override, evaluation, label=b3_override_label)
 
