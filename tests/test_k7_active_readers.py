@@ -522,3 +522,91 @@ def test_a_legacy_superseded_dispatch_is_still_no_open_point(
     assert attempt_verdict(state_dir, PROJECT, "d-legacy-super").is_legacy
     assert _fold(state_dir, "d-legacy-super") == "superseded"
     assert "d-legacy-super" not in _items(data_dir)
+
+
+# ---------------------------------------------------------------------------
+# 10. Only a ``dispatch_finished`` ends a v3 attempt (K-7 round 3, codex #2380)
+# ---------------------------------------------------------------------------
+
+def _legacy_completion(state_dir: Path, dispatch_id: str, status: str = "success", *,
+                       attempt: int = 1) -> None:
+    """The legacy completion family's line for this key's attempt (no end)."""
+    _ledger_line(state_dir, event_type="task_complete", dispatch_id=dispatch_id,
+                 attempt=attempt, status=status)
+
+
+def test_a_legacy_completion_is_no_end_for_a_dead_v3_attempt(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    """Codex's reproduction: a success receipt ended the attempt the sweep saw in flight."""
+    _v3(state_dir, spec_file, "d-legacy-end")
+    _legacy_completion(state_dir, "d-legacy-end")
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+    entry = _active(data_dir, "d-legacy-end", hours_old=5.0)
+
+    verdict = attempt_verdict(state_dir, PROJECT, "d-legacy-end")
+    assert verdict.kind == "dead_no_end"
+    assert verdict.end_line is None and verdict.attempt == 1
+    assert _items(data_dir)["d-legacy-end"]["outcome"] == oo.OUTCOME_ABANDONED_CANDIDATE
+    result = _drain(data_dir)["d-legacy-end"]
+    assert result.action == "skipped" and "abandoned candidate" in result.reason
+    assert entry.is_dir()
+    assert not (data_dir / "dispatches" / "completed" / "d-legacy-end").exists()
+
+
+def test_a_legacy_completion_is_no_end_for_a_live_v3_attempt(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    _v3(state_dir, spec_file, "d-legacy-live")
+    _legacy_completion(state_dir, "d-legacy-live")
+    probe.update(occupancy="held")
+    entry = _active(data_dir, "d-legacy-live", hours_old=50.0)
+
+    verdict = attempt_verdict(state_dir, PROJECT, "d-legacy-live")
+    assert verdict.kind == "live" and verdict.end_line is None
+    result = _drain(data_dir)["d-legacy-live"]
+    assert result.action == "skipped" and "still running" in result.reason
+    assert entry.is_dir()
+    assert "d-legacy-live" not in _items(data_dir)
+
+
+def test_a_dispatch_finished_ends_the_v3_attempt_as_before(
+        data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    handover = _v3(state_dir, spec_file, "d-finished")
+    _legacy_completion(state_dir, "d-finished")  # beside it, the legacy line must not win
+    _finalize(state_dir, handover, "completed")
+
+    verdict = attempt_verdict(state_dir, PROJECT, "d-finished")
+    assert verdict.kind == "ended" and verdict.attempt == 1
+    assert verdict.end_state == "completed" and verdict.end_status == "success"
+    assert verdict.end_line is not None
+    assert verdict.end_line["event_type"] == "dispatch_finished"
+    _active(data_dir, "d-finished")
+    assert _drain(data_dir)["d-finished"].action == "completed"
+
+
+def test_an_older_attempts_dispatch_finished_never_ends_a_newer_start(
+        state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    first = _v3(state_dir, spec_file, "d-refire")
+    _finalize(state_dir, first, "completed")
+    second = _begin(state_dir, spec_file, "d-refire")
+    assert second.attempt == 2
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+
+    verdict = attempt_verdict(state_dir, PROJECT, "d-refire")
+    assert verdict.kind == "dead_no_end" and verdict.attempt == 2
+    assert verdict.end_line is None
+    probe.update(occupancy="held")
+    assert attempt_verdict(state_dir, PROJECT, "d-refire").kind == "live"
+
+
+def test_a_legacy_completion_still_ends_a_dispatch_without_a_v3_start(
+        data_dir: Path, state_dir: Path) -> None:
+    _legacy_completion(state_dir, "d-legacy-only")
+    _receipt(data_dir, "d-legacy-only", "success")
+    _active(data_dir, "d-legacy-only", hours_old=5.0)
+
+    verdict = attempt_verdict(state_dir, PROJECT, "d-legacy-only")
+    assert verdict.kind == "legacy" and verdict.is_legacy
+    assert verdict.end_line is None
+    result = _drain(data_dir)["d-legacy-only"]
+    assert result.action == "completed"
+    assert result.reason == "receipt found with success status"

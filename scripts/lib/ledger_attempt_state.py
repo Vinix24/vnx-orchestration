@@ -81,16 +81,18 @@ def attempt_verdict(state_dir: str | Path, project_id: str, dispatch_id: str, *,
     starts = _v3_starts(owned, project_id, dispatch_id)
     if not starts:
         return AttemptVerdict(KIND_LEGACY, project_id, dispatch_id)
-    line = end_line(owned, project_id, dispatch_id)
-    if line is not None:
-        attempt, state = line.get("attempt"), line.get("end_state")
-        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
-            attempt = None
-        finished = str(line.get("event_type") or "").strip() == DISPATCH_FINISHED_EVENT_TYPE
-        state = (state.strip().lower() or None) if finished and isinstance(state, str) else None
-        return AttemptVerdict(KIND_ENDED, project_id, dispatch_id, attempt=attempt,
-                              end_line=line, end_status=end_status(line), end_state=state)
     attempt = max(starts)
+    # A v3 attempt ends only on its own ``dispatch_finished``: a legacy
+    # completion or a door refusal for the same key is no end (ADR-045), so it
+    # falls through to the liveness branch exactly as no end line would.
+    line = end_line(owned, project_id, dispatch_id, attempt=attempt)
+    if (line is not None
+            and str(line.get("event_type") or "").strip().lower() == DISPATCH_FINISHED_EVENT_TYPE):
+        state = line.get("end_state")
+        return AttemptVerdict(KIND_ENDED, project_id, dispatch_id, attempt=attempt,
+                              end_line=line, end_status=end_status(line),
+                              end_state=(state.strip().lower() or None)
+                              if isinstance(state, str) else None)
     measured, _signal = liveness(state_dir, InFlightAttempt(project_id, dispatch_id,
                                                             attempt, starts[attempt]))
     # a signal outside the three is unknown, never dead: unknown never abandons
