@@ -16,6 +16,7 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import shutil
@@ -1732,6 +1733,46 @@ class TestRejectedDetailHistory:
         dispatch_ids = [e["dispatch_id"] for e in entries]
         assert "20260906-cap-0000" not in dispatch_ids  # oldest evicted
         assert f"20260906-cap-{_HEALTH_REJECTED_HISTORY_MAX:04d}" in dispatch_ids  # newest kept
+
+
+class TestLifecycleRefusalClassification:
+    """Every ``ReportPathRefused`` code is permanent (no later ledger read can
+    undo it, so an aged one is dead-lettered) or transient (a later scan
+    resolves it). The two sets partition the codes the module raises, so a new
+    code without a classification fails here instead of silently defaulting to
+    "retried forever"."""
+
+    def _codes_the_module_raises(self) -> set:
+        source = (SCRIPTS_LIB / "report_lifecycle_mode.py").read_text(encoding="utf-8")
+        codes = set()
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name != "ReportPathRefused":
+                continue
+            assert len(node.args) >= 2, ast.dump(node)
+            code = node.args[1]
+            assert isinstance(code, ast.Constant) and isinstance(code.value, str), ast.dump(node)
+            codes.add(code.value)
+        return codes
+
+    def test_the_two_sets_partition_every_code_the_module_raises(self) -> None:
+        from report_to_receipt_converter import (
+            PERMANENT_LIFECYCLE_REFUSALS,
+            TRANSIENT_LIFECYCLE_REFUSALS,
+        )
+
+        raised = self._codes_the_module_raises()
+        assert raised, "the AST scan found no ReportPathRefused call"
+        assert not (PERMANENT_LIFECYCLE_REFUSALS & TRANSIENT_LIFECYCLE_REFUSALS)
+        assert raised == set(PERMANENT_LIFECYCLE_REFUSALS) | set(TRANSIENT_LIFECYCLE_REFUSALS)
+        # Pinned: a later dispatch_finished for the same key resolves
+        # end_outcome_id_missing (_narrow_end takes the LAST end line).
+        assert TRANSIENT_LIFECYCLE_REFUSALS == frozenset({
+            "ledger_unreadable", "lifecycle_mode_undecidable", "end_outcome_id_missing",
+        })
 
 
 # ---------------------------------------------------------------------------

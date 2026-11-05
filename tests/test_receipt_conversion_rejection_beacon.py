@@ -297,6 +297,19 @@ class TestBothBeaconsAgreeOnTheSameScan:
         "## Verification\n\npytest tests/ -x: 42 passed\n\n"
         "## Open Items\n\nNone\n"
     )
+    _TENANT = "proj-agree"
+    # A report that books: model present, tenant named (the v3 fixtures below
+    # need the tenant to resolve a row without VNX_PROJECT_ID).
+    _BOOKABLE_REPORT = (
+        "---\ndispatch_id: {name}\nproject_id: " + _TENANT + "\n"
+        "provider: claude\nmodel: claude-sonnet-4-6\n{extra}---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n"
+    )
+
 
     def _scan_and_feed_the_beacon(self, reports_dir: Path, state_dir: Path, caplog) -> tuple[str, str, int]:
         """(converter status, rejections-beacon status, REJECTED lines this scan wrote to stderr)."""
@@ -369,6 +382,86 @@ class TestBothBeaconsAgreeOnTheSameScan:
 
         assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
         assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 0)
+
+    def test_same_verdict_for_a_young_attempt_unknown_refusal(self, tmp_path: Path, caplog) -> None:
+        """``attempt_unknown`` is transient (a later ``dispatch_started`` can
+        start the named attempt), so the refusal stays in the scanned directory
+        and its REFUSED line reaches this beacon: fail. The converter beacon
+        must record the same refusal — the other report books, so without a
+        detail entry it would say ok for the very scan this one calls fail."""
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "t0_receipts.ndjson").write_text(
+            json.dumps({
+                "event_type": "dispatch_started", "dispatch_id": "20260601-refused",
+                "project_id": self._TENANT, "attempt": 1, "lifecycle_mode": "v3",
+                "timestamp": "2026-06-01T10:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-refused.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-refused", extra="attempt: 3\n"),
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-books.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-books", extra=""), encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        # Not quarantined: only a permanent code on an aged report is dead-lettered.
+        assert (reports_dir / "20260601-refused.md").is_file()
+
+    def test_same_verdict_for_a_transient_ledger_unreadable_refusal(self, tmp_path: Path, caplog) -> None:
+        """``ledger_unreadable`` resolves on the first readable scan, so it is
+        never dead-lettered; the report stays and its REFUSED line keeps this
+        beacon at fail. The converter beacon must name the same refusal while
+        the other report books normally."""
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _seed_v3_row(state_dir, "20260601-unreadable")
+        # An INTERIOR unparseable line naming this dispatch: the ledger cannot
+        # be read as evidence for it, while every other dispatch reads normally.
+        (state_dir / "t0_receipts.ndjson").write_text(
+            '{"event_type": "dispatch_started", "dispatch_id": "20260601-unreadable"\n'
+            + json.dumps({"event_type": "report_ingested", "dispatch_id": "20260601-other"}) + "\n",
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-unreadable.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-unreadable", extra=""), encoding="utf-8",
+        )
+        (reports_dir / "20260601-books.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-books", extra=""), encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        assert (reports_dir / "20260601-unreadable.md").is_file()
+
+
+def _seed_v3_row(state_dir: Path, dispatch_id: str, project_id: str = "proj-agree") -> None:
+    """A real coordination row whose metadata says ``lifecycle_mode: v3`` — the
+    only v3 evidence left once the ledger itself cannot be read."""
+    import sqlite3
+
+    import coordination_db
+    import project_id_migration
+
+    coordination_db.init_schema(state_dir)
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=project_id)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, metadata_json) "
+            "VALUES (?, ?, 'running', 1, ?)",
+            (dispatch_id, project_id, json.dumps({"lifecycle_mode": "v3"})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_converter_component_name_matches_the_converter_beacon() -> None:

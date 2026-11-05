@@ -1121,6 +1121,29 @@ def test_a_transient_refusal_on_an_old_report_is_never_dead_lettered(
     assert "ledger_unreadable" in caplog.text
 
 
+def test_end_outcome_id_missing_on_an_old_report_is_never_dead_lettered(
+    state_dir, spec_file, v3, clock, caplog, tmp_path
+):
+    """OA round 2 finding 1: ``_narrow_end`` takes the LAST end line for the
+    attempt, so a later ``dispatch_finished`` carrying an ``outcome_id``
+    resolves this refusal — it is transient, however old the report is."""
+    clock["now"] = T0
+    _begin(state_dir, spec_file)
+    # A legacy end line: written before the append layer stamped outcome_id, so
+    # it freezes no outcome and _narrow_end hands back an empty one.
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_end_line()) + "\n")
+    report = _aged_report(tmp_path, age_seconds=_DAY + 3600, attempt=1)
+    caplog.set_level(logging.WARNING, logger=rtc.logger.name)
+
+    _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
+
+    assert outcome == "error"
+    assert report.is_file()
+    assert not (state_dir / "receipt_deadletter").exists()
+    assert "end_outcome_id_missing" in caplog.text
+
+
 def test_a_dry_run_of_the_dead_letter_case_moves_nothing(
     state_dir, spec_file, v3, clock, caplog, tmp_path
 ):

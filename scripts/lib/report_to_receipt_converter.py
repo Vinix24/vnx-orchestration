@@ -1033,20 +1033,22 @@ def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
                                rejected_detail_sink: Optional[List[Dict[str, Any]]]) -> str:
     """``rejected`` for a permanent, aged refusal (OI-2542): it takes the model
     refusal's path. A transient code, a young report or an unreadable mtime is
-    logged and stays ``error`` — booked nothing, retried on the next scan.
+    logged and stays ``error`` — booked nothing, retried on the next scan; it is
+    named in *rejected_detail_sink* (``kind="lifecycle_refusal"``) either way.
     """
+    reason = f"ledger lifecycle {exc.code}: {exc.detail}"
+    if rejected_detail_sink is not None:
+        rejected_detail_sink.append({
+            "dispatch_id": str(exc.dispatch_id or ""), "file": report_path.name, "reason": reason,
+            "kind": "lifecycle_refusal",
+            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     mtime = _read_report_mtime(report_path)
     if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and mtime is not None
             and time.time() - mtime > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
         _log_refusal(exc, report_path)
         return "error"
-    reason = f"ledger lifecycle {exc.code}: {exc.detail}"
     logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
                    "[dry-run] " if dry_run else "", exc.dispatch_id, report_path.name, reason)
-    if rejected_detail_sink is not None:
-        rejected_detail_sink.append({
-            "dispatch_id": str(exc.dispatch_id or ""), "file": report_path.name, "reason": reason,
-            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
     if not dry_run and state_dir is not None:
         _deadletter_report(report_path, f"lifecycle_{exc.code}", state_dir)
     return "rejected"
@@ -1634,9 +1636,9 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 # scan_and_convert() for per-scan counting (OI-998):
 #   "appended"  — new receipt written.
 #   "duplicate" — idempotent re-send, no new receipt.
-#   "rejected"  — fail-closed refusal by append_receipt_payload's own model
-#                 validation (see MODEL_REFUSAL_CODES below: a missing Model,
-#                 or a Model value that is not a model name).
+#   "rejected"  — fail-closed refusal of the report's bytes: the model check in
+#                 append_receipt_payload (MODEL_REFUSAL_CODES below), or a permanent
+#                 ReportPathRefused code on a report older than a day (OI-2542).
 #                 A WARNING is logged here with dispatch_id + reason so the
 #                 refusal is loud, not silent. The report is quarantined into
 #                 receipt_deadletter/ (reason code = the refusal's own code)
@@ -1662,15 +1664,19 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 # a model name: spaces, backticks, too long). Both are a verdict on the
 # report's bytes, so both take the "rejected" outcome: counted as rejected,
 # named in the rejection history, quarantined on the first refusal. This is the
-# ONE place that decides which codes take that path; every other refusal stays
-# an "error" and is retried. A test pins this set to what the validator raises.
+# ONE place that decides which APPEND-VALIDATION codes take that path (lifecycle codes:
+# PERMANENT_LIFECYCLE_REFUSALS in _lifecycle_refusal_outcome); the rest stay "error" and
+# are retried. A test pins this set to what the validator raises.
 MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
 
 # The ReportPathRefused codes no later read of the append-only ledger can undo (OI-2542): a
-# start line precedes its attempt's report and one end line per attempt is final. Transient
-# codes (ledger_unreadable, lifecycle_mode_undecidable) are absent; one day of age is the line.
+# start line precedes its attempt's report and one end line per attempt is final. The rest are
+# TRANSIENT_LIFECYCLE_REFUSALS below; one day of age is the deadline.
 PERMANENT_LIFECYCLE_REFUSALS = frozenset({"attempt_unknown", "attempt_ambiguous", "project_mismatch",
-                                          "project_ambiguous", "project_unknown", "missing_dispatch_id",
+                                          "project_ambiguous", "project_unknown", "missing_dispatch_id"})
+# Never dead-lettered: a readable ledger, a decidable mode or a later dispatch_finished for the
+# same key (_narrow_end takes the LAST end line) resolves each; a test pins both sets to the codes.
+TRANSIENT_LIFECYCLE_REFUSALS = frozenset({"ledger_unreadable", "lifecycle_mode_undecidable",
                                           "end_outcome_id_missing"})
 LIFECYCLE_REFUSAL_DEADLETTER_SECONDS = 24 * 3600
 
@@ -2067,7 +2073,7 @@ class ScanStats:
     # dry-run so this count never influences health status either way.
     would_append_count: int = 0
     # F1-3: per-rejection detail ({dispatch_id, file, reason, rejected_at})
-    # for THIS scan's model refusals (MODEL_REFUSAL_CODES) — see _write_scan_heartbeat,
+    # for THIS scan's fail-closed refusals (MODEL_REFUSAL_CODES and lifecycle) — see _write_scan_heartbeat,
     # which merges this into the beacon's accumulated details.rejected
     # history. A tuple (not a list) so the frozen dataclass never exposes a
     # mutable default shared across instances.

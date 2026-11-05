@@ -13,18 +13,18 @@ watching stderr, and that stderr is exactly what
 
 This module is the Bash caller's own health writer, not a change to the
 converter: ``receipt_processor.sh`` now captures the converter's stderr (see
-``_run_receipt_converter_scan``), and pipes the raw text here on stdin. Every
-line matching the converter's own fail-closed log format —
+``_run_receipt_converter_scan``), and pipes the raw text here on stdin. Both of the
+converter's refusal log shapes —
 
     "REJECTED (fail-closed) dispatch=<id> file=<name> reason=<msg>"
+    "REFUSED (ledger lifecycle) dispatch=<id> file=<name> reason=<code>: <detail>"
 
-(``report_to_receipt_converter.py``'s ``_convert_one_detailed``, logged via
-``logger.warning`` on every ``AppendReceiptError`` whose code is in
-``MODEL_REFUSAL_CODES``: ``missing_model`` and ``invalid_model_shape``) — is
-parsed into a ``{dispatch_id, file, reason, kind}`` record and written as this
-scan's beacon detail. Any other line (INFO chatter, the per-scan summary
+(``_convert_one_detailed``: REJECTED for ``MODEL_REFUSAL_CODES`` and for
+dead-lettered lifecycle refusals, REFUSED for the young or transient ones) —
+is parsed into one ``{dispatch_id, file, reason, kind}`` record and written as
+this scan's beacon detail. Any other line (INFO chatter, the per-scan summary
 line, a different WARNING) is ignored: it is not this beacon's job to
-duplicate the processing log, only to make the REJECTED reason traceable.
+duplicate the processing log, only to make the refusal reason traceable.
 
 ``details.rejections`` is a snapshot, matching
 ``report_to_receipt_converter._write_scan_heartbeat``'s own convention: it
