@@ -15,8 +15,12 @@ def _emit_dispatch_register(receipt: dict) -> bool:
     for every appended (or duplicate-skipped, OI-1425) receipt (before the
     skip_enrichment gate).
 
-    Returns True on success, False on any failure OR when this event_type
-    carries no register mapping (best-effort, never raises). OI-1425: a
+    Returns True on success, False on any failure OR when this receipt carries
+    no register event (best-effort, never raises). OI-2536: a receipt stamped
+    ``receipt_schema.REFUSAL_SCOPE_FIRE`` refuses ONE fire while another attempt
+    of the same dispatch is still live — it says nothing about the dispatch, so
+    it writes no outcome event (a silent, expected ``False``, not the loud
+    failure path). OI-1425: a
     `return False` from "nothing to map here" (expected, silent) is no longer
     indistinguishable from a `return False` caused by a real failure (import
     error, bad receipt shape, register write failure) — the latter is always
@@ -29,12 +33,15 @@ def _emit_dispatch_register(receipt: dict) -> bool:
         sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
         from dispatch_register import append_event
         from event_outcome_semantics import classify_event_outcome, COMPLETION_EVENT_TYPES
+        from receipt_schema import REFUSAL_SCOPE_FIRE
     except Exception as exc:
         _emit("WARN", "dispatch_register_emit_failed", stage="import",
               dispatch_id=dispatch_id, error=str(exc))
         return False
 
     try:
+        if receipt.get("refusal_scope") == REFUSAL_SCOPE_FIRE:
+            return False  # fire-scoped refusal, not an outcome of the dispatch — expected, not an error
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
         gate = str(receipt.get("gate", "")).lower()

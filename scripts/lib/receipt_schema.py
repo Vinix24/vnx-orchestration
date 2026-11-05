@@ -69,6 +69,13 @@ def _utc_now_iso() -> str:
 RECEIPT_V2_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 RECEIPT_V2_EVENT_TYPE = "task_complete"
 
+# OI-2536: the scope of a refusal receipt. A fire the door refused because
+# ANOTHER attempt of the same dispatch is still live says nothing about the
+# dispatch's outcome — the refusal is scoped to this one fire. Only this exact
+# value carries that meaning; an absent or different value keeps the receipt's
+# normal outcome reading (fail-closed: an unknown marker never suppresses).
+REFUSAL_SCOPE_FIRE = "fire"
+
 # ReceiptV2 fields stamped only when not None, in ledger insertion order (the
 # writer uses sort_keys=False, so this order is part of the byte shape).
 # failure_reason/failure_class (OI-866) are omitted on success so pre-feature
@@ -77,7 +84,7 @@ RECEIPT_V2_EVENT_TYPE = "task_complete"
 _STAMPED_WHEN_SET = (
     "final_prompt_path", "final_prompt_sha256", "injection_reconstructs", "verification", "warnings",
     "tool_call_count", "tool_call_failures", "tool_call_retries", "deadline_seconds",
-    "failure_reason", "failure_class", "delivery_state",
+    "failure_reason", "failure_class", "delivery_state", "refusal_scope",
     "role_applied", "role_tier", "role_not_applied_reason", "role_source_path",
     "skill_applied", "skill_source_path", "skill_unapplied_reason",
     "parent_dispatch", "task_class", "tier_from", "tier_to",
@@ -166,6 +173,11 @@ class ReceiptV2:
     # refusals. Conditionally stamped (None omits) so lanes that do not yet
     # compute it keep a byte-identical receipt shape.
     delivery_state: Optional[str] = None
+    # OI-2536: this receipt's refusal scope. ``REFUSAL_SCOPE_FIRE`` marks a
+    # refusal of ONE fire (another attempt of the dispatch is still live), so
+    # the receipt is never read as an outcome of the dispatch. Conditionally
+    # stamped (None omits) so every other receipt keeps its byte shape.
+    refusal_scope: Optional[str] = None
     # Deterministic role-applied control (dispatch-20260801-w10): stamped by the
     # provider/envelope GOVERN paths after the deterministic check that the
     # resolved role source's content actually reached the assembled final prompt.

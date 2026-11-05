@@ -75,6 +75,25 @@ def _validate_provider(provider: str) -> None:
         )
 
 
+def _normalize_models(
+    model: str, model_resolved: Optional[str], dispatch_id: str,
+) -> Tuple[str, Optional[str]]:
+    """Normalize the requested/actual model ids at the receipt boundary.
+
+    Unmapped strings pass through unchanged and are caught by the fail-closed
+    model validator downstream. A normalizer failure must never block receipt
+    emission, so it is logged and the caller's values are kept.
+    """
+    try:
+        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
+        model = normalize_model_name(model)
+        if model_resolved:
+            model_resolved = normalize_model_name(model_resolved)
+    except Exception:  # vnx-silent-except: a normalizer failure must never block receipt emission
+        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
+    return model, model_resolved
+
+
 def emit_dispatch_receipt(
     dispatch_id: str,
     terminal_id: str,
@@ -108,6 +127,7 @@ def emit_dispatch_receipt(
     failure_reason: Optional[str] = None,
     failure_class: Optional[str] = None,
     delivery_state: Optional[str] = None,
+    refusal_scope: Optional[str] = None,
     role_applied: Optional[bool] = None,
     role_tier: Optional[str] = None,
     role_not_applied_reason: Optional[str] = None,
@@ -219,6 +239,13 @@ def emit_dispatch_receipt(
     (None omits) so lanes that do not yet compute it keep a byte-identical
     receipt shape.
 
+    ``refusal_scope``: OI-2536 — the narrowest carrier for a receipt that is a
+    refusal of ONE fire rather than an outcome of the dispatch. The door stamps
+    ``receipt_schema.REFUSAL_SCOPE_FIRE`` when it refuses a refire because
+    another attempt of the same dispatch is still live; the register emitter
+    then writes no outcome event for that receipt. Conditionally stamped (None
+    omits) so every other receipt keeps its byte-identical shape.
+
     ``permission_posture`` / ``permission_profile`` / ``permission_allow_
     pattern_count``: OI-864 — the ACTUAL spawn-time permission posture
     (``"blanket-skip"`` | ``"scoped-allowlist"`` | ``"attached-interactive"``),
@@ -251,13 +278,7 @@ def emit_dispatch_receipt(
     # (deepseek/deepseek-v4-pro vs deepseek-v4-pro, kimi-code/k3 vs kimi-k3,
     # claude-sonnet-5 vs sonnet-5). Unmapped strings pass through unchanged and
     # are caught by the fail-closed model validator downstream.
-    try:
-        from providers.model_normalizer import normalize_model_name  # noqa: PLC0415
-        model = normalize_model_name(model)
-        if model_resolved:
-            model_resolved = normalize_model_name(model_resolved)
-    except Exception:  # noqa: BLE001 — a normalizer failure must never block receipt emission
-        logger.debug("emit_dispatch_receipt: model normalization failed dispatch=%s", dispatch_id, exc_info=True)
+    model, model_resolved = _normalize_models(model, model_resolved, dispatch_id)
 
     # Chain-link fallback: the caller may not know the fields (the tmux worker
     # path writes its own receipt via append_receipt_payload and inherits them
@@ -326,6 +347,7 @@ def emit_dispatch_receipt(
         failure_reason=failure_reason,
         failure_class=failure_class,
         delivery_state=delivery_state,
+        refusal_scope=refusal_scope,
         role_applied=role_applied,
         role_tier=role_tier,
         role_not_applied_reason=role_not_applied_reason,

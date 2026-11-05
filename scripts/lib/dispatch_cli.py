@@ -59,6 +59,7 @@ from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # n
 from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
 import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
+from receipt_schema import REFUSAL_SCOPE_FIRE  # noqa: E402
 from worker_permissions import role_grants_write  # noqa: E402
 from receipt_verdict import (  # noqa: E402
     HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
@@ -658,6 +659,7 @@ _REFUSAL_RECEIPT_DELIVERY_STATE = "delivery_refused"
 def _record_door_refusal_receipt(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, state_dir: Path, error: str,
     failure_reason: Optional[str] = None, booked_as: str,
+    refusal_scope: Optional[str] = None,
 ) -> None:
     """Book a door refusal of a fire as ONE ``receipt_kind="dispatch"`` receipt (ADR-005).
 
@@ -669,6 +671,11 @@ def _record_door_refusal_receipt(
     is the operator-facing detail. A write failure is booked via ``_record_bookkeeping_failure``
     under ``booked_as``; the door refuses all the same, and ``TestIsolationGuardError`` is
     re-raised (OI-1079: a test must fail loudly, never be swallowed here).
+
+    ``refusal_scope`` is carried onto the receipt as-is (OI-2536). A refuse because
+    another attempt of the same dispatch is live passes ``REFUSAL_SCOPE_FIRE`` so the
+    refusal is never read as an outcome of the dispatch; every other caller leaves it
+    None and keeps the receipt's normal outcome reading.
     """
     from failure_classification import classify_failure_safe
     from governance_emit import emit_dispatch_receipt
@@ -692,6 +699,7 @@ def _record_door_refusal_receipt(
                 else classified.get("failure_reason")),
             failure_class=classified.get("failure_class"),
             delivery_state=_REFUSAL_RECEIPT_DELIVERY_STATE,
+            refusal_scope=refusal_scope,
             parent_dispatch=plan.parent_dispatch, task_class=plan.task_class,
             tier_from=plan.tier_from, tier_to=plan.tier_to,
         )
@@ -3581,6 +3589,11 @@ def _owner_hand_over(
         _record_door_refusal_receipt(
             plan, spec, state_dir=state_dir, error=label,
             failure_reason=" ".join(f"{label}: {exc.detail}".split())[:300],
+            # OI-2536: a refusal of THIS fire because another attempt is live is
+            # not an outcome of the dispatch — it must never reach the register
+            # as dispatch_failed. Every other start refusal keeps its reading.
+            refusal_scope=(
+                REFUSAL_SCOPE_FIRE if exc.code == "refire_attempt_live" else None),
             booked_as="start_line_refusal_receipt")
         if attempt_id is not None:
             _owner_finish(spec.dispatch_id, attempt_id, state_dir=state_dir,
