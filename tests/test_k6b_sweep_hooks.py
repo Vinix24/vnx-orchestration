@@ -26,7 +26,12 @@ to 14400. This file covers plan row 6 and OI-2522:
    integer ``attempt`` of at least 1 and a non-negative integer ``offset``;
    anything else — a cursor left without a ``project_id`` included — is the
    front for the next bounded sweep and never an error inside ``_resume_at``
-   (codex finding on the round-2 head).
+   (codex finding on the round-2 head);
+9. a bounded sweep walks ONE sequence — the open intents then the in-flight
+   attempts — starting at the cursor's item and wrapping, so a failing intent
+   costs one item of one run and never every run (OI-2527, OI-2530); the cursor
+   carries its item's ``kind`` and combined offset, and a K-6b cursor without a
+   ``kind`` resumes at its attempt.
 
 Every store is real (a real ledger, a real ``runtime_coordination.db``) under
 ``tmp_path``; only clocks and process liveness are pinned.
@@ -431,8 +436,8 @@ def test_a_bounded_sweep_leaves_the_live_prefix_and_the_next_one_takes_the_dead(
     assert (first.live, first.abandoned, first.budget_exhausted) == (2, 0, True), first
     assert first.budget_left == 1
     assert _finished(state_dir, dead_id) == []
-    assert _cursor(state_dir) == {"project_id": PROJECT, "dispatch_id": dead_id,
-                                  "attempt": ATTEMPT, "offset": 2}
+    assert _cursor(state_dir) == {"kind": "attempt", "project_id": PROJECT,
+                                  "dispatch_id": dead_id, "attempt": ATTEMPT, "offset": 2}
 
     second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
 
@@ -584,6 +589,7 @@ def test_a_cursor_without_a_project_id_starts_the_next_bounded_sweep_at_the_fron
     {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": "1", "offset": 0},
     {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": -1},
     {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": False},
+    {"kind": "bogus", "project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": 0},
 ])
 def test_read_cursor_rejects_a_cursor_that_cannot_be_resumed(state_dir, cursor):
     _write_heartbeat(state_dir, cursor)
@@ -593,7 +599,8 @@ def test_read_cursor_rejects_a_cursor_that_cannot_be_resumed(state_dir, cursor):
 
 
 def test_read_cursor_accepts_a_well_formed_cursor_only_in_its_own_scope(state_dir):
-    good = {"project_id": PROJECT, "dispatch_id": "d-k6b-x", "attempt": 1, "offset": 0}
+    good = {"kind": "attempt", "project_id": PROJECT, "dispatch_id": "d-k6b-x",
+            "attempt": 1, "offset": 0}
     _write_heartbeat(state_dir, good)
 
     assert lifecycle._read_cursor(state_dir, None) == good
@@ -614,7 +621,7 @@ def test_resume_at_starts_at_the_front_on_a_cursor_missing_a_key(state_dir, life
     flights, errors = lifecycle.v3_in_flight(state_dir, None)
     assert (len(flights), errors) == (2, ())
 
-    assert lifecycle._resume_at(flights, cursor) == 0
+    assert lifecycle._resume_at(lifecycle._sequence((), flights), cursor) == 0
 
 
 def test_a_raising_sweep_never_carries_an_unreadable_cursor_forward(
@@ -638,6 +645,117 @@ def test_a_raising_sweep_never_carries_an_unreadable_cursor_forward(
     result = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
 
     assert result.live == 1, result
+
+
+# ---------------------------------------------------------------------------
+# 3d. K-6b round 4 (OI-2527, OI-2530): one bounded sequence over intents + attempts
+# ---------------------------------------------------------------------------
+
+def _recover_raises_for(monkeypatch, *dispatch_ids) -> None:
+    """The publish lock hangs on these intents: their ``recover`` raises, they stay open."""
+    real = lifecycle.recover
+
+    def _recover(**kwargs):
+        if kwargs["dispatch_id"] in dispatch_ids:
+            raise RuntimeError("publish lock taken")
+        return real(**kwargs)
+
+    monkeypatch.setattr(lifecycle, "recover", _recover)
+
+
+def test_a_bounded_run_spent_on_a_failing_intent_resumes_at_the_next_one(
+        state_dir, lifecycle_on, monkeypatch):
+    """OI-2527: a hanging recover must not cost every bounded run the same intent."""
+    first_id, second_id = "d-k6b-r4-i1", "d-k6b-r4-i2"
+    _open_intent(state_dir, first_id)
+    _open_intent(state_dir, second_id)
+    _recover_raises_for(monkeypatch, first_id)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.recovered, first.budget_exhausted) == (0, True), first
+    assert any("recover d-k6b-r4-i1" in error for error in first.errors), first.errors
+    assert _cursor(state_dir)["kind"] == "intent"
+    assert _cursor(state_dir)["dispatch_id"] == second_id
+    assert _finished(state_dir, second_id) == []
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.recovered == 1, second
+    assert len(_finished(state_dir, second_id)) == 1
+    assert _finished(state_dir, first_id) == []  # still open, still the next run's item
+
+
+def test_a_bounded_run_spent_on_a_failing_intent_still_reaches_the_attempt(
+        state_dir, lifecycle_on, monkeypatch):
+    """OI-2530: within two bounded runs the dead attempt is booked ``abandoned``."""
+    intent_id, dead_id = "d-k6b-r4-a-intent", "d-k6b-r4-a-dead"
+    _open_intent(state_dir, intent_id)
+    _attempt(state_dir, dead_id, live=False)
+    _recover_raises_for(monkeypatch, intent_id)
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    first = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (first.abandoned, first.budget_exhausted) == (0, True), first
+    assert _cursor(state_dir)["kind"] == "attempt"
+    assert _cursor(state_dir)["dispatch_id"] == dead_id
+    assert _finished(state_dir, dead_id) == []
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    second = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert second.abandoned == 1, second
+    ended = _finished(state_dir, dead_id)
+    assert len(ended) == 1 and ended[0]["end_state"] == "abandoned", ended
+
+
+def test_a_k6b_cursor_without_kind_resumes_at_its_attempt(
+        state_dir, lifecycle_on, monkeypatch):
+    """An upgrade reads the K-6b attempt cursor as an attempt, never as the front."""
+    dispatch_ids = ["d-k6b-r4-k1", "d-k6b-r4-k2", "d-k6b-r4-k3"]
+    for dispatch_id in dispatch_ids:
+        _attempt(state_dir, dispatch_id, live=True)
+    # offset 0 alone would be the front; the key is the second attempt (the K-6b format)
+    _write_heartbeat(state_dir, {"project_id": PROJECT, "dispatch_id": dispatch_ids[1],
+                                 "attempt": ATTEMPT, "offset": 0})
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    monkeypatch.setattr(lifecycle, "_monotonic", _PinnedClock([0.0, 0.0, 2.0]))
+    result = lifecycle.sweep(state_dir=state_dir, now=now, budget_seconds=1.0)
+
+    assert (result.live, result.budget_exhausted) == (1, True), result
+    assert _cursor(state_dir) == {"kind": "attempt", "project_id": PROJECT,
+                                  "dispatch_id": dispatch_ids[2], "attempt": ATTEMPT,
+                                  "offset": 2}
+
+
+def test_an_unbounded_run_after_a_failing_intent_takes_everything_and_clears_the_cursor(
+        state_dir, lifecycle_on, monkeypatch):
+    bad_id, good_id, dead_id, live_id = (
+        "d-k6b-r4-u-bad", "d-k6b-r4-u-good", "d-k6b-r4-u-dead", "d-k6b-r4-u-live")
+    _open_intent(state_dir, bad_id)
+    _open_intent(state_dir, good_id)
+    _attempt(state_dir, dead_id, live=False)
+    _attempt(state_dir, live_id, live=True)
+    _recover_raises_for(monkeypatch, bad_id)
+    _write_heartbeat(state_dir, {"kind": "attempt", "project_id": PROJECT,
+                                 "dispatch_id": live_id, "attempt": ATTEMPT, "offset": 3})
+    now = _now_after(START_DT, DEADLINE + GRACE + 60)
+
+    result = lifecycle.sweep(state_dir=state_dir, now=now)
+
+    assert (result.recovered, result.abandoned, result.live) == (1, 1, 1), result
+    assert result.budget_exhausted is False
+    assert _cursor(state_dir) is None
+    assert len(_finished(state_dir, good_id)) == 1
+    assert len(_finished(state_dir, dead_id)) == 1
+    assert _finished(state_dir, bad_id) == []
+    assert any("recover d-k6b-r4-u-bad" in error for error in result.errors), result.errors
 
 
 # ---------------------------------------------------------------------------
