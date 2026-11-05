@@ -13,18 +13,18 @@ watching stderr, and that stderr is exactly what
 
 This module is the Bash caller's own health writer, not a change to the
 converter: ``receipt_processor.sh`` now captures the converter's stderr (see
-``_run_receipt_converter_scan``), and pipes the raw text here on stdin. Every
-line matching the converter's own fail-closed log format —
+``_run_receipt_converter_scan``), and pipes the raw text here on stdin. Both of the
+converter's refusal log shapes —
 
     "REJECTED (fail-closed) dispatch=<id> file=<name> reason=<msg>"
+    "REFUSED (ledger lifecycle) dispatch=<id> file=<name> reason=<code>: <detail>"
 
-(``report_to_receipt_converter.py``'s ``_convert_one_detailed``, logged via
-``logger.warning`` on every ``AppendReceiptError`` whose code is in
-``MODEL_REFUSAL_CODES``: ``missing_model`` and ``invalid_model_shape``) — is
-parsed into a ``{dispatch_id, file, reason}`` record and written as this
-scan's beacon detail. Any other line (INFO chatter, the per-scan summary
+(``_convert_one_detailed``: REJECTED for ``MODEL_REFUSAL_CODES`` and for
+dead-lettered lifecycle refusals, REFUSED for the young or transient ones) —
+is parsed into one ``{dispatch_id, file, reason, kind}`` record and written as
+this scan's beacon detail. Any other line (INFO chatter, the per-scan summary
 line, a different WARNING) is ignored: it is not this beacon's job to
-duplicate the processing log, only to make the REJECTED reason traceable.
+duplicate the processing log, only to make the refusal reason traceable.
 
 ``details.rejections`` is a snapshot, matching
 ``report_to_receipt_converter._write_scan_heartbeat``'s own convention: it
@@ -84,30 +84,43 @@ REJECTION_ALARM_WINDOW_SECONDS = 24 * 3600
 
 _REJECTED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Mirrors report_to_receipt_converter.py's own log line exactly:
-#   "report_to_receipt_converter: REJECTED (fail-closed) dispatch=%s file=%s reason=%s"
+# Mirrors report_to_receipt_converter.py's own log lines exactly:
+#   "REJECTED (fail-closed) dispatch=%s file=%s reason=%s"
+#   "REFUSED (ledger lifecycle) dispatch=%s file=%s reason=%s: %s"  (OI-2541)
 _REJECTED_PATTERN = re.compile(
     r"REJECTED \(fail-closed\) dispatch=(\S+) file=(\S+) reason=(.*)$"
 )
+_LIFECYCLE_REFUSED_PATTERN = re.compile(
+    r"REFUSED \(ledger lifecycle\) dispatch=(\S+) file=(\S+) reason=(.*)$"
+)
+# ``kind`` tells a dead-lettered verdict from one still retried every scan.
+_PATTERNS_BY_KIND = (("fail_closed", _REJECTED_PATTERN), ("lifecycle_refusal", _LIFECYCLE_REFUSED_PATTERN))
+
+# A dead-lettered lifecycle refusal shares the REJECTED line; its reason prefix marks it.
+_LIFECYCLE_REASON_PREFIX = "ledger lifecycle "
 
 
 def parse_rejections(raw_stderr: str) -> List[Dict[str, str]]:
-    """Extract ``{dispatch_id, file, reason}`` records from raw stderr text.
+    """Extract ``{dispatch_id, file, reason, kind}`` records from raw stderr text.
 
-    Never raises on malformed input — a line that doesn't match the pattern
+    Never raises on malformed input — a line that doesn't match a pattern
     is simply not a rejection line and is skipped, not an error.
     """
     rejections: List[Dict[str, str]] = []
     for line in raw_stderr.splitlines():
-        match = _REJECTED_PATTERN.search(line)
-        if not match:
-            continue
-        dispatch_id, file_name, reason = match.groups()
-        rejections.append({
-            "dispatch_id": dispatch_id,
-            "file": file_name,
-            "reason": reason.strip(),
-        })
+        for kind, pattern in _PATTERNS_BY_KIND:
+            match = pattern.search(line)
+            if match:
+                dispatch_id, file_name, reason = match.groups()
+                if kind == "fail_closed" and reason.strip().startswith(_LIFECYCLE_REASON_PREFIX):
+                    kind = "lifecycle_refusal"
+                rejections.append({
+                    "dispatch_id": dispatch_id,
+                    "file": file_name,
+                    "reason": reason.strip(),
+                    "kind": kind,
+                })
+                break
     return rejections
 
 
@@ -133,12 +146,22 @@ def load_rejected_history(state_dir: Path, component: str) -> List[Dict[str, Any
     return [entry for entry in prior if isinstance(entry, dict)] if isinstance(prior, list) else []
 
 
-def _rejected_at_epoch(entry: Dict[str, Any]) -> Optional[float]:
+def _rejected_at_epoch(value: Any) -> Optional[float]:
+    """Epoch of one beacon stamp; missing or malformed is no age at all."""
     try:
-        parsed = datetime.strptime(entry.get("rejected_at"), _REJECTED_AT_FORMAT)
+        parsed = datetime.strptime(value, _REJECTED_AT_FORMAT)
     except (TypeError, ValueError):
         return None
     return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+
+def first_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
+                         reason: str) -> Optional[float]:
+    """Epoch of the EARLIEST sighting of this exact refusal in *history*; None is no age."""
+    stamps = [_rejected_at_epoch(entry.get("first_rejected_at") or entry.get("rejected_at"))
+              for entry in history if (entry.get("dispatch_id"), entry.get("file"),
+                                       entry.get("reason")) == (dispatch_id, file_name, reason)]
+    return min((stamp for stamp in stamps if stamp is not None), default=None)
 
 
 def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -151,7 +174,7 @@ def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]
     cutoff = time.time() - REJECTION_ALARM_WINDOW_SECONDS
     recent: List[Dict[str, Any]] = []
     for entry in history:
-        epoch = _rejected_at_epoch(entry)
+        epoch = _rejected_at_epoch(entry.get("rejected_at"))
         if epoch is not None and epoch > cutoff:
             recent.append(entry)
     return recent

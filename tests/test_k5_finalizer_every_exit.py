@@ -27,6 +27,7 @@ below finds an empty ledger.
 from __future__ import annotations
 
 import contextlib
+import gzip
 import hashlib
 import json
 import logging
@@ -47,6 +48,8 @@ import dispatch_cli  # noqa: E402
 import dispatch_lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import dispatch_worktree_isolation as isolation  # noqa: E402
+import envelope_govern_support  # noqa: E402
+import event_store  # noqa: E402
 import project_id_migration  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
 from dispatch_internal import issue_permit  # noqa: E402
@@ -774,3 +777,147 @@ def test_the_governed_table_keys_the_envelope_receipt_missing_status():
 
     key = dispatch_envelope.RECEIPT_MISSING_STATUS
     assert dispatch_exit.GOVERNED_END_STATES[key] == ("failed", key)
+
+
+# ---------------------------------------------------------------------------
+# 8. round 3 — the teardown event reaches the archive again
+#
+# The exit order stays _govern -> end line -> teardown: the teardown releases
+# the occupancy flock, so it must carry the governed outcome. That puts the
+# ``provider_teardown_worktree`` event AFTER the archive step. The lane's one
+# late pass (``_LaneExit.close()``, after the teardown) appends it to the
+# dispatch's archive: on a per-run terminal by moving the run's own stream into
+# the archive it already has, on a terminal-pinned stream by appending only
+# this dispatch's lines — never the replacing copy the archive step uses, which
+# would drop everything already filed.
+# ---------------------------------------------------------------------------
+
+PER_RUN_TERMINAL = "ephemeral"
+PINNED_TERMINAL = "T1"
+
+
+@pytest.fixture
+def store_data_dir(tmp_path, monkeypatch) -> Path:
+    """A tmp VNX_DATA_DIR: the store helpers resolve from it, never the real ledger."""
+    data_dir = tmp_path / "store-data"
+    monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    return data_dir
+
+
+def _append_event(terminal: str, dispatch_id: str, etype: str, **data) -> None:
+    event_store.EventStore().append(
+        terminal, {"type": etype, "dispatch_id": dispatch_id, "data": data})
+
+
+def _archived(terminal: str, dispatch_id: str) -> "list[dict]":
+    archive = event_store.resolve_archive_file(
+        Path(os.environ["VNX_DATA_DIR"]) / "events" / "archive" / terminal, dispatch_id)
+    if archive is None:
+        return []
+    with event_store.open_archive_text(archive) as handle:
+        return [json.loads(line) for line in handle if line.strip()]
+
+
+def _govern_archives(terminal: str, dispatch_id: str) -> None:
+    """_govern's archive step, then its clear: the run's stream is filed."""
+    events_path, clear_ok = envelope_govern_support._archive_dispatch_events(terminal, dispatch_id)
+    envelope_govern_support._clear_dispatch_events(terminal, dispatch_id)
+    assert events_path is not None and clear_ok is True
+
+
+def test_a_per_run_archive_ends_with_the_teardown_events(store_data_dir):
+    """The per-run stream is moved into its archive, teardown events last, no live file left."""
+    dispatch_id = "20261104-k5-r3-per-run"
+    _append_event(PER_RUN_TERMINAL, dispatch_id, "init")
+    _append_event(PER_RUN_TERMINAL, dispatch_id, "result")
+    _govern_archives(PER_RUN_TERMINAL, dispatch_id)
+
+    # remove_dispatch_worktree runs AFTER _govern and writes its events then.
+    _append_event(PER_RUN_TERMINAL, dispatch_id, "provider_teardown_worktree",
+                  worktree_state="pushed")
+    _append_event(PER_RUN_TERMINAL, dispatch_id, "provider_teardown_preserved",
+                  worktree_state="preserved")
+    envelope_govern_support._archive_late_dispatch_events(PER_RUN_TERMINAL, dispatch_id)
+
+    assert [event["type"] for event in _archived(PER_RUN_TERMINAL, dispatch_id)] == [
+        "init", "result", "provider_teardown_worktree", "provider_teardown_preserved"]
+    assert not (store_data_dir / "events" / PER_RUN_TERMINAL / f"{dispatch_id}.ndjson").exists()
+
+
+@pytest.mark.parametrize("gz", [False, True])
+def test_a_pinned_archive_keeps_its_events_and_gains_the_teardown(store_data_dir, gz):
+    """Never a replacing copy: what _govern filed stays, the teardown event goes last."""
+    dispatch_id = f"20261104-k5-r3-pinned-{'gz' if gz else 'plain'}"
+    _append_event(PINNED_TERMINAL, dispatch_id, "init")
+    _append_event(PINNED_TERMINAL, dispatch_id, "result")
+    _govern_archives(PINNED_TERMINAL, dispatch_id)
+    archive_dir = store_data_dir / "events" / "archive" / PINNED_TERMINAL
+    if gz:
+        plain = archive_dir / f"{dispatch_id}.ndjson"
+        gz_path = archive_dir / f"{dispatch_id}.ndjson.gz"
+        with gzip.open(gz_path, "wb") as handle:
+            handle.write(plain.read_bytes())
+        plain.unlink()
+    filed = _archived(PINNED_TERMINAL, dispatch_id)
+    assert [event["type"] for event in filed] == ["init", "result"]
+
+    _append_event(PINNED_TERMINAL, dispatch_id, "provider_teardown_worktree",
+                  worktree_state="pushed")
+    envelope_govern_support._archive_late_dispatch_events(PINNED_TERMINAL, dispatch_id)
+
+    events = _archived(PINNED_TERMINAL, dispatch_id)
+    assert events[: len(filed)] == filed, "the late pass replaced what _govern archived"
+    assert [event["type"] for event in events] == ["init", "result", "provider_teardown_worktree"]
+    live = store_data_dir / "events" / f"{PINNED_TERMINAL}.ndjson"
+    assert live.exists() and live.stat().st_size == 0
+
+
+def test_a_pinned_stream_holding_another_dispatch_is_never_touched(store_data_dir):
+    """A shared ring buffer that moved on: no truncate, no archive created for the other run."""
+    dispatch_id, other = "20261104-k5-r3-pinned-own", "20261104-k5-r3-pinned-other"
+    _append_event(PINNED_TERMINAL, dispatch_id, "init")
+    _govern_archives(PINNED_TERMINAL, dispatch_id)
+    filed = _archived(PINNED_TERMINAL, dispatch_id)
+
+    _append_event(PINNED_TERMINAL, other, "init")
+    live = store_data_dir / "events" / f"{PINNED_TERMINAL}.ndjson"
+    before = live.read_bytes()
+
+    envelope_govern_support._archive_late_dispatch_events(PINNED_TERMINAL, dispatch_id)
+
+    assert live.read_bytes() == before, "the late pass truncated another dispatch's stream"
+    assert _archived(PINNED_TERMINAL, dispatch_id) == filed
+    assert event_store.resolve_archive_file(
+        store_data_dir / "events" / "archive" / PINNED_TERMINAL, other) is None
+
+
+@pytest.mark.parametrize("lane", LANES)
+def test_a_raising_late_archive_leaves_the_governed_outcome_alone(lane, tmp_path, monkeypatch):
+    """Best effort: the exit line is the governed one and the worktree still goes."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
+    dispatch_id = f"20261104-k5-r3-late-archive-raises-{lane}"
+    _data_dir, state_dir = _state_dirs(tmp_path)
+    handover = _v3_handover(dispatch_id)
+    receipt = state_dir / "t0_receipts.ndjson"
+
+    def _govern_with_receipt(spec, _result, _start, _end, **_kwargs):
+        with receipt.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event_type": "dispatch_completed",
+                                     "dispatch_id": spec.dispatch_id,
+                                     "project_id": PROJECT}) + "\n")
+        return None, receipt
+
+    def _archive_raises(_self, _terminal, _dispatch_id):
+        raise RuntimeError("the late archive blew up")
+
+    with _teardown_spy() as torn_down, \
+         patch.object(event_store.EventStore, "archive_late_events", _archive_raises):
+        rc = _run_lane(lane, tmp_path, state_dir, dispatch_id, handover,
+                       govern=_govern_with_receipt)
+
+    assert rc == 0, f"{lane}: a best-effort late archive must not fail the dispatch"
+    lines = _finished(state_dir, dispatch_id)
+    assert len(lines) == 1, f"{lane}: expected one dispatch_finished, got {lines}"
+    assert (lines[0]["end_state"], lines[0].get("reason")) == ("completed", None), lines[0]
+    assert torn_down == [dispatch_id], f"{lane}: the worktree must still be removed"

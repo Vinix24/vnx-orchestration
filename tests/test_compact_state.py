@@ -558,3 +558,96 @@ class TestTwoPhaseWrite:
         rc2 = cs.compact_receipts(state)
         assert rc2 == 0
         assert archive_file.exists(), "archive created on successful retry"
+
+
+# ---------------------------------------------------------------------------
+# K-6 follow-up (OI-2537): an unfinished v3 start never leaves the live file
+# ---------------------------------------------------------------------------
+
+def _v3_start(seq: int, *, dispatch_id: str = "d-live", attempt: int = 1) -> str:
+    return json.dumps({
+        "seq": seq, "timestamp": seq, "event_type": "dispatch_started",
+        "project_id": "vnx-dev", "dispatch_id": dispatch_id, "attempt": attempt,
+        "lifecycle_mode": "v3",
+    }) + "\n"
+
+
+def _finished(seq: int, *, dispatch_id: str = "d-live", attempt: int = 1) -> str:
+    return json.dumps({
+        "seq": seq, "timestamp": seq, "event_type": "dispatch_finished",
+        "project_id": "vnx-dev", "dispatch_id": dispatch_id, "attempt": attempt,
+        "end_state": "completed",
+    }) + "\n"
+
+
+def _legacy_start(seq: int) -> str:
+    return json.dumps({
+        "seq": seq, "timestamp": seq, "event_type": "dispatch_started",
+        "project_id": "vnx-dev", "dispatch_id": "d-legacy", "attempt": 1,
+        "lifecycle_mode": "legacy",
+    }) + "\n"
+
+
+def _filler(count: int, start: int = 100) -> list[str]:
+    return [json.dumps({"seq": i, "timestamp": i}) + "\n" for i in range(start, start + count)]
+
+
+class TestReceiptsKeepsUnfinishedV3Starts:
+    def test_a_finished_v3_start_in_the_overflow_is_archived(self, tmp_path: Path) -> None:
+        state = _setup_state(tmp_path)
+        live = state / "t0_receipts.ndjson"
+        live.write_text(_v3_start(0) + _finished(1) + "".join(_filler(12_000, 2)), encoding="utf-8")
+
+        assert cs.compact_receipts(state) == 0
+
+        archived = _read_archive(next((state / "archive").glob("t0_receipts_*.ndjson.gz")))
+        assert [json.loads(raw)["seq"] for raw in archived][:2] == [0, 1]
+        live_lines = [json.loads(raw) for raw in live.read_text().splitlines() if raw.strip()]
+        assert len(live_lines) == cs.RECEIPTS_MAX_RECORDS
+        assert live_lines[0]["seq"] == 2_002
+
+    def test_a_legacy_start_in_the_overflow_is_archived(self, tmp_path: Path) -> None:
+        state = _setup_state(tmp_path)
+        live = state / "t0_receipts.ndjson"
+        live.write_text(_legacy_start(0) + "".join(_filler(12_000, 1)), encoding="utf-8")
+
+        assert cs.compact_receipts(state) == 0
+
+        archived = _read_archive(next((state / "archive").glob("t0_receipts_*.ndjson.gz")))
+        assert [json.loads(raw)["seq"] for raw in archived] == [0] + list(range(1, 2_001))
+        live_lines = [json.loads(raw) for raw in live.read_text().splitlines() if raw.strip()]
+        assert len(live_lines) == cs.RECEIPTS_MAX_RECORDS
+        assert all(line.get("event_type") != "dispatch_started" for line in live_lines)
+
+    def test_dry_run_reports_the_same_numbers_as_the_real_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        state = _setup_state(tmp_path)
+        live = state / "t0_receipts.ndjson"
+        # Two unfinished v3 starts in the overflow: both stay live.
+        live.write_text(_v3_start(0, dispatch_id="d-a") + _v3_start(1, dispatch_id="d-b")
+                        + "".join(_filler(12_000, 2)), encoding="utf-8")
+
+        assert cs.compact_receipts(state, dry_run=True) == 0
+        dry = _receipts_rotating_report(capsys)
+        assert dry["kept_unfinished_v3_starts"] == 2
+        assert dry["keep_lines"] == cs.RECEIPTS_MAX_RECORDS + 2
+        assert dry["archive_lines"] == 2_000
+
+        assert cs.compact_receipts(state) == 0
+        real = _receipts_rotating_report(capsys)
+        assert real["kept_unfinished_v3_starts"] == dry["kept_unfinished_v3_starts"]
+        assert real["archive_lines"] == dry["archive_lines"]
+        assert real["keep_lines"] == dry["keep_lines"]
+
+        live_lines = [json.loads(raw) for raw in live.read_text().splitlines() if raw.strip()]
+        assert [line["dispatch_id"] for line in live_lines[:2]] == ["d-a", "d-b"]
+        assert len(live_lines) == cs.RECEIPTS_MAX_RECORDS + 2
+
+
+def _receipts_rotating_report(capsys: pytest.CaptureFixture[str]) -> dict:
+    """The one ``receipts_rotating`` event a compaction emits on stderr."""
+    events = [json.loads(raw) for raw in capsys.readouterr().err.splitlines() if raw.strip()]
+    reports = [event for event in events if event.get("code") == "receipts_rotating"]
+    assert len(reports) == 1, events
+    return reports[0]

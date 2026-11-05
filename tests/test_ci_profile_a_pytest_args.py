@@ -4,9 +4,10 @@ The script holds the one pytest selection of CI Profile A, moved out of
 .github/workflows/vnx-ci.yml so Profile A and the xdist shadow job cannot
 drift. Three things are pinned here:
 
-* golden: with VNX_CI_XDIST unset or 0 it emits exactly the argument vector
-  the inline workflow block emitted, on the real tree and on an exclusion list
-  with every comment shape the parser has to survive;
+* golden: with VNX_CI_XDIST=0 it emits exactly the argument vector the inline
+  workflow block emitted, on the real tree and on an exclusion list with every
+  comment shape the parser has to survive; D4 made the unset/1 two-phase xdist
+  shape the default, and `VNX_CI_XDIST=0` the one-line way back to serial;
 * the two-phase shape: a file entry of serial_tests.txt moves to the serial
   phase and leaves the parallel phase as --ignore, a nodeid entry as
   --deselect, and the two phases partition the full selection;
@@ -184,7 +185,7 @@ def _collected(root: Path, vector: list, tmp_path: Path, name: str) -> list:
 
 
 def test_full_vector_matches_the_inline_block_on_the_real_tree(tmp_path):
-    proc = _run_script(SCRIPT, tmp_path / "out")
+    proc = _run_script(SCRIPT, tmp_path / "out", "0")
     assert proc.returncode == 0, proc.stderr
     vector = _read_vector(tmp_path / "out" / "full.args")
     assert vector == _run_inline(REPO_ROOT)
@@ -195,7 +196,7 @@ def test_full_vector_matches_the_inline_block_on_the_real_tree(tmp_path):
 
 def test_full_vector_matches_the_inline_block_on_every_comment_shape(tmp_path):
     root = _make_root(tmp_path, TRICKY_EXCLUSIONS)
-    proc = _run_script(root / "scripts" / "ci" / SCRIPT.name, tmp_path / "out")
+    proc = _run_script(root / "scripts" / "ci" / SCRIPT.name, tmp_path / "out", "0")
     assert proc.returncode == 0, proc.stderr
     vector = _read_vector(tmp_path / "out" / "full.args")
     assert vector == _run_inline(root)
@@ -204,7 +205,7 @@ def test_full_vector_matches_the_inline_block_on_every_comment_shape(tmp_path):
     ]
 
 
-@pytest.mark.parametrize("xdist", [None, "", "0"])
+@pytest.mark.parametrize("xdist", ["0"])
 def test_serial_mode_writes_only_the_full_vector(tmp_path, xdist):
     stale = tmp_path / "out"
     stale.mkdir()
@@ -214,7 +215,7 @@ def test_serial_mode_writes_only_the_full_vector(tmp_path, xdist):
     assert sorted(p.name for p in stale.iterdir()) == ["full.args", "run.json"]
 
 
-@pytest.mark.parametrize("xdist", [None, "1"], ids=["serial-mode", "xdist-mode"])
+@pytest.mark.parametrize("xdist", ["0", "1"], ids=["serial-mode", "xdist-mode"])
 def test_the_emission_carries_the_run_stamp_of_its_run(tmp_path, xdist):
     proc = _run_script(SCRIPT, tmp_path / "out", xdist, run={"GITHUB_RUN_ID": "38939122085", "GITHUB_RUN_ATTEMPT": "2"})
     assert proc.returncode == 0, proc.stderr
@@ -275,7 +276,7 @@ def test_empty_serial_list_emits_no_serial_phase(tmp_path):
 
 def _run_full(tmp_path: Path) -> Path:
     out = tmp_path / "full-out"
-    proc = _run_script(SCRIPT, out)
+    proc = _run_script(SCRIPT, out, "0")
     assert proc.returncode == 0, proc.stderr
     return out / "full.args"
 
@@ -303,7 +304,7 @@ def test_the_two_phases_partition_the_full_selection(tmp_path):
     root = _suite_root(tmp_path, serial)
     script = root / "scripts" / "ci" / SCRIPT.name
     assert _run_script(script, tmp_path / "x", "1").returncode == 0
-    assert _run_script(script, tmp_path / "f").returncode == 0
+    assert _run_script(script, tmp_path / "f", "0").returncode == 0
     full = _collected(root, _read_vector(tmp_path / "f" / "full.args"), tmp_path, "full")
     ser = _collected(root, _read_vector(tmp_path / "x" / "serial.args"), tmp_path, "serial")
     par = _collected(root, _read_vector(tmp_path / "x" / "parallel.args"), tmp_path, "parallel")
@@ -381,6 +382,6 @@ def test_a_broken_entry_file_is_refused_with_the_collection_log(tmp_path):
 
 def test_serial_mode_ignores_the_serial_list(tmp_path):
     root = _suite_root(tmp_path, "tests/test_missing.py\n")
-    proc = _run_script(root / "scripts" / "ci" / SCRIPT.name, tmp_path / "out")
+    proc = _run_script(root / "scripts" / "ci" / SCRIPT.name, tmp_path / "out", "0")
     assert proc.returncode == 0, proc.stderr
     assert (tmp_path / "out" / "full.args").is_file()

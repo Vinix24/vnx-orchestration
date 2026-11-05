@@ -967,7 +967,7 @@ class ReportParser:
         ``report_ingested`` (linked to the ``dispatch_finished`` when it is
         already there); a legacy dispatch keeps the task-shaped receipt byte for
         byte. The decision lives in ``report_lifecycle_mode``, is handed the store
-        ``append_receipt.py`` writes to and the write time of the file READ here,
+        the receipt appender writes to and the write time of the file READ here,
         and gets on a copy only what the REPORT itself names — its tenant and its
         attempt (a legacy receipt stays untouched). The tenant is resolved once,
         by K-8a. A refusal returns the ``error`` shape and books nothing;

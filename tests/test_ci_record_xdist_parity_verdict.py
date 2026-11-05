@@ -1,11 +1,12 @@
 """Tests for scripts/ci/record_xdist_parity_verdict.py (track ci-profile-a-xdist, D2b): the record step's decision.
 
-The record step runs after the comparison in the job "xdist parity". It adds
+The record step runs after the comparison in the parity job of the nightly
+`vnx-ci-serial-truth.yml` (it moved there in D4, when the per-PR shadow and
+parity jobs were removed from `vnx-ci.yml`). It adds
 the comparison step's own outcome to the verdict that step wrote (OI-2145),
 or writes an exit-2 verdict with every field of a normal one when it wrote
 none (OI-2147). The workflow-level counterpart, which runs the step itself and
-holds its bash fallback equal to this script, is
-tests/test_ci_xdist_parity_workflow.py.
+holds its bash fallback equal to this script, is the nightly parity job below.
 
 The second half pins the verdict fixtures in tests/fixtures/xdist_parity_verdicts/
 to what the pipeline writes today, so the history tests read the real schema:
@@ -27,7 +28,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "record_xdist_parity_verdict.py"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "xdist_parity_verdicts"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci.yml"
+WORKFLOW = REPO_ROOT / ".github" / "workflows" / "vnx-ci-serial-truth.yml"
 
 
 def _load(name: str, path: Path):
@@ -199,8 +200,11 @@ def test_every_fixture_carries_one_field_set():
 
 
 def _workflow_step(step_id: str) -> str:
+    # The nightly job names the comparison step "compare"; the record step's
+    # env keeps the recorded step name "parity" (cxp.RECORDED_STEPS).
+    job_id = "compare" if step_id == "parity" else step_id
     jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
-    [step] = [s for s in jobs["xdist-parity"]["steps"] if s.get("id") == step_id]
+    [step] = [s for s in jobs["parity"]["steps"] if s.get("id") == job_id]
     return step["run"]
 
 
@@ -210,20 +214,22 @@ def _run_step(step_id: str, env: dict) -> None:
     assert proc.returncode == 0, proc.stderr
 
 
-def _step_env(tmp_path: Path, profile: str, outcomes: dict) -> dict:
+def _step_env(tmp_path: Path, profile: str, outcomes: dict, *, workspace: Path = REPO_ROOT,
+              upstream: dict | None = None) -> dict:
     """The steps' inputs; the summary goes to *tmp_path*, never to the summary of the CI job running this test."""
-    return {"GITHUB_WORKSPACE": str(REPO_ROOT), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+    upstream = upstream or {"profile_a": "success", "shadow": "success"}
+    return {"GITHUB_WORKSPACE": str(workspace), "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
             "PARITY_WORK": str(tmp_path / "work"), "PARITY_PROFILE": profile,
             **{f"PARITY_{k.upper()}": v for k, v in META.items()},
             **{f"OUTCOME_{k.upper()}": v for k, v in outcomes.items()},
-            "RESULT_PROFILE_A": "success", "RESULT_SHADOW": "success"}
+            "RESULT_PROFILE_A": upstream.get("profile_a", ""), "RESULT_SHADOW": upstream.get("shadow", "")}
 
 
 def _uploaded(tmp_path: Path) -> dict:
     return json.loads((tmp_path / "work" / "verdict" / cxp.VERDICT_FILE).read_text(encoding="utf-8"))
 
 
-def test_the_light_fixture_is_what_the_parity_and_record_steps_write_on_a_light_run(tmp_path):
+def test_the_light_fixture_is_what_the_parity_steps_write_on_a_light_run(tmp_path):
     outcomes = {**ALL_SUCCESS, "selection": "skipped", "download_reference": "skipped", "download_candidate": "skipped"}
     env = _step_env(tmp_path, "light", outcomes)
     _run_step("parity", env)
@@ -234,3 +240,106 @@ def test_the_light_fixture_is_what_the_parity_and_record_steps_write_on_a_light_
 def test_the_emergency_fixture_is_what_the_record_step_writes_after_a_crashed_comparison(tmp_path):
     _run_step("record", _step_env(tmp_path, "heavy", {**ALL_SUCCESS, "parity": "failure"}))
     assert _uploaded(tmp_path) == fixture("emergency")
+
+
+# --- the bash fallback of the record step, held equal to the script (OI-2543 point 1) --------------------------
+
+FALLBACK_CASES = [
+    ({**ALL_SUCCESS, "parity": "skipped"}, {"profile_a": "success", "shadow": "success"}),
+    ({"checkout": "failure", "prelude": "skipped", "selection": "success", "download_reference": "success",
+      "download_candidate": "success", "parity": "failure"}, {"profile_a": "failure", "shadow": ""}),
+]
+
+
+@pytest.mark.parametrize(("outcomes", "upstream"), FALLBACK_CASES,
+                         ids=["parity-skipped", "checkout-and-reference-failed"])
+def test_the_no_checkout_fallback_writes_the_scripts_verdict_and_summary(tmp_path, outcomes, upstream):
+    """The record step's own comment promises this test: without the script, its bash writes the same verdict.
+
+    It runs the step's bash against a workspace that holds no
+    ``scripts/ci/record_xdist_parity_verdict.py``, then runs the script for
+    the same inputs, and compares the verdict (every key and value) and the
+    step summary text. D4 deleted the file that held this and the two had
+    already drifted in their summary line (OI-2543).
+    """
+    workspace = tmp_path / "no-checkout"
+    workspace.mkdir()
+    bash_work = tmp_path / "bash"
+    _run_step("record", _step_env(bash_work, "heavy", outcomes, workspace=workspace, upstream=upstream))
+    bash_verdict = _uploaded(bash_work)
+    bash_summary = (bash_work / "summary.md").read_text(encoding="utf-8")
+
+    script_work = tmp_path / "script"
+    script_work.mkdir()
+    verdict_path, summary_path = script_work / "verdict.json", script_work / "summary.md"
+    assert rec.main(_cli_args(verdict_path, summary_path, steps=outcomes, upstream=upstream)) == 0
+    assert json.loads(verdict_path.read_text(encoding="utf-8")) == bash_verdict
+    assert summary_path.read_text(encoding="utf-8") == bash_summary
+
+
+# --- the report step's clean decision (OI-2521) ----------------------------------------------------------------
+
+
+def test_the_report_decision_is_not_clean_for_a_compare_step_that_failed_after_exit_0():
+    """Acceptance of OI-2521: the real record function on an exit-0 verdict, then the report decision on its output."""
+    recorded = rec.record_compare_outcome(fixture("written-heavy-parity"), "failure")
+    assert recorded["exit"] == 0, "the written verdict still says exit 0"
+    assert recorded["step_failures"] == ["parity.parity=failure"]
+    assert rec.report_decision(recorded) is False
+
+
+def test_the_report_decision_is_clean_for_exit_0_and_no_step_failure():
+    recorded = rec.record_compare_outcome(fixture("written-heavy-parity"), "success")
+    assert recorded["step_failures"] == []
+    assert rec.report_decision(recorded) is True
+
+
+@pytest.mark.parametrize("verdict", [
+    None,
+    {},
+    {"step_failures": []},                       # exit missing
+    {"exit": None, "step_failures": []},         # exit null
+    {"exit": "0", "step_failures": []},          # exit malformed (a string)
+    {"exit": 0.0, "step_failures": []},          # exit malformed (a float)
+    {"exit": False, "step_failures": []},        # False == 0 in Python, but it is no exit code
+    {"exit": 1, "step_failures": []},            # a difference
+    {"exit": 2, "step_failures": []},            # invalid evidence
+    {"exit": 0},                                 # step_failures missing
+    {"exit": 0, "step_failures": None},          # step_failures null
+    {"exit": 0, "step_failures": "parity.parity=failure"},  # step_failures malformed
+    {"exit": 0, "step_failures": ["parity.parity=unknown"]},  # an unknown recorded failure
+], ids=["no-verdict", "empty", "exit-missing", "exit-null", "exit-string", "exit-float", "exit-false",
+        "exit-1", "exit-2", "failures-missing", "failures-null", "failures-string", "failures-unknown"])
+def test_the_report_decision_stays_blocking_without_positive_evidence(verdict):
+    assert rec.report_decision(verdict) is False
+
+
+def test_the_cli_report_check_exits_1_for_a_failed_step_and_0_for_a_clean_verdict(tmp_path):
+    path = tmp_path / "verdict.json"
+    path.write_text(json.dumps(rec.record_compare_outcome(fixture("written-heavy-parity"), "failure")),
+                    encoding="utf-8")
+    assert rec.main(["--verdict", str(path), "--report-clean"]) == 1
+    path.write_text(json.dumps(fixture("heavy-parity")), encoding="utf-8")
+    assert rec.main(["--verdict", str(path), "--report-clean"]) == 0
+
+
+def test_the_cli_report_check_is_blocking_when_the_verdict_is_absent(tmp_path):
+    assert rec.main(["--verdict", str(tmp_path / "no-such-verdict.json"), "--report-clean"]) == 1
+
+
+def test_the_report_step_takes_its_clean_decision_from_the_script():
+    run = _workflow_step("report")
+    assert "record_xdist_parity_verdict.py" in run and "--report-clean" in run
+    assert '.get("exit")' not in run, "the step decides on exit alone again"
+
+
+def test_the_report_step_prints_parity_holds_for_a_clean_recorded_verdict(tmp_path):
+    (tmp_path / "work" / "verdict").mkdir(parents=True)
+    (tmp_path / "work" / "verdict" / cxp.VERDICT_FILE).write_text(
+        json.dumps(rec.record_compare_outcome(fixture("written-heavy-parity"), "success")), encoding="utf-8")
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("OUTCOME_", "PARITY_", "RESULT_"))}
+    env = {**base, "GITHUB_WORKSPACE": str(REPO_ROOT), "PARITY_WORK": str(tmp_path / "work"),
+           "GH_TOKEN": "", "GITHUB_REPOSITORY": ""}
+    proc = subprocess.run(["bash", "-c", _workflow_step("report")], env=env, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "parity holds" in proc.stdout
