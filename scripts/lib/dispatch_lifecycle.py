@@ -617,7 +617,8 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     An attempt ends only on its own lifecycle end: a ``dispatch_finished`` whose
     ``project_id``, ``dispatch_id`` and ``attempt`` are exactly its key. A legacy
     ``task_complete`` (also one refusing delivery), another completion type or a
-    line without an ``attempt`` is no end for it (ADR-045 §2).
+    line without an ``attempt`` is no end for it (ADR-045 §2). The ledger is read
+    as a stream; only the end keys and the first start per key are kept (OI-2559).
     """
     ledger = Path(state_dir) / LEDGER_FILENAME
     try:
@@ -627,8 +628,6 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     except OSError as exc:
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read {ledger}: {exc}") from exc
-    # Only the end keys and the first start per key are kept: the ledger is streamed
-    # line by line, never held whole nor as a list of records (OI-2559).
     corrupt_errors: List[str] = []
     unkeyable_errors: List[str] = []
     finished: Set[LifecycleKey] = set()

@@ -167,10 +167,9 @@ def scan_ndjson_stream(handle: BinaryIO
 
     ``handle`` is a binary file handle read in line order. Only the chunk just read
     is ever held: the reader never keeps the blob or the records, so a ledger of any
-    size costs one line's memory. Chunks are numbered exactly as the blob reader
-    numbers them (blank lines count). The final chunk of a file that does not end
-    in a newline is the torn fragment; every earlier chunk was newline-terminated,
-    so a break in one is interior corruption (K-9c rule 2).
+    size costs one line's memory. Chunks are numbered as the blob reader numbers
+    them. The final chunk of a file that does not end in a newline is the torn
+    fragment; any earlier break is interior corruption (K-9c rule 2).
     """
     for number, raw_line in enumerate(handle, start=1):
         terminated = raw_line.endswith(b"\n")
