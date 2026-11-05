@@ -320,6 +320,32 @@ def test_unset_emits_the_xdist_shape_and_vnx_ci_xdist_0_the_serial_one(tmp_path)
     assert full[:2] == ["-q", str(REPO_ROOT / "tests")]
 
 
+_PIN_LINE = re.compile(r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?)\s*==(?P<version>[^\s;#]+)")
+
+
+def _mutate_first_pin(constraints_text: str) -> str:
+    """Change the version of the first ``==`` pin, and nothing else, in the text given.
+
+    The mutation is derived from the text instead of naming a literal version
+    (OI-2543 point 3): when the pin in ``profile_a_constraints.txt`` moves, the
+    mutated text moves with it. A literal ``replace("pytest==9.1.1", ...)``
+    silently becomes a no-op on that day and turns the fingerprint test red for
+    a reason that has nothing to do with the fingerprint.
+    """
+    lines = constraints_text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = _PIN_LINE.match(line)
+        if match is None:
+            continue
+        version = match.group("version")
+        head, _, last = version.rpartition(".")
+        bumped = f"{head}.{int(last) + 1}" if head and last.isdigit() else f"{version}.post1"
+        start, end = match.span("version")
+        lines[index] = f"{line[:start]}{bumped}{line[end:]}"
+        return "".join(lines)
+    raise AssertionError(f"no `==` pin line in the constraints text: {constraints_text!r}")
+
+
 def test_the_xdist_selection_fingerprint_is_stable_for_one_selection_and_moves_with_its_inputs(tmp_path):
     """What the fingerprint means, instead of one literal sha256 of today's vectors (OI-2543 point 3).
 
@@ -342,14 +368,41 @@ def test_the_xdist_selection_fingerprint_is_stable_for_one_selection_and_moves_w
     quarantine = list(parallel)
     [k_index] = [i for i, arg in enumerate(quarantine) if arg == "-k"]
     quarantine[k_index + 1] = quarantine[k_index + 1] + " and not another_quarantined_test"
+    pin_mutation = _mutate_first_pin(constraints)
+    assert pin_mutation != constraints, "the pin mutation must change the constraints text"
     inputs = {
         "an exclusion from test_exclusions.txt": (serial, [*parallel, "--ignore=/tmp/tests/test_repaired.py"],
                                                   constraints),
         "the -k quarantine": (serial, quarantine, constraints),
-        "a constraint pin": (serial, parallel, constraints.replace("pytest==9.1.1", "pytest==9.1.2")),
+        "a constraint pin": (serial, parallel, pin_mutation),
     }
     for name, (case_serial, case_parallel, case_constraints) in inputs.items():
         assert cxp.selection_fingerprint(case_serial, case_parallel, case_constraints, str(REPO_ROOT)) != fingerprint, name
+
+
+@pytest.mark.parametrize("constraints_text", [
+    "pytest==8.0.0\n",
+    "# a comment and a blank line come first\n\npytest==9.2.0\npytest-xdist==3.8.0\n",
+], ids=["one-pin", "after-comment-and-blank"])
+def test_the_pin_mutation_follows_whatever_version_the_text_pins(constraints_text, tmp_path):
+    """A version this test does not name still moves: the mutation reads the text (OI-2543 point 3)."""
+    mutated = _mutate_first_pin(constraints_text)
+    assert mutated != constraints_text, "the mutation left the constraints text unchanged"
+
+    before = constraints_text.splitlines()
+    after = mutated.splitlines()
+    assert len(before) == len(after)
+    changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+    assert len(changed) == 1, f"the mutation changed more than the pinned line: {changed}"
+
+    before_path = tmp_path / "before.txt"
+    before_path.write_text(constraints_text, encoding="utf-8")
+    after_path = tmp_path / "after.txt"
+    after_path.write_text(mutated, encoding="utf-8")
+    before_pins, after_pins = cxp.read_pins(before_path), cxp.read_pins(after_path)
+    assert list(after_pins) == list(before_pins), (before_pins, after_pins)
+    moved = [name for name, version in before_pins.items() if after_pins[name] != version]
+    assert moved == [next(iter(before_pins))], (before_pins, after_pins)
 
 
 # --- the workflows ----------------------------------------------------------------------------
