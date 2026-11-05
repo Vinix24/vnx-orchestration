@@ -73,6 +73,7 @@ from envelope_prepare import (  # noqa: E402
 )
 from envelope_govern_support import (  # noqa: E402
     _archive_dispatch_events,
+    _archive_late_dispatch_events,
     _clear_dispatch_events,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
@@ -587,6 +588,11 @@ class _LaneExit:
         self.spawn_marks: Dict[str, str] = {} if spawn_marks is None else spawn_marks
         self.result: "Optional[_AdapterResult]" = None
         self.status, self.reason, self._closed = None, None, False
+        # OI-2519: the status the END LINE carries. Equal to ``status`` except
+        # when GOVERN rejected the report: the caller-visible EnvelopeResult keeps
+        # the ``_envelope_outcome`` status while the frozen end line (§2/§5) says
+        # what governance decided.
+        self.exit_status: "Optional[str]" = None
         self.returncode, self.error = 1, None
 
     def govern(self, spec, result, start, end, *, phantom_diff=None, integrity=None,
@@ -603,6 +609,17 @@ class _LaneExit:
             raise
         self.status, self.returncode, self.error = _envelope_outcome(
             result.status, receipt_path, result.error)
+        # OI-2519: the end line follows the GOVERNED verdict. When the work
+        # succeeded (and only then) but governance downgraded it — a report body
+        # that fails the contract, a phantom delivery — the attempt is that
+        # governed status, never `completed`; any governed downgrade counts, not
+        # one named value, and `dispatch_exit.GOVERNED_END_STATES` fails an
+        # unknown one closed. A non-success outcome of `_envelope_outcome`
+        # (failure/timeout/receipt_missing) wins unchanged.
+        self.exit_status = self.status
+        _governed = getattr(result, "governed_status", None)
+        if self.status == "success" and _governed and _governed != "success":
+            self.exit_status = _governed
         self.close()
         return EnvelopeResult(
             status=self.status, returncode=self.returncode, report_path=report_path,
@@ -617,12 +634,19 @@ class _LaneExit:
         try:
             finalize_lane_exit(
                 self.handover, state_dir=self.state_dir, result=self.result,
-                status=self.status or "failure", reason=self.reason,
+                status=self.exit_status or self.status or "failure", reason=self.reason,
                 wt_path=self.wt_path, spawned_at=self.spawn_marks.get("spawned_at"))
         finally:
             from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
-            remove_dispatch_worktree(self.dispatch_id, project_root=self.project_root,
-                                     terminal_id=self.terminal_id)
+            try:
+                remove_dispatch_worktree(self.dispatch_id, project_root=self.project_root,
+                                         terminal_id=self.terminal_id)
+            finally:
+                # K-5 r3: the teardown event is written AFTER _govern archived
+                # the stream (the teardown releases the occupancy flock, so it
+                # stays last), so the events it wrote are appended to the
+                # dispatch's archive here, with no live stream left behind.
+                _archive_late_dispatch_events(self.terminal_id, self.dispatch_id)
 
 
 def run_envelope_plan(
@@ -918,8 +942,7 @@ def run_envelope_headless_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
     *,
-    state_dir: Path,
-    data_dir: Path,
+    state_dir: Path, data_dir: Path,
     role: Optional[str] = None, handover: "Optional[Any]" = None, base_sha: Optional[str] = None,
     on_spawn: "Optional[Callable[[int], None]]" = None,
 ) -> EnvelopeResult:

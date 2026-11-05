@@ -373,18 +373,52 @@ def _default_stack() -> Sequence[str]:
     return list(resolve_review_seats().seats)
 
 
+def _recorded_seats(record: Any) -> List[str]:
+    """The seats a report's own ``review_seats`` record names, or ``[]`` when it names none.
+
+    A record under ``SIGNAL_SEAT_RULE`` (PR 4) must be internally consistent
+    before its shorter seat list is trusted: ``seats`` equals ``required_seats``
+    and is a leading run of ``stack``, and a record naming a signal or an
+    ``UNKNOWN`` field requires the whole stack. Anything malformed is ``[]``, so
+    the caller falls back to the full stack (fail-closed).
+    """
+    if not isinstance(record, dict):
+        return []
+    seats = record.get("seats")
+    if not isinstance(seats, list):
+        return []
+    names = [str(seat) for seat in seats if str(seat).strip()]
+    if not names:
+        return []
+    from review_seat_evaluation import SIGNAL_SEAT_RULE
+
+    if record.get("rule") != SIGNAL_SEAT_RULE:
+        return names
+    stack, required = record.get("stack"), record.get("required_seats")
+    signals, unknown = record.get("signals"), record.get("unknown")
+    if not all(isinstance(value, list) for value in (stack, required, signals, unknown)):
+        return []
+    stack_names = [str(seat) for seat in stack]
+    if required != seats or names != stack_names[: len(names)]:
+        return []
+    if (signals or unknown) and names != stack_names:
+        return []
+    return names
+
+
 def requested_stack(report: Dict[str, Any], fallback: Callable[[], Sequence[str]]) -> Callable[[], Sequence[str]]:
     """The default seats for a report: the seats it says it requested, else ``fallback``.
 
     ``request-and-execute`` reports the seat list its round resolved
     (``review_seats.seats``). Verifying against exactly that list is verifying
     the request that ran, even when the config changed between the request
-    and this check.
+    and this check, and whichever rule — ``every_seat_distinct_reviewer``,
+    ``first_seat_or_every_seat_by_risk`` or ``first_seat_or_every_seat_on_signal``
+    — the record names. Never the current key.
     """
-    record = report.get("review_seats")
-    seats = record.get("seats") if isinstance(record, dict) else None
-    if isinstance(seats, list) and any(str(seat).strip() for seat in seats):
-        return lambda: [str(seat) for seat in seats]
+    seats = _recorded_seats(report.get("review_seats"))
+    if seats:
+        return lambda: list(seats)
     return fallback
 
 

@@ -30,7 +30,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from dispatch_lifecycle import LifecycleResult, finalize
+from envelope_types import PHANTOM_REJECTED_STATUS
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, NO_PUSH_PREFIX
+# OI-2519: the one literal GOVERN stamps for a report that fails the body
+# contract — the end-line table below keys on it, never on a second literal.
+from report_body_contract import CONTRACT_INVALID_STATUS
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +66,12 @@ GOVERNED_END_STATES: Dict[str, Tuple[str, Optional[str]]] = {
     _LANE_TIMEOUT: ("timed_out", REASON_TIMEOUT),
     # OI-1287: the work succeeded but GOVERN produced no receipt — never a pass.
     "receipt_missing": ("failed", "receipt_missing"),
+    # OI-2519: the work succeeded but GOVERN rejected the report body — a
+    # governed refusal is never `completed`, and the reason names it.
+    CONTRACT_INVALID_STATUS: ("failed", CONTRACT_INVALID_STATUS),
+    # OI-2519 (K-5b r2): the work claimed success but the phantom guard found no
+    # deliverable — the delivery was rejected, so the attempt is never a pass.
+    PHANTOM_REJECTED_STATUS: ("failed", PHANTOM_REJECTED_STATUS),
 }
 
 def now_utc() -> str:
