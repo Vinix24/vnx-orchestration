@@ -16,8 +16,10 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -1713,25 +1715,305 @@ class TestRejectedDetailHistory:
         dispatch_ids = {e["dispatch_id"] for e in entries}
         assert dispatch_ids == {"20260906-stranded-a", "20260906-stranded-b"}
 
-    def test_rejected_history_capped_oldest_evicted(self, reports_dir, state_dir):
+    def test_rejected_history_capped_oldest_evicted(self, reports_dir, state_dir, monkeypatch):
         """The history never grows without bound across an unattended
-        fleet — once it exceeds the cap, the OLDEST entries are dropped
-        first, not the newest."""
-        from report_to_receipt_converter import _HEALTH_REJECTED_HISTORY_MAX
+        fleet — once the entries NOT sighted in this scan exceed the cap, the
+        OLDEST of them are dropped first, not the newest. The one entry this
+        scan just saw is kept on top of that cap (it is bounded by the reports
+        on disk), because evicting it would reset its first_rejected_at."""
+        import report_to_receipt_converter as rtc
+        from datetime import datetime, timezone
 
-        # One rejection per scan cycle, one cycle more than the cap allows.
-        for i in range(_HEALTH_REJECTED_HISTORY_MAX + 1):
+        max_entries = rtc._HEALTH_REJECTED_HISTORY_MAX
+        # Stamps are second-resolution: step one second per scan so the oldest
+        # entry is unambiguous (a real fleet scans ~30 s apart).
+        tick = {"epoch": time.time()}
+
+        class _SteppingDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(tick["epoch"], tz or timezone.utc)
+
+        monkeypatch.setattr(rtc, "datetime", _SteppingDatetime)
+
+        # One rejection per scan cycle; the last two scans push the non-sighted
+        # pool past the cap. MAX + 2 scans ends with the just-sighted entry plus
+        # MAX retained others, the oldest of which has just been evicted.
+        for i in range(max_entries + 2):
             name = f"20260906-cap-{i:04d}"
             report = reports_dir / f"{name}.md"
             _write_report_without_model(report, name)
             scan_and_convert([reports_dir], state_dir)
             assert not report.exists()  # quarantined by the scan
+            tick["epoch"] += 1
 
         entries = self._rejected_entries(state_dir)
-        assert len(entries) == _HEALTH_REJECTED_HISTORY_MAX
+        assert len(entries) == max_entries + 1
         dispatch_ids = [e["dispatch_id"] for e in entries]
         assert "20260906-cap-0000" not in dispatch_ids  # oldest evicted
-        assert f"20260906-cap-{_HEALTH_REJECTED_HISTORY_MAX:04d}" in dispatch_ids  # newest kept
+        assert f"20260906-cap-{max_entries + 1:04d}" in dispatch_ids  # newest kept
+
+
+class TestLifecycleRefusalClassification:
+    """Every ``ReportPathRefused`` code is permanent (no later ledger read can
+    undo it, so an aged one is dead-lettered) or transient (a later scan
+    resolves it). The two sets partition the codes the module raises, so a new
+    code without a classification fails here instead of silently defaulting to
+    "retried forever"."""
+
+    def _codes_the_module_raises(self) -> set:
+        source = (SCRIPTS_LIB / "report_lifecycle_mode.py").read_text(encoding="utf-8")
+        codes = set()
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name != "ReportPathRefused":
+                continue
+            assert len(node.args) >= 2, ast.dump(node)
+            code = node.args[1]
+            assert isinstance(code, ast.Constant) and isinstance(code.value, str), ast.dump(node)
+            codes.add(code.value)
+        return codes
+
+    def test_the_two_sets_partition_every_code_the_module_raises(self) -> None:
+        from report_to_receipt_converter import (
+            PERMANENT_LIFECYCLE_REFUSALS,
+            TRANSIENT_LIFECYCLE_REFUSALS,
+        )
+
+        raised = self._codes_the_module_raises()
+        assert raised, "the AST scan found no ReportPathRefused call"
+        assert not (PERMANENT_LIFECYCLE_REFUSALS & TRANSIENT_LIFECYCLE_REFUSALS)
+        assert raised == set(PERMANENT_LIFECYCLE_REFUSALS) | set(TRANSIENT_LIFECYCLE_REFUSALS)
+        # Pinned: a later dispatch_finished for the same key resolves
+        # end_outcome_id_missing (_narrow_end takes the LAST end line), and
+        # project_mismatch / project_unknown depend on resolve_project_id()
+        # (report_lifecycle_mode._resolve_tenant falls back to the environment),
+        # so a misconfigured tenant must never dead-letter a report (OI-2542 r3).
+        assert TRANSIENT_LIFECYCLE_REFUSALS == frozenset({
+            "ledger_unreadable", "lifecycle_mode_undecidable", "end_outcome_id_missing",
+            "project_mismatch", "project_unknown",
+        })
+        assert PERMANENT_LIFECYCLE_REFUSALS == frozenset({
+            "attempt_unknown", "attempt_ambiguous", "project_ambiguous", "missing_dispatch_id",
+        })
+
+
+_V3_TENANT = "proj-quarantine"
+
+
+def _write_v3_attempt_report(path: Path, dispatch_id: str, *, attempt: int = 3,
+                             project_id: str = _V3_TENANT) -> Path:
+    """A bookable v3 report naming an attempt no ``dispatch_started`` starts."""
+    path.write_text(
+        f"---\ndispatch_id: {dispatch_id}\nproject_id: {project_id}\nprovider: claude\n"
+        f"model: claude-sonnet-4-6\nattempt: {attempt}\n---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _seed_v3_start(state_dir: Path, dispatch_id: str, *, attempt: int = 1,
+                   project_id: str = _V3_TENANT) -> None:
+    """The one ledger line this dispatch has: a v3 start for *attempt*."""
+    (state_dir / "t0_receipts.ndjson").write_text(
+        json.dumps({"timestamp": "2026-06-01T10:00:00Z", "event_type": "dispatch_started",
+                    "dispatch_id": dispatch_id, "project_id": project_id,
+                    "attempt": attempt, "lifecycle_mode": "v3"}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _stamp_hours_ago(hours: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+
+
+def _seed_history_entries(state_dir: Path, *entries: dict) -> None:
+    """Leave the converter beacon as a scan that saw exactly these refusals wrote it."""
+    from health_beacon import HealthBeacon
+
+    HealthBeacon(state_dir.parent, "report_to_receipt_converter",
+                 expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"rejected": list(entries)},
+    )
+
+
+def _history_dispatch(state_dir: Path, dispatch_id: str) -> dict:
+    entries = _converter_beacon(state_dir)["details"]["rejected"]
+    [entry] = [e for e in entries if e["dispatch_id"] == dispatch_id]
+    return entry
+
+
+class TestLifecycleRefusalQuarantine:
+    """OI-2542 round 3: the 24 h deadline is measured on the REFUSAL (the
+    converter's own history), never on the report's mtime, and only a
+    genuinely permanent code is ever quarantined."""
+
+    def test_a_permanent_refusal_the_history_carried_for_a_day_is_quarantined(
+        self, reports_dir, state_dir
+    ):
+        _seed_v3_start(state_dir, "20260601-aging")
+        report = _write_v3_attempt_report(reports_dir / "20260601-aging.md", "20260601-aging")
+
+        # Scan 1 is the refusal's FIRST sighting: nothing is aged yet.
+        scan_and_convert([reports_dir], state_dir)
+        assert report.is_file()
+        entry = _history_dispatch(state_dir, "20260601-aging")
+        assert entry["reason"].startswith("ledger lifecycle attempt_unknown: ")
+        assert entry["first_rejected_at"] == entry["rejected_at"]
+
+        # Seen every hour since: a day of observed alarm, the last sighting an hour ago.
+        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(1),
+                                          "first_rejected_at": _stamp_hours_ago(25),
+                                          "alarm_seconds": 25 * 3600})
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-aging.md").is_file()
+
+    def test_a_permanent_refusal_first_seen_now_is_not_quarantined_however_old_the_report(
+        self, reports_dir, state_dir
+    ):
+        """The outage case: the report is three days old, but this converter is
+        refusing it for the first time — it must stay for the next scan."""
+        _seed_v3_start(state_dir, "20260601-outage")
+        report = _write_v3_attempt_report(reports_dir / "20260601-outage.md", "20260601-outage")
+        stale = time.time() - 3 * 24 * 3600
+        os.utime(report, (stale, stale))
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.error_count, stats.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_project_mismatch_is_never_quarantined_however_old_the_history(
+        self, reports_dir, state_dir
+    ):
+        """project_mismatch depends on resolve_project_id(), not only on the
+        append-only ledger (_resolve_tenant falls back to the environment): a
+        processor returning with a misconfigured tenant must move nothing."""
+        _seed_v3_start(state_dir, "20260601-tenant", project_id="proj-elsewhere")
+        report = _write_v3_attempt_report(
+            reports_dir / "20260601-tenant.md", "20260601-tenant", attempt=1)
+        stale = time.time() - 3 * 24 * 3600
+        os.utime(report, (stale, stale))
+
+        scan_and_convert([reports_dir], state_dir)
+        entry = _history_dispatch(state_dir, "20260601-tenant")
+        assert entry["reason"].startswith("ledger lifecycle project_mismatch: ")
+
+        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(25),
+                                          "first_rejected_at": _stamp_hours_ago(25),
+                                          "alarm_seconds": 25 * 3600})
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.error_count, stats.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_a_history_entry_without_first_rejected_at_uses_its_own_rejected_at(
+        self, reports_dir, state_dir
+    ):
+        """An entry written before first_rejected_at existed still counts: its
+        rejected_at IS the first time that key was seen."""
+        _seed_v3_start(state_dir, "20260601-legacy-entry")
+        report = _write_v3_attempt_report(
+            reports_dir / "20260601-legacy-entry.md", "20260601-legacy-entry")
+
+        scan_and_convert([reports_dir], state_dir)
+        entry = _history_dispatch(state_dir, "20260601-legacy-entry")
+        legacy = {key: entry[key] for key in ("dispatch_id", "file", "reason", "kind")}
+        # A pre-first_rejected_at entry, sighted hourly for the whole day (no gap):
+        # the day of alarm has to be seeded, since #2395 counts observed alarm.
+        _seed_history_entries(
+            state_dir,
+            *[{**legacy, "rejected_at": _stamp_hours_ago(hours),
+               "alarm_seconds": 25 * 3600} for hours in range(25, 0, -1)],
+        )
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-legacy-entry.md").is_file()
+
+    def test_one_hanging_refusal_never_evicts_a_model_rejection_from_the_history(
+        self, reports_dir, state_dir
+    ):
+        """300 scans with one hanging young attempt_unknown refusal is ~100
+        minutes at the ~30 s cadence: appended once per scan, it filled the
+        whole 200-entry history and every model rejection fell out of it."""
+        from report_to_receipt_converter import _HEALTH_REJECTED_HISTORY_MAX
+
+        _seed_v3_start(state_dir, "20260601-hangs")
+        hanging = _write_v3_attempt_report(reports_dir / "20260601-hangs.md", "20260601-hangs")
+        _write_report_without_model(reports_dir / "20260601-no-model.md", "20260601-no-model")
+
+        scan_and_convert([reports_dir], state_dir)
+        first_stamp = _history_dispatch(state_dir, "20260601-hangs")["rejected_at"]
+        for _ in range(299):
+            scan_and_convert([reports_dir], state_dir)
+
+        entries = _converter_beacon(state_dir)["details"]["rejected"]
+        assert len(entries) <= _HEALTH_REJECTED_HISTORY_MAX
+        assert {e["dispatch_id"] for e in entries} == {"20260601-hangs", "20260601-no-model"}
+        hanging_entry = _history_dispatch(state_dir, "20260601-hangs")
+        assert hanging_entry["first_rejected_at"] == first_stamp
+        assert hanging_entry["rejected_at"] >= first_stamp
+        assert hanging.is_file()  # young refusal: still retried, never quarantined
+
+
+class TestMergeRejectedHistory:
+    """The merge rule itself, on fixed stamps (no clock): one entry per key."""
+
+    def test_newest_rejected_at_with_the_earliest_first_rejected_at(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        prior = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T10:00:00Z",
+                  "first_rejected_at": "2026-05-01T10:00:00Z"}]
+        fresh = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T12:00:00Z"}]
+
+        assert _merge_rejected_history(prior, fresh) == [{
+            "dispatch_id": "d", "file": "f.md", "reason": "r",
+            "rejected_at": "2026-06-01T12:00:00Z",
+            "first_rejected_at": "2026-05-01T10:00:00Z",
+            # a two-hour gap is inside the continuity window: it is observed alarm
+            "alarm_seconds": 2 * 3600,
+        }]
+
+    def test_an_older_sighting_never_moves_rejected_at_backwards(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        prior = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T12:00:00Z",
+                  "first_rejected_at": "2026-06-01T12:00:00Z"}]
+        fresh = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T10:00:00Z"}]
+
+        [merged] = _merge_rejected_history(prior, fresh)
+        assert merged["rejected_at"] == "2026-06-01T12:00:00Z"
+        assert merged["first_rejected_at"] == "2026-06-01T10:00:00Z"
+
+    def test_different_reasons_for_one_report_stay_separate(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        merged = _merge_rejected_history([], [
+            {"dispatch_id": "d", "file": "f.md", "reason": "a", "rejected_at": "2026-06-01T10:00:00Z"},
+            {"dispatch_id": "d", "file": "f.md", "reason": "b", "rejected_at": "2026-06-01T11:00:00Z"},
+        ])
+
+        assert [entry["reason"] for entry in merged] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
@@ -1913,14 +2195,26 @@ class TestFailClosedBranchNotOnOrigin:
         Finds any dispatch branch on origin via ``git ls-remote`` as a
         positive control — no hardcoded branch name, no assumption that
         the current worktree has been pushed.
+
+        The listing is a precondition, not the thing under test (OI-2518:
+        under xdist it can hit the 10 s timeout and fail the run). Narrowed
+        to ``dispatch/*``, and a timeout or a non-zero exit of it skips with
+        the reason instead of failing; the check under test keeps its real
+        call and its real assertion.
         """
         from report_to_receipt_converter import _check_branch_on_origin
 
         cwd = str(Path(__file__).resolve().parent.parent)
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", "origin"],
-            capture_output=True, text=True, timeout=10, cwd=cwd,
-        )
+        try:
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", "origin", "dispatch/*"],
+                capture_output=True, text=True, timeout=10, cwd=cwd,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.skip(
+                "precondition `git ls-remote --heads origin dispatch/*` timed "
+                "out after 10 s — no positive control available (OI-2518)"
+            )
         if result.returncode != 0 or not result.stdout.strip():
             pytest.skip("git ls-remote origin returned nothing — cannot run positive test")
 
@@ -1942,6 +2236,31 @@ class TestFailClosedBranchNotOnOrigin:
             return  # Found one — test passes
 
         pytest.skip("No dispatch/* branch found on origin for positive control")
+
+    @pytest.mark.parametrize(
+        "precondition",
+        ["timeout", "nonzero_exit", "empty_output"],
+        ids=["timeout", "nonzero-exit", "empty-output"],
+    )
+    def test_no_positive_control_skips_instead_of_failing(self, monkeypatch, precondition):
+        """A precondition listing that cannot answer skips, never fails.
+
+        Only the precondition's ``git ls-remote`` is patched here; the call
+        under test is not reached, because the skip fires first (OI-2518).
+        Before the fix a ``TimeoutExpired`` of this listing failed the run.
+        """
+        def _fake_run(argv, **kwargs):
+            if precondition == "timeout":
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=kwargs.get("timeout", 10))
+            if precondition == "nonzero_exit":
+                return subprocess.CompletedProcess(argv, 128, stdout="", stderr="fatal")
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            self.test_existing_branch_passes_check()
+        expected = "timed out" if precondition == "timeout" else "returned nothing"
+        assert expected in str(excinfo.value), str(excinfo.value)
 
     def test_non_terminal_status_skips_branch_check(self, tmp_path, state_dir):
         """Reports with status='unknown' skip the fail-closed gate entirely,

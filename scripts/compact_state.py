@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 from project_root import resolve_data_dir
+import dispatch_lifecycle as lifecycle
 import state_writer
 
 INTELLIGENCE_ARCHIVE_MIN_MB = 50
@@ -196,6 +197,50 @@ def compact_intelligence_archive(state_dir: Path, *, dry_run: bool = False) -> i
     return 0
 
 
+def _receipt_record(raw: str) -> dict | None:
+    """One parsed NDJSON record, or ``None`` for a blank or unparseable line."""
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    try:
+        record = json.loads(stripped)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def _partition_receipts(lines: list[str]) -> tuple[list[str], list[str], int]:
+    """``(keep, archive, kept_unfinished_v3_starts)`` for an over-cap receipts file.
+
+    An overflow line that is an unfinished ``v3`` start stays in the live file
+    (K-6 follow-up, OI-2537): ``v3_in_flight`` reads only the live ledger, so a
+    start moved into the archive would read as no in-flight attempt at all. The
+    key and end rule are ``dispatch_lifecycle``'s own predicate, never a copy.
+    Kept starts keep their original order and go before the newest
+    ``RECEIPTS_MAX_RECORDS`` lines; every other overflow line is archived.
+    """
+    overflow, tail = lines[:-RECEIPTS_MAX_RECORDS], lines[-RECEIPTS_MAX_RECORDS:]
+    finished = lifecycle.end_keys(
+        record for record in map(_receipt_record, lines) if record is not None)
+    kept: list[str] = []
+    archive: list[str] = []
+    for raw in overflow:
+        record = _receipt_record(raw)
+        if record is not None and lifecycle.is_unfinished_v3_start(record, finished):
+            kept.append(raw)
+        else:
+            archive.append(raw)
+    return kept + tail, archive, len(kept)
+
+
+def _emit_receipts_rotation(*, live_file: Path, archive_file: Path, keep_lines: int,
+                            archive_lines: int, kept_starts: int, dry_run: bool) -> None:
+    """The one ``receipts_rotating`` event of a run, the same fields for dry and real."""
+    _emit("INFO", "receipts_rotating", live_path=str(live_file),
+          archive_path=str(archive_file), archive_lines=archive_lines,
+          keep_lines=keep_lines, kept_unfinished_v3_starts=kept_starts, dry_run=dry_run)
+
+
 def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
     """Cap t0_receipts.ndjson at 10000 lines, archive overflow. Returns 0 on success."""
     live_file = state_dir / "t0_receipts.ndjson"
@@ -213,17 +258,10 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
         if archive_file.exists():
             _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
             return 0
-        keep = lines[-RECEIPTS_MAX_RECORDS:]
-        overflow = lines[: -RECEIPTS_MAX_RECORDS]
-        _emit(
-            "INFO",
-            "receipts_rotating",
-            live_path=str(live_file),
-            archive_path=str(archive_file),
-            archive_lines=len(overflow),
-            keep_lines=len(keep),
-            dry_run=True,
-        )
+        keep, overflow, kept_starts = _partition_receipts(lines)
+        _emit_receipts_rotation(live_file=live_file, archive_file=archive_file,
+                                keep_lines=len(keep), archive_lines=len(overflow),
+                                kept_starts=kept_starts, dry_run=True)
         return 0
 
     # Two-phase write: stage archive content to a temp path so the real archive path
@@ -249,8 +287,7 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
                 }
                 return current_content
 
-            current_keep = current_lines[-RECEIPTS_MAX_RECORDS:]
-            current_overflow = current_lines[: -RECEIPTS_MAX_RECORDS]
+            current_keep, current_overflow, kept_starts = _partition_receipts(current_lines)
             archive_tmp = _stage_bytes(
                 archive_file.parent,
                 gzip.compress("".join(current_overflow).encode("utf-8")),
@@ -259,6 +296,7 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
                 "action": "rotate",
                 "keep": current_keep,
                 "overflow": current_overflow,
+                "kept_unfinished_v3_starts": kept_starts,
             }
             return "".join(current_keep).encode("utf-8")
 
@@ -270,15 +308,11 @@ def compact_receipts(state_dir: Path, *, dry_run: bool = False) -> int:
             _emit("INFO", "receipts_skip", reason="archive_already_exists_today", archive=str(archive_file))
             return 0
 
-        _emit(
-            "INFO",
-            "receipts_rotating",
-            live_path=str(live_file),
-            archive_path=str(archive_file),
-            archive_lines=len(plan["overflow"]),
-            keep_lines=len(plan["keep"]),
-            dry_run=dry_run,
-        )
+        _emit_receipts_rotation(live_file=live_file, archive_file=archive_file,
+                                keep_lines=len(plan["keep"]),
+                                archive_lines=len(plan["overflow"]),
+                                kept_starts=plan["kept_unfinished_v3_starts"],
+                                dry_run=dry_run)
         os.replace(archive_tmp, archive_file)
         archive_tmp = None
     except OSError as exc:

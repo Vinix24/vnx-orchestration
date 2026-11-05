@@ -99,6 +99,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, NamedTuple, Optional
 
 from gate_obligations import OBLIGATIONS_SUBDIR, REASON_DEGENERATE_RETRY_CAP, STATUS_PENDING
+from ledger_attempt_state import (AttemptVerdict, KIND_ENDED, KIND_LEGACY, KIND_LIVE,  # noqa: E501
+                                  KIND_UNKNOWN, LEDGER_FILENAME, attempt_verdict, read_ledger)
 from receipt_outcome import (
     BOOKKEEPING_EVENT_TYPES,
     INVALID_DISPATCH_IDS,
@@ -131,6 +133,11 @@ OUTCOME_NO_OUTCOME = "no_outcome"
 OUTCOME_NO_DECISION = "no_decision"
 # What a gate obligation parked at the retry cap reads as (R10).
 OUTCOME_RETRY_CAP = "retry_cap"
+# A v3 start without an end and without liveness (ADR-045 §7): the K-6 sweep
+# books the end, this reader only names the candidate.
+OUTCOME_ABANDONED_CANDIDATE = "abandoned_candidate"
+OUTCOME_MALFORMED_END = "malformed_end_line"  # an end line is never guessed "done"
+OUTCOME_LEDGER_UNREADABLE = "ledger_unreadable"  # fail-closed on evidence
 
 # An active dispatch without any receipt is still running until it is this
 # old; after that it is an open point (the drain's --older-than-hours default).
@@ -418,6 +425,29 @@ _DECISION_DESTINATION = {"accept": "completed", "reject": "dead_letter"}
 RECEIPT_WITHOUT_OUTCOME = "receipt present without an outcome: needs a human look"
 
 
+def _verdict_destination(verdict: AttemptVerdict) -> tuple:
+    """Where a ``v3`` dispatch goes, read from its attempt verdict (ADR-045 §7):
+    the end line decides an ``ended`` attempt (malformed evidence is an open
+    point), liveness a start without one — live and unknown are no open point,
+    ``dead_no_end`` the ``abandoned_candidate`` the sweep books."""
+    if verdict.kind == KIND_ENDED:
+        if verdict.end_status is None:
+            return ("skipped", "open point: end line without a readable end_state "
+                    "(malformed evidence, needs a human look)", OUTCOME_MALFORMED_END)
+        if verdict.end_status == "success":
+            return "completed", "end line: completed", None
+        outcome = verdict.end_state or _STATUS_OUTCOME.get(verdict.end_status,
+                                                           verdict.end_status)
+        return ("skipped", f"open point: end state {outcome!r} needs a human look "
+                "(a T0 decides: receipt_query.py decide)", outcome)
+    if verdict.kind == KIND_LIVE:
+        return "skipped", "still running: the attempt is live", None
+    if verdict.kind == KIND_UNKNOWN:
+        return "skipped", "liveness unknown: unknown never reads as dead", None
+    return ("skipped", "open point: abandoned candidate: a v3 start without an end and "
+            "without liveness (the K-6 sweep books the end)", OUTCOME_ABANDONED_CANDIDATE)
+
+
 def active_destination(
     *,
     receipt_status: Optional[str],
@@ -425,6 +455,7 @@ def active_destination(
     decision: Optional[str],
     age_seconds: Optional[float],
     threshold_seconds: float,
+    verdict: Optional[AttemptVerdict] = None,
 ) -> tuple:
     """Where a dispatch in ``active/`` goes: ``(destination, reason, open)``.
 
@@ -432,13 +463,16 @@ def active_destination(
     ``open`` is what the open point reads as, or None when it is none (moved,
     or without a receipt and still younger than the threshold).
 
-    A T0 ``decision`` goes first. Only an accept goes to completed; dead_letter
-    is only a T0 reject. Everything else stays in active/ as an open point:
-    a failure or investigate outcome, a receipt without an outcome of its own,
-    and no receipt past the threshold or without a timestamp.
+    A T0 ``decision`` goes first. A ``v3`` ``verdict`` decides next
+    (``_verdict_destination``); without one, or with a ``legacy`` verdict, the
+    receipt-based branches below are the dispatch's old path, unchanged: only
+    an accept goes to completed, only a T0 reject to dead_letter, and
+    everything else stays in active/ as an open point.
     """
     if decision in _DECISION_DESTINATION:
         return _DECISION_DESTINATION[decision], f"T0 decision {decision!r} in the decision log", None
+    if verdict is not None and verdict.kind != KIND_LEGACY:
+        return _verdict_destination(verdict)
     if receipt_status == "success":
         return "completed", "receipt found with success status", None
     if receipt_status is not None:
@@ -608,14 +642,18 @@ def active_dispatch_items(
     now: Optional[datetime] = None,
     threshold_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
     scan: Optional[ActiveScan] = None,
+    records: Optional[Iterable[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """The dispatches in a live bucket (``<data_dir>/dispatches/active/`` and
     ``rejected/<reason>/``) the drain leaves standing as an open point, read
     exactly as the drain reads them: the bucket scan (directories and dispatch
-    ``.md`` files), then ``receipts/processed`` through
-    ``dispatch_receipts``, then ``active_destination``. ``scan`` is a bucket
-    set already read (``scan_open_buckets``); an id in both buckets is one
-    item, the ``active/`` entry first."""
+    ``.md`` files), the attempt verdict from the ledger plus liveness
+    (``attempt_verdict``), then ``receipts/processed`` through
+    ``dispatch_receipts`` and ``active_destination``. A ``v3`` dispatch is
+    decided on its verdict; a ``legacy`` one keeps the receipt-based path
+    unchanged. ``scan`` is a bucket set already read (``scan_open_buckets``)
+    and ``records`` a ledger already read; an id in both buckets is one item,
+    the ``active/`` entry first."""
     data_dir = Path(data_dir)
     entries = (scan or scan_open_buckets(data_dir / "dispatches")).entries
     if not entries:
@@ -624,6 +662,14 @@ def active_dispatch_items(
     receipts, pid = scope_receipts(receipts, project_id)
     status_index, presence = dispatch_receipts(receipts, pid)
     now = now or datetime.now(timezone.utc)
+    state_dir = data_dir / "state"
+    ledger_error: Optional[str] = None
+    ledger_records = list(records) if records is not None else None
+    if ledger_records is None:
+        try:
+            ledger_records = read_ledger(state_dir)
+        except OSError as exc:
+            ledger_error = f"cannot read {LEDGER_FILENAME} to decide the attempt: {exc}"
     items: List[Dict[str, Any]] = []
     seen: set = set()
     for entry in entries:
@@ -633,15 +679,27 @@ def active_dispatch_items(
         if did in seen:
             continue
         seen.add(did)
+        if ledger_error is not None:
+            # fail-closed: without the ledger nothing proves the dispatch done
+            items.append({
+                "kind": KIND_ACTIVE_DISPATCH,
+                "dispatch_id": did,
+                "outcome": OUTCOME_LEDGER_UNREADABLE,
+                "status": None,
+                "reason": f"open point: {ledger_error}",
+                "last_seen": entry.timestamp.isoformat() if entry.timestamp else None,
+            })
+            continue
         age = (now - entry.timestamp).total_seconds() if entry.timestamp else None
         status = status_index.get(did)
         has_receipt = did in presence
         decision = (decisions.get(did) or {}).get("decision")
+        verdict = attempt_verdict(state_dir, project_id, did, records=ledger_records)
         _, reason, open_as = active_destination(
             receipt_status=status, has_receipt=has_receipt,
             decision=decision, age_seconds=age,
-            threshold_seconds=threshold_hours * 3600.0)
-        if (open_as is None and entry.bucket == "rejected"
+            threshold_seconds=threshold_hours * 3600.0, verdict=verdict)
+        if (open_as is None and verdict.is_legacy and entry.bucket == "rejected"
                 and decision is None and status is None and not has_receipt):
             # A file under rejected/<reason>/ is there because the worker
             # exited non-successfully (cleanup_worker_exit step 3), so the
@@ -804,23 +862,42 @@ def open_outcome_items(
     *,
     project_id: str,
     since: str = OPEN_OUTCOMES_EPOCH,
+    state_dir: Optional[Path] = None,
 ) -> List[Dict[str, Any]]:
     """Every ``reject``/``investigate``/``unknown`` dispatch of ``project_id``
-    without a decision, newest first (by its latest receipt timestamp)."""
+    without a decision, newest first (by its latest receipt timestamp).
+
+    A ``v3`` dispatch is decided on its attempt verdict: the end line or, without
+    one, liveness (``_verdict_destination``). A ``legacy`` dispatch keeps
+    ``summarize``'s outcome, unchanged.
+
+    A ``v3`` end other than ``completed`` stays an open point until a T0 decision.
+    """
     summary = summarize(receipts, project_id=project_id, cutoff=_parse_ts(since))
     last_seen = _last_seen(receipts, project_id)
     items: List[Dict[str, Any]] = []
     for outcome in summary["outcomes"]:
         did = outcome["dispatch_id"]
-        if outcome["decision"] not in OPEN_DECISIONS or did in decisions:
+        open_as, reason = outcome["decision"], outcome.get("reason")
+        verdict = (attempt_verdict(Path(state_dir), project_id, did, records=receipts)
+                   if state_dir is not None else None)
+        v3 = verdict is not None and not verdict.is_legacy
+        if v3:
+            # only a T0 decision or a no-open-point destination closes a v3 end
+            if did in decisions:
+                continue
+            _, reason, open_as = _verdict_destination(verdict)
+            if open_as is None:
+                continue  # a completed, live or unknown v3 attempt is no open point
+        elif outcome["decision"] not in OPEN_DECISIONS or did in decisions:
             continue
         seen = last_seen.get(did)
         items.append({
             "kind": KIND_RECEIPT_OUTCOME,
             "dispatch_id": did,
-            "outcome": outcome["decision"],
+            "outcome": open_as,
             "status": outcome.get("status"),
-            "reason": outcome.get("reason"),
+            "reason": reason,
             "last_seen": seen.isoformat() if seen else None,
         })
     items.sort(key=lambda i: i["dispatch_id"])
@@ -869,14 +946,15 @@ def build_open_outcomes(
     except OSError as exc:
         return {"available": False, "reason": f"could not read {ledger.name} or {log.name}: {exc}"}
 
-    items = open_outcome_items(receipts, decisions, project_id=project_id, since=since)
+    items = open_outcome_items(receipts, decisions, project_id=project_id, since=since,
+                               state_dir=state_dir)
     listed = {i["dispatch_id"] for i in items}
     store = Path(data_dir) if data_dir else state_dir.parent
     try:
         scan = scan_open_buckets(store / "dispatches")
         active = active_dispatch_items(
             store, decisions, project_id=project_id, now=now,
-            threshold_hours=no_receipt_threshold_hours, scan=scan)
+            threshold_hours=no_receipt_threshold_hours, scan=scan, records=receipts)
         abandoned = abandoned_dispatch_items(store, decisions)
         capped = gate_retry_cap_items(
             Path(obligations_dir) if obligations_dir else state_dir / OBLIGATIONS_SUBDIR, project_id)

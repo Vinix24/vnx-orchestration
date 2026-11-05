@@ -290,6 +290,16 @@ def _unnormalisable(path: Any) -> bool:
     return not smart_router.normalize_dispatch_path(path)
 
 
+def path_is_unnormalisable(path: Any) -> bool:
+    """Whether the classification cannot read ``path`` as one repository path.
+
+    The public name for the test :func:`_diff_class` applies, so a reader of a
+    recorded classification keys off the classifier's own rule instead of a
+    second copy of it.
+    """
+    return _unnormalisable(path)
+
+
 def _deciding_text(deciding: Sequence[Tuple[str, str]]) -> str:
     shown = [
         f"path {path!r} cannot be normalised (fail-closed)" if category == CATEGORY_UNNORMALISABLE

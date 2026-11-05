@@ -176,6 +176,9 @@ _poll_new_reports_cycle 6 7
         "dispatch_id": "DISP-POLL-STUB",
         "file": "poll-stub.md",
         "reason": "missing model",
+        # OI-2541: every parsed entry names its kind (a ledger-lifecycle
+        # refusal is also counted now, so a reader must be able to tell them apart).
+        "kind": "fail_closed",
     }]
 
 

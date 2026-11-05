@@ -33,6 +33,13 @@ _REAL_REJECTED_LINE = (
     "20260905-golf3b-receipt-refusals-visible.md reason=missing model"
 )
 
+_REAL_LIFECYCLE_REFUSED_LINE = (
+    "WARNING report_to_receipt_converter: report_to_receipt_converter: REFUSED "
+    "(ledger lifecycle) dispatch=DISP-20260905-lifecycle file=20260905-lifecycle.md "
+    "reason=ledger lifecycle attempt_unknown: the receipt carries attempt 3, but no "
+    "dispatch_started starts it"
+)
+
 
 class TestParseRejections:
     def test_extracts_dispatch_file_and_reason_from_a_real_shaped_line(self) -> None:
@@ -41,7 +48,55 @@ class TestParseRejections:
             "dispatch_id": "DISP-20260905-golf3b",
             "file": "20260905-golf3b-receipt-refusals-visible.md",
             "reason": "missing model",
+            "kind": "fail_closed",
         }]
+
+    def test_a_lifecycle_refusal_is_counted_with_its_own_kind(self) -> None:
+        """OI-2541: the converter logged this line, but the beacon matched only
+        ``REJECTED (fail-closed)``, so a refusal retried on every scan was a
+        WARNING in a log and nothing in any health file."""
+        rejections = beacon_mod.parse_rejections(_REAL_LIFECYCLE_REFUSED_LINE)
+        [rejection] = rejections
+        assert rejection["dispatch_id"] == "DISP-20260905-lifecycle"
+        assert rejection["file"] == "20260905-lifecycle.md"
+        assert rejection["reason"].startswith("ledger lifecycle attempt_unknown: ")
+        assert rejection["kind"] == "lifecycle_refusal"
+
+    def test_both_kinds_in_one_scan_are_both_captured_and_keep_running(self, tmp_path: Path) -> None:
+        raw = "\n".join([_REAL_REJECTED_LINE, _REAL_LIFECYCLE_REFUSED_LINE])
+        rejections = beacon_mod.parse_rejections(raw)
+        assert [r["kind"] for r in rejections] == ["fail_closed", "lifecycle_refusal"]
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        beacon_mod.record_rejections(state_dir, rejections)
+
+        payload = json.loads(
+            (tmp_path / "health" / "receipt_conversion_rejections.json").read_text(encoding="utf-8")
+        )
+        assert payload["status"] == "fail"
+        assert payload["details"]["count"] == 2
+        assert [r["kind"] for r in payload["details"]["rejections"]] == [
+            "fail_closed", "lifecycle_refusal",
+        ]
+
+    def test_a_dead_lettered_lifecycle_refusal_keeps_its_own_kind(self) -> None:
+        """The quarantine is logged on the ``REJECTED (fail-closed)`` line, but
+        the converter history calls that same refusal ``lifecycle_refusal``;
+        one name per refusal in both beacons, or a reader cannot join them."""
+        raw = (
+            "WARNING report_to_receipt_converter: report_to_receipt_converter: "
+            "REJECTED (fail-closed) dispatch=DISP-20260905-aged file=20260905-aged.md "
+            "reason=ledger lifecycle attempt_unknown: the receipt carries attempt 3, "
+            "but no dispatch_started starts it"
+        )
+        [rejection] = beacon_mod.parse_rejections(raw)
+        assert rejection["kind"] == "lifecycle_refusal"
+        assert rejection["reason"].startswith("ledger lifecycle attempt_unknown: ")
+
+    def test_a_model_refusal_is_still_fail_closed(self) -> None:
+        [rejection] = beacon_mod.parse_rejections(_REAL_REJECTED_LINE)
+        assert rejection["kind"] == "fail_closed"
 
     def test_multiple_rejections_in_one_scan_are_all_captured(self) -> None:
         raw = "\n".join([
@@ -260,6 +315,19 @@ class TestBothBeaconsAgreeOnTheSameScan:
         "## Verification\n\npytest tests/ -x: 42 passed\n\n"
         "## Open Items\n\nNone\n"
     )
+    _TENANT = "proj-agree"
+    # A report that books: model present, tenant named (the v3 fixtures below
+    # need the tenant to resolve a row without VNX_PROJECT_ID).
+    _BOOKABLE_REPORT = (
+        "---\ndispatch_id: {name}\nproject_id: " + _TENANT + "\n"
+        "provider: claude\nmodel: claude-sonnet-4-6\n{extra}---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n"
+    )
+
 
     def _scan_and_feed_the_beacon(self, reports_dir: Path, state_dir: Path, caplog) -> tuple[str, str, int]:
         """(converter status, rejections-beacon status, REJECTED lines this scan wrote to stderr)."""
@@ -332,6 +400,142 @@ class TestBothBeaconsAgreeOnTheSameScan:
 
         assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
         assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 0)
+
+    def test_same_verdict_for_a_young_attempt_unknown_refusal(self, tmp_path: Path, caplog) -> None:
+        """``attempt_unknown`` is PERMANENT (no later ``dispatch_started`` can
+        start an attempt the report already names), so it is dead-lettered once
+        the refusal itself has lasted a day. Until then the report stays in the
+        scanned directory and its REFUSED line reaches this beacon: fail. The
+        converter beacon must record the same refusal — the other report books,
+        so without a detail entry it would say ok for the very scan this one
+        calls fail."""
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "t0_receipts.ndjson").write_text(
+            json.dumps({
+                "event_type": "dispatch_started", "dispatch_id": "20260601-refused",
+                "project_id": self._TENANT, "attempt": 1, "lifecycle_mode": "v3",
+                "timestamp": "2026-06-01T10:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-refused.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-refused", extra="attempt: 3\n"),
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-books.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-books", extra=""), encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        # Not quarantined: only a permanent code on an aged report is dead-lettered.
+        assert (reports_dir / "20260601-refused.md").is_file()
+
+    def test_same_verdict_for_a_transient_ledger_unreadable_refusal(self, tmp_path: Path, caplog) -> None:
+        """``ledger_unreadable`` resolves on the first readable scan, so it is
+        never dead-lettered; the report stays and its REFUSED line keeps this
+        beacon at fail. The converter beacon must name the same refusal while
+        the other report books normally."""
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        _seed_v3_row(state_dir, "20260601-unreadable")
+        # An INTERIOR unparseable line naming this dispatch: the ledger cannot
+        # be read as evidence for it, while every other dispatch reads normally.
+        (state_dir / "t0_receipts.ndjson").write_text(
+            '{"event_type": "dispatch_started", "dispatch_id": "20260601-unreadable"\n'
+            + json.dumps({"event_type": "report_ingested", "dispatch_id": "20260601-other"}) + "\n",
+            encoding="utf-8",
+        )
+        (reports_dir / "20260601-unreadable.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-unreadable", extra=""), encoding="utf-8",
+        )
+        (reports_dir / "20260601-books.md").write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-books", extra=""), encoding="utf-8",
+        )
+
+        assert self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog) == ("fail", "fail", 1)
+        assert (reports_dir / "20260601-unreadable.md").is_file()
+
+    def test_both_beacons_name_a_quarantined_lifecycle_refusal_lifecycle_refusal(
+        self, tmp_path: Path, caplog
+    ):
+        """A permanent refusal the history has carried for a day IS dead-lettered
+        and logged on the ``REJECTED (fail-closed)`` line. The converter history
+        calls it ``lifecycle_refusal``; this beacon must not call the same
+        refusal ``fail_closed``."""
+        import logging
+
+        import report_to_receipt_converter as rtc
+
+        reports_dir = tmp_path / "unified_reports"
+        reports_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        (state_dir / "t0_receipts.ndjson").write_text(
+            json.dumps({
+                "event_type": "dispatch_started", "dispatch_id": "20260601-aged",
+                "project_id": self._TENANT, "attempt": 1, "lifecycle_mode": "v3",
+                "timestamp": "2026-06-01T10:00:00Z",
+            }) + "\n",
+            encoding="utf-8",
+        )
+        report = reports_dir / "20260601-aged.md"
+        report.write_text(
+            self._BOOKABLE_REPORT.format(name="20260601-aged", extra="attempt: 3\n"),
+            encoding="utf-8",
+        )
+
+        # Scan 1 records the refusal; it is young, so the report stays.
+        self._scan_and_feed_the_beacon(reports_dir, state_dir, caplog)
+        assert report.is_file()
+        [entry] = beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT)
+        _seed_converter_history(tmp_path, {**entry, "rejected_at": _iso(1),
+                                           "first_rejected_at": _iso(25),
+                                           "alarm_seconds": 25 * 3600})
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):
+            rtc.scan_and_convert([reports_dir], state_dir)
+        stderr = "\n".join(f"WARNING report_to_receipt_converter: {r.getMessage()}" for r in caplog.records)
+        [rejection] = beacon_mod.parse_rejections(stderr)
+        beacon_mod.record_rejections(state_dir, [rejection])
+
+        assert not report.exists()  # quarantined: the refusal lasted a day
+        assert rejection["kind"] == "lifecycle_refusal"
+        assert rejection["reason"].startswith("ledger lifecycle attempt_unknown: ")
+        [converter_entry] = beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT)
+        assert converter_entry["kind"] == "lifecycle_refusal"
+        health = tmp_path / "health"
+        for component in ("report_to_receipt_converter", "receipt_conversion_rejections"):
+            payload = json.loads((health / f"{component}.json").read_text(encoding="utf-8"))
+            assert payload["status"] == "fail"
+
+
+def _seed_v3_row(state_dir: Path, dispatch_id: str, project_id: str = "proj-agree") -> None:
+    """A real coordination row whose metadata says ``lifecycle_mode: v3`` — the
+    only v3 evidence left once the ledger itself cannot be read."""
+    import sqlite3
+
+    import coordination_db
+    import project_id_migration
+
+    coordination_db.init_schema(state_dir)
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    project_id_migration.run_runtime_coordination_migration(db_path, default_project_id=project_id)
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.execute(
+            "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, metadata_json) "
+            "VALUES (?, ?, 'running', 1, ?)",
+            (dispatch_id, project_id, json.dumps({"lifecycle_mode": "v3"})),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def test_converter_component_name_matches_the_converter_beacon() -> None:

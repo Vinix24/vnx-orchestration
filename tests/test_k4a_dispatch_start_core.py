@@ -529,6 +529,34 @@ def test_a_torn_final_fragment_is_tolerated_at_the_door(state_dir, spec_file, v3
     assert appended["dispatch_id"] == DISPATCH and appended["attempt"] == 2
 
 
+# --- K-6 follow-up (OI-2539): the start line carries its own deadline ---------
+
+def _staged_json_spec(state_dir: Path, *, deadline: int | None = 1800,
+                      subdir: str = "pending") -> Path:
+    path = state_dir.parent / "dispatches" / subdir / DISPATCH / "dispatch-spec.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    spec = {"dispatch_id": DISPATCH}
+    if deadline is not None:
+        spec["deadline_seconds"] = deadline
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
+def test_the_start_line_deadline_survives_the_door_rewriting_the_spec(state_dir, v3):
+    """K-6b covers the plain lookup (OI-2522); this is the rewrite that motivated it."""
+    import dispatch_lifecycle
+    from final_prompt_integrity import persist_final_prompt
+
+    spec = _staged_json_spec(state_dir, deadline=1800)
+    _begin(state_dir, spec)
+    line = _starts(state_dir)[0]
+
+    # The door persists the final prompt after the start, rewriting the spec's
+    # bytes so ``spec_sha256`` no longer matches (the K-act lane's normal path).
+    persist_final_prompt(spec.parent, "the assembled final prompt")
+
+    assert dispatch_lifecycle.deadline_for(state_dir, line, None) == (1800, "start_line")
+
 # --- K-9c rule 3 (round 3): a path that exists is never read as "no row" ------
 
 def test_a_database_that_is_a_directory_is_unreadable_never_no_row(tmp_path):

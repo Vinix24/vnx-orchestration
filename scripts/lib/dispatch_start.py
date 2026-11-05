@@ -198,7 +198,17 @@ def _handover_lock(state_dir: Path, project_id: str, dispatch_id: str) -> Iterat
 
 
 def pid_verdict(pid: object, started_at: object) -> Optional[bool]:
-    """True alive, False dead, None unmeasurable — unknown is never dead (K-9d rule 3)."""
+    """True alive, False dead, None unmeasurable — unknown is never dead (K-9d rule 3).
+
+    The readers patch ``process_started_at`` as the probe seam, so it answers first;
+    ``probe_process_started_at`` then tells a gone pid from a probe that could not answer.
+    """
+    try:
+        measured = process_started_at(pid)
+    except (OSError, subprocess.SubprocessError): return None
+    if measured is not None:
+        if not isinstance(started_at, str) or not started_at.strip(): return None
+        return measured == started_at
     state, actual = probe_process_started_at(pid)
     if state != PROBE_ALIVE or not isinstance(started_at, str) or not started_at.strip():
         return False if state == PROBE_DEAD else None
