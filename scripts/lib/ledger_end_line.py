@@ -21,8 +21,11 @@ Everything here is deterministic: same records, same answer.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Optional, Set
 
+# completion_reading imports only event_outcome_semantics (a leaf), so this
+# direction cannot form a cycle: the predicate has exactly one definition there.
+from completion_reading import is_refusal
 from event_outcome_semantics import (
     COMPLETION_EVENT_TYPES,
     classify_event_outcome,
@@ -30,6 +33,7 @@ from event_outcome_semantics import (
 )
 
 DISPATCH_FINISHED_EVENT_TYPE = "dispatch_finished"
+DISPATCH_STARTED_EVENT_TYPE = "dispatch_started"
 
 __all__ = [
     "DISPATCH_FINISHED_EVENT_TYPE",
@@ -87,6 +91,10 @@ def end_line(
     report) but no end answers ``None`` instead of falling back to an older
     attempt's end. A ``report_ingested`` without an end line is exactly that:
     "report in, dispatch not ended", never an outcome.
+
+    A door refusal ends no attempt that has a ``dispatch_started`` line for the
+    same ``(project_id, dispatch_id, attempt)`` (OI-2524); without such a start
+    line (legacy history) it stays that attempt's end, exactly as before.
     """
     did = str(dispatch_id or "").strip()
     if not did:
@@ -110,9 +118,21 @@ def end_line(
             return None
         target = attempt
 
+    # OI-2524: a refusal is no end for an attempt that has a start line. The
+    # refusal carries no ``attempt``, so it belongs to attempt 1 -- exactly the
+    # attempt a live refire refusal was being mistaken for.
+    started_attempts: Set[int] = {
+        attempt_number for attempt_number in (
+            _attempt_of(record) for record in matched
+            if _event_type(record) == DISPATCH_STARTED_EVENT_TYPE
+        ) if attempt_number is not None
+    }
+    refuse_is_no_end = target in started_attempts
     ends = [
         record for record in matched
-        if _attempt_of(record) == target and _event_type(record) in COMPLETION_EVENT_TYPES
+        if _attempt_of(record) == target
+        and _event_type(record) in COMPLETION_EVENT_TYPES
+        and not (refuse_is_no_end and is_refusal(record))
     ]
     if not ends:
         return None

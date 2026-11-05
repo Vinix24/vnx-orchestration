@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Record the xdist parity verdict: the last word of the parity job before its upload.
 
-Track ``ci-profile-a-xdist``, D2b. Runs in the job "xdist parity" after the
-comparison step (``check_xdist_parity.py compare``, step id ``parity``), with
+Track ``ci-profile-a-xdist``, D2b. Runs in the parity job of the nightly
+``vnx-ci-serial-truth.yml`` after the comparison step
+(``check_xdist_parity.py compare``, step id ``parity``), with
 ``if: always()``. It decides between two cases:
 
 * The comparison step wrote a verdict. The step's own outcome is added to it,
@@ -22,8 +23,8 @@ comparison step (``check_xdist_parity.py compare``, step id ``parity``), with
   ``not_read``.
 
 The workflow step falls back to plain bash when this script is absent (the
-checkout failed); ``tests/test_ci_xdist_parity_workflow.py`` holds that
-fallback's verdict equal to this script's for the same inputs.
+checkout failed); ``tests/test_ci_record_xdist_parity_verdict.py`` holds that
+fallback's verdict and summary equal to this script's for the same inputs.
 
 Exit 0 when the verdict and the summary are written; 2 with a reason when
 either cannot be. The verdict is always written first, so a summary that
@@ -87,10 +88,28 @@ def emergency_verdict(meta: dict, profile: str, steps: dict, upstream: dict) -> 
     }
 
 
+def report_decision(verdict: dict | None) -> bool:
+    """True only when the report step may call the run clean: ``exit`` 0 and no recorded step failure.
+
+    ``record_compare_outcome`` keeps ``exit`` 0 when the comparison step failed
+    after writing its verdict and records that failure in ``step_failures``, so
+    the exit code alone is not evidence of parity (OI-2521). Everything that is
+    not positive evidence — no verdict, an exit that is not the integer 0, a
+    ``step_failures`` that is absent, null, not a list or not empty — stays
+    blocking, so the caller takes the issue path.
+    """
+    if verdict is None:
+        return False
+    exit_code = verdict.get("exit")
+    if type(exit_code) is not int or exit_code != 0:
+        return False
+    return verdict.get("step_failures") == []
+
+
 def summary_line(verdict: dict, written: dict | None) -> str:
     """What the step summary gains: why there is an emergency verdict, or a failed step under a clean exit."""
     if written is None:
-        return ("### xdist parity\n\nNot a required check. Verdict: **invalid_evidence** (exit 2): "
+        return ("### xdist parity\n\nNightly serial truth. Verdict: **invalid_evidence** (exit 2): "
                 "the parity script wrote no verdict.\n")
     outcome = verdict["steps"][COMPARE_STEP]
     if outcome == "success" or written.get("exit") not in (0, None):
@@ -122,6 +141,8 @@ def _pair(value: str) -> tuple:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--verdict", required=True, help="the xdist-parity-verdict.json the comparison writes")
+    parser.add_argument("--report-clean", action="store_true",
+                        help="exit 0 when report_decision says clean, 1 otherwise; writes nothing")
     parser.add_argument("--summary", default="", help="append a markdown note here (GITHUB_STEP_SUMMARY)")
     parser.add_argument("--profile", default="", help="light or heavy, from the CI profile classifier")
     for name in META_FIELDS:
@@ -134,6 +155,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
+    if args.report_clean:
+        return 0 if report_decision(read_json_object(Path(args.verdict))) else 1
     verdict, note = record(args)
     try:
         write_json_atomic(Path(args.verdict), verdict)

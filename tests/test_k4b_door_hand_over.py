@@ -11,6 +11,15 @@ stores under ``tmp_path``; the lane executors and the slot are spied on.
 
 Red on the K-4a head: nothing there calls ``begin`` (no ``dispatch_started``
 line, no start-line refusal, no consumer-repo resolution).
+
+OI-2549: a test that drives the door against the REAL repository must neutralise
+the door's own ``fetch_remote_base`` (``_patched_fetch`` below). Otherwise the
+door runs a live ``git fetch origin main`` in this checkout, and a merge landing
+on main while the suite runs moves the ref between the test's expectation and
+the hand-over — main-CI run 41996195419 failed exactly that way (expected
+``cf377391``, recorded ``0c28ca7d``, PR #2389 merged mid-run). The tests that
+build their own clone in ``tmp_path`` and prove the fetch on purpose (§6) keep
+the real fetch: their origin is a disposable local bare repo.
 """
 
 from __future__ import annotations
@@ -37,7 +46,10 @@ import project_id_migration  # noqa: E402
 import runtime_coordination as rc  # noqa: E402
 from append_receipt_internals import payload as payload_module  # noqa: E402
 from dispatch_plan import ModelPin, RuntimeSnapshot  # noqa: E402
-from dispatch_worktree_isolation import create_dispatch_worktree  # noqa: E402
+from dispatch_worktree_isolation import (  # noqa: E402
+    create_dispatch_worktree,
+    resolve_consumer_project_root,
+)
 from receipt_schema import DISPATCH_STARTED_EVENT_TYPE  # noqa: E402
 
 PROJECT = "vnx-dev"
@@ -245,6 +257,26 @@ def _consumer_root(path: Path):
         yield
 
 
+@contextlib.contextmanager
+def _patched_fetch():
+    """OI-2549: keep the door's base resolution off the REAL origin.
+
+    ``_resolve_start_base_sha`` calls ``dispatch_worktree_isolation``'s
+    ``fetch_remote_base`` (imported inside the function, so patching the module
+    attribute is where the door looks it up). Against the real checkout that is
+    a live ``git fetch origin main``: a merge landing on main while the suite
+    runs moves the ref between the test's own ``rev-parse`` and the hand-over,
+    and the start line records a sha the test never expected (main-CI
+    41996195419: ``cf377391`` expected, ``0c28ca7d`` recorded — PR #2389
+    merged mid-run). Every caller asserts on the returned spy: ``called once
+    with`` the consumer root and ``origin/main`` proves the patch landed on the
+    call the door actually makes. §6's clone-based tests deliberately keep the
+    real fetch — their origin is a disposable ``tmp_path`` bare repo.
+    """
+    with patch("dispatch_worktree_isolation.fetch_remote_base", return_value=False) as spy:
+        yield spy
+
+
 # ---------------------------------------------------------------------------
 # 1. lifecycle on: one line, before the slot, with the consumer repo's base sha
 # ---------------------------------------------------------------------------
@@ -259,13 +291,22 @@ def test_one_start_line_written_before_the_slot(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
 
     seen: dict = {}
-    consumer_root = dispatch_cli._resolve_repo_root()
+    # The door resolves its base in the CONSUMER repo (OI-2510), not in the
+    # engine checkout this file lives in — read the expectation from the same
+    # root, so the test and the door can never name two different repos.
+    consumer_root = resolve_consumer_project_root()
     expected_sha = _rev_parse(consumer_root, "origin/main")
 
-    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+    with _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
          patch("dispatch_cli._execute_claude_headless", return_value=0):
         assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    # OI-2549: the patch landed on the call the door really makes (consumer
+    # root + origin/main) — and that call can no longer move the ref the
+    # expectation above was read from.
+    fetch_spy.assert_called_once_with(consumer_root, "origin/main")
 
     lines = _start_lines(state_dir)
     assert len(lines) == 1, lines
@@ -331,11 +372,15 @@ def test_unresolvable_ref_refuses_before_the_hand_over(tmp_path, monkeypatch, ca
     monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
 
     seen: dict = {}
-    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+    with _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
          patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
         assert dispatch_cli.run_dispatch(spec_file) == 1
 
+    # A non-``origin/`` ref is never fetched (OI-2549: the door is on the real
+    # checkout here, so this also proves no live fetch can fire behind it).
+    fetch_spy.assert_not_called()
     assert "start_lines_at_slot" not in seen, "a refused base must never reach the slot"
     headless.assert_not_called()
     assert _start_lines(state_dir) == []
@@ -365,13 +410,17 @@ def test_refused_start_closes_only_this_doors_attempt(tmp_path, monkeypatch, cap
         entered["slot"] = True
         yield
 
-    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+    with _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", _slot), \
          patch("dispatch_cli._execute_claude_headless", return_value=0) as headless, \
          patch("dispatch_start.begin",
                side_effect=dispatch_start.StartRefused("start_test_forced", "forced by the test")):
         assert dispatch_cli.run_dispatch(spec_file) == 1
 
+    # OI-2549: the base is resolved (and fetched) before ``begin`` is forced to
+    # refuse — patch that fetch, never the real origin.
+    fetch_spy.assert_called_once_with(resolve_consumer_project_root(), "origin/main")
     assert entered["slot"] is False, "a refused start must not take the slot"
     headless.assert_not_called()
     assert "REJECT [start-line-refused]: start_test_forced: forced by the test" in capsys.readouterr().err
@@ -413,12 +462,14 @@ def test_failed_projection_is_named_and_the_dispatch_proceeds(tmp_path, monkeypa
         entered["slot"] = True
         yield
 
-    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+    with _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", _slot), \
          patch("dispatch_cli._execute_claude_headless", return_value=0) as headless, \
          patch("dispatch_start.begin", return_value=failed):
         assert dispatch_cli.run_dispatch(spec_file) == 0
 
+    fetch_spy.assert_called_once_with(resolve_consumer_project_root(), "origin/main")
     assert entered["slot"] is True
     headless.assert_called_once()
     err = capsys.readouterr().err
@@ -439,10 +490,13 @@ def test_legacy_writes_no_line_and_keeps_main_s_decision(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
 
-    with patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+    with _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
         assert dispatch_cli.run_dispatch(spec_file) == 0
 
+    # The legacy path resolves (and so fetches) the base too — off the real origin.
+    fetch_spy.assert_called_once_with(resolve_consumer_project_root(), "origin/main")
     headless.assert_called_once()
     # No lifecycle line and no lifecycle receipt anywhere on the ledger.
     assert _start_lines(state_dir) == []
@@ -587,3 +641,75 @@ def test_legacy_path_has_the_same_freshness(tmp_path, monkeypatch):
     assert headless.call_args.kwargs["base_sha"] == fresh_sha
     # Still no lifecycle line: only the freshness changed.
     assert _start_lines(state_dir) == []
+
+
+# ---------------------------------------------------------------------------
+# 7. OI-2549 — a merge on main while the run is in flight
+#    (main-CI 41996195419 ran on cf377391; #2389 merged at 08:45Z, the door's
+#    own fetch moved origin/main to 0c28ca7d between the test's read and the
+#    hand-over. The control below reproduces that on a disposable origin; the
+#    test after it pins what §1-§5 now rely on: a neutralised fetch cannot move
+#    the ref the expectation was read from.)
+# ---------------------------------------------------------------------------
+
+def test_the_race_the_hermetic_tests_neutralise_is_real(tmp_path, monkeypatch):
+    """Control: WITHOUT the patch, the upstream move lands in the start line.
+
+    Proves the fixture can reproduce the CI failure, so the pass in the test
+    below is caused by the neutralised fetch and not by a dead fixture.
+    """
+    dispatch_id = "20261103-k4b-upstream-race"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="origin/main")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    expected_sha = _rev_parse(consumer, "origin/main")
+    moved_sha = _push_main(seed, "merged-during-the-run.txt")
+    assert moved_sha != expected_sha, "fixture: the upstream commit must be new"
+    assert _rev_parse(consumer, "origin/main") == expected_sha, (
+        "fixture: the clone's local origin/main must still be the pre-merge commit")
+
+    with _consumer_root(consumer), \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0):
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    # The door's own fetch moved the ref under the test — exactly 41996195419.
+    assert lines[0]["base_sha"] == moved_sha
+    assert lines[0]["base_sha"] != expected_sha
+
+
+def test_a_merge_during_the_run_keeps_the_line_on_the_expected_base(tmp_path, monkeypatch):
+    """Same move, fetch neutralised: the line names the sha the test read.
+
+    This is the shape §1-§5 use against the real checkout, proven on a repo
+    whose origin this test can move: read the expectation, merge upstream, run
+    the door. Nothing outside the test can move the ref in between.
+    """
+    dispatch_id = "20261103-k4b-upstream-hermetic"
+    data_dir, spec_file = _make_bundle(tmp_path, dispatch_id=dispatch_id, base_ref="origin/main")
+    state_dir = _door_env(monkeypatch, data_dir, lifecycle=True)
+
+    seed, consumer = _init_origin_and_clone(tmp_path)
+    expected_sha = _rev_parse(consumer, "origin/main")
+    moved_sha = _push_main(seed, "merged-during-the-run.txt")
+    assert moved_sha != expected_sha, "fixture: the upstream commit must be new"
+
+    seen: dict = {}
+    with _consumer_root(consumer), \
+         _patched_fetch() as fetch_spy, \
+         patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
+         patch("dispatch_cli.serialize_lane", side_effect=lambda *a, **k: _slot_spy(state_dir, seen)), \
+         patch("dispatch_cli._execute_claude_headless", return_value=0) as headless:
+        assert dispatch_cli.run_dispatch(spec_file) == 0
+
+    fetch_spy.assert_called_once_with(consumer, "origin/main")
+    lines = _start_lines(state_dir)
+    assert len(lines) == 1, lines
+    assert lines[0]["base_sha"] == expected_sha, (
+        f"the start line named {lines[0]['base_sha']!r}; the test read {expected_sha!r} "
+        f"before the run and upstream had moved to {moved_sha!r}")
+    assert headless.call_args.kwargs["base_sha"] == expected_sha
+    assert [line["dispatch_id"] for line in seen["start_lines_at_slot"]] == [dispatch_id]

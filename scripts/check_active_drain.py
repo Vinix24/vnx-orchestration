@@ -64,6 +64,8 @@ from typing import Mapping, NamedTuple
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR / "lib"))
 
+from ledger_attempt_state import (LEDGER_FILENAME, AttemptVerdict,  # noqa: E402, E501
+                                  attempt_verdict, read_ledger)
 from open_outcomes import (  # noqa: E402
     DECISION_LOG_NAME,
     NO_RECEIPT_THRESHOLD_HOURS,
@@ -75,6 +77,7 @@ from open_outcomes import (  # noqa: E402
     receipt_status_index,
     scan_active,
     scoped_processed,
+    store_project_id,
 )
 from project_root import resolve_data_dir  # noqa: E402
 from receipt_outcome import summarize as summarize_outcomes  # noqa: E402
@@ -148,13 +151,16 @@ def _destination(
     older_than_seconds: float,
     has_receipt: bool = False,
     decision: str | None = None,
+    verdict: AttemptVerdict | None = None,
 ) -> tuple[str, str]:
     """Where a dispatch goes and why: ``completed``, ``dead_letter`` or
-    ``skipped`` (it stays in active/); open_outcomes.active_destination."""
+    ``skipped`` (it stays in active/); open_outcomes.active_destination. A
+    ``v3`` ``verdict`` decides it; without one, or with a ``legacy`` verdict,
+    the receipt-based rule is the legacy path, unchanged."""
     age = (now - entry.timestamp).total_seconds() if entry.timestamp is not None else None
     destination, reason, _ = active_destination(
         receipt_status=receipt_status, has_receipt=has_receipt, decision=decision,
-        age_seconds=age, threshold_seconds=older_than_seconds)
+        age_seconds=age, threshold_seconds=older_than_seconds, verdict=verdict)
     return destination, reason
 
 
@@ -167,11 +173,14 @@ def drain_one(
     dry_run: bool,
     receipt_present: "frozenset[str]" = frozenset(),
     decisions: "Mapping[str, dict] | None" = None,
+    verdict: AttemptVerdict | None = None,
 ) -> DrainResult:
     """``receipt_present`` (build_receipt_presence) names the dispatches with a
     receipt on disk; one of them without an index entry is left in active/.
     ``decisions`` (read_outcome_decisions) maps a dispatch id to the T0's last
-    recorded decision, which moves the dispatch whatever its receipts say."""
+    recorded decision, which moves the dispatch whatever its receipts say.
+    A ``v3`` ``verdict`` decides on the end line plus liveness; a ``legacy``
+    one, or none, takes the receipt-based path unchanged."""
     # Accept either the legacy frozenset (success-implied) or the new
     # status-aware dict to keep external callers working.
     if isinstance(receipt_index, dict):
@@ -184,7 +193,7 @@ def drain_one(
     decision = ((decisions or {}).get(entry.dispatch_id) or {}).get("decision")
     dest_bucket, reason = _destination(entry, receipt_status, now, older_than_seconds,
                                        has_receipt=entry.dispatch_id in receipt_present,
-                                       decision=decision)
+                                       decision=decision, verdict=verdict)
     if dest_bucket == "skipped":
         return DrainResult(
             dispatch_id=entry.dispatch_id,
@@ -234,7 +243,12 @@ def drain_active(
     older_than_hours: float = NO_RECEIPT_THRESHOLD_HOURS,
     dry_run: bool = False,
 ) -> list[DrainResult]:
-    """Main entry point: drain active/ dispatches. Returns list of DrainResult."""
+    """Main entry point: drain active/ dispatches. Returns list of DrainResult.
+
+    A ``v3`` dispatch is decided on its attempt verdict from a ledger read once
+    for the whole run; a ``legacy`` one keeps the receipt-based path unchanged,
+    and an unreadable ledger makes every entry an open point — never a move.
+    """
     dispatches_dir = data_dir / "dispatches"
     receipts_dir = data_dir / "receipts"
 
@@ -244,6 +258,12 @@ def drain_active(
     receipt_present = receipt_presence(receipts, project_id, summary)
     # the sentinel project matches no decision: without a project id nothing is decided
     decisions = read_outcome_decisions(data_dir / "state" / DECISION_LOG_NAME, project_id)
+    ledger_project = store_project_id(data_dir)
+    try:
+        ledger_records: "list[dict] | None" = read_ledger(data_dir / "state")
+        ledger_error: str | None = None
+    except OSError as exc:
+        ledger_records, ledger_error = None, f"cannot read {LEDGER_FILENAME}: {exc}"
     now = datetime.now(tz=timezone.utc)
     older_than_seconds = older_than_hours * 3600.0
 
@@ -254,6 +274,11 @@ def drain_active(
         for name, reason in scan.ignored
     ]
     for entry in scan.entries:
+        if ledger_error is not None:
+            # fail-closed: without the ledger nothing proves the dispatch done
+            results.append(DrainResult(dispatch_id=entry.dispatch_id, action="skipped",
+                                       reason=f"open point: {ledger_error}", dry_run=dry_run))
+            continue
         result = drain_one(
             entry=entry,
             receipt_index=receipt_index,
@@ -263,6 +288,8 @@ def drain_active(
             dry_run=dry_run,
             receipt_present=receipt_present,
             decisions=decisions,
+            verdict=attempt_verdict(data_dir / "state", ledger_project, entry.dispatch_id,
+                                    records=ledger_records),
         )
         results.append(result)
     return results

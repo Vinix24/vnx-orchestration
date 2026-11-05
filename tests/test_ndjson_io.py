@@ -225,6 +225,44 @@ def test_strict_reader_refuses_an_undecodable_final_line_that_ends_in_a_newline(
     assert exc.value.line_number == 2
 
 
+def test_strict_reader_refuses_a_committed_break_before_a_whitespace_only_tail(tmp_path):
+    """Only the final physical fragment can be torn: trailing spaces never rescue a break."""
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"dispatch_id":"d-own", broken\n   ', encoding="utf-8")
+
+    with pytest.raises(NdjsonCorruptionError) as exc:
+        read_ndjson_strict(path)
+
+    assert exc.value.line_number == 1
+
+    terminated = tmp_path / "terminated.ndjson"
+    terminated.write_text('{"dispatch_id":"d-own", broken\n', encoding="utf-8")
+    with pytest.raises(NdjsonCorruptionError) as terminated_exc:
+        read_ndjson_strict(terminated)
+    assert terminated_exc.value.line_number == 1
+
+
+def test_strict_reader_skips_a_real_torn_tail(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n{"dispatch_id": "x", brok', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}]
+
+
+def test_strict_reader_keeps_records_before_a_whitespace_only_final_fragment(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n   ', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}]
+
+
+def test_strict_reader_reads_an_unterminated_valid_final_line(tmp_path):
+    path = tmp_path / "t0_receipts.ndjson"
+    path.write_text('{"a": 1}\n{"b": 2}', encoding="utf-8")
+
+    assert read_ndjson_strict(path) == [{"a": 1}, {"b": 2}]
+
+
 def test_strict_reader_with_a_predicate_skips_another_dispatches_broken_line(
         tmp_path, caplog):
     path = tmp_path / "t0_receipts.ndjson"
