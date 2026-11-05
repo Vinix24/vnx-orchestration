@@ -38,6 +38,12 @@ bulk. This module is built to make that impossible by default:
   a clean no-op.
 * **Dry-run.** ``--dry-run`` reports exactly what would happen and writes
   nothing — no receipt, no manifest move, no lease/state mutation.
+
+``v3`` dispatches (ADR-045 §7)
+------------------------------
+The run reads the ledger once and asks ``attempt_verdict`` per orphan. A ``v3``
+orphan is never recovered here — only the finalizer or the K-6 sweep ends it and
+only the K-7 drain moves its manifest — so it is counted by kind.
 """
 
 from __future__ import annotations
@@ -49,6 +55,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+
+from ledger_attempt_state import (AttemptVerdict, LEDGER_FILENAME,
+                                  attempt_verdict, read_ledger)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +127,11 @@ class SweepResult:
     skipped_alive: list = field(default_factory=list)  # dispatch_ids with a live orchestrator
     skipped_no_pid: list = field(default_factory=list)  # eligible but no PID resolved (still recovered)
     skipped_protected: list = field(default_factory=list)  # excluded by caller (e.g. the invoking dispatch)
+    v3_ended: list = field(default_factory=list)
+    v3_live: list = field(default_factory=list)
+    v3_unknown: list = field(default_factory=list)
+    v3_dead_no_end: list = field(default_factory=list)
+    ledger_error: Optional[str] = None  # why nothing was recovered: unreadable ledger
     capped: bool = False
     dry_run: bool = False
     errors: list = field(default_factory=list)
@@ -130,6 +144,11 @@ class SweepResult:
             "skipped_alive": list(self.skipped_alive),
             "skipped_no_pid": list(self.skipped_no_pid),
             "skipped_protected": list(self.skipped_protected),
+            "v3_ended": list(self.v3_ended),
+            "v3_live": list(self.v3_live),
+            "v3_unknown": list(self.v3_unknown),
+            "v3_dead_no_end": list(self.v3_dead_no_end),
+            "ledger_error": self.ledger_error,
             "capped": self.capped,
             "dry_run": self.dry_run,
             "errors": list(self.errors),
@@ -242,6 +261,41 @@ def discover_orphans(data_dir: Path, state_dir: Path, project_id: str) -> list[O
     return orphans
 
 
+def _ledger_verdicts(state_dir: Path, project_id: str, orphans: "list[Orphan]",
+                     records: "Optional[list]" = None
+                     ) -> "tuple[dict[str, AttemptVerdict], Optional[str]]":
+    """Read the ledger once (ADR-045 §7) and judge every orphan; ``({}, reason)``
+    for an unreadable ledger, since it cannot tell a ``v3`` orphan from a legacy one.
+    """
+    if records is None:
+        try:
+            records = read_ledger(state_dir)
+        except OSError as exc:
+            return {}, f"cannot read {LEDGER_FILENAME} to decide a v3 dispatch: {exc}"
+    return ({orphan.dispatch_id: attempt_verdict(state_dir, project_id,
+                                                 orphan.dispatch_id, records=records)
+             for orphan in orphans}, None)
+
+
+def _skip_not_recoverable(orphans: "list[Orphan]", verdicts: "dict[str, AttemptVerdict]",
+                          protected: "set[str]", result: SweepResult) -> "list[Orphan]":
+    """Return the ``legacy`` orphans only; a ``v3`` attempt is never recovered here."""
+    # A v3 attempt is ended by the finalizer/K-6 sweep and moved only by the K-7 drain.
+    legacy = []
+    for orphan in orphans:
+        verdict = verdicts[orphan.dispatch_id]
+        if orphan.dispatch_id in protected:
+            result.skipped_protected.append(orphan.dispatch_id)
+            logger.info("crash_recovery: SKIP %s — excluded by caller", orphan.dispatch_id)
+        elif verdict.is_legacy:
+            legacy.append(orphan)
+        else:
+            getattr(result, f"v3_{verdict.kind}").append(orphan.dispatch_id)
+            logger.info("crash_recovery: LEAVE %s — attempt is v3 (%s)",
+                        orphan.dispatch_id, verdict.kind)
+    return legacy
+
+
 # ---------------------------------------------------------------------------
 # Recovery actions
 # ---------------------------------------------------------------------------
@@ -349,6 +403,7 @@ def sweep(
     dry_run: bool = False,
     pid_alive: "Optional[Callable[[Optional[int]], bool]]" = None,
     exclude_ids: "Optional[set[str]]" = None,
+    ledger: "Optional[list[dict]]" = None,
 ) -> SweepResult:
     """Recover up to ``max_orphans`` dead-PID orphaned active dispatches.
 
@@ -372,6 +427,11 @@ def sweep(
                      are recorded in ``skipped_protected`` and never consume the
                      cap.
 
+    A ``legacy`` orphan is recovered exactly as before; a ``v3`` orphan is never
+    recovered but counted under ``v3_<kind>`` (ADR-045 §7); an unreadable ledger
+    recovers nothing and names the reason. ``ledger`` is a read the caller already
+    made (the unified orphan sweep reads once per run); ``None`` reads it here.
+
     Returns:
         :class:`SweepResult` — never raises on a per-orphan error (recorded in
         ``errors`` and the sweep continues).
@@ -383,18 +443,13 @@ def sweep(
 
     orphans = discover_orphans(data_dir, state_dir, project_id)
     result.scanned = len(orphans)
+    verdicts, result.ledger_error = _ledger_verdicts(state_dir, project_id, orphans, ledger)
+    if result.ledger_error is not None:
+        result.errors.append({"dispatch_id": None, "error": result.ledger_error})
+        logger.error("crash_recovery: %s — no orphan recovered this run", result.ledger_error)
+        return _emit_summary(result)
 
-    for orphan in orphans:
-        # Exclusion is checked FIRST, before liveness and the cap: a protected
-        # orphan is never recovered no matter what its PID probe says, and it
-        # never consumes the flood budget.
-        if orphan.dispatch_id in protected:
-            result.skipped_protected.append(orphan.dispatch_id)
-            logger.info(
-                "crash_recovery: SKIP %s — excluded by caller (never recovered)",
-                orphan.dispatch_id,
-            )
-            continue
+    for orphan in _skip_not_recoverable(orphans, verdicts, protected, result):
         # Liveness is checked BEFORE the cap so that a live orphan never trips
         # the cap or stops the scan — only genuinely recoverable (dead-PID)
         # orphans consume the budget.
@@ -455,7 +510,8 @@ def sweep(
     return result
 
 
-def _emit_summary(result: SweepResult) -> None:
+def _emit_summary(result: SweepResult) -> SweepResult:
+    """Name every count of the run, the four ``v3`` kinds and a refusal included."""
     when = datetime.now(timezone.utc).isoformat()
     logger.info(
         "crash_recovery: sweep complete at %s — scanned=%d recovered=%d "
@@ -463,3 +519,7 @@ def _emit_summary(result: SweepResult) -> None:
         when, result.scanned, len(result.recovered), len(result.skipped_alive),
         len(result.skipped_no_pid), result.capped, result.dry_run, len(result.errors),
     )
+    logger.info("crash_recovery: v3 ended=%d live=%d unknown=%d dead_no_end=%d err=%s",
+                len(result.v3_ended), len(result.v3_live), len(result.v3_unknown),
+                len(result.v3_dead_no_end), result.ledger_error is not None)
+    return result
