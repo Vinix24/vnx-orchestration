@@ -22,6 +22,7 @@ from dispatch_lifecycle import (  # its table, its grace, its parser: never a co
     ABANDON_GRACE_SECONDS, END_INTENT_DIRNAME, END_STATE_TARGET, PROJECTION_ROUTES,
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
 )
+from coordination_db import DISPATCH_TRANSITIONS  # the legal hops, never a copy
 from ledger_end_line import end_line
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
@@ -133,6 +134,22 @@ def _records(state_dir: Path, repo: str, activation, project: str):
     return starts, ends, unknown, problems, records
 
 
+def _projection_successors(target: str) -> frozenset:
+    """Every state this attempt can still reach from the projection ``target``.
+
+    A new attempt begins at the claim (``increment_attempt_count`` runs on each
+    claim path), so the walk stops at ``claimed``: it and everything behind it
+    belong to a later attempt. Read from ``DISPATCH_TRANSITIONS``, never copied.
+    """
+    seen, queue = set(), [target]
+    while queue:
+        for nxt in DISPATCH_TRANSITIONS.get(queue.pop(), frozenset()):
+            if nxt != "claimed" and nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+    return frozenset(seen)
+
+
 def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated: datetime,
              problems: list) -> dict:
     found = {name: [] for name in DEFECTS}  # rule 3: a list of keys per defect
@@ -170,7 +187,8 @@ def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated
             row = rows[key[:2]]
             attempt, state = row.get("attempt_count"), str(row.get("state") or "").strip()
             if attempt == key[2] and not isinstance(attempt, bool) and state != target \
-                    and state not in PROJECTION_ROUTES[target]:
+                    and state not in PROJECTION_ROUTES[target] \
+                    and state not in _projection_successors(target):
                 found["projection_conflict"].append(key)
     return found
 
