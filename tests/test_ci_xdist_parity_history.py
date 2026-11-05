@@ -122,9 +122,12 @@ def clean_window() -> list:
     return runs + [main_run(9, day=2, hour=23)]
 
 
-def evaluate(runs, *, watch_list=(), oi_status=None, truncated=False, ancestry=None, job_evidence=None):
+def evaluate(runs, *, watch_list=(), oi_status=None, truncated=False, ancestry=None, job_evidence=None,
+             candidate_branch=None):
     ancestry = ancestry or {}
     option = {} if job_evidence is None else {"job_evidence": job_evidence}
+    if candidate_branch is not None:
+        option["candidate_branch"] = candidate_branch
     return hist.evaluate(
         runs,
         target_fingerprint=FP,
@@ -503,6 +506,46 @@ def test_a_run_without_a_verdict_before_the_window_is_ignored():
     evaluation = evaluate(clean_window() + [_without_verdict(run(30, sha=BEFORE, day=1, hour=0))])
     assert evaluation.holds
     assert evaluation.placements[-1].place == "before_window"
+
+
+# --- the candidate branch: the run whose workflow has no shadow job by design (OI-2544) -----------------------
+
+CANDIDATE_BRANCH = "dispatch/dlv-5e142214333a"
+
+
+def test_a_candidate_run_without_a_verdict_is_no_verdict_without_the_flag_and_candidate_with_it():
+    candidate = _without_verdict(run(30, branch=CANDIDATE_BRANCH, day=3))
+    without = hist.place_run(candidate, FP, lambda head: True)
+    assert without.place == "no_verdict" and without.reasons
+    with_flag = hist.place_run(candidate, FP, lambda head: True, candidate_branch=CANDIDATE_BRANCH)
+    assert with_flag.place == "candidate"
+    assert with_flag.reasons == ["candidate branch: outside the window; it neither measures parity nor blocks the rule"]
+
+
+def test_a_candidate_run_is_outside_the_window_and_never_a_blocker():
+    candidate = _without_verdict(run(30, branch=CANDIDATE_BRANCH, day=3))
+    evaluation = evaluate(clean_window() + [candidate], candidate_branch=CANDIDATE_BRANCH)
+    assert evaluation.holds, [vars(c) for c in evaluation.conditions]
+    assert evaluation.placements[-1].place == "candidate"
+    assert candidate not in evaluation.window
+
+
+@pytest.mark.parametrize("branch", ["", "dispatch/other", None], ids=["empty", "other", "unknown"])
+def test_a_branch_that_is_not_the_candidate_branch_still_blocks(branch):
+    """Only an exact match to the given branch places a run as candidate; a missing or other branch blocks."""
+    bad = _without_verdict(run(30, day=3))
+    bad.head_branch = branch
+    evaluation = evaluate(clean_window() + [bad], candidate_branch=CANDIDATE_BRANCH)
+    assert failed(evaluation) == {"every_run_has_verdict"}
+
+
+def test_the_table_names_the_candidate_and_why_it_is_outside_the_window():
+    candidate = _without_verdict(run(30, branch=CANDIDATE_BRANCH, day=3))
+    header = {**HEADER, "candidate_branch": CANDIDATE_BRANCH}
+    text = hist.render(evaluate(clean_window() + [candidate], candidate_branch=CANDIDATE_BRANCH), header)
+    [row] = [line for line in text.splitlines() if line.startswith("1030 ")]
+    assert " candidate " in row and "candidate branch: outside the window" in row
+    assert f"candidate branch: {CANDIDATE_BRANCH}" in text
 
 
 def test_a_run_without_a_verdict_whose_head_cannot_be_found_blocks():
@@ -1388,6 +1431,28 @@ def test_the_cli_blocks_on_a_completed_run_whose_artifact_is_missing(tmp_path):
     assert _failed_names(document) == {"every_run_has_verdict"}
     assert places["11"]["place"] == "no_verdict"
     assert "no valid artifacts found to download" in places["11"]["reasons"][0]
+
+
+def test_the_cli_places_a_candidate_branch_run_outside_the_window_only_with_the_flag(tmp_path):
+    """OI-2544 end to end: D4's own run has no shadow job, so without the flag it blocks as ``no_verdict``."""
+    base, heads = _first_parent_window()
+    runs, verdicts = _holding_runs(heads)
+    runs.append(_listed(11, heads[0], "2099-01-02T08:30:00Z", branch=CANDIDATE_BRANCH, event="pull_request"))
+    without_dir = tmp_path / "without"
+    without_dir.mkdir()
+    without = _cli(without_dir, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP,
+                   "--no-watch-list", "--json")
+    assert without.returncode == 1, without.stderr
+    assert {r["run_id"]: r["place"] for r in json.loads(without.stdout)["runs"]}["11"] == "no_verdict"
+
+    with_dir = tmp_path / "with"
+    with_dir.mkdir()
+    with_flag = _cli(with_dir, runs, verdicts, "--last-d3-merge", base, "--fingerprint", FP,
+                     "--no-watch-list", "--candidate-branch", CANDIDATE_BRANCH, "--json")
+    assert with_flag.returncode == 0, with_flag.stderr
+    document = json.loads(with_flag.stdout)
+    assert {r["run_id"]: r["place"] for r in document["runs"]}["11"] == "candidate"
+    assert document["holds"] is True and document["candidate_branch"] == CANDIDATE_BRANCH
 
 
 def test_the_cli_does_not_count_or_cache_an_earlier_attempts_verdict(tmp_path):
