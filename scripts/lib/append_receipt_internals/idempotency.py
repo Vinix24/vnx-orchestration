@@ -87,7 +87,7 @@ def _chain_receipts_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
-_TORN_TAIL_WINDOW = 65536  # a longer fragment was not written by this path: seal it
+_TORN_TAIL_WINDOW = 65536  # the chunk the closer reads backwards in; no size decides
 
 
 def _parses_as_json_object(fragment: bytes) -> bool:
@@ -108,8 +108,8 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
     can see. This ledger is append-only: the fragment stays on disk
     byte-for-byte; ``TORN_TAIL_CLOSED`` and one ``\\n`` follow — debris, never
     corruption (K-9c rule 1). A COMPLETE record that only lacks its newline is
-    not torn: it parses, so it stands and gets just the ``\\n``. Only the tail
-    window is read, never the whole ledger.
+    not torn: it parses, so it stands and gets just the ``\\n``. The whole final
+    fragment is judged, read back in chunks until the last ``\\n`` (K-9d rule 1).
 
     MUST be called while holding the append lock.
     """
@@ -121,18 +121,19 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
             reader.seek(-1, os.SEEK_END)
             if reader.read(1) == b"\n":
                 return False
-            start = max(0, size - _TORN_TAIL_WINDOW)
-            reader.seek(start)
-            window = reader.read()
+            fragment, end = b"", size
+            while end > 0 and b"\n" not in fragment:
+                start = max(0, end - _TORN_TAIL_WINDOW)
+                fragment = os.pread(reader.fileno(), end - start, start) + fragment
+                end = start
+            fragment = fragment.rsplit(b"\n", 1)[-1]
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise AppendReceiptError(
             "receipt_tail_unreadable", EXIT_IO_ERROR,
             f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
-    # No newline in a window that did not start at 0: too long to be a record here.
-    stands = (start == 0 or b"\n" in window) and _parses_as_json_object(
-        window.rsplit(b"\n", 1)[-1])
+    stands = _parses_as_json_object(fragment)
     try:
         with receipt_path.open("ab") as writer:
             writer.write(b"\n" if stands else TORN_TAIL_CLOSED + b"\n")
