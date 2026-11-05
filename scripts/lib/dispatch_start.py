@@ -217,15 +217,27 @@ def pid_verdict(pid: object, started_at: object) -> Optional[bool]:
 
 def _liveness(start_line: Dict[str, Any], *, state_dir: Path, dispatch_id: str) -> Optional[str]:
     """The first of §5's signals that holds, else ``PROBE_UNKNOWN`` if one could not be
-    measured, else None (K-9d rule 3)."""
+    measured, else None (K-9d rule 3). Only a missing spawn file means no child was
+    recorded; an unreadable or untrusted one is unknown (K-act rule 5)."""
     signals = {"door_pid": pid_verdict(start_line.get("door_pid"), start_line.get("door_started_at"))}
     try:
-        spawn = json.loads(spawn_file_path(state_dir, start_line["project_id"], dispatch_id,
-                                           int(start_line["attempt"])).read_text(encoding="utf-8"))
-    except (KeyError, TypeError, ValueError, OSError, StartRefused, json.JSONDecodeError):
-        spawn = None
-    if isinstance(spawn, dict):
-        signals["child_pid"] = pid_verdict(spawn.get("child_pid"), spawn.get("child_started_at"))
+        text = spawn_file_path(state_dir, start_line["project_id"], dispatch_id,
+                               int(start_line["attempt"])).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = None  # no spawn file: this attempt recorded no child, so no extra signal
+    except (KeyError, TypeError, ValueError, OSError, StartRefused):
+        text = None  # exists but is unreadable or undecodable: unknown, never absent
+        signals["child_pid"] = None
+    if text is not None:
+        try:
+            spawn = json.loads(text)
+        except ValueError:  # JSONDecodeError is a ValueError
+            spawn = None
+        child = spawn.get("child_pid") if isinstance(spawn, dict) else None
+        # A non-object value or a child_pid that is not a positive int (a bool is no int) is no evidence.
+        signals["child_pid"] = (pid_verdict(child, spawn.get("child_started_at"))
+                                if isinstance(child, int) and not isinstance(child, bool) and child > 0
+                                else None)
     from dispatch_worktree_isolation import claims_dir_for_state_dir, probe_occupancy  # noqa: PLC0415
     try:
         held = probe_occupancy(claims_dir_for_state_dir(state_dir), dispatch_id)
@@ -382,13 +394,12 @@ def begin(
 
 
 def record_child(handover: Handover, *, state_dir: str | Path, child_pid: int) -> Optional[Path]:
-    """The ``on_spawn`` hook: record the child right after the spawn; v3 only, and no
-    readable child start time means nothing is written."""
+    """The ``on_spawn`` hook: record the child right after the spawn; v3 only. An
+    unreadable start time still records the child with an unknown start, because
+    unknown never reads as dead (K-9d rule 3)."""
     if not handover.is_v3 or handover.attempt < 1: return None
-    started = process_started_at(child_pid)
-    if started is None: return None
     path = spawn_file_path(state_dir, handover.project_id, handover.dispatch_id, handover.attempt)
     atomic_write_json(path, {"version": 1, "project_id": handover.project_id,
                              "dispatch_id": handover.dispatch_id, "attempt": handover.attempt,
-                             "child_pid": child_pid, "child_started_at": started})
+                             "child_pid": child_pid, "child_started_at": process_started_at(child_pid)})
     return path
