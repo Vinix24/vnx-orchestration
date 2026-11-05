@@ -77,10 +77,16 @@ the summary counts tests that never run.
 Subcommands: ``compare`` writes ``xdist-parity-verdict.json`` (and a step
 summary); ``fingerprint`` prints the selection fingerprint of an args
 directory written by ``scripts/ci/profile_a_pytest_args.sh`` with
-``VNX_CI_XDIST=1``. Exit codes of ``compare``: the verdict's exit (0, 1, 2),
-or 0 when the run is not applicable (light profile); 2 with a reason on stderr,
-never a traceback, when an argument is malformed or the verdict or its
-summary cannot be written.
+``VNX_CI_XDIST=1``; ``completeness`` is Profile A's own per-PR check after the
+switch (D4): with no serial reference to compare against, it reads the two
+phase manifests and XMLs of the same run and fails on a collected test that
+did not run, a test run more than once, a selection the two phases do not
+partition, a failed collection, or a skip whose key is not recorded in
+``scripts/ci/xdist_expected_skips.txt``. Its verdict is
+``xdist-completeness-verdict.json``. Exit codes of ``compare`` and
+``completeness``: the verdict's exit (0, 1, 2), or 0 when a compare run is not
+applicable (light profile); 2 with a reason on stderr, never a traceback, when
+an argument is malformed or the verdict or its summary cannot be written.
 """
 
 from __future__ import annotations
@@ -125,6 +131,17 @@ PARITY_STEPS = ("checkout", "prelude", "selection", "download_reference", "downl
 # the record step after it can add its outcome; a recorded verdict carries all six.
 COMPARE_STEP = "parity"
 RECORDED_STEPS = PARITY_STEPS + (COMPARE_STEP,)
+# The per-PR completeness check of Profile A after the switch (D4). Its own
+# difference kinds, because it has no serial reference to name.
+COMPLETENESS_SCHEMA = "vnx-xdist-completeness/1"
+COMPLETENESS_FILE = "xdist-completeness-verdict.json"
+COMPLETENESS_KINDS = (
+    "not_run",
+    "run_more_than_once",
+    "partition",
+    "unexpected_skip",
+    "collection_outcome_failed",
+)
 CLASS_ORDER = ("fail", "xfail", "skip", "pass")
 _TEARDOWN_PREFIX = "failed on teardown with"
 _XPASS_AS_SKIPPED = "xfail-marked test passes unexpectedly"
@@ -849,6 +866,161 @@ def _compare_evidence(inputs: CompareInputs, problems: list) -> dict:
     return {"differences": compare(reference, serial, parallel), "counts": counts, "tool_versions": pins}
 
 
+# --- the per-PR completeness check of Profile A after the switch (D4) --------------------
+
+
+def expected_skip_entry_problem(entry: str) -> str | None:
+    """Why *entry* is not a test key of xdist_expected_skips.txt; None when it is."""
+    if not entry.startswith("tests/"):
+        return "not a path under tests/"
+    if not entry.split("::", 1)[0].endswith(".py"):
+        return "not a test file (.py)"
+    if "\\" in entry or ".." in entry or "//" in entry or "/./" in entry:
+        return "the path must be plain, without '.', '..', '/' or '//'"
+    return None
+
+
+def read_expected_skips(path: Path) -> tuple:
+    """(recorded keys, problems) of xdist_expected_skips.txt; a missing or unreadable file is a problem."""
+    if not path.is_file():
+        return set(), [("missing_expected_skips", str(path))]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as exc:
+        return set(), [("unreadable_expected_skips", f"{path}: {exc}")]
+    entries, problems = set(), []
+    for number, line in enumerate(lines, start=1):
+        entry = re.sub(r"(^|[ \t])#.*$", "", line).strip()
+        if not entry:
+            continue
+        problem = expected_skip_entry_problem(entry)
+        if problem is not None:
+            problems.append(("malformed_expected_skips", f"{path}:{number}: {entry!r}: {problem}"))
+            continue
+        entries.add(entry)
+    return entries, problems
+
+
+def phase_skips(phase: Phase) -> list:
+    """Every skip of one phase, test keys and collection-time skips, with its reason."""
+    entries = []
+    for k, executions in phase.executions.items():
+        if combined_class(executions) == "skip":
+            entries.append({"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"),
+                            "phase": phase.name, "reason": combined_skip_reason(executions)})
+    for outcome in phase.manifest["collection_outcomes"]:
+        if outcome["outcome"] == "skipped":
+            entries.append({"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+    return entries
+
+
+def _collection_nodes(phase: Phase) -> set:
+    return {outcome["nodeid"] for outcome in phase.manifest["collection_outcomes"]}
+
+
+def completeness_differences(serial: Phase, parallel: Phase, expected: set) -> dict:
+    """Every way the run is not complete, from its own two phases (plan "After the switch")."""
+    out = {kind: [] for kind in COMPLETENESS_KINDS}
+    out["partition"] = ([{"nodeid": n, "problem": "in both phases"} for n in set(serial.nodeids) & set(parallel.nodeids)]
+                        + [{"nodeid": n, "problem": "collection outcome in both phases"}
+                           for n in _collection_nodes(serial) & _collection_nodes(parallel)])
+    for phase in (serial, parallel):
+        for k, executions in phase.executions.items():
+            if len(executions) > 1:
+                out["run_more_than_once"].append(
+                    {"nodeid": phase.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phase": phase.name,
+                     "executions": len(executions)})
+        out["not_run"] += [{"nodeid": nodeid, "phase": phase.name}
+                           for k, nodeid in phase.nodeid_by_key.items() if k not in phase.executions]
+        for outcome in phase.manifest["collection_outcomes"]:
+            if outcome["outcome"] == "failed":
+                out["collection_outcome_failed"].append(
+                    {"nodeid": outcome["nodeid"], "phase": phase.name, "reason": outcome["reason"]})
+    for k in set(serial.executions) & set(parallel.executions):
+        out["run_more_than_once"].append(
+            {"nodeid": serial.nodeid_by_key.get(k, f"{k[0]}::{k[1]}"), "phases": ["serial", "parallel"]})
+    for phase in (serial, parallel):
+        out["unexpected_skip"] += [entry for entry in phase_skips(phase) if entry["nodeid"] not in expected]
+    for kind in COMPLETENESS_KINDS:
+        out[kind] = sorted(out[kind], key=lambda entry: json.dumps(entry, sort_keys=True))
+    return out
+
+
+def completeness_summary(verdict: dict) -> str:
+    """The markdown the completeness step appends to the run summary."""
+    lines = ["### Profile A completeness (pytest-xdist)\n",
+             f"Verdict: **{verdict['verdict']}** (exit {verdict['exit']}). "
+             f"Expected skips recorded: {verdict['expected_skips']['entries']}.\n"]
+    for kind, entries in (verdict["differences"] or {}).items():
+        if not entries:
+            continue
+        lines.append(f"- {kind}: {len(entries)}")
+        for entry in entries[:_SUMMARY_LIMIT]:
+            detail = entry.get("problem") or entry.get("reason") or entry.get("phase") or ""
+            lines.append(f"  - `{entry.get('nodeid', '')}` {detail}".rstrip())
+    for problem in verdict["invalid_evidence"]:
+        lines.append(f"- invalid evidence, {problem['reason']}: {problem['detail']}")
+    return "\n".join(lines) + "\n"
+
+
+@dataclass
+class CompletenessInputs:
+    candidate_dir: Path
+    constraints: Path
+    expected_skips: Path
+    meta: dict
+
+
+def evaluate_completeness(inputs: CompletenessInputs) -> dict:
+    """The completeness verdict of one run, also when its evidence is unusable."""
+    verdict = {"schema": COMPLETENESS_SCHEMA, **inputs.meta}
+    expected, problems = read_expected_skips(inputs.expected_skips)
+    verdict["expected_skips"] = {"path": str(inputs.expected_skips), "entries": len(expected)}
+    try:
+        pins = read_pins(inputs.constraints)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        pins = {}
+        problems.append(("unreadable_constraints", f"{inputs.constraints}: {exc}"))
+    own = own_tool_problems(pins)
+    problems.extend(own)
+    serial = parallel = None
+    if not (own and own[0][0] == "pytest_unavailable"):
+        reader = PhaseReader(pins, junit_key_function(),
+                             (inputs.meta.get("run_id"), inputs.meta.get("run_attempt")), problems)
+        serial = reader.load(inputs.candidate_dir, "serial")
+        parallel = reader.load(inputs.candidate_dir, "parallel")
+    counts = {"serial": phase_counts(serial), "parallel": phase_counts(parallel)}
+    differences = (completeness_differences(serial, parallel, expected)
+                   if serial is not None and parallel is not None and not problems else None)
+    verdict.update(counts=counts, differences=differences,
+                   invalid_evidence=[{"reason": reason, "detail": detail} for reason, detail in problems])
+    has_differences = any(differences.values()) if differences else False
+    verdict["exit"] = 2 if problems else (1 if has_differences else 0)
+    verdict["verdict"] = {0: "complete", 1: "incomplete", 2: "invalid_evidence"}[verdict["exit"]]
+    return verdict
+
+
+def _cmd_completeness(args) -> int:
+    inputs = CompletenessInputs(
+        candidate_dir=Path(args.candidate),
+        constraints=Path(args.constraints),
+        expected_skips=Path(args.expected_skips),
+        meta={"head_sha": args.head_sha, "tested_sha": args.tested_sha, "run_id": args.run_id,
+              "run_attempt": args.run_attempt, "event": args.event, "ref": args.ref},
+    )
+    verdict = evaluate_completeness(inputs)
+    try:
+        write_json_atomic(Path(args.output), verdict)
+        if args.summary:
+            with open(args.summary, "a", encoding="utf-8") as fh:
+                fh.write(completeness_summary(verdict))
+    except OSError as exc:
+        print(f"check_xdist_parity: cannot write the completeness verdict to {args.output}: {exc}", file=sys.stderr)
+        return 2
+    print(f"xdist completeness: {verdict['verdict']} (exit {verdict['exit']}), verdict at {args.output}")
+    return int(verdict["exit"])
+
+
 def write_json_atomic(path: Path, document: dict) -> None:
     """Write *document* to *path* through a temp file in the same directory."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -978,6 +1150,15 @@ def _parser() -> argparse.ArgumentParser:
     fp.add_argument("--constraints", required=True)
     fp.add_argument("--workspace-root", required=True)
     fp.set_defaults(func=_cmd_fingerprint)
+    comp = sub.add_parser("completeness", help="check the two phases of one run against each other")
+    comp.add_argument("--candidate", required=True, help="directory with the serial and parallel manifests and XMLs")
+    comp.add_argument("--constraints", required=True, help="scripts/ci/profile_a_constraints.txt")
+    comp.add_argument("--expected-skips", required=True, help="scripts/ci/xdist_expected_skips.txt")
+    comp.add_argument("--output", required=True, help=f"path of {COMPLETENESS_FILE}")
+    comp.add_argument("--summary", default="", help="append a markdown summary here (GITHUB_STEP_SUMMARY)")
+    for name in ("head-sha", "tested-sha", "run-id", "run-attempt", "event", "ref"):
+        comp.add_argument(f"--{name}", default="")
+    comp.set_defaults(func=_cmd_completeness)
     return parser
 
 

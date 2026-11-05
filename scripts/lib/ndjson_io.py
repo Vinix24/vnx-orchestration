@@ -13,6 +13,10 @@ its sibling gate/event NDJSON streams):
   read_ndjson(path)     line left by a crash mid-append instead of raising. A
                         partial last record must never break the reader.
 
+  read_ndjson_strict    Same parsing, but only the torn tail (the final fragment
+                        of a file that does not end in a newline) may be
+                        unparseable; an optional predicate scopes the refusal.
+
 Posix-only paths (the audit trail is written with ``fcntl.flock`` on posix);
 ``os.fsync`` is available on every platform this repo targets.
 """
@@ -23,7 +27,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Iterator, List, Union
+from typing import Any, Callable, Iterator, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -103,4 +107,50 @@ def read_ndjson(path: PathLike) -> List[Any]:
     return list(iter_ndjson(path))
 
 
-__all__ = ["fsync_fileno", "iter_ndjson", "read_ndjson"]
+class NdjsonCorruptionError(ValueError):
+    """An unparseable line that is NOT the torn tail: the file cannot be read as evidence."""
+
+    def __init__(self, path: PathLike, line_number: int, detail: str):
+        self.path, self.line_number, self.detail = path, line_number, detail
+        super().__init__(f"unparseable line {line_number} of {path} "
+                         f"(interior corruption, not a torn tail): {detail}")
+
+
+def read_ndjson_strict(
+    path: PathLike, predicate: Optional[Callable[[str], bool]] = None
+) -> List[Any]:
+    """Parsed records; only an unterminated final fragment (torn) may be unparseable.
+
+    A broken final line that ends in a newline was written completely, so it is
+    interior corruption. A line that is not UTF-8 is unparseable too — never U+FFFD.
+    ``predicate`` scopes the refusal: an interior break raises only when it holds for
+    that line's raw text, and is otherwise skipped with a WARNING.
+    """
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except FileNotFoundError:
+        return []
+    lines = data.split(b"\n")
+    # Only the final physical fragment — the bytes after the last "\n" — can be torn.
+    # A whitespace-only fragment is no line at all, so a break before it is interior.
+    final_idx = len(lines) - 1
+    torn_idx = final_idx if not data.endswith(b"\n") and lines[final_idx].strip() else -1
+    records: List[Any] = []
+    for idx, raw in enumerate(lines):
+        if not raw.strip():
+            continue
+        try:
+            records.append(json.loads(raw.decode("utf-8").strip()))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if idx == torn_idx:
+                logger.debug("ndjson_io: skipping torn tail line %d in %s", idx + 1, p)
+                continue
+            if predicate is None or predicate(raw.decode("utf-8", errors="replace")):
+                raise NdjsonCorruptionError(p, idx + 1, str(exc)) from exc
+            logger.warning("ndjson_io: skipping malformed NDJSON line %d in %s", idx + 1, p)
+    return records
+
+
+__all__ = ["NdjsonCorruptionError", "fsync_fileno", "iter_ndjson", "read_ndjson",
+           "read_ndjson_strict"]

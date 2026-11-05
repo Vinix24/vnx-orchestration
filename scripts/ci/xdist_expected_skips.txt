@@ -1,0 +1,77 @@
+# xdist_expected_skips.txt — the skip set CI Profile A accepts under pytest-xdist.
+#
+# Written by D4 (track ci-profile-a-xdist) from the last measurable run of the
+# cutover window (plan line 129): VNX CI run 41119890499, head 75011469, on
+# 2026-10-30, artifact `profile-a-evidence` of its serial Profile A
+# (junit-full.xml + manifest-full.json, phase `full`, run attempt 1). That run
+# recorded 50 skips and no collection-time skip; every one is listed below with
+# the reason it carried. One key was added after that run by the D4 round of
+# OI-2518 (2026-11-03): the positive control of the branch-on-origin check now
+# skips when its precondition listing cannot answer under xdist, so that skip
+# is accepted here with the reason it carries.
+#
+# ENTRY RULE. One key per line: a test nodeid
+# (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
+# whose collection is skipped. The skip reason follows after `#`; an inline
+# comment starts at whitespace followed by `#`, so a reason may itself hold a
+# `#`. Order does not matter; the check reads the file as a set.
+#
+# After the switch Profile A's completeness step (scripts/ci/check_xdist_parity.py
+# completeness, a required step) fails on a skip that is not in this file. A PR
+# that adds a legitimate skip adds its key and reason here in the same PR. A
+# recorded key that stops skipping is not a difference: it is more coverage.
+#
+# This file is not part of the selection fingerprint: it never changes what
+# pytest selects, only whether a new skip is accepted.
+
+tests/dashboard/test_page_subsystems.py::test_subsystem_cockpit_tile_rtl_suite_passes  # token-dashboard Node toolchain not installed (no node_modules/.bin/jest) -- run `cd dashboard/token-dashboard && npm ci` first
+tests/integration/test_codex_streaming.py::TestCodexLiveStreaming::test_all_events_have_tier_1  # codex binary not installed
+tests/integration/test_codex_streaming.py::TestCodexLiveStreaming::test_archive_populated_after_dispatch  # codex binary not installed
+tests/integration/test_codex_streaming.py::TestCodexLiveStreaming::test_execute_returns_done_status  # codex binary not installed
+tests/integration/test_codex_streaming.py::TestCodexLiveStreaming::test_stream_events_yields_before_completion  # codex binary not installed
+tests/integration/test_litellm_bedrock_smoke.py::TestLiteLLMBedrockSmoke::test_bedrock_claude_emits_events  # AWS credentials not present — set AWS_ACCESS_KEY_ID or AWS_PROFILE
+tests/integration/test_litellm_bedrock_smoke.py::TestLiteLLMBedrockSmoke::test_bedrock_event_types_include_text_and_complete  # AWS credentials not present — set AWS_ACCESS_KEY_ID or AWS_PROFILE
+tests/integration/test_litellm_bedrock_smoke.py::TestLiteLLMBedrockSmoke::test_bedrock_events_are_canonical  # AWS credentials not present — set AWS_ACCESS_KEY_ID or AWS_PROFILE
+tests/integration/test_litellm_bedrock_smoke.py::TestLiteLLMBedrockSmoke::test_bedrock_missing_creds_returns_error  # AWS credentials not present — set AWS_ACCESS_KEY_ID or AWS_PROFILE
+tests/integration/test_ollama_streaming.py::TestEventStoreLiveWrites::test_events_written_to_store_during_streaming  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestEventStoreLiveWrites::test_stored_events_have_correct_dispatch_id  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestEventStoreLiveWrites::test_stored_events_have_observability_tier  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestExecuteIntegration::test_execute_complete_event_has_token_count  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestExecuteIntegration::test_execute_events_include_complete  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestExecuteIntegration::test_execute_output_is_non_empty  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestExecuteIntegration::test_execute_returns_done  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestStreamingProducesCanonicalEvents::test_drain_http_stream_yields_canonical_events  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestStreamingProducesCanonicalEvents::test_stream_events_complete_has_done_flag  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestStreamingProducesCanonicalEvents::test_stream_events_has_complete_event  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestStreamingProducesCanonicalEvents::test_stream_events_yields_dicts  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestStreamingProducesCanonicalEvents::test_text_events_have_text_field  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/integration/test_ollama_streaming.py::TestTierLabeling::test_text_only_model_is_tier_2  # Ollama daemon not reachable on localhost:11434 or no models installed. Pull a model first: ollama pull qwen2.5-coder:0.5b
+tests/smoke/smoke_health_beacons_fresh.py::test_critical_beacons_present_and_fresh  # no beacons present at /tmp/pytest-of-runner/pytest-0/test_critical_beacons_present_0/_vnx_test_data/health (skip in bare env)
+tests/smoke/smoke_open_items_recency.py::test_open_items_digest_recency_and_consistency  # open_items_digest.json missing under /tmp/pytest-of-runner/pytest-0/test_open_items_digest_recency0/_vnx_test_data/state
+tests/smoke/smoke_receipt_activity.py::test_dispatcher_activity_recent  # no activity sources provisioned under /tmp/pytest-of-runner/pytest-0/test_dispatcher_activity_recen0/_vnx_test_data/state (bare environment / fresh checkout)
+tests/smoke/smoke_sqlite_wal.py::test_wal_files_below_cap  # no *.db-wal files under /tmp/pytest-of-runner/pytest-0/test_wal_files_below_cap0/_vnx_test_data/state
+tests/test_event_analyzer.py::TestAnalyzeRealDispatch::test_analyze_real_dispatch  # Real archive not found: /home/runner/work/vnx-orchestration/vnx-orchestration/.vnx-data/events/archive/T1/20260414-090200-f58-pr3-layered-prompt-A.ndjson
+tests/test_event_analyzer.py::TestAnalyzeRealDispatch::test_real_dispatch_committed_and_pushed  # Real archive not found: /home/runner/work/vnx-orchestration/vnx-orchestration/.vnx-data/events/archive/T1/20260414-090200-f58-pr3-layered-prompt-A.ndjson
+tests/test_event_analyzer.py::TestAnalyzeRealDispatch::test_real_dispatch_has_real_tool_counts  # Real archive not found: /home/runner/work/vnx-orchestration/vnx-orchestration/.vnx-data/events/archive/T1/20260414-090200-f58-pr3-layered-prompt-A.ndjson
+tests/test_event_analyzer.py::TestAnalyzeRealDispatch::test_real_dispatch_wrote_report  # Real archive not found: /home/runner/work/vnx-orchestration/vnx-orchestration/.vnx-data/events/archive/T1/20260414-090200-f58-pr3-layered-prompt-A.ndjson
+tests/test_event_analyzer.py::TestExtractBashErrors::test_real_archive_has_errors  # Skipped
+tests/test_event_analyzer.py::TestReadsBeforeFirstWrite::test_real_dispatch_exploration_depth  # Skipped
+tests/test_event_analyzer.py::TestSummaryAggregation::test_summary_real_data  # Archive dir not found
+tests/test_failure_decay_recency.py::FailureDecayRecencyCanary::test_recent_failure_produced_decay  # live quality_intelligence.db not available
+tests/test_fsr_isolation_guard.py::TestCanonicalDbHashUnchanged::test_canonical_db_hash_unchanged_after_migration_run  # Canonical DB absent — CI or fresh environment, skipping canary
+tests/test_headless_context_rotation.py::TestContextWindowJson::test_context_window_json_written  # Tests F43-branch SubprocessAdapter.read_events_with_timeout(context_tracker=...) — not present in main's adapter; rotation handled in deliver_via_subprocess event loop instead
+tests/test_headless_context_rotation.py::TestContextWindowJson::test_no_context_window_json_without_rotation  # Tests F43-branch SubprocessAdapter.read_events_with_timeout(context_tracker=...) — not present in main's adapter; rotation handled in deliver_via_subprocess event loop instead
+tests/test_intel_lus_injection_outcome.py::TestEndToEndOnCopiedStoreData::test_e2e_lands_rows_on_real_offers  # live quality_intelligence.db not present on this machine
+tests/test_intelligence_recency.py::TestConfidenceEventsRecent::test_confidence_events_in_last_24h  # /tmp/pytest-of-runner/pytest-0/_fsr_module610/state/quality_intelligence.db not present — canary requires runtime state
+tests/test_intelligence_recency.py::TestInjectionDiversity::test_recent_injections_not_all_identical  # /tmp/pytest-of-runner/pytest-0/_fsr_module610/state/runtime_coordination.db not present — canary requires runtime state
+tests/test_intelligence_recency.py::TestInjectionsRecent::test_intelligence_injections_in_last_24h  # /tmp/pytest-of-runner/pytest-0/_fsr_module610/state/runtime_coordination.db not present — canary requires runtime state
+tests/test_intelligence_recency.py::TestNoConfidenceSaturation::test_not_all_patterns_at_max_confidence  # /tmp/pytest-of-runner/pytest-0/_fsr_module610/state/quality_intelligence.db not present — canary requires runtime state
+tests/test_intelligence_recency.py::TestPatternUsageRecent::test_pattern_usage_updated_in_last_7d  # /tmp/pytest-of-runner/pytest-0/_fsr_module610/state/quality_intelligence.db not present — canary requires runtime state
+tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed::test_plutil_lint_passes[com.vnx.dashboard-generator.plist]  # plutil is macOS only
+tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed::test_plutil_lint_passes[com.vnx.fleet-role-drift.plist]  # plutil is macOS only
+tests/test_launchd_subsystem_probe_driver.py::TestTemplateIsWellFormed::test_plutil_lint_passes  # plutil is macOS only
+tests/test_learning_d3_proposal.py::test_real_history_produces_at_least_one_proposal  # real receipt trail not found at /tmp/vnx_conftest_q47sxiqe/state/t0_receipts.ndjson
+tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_lane_log_stamp_failure_reason_on_copy  # real PR #1677 kimi_gate report/lane-log not present under /home/runner/.vnx-data/vnx-dev — this verification only runs on the operator's own local central store
+tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass
+tests/test_report_to_receipt_converter_staleness.py::TestConverterBeaconFreshnessLiveStore::test_converter_beacon_is_fresh_on_the_live_store  # no live VNX store resolvable — no store with a booked receipt (state/t0_receipts.ndjson) was found, so the tripwire has nothing to measure (CI runner / fresh machine)
+tests/test_workflow_validation.py::test_repo_workflows_pass_validation  # actionlint not installed

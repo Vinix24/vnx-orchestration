@@ -53,47 +53,18 @@ This document is the single source of truth for which VNX subsystems are live, p
 
 The rows above are feature flags. Two CI guards are not, and are described here
 because they are subsystems an operator has to know the state of. Both are on `main`,
-not yet released, and in `.github/workflows/vnx-ci.yml`. This is code behaviour; no ADR records them.
+not yet released. This is code behaviour; no ADR records them.
 
-**xdist shadow and parity check.** Profile A (the core test job) still runs
-its suite serially. Next to it the job `profile-a-xdist-shadow` runs the same suite in
-the shape a switch to pytest-xdist would use: the tests listed in
-`scripts/ci/serial_tests.txt` in one process with xdist off, then the rest under
-xdist. The shadow is not a required check and must never fail one: every step that can
-fail has `continue-on-error`, each step has its own timeout, the record and upload run
-`if: always()`, and a docs-only run records `not_applicable`. The job `xdist-parity`
-(`scripts/ci/check_xdist_parity.py`) then compares the serial run's JUnit XML and
-collection manifest (`scripts/ci/pytest_collection_manifest.py`) with the shadow's. It
-exits 1 on a test that was not run, ran extra or ran more than once, on a different
-outcome, on a different skip set or collection outcome, and when the two shadow phases
-do not partition the serial selection. It exits 2 on invalid or stale evidence. The
-verdict is uploaded as the `xdist-parity-verdict` artifact
-(`scripts/ci/record_xdist_parity_verdict.py`). `scripts/ci/xdist_parity_history.py`
-applies the cutover rule to the recorded verdicts and counts only a verdict that a
-failed parity step cannot leave clean. Under option A of that rule (operator
-decision, 2026-10-22) a run whose serial reference job failed, or in which either
-Profile A job received a runner shutdown signal, is not measurable: it is set aside
-from every condition of the window and listed with its reason. Only positive evidence
-sets a run aside: the reference job's conclusion, or the verdict's
-`reference.job_result`, is exactly `failure`, or its reference result is present with a
-whole-number exit other than 0. A `cancelled`, `timed_out`, `skipped`, missing or
-unknown conclusion or job result, and a missing or malformed exit, are no cause and
-never set a run aside (codex round 3 on #2184); a cancelled reference job that a
-runner shutdown cut short is still set aside through the shutdown evidence. A shutdown
-is proven by the runner's own line in the job log (`##[error]The runner has received a
-shutdown signal`), read per job from `actions/jobs/<id>/logs` when the check-run
-annotations do not carry that text themselves; GitHub's `The operation was canceled.`
-annotation is posted for a timeout and a manual or concurrency cancel too and proves
-nothing. The annotations are read from `check-runs/<check-run id>/annotations`: the
-check-runs API is keyed by that id, never by the Actions job id, and the job row
-carries it only as the last path segment of its `check_run_url`. A job row without
-that URL, or with one that does not end in a whole number, has no readable annotation
-list, and a failed annotation read still reads the job log (codex round 4 on #2184). A
-failed annotation or log read is never a shutdown (fail-closed), and when both fail
-the problem names both. A real parity difference still blocks. So does an xdist shadow job that is not known to have
-succeeded — a conclusion or, with none, a verdict job result of exactly `success`, or a
-proven shutdown of its own: a failed shadow blocks, and so does an unknown one.
-Nothing has switched Profile A to xdist.
+**Profile A and pytest-xdist.** Since D4, Profile A (the core test job) runs a
+two-phase shape: the entries of `scripts/ci/serial_tests.txt` in one process with xdist
+off, then the rest under pytest-xdist, followed by a required completeness step
+(`scripts/ci/check_xdist_parity.py completeness`) that fails on a test not run, a test
+run more than once, a broken partition, a failed collection, or a skip not recorded in
+`scripts/ci/xdist_expected_skips.txt`. The per-PR `profile-a-xdist-shadow` and
+`xdist-parity` jobs are gone; the serial truth runs nightly in
+`.github/workflows/vnx-ci-serial-truth.yml` and opens or updates one `xdist-parity`
+issue on a difference. `vars.VNX_CI_XDIST=0` returns Profile A to the serial sweep
+without changing the selection. The full description is `docs/core/CI_PROFILE_A.md`.
 
 **Function-size ratchet.** `scripts/ci/check_function_size_ratchet.py` (the
 `Function size ratchet` step of the `Lint Patterns` job) fails a pull request that

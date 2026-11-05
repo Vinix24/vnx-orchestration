@@ -1,0 +1,438 @@
+name: VNX CI serial truth
+
+# Track ci-profile-a-xdist, D4 (plan "After the switch"): after Profile A runs
+# the two-phase pytest-xdist shape, this workflow is the serial truth. It runs
+# the full serial sweep and the two-phase shape as two jobs on the same SHA,
+# with the same prelude, constraints and selection, then compares them through
+# scripts/ci/check_xdist_parity.py. A difference fails this workflow and opens
+# or updates one issue labelled `xdist-parity`; the T0 turns it into an OI.
+#
+# Deliberately NOT named "VNX CI": merge_preflight_ci_check and pre_merge_gate
+# select runs by that name, and closure_verifier/gate_executor read every check
+# run of a PR's head. This workflow's check runs attach to main's commit (a
+# scheduled or dispatched run on main, a SHA no PR has as its head), so they
+# never become merge evidence. tests/test_ci_xdist_d4_switch.py pins that.
+# Every job carries `if: github.ref == 'refs/heads/main'`. It does not keep the
+# check runs off a PR head when a workflow_dispatch runs on another ref: the
+# jobs are skipped, and GitHub still creates check runs with conclusion
+# `skipped` on that SHA, where the merge readers look. That fails
+# closed, not open: closure_verifier._rollup_all_green reads `skipped` as not
+# green, so a skipped run on a PR head blocks the merge rather than passing it
+# (OI-2521, OI-2543). Dispatch it on main.
+#
+# It always runs the full sweep: no light/heavy classifier here.
+
+on:
+  schedule:
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+
+# Its own group: a nightly run never cancels or is cancelled by VNX CI.
+concurrency:
+  group: vnx-ci-serial-truth-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  serial-truth:
+    name: Serial truth (full serial sweep)
+    runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' }}
+    # On main the serial Profile A now runs 52, 52 and 54.8 minutes (03-11,
+    # runs 41635101067, 41644670004, 41676693958); the 55-minute timeout cut
+    # every stacked run at exactly 55 (OI-2523). 80 leaves room for that spread.
+    timeout-minutes: 80
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Emit the serial selection
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "0"
+          SERIAL_TRUTH_EVIDENCE: ${{ runner.temp }}/serial-truth-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$SERIAL_TRUTH_EVIDENCE/args"
+
+      - name: Run the full serial sweep
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          SERIAL_TRUTH_EVIDENCE: ${{ runner.temp }}/serial-truth-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" full "$SERIAL_TRUTH_EVIDENCE"
+
+      - name: Upload the serial truth evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnx-serial-truth-evidence
+          path: ${{ runner.temp }}/serial-truth-evidence/
+          if-no-files-found: warn
+          overwrite: true
+
+  xdist-shape:
+    name: Xdist shape (the two phases)
+    runs-on: ubuntu-24.04
+    if: ${{ github.ref == 'refs/heads/main' }}
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Plan the xdist phases
+        id: plan
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "1"
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$XDIST_TRUTH_EVIDENCE/args"
+          if [ -f "$XDIST_TRUTH_EVIDENCE/args/serial.args" ]; then
+            echo "serial_active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "serial_active=false" >> "$GITHUB_OUTPUT"
+            python3 "$GITHUB_WORKSPACE/scripts/ci/pytest_collection_manifest.py" inactive \
+              --phase serial --output "$XDIST_TRUTH_EVIDENCE/manifest-serial.json"
+          fi
+
+      - name: Serial phase (serial list, xdist off)
+        id: serial
+        if: ${{ !cancelled() && steps.plan.outputs.serial_active == 'true' }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" serial "$XDIST_TRUTH_EVIDENCE"
+
+      - name: Parallel phase (the rest, under pytest-xdist)
+        id: parallel
+        if: ${{ !cancelled() }}
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_run_phase.sh" parallel "$XDIST_TRUTH_EVIDENCE"
+
+      # The record check_xdist_parity.py reads for the profile and the suite
+      # wall time, in the shape the removed shadow job wrote. Written with
+      # if: always(), so a red phase still leaves evidence for the comparison.
+      - name: Record the xdist outcome
+        id: record
+        if: ${{ always() }}
+        env:
+          XDIST_TRUTH_EVIDENCE: ${{ runner.temp }}/xdist-truth-evidence
+          XDIST_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          XDIST_TESTED_SHA: ${{ github.sha }}
+          OUTCOME_PLAN: ${{ steps.plan.outcome }}
+          OUTCOME_SERIAL: ${{ steps.serial.outcome }}
+          OUTCOME_PARALLEL: ${{ steps.parallel.outcome }}
+        run: |
+          set -euo pipefail
+          E="$XDIST_TRUTH_EVIDENCE"
+          mkdir -p "$E"
+          int_file() {
+            local v=""
+            if [ -f "$1" ]; then v="$(tr -cd '0-9' < "$1")"; fi
+            if [ -n "$v" ]; then printf '%s' "$v"; else printf 'null'; fi
+          }
+          if [ "$OUTCOME_PLAN" != "success" ] || [ "$OUTCOME_PARALLEL" != "success" ]; then
+            verdict="shadow_failed"
+          elif [ "$OUTCOME_SERIAL" = "failure" ] || [ "$OUTCOME_SERIAL" = "cancelled" ]; then
+            verdict="shadow_failed"
+          else
+            verdict="shadow_passed"
+          fi
+          {
+            printf '{\n'
+            printf '  "schema": "vnx-xdist-shadow/1",\n'
+            printf '  "head_sha": "%s",\n' "$XDIST_HEAD_SHA"
+            printf '  "tested_sha": "%s",\n' "$XDIST_TESTED_SHA"
+            printf '  "run_id": "%s",\n' "$GITHUB_RUN_ID"
+            printf '  "run_attempt": "%s",\n' "$GITHUB_RUN_ATTEMPT"
+            printf '  "event": "%s",\n' "$GITHUB_EVENT_NAME"
+            printf '  "profile": "heavy",\n'
+            printf '  "verdict": "%s",\n' "$verdict"
+            printf '  "steps": {"plan": "%s", "serial": "%s", "parallel": "%s"},\n' \
+              "$OUTCOME_PLAN" "${OUTCOME_SERIAL:-skipped}" "$OUTCOME_PARALLEL"
+            printf '  "exit_codes": {"serial": %s, "parallel": %s},\n' \
+              "$(int_file "$E/exit-serial")" "$(int_file "$E/exit-parallel")"
+            printf '  "durations_s": {"serial": %s, "parallel": %s}\n' \
+              "$(int_file "$E/duration-serial-s")" "$(int_file "$E/duration-parallel-s")"
+            printf '}\n'
+          } > "$E/xdist-shadow.json"
+          cat "$E/xdist-shadow.json"
+
+      - name: Upload the xdist evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnx-xdist-truth-evidence
+          path: ${{ runner.temp }}/xdist-truth-evidence/
+          if-no-files-found: warn
+          overwrite: true
+
+  parity:
+    name: Serial truth vs xdist shape
+    runs-on: ubuntu-24.04
+    needs: [serial-truth, xdist-shape]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Emit this run's xdist selection
+        id: selection
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: "1"
+          PARITY_WORK: ${{ runner.temp }}/nightly-parity
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PARITY_WORK/args"
+
+      - name: Download the serial truth (reference)
+        id: download_reference
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: vnx-serial-truth-evidence
+          path: ${{ runner.temp }}/nightly-parity/reference
+
+      - name: Download the xdist shape (candidate)
+        id: download_candidate
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: vnx-xdist-truth-evidence
+          path: ${{ runner.temp }}/nightly-parity/candidate
+
+      - name: Compare the two shapes
+        id: compare
+        env:
+          PARITY_WORK: ${{ runner.temp }}/nightly-parity
+          PARITY_PROFILE: heavy
+          PARITY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PARITY_TESTED_SHA: ${{ github.sha }}
+          PARITY_RUN_ID: ${{ github.run_id }}
+          PARITY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PARITY_EVENT: ${{ github.event_name }}
+          PARITY_REF: ${{ github.head_ref || github.ref_name }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PRELUDE: ${{ steps.prelude.outcome }}
+          OUTCOME_SELECTION: ${{ steps.selection.outcome }}
+          OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
+          OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
+          RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
+          RESULT_SHADOW: ${{ needs.xdist-shape.result }}
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/scripts/ci/check_xdist_parity.py" compare \
+            --reference "$PARITY_WORK/reference" \
+            --candidate "$PARITY_WORK/candidate" \
+            --constraints "$GITHUB_WORKSPACE/scripts/ci/profile_a_constraints.txt" \
+            --args-dir "$PARITY_WORK/args" \
+            --workspace-root "$GITHUB_WORKSPACE" \
+            --output "$PARITY_WORK/verdict/xdist-parity-verdict.json" \
+            --summary "${GITHUB_STEP_SUMMARY:-/dev/null}" \
+            --profile "$PARITY_PROFILE" \
+            --head-sha "$PARITY_HEAD_SHA" --tested-sha "$PARITY_TESTED_SHA" \
+            --run-id "$PARITY_RUN_ID" --run-attempt "$PARITY_RUN_ATTEMPT" \
+            --event "$PARITY_EVENT" --ref "$PARITY_REF" \
+            --step "checkout=$OUTCOME_CHECKOUT" --step "prelude=$OUTCOME_PRELUDE" \
+            --step "selection=$OUTCOME_SELECTION" \
+            --step "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+            --step "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" \
+            --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW"
+
+      # Adds the compare step's own outcome to the verdict it wrote, so a step
+      # that failed after writing exit 0 never leaves a clean verdict
+      # (OI-2145); when it wrote none (a crash), writes an exit-2 verdict with
+      # every field of a normal one (OI-2147). The decision is
+      # scripts/ci/record_xdist_parity_verdict.py. Without a checkout that
+      # script is absent, and the bash below writes the same exit-2 verdict;
+      # tests/test_ci_record_xdist_parity_verdict.py holds the two equal.
+      - name: Record the parity verdict
+        id: record
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          PARITY_WORK: ${{ runner.temp }}/nightly-parity
+          PARITY_PROFILE: heavy
+          PARITY_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PARITY_TESTED_SHA: ${{ github.sha }}
+          PARITY_RUN_ID: ${{ github.run_id }}
+          PARITY_RUN_ATTEMPT: ${{ github.run_attempt }}
+          PARITY_EVENT: ${{ github.event_name }}
+          PARITY_REF: ${{ github.head_ref || github.ref_name }}
+          OUTCOME_CHECKOUT: ${{ steps.checkout.outcome }}
+          OUTCOME_PRELUDE: ${{ steps.prelude.outcome }}
+          OUTCOME_SELECTION: ${{ steps.selection.outcome }}
+          OUTCOME_DOWNLOAD_REFERENCE: ${{ steps.download_reference.outcome }}
+          OUTCOME_DOWNLOAD_CANDIDATE: ${{ steps.download_candidate.outcome }}
+          OUTCOME_PARITY: ${{ steps.compare.outcome }}
+          RESULT_PROFILE_A: ${{ needs.serial-truth.result }}
+          RESULT_SHADOW: ${{ needs.xdist-shape.result }}
+        run: |
+          set -euo pipefail
+          V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
+          RECORD="$GITHUB_WORKSPACE/scripts/ci/record_xdist_parity_verdict.py"
+          mkdir -p "$PARITY_WORK/verdict"
+          rc=0
+          if [ -f "$RECORD" ]; then
+            python3 "$RECORD" --verdict "$V" --summary "${GITHUB_STEP_SUMMARY:-}" \
+              --profile "$PARITY_PROFILE" \
+              --head-sha "$PARITY_HEAD_SHA" --tested-sha "$PARITY_TESTED_SHA" \
+              --run-id "$PARITY_RUN_ID" --run-attempt "$PARITY_RUN_ATTEMPT" \
+              --event "$PARITY_EVENT" --ref "$PARITY_REF" \
+              --step "checkout=$OUTCOME_CHECKOUT" --step "prelude=$OUTCOME_PRELUDE" \
+              --step "selection=$OUTCOME_SELECTION" \
+              --step "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+              --step "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" \
+              --step "parity=$OUTCOME_PARITY" \
+              --upstream "profile_a=$RESULT_PROFILE_A" --upstream "shadow=$RESULT_SHADOW" || rc=$?
+          else
+            clean() { printf '%s' "$1" | tr -cd 'A-Za-z0-9_.:/-'; }
+            token() { printf '"%s"' "$(clean "$1")"; }
+            result() { if [ -n "$1" ]; then token "$1"; else printf 'null'; fi; }
+            failures='"parity.verdict=missing"'
+            for pair in "checkout=$OUTCOME_CHECKOUT" "prelude=$OUTCOME_PRELUDE" "selection=$OUTCOME_SELECTION" \
+                        "download_reference=$OUTCOME_DOWNLOAD_REFERENCE" \
+                        "download_candidate=$OUTCOME_DOWNLOAD_CANDIDATE" "parity=$OUTCOME_PARITY"; do
+              outcome="${pair#*=}"
+              if [ "$outcome" != success ]; then
+                failures="$failures, \"parity.${pair%%=*}=$(clean "${outcome:-unknown}")\""
+              fi
+            done
+            if [ "$RESULT_PROFILE_A" != success ]; then
+              failures="$failures, \"reference.job=$(clean "${RESULT_PROFILE_A:-unknown}")\""
+            fi
+            failures="$failures, \"reference.result=not_read\", \"shadow.record=not_read\""
+            if [ "$RESULT_SHADOW" != success ]; then
+              failures="$failures, \"shadow.job=$(clean "${RESULT_SHADOW:-unknown}")\""
+            fi
+            {
+              printf '{\n'
+              printf ' "schema": "vnx-xdist-parity/1",\n'
+              printf ' "head_sha": %s,\n' "$(token "$PARITY_HEAD_SHA")"
+              printf ' "tested_sha": %s,\n' "$(token "$PARITY_TESTED_SHA")"
+              printf ' "run_id": %s,\n' "$(token "$PARITY_RUN_ID")"
+              printf ' "run_attempt": %s,\n' "$(token "$PARITY_RUN_ATTEMPT")"
+              printf ' "event": %s,\n' "$(token "$PARITY_EVENT")"
+              printf ' "ref": %s,\n' "$(token "$PARITY_REF")"
+              printf ' "profile": %s,\n' "$(token "${PARITY_PROFILE:-unknown}")"
+              printf ' "steps": {"checkout": %s, "prelude": %s, "selection": %s, "download_reference": %s, "download_candidate": %s, "parity": %s},\n' \
+                "$(token "$OUTCOME_CHECKOUT")" "$(token "$OUTCOME_PRELUDE")" "$(token "$OUTCOME_SELECTION")" \
+                "$(token "$OUTCOME_DOWNLOAD_REFERENCE")" "$(token "$OUTCOME_DOWNLOAD_CANDIDATE")" "$(token "$OUTCOME_PARITY")"
+              printf ' "shadow": {"record": "not_read", "job_result": %s},\n' "$(result "$RESULT_SHADOW")"
+              printf ' "reference": {"job_result": %s, "result": "not_read", "exit": null, "duration_s": null},\n' \
+                "$(result "$RESULT_PROFILE_A")"
+              printf ' "selection_fingerprint": null,\n'
+              printf ' "selection_fingerprint_source": null,\n'
+              printf ' "differences": null,\n'
+              printf ' "counts": null,\n'
+              printf ' "tool_versions": null,\n'
+              printf ' "invalid_evidence": [{"reason": "no_verdict", "detail": "the parity script wrote no verdict (checkout %s, parity step %s)"}],\n' \
+                "$(clean "$OUTCOME_CHECKOUT")" "$(clean "$OUTCOME_PARITY")"
+              printf ' "exit": 2,\n'
+              printf ' "verdict": "invalid_evidence",\n'
+              printf ' "step_failures": [%s]\n' "$failures"
+              printf '}\n'
+            } > "$V"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '### xdist parity\n\nNightly serial truth. Verdict: **invalid_evidence** (exit 2): the parity script wrote no verdict.\n' \
+                >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          cat "$V"
+          exit "$rc"
+
+      # The verdict decides. Record never fails the job on a non-clean verdict
+      # (it exits 0 with the verdict written); this step turns every non-clean
+      # verdict into a red workflow step and one issue labelled xdist-parity.
+      - name: Fail on a difference and open the issue
+        id: report
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PARITY_WORK: ${{ runner.temp }}/nightly-parity
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          V="$PARITY_WORK/verdict/xdist-parity-verdict.json"
+          RECORD="$GITHUB_WORKSPACE/scripts/ci/record_xdist_parity_verdict.py"
+          # exit 0 alone is not clean: the script reads step_failures too (OI-2521).
+          if python3 "$RECORD" --report-clean --verdict "$V"; then
+            echo "serial truth vs xdist shape: parity holds"
+            exit 0
+          fi
+          BODY="$PARITY_WORK/verdict/xdist-parity-issue.md"
+          python3 - "$V" > "$BODY" <<'PY'
+          import json
+          import sys
+          verdict = json.load(open(sys.argv[1], encoding="utf-8"))
+          lines = [f"Nightly serial truth: **{verdict.get('verdict')}** (exit {verdict.get('exit')}) "
+                   f"on `{verdict.get('tested_sha')}`, run {verdict.get('run_id')}.", ""]
+          for kind, entries in (verdict.get("differences") or {}).items():
+              if entries:
+                  lines.append(f"- {kind}: {len(entries)}")
+                  for entry in entries[:50]:
+                      lines.append(f"  - `{entry.get('nodeid', '')}` {entry.get('problem', '')}".rstrip())
+          for problem in verdict.get("invalid_evidence") or []:
+              lines.append(f"- invalid evidence, {problem.get('reason')}: {problem.get('detail')}")
+          lines += ["", "The T0 turns this into an OI (plan ci-profile-a-xdist, D4)."]
+          print("\n".join(lines))
+          PY
+          number="$(gh issue list --repo "$GITHUB_REPOSITORY" --label xdist-parity --state open \
+            --limit 1 --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --label xdist-parity \
+              --title "xdist parity: the nightly serial truth found a difference" --body-file "$BODY"
+          fi
+          exit 1
+
+      - name: Upload the verdict
+        if: ${{ always() }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: vnx-serial-truth-parity-verdict
+          path: ${{ runner.temp }}/nightly-parity/verdict/
+          if-no-files-found: warn
+          overwrite: true
