@@ -1080,7 +1080,8 @@ def _first_refusal_entry(state_dir: Path, report: Path) -> dict:
 def _seed_aged_history(state_dir: Path, entry: dict, *, hours_ago: float = 25) -> None:
     """Leave the converter beacon as a scan *hours_ago* wrote this refusal: the
     dead-letter deadline is measured on the refusal, never on the report's mtime.
-    The last sighting an hour ago keeps the day unbroken (continuity)."""
+    The last sighting an hour ago keeps the day unbroken (continuity), and the
+    alarm time is what was observed (``alarm_seconds``), so it is seeded too."""
     from health_beacon import HealthBeacon
 
     first = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours_ago * 3600))
@@ -1088,7 +1089,8 @@ def _seed_aged_history(state_dir: Path, entry: dict, *, hours_ago: float = 25) -
     HealthBeacon(state_dir.parent, "report_to_receipt_converter",
                  expected_interval_seconds=3600).heartbeat(
         status="fail", details={"rejected": [{**entry, "rejected_at": last,
-                                              "first_rejected_at": first}]},
+                                              "first_rejected_at": first,
+                                              "alarm_seconds": hours_ago * 3600}]},
     )
 
 

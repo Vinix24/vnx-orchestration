@@ -494,7 +494,8 @@ class TestBothBeaconsAgreeOnTheSameScan:
         assert report.is_file()
         [entry] = beacon_mod.load_rejected_history(state_dir, beacon_mod.CONVERTER_COMPONENT)
         _seed_converter_history(tmp_path, {**entry, "rejected_at": _iso(1),
-                                           "first_rejected_at": _iso(25)})
+                                           "first_rejected_at": _iso(25),
+                                           "alarm_seconds": 25 * 3600})
 
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger="report_to_receipt_converter"):

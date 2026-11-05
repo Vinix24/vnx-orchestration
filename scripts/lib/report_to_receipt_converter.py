@@ -74,8 +74,7 @@ from provider_identity import ProviderIdentity, UnrecognizedProviderError, norma
 from receipt_conversion_rejection_beacon import (
     REJECTION_ALARM_WINDOW_SECONDS,
     _rejected_at_epoch,  # canonical stamp parse, never a second copy
-    first_rejected_epoch,
-    last_rejected_epoch,
+    alarm_after_sighting, latest_rejected_entry,
     load_rejected_history,
     recent_rejections,
 )
@@ -1050,13 +1049,9 @@ def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
     # Deadline on the REFUSAL (r3), not the report's mtime: an outage-returnee still waits a day.
     did, file_name = str(exc.dispatch_id or ""), report_path.name
     history = _load_prior_rejected_history(state_dir) if state_dir is not None else []
-    first_seen = first_rejected_epoch(history, did, file_name, reason)
-    last_seen = last_rejected_epoch(history, did, file_name, reason)
-    # An unbroken day: a last sighting older than the continuity gap is an outage.
-    continuous = (last_seen is not None
-                  and time.time() - last_seen <= _REJECTION_CONTINUITY_GAP_SECONDS)
-    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and first_seen is not None
-            and continuous and time.time() - first_seen > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
+    alarm = alarm_after_sighting(latest_rejected_entry(history, did, file_name, reason),
+                                 time.time(), _REJECTION_CONTINUITY_GAP_SECONDS)
+    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and alarm > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
         _log_refusal(exc, report_path)
         return "error"
     logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
@@ -2050,10 +2045,10 @@ def convert_report_to_receipt(
 
 _HEALTH_COMPONENT = "report_to_receipt_converter"
 _HEALTH_EXPECTED_INTERVAL_SECONDS = 3600
-# Twice the expected scan interval: a longer silence is an outage, and the deadline restarts.
+# Twice the expected scan interval: a longer silence adds no alarm time (outage or sleeping host).
 _REJECTION_CONTINUITY_GAP_SECONDS = 2 * _HEALTH_EXPECTED_INTERVAL_SECONDS
 # F1-3: bound on details.rejected history carried on this beacon (below) —
-# the oldest entries are evicted once the accumulated history exceeds this,
+# entries sighted in this scan stay on top of the cap; the rest is cut oldest first,
 # so the file never grows without bound across an unattended fleet.
 _HEALTH_REJECTED_HISTORY_MAX = 200
 
@@ -2131,8 +2126,7 @@ def _merge_rejected_history(prior: List[Dict[str, Any]],
 
     Appended raw, ONE young refusal filled the 200-entry history in ~100 min and
     evicted every model rejection: dedupe BEFORE the cap. ``rejected_at`` = newest
-    sighting (the alarm); ``first_rejected_at`` = earliest (the dead-letter deadline).
-    A gap over ``_REJECTION_CONTINUITY_GAP_SECONDS`` is an outage: the deadline restarts.
+    sighting; ``first_rejected_at`` = run start (informative); ``alarm_seconds`` = observed alarm.
     """
     merged: Dict[tuple, Dict[str, Any]] = {}
     for entry in [*prior, *fresh]:
@@ -2141,12 +2135,13 @@ def _merge_rejected_history(prior: List[Dict[str, Any]],
         newest = max((held, entry), key=lambda held_or_new: held_or_new.get("rejected_at") or "")
         last = _rejected_at_epoch(held.get("rejected_at"))
         now = _rejected_at_epoch(entry.get("rejected_at"))
+        alarm = alarm_after_sighting(held, now, _REJECTION_CONTINUITY_GAP_SECONDS)
         if last is not None and now is not None and now - last > _REJECTION_CONTINUITY_GAP_SECONDS:
             held = {**held, "first_rejected_at": entry.get("rejected_at")}
         first = min(held["first_rejected_at"],
                     entry.get("first_rejected_at") or entry.get("rejected_at"),
                     key=lambda stamp: stamp or "")
-        merged[key] = {**newest, "first_rejected_at": first}
+        merged[key] = {**newest, "first_rejected_at": first, "alarm_seconds": alarm}
     return sorted(merged.values(), key=lambda entry: entry.get("rejected_at") or "")
 
 
