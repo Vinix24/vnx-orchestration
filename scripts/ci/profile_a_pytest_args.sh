@@ -7,8 +7,11 @@
 # NUL-delimited files. A caller reads one with
 #   mapfile -d '' -t ARGS < "OUT_DIR/<phase>.args"
 #
-#   VNX_CI_XDIST unset, empty or 0   full.args      the serial whole-tree sweep
-#   VNX_CI_XDIST=1                   serial.args    the entries of
+#   VNX_CI_XDIST=0                   full.args      the serial whole-tree sweep
+#                                                   (the way back to serial,
+#                                                   set as the repository
+#                                                   variable vars.VNX_CI_XDIST)
+#   VNX_CI_XDIST unset, empty or 1   serial.args    the entries of
 #                                                   serial_tests.txt in one
 #                                                   process with xdist off;
 #                                                   written only when the list
@@ -24,10 +27,11 @@
 #                                                   this attempt's emission from
 #                                                   an earlier attempt's
 #
-# Profile A and the xdist shadow job of .github/workflows/vnx-ci.yml both call
-# this script, so the selection cannot drift between them: a second inline
-# copy would drift the first time someone edits -k. Each vector is also
-# printed, shell-quoted, on stderr for the run log.
+# Since D4 the default is the two-phase xdist shape. Profile A and the nightly
+# serial truth of .github/workflows/vnx-ci-serial-truth.yml call this script,
+# so the selection cannot drift between them: a second inline copy would drift
+# the first time someone edits -k. Each vector is also printed, shell-quoted,
+# on stderr for the run log.
 #
 # Exit 0 on success; 2 on a refused input (VNX_CI_XDIST other than 0 or 1, or
 # a serial entry that does not match exactly, see serial_tests.txt); 1 when the
@@ -247,7 +251,9 @@ main() {
     refuse "usage: profile_a_pytest_args.sh OUT_DIR"
   fi
   OUT_DIR="$1"
-  local mode="${VNX_CI_XDIST:-0}"
+  # D4: unset means the two-phase xdist shape; VNX_CI_XDIST=0 is the way back
+  # to fully serial, without any other change.
+  local mode="${VNX_CI_XDIST:-1}"
   case "$mode" in
     0|1) ;;
     *) refuse "VNX_CI_XDIST must be 0 or 1, got '$mode'" ;;
