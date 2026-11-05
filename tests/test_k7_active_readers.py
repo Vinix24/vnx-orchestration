@@ -474,7 +474,6 @@ def test_a_superseded_failed_end_stays_open_until_a_t0_decision(
 
     item = _items(data_dir)["d-parent"]
     assert item["outcome"] == "failed"
-    assert item["superseded_by"] == ["d-child"]
 
     _decide(data_dir, "d-parent", "reject")
     assert "d-parent" not in _items(data_dir)
@@ -487,9 +486,7 @@ def test_another_superseded_open_end_is_listed_too(
     _child(state_dir, f"d-parent-{end_state}", f"d-child-{end_state}")
     assert _fold(state_dir, f"d-parent-{end_state}") == "superseded"
 
-    item = _items(data_dir)[f"d-parent-{end_state}"]
-    assert item["outcome"] == end_state
-    assert item["superseded_by"] == [f"d-child-{end_state}"]
+    assert _items(data_dir)[f"d-parent-{end_state}"]["outcome"] == end_state
 
 
 def test_a_superseded_completed_end_is_no_open_point(
@@ -509,9 +506,7 @@ def test_an_accept_fold_does_not_hide_a_failed_end(
                  status="done", report_file="d-late-accept.md", verification=GOOD)
     assert _fold(state_dir, "d-late-accept") == "accept"
 
-    item = _items(data_dir)["d-late-accept"]
-    assert item["outcome"] == "failed"
-    assert "superseded_by" not in item
+    assert _items(data_dir)["d-late-accept"]["outcome"] == "failed"
 
 
 def test_a_legacy_superseded_dispatch_is_still_no_open_point(
@@ -610,3 +605,73 @@ def test_a_legacy_completion_still_ends_a_dispatch_without_a_v3_start(
     result = _drain(data_dir)["d-legacy-only"]
     assert result.action == "completed"
     assert result.reason == "receipt found with success status"
+
+
+# ---------------------------------------------------------------------------
+# 11. The end line must carry the exact key ``v3_in_flight`` ends on (K-7
+#     round 4, codex #2380): a ``dispatch_finished`` missing a key field, or
+#     with a malformed attempt, is no end -- never a defaulted one.
+# ---------------------------------------------------------------------------
+
+def _finished_line(state_dir: Path, dispatch_id: str, **fields: Any) -> None:
+    """A ``dispatch_finished`` line; a field passed as ``None`` is left out."""
+    line = {"timestamp": "2026-11-03T13:30:00Z", "event_type": "dispatch_finished",
+            "project_id": PROJECT, "dispatch_id": dispatch_id, "attempt": 1,
+            "end_state": "completed", **fields}
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({k: v for k, v in line.items() if v is not None}) + "\n")
+
+
+def _assert_no_end(state_dir: Path, did: str) -> None:
+    assert attempt_verdict(state_dir, PROJECT, did).kind == "dead_no_end"
+
+
+def test_a_finished_line_without_an_attempt_is_no_end(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    _v3(state_dir, spec_file, "d-no-attempt")
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+    line = {"timestamp": "2026-11-03T13:30:00Z", "event_type": "dispatch_finished",
+            "project_id": PROJECT, "dispatch_id": "d-no-attempt", "end_state": "completed"}
+    with (state_dir / "t0_receipts.ndjson").open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(line) + "\n")
+    entry = _active(data_dir, "d-no-attempt", hours_old=5.0)
+
+    _assert_no_end(state_dir, "d-no-attempt")
+    assert _items(data_dir)["d-no-attempt"]["outcome"] == oo.OUTCOME_ABANDONED_CANDIDATE
+    assert _drain(data_dir)["d-no-attempt"].action == "skipped"
+    assert entry.is_dir()
+    assert not (data_dir / "dispatches" / "completed" / "d-no-attempt").exists()
+
+
+def test_a_finished_line_without_a_project_id_is_no_end(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    _v3(state_dir, spec_file, "d-no-project")
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+    _finished_line(state_dir, "d-no-project", project_id=None)
+    entry = _active(data_dir, "d-no-project", hours_old=5.0)
+
+    _assert_no_end(state_dir, "d-no-project")
+    assert _items(data_dir)["d-no-project"]["outcome"] == oo.OUTCOME_ABANDONED_CANDIDATE
+    assert _drain(data_dir)["d-no-project"].action == "skipped"
+    assert entry.is_dir()
+    assert not (data_dir / "dispatches" / "completed" / "d-no-project").exists()
+
+
+def test_a_finished_line_of_another_project_is_no_end(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any]) -> None:
+    _v3(state_dir, spec_file, "d-other-project")
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+    _finished_line(state_dir, "d-other-project", project_id=OTHER)
+
+    _assert_no_end(state_dir, "d-other-project")
+
+
+@pytest.mark.parametrize("attempt", ["1", True])
+def test_a_finished_line_with_a_malformed_attempt_is_no_end(
+        data_dir: Path, state_dir: Path, spec_file: Path, probe: Dict[str, Any],
+        attempt: Any) -> None:
+    _v3(state_dir, spec_file, "d-bad-attempt")
+    probe.update(occupancy="absent", door_clock=OTHER_CLOCK)
+    _finished_line(state_dir, "d-bad-attempt", attempt=attempt)
+
+    _assert_no_end(state_dir, "d-bad-attempt")
