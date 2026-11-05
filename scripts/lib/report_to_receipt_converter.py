@@ -42,7 +42,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,7 @@ from provider_identity import ProviderIdentity, UnrecognizedProviderError, norma
 # both beacons judge the same accumulated history by the same window.
 from receipt_conversion_rejection_beacon import (
     REJECTION_ALARM_WINDOW_SECONDS,
+    first_rejected_epoch,
     load_rejected_history,
     recent_rejections,
 )
@@ -1031,10 +1032,10 @@ def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Pa
 def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
                                report_path: Path, state_dir: Optional[Path], dry_run: bool,
                                rejected_detail_sink: Optional[List[Dict[str, Any]]]) -> str:
-    """``rejected`` for a permanent, aged refusal (OI-2542): it takes the model
-    refusal's path. A transient code, a young report or an unreadable mtime is
-    logged and stays ``error`` — booked nothing, retried on the next scan; it is
-    named in *rejected_detail_sink* (``kind="lifecycle_refusal"``) either way.
+    """``rejected`` for a permanent refusal the history carried for a day (OI-2542):
+    it takes the model refusal's path. A transient or younger refusal is logged,
+    stays ``error`` (booked nothing, retried) and is named in *rejected_detail_sink*
+    as ``kind="lifecycle_refusal"`` either way.
     """
     reason = f"ledger lifecycle {exc.code}: {exc.detail}"
     if rejected_detail_sink is not None:
@@ -1042,9 +1043,11 @@ def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
             "dispatch_id": str(exc.dispatch_id or ""), "file": report_path.name, "reason": reason,
             "kind": "lifecycle_refusal",
             "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
-    mtime = _read_report_mtime(report_path)
-    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and mtime is not None
-            and time.time() - mtime > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
+    # Deadline on the REFUSAL (r3), not the report's mtime: an outage-returnee still waits a day.
+    history = _load_prior_rejected_history(state_dir) if state_dir is not None else []
+    first_seen = first_rejected_epoch(history, str(exc.dispatch_id or ""), report_path.name, reason)
+    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and first_seen is not None
+            and time.time() - first_seen > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
         _log_refusal(exc, report_path)
         return "error"
     logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
@@ -1670,14 +1673,16 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
 
 # The ReportPathRefused codes no later read of the append-only ledger can undo (OI-2542): a
-# start line precedes its attempt's report and one end line per attempt is final. The rest are
-# TRANSIENT_LIFECYCLE_REFUSALS below; one day of age is the deadline.
-PERMANENT_LIFECYCLE_REFUSALS = frozenset({"attempt_unknown", "attempt_ambiguous", "project_mismatch",
-                                          "project_ambiguous", "project_unknown", "missing_dispatch_id"})
+# start line precedes its attempt's report and one end line per attempt is final. Only these are
+# dead-lettered, once the refusal itself has lasted LIFECYCLE_REFUSAL_DEADLETTER_SECONDS.
+PERMANENT_LIFECYCLE_REFUSALS = frozenset({"attempt_unknown", "attempt_ambiguous", "project_ambiguous",
+                                          "missing_dispatch_id"})
 # Never dead-lettered: a readable ledger, a decidable mode or a later dispatch_finished for the
-# same key (_narrow_end takes the LAST end line) resolves each; a test pins both sets to the codes.
+# same key resolves each; project_mismatch/project_unknown also hinge on resolve_project_id() (the
+# env fallback in _resolve_tenant), so a misconfigured tenant must never move a report.
 TRANSIENT_LIFECYCLE_REFUSALS = frozenset({"ledger_unreadable", "lifecycle_mode_undecidable",
-                                          "end_outcome_id_missing"})
+                                          "end_outcome_id_missing", "project_mismatch",
+                                          "project_unknown"})
 LIFECYCLE_REFUSAL_DEADLETTER_SECONDS = 24 * 3600
 
 
@@ -2109,6 +2114,26 @@ def _load_prior_rejected_history(state_dir: Path) -> List[Dict[str, Any]]:
     return load_rejected_history(state_dir, _HEALTH_COMPONENT)
 
 
+def _merge_rejected_history(prior: List[Dict[str, Any]],
+                            fresh: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per ``(dispatch_id, file, reason)``, oldest first (OI-2542 r3).
+
+    Appended raw, ONE young refusal filled the 200-entry history in ~100 min and
+    evicted every model rejection: dedupe BEFORE the cap. ``rejected_at`` = newest
+    sighting (the alarm); ``first_rejected_at`` = earliest (the dead-letter deadline).
+    """
+    merged: Dict[tuple, Dict[str, Any]] = {}
+    for entry in [*prior, *fresh]:
+        key = (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
+        held = merged.get(key, {**entry, "first_rejected_at": entry.get("rejected_at")})
+        newest = max((held, entry), key=lambda held_or_new: held_or_new.get("rejected_at") or "")
+        first = min(held["first_rejected_at"],
+                    entry.get("first_rejected_at") or entry.get("rejected_at"),
+                    key=lambda stamp: stamp or "")
+        merged[key] = {**newest, "first_rejected_at": first}
+    return sorted(merged.values(), key=lambda entry: entry.get("rejected_at") or "")
+
+
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     """Surface this scan's counts via the existing HealthBeacon channel.
 
@@ -2158,9 +2183,8 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     # operator sees "27 rejected" with no way to find out which reports or
     # why without re-running the scan by hand. Accumulate per-rejection
     # detail across scans (bounded, oldest evicted) so the identity of every
-    # rejection survives on this beacon, not just its count.
-    rejected_history = _load_prior_rejected_history(state_dir)
-    rejected_history.extend(stats.rejected)
+    # rejection survives on this beacon, not just its count. One entry per key.
+    rejected_history = _merge_rejected_history(_load_prior_rejected_history(state_dir), stats.rejected)
     if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
         rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
 

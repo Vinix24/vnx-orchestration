@@ -96,6 +96,9 @@ _LIFECYCLE_REFUSED_PATTERN = re.compile(
 # ``kind`` tells a dead-lettered verdict from one still retried every scan.
 _PATTERNS_BY_KIND = (("fail_closed", _REJECTED_PATTERN), ("lifecycle_refusal", _LIFECYCLE_REFUSED_PATTERN))
 
+# A dead-lettered lifecycle refusal shares the REJECTED line; its reason prefix marks it.
+_LIFECYCLE_REASON_PREFIX = "ledger lifecycle "
+
 
 def parse_rejections(raw_stderr: str) -> List[Dict[str, str]]:
     """Extract ``{dispatch_id, file, reason, kind}`` records from raw stderr text.
@@ -109,6 +112,8 @@ def parse_rejections(raw_stderr: str) -> List[Dict[str, str]]:
             match = pattern.search(line)
             if match:
                 dispatch_id, file_name, reason = match.groups()
+                if kind == "fail_closed" and reason.strip().startswith(_LIFECYCLE_REASON_PREFIX):
+                    kind = "lifecycle_refusal"
                 rejections.append({
                     "dispatch_id": dispatch_id,
                     "file": file_name,
@@ -141,12 +146,22 @@ def load_rejected_history(state_dir: Path, component: str) -> List[Dict[str, Any
     return [entry for entry in prior if isinstance(entry, dict)] if isinstance(prior, list) else []
 
 
-def _rejected_at_epoch(entry: Dict[str, Any]) -> Optional[float]:
+def _rejected_at_epoch(value: Any) -> Optional[float]:
+    """Epoch of one beacon stamp; missing or malformed is no age at all."""
     try:
-        parsed = datetime.strptime(entry.get("rejected_at"), _REJECTED_AT_FORMAT)
+        parsed = datetime.strptime(value, _REJECTED_AT_FORMAT)
     except (TypeError, ValueError):
         return None
     return parsed.replace(tzinfo=timezone.utc).timestamp()
+
+
+def first_rejected_epoch(history: Iterable[Dict[str, Any]], dispatch_id: str, file_name: str,
+                         reason: str) -> Optional[float]:
+    """Epoch of the EARLIEST sighting of this exact refusal in *history*; None is no age."""
+    stamps = [_rejected_at_epoch(entry.get("first_rejected_at") or entry.get("rejected_at"))
+              for entry in history if (entry.get("dispatch_id"), entry.get("file"),
+                                       entry.get("reason")) == (dispatch_id, file_name, reason)]
+    return min((stamp for stamp in stamps if stamp is not None), default=None)
 
 
 def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -159,7 +174,7 @@ def recent_rejections(history: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]
     cutoff = time.time() - REJECTION_ALARM_WINDOW_SECONDS
     recent: List[Dict[str, Any]] = []
     for entry in history:
-        epoch = _rejected_at_epoch(entry)
+        epoch = _rejected_at_epoch(entry.get("rejected_at"))
         if epoch is not None and epoch > cutoff:
             recent.append(entry)
     return recent

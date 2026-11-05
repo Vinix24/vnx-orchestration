@@ -1067,12 +1067,37 @@ def _deadletter_index(state_dir: Path) -> list:
     return index.read_text(encoding="utf-8").splitlines() if index.is_file() else []
 
 
-def test_a_permanent_lifecycle_refusal_older_than_a_day_is_dead_lettered(
+def _first_refusal_entry(state_dir: Path, report: Path) -> dict:
+    """The detail entry this report's refusal writes, as the scan collects it."""
+    details: list = []
+    _r, outcome = rtc._convert_one_detailed(
+        report, receipts_file=str(_ledger(state_dir)), rejected_detail_sink=details)
+    assert outcome == "error", "a refusal seen for the first time is always retried"
+    [entry] = details
+    return entry
+
+
+def _seed_aged_history(state_dir: Path, entry: dict, *, hours_ago: float = 25) -> None:
+    """Leave the converter beacon as a scan *hours_ago* wrote this refusal: the
+    dead-letter deadline is measured on the refusal, never on the report's mtime."""
+    from health_beacon import HealthBeacon
+
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours_ago * 3600))
+    HealthBeacon(state_dir.parent, "report_to_receipt_converter",
+                 expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"rejected": [{**entry, "rejected_at": stamp,
+                                              "first_rejected_at": stamp}]},
+    )
+
+
+def test_a_permanent_lifecycle_refusal_the_history_carried_for_a_day_is_dead_lettered(
     state_dir, spec_file, v3, clock, caplog, tmp_path
 ):
     clock["now"] = T0
     _begin(state_dir, spec_file)  # attempt 1 starts; the report names attempt 3
-    report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+    report = _aged_report(tmp_path, age_seconds=3600)
+    _seed_aged_history(state_dir, _first_refusal_entry(state_dir, report))
+    caplog.clear()
     caplog.set_level(logging.WARNING, logger=rtc.logger.name)
 
     _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
@@ -1086,12 +1111,14 @@ def test_a_permanent_lifecycle_refusal_older_than_a_day_is_dead_lettered(
     assert [line["event_type"] for line in _lines(state_dir)] == ["dispatch_started"]
 
 
-def test_the_same_refusal_on_a_young_report_keeps_todays_retry_behaviour(
+def test_the_first_sighting_of_a_permanent_refusal_is_retried_however_old_the_report(
     state_dir, spec_file, v3, clock, caplog, tmp_path
 ):
+    """The outage case: the processor is back after days and has never seen
+    this refusal, so it must refuse for a full day before anything moves."""
     clock["now"] = T0
     _begin(state_dir, spec_file)
-    report = _aged_report(tmp_path, age_seconds=3600)
+    report = _aged_report(tmp_path, age_seconds=3 * _DAY)
     caplog.set_level(logging.WARNING, logger=rtc.logger.name)
 
     _r, outcome = rtc._convert_one_detailed(report, receipts_file=str(_ledger(state_dir)))
@@ -1150,6 +1177,8 @@ def test_a_dry_run_of_the_dead_letter_case_moves_nothing(
     clock["now"] = T0
     _begin(state_dir, spec_file)
     report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+    _seed_aged_history(state_dir, _first_refusal_entry(state_dir, report))
+    caplog.clear()
     caplog.set_level(logging.WARNING, logger=rtc.logger.name)
 
     _r, outcome = rtc._convert_one_detailed(
@@ -1172,6 +1201,7 @@ def test_a_dead_lettered_lifecycle_refusal_is_not_retried_on_the_next_scan(
     clock["now"] = T0
     _begin(state_dir, spec_file)
     report = _aged_report(tmp_path, age_seconds=_DAY + 3600)
+    _seed_aged_history(state_dir, _first_refusal_entry(state_dir, report))
 
     first = rtc.scan_and_convert([tmp_path / "reports"], state_dir=state_dir)
     second = rtc.scan_and_convert([tmp_path / "reports"], state_dir=state_dir)
