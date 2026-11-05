@@ -27,7 +27,6 @@ from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
 from coordination_db import db_path_from_state_dir, get_connection
-from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
@@ -254,20 +253,14 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt
         return MODE_WRITE_FAILED
 
 
-def _spec_deadline(blob: bytes) -> Optional[int]:
-    """The staged spec's legal ``deadline_seconds``; ``None`` when absent or not legal.
-
-    Parsed from the same bytes the start line hashes: the door rewrites the spec
-    afterwards (``final_prompt_sha256``), so a later reader could not trust it
-    (OI-2539). An unparseable spec yields no field and still refuses below.
-    """
+def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
+    """The spec's own legal integer ``deadline_seconds``, else None (K-6b/OI-2522)."""
+    from dispatch_lifecycle import _valid_deadline  # noqa: PLC0415
     try:
         value = json.loads(blob).get("deadline_seconds")
+        return value if _valid_deadline(value) else None
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
         return None
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX else None
 
 
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
@@ -276,22 +269,21 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
     from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
     slot = (target_slot or "").strip()
     try:
-        spec_blob = Path(spec_file).read_bytes()
+        spec_bytes = Path(spec_file).read_bytes()
+        spec_sha = hashlib.sha256(spec_bytes).hexdigest()
     except OSError as exc:
         raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
     receipt = {
         "timestamp": handover.started_at, "event_type": DISPATCH_STARTED_EVENT_TYPE,
         "project_id": handover.project_id, "dispatch_id": handover.dispatch_id,
         "attempt": handover.attempt, "role": role, "base_sha": str(base_sha or "").strip(),
-        "spec_sha256": hashlib.sha256(spec_blob).hexdigest(),
-        "lifecycle_mode": handover.lifecycle_mode,
+        "spec_sha256": spec_sha, "lifecycle_mode": handover.lifecycle_mode,
         "door_pid": handover.door_pid, "door_started_at": handover.door_started_at,
         "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
             f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
     }
-    deadline = _spec_deadline(spec_blob)
-    if deadline is not None:
-        receipt["deadline_seconds"] = deadline
+    if (deadline_seconds := _spec_deadline_seconds(spec_bytes)) is not None:
+        receipt["deadline_seconds"] = deadline_seconds
     try:
         result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
     except AppendReceiptError as exc:

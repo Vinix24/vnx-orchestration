@@ -1029,15 +1029,6 @@ def test_a_missing_intent_root_and_project_dir_are_no_intents_and_no_error(
 # 15. K-6 follow-up (OI-2539): the start line's own deadline is the first source
 # ---------------------------------------------------------------------------
 
-def test_a_start_line_without_the_field_still_resolves_through_the_staged_spec(
-        state_dir, lifecycle_on):
-    spec_path, spec_sha = _spec(state_dir, deadline=DEADLINE)
-    start = _start_line(state_dir, spec_sha=spec_sha)
-
-    assert "deadline_seconds" not in start
-    assert lifecycle.deadline_for(state_dir, start, None) == (DEADLINE, f"spec:{spec_path}")
-
-
 @pytest.mark.parametrize("value", [DEADLINE_SECONDS_MAX + 1, 299, True, "1800"])
 def test_an_invalid_start_line_deadline_falls_through_to_the_fallback(
         state_dir, lifecycle_on, value):

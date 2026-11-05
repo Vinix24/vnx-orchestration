@@ -3519,6 +3519,30 @@ def _finalize_door_exit(handover, *, state_dir: Path, reason: str) -> None:
     dispatch_exit.finalize_exit(handover, state_dir=state_dir, status="failure", reason=reason)
 
 
+#: ADR-045 plan row 6 (K-6b): the door's sweep may spend at most this long before the hand-over.
+DOOR_SWEEP_BUDGET_SECONDS = 2.0
+
+
+def _door_lifecycle_sweep(state_dir: Path, project_id: str) -> None:
+    """ADR-045 §6 + plan row 6: one bounded sweep per real fire, before the hand-over.
+
+    A sweep that raises, or one that hits its budget with items left, is ONE stderr
+    line: it never refuses the fire or changes its exit code.
+    """
+    try:
+        from dispatch_lifecycle import sweep  # noqa: PLC0415
+
+        result = sweep(state_dir=state_dir, project_id=project_id,
+                       budget_seconds=DOOR_SWEEP_BUDGET_SECONDS)
+    except Exception as exc:  # vnx-silent-except: maintenance only; the fire must not be refused or changed by it
+        print("[dispatch_cli] [WARN] lifecycle sweep failed before the hand-over: "
+              f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return
+    if result.budget_exhausted:
+        print(f"[dispatch_cli] [WARN] lifecycle sweep left {result.budget_left} item(s); "
+              "the next sweep continues", file=sys.stderr)
+
+
 def _owner_hand_over(
     plan: ExecutionPlan, spec: DispatchSpec, *, project_id: str, spec_file: Path,
     state_dir: Path, attempt_id: Optional[str],
@@ -3984,15 +4008,16 @@ def run_dispatch(
         # permit check all passed, and before the lane is invoked. Fail-closed:
         # a ledger write failure refuses the fire here with nothing dispatched.
         if not dry_run:
-            if _commit_fire(
-                plan, permit, vspec.spec, snapshot, state_dir=state_dir,
-                headless_isolation_warning=headless_isolation_warning,
-            ):
+            if _commit_fire(plan, permit, vspec.spec, snapshot, state_dir=state_dir,
+                            headless_isolation_warning=headless_isolation_warning):
                 return 1
 
         if dry_run:
             _print_plan(plan, fp, spec=vspec.spec)
             return 0
+
+        # K-6b (plan row 6): one bounded sweep of this project's store, guarded.
+        _door_lifecycle_sweep(state_dir, project_id)
 
         # Point 3 (golf 1A) + K-4b (ADR-045 §1/§5): claimed -> delivering, then the
         # dispatch_started line at the hand-over — one call into dispatch_start.begin

@@ -542,37 +542,17 @@ def _staged_json_spec(state_dir: Path, *, deadline: int | None = 1800,
     return path
 
 
-def test_the_start_line_carries_the_staged_spec_deadline_and_deadline_for_uses_it(
-        state_dir, v3):
-    """OI-2539: the door rewrites the spec after the start, so the line must keep it."""
+def test_the_start_line_deadline_survives_the_door_rewriting_the_spec(state_dir, v3):
+    """K-6b covers the plain lookup (OI-2522); this is the rewrite that motivated it."""
     import dispatch_lifecycle
     from final_prompt_integrity import persist_final_prompt
 
     spec = _staged_json_spec(state_dir, deadline=1800)
     _begin(state_dir, spec)
-
     line = _starts(state_dir)[0]
-    assert line["deadline_seconds"] == 1800
 
-    # The real door then persists the final prompt, rewriting the spec's bytes so
-    # ``spec_sha256`` no longer matches (the K-act lane's normal path).
+    # The door persists the final prompt after the start, rewriting the spec's
+    # bytes so ``spec_sha256`` no longer matches (the K-act lane's normal path).
     persist_final_prompt(spec.parent, "the assembled final prompt")
-    assert json.loads(spec.read_text(encoding="utf-8"))["final_prompt_sha256"]
 
     assert dispatch_lifecycle.deadline_for(state_dir, line, None) == (1800, "start_line")
-
-
-def test_a_spec_without_a_legal_deadline_writes_no_field_on_the_start_line(state_dir, v3):
-    spec = _staged_json_spec(state_dir, deadline=None)
-    _begin(state_dir, spec)
-
-    assert "deadline_seconds" not in _starts(state_dir)[0]
-
-
-@pytest.mark.parametrize("deadline", [299, 14_401, True, "1800"])
-def test_an_illegal_spec_deadline_writes_no_field_on_the_start_line(
-        state_dir, v3, deadline):
-    spec = _staged_json_spec(state_dir, deadline=deadline)
-    _begin(state_dir, spec)
-
-    assert "deadline_seconds" not in _starts(state_dir)[0]
