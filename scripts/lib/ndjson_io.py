@@ -22,7 +22,10 @@ its sibling gate/event NDJSON streams):
                         from an offset), for readers that never hold the whole file.
 
   scan_ndjson_lines     The one torn-tail rule, per line; its readers (door,
-                        finalizer, append tail, sweep, report) never re-derive it.
+  scan_ndjson_stream    finalizer, append tail, sweep, report) never re-derive it.
+                        The stream form yields the same tuples from a binary
+                        handle one line at a time, holding no more than that line
+                        (the sweep's ledger read: OI-2559).
 
 Posix-only paths (the audit trail is written with ``fcntl.flock`` on posix);
 ``os.fsync`` is available on every platform this repo targets.
@@ -34,7 +37,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
+from typing import Any, BinaryIO, Callable, Iterator, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +128,22 @@ class NdjsonCorruptionError(ValueError):
                          f"(interior corruption, not a torn tail): {detail}")
 
 
+def _line_verdict(number: int, raw: bytes, *, torn: bool
+                  ) -> Optional[Tuple[int, bytes, Any, Optional[Exception], bool]]:
+    """The ONE per-line decision both readers share: blank skipped, else parsed or (error, torn).
+
+    ``torn`` is only ever set by the caller for the final fragment of a file that
+    does not end in a newline (K-9c rule 2); it is carried onto a parse failure and
+    nowhere else, so a broken newline-terminated line stays interior corruption.
+    """
+    if not raw.strip():
+        return None
+    try:
+        return number, raw, json.loads(raw.decode("utf-8").strip()), None, False
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return number, raw, None, exc, torn
+
+
 def scan_ndjson_lines(data: bytes) -> Iterator[Tuple[int, bytes, Any, Optional[Exception], bool]]:
     """(number, raw, record, error, torn) per line — the ONE torn-tail rule.
 
@@ -137,12 +156,28 @@ def scan_ndjson_lines(data: bytes) -> Iterator[Tuple[int, bytes, Any, Optional[E
     parts = data.split(b"\n")
     torn_idx = len(parts) - 1 if not data.endswith(b"\n") else -1
     for index, raw in enumerate(parts):
-        if not raw.strip():
-            continue
-        try:
-            yield index + 1, raw, json.loads(raw.decode("utf-8").strip()), None, False
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            yield index + 1, raw, None, exc, index == torn_idx
+        verdict = _line_verdict(index + 1, raw, torn=index == torn_idx)
+        if verdict is not None:
+            yield verdict
+
+
+def scan_ndjson_stream(handle: BinaryIO
+                       ) -> Iterator[Tuple[int, bytes, Any, Optional[Exception], bool]]:
+    """The same tuples as ``scan_ndjson_lines(handle.read())``, one line at a time.
+
+    ``handle`` is a binary file handle read in line order. Only the chunk just read
+    is ever held: the reader never keeps the blob or the records, so a ledger of any
+    size costs one line's memory. Chunks are numbered exactly as the blob reader
+    numbers them (blank lines count). The final chunk of a file that does not end
+    in a newline is the torn fragment; every earlier chunk was newline-terminated,
+    so a break in one is interior corruption (K-9c rule 2).
+    """
+    for number, raw_line in enumerate(handle, start=1):
+        terminated = raw_line.endswith(b"\n")
+        verdict = _line_verdict(number, raw_line[:-1] if terminated else raw_line,
+                                torn=not terminated)
+        if verdict is not None:
+            yield verdict
 
 
 def read_ndjson_strict_bytes(
@@ -191,4 +226,5 @@ def read_ndjson_strict(
 
 
 __all__ = ["NdjsonCorruptionError", "TORN_TAIL_CLOSED", "fsync_fileno", "iter_ndjson",
-           "read_ndjson", "read_ndjson_strict", "read_ndjson_strict_bytes", "scan_ndjson_lines"]
+           "read_ndjson", "read_ndjson_strict", "read_ndjson_strict_bytes", "scan_ndjson_lines",
+           "scan_ndjson_stream"]
