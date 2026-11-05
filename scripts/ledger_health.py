@@ -69,12 +69,16 @@ missing or unreadable) — mirrors ``pre_merge_gate.py``'s ``SKIPPED_UNVERIFIED`
 (#1468): an unmeasurable state is never conflated with a pass, and outranks a
 finding in the overall rollup.
 
+  lifecycle_count — (ADR-045 K-9) the five lifecycle defects over this project's
+      ``v3`` lines (``scripts/lib/lifecycle_count.py``), reported BESIDE the four
+      checks and never folded into ``overall_status``/``exit_code``.
+
 Out of scope (by dispatch instruction, not an oversight): does not enable
 ``VNX_CHAIN_RECEIPTS``, does not decide open outcomes, does not
 write receipts. Read-only on state; the only writes this module performs are
-its own atomic health beacon under ``<data_dir>/health/ledger_health.json``
-and, for the ``acknowledge`` subcommand alone, one appended line in
-``ledger_coverage_acknowledged.ndjson``.
+its own atomic health beacons under ``<data_dir>/health/ledger_health.json``
+and ``<data_dir>/health/lifecycle_count.json``, and, for the ``acknowledge``
+subcommand alone, one appended line in ``ledger_coverage_acknowledged.ndjson``.
 """
 from __future__ import annotations
 
@@ -95,6 +99,7 @@ if str(LIB_DIR) not in sys.path:
 
 from ndjson_hash_chain import verify_chain  # noqa: E402
 from open_outcomes import build_open_outcomes
+from lifecycle_count import briefing_line, compute_lifecycle_count
 from receipt_outcome import is_foreign_project
 from vnx_paths import project_id_from_state_dir
 from vnx_ids import PROJECT_ID_RE
@@ -106,6 +111,7 @@ LEDGER_NAME = "t0_receipts.ndjson"
 ACKNOWLEDGED_NAME = "ledger_coverage_acknowledged.ndjson"
 RUNTIME_DB_NAME = "runtime_coordination.db"
 COMPONENT_NAME = "ledger_health"
+LIFECYCLE_COUNT_COMPONENT = "lifecycle_count"
 
 # An open outcome is a point a T0 has to decide on; an active project runs
 # several T0 cycles a day. One that waits a full day/night cycle since its
@@ -521,8 +527,15 @@ def compute_health(
     state_dir: Path,
     *,
     open_outcome_stale_hours: float = DEFAULT_OPEN_OUTCOME_STALE_HOURS,
+    activation_commit: Optional[str] = None,
+    repo: Optional[str | Path] = None,
 ) -> Dict[str, Any]:
-    """Run all four checks read-only. Pure function: no writes, no mutation."""
+    """Run the four checks read-only, plus the lifecycle count beside them.
+
+    The count is NOT folded into ``overall_status``/``exit_code`` (K-9, plan
+    revisie 2 gap 7): ``activation_commit`` narrows its cohort, ``repo`` is the
+    checkout its provenance is read against. Pure function: no writes.
+    """
     checks = {
         "receipt_coverage": check_receipt_coverage(state_dir),
         "open_outcomes": check_open_outcomes(state_dir, stale_hours=open_outcome_stale_hours),
@@ -548,6 +561,9 @@ def compute_health(
         "exit_code": exit_code,
         "open_outcome_stale_hours_threshold": open_outcome_stale_hours,
         "checks": checks,
+        # Deliberately outside the fold above: this count never moves the exit code.
+        "lifecycle_count": compute_lifecycle_count(
+            state_dir, activation_commit=activation_commit, repo=repo),
     }
 
 
@@ -567,6 +583,27 @@ def write_health_surface(data_dir: Path, result: Dict[str, Any]) -> Path:
     )
     status = "ok" if result["overall_status"] == STATUS_OK else "fail"
     beacon.heartbeat_strict(status=status, details=result)
+    return beacon.path
+
+
+def write_count_beacon(data_dir: Path, result: Dict[str, Any]) -> Path:
+    """Persist the count as its own beacon: ``health/lifecycle_count.json`` (K-9 rule 5).
+
+    Same ``HealthBeacon`` primitive as the health surface, counts plus timestamp,
+    so the SessionStart briefing never recounts. Green only for a measured, clean
+    count; a defect or a gap is a fail, never a silent pass.
+    """
+    from health_beacon import HealthBeacon
+
+    count = result.get("lifecycle_count") or {}
+    clean = count.get("status") == "measured" and not (count.get("counts") or {}).get("total")
+    beacon = HealthBeacon(
+        data_dir, LIFECYCLE_COUNT_COMPONENT, expected_interval_seconds=BEACON_EXPECTED_INTERVAL_SECONDS
+    )
+    beacon.heartbeat_strict(status="ok" if clean else "fail", details={
+        **count, "counted_at": count.get("evaluated_at"),
+        "health_status": result.get("overall_status"),
+        "health_exit_code": result.get("exit_code")})
     return beacon.path
 
 
@@ -602,6 +639,7 @@ def _resolve_default_dirs() -> Tuple[Path, Path]:
 
 def _format_human(result: Dict[str, Any]) -> str:
     lines = [f"ledger_health: {result['overall_status']} (exit {result['exit_code']})"]
+    if result.get("lifecycle_count"): lines.append(f"  {briefing_line(result['lifecycle_count'])}")
     for name, check in result["checks"].items():
         status = check["status"]
         reason = check.get("reason") or ""
@@ -685,6 +723,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="an open outcome older than this (since its latest receipt) is a finding "
              f"(default: {DEFAULT_OPEN_OUTCOME_STALE_HOURS})",
     )
+    parser.add_argument(
+        "--activation-commit", default=None,
+        help="cohort boundary: count only v3 lines whose writer_sha descends from this commit",
+    )
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     parser.add_argument(
         "--no-write", action="store_true",
@@ -736,10 +778,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     data_dir = Path(args.data_dir) if args.data_dir else default_data_dir
     state_dir = Path(args.state_dir) if args.state_dir else default_state_dir
 
-    result = compute_health(data_dir, state_dir, open_outcome_stale_hours=args.open_outcome_stale_hours)
+    result = compute_health(
+        data_dir, state_dir, open_outcome_stale_hours=args.open_outcome_stale_hours,
+        activation_commit=args.activation_commit)
 
     if not args.no_write:
         write_health_surface(data_dir, result)
+        write_count_beacon(data_dir, result)
 
     if args.json:
         print(json.dumps(result, indent=2))
