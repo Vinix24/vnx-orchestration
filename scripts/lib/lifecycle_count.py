@@ -18,11 +18,11 @@ from functools import lru_cache
 from pathlib import Path
 
 from coordination_db import db_path_from_state_dir, get_connection
-from coordination_db import DISPATCH_TRANSITIONS  # the legal hops, never a copy
 from dispatch_lifecycle import (  # its table, its grace, its parser: never a copy
     ABANDON_GRACE_SECONDS, END_INTENT_DIRNAME, END_STATE_TARGET, PROJECTION_ROUTES,
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
 )
+from coordination_db import DISPATCH_TRANSITIONS  # the legal hops, never a copy
 from ledger_end_line import end_line
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
