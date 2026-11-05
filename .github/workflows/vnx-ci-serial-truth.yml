@@ -12,9 +12,13 @@ name: VNX CI serial truth
 # run of a PR's head. This workflow's check runs attach to main's commit (a
 # scheduled or dispatched run on main, a SHA no PR has as its head), so they
 # never become merge evidence. tests/test_ci_xdist_d4_switch.py pins that.
-# Every job carries `if: github.ref == 'refs/heads/main'` because a manual
-# workflow_dispatch could otherwise be pointed at a PR head and put these check
-# runs on that SHA, where the merge readers look (OI-2521).
+# Every job carries `if: github.ref == 'refs/heads/main'`. It does not keep the
+# check runs off a PR head when a workflow_dispatch runs on another ref: the
+# jobs are skipped, and GitHub still creates check runs with conclusion
+# `skipped` on that SHA, where the merge readers look. That fails
+# closed, not open: closure_verifier._rollup_all_green reads `skipped` as not
+# green, so a skipped run on a PR head blocks the merge rather than passing it
+# (OI-2521, OI-2543). Dispatch it on main.
 #
 # It always runs the full sweep: no light/heavy classifier here.
 

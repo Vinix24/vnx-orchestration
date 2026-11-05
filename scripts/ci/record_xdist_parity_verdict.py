@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Record the xdist parity verdict: the last word of the parity job before its upload.
 
-Track ``ci-profile-a-xdist``, D2b. Runs in the job "xdist parity" after the
-comparison step (``check_xdist_parity.py compare``, step id ``parity``), with
+Track ``ci-profile-a-xdist``, D2b. Runs in the parity job of the nightly
+``vnx-ci-serial-truth.yml`` after the comparison step
+(``check_xdist_parity.py compare``, step id ``parity``), with
 ``if: always()``. It decides between two cases:
 
 * The comparison step wrote a verdict. The step's own outcome is added to it,
@@ -22,8 +23,8 @@ comparison step (``check_xdist_parity.py compare``, step id ``parity``), with
   ``not_read``.
 
 The workflow step falls back to plain bash when this script is absent (the
-checkout failed); ``tests/test_ci_xdist_parity_workflow.py`` holds that
-fallback's verdict equal to this script's for the same inputs.
+checkout failed); ``tests/test_ci_record_xdist_parity_verdict.py`` holds that
+fallback's verdict and summary equal to this script's for the same inputs.
 
 Exit 0 when the verdict and the summary are written; 2 with a reason when
 either cannot be. The verdict is always written first, so a summary that
@@ -108,7 +109,7 @@ def report_decision(verdict: dict | None) -> bool:
 def summary_line(verdict: dict, written: dict | None) -> str:
     """What the step summary gains: why there is an emergency verdict, or a failed step under a clean exit."""
     if written is None:
-        return ("### xdist parity\n\nNot a required check. Verdict: **invalid_evidence** (exit 2): "
+        return ("### xdist parity\n\nNightly serial truth. Verdict: **invalid_evidence** (exit 2): "
                 "the parity script wrote no verdict.\n")
     outcome = verdict["steps"][COMPARE_STEP]
     if outcome == "success" or written.get("exit") not in (0, None):

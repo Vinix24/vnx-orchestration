@@ -320,17 +320,36 @@ def test_unset_emits_the_xdist_shape_and_vnx_ci_xdist_0_the_serial_one(tmp_path)
     assert full[:2] == ["-q", str(REPO_ROOT / "tests")]
 
 
-def test_the_xdist_selection_fingerprint_is_the_pre_d4_one(tmp_path):
-    """Source: origin/main @ cac71ef3 (before D4), `VNX_CI_XDIST=1`, the committed constraints.
+def test_the_xdist_selection_fingerprint_is_stable_for_one_selection_and_moves_with_its_inputs(tmp_path):
+    """What the fingerprint means, instead of one literal sha256 of today's vectors (OI-2543 point 3).
 
-    It is the same emission Profile A makes with the variable unset after D4:
-    the default emission, not the switch, is what has to reproduce it.
+    Same inputs give the same value (two emissions), and each input that
+    defines the selection moves it: the ``--ignore`` entries from
+    ``scripts/ci/test_exclusions.txt``, the ``-k`` quarantine, and the
+    constraints file (pins). A PR that repairs an excluded test or bumps a pin
+    therefore changes the value on purpose; it does not turn Profile A red.
+
+    The cutover value of the D4 merge stays on record in
+    ``claudedocs/2026-10-24-nachtrun-golf-1-3/evidence/d4-overstapregel-20261105-0251.json``.
     """
-    out = _emit(tmp_path, None)
-    assert (out / "parallel.args").is_file(), "the default emission is the xdist shape"
-    assert not (out / "serial.args").exists(), "the committed serial list is empty"
-    fingerprint = cxp.fingerprint_of_args_dir(out, CONSTRAINTS, str(REPO_ROOT))
-    assert fingerprint == "0ffd56308105e4ee3a6ed04cb5891e8d1fe1edf0804cefe8f336652356f72f37"
+    first = _emit(tmp_path / "first", None)
+    second = _emit(tmp_path / "second", None)
+    fingerprint = cxp.fingerprint_of_args_dir(first, CONSTRAINTS, str(REPO_ROOT))
+    assert cxp.fingerprint_of_args_dir(second, CONSTRAINTS, str(REPO_ROOT)) == fingerprint
+
+    serial, parallel = cxp.read_args_dir(first)
+    constraints = CONSTRAINTS.read_text(encoding="utf-8")
+    quarantine = list(parallel)
+    [k_index] = [i for i, arg in enumerate(quarantine) if arg == "-k"]
+    quarantine[k_index + 1] = quarantine[k_index + 1] + " and not another_quarantined_test"
+    inputs = {
+        "an exclusion from test_exclusions.txt": (serial, [*parallel, "--ignore=/tmp/tests/test_repaired.py"],
+                                                  constraints),
+        "the -k quarantine": (serial, quarantine, constraints),
+        "a constraint pin": (serial, parallel, constraints.replace("pytest==9.1.1", "pytest==9.1.2")),
+    }
+    for name, (case_serial, case_parallel, case_constraints) in inputs.items():
+        assert cxp.selection_fingerprint(case_serial, case_parallel, case_constraints, str(REPO_ROOT)) != fingerprint, name
 
 
 # --- the workflows ----------------------------------------------------------------------------
@@ -658,9 +677,24 @@ def test_every_nightly_job_runs_only_on_main():
     assert "!cancelled()" in jobs["parity"]["if"], "the parity job still runs when a needed job failed"
 
 
+def test_every_job_of_the_nightly_carries_the_main_guard():
+    """Every job, not only the three named above: a job added without the guard is a skipped check run on a PR head.
+
+    A dispatch on another ref skips these jobs, and GitHub still creates check
+    runs with conclusion ``skipped`` on that SHA; ``closure_verifier._rollup_all_green``
+    reads that as not green, so it blocks rather than passes (OI-2543 point 2).
+    """
+    jobs = _jobs(NIGHTLY)
+    assert jobs, "the nightly has no jobs"
+    missing = [job_id for job_id, job in jobs.items()
+               if "github.ref == 'refs/heads/main'" not in (job.get("if") or "")]
+    assert missing == [], missing
+
+
 def test_the_nightly_header_says_why_the_main_guard_exists():
     header = _nightly_text().split("\non:\n", 1)[0]
     assert "workflow_dispatch" in header and "refs/heads/main" in header
+    assert "skipped" in header and "_rollup_all_green" in header, "the header names what the guard really does"
 
 
 def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs():
