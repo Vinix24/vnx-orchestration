@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """xdist parity history: does the cutover rule of track ci-profile-a-xdist hold?
 
-Fetches the ``xdist-parity-verdict`` artifacts of VNX CI runs and applies the
-cutover rule (plan "The cutover rule", D4's merge condition), so the
-condition is computed, not counted by eye.
+Fetches the ``xdist-parity-verdict`` artifacts of VNX CI runs (the per-PR
+runs before D4) and applies the cutover rule (plan "The cutover rule", D4's
+merge condition), so the condition is computed, not counted by eye. The
+nightly ``vnx-ci-serial-truth.yml`` does not run this script: it runs
+``check_xdist_parity.py compare`` and ``record_xdist_parity_verdict.py``
+itself. This tool reads the verdicts the per-PR parity job used to upload.
 
 The window is every VNX CI run whose verdict is on a heavy profile, whose
 ``selection_fingerprint`` equals the target fingerprint (the one the checkout
@@ -60,6 +63,14 @@ set aside: a real parity difference (any entry in the verdict's
 (the conclusion, or with none the verdict's job result, is exactly
 ``success``) without a shutdown of its own: a failed shadow blocks, and an
 unknown one does too.
+
+A run whose head branch is ``--candidate-branch`` is placed ``candidate``:
+outside the window, listed with its reason in the table, and never a
+measurement or a blocker. The candidate branch's own run is the D4 run whose
+workflow has no shadow job by design, so its missing verdict would otherwise
+block the rule for good (OI-2544). Without the flag nothing changes; only an
+exact branch match is placed this way, and a run with no branch, another
+branch, or no verdict for any other reason still blocks.
 
 A light run never counts, whatever its step list says: the light early return
 of the comparison names its skipped steps (OI-2147), and a light run is
@@ -335,8 +346,15 @@ def _with_note(reason: str, evidence: JobEvidence | None) -> str:
     return f"{reason}; {note}" if note else reason
 
 
-def place_run(run: Run, target_fingerprint: str, is_ancestor, job_evidence=None) -> Placement:
+def place_run(run: Run, target_fingerprint: str, is_ancestor, job_evidence=None,
+              candidate_branch: str | None = None) -> Placement:
     """Where one run stands relative to the window; *is_ancestor(head)* is True, False or None.
+
+    A run whose head branch is exactly *candidate_branch* is ``candidate``:
+    outside the window, with its reason, never a measurement or a blocker. It
+    is placed before anything is read from its verdict, because the candidate
+    branch's own run has no verdict to read by design (OI-2544). With no
+    *candidate_branch* (None or empty) nothing is placed this way.
 
     A run without a current verdict (still running, none, one that does not
     prove this run's latest attempt, or one that lacks a field) is placed on
@@ -357,6 +375,9 @@ def place_run(run: Run, target_fingerprint: str, is_ancestor, job_evidence=None)
     a Profile A job and nothing keeps it dirty. A run that is clean never
     reads the job evidence: it counts as it is.
     """
+    if candidate_branch and run.head_branch == candidate_branch:
+        return Placement(run, "candidate",
+                         ["candidate branch: outside the window; it neither measures parity nor blocks the rule"])
     gap = evidence_gap(run)
     if gap is not None:
         return _place_on_ancestry(run, *gap, is_ancestor=is_ancestor, job_evidence=job_evidence)
@@ -629,9 +650,10 @@ def watch_list_condition(watch_list: list | None, oi_status: dict | None) -> Con
 
 
 def evaluate(runs: list, *, target_fingerprint: str, is_ancestor, watch_list, oi_status, list_truncated: bool,
-             job_evidence=None) -> Evaluation:
+             job_evidence=None, candidate_branch: str | None = None) -> Evaluation:
     """Apply the cutover rule to *runs* (newest first or in any order)."""
-    placements = [place_run(run, target_fingerprint, is_ancestor, job_evidence) for run in runs]
+    placements = [place_run(run, target_fingerprint, is_ancestor, job_evidence,
+                            candidate_branch=candidate_branch) for run in runs]
     window = [p.run for p in placements if p.place == "in_window"]
     conditions = [Condition("run_list_complete", not list_truncated,
                             "the run list may be cut off: raise --limit" if list_truncated else "every run since the window base listed")]
@@ -648,6 +670,7 @@ def render(evaluation: Evaluation, header: dict) -> str:
         "xdist parity history: the cutover rule of track ci-profile-a-xdist",
         f"window base: {header['window_base']} ({header['window_base_source']})",
         f"selection fingerprint: {header['fingerprint']} ({header['fingerprint_source']})",
+        f"candidate branch: {header.get('candidate_branch') or 'none (every run can block)'}",
         f"watch list: {header['watch_list']}",
         f"runs listed: {len(evaluation.placements)} of workflow {header['workflow']!r} in {header['repo']}",
         "",
@@ -1174,6 +1197,11 @@ WATCH_LIST_HELP = (
     "triages a parity difference; their status is read from the open-items ledger "
     "(python3 scripts/open_items_manager.py list)"
 )
+CANDIDATE_BRANCH_HELP = (
+    "a head branch whose runs are placed `candidate`: outside the window, with their reason, and never a "
+    "measurement or a blocker. Use it for the cutover's own candidate branch, whose workflow runs no shadow "
+    "job by design (OI-2544). Without it nothing changes; only an exact branch match is placed this way."
+)
 
 
 def _positive_int(value: str) -> int:
@@ -1203,6 +1231,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--workflow", default=WORKFLOW_NAME)
     parser.add_argument("--fingerprint", default="",
                         help="target fingerprint (default: what this checkout emits; run it from the D4 branch)")
+    parser.add_argument("--candidate-branch", default="", metavar="BRANCH", help=CANDIDATE_BRANCH_HELP)
     parser.add_argument("--open-items", default="", help="open_items.json (default: this project's ledger)")
     parser.add_argument("--limit", type=_positive_int, default=300, help="how many runs to list (newest first)")
     parser.add_argument("--cache-dir", default="", help="keep downloaded verdicts here between calls")
@@ -1222,7 +1251,8 @@ def _inputs(args, repo_root: Path) -> tuple:
         oi_status = read_oi_status(Path(args.open_items) if args.open_items else default_open_items(repo_root))
     header = {"repo": repo, "workflow": args.workflow, "window_base": args.last_d3_merge,
               "window_base_source": "the last D3 merge, given", "fingerprint": fingerprint,
-              "fingerprint_source": fp_source, "watch_list": ", ".join(watch_list) or "none (--no-watch-list)"}
+              "fingerprint_source": fp_source, "candidate_branch": args.candidate_branch,
+              "watch_list": ", ".join(watch_list) or "none (--no-watch-list)"}
     return header, watch_list, oi_status
 
 
@@ -1241,7 +1271,11 @@ def _collect(header: dict, args, repo_root: Path, cache: Path) -> tuple:
                         f"or name another base")
     listed = list_runs(header["repo"], header["workflow"], args.limit)
     runs = [r for r in listed if _created(r) >= since]
-    missing = missing_commits(repo_root, run_heads(runs))
+    # A candidate run is placed on its branch, never on ancestry, so its head
+    # need not be in this checkout: requiring it would make the candidate
+    # block the rule it is meant never to block (OI-2544).
+    heads = run_heads([r for r in runs if not (args.candidate_branch and r.head_branch == args.candidate_branch)])
+    missing = missing_commits(repo_root, heads)
     if missing is not None:
         raise ToolError(missing)
     truncated = len(listed) >= args.limit and len(runs) == len(listed)
@@ -1271,6 +1305,7 @@ def main(argv=None) -> int:
                 oi_status=oi_status,
                 list_truncated=truncated,
                 job_evidence=job_evidence_provider(header["repo"], cache),
+                candidate_branch=args.candidate_branch,
             )
     except (ToolError, OSError, RuntimeError) as exc:
         print(f"xdist_parity_history: {exc}", file=sys.stderr)

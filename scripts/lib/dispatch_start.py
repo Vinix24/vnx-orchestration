@@ -27,6 +27,7 @@ from append_receipt_internals.common import AppendReceiptError
 from append_receipt_internals.lifecycle import end_intent_path, lifecycle_enabled
 from atomic_io import atomic_write_json
 from coordination_db import db_path_from_state_dir, get_connection
+from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -106,20 +107,21 @@ def read_attempt_state(state_dir: str | Path, project_id: str, dispatch_id: str)
 
 
 def _lifecycle_lines(state_dir, project_id: str, dispatch_id: str) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
-    """This exact key's start lines (file order) and its end lines, by attempt."""
+    """This exact key's start lines (file order) and its end lines, by attempt.
+
+    The ledger is read strictly with the refusal scoped to lines carrying this dispatch
+    id (OI-2528): another dispatch's break is skipped, this dispatch's own refuses
+    ``ledger_corrupt``; a torn final fragment stays tolerated.
+    """
     ledger = Path(state_dir) / LEDGER_FILENAME
     try:
-        text = ledger.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError: return [], {}
+        records = read_ndjson_strict(ledger, lambda raw: dispatch_id in raw)
+    except NdjsonCorruptionError as exc:
+        raise StartRefused("ledger_corrupt", f"{exc}") from exc
     except OSError as exc:
         raise StartRefused("ledger_unreadable", f"cannot read {ledger}: {exc}") from exc
     starts, ends = [], {}
-    for raw in text.splitlines():
-        if dispatch_id not in raw: continue  # format-agnostic prefilter; the separators are not ours
-        try:
-            line = json.loads(raw)
-        except json.JSONDecodeError:
-            continue  # a torn line is not evidence of a completed record
+    for line in records:
         # The prefilter admits ids that merely CONTAIN this one (``job-extra`` for
         # ``job``); only the exact key counts (ADR-045 §3).
         attempt = line.get("attempt") if isinstance(line, dict) else None
@@ -251,13 +253,24 @@ def _record_lifecycle_mode(handover: Handover, *, state_dir: Path, write_attempt
         return MODE_WRITE_FAILED
 
 
+def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
+    """The spec's own legal integer ``deadline_seconds``, else None (K-6b/OI-2522)."""
+    from dispatch_lifecycle import _valid_deadline  # noqa: PLC0415
+    try:
+        value = json.loads(blob).get("deadline_seconds")
+        return value if _valid_deadline(value) else None
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+        return None
+
+
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
                        target_slot: Optional[str], state_dir: Path) -> None:
     """Write the v3 start line; a ``duplicate`` verdict means another hand-over owns the key."""
     from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
     slot = (target_slot or "").strip()
     try:
-        spec_sha = hashlib.sha256(Path(spec_file).read_bytes()).hexdigest()
+        spec_bytes = Path(spec_file).read_bytes()
+        spec_sha = hashlib.sha256(spec_bytes).hexdigest()
     except OSError as exc:
         raise StartRefused("spec_unreadable", f"cannot read the staged spec {spec_file}: {exc}") from exc
     receipt = {
@@ -269,6 +282,8 @@ def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_fil
         "requested_by": (os.environ.get("VNX_REQUESTED_BY") or "").strip() or (
             f"terminal:{slot}" if slot else f"door:{handover.door_pid}"),
     }
+    if (deadline_seconds := _spec_deadline_seconds(spec_bytes)) is not None:
+        receipt["deadline_seconds"] = deadline_seconds
     try:
         result = append_receipt_payload(receipt, receipts_file=str(state_dir / LEDGER_FILENAME))
     except AppendReceiptError as exc:

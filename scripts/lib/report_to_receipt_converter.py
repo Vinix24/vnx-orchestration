@@ -38,13 +38,18 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ADR-045 (K-8b): one decision, in report_lifecycle_mode. Imported as a MODULE so
+# `report_line` is not rebound here for other writers to reuse.
+import report_lifecycle_mode
+from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 # Canonical receipt status vocabulary (single generated source). The converter
 # no longer carries its own hand-copied terminal-status sets; it resolves every
@@ -67,6 +72,7 @@ from provider_identity import ProviderIdentity, UnrecognizedProviderError, norma
 # both beacons judge the same accumulated history by the same window.
 from receipt_conversion_rejection_beacon import (
     REJECTION_ALARM_WINDOW_SECONDS,
+    first_rejected_epoch,
     load_rejected_history,
     recent_rejections,
 )
@@ -657,10 +663,12 @@ def _resolve_report_role(
     role: Optional[str] = None
     try:
         from dispatch_identity import resolve_effective_role  # noqa: PLC0415
-        project_id = merged.get("project_id") or None
+        project_id = str(merged.get("project_id") or "").strip() or None
         if not project_id:
-            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-            project_id = _resolve_project_id()
+            # The report's role join still needs a tenant; reuse the door's
+            # canonical resolver rather than the door's private wrapper.
+            from project_root import resolve_project_id  # noqa: PLC0415
+            project_id = resolve_project_id()
         role = resolve_effective_role(
             merged.get("role"), dispatch_id, project_id, state_dir=state_dir,
         )
@@ -955,6 +963,140 @@ def _run_fail_closed_checks(
         violations.extend(_check_pr_delivery(dispatch_id, merged or {}))
 
     return violations
+
+
+def _read_report_mtime(report_path: Path) -> Optional[float]:
+    """When the worker WROTE the file this caller read — never the canonical path's.
+
+    The receipt's own ``report_path`` can be a different file (codex round 2,
+    advisory); a missing file yields ``None`` and the decision refuses instead.
+    """
+    try:
+        return report_path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _named_attempt(merged: Dict[str, Any]) -> Optional[int]:
+    """The report's own ``attempt`` when it names a positive integer; else ``None``.
+
+    THE one reader (K-8b round 3): ``report_parser.py`` imports this function
+    instead of carrying a copy, so the two writers can never disagree about the
+    same report. ``report_parser.extract_metadata`` reads frontmatter lines raw
+    and keeps ``attempt: '1'`` quoted, while ``parse_frontmatter`` here strips
+    the quotes; one layer of surrounding matching quotes is removed on both
+    paths so ``1``, ``'1'``, ``"1"`` and `` 1 `` all mean 1. An unmatched quote
+    (``'1``) or an empty value stays unparseable and names no attempt.
+
+    ``report_lifecycle_mode`` reads an attempt off the receipt and refuses
+    ``attempt_unknown`` for anything that is not a positive integer, so a
+    report naming ``"x"`` / ``0`` hands over nothing and the decision
+    attributes by write time as before (K-8b round 2, rule 3).
+    """
+    raw = merged.get("attempt")
+    if raw is None or isinstance(raw, bool):
+        return None
+    text = str(raw).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1]
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 1 else None
+
+
+def report_hint_fields(text: str, receipt: Dict[str, Any]) -> Dict[str, Any]:
+    """The hint fields the REPORT itself names — THE one hint builder (K-8b round 4)."""
+    merged: Dict[str, Any] = {**_extract_body_fields(text), **parse_frontmatter(text)}
+    named: Dict[str, Any] = {}
+    tenant = re.sub(r"^(['\"])(.*)\1$", r"\2",
+                    str(merged.get("project_id") or "").strip()).strip()
+    if tenant and not receipt.get("project_id"):
+        named["project_id"] = tenant
+    attempt = _named_attempt(merged)
+    if attempt is not None:
+        named["attempt"] = attempt
+    return named
+
+
+def _log_refusal(exc: "report_lifecycle_mode.ReportPathRefused", report_path: Path) -> None:
+    """Name the dispatch and the reason; the caller books nothing (K-8b rule 4)."""
+    logger.warning(
+        "report_to_receipt_converter: REFUSED (ledger lifecycle) dispatch=%s "
+        "file=%s reason=%s: %s — nothing written, report stays for the next scan",
+        exc.dispatch_id, report_path.name, exc.code, exc.detail,
+    )
+
+
+def _lifecycle_refusal_outcome(exc: "report_lifecycle_mode.ReportPathRefused",
+                               report_path: Path, state_dir: Optional[Path], dry_run: bool,
+                               rejected_detail_sink: Optional[List[Dict[str, Any]]]) -> str:
+    """``rejected`` for a permanent refusal the history carried for a day (OI-2542):
+    it takes the model refusal's path. A transient or younger refusal is logged,
+    stays ``error`` (booked nothing, retried) and is named in *rejected_detail_sink*
+    as ``kind="lifecycle_refusal"`` either way.
+    """
+    reason = f"ledger lifecycle {exc.code}: {exc.detail}"
+    if rejected_detail_sink is not None:
+        rejected_detail_sink.append({
+            "dispatch_id": str(exc.dispatch_id or ""), "file": report_path.name, "reason": reason,
+            "kind": "lifecycle_refusal",
+            "rejected_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    # Deadline on the REFUSAL (r3), not the report's mtime: an outage-returnee still waits a day.
+    history = _load_prior_rejected_history(state_dir) if state_dir is not None else []
+    first_seen = first_rejected_epoch(history, str(exc.dispatch_id or ""), report_path.name, reason)
+    if not (exc.code in PERMANENT_LIFECYCLE_REFUSALS and first_seen is not None
+            and time.time() - first_seen > LIFECYCLE_REFUSAL_DEADLETTER_SECONDS):
+        _log_refusal(exc, report_path)
+        return "error"
+    logger.warning("report_to_receipt_converter: %sREJECTED (fail-closed) dispatch=%s file=%s reason=%s",
+                   "[dry-run] " if dry_run else "", exc.dispatch_id, report_path.name, reason)
+    if not dry_run and state_dir is not None:
+        _deadletter_report(report_path, f"lifecycle_{exc.code}", state_dir)
+    return "rejected"
+
+
+def _same_booking(record: Dict[str, Any], receipt: Dict[str, Any]) -> bool:
+    """True when *record* is the line *receipt* would book — attempt for attempt.
+
+    K-8b rule 5: a ``report_ingested`` may only be suppressed by an earlier one
+    with the same ``dispatch_id``, ``project_id`` and ``attempt``. Every legacy
+    shape keeps the plain ``dispatch_id`` + ``receipt_kind`` match, byte for byte.
+    """
+    if record.get("dispatch_id") != receipt.get("dispatch_id"):
+        return False
+    if record.get("receipt_kind") != receipt.get("receipt_kind"):
+        return False
+    if str(receipt.get("event_type") or "").strip() != REPORT_INGESTED_EVENT_TYPE:
+        return True
+    return (
+        str(record.get("event_type") or "").strip() == REPORT_INGESTED_EVENT_TYPE
+        and record.get("project_id") == receipt.get("project_id")
+        and record.get("attempt") == receipt.get("attempt")
+    )
+
+
+def _lifecycle_report_line(
+    receipt: Dict[str, Any], text: str, *, state_dir: Optional[Path],
+    report_path: Path,
+) -> Dict[str, Any]:
+    """The ONE shaping point: the line this dispatch's lifecycle mode asks for.
+
+    A legacy dispatch gets its receipt object back untouched; a v3 dispatch gets
+    one ``report_ingested`` copy. Only what the REPORT itself names goes on the
+    hint copy — its tenant and its attempt — so a legacy booking never gains a
+    field it did not have, and the tenant is resolved once, by K-8a.
+    """
+    named = report_hint_fields(text, receipt)
+    hint = {**receipt, **named} if named else receipt
+    line = report_lifecycle_mode.report_line(
+        hint,
+        state_dir=(state_dir if state_dir is not None
+                   else report_lifecycle_mode.append_destination_state_dir()),
+        report_written_at=_read_report_mtime(report_path),
+    )
+    return receipt if line is hint else line
 
 
 def _build_receipt_from_report_core(
@@ -1434,6 +1576,12 @@ def build_receipt_from_report(
     suppressed) and into ``_resolve_pr_link`` (obligation write suppressed)
     so the function honours the scan-level dry-run contract "nothing on disk
     changes" end to end (OI-1744).
+
+    ADR-045 (K-8b): a ``v3`` dispatch returns one ``report_ingested`` instead of
+    a ``task_complete``; a legacy receipt passes through untouched. When the line
+    cannot be established this RAISES ``report_lifecycle_mode.ReportPathRefused``
+    (dispatch id + named reason) instead of returning a receipt: the caller must
+    book nothing and keep the report retryable.
     """
     receipt = _build_receipt_from_report_core(report_path, text, state_dir=state_dir, dry_run=dry_run)
     if receipt is None:
@@ -1442,6 +1590,7 @@ def build_receipt_from_report(
     fm = parse_frontmatter(text)
     body = _extract_body_fields(text)
     merged: Dict[str, Any] = {**body, **fm}
+    receipt = _lifecycle_report_line(receipt, text, state_dir=state_dir, report_path=report_path)
     pr_link, pr_link_reason = _resolve_pr_link(
         receipt.get("dispatch_id"), merged, state_dir, dry_run=dry_run,
     )
@@ -1490,9 +1639,9 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 # scan_and_convert() for per-scan counting (OI-998):
 #   "appended"  — new receipt written.
 #   "duplicate" — idempotent re-send, no new receipt.
-#   "rejected"  — fail-closed refusal by append_receipt_payload's own model
-#                 validation (see MODEL_REFUSAL_CODES below: a missing Model,
-#                 or a Model value that is not a model name).
+#   "rejected"  — fail-closed refusal of the report's bytes: the model check in
+#                 append_receipt_payload (MODEL_REFUSAL_CODES below), or a permanent
+#                 ReportPathRefused code on a report older than a day (OI-2542).
 #                 A WARNING is logged here with dispatch_id + reason so the
 #                 refusal is loud, not silent. The report is quarantined into
 #                 receipt_deadletter/ (reason code = the refusal's own code)
@@ -1518,9 +1667,23 @@ def _report_cost_fields(text: str) -> Dict[str, Any]:
 # a model name: spaces, backticks, too long). Both are a verdict on the
 # report's bytes, so both take the "rejected" outcome: counted as rejected,
 # named in the rejection history, quarantined on the first refusal. This is the
-# ONE place that decides which codes take that path; every other refusal stays
-# an "error" and is retried. A test pins this set to what the validator raises.
+# ONE place that decides which APPEND-VALIDATION codes take that path (lifecycle codes:
+# PERMANENT_LIFECYCLE_REFUSALS in _lifecycle_refusal_outcome); the rest stay "error" and
+# are retried. A test pins this set to what the validator raises.
 MODEL_REFUSAL_CODES = frozenset({"missing_model", "invalid_model_shape"})
+
+# The ReportPathRefused codes no later read of the append-only ledger can undo (OI-2542): a
+# start line precedes its attempt's report and one end line per attempt is final. Only these are
+# dead-lettered, once the refusal itself has lasted LIFECYCLE_REFUSAL_DEADLETTER_SECONDS.
+PERMANENT_LIFECYCLE_REFUSALS = frozenset({"attempt_unknown", "attempt_ambiguous", "project_ambiguous",
+                                          "missing_dispatch_id"})
+# Never dead-lettered: a readable ledger, a decidable mode or a later dispatch_finished for the
+# same key resolves each; project_mismatch/project_unknown also hinge on resolve_project_id() (the
+# env fallback in _resolve_tenant), so a misconfigured tenant must never move a report.
+TRANSIENT_LIFECYCLE_REFUSALS = frozenset({"ledger_unreadable", "lifecycle_mode_undecidable",
+                                          "end_outcome_id_missing", "project_mismatch",
+                                          "project_unknown"})
+LIFECYCLE_REFUSAL_DEADLETTER_SECONDS = 24 * 3600
 
 
 def _sync_report_open_items(receipt: Dict[str, Any], text: str) -> None:
@@ -1606,11 +1769,17 @@ def _convert_one_detailed(
         logger.warning("report_to_receipt_converter: cannot read %s: %s", report_path.name, exc)
         return None, "malformed"
 
+    # The store the line is appended to (K-8b rule 2); a None state_dir is never "legacy".
     state_dir_for_route = Path(receipts_file).parent if receipts_file else None
     try:
         receipt = build_receipt_from_report(
             report_path, text, state_dir=state_dir_for_route, dry_run=dry_run,
         )
+    except report_lifecycle_mode.ReportPathRefused as exc:
+        # Named refusal (K-8b rule 4): book nothing — or dead-letter when permanent
+        # and aged (OI-2542). Caught BEFORE the generic handler: never a crash.
+        return None, _lifecycle_refusal_outcome(
+            exc, report_path, state_dir_for_route, dry_run, rejected_detail_sink)
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1658,12 +1827,7 @@ def _convert_one_detailed(
     _guard_did = receipt.get("dispatch_id")
     _guard_kind = receipt.get("receipt_kind")
     _guard_matched = False
-    if (
-        _guard_did
-        and _guard_kind
-        and receipts_file
-        and Path(receipts_file).exists()
-    ):
+    if _guard_did and _guard_kind and receipts_file and Path(receipts_file).exists():
         try:
             _text = Path(receipts_file).read_text(encoding="utf-8", errors="replace")
             # Parse NDJSON lines: compare the parsed dispatch_id field
@@ -1678,10 +1842,7 @@ def _convert_one_detailed(
                     _rec = json.loads(_line)
                 except json.JSONDecodeError:
                     continue
-                if (
-                    _rec.get("dispatch_id") == _guard_did
-                    and _rec.get("receipt_kind") == _guard_kind
-                ):
+                if _same_booking(_rec, receipt):
                     logger.info(
                         "report_to_receipt_converter: skipping dispatch=%s — "
                         "completion receipt already exists (hot-path wrote first)",
@@ -1917,7 +2078,7 @@ class ScanStats:
     # dry-run so this count never influences health status either way.
     would_append_count: int = 0
     # F1-3: per-rejection detail ({dispatch_id, file, reason, rejected_at})
-    # for THIS scan's model refusals (MODEL_REFUSAL_CODES) — see _write_scan_heartbeat,
+    # for THIS scan's fail-closed refusals (MODEL_REFUSAL_CODES and lifecycle) — see _write_scan_heartbeat,
     # which merges this into the beacon's accumulated details.rejected
     # history. A tuple (not a list) so the frozen dataclass never exposes a
     # mutable default shared across instances.
@@ -1951,6 +2112,26 @@ def _load_prior_rejected_history(state_dir: Path) -> List[Dict[str, Any]]:
     judge its own status.
     """
     return load_rejected_history(state_dir, _HEALTH_COMPONENT)
+
+
+def _merge_rejected_history(prior: List[Dict[str, Any]],
+                            fresh: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per ``(dispatch_id, file, reason)``, oldest first (OI-2542 r3).
+
+    Appended raw, ONE young refusal filled the 200-entry history in ~100 min and
+    evicted every model rejection: dedupe BEFORE the cap. ``rejected_at`` = newest
+    sighting (the alarm); ``first_rejected_at`` = earliest (the dead-letter deadline).
+    """
+    merged: Dict[tuple, Dict[str, Any]] = {}
+    for entry in [*prior, *fresh]:
+        key = (entry.get("dispatch_id"), entry.get("file"), entry.get("reason"))
+        held = merged.get(key, {**entry, "first_rejected_at": entry.get("rejected_at")})
+        newest = max((held, entry), key=lambda held_or_new: held_or_new.get("rejected_at") or "")
+        first = min(held["first_rejected_at"],
+                    entry.get("first_rejected_at") or entry.get("rejected_at"),
+                    key=lambda stamp: stamp or "")
+        merged[key] = {**newest, "first_rejected_at": first}
+    return sorted(merged.values(), key=lambda entry: entry.get("rejected_at") or "")
 
 
 def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
@@ -2002,9 +2183,8 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     # operator sees "27 rejected" with no way to find out which reports or
     # why without re-running the scan by hand. Accumulate per-rejection
     # detail across scans (bounded, oldest evicted) so the identity of every
-    # rejection survives on this beacon, not just its count.
-    rejected_history = _load_prior_rejected_history(state_dir)
-    rejected_history.extend(stats.rejected)
+    # rejection survives on this beacon, not just its count. One entry per key.
+    rejected_history = _merge_rejected_history(_load_prior_rejected_history(state_dir), stats.rejected)
     if len(rejected_history) > _HEALTH_REJECTED_HISTORY_MAX:
         rejected_history = rejected_history[-_HEALTH_REJECTED_HISTORY_MAX:]
 

@@ -29,6 +29,8 @@ reaches it fails the test). Nothing leaves ``tmp_path``.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from argparse import Namespace
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +43,14 @@ from review_seat_support import no_config_store, pin_review_stack
 
 OLD_HEADS = [c * 40 for c in "abcdef0123"]
 CLEAN_REPORT = "## Findings\n\nBlocking count: 0\nAdvisory count: 0\n"
+# Hermetic identity for the throwaway consumer repo (no operator git config read).
+_GIT_ENV = {
+    **os.environ,
+    "GIT_AUTHOR_NAME": "vnx-test",
+    "GIT_AUTHOR_EMAIL": "vnx-test@example.invalid",
+    "GIT_COMMITTER_NAME": "vnx-test",
+    "GIT_COMMITTER_EMAIL": "vnx-test@example.invalid",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -661,9 +671,36 @@ def _build_snapshot(tmp_path, *, work_ref: str):
     return data_dir, vspec, spec_file, build_runtime_snapshot
 
 
+def _consumer_repo(root: Path) -> Path:
+    """A real consumer repo whose ``origin/main`` resolves to its one commit.
+
+    K-4b resolves the dispatch base once at the door (``_resolve_start_base_sha``)
+    in the consumer root and refuses before the hand-over when it cannot. The
+    firing tests below must therefore hand the door a repo, not a bare
+    ``tmp_path``: one ``git init``, one commit, and ``origin/main`` pointing at
+    it. ``_resolve_start_base_sha`` itself stays unstubbed — the door resolves a
+    real ref, as it does in production.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=_GIT_ENV)
+    (root / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=root, check=True, env=_GIT_ENV)
+    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=root, check=True, env=_GIT_ENV)
+    subprocess.run(["git", "branch", "-M", "main"], cwd=root, check=True, env=_GIT_ENV)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=root, check=True, env=_GIT_ENV,
+    )
+    return root
+
+
 def _door_env(monkeypatch, tmp_path, data_dir) -> None:
-    """Point the real door (run_dispatch) at the snapshot's throwaway store."""
-    monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+    """Point the real door (run_dispatch) at the snapshot's throwaway store.
+
+    The consumer root is a real repo with ``origin/main`` (K-4b: the door needs a
+    base it can resolve, and a non-repo or a repo without that ref is refused).
+    """
+    project_root = _consumer_repo(tmp_path / "consumer-repo")
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(project_root))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")

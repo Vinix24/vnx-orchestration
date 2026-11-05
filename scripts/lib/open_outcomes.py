@@ -899,8 +899,6 @@ def open_outcome_items(
             "status": outcome.get("status"),
             "reason": reason,
             "last_seen": seen.isoformat() if seen else None,
-            **({"superseded_by": summary["superseded_by"][did]}
-               if v3 and outcome["decision"] == "superseded" else {}),
         })
     items.sort(key=lambda i: i["dispatch_id"])
     items.sort(key=lambda i: i["last_seen"] or "", reverse=True)
