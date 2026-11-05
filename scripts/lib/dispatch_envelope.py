@@ -73,6 +73,7 @@ from envelope_prepare import (  # noqa: E402
 )
 from envelope_govern_support import (  # noqa: E402
     _archive_dispatch_events,
+    _archive_late_dispatch_events,
     _clear_dispatch_events,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
@@ -89,6 +90,15 @@ from envelope_adapters_provider import ProviderAdapter  # noqa: E402
 from paid_lane_budget import (  # noqa: E402
     PaidLaneBudgetExceededError,
     enforce_daily_budget,
+)
+# ADR-045 K-5: the one end line per lane exit, published BEFORE the occupancy
+# flock is released (remove_dispatch_worktree below).
+from dispatch_exit import (  # noqa: E402
+    REASON_GOVERN_ERROR,
+    REASON_PRE_SPAWN_ERROR,
+    finalize_exit,
+    finalize_lane_exit,
+    now_utc,
 )
 
 logger = logging.getLogger(__name__)
@@ -404,6 +414,7 @@ class LaneRouter:
 RECEIPT_MISSING_STATUS = "receipt_missing"
 
 
+
 def _envelope_outcome(
     work_status: str, receipt_path: Optional[Path], error: Optional[str],
 ) -> "tuple[str, int, Optional[str]]":
@@ -523,6 +534,121 @@ def run_envelope(spec: EnvelopeSpec, lane: str = "codex") -> EnvelopeResult:
 # ---------------------------------------------------------------------------
 
 
+def _pre_spawn_failure(
+    handover, state_dir: Path, *, reason: str, error: str,
+    report_path=None, receipt_path=None,
+) -> "EnvelopeResult":
+    """An exit BEFORE the spawn: the end line first, then the same failure result.
+
+    ADR-045 §1/§5: every exit after the hand-over becomes an end line. These
+    happen before any worktree exists, so ``finalize_exit`` writes ``failed`` with
+    the caller's reason and ``no_push:no_worktree`` — a no-op for a legacy
+    hand-over, which keeps the K-4c result byte-for-byte, ``EnvelopeResult`` included.
+    """
+    finalize_exit(handover, state_dir=state_dir, status="failure", reason=reason)
+    return EnvelopeResult(
+        status="failure", returncode=1, report_path=report_path,
+        receipt_path=receipt_path, completion_text="", error=error,
+    )
+
+
+def _spawn_marker(handover, on_spawn, marks: Dict[str, str]):
+    """The lane's own ``on_spawn`` wrapper: stamp ``spawned_at`` for the end line.
+
+    Only a v3 hand-over gets one — a legacy fire passes the caller's hook through
+    untouched, so its spawn behaviour is exactly the K-4c one. The stamp is taken
+    first, so a raising hook cannot cost the exit its ``spawned_at``.
+    """
+    if handover is None or not getattr(handover, "is_v3", False):
+        return on_spawn
+
+    def _mark_and_forward(child_pid: int) -> None:
+        marks.setdefault("spawned_at", now_utc())
+        if on_spawn is not None:
+            on_spawn(child_pid)
+
+    return _mark_and_forward
+
+
+class _LaneExit:
+    """One lane attempt's exit: GOVERN → governed outcome → one end line → teardown.
+
+    ADR-045 §2/§5 (K-5 r2): the end line is frozen once written and the teardown
+    releases the occupancy flock, so both come AFTER governance and carry the
+    GOVERNED outcome — K-5's head booked a worker success ``completed`` before
+    ``_govern`` could fail it. ``close()`` publishes once: ``govern()`` or the
+    lane's ``finally`` (``BaseException``), whichever gets there first.
+    """
+
+    def __init__(self, handover, *, state_dir, wt_path, dispatch_id, project_root,
+                 terminal_id, spawn_marks=None):
+        self.handover, self.state_dir, self.wt_path = handover, state_dir, wt_path
+        self.dispatch_id, self.project_root, self.terminal_id = (
+            dispatch_id, project_root, terminal_id)
+        self.spawn_marks: Dict[str, str] = {} if spawn_marks is None else spawn_marks
+        self.result: "Optional[_AdapterResult]" = None
+        self.status, self.reason, self._closed = None, None, False
+        # OI-2519: the status the END LINE carries. Equal to ``status`` except
+        # when GOVERN rejected the report: the caller-visible EnvelopeResult keeps
+        # the ``_envelope_outcome`` status while the frozen end line (§2/§5) says
+        # what governance decided.
+        self.exit_status: "Optional[str]" = None
+        self.returncode, self.error = 1, None
+
+    def govern(self, spec, result, start, end, *, phantom_diff=None, integrity=None,
+               base_ref=None) -> "EnvelopeResult":
+        self.result = result
+        try:
+            report_path, receipt_path = _govern(
+                spec, result, start, end, phantom_diff=phantom_diff,
+                integrity=integrity, base_ref=base_ref)
+        except BaseException as exc:
+            self.status, self.reason = "failure", REASON_GOVERN_ERROR
+            logger.exception("envelope: _govern raised dispatch=%s: %r", self.dispatch_id, exc)
+            self.close()
+            raise
+        self.status, self.returncode, self.error = _envelope_outcome(
+            result.status, receipt_path, result.error)
+        # OI-2519: the end line follows the GOVERNED verdict. When the work
+        # succeeded (and only then) but governance downgraded it — a report body
+        # that fails the contract, a phantom delivery — the attempt is that
+        # governed status, never `completed`; any governed downgrade counts, not
+        # one named value, and `dispatch_exit.GOVERNED_END_STATES` fails an
+        # unknown one closed. A non-success outcome of `_envelope_outcome`
+        # (failure/timeout/receipt_missing) wins unchanged.
+        self.exit_status = self.status
+        _governed = getattr(result, "governed_status", None)
+        if self.status == "success" and _governed and _governed != "success":
+            self.exit_status = _governed
+        self.close()
+        return EnvelopeResult(
+            status=self.status, returncode=self.returncode, report_path=report_path,
+            receipt_path=receipt_path, completion_text=result.completion_text,
+            error=self.error)
+
+    def close(self, result: "Optional[_AdapterResult]" = None) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.result = self.result or result
+        try:
+            finalize_lane_exit(
+                self.handover, state_dir=self.state_dir, result=self.result,
+                status=self.exit_status or self.status or "failure", reason=self.reason,
+                wt_path=self.wt_path, spawned_at=self.spawn_marks.get("spawned_at"))
+        finally:
+            from dispatch_worktree_isolation import remove_dispatch_worktree  # noqa: PLC0415
+            try:
+                remove_dispatch_worktree(self.dispatch_id, project_root=self.project_root,
+                                         terminal_id=self.terminal_id)
+            finally:
+                # K-5 r3: the teardown event is written AFTER _govern archived
+                # the stream (the teardown releases the occupancy flock, so it
+                # stays last), so the events it wrote are appended to the
+                # dispatch's archive here, with no live stream left behind.
+                _archive_late_dispatch_events(self.terminal_id, self.dispatch_id)
+
+
 def run_envelope_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
@@ -563,12 +689,8 @@ def run_envelope_plan(
     # The old `if plan.instruction_sha256:` guard fell OPEN on an empty hash, letting
     # an empty-hash plan + valid permit spawn mutated content. No hash → no spawn.
     if not is_valid_instruction_hash(plan.instruction_sha256):
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"plan.instruction_sha256 is not a valid 64-hex digest "
                 f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
@@ -579,12 +701,8 @@ def run_envelope_plan(
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
     actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     if actual != plan.instruction_sha256:
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"instruction file mutated after permit: sha256 mismatch "
                 f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
@@ -662,18 +780,13 @@ def run_envelope_plan(
             enriched_spec, _budget_fail_result, _budget_fail_start, _budget_fail_end,
             integrity=integrity,
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=str(_budget_exc),
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=str(_budget_exc),
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     from dispatch_worktree_isolation import (  # noqa: PLC0415
         create_dispatch_worktree,
-        remove_dispatch_worktree,
         resolve_consumer_project_root,
     )
 
@@ -713,13 +826,9 @@ def run_envelope_plan(
         report_path, receipt_path = _govern(
             enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=_isolation_error,
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
@@ -750,9 +859,15 @@ def run_envelope_plan(
     # preserving whatever the worker produced, and fall through to _govern.
     _phantom_diff: Optional[str] = None
     _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
+    # ADR-045 §8: this lane never sees the child, so the hand-off IS its spawn boundary.
+    _exit = _LaneExit(handover, state_dir=state_dir, wt_path=wt_path,
+                      dispatch_id=plan.dispatch_id, project_root=_consumer_project_root,
+                      terminal_id=plan.target_id)
     start = datetime.now(timezone.utc)
     end = start
     try:
+        _exit.spawn_marks.setdefault("spawned_at", now_utc())
         result = ProviderAdapter().run(plan, enriched_spec.instruction, cwd=wt_path, role=role)
         _prior_result = result
         end = datetime.now(timezone.utc)
@@ -813,31 +928,21 @@ def run_envelope_plan(
             session_id=_prior_result.session_id if _prior_result is not None else None,
             model=_prior_result.model if _prior_result is not None else None,
         )
+        return _exit.govern(enriched_spec, result, start, end,
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
+    else:
+        return _exit.govern(enriched_spec, result, start, end,
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
     finally:
-        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
-
-    report_path, receipt_path = _govern(
-        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
-        base_ref=_base_ref,
-    )
-
-    _status, _returncode, _error = _envelope_outcome(result.status, receipt_path, result.error)
-    return EnvelopeResult(
-        status=_status,
-        returncode=_returncode,
-        report_path=report_path,
-        receipt_path=receipt_path,
-        completion_text=result.completion_text,
-        error=_error,
-    )
+        # A BaseException (KeyboardInterrupt/SystemExit) skipped both exits above.
+        _exit.close(result)
 
 
 def run_envelope_headless_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
     *,
-    state_dir: Path,
-    data_dir: Path,
+    state_dir: Path, data_dir: Path,
     role: Optional[str] = None, handover: "Optional[Any]" = None, base_sha: Optional[str] = None,
     on_spawn: "Optional[Callable[[int], None]]" = None,
 ) -> EnvelopeResult:
@@ -880,12 +985,8 @@ def run_envelope_headless_plan(
 
     # P0-3: REQUIRE a valid 64-hex plan hash before delivery — fail-CLOSED.
     if not is_valid_instruction_hash(plan.instruction_sha256):
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"plan.instruction_sha256 is not a valid 64-hex digest "
                 f"(got {plan.instruction_sha256!r}); refusing to deliver (fail-closed)"
@@ -896,12 +997,8 @@ def run_envelope_headless_plan(
     instruction = Path(plan.instruction_file).read_text(encoding="utf-8")
     actual = hashlib.sha256(instruction.encode("utf-8")).hexdigest()
     if actual != plan.instruction_sha256:
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=None,
-            receipt_path=None,
-            completion_text="",
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR,
             error=(
                 f"instruction file mutated after permit: sha256 mismatch "
                 f"(expected {plan.instruction_sha256[:12]}…, got {actual[:12]}…)"
@@ -987,7 +1084,6 @@ def run_envelope_headless_plan(
 
     from dispatch_worktree_isolation import (  # noqa: PLC0415
         create_dispatch_worktree,
-        remove_dispatch_worktree,
         resolve_consumer_project_root,
     )
 
@@ -1018,13 +1114,9 @@ def run_envelope_headless_plan(
         report_path, receipt_path = _govern(
             enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
         )
-        return EnvelopeResult(
-            status="failure",
-            returncode=1,
-            report_path=report_path,
-            receipt_path=receipt_path,
-            completion_text="",
-            error=_isolation_error,
+        return _pre_spawn_failure(
+            handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
+            report_path=report_path, receipt_path=receipt_path,
         )
 
     # ── OI-1113 pre-measurement: capture remote HEAD of the target branch ──
@@ -1061,10 +1153,16 @@ def run_envelope_headless_plan(
     # first.
     _phantom_diff: Optional[str] = None
     _prior_result: "Optional[_AdapterResult]" = None  # worker output before any close-out stumble
+    result: "Optional[_AdapterResult]" = None  # bound for the exit's end line, even if the block raises
+    _spawn_marks: Dict[str, str] = {}  # ADR-045 §8 spawned_at, stamped by the spawn hook
+    _exit = _LaneExit(handover, state_dir=state_dir, wt_path=wt_path,
+                      dispatch_id=plan.dispatch_id, project_root=_consumer_project_root,
+                      terminal_id=plan.target_id, spawn_marks=_spawn_marks)
     start = datetime.now(timezone.utc)
     end = start
     try:
-        result = ClaudeSubprocessAdapter().run(enriched_spec, cwd=wt_path, on_spawn=on_spawn)
+        result = ClaudeSubprocessAdapter().run(
+            enriched_spec, cwd=wt_path, on_spawn=_spawn_marker(handover, on_spawn, _spawn_marks))
         _prior_result = result
         end = datetime.now(timezone.utc)
         try:
@@ -1120,20 +1218,11 @@ def run_envelope_headless_plan(
             session_id=_prior_result.session_id if _prior_result is not None else None,
             model=_prior_result.model if _prior_result is not None else None,
         )
+        return _exit.govern(enriched_spec, result, start, end,
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
+    else:
+        return _exit.govern(enriched_spec, result, start, end,
+                            phantom_diff=_phantom_diff, integrity=integrity, base_ref=_base_ref)
     finally:
-        remove_dispatch_worktree(plan.dispatch_id, project_root=_consumer_project_root, terminal_id=plan.target_id)
-
-    report_path, receipt_path = _govern(
-        enriched_spec, result, start, end, phantom_diff=_phantom_diff, integrity=integrity,
-        base_ref=_base_ref,
-    )
-
-    _status, _returncode, _error = _envelope_outcome(result.status, receipt_path, result.error)
-    return EnvelopeResult(
-        status=_status,
-        returncode=_returncode,
-        report_path=report_path,
-        receipt_path=receipt_path,
-        completion_text=result.completion_text,
-        error=_error,
-    )
+        # A BaseException (KeyboardInterrupt/SystemExit) skipped both exits above.
+        _exit.close(result)
