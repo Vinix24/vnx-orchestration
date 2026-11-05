@@ -527,3 +527,52 @@ def test_a_torn_final_fragment_is_tolerated_at_the_door(state_dir, spec_file, v3
     assert handover.attempt == 2
     appended = json.loads(_raw_lines(state_dir)[-1])
     assert appended["dispatch_id"] == DISPATCH and appended["attempt"] == 2
+
+
+# --- K-6 follow-up (OI-2539): the start line carries its own deadline ---------
+
+def _staged_json_spec(state_dir: Path, *, deadline: int | None = 1800,
+                      subdir: str = "pending") -> Path:
+    path = state_dir.parent / "dispatches" / subdir / DISPATCH / "dispatch-spec.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    spec = {"dispatch_id": DISPATCH}
+    if deadline is not None:
+        spec["deadline_seconds"] = deadline
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
+def test_the_start_line_carries_the_staged_spec_deadline_and_deadline_for_uses_it(
+        state_dir, v3):
+    """OI-2539: the door rewrites the spec after the start, so the line must keep it."""
+    import dispatch_lifecycle
+    from final_prompt_integrity import persist_final_prompt
+
+    spec = _staged_json_spec(state_dir, deadline=1800)
+    _begin(state_dir, spec)
+
+    line = _starts(state_dir)[0]
+    assert line["deadline_seconds"] == 1800
+
+    # The real door then persists the final prompt, rewriting the spec's bytes so
+    # ``spec_sha256`` no longer matches (the K-act lane's normal path).
+    persist_final_prompt(spec.parent, "the assembled final prompt")
+    assert json.loads(spec.read_text(encoding="utf-8"))["final_prompt_sha256"]
+
+    assert dispatch_lifecycle.deadline_for(state_dir, line, None) == (1800, "start_line")
+
+
+def test_a_spec_without_a_legal_deadline_writes_no_field_on_the_start_line(state_dir, v3):
+    spec = _staged_json_spec(state_dir, deadline=None)
+    _begin(state_dir, spec)
+
+    assert "deadline_seconds" not in _starts(state_dir)[0]
+
+
+@pytest.mark.parametrize("deadline", [299, 14_401, True, "1800"])
+def test_an_illegal_spec_deadline_writes_no_field_on_the_start_line(
+        state_dir, v3, deadline):
+    spec = _staged_json_spec(state_dir, deadline=deadline)
+    _begin(state_dir, spec)
+
+    assert "deadline_seconds" not in _starts(state_dir)[0]

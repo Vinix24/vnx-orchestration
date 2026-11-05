@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Tuple
+from typing import AbstractSet, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
 from append_receipt_internals.common import (
     EXIT_IO_ERROR,
@@ -556,6 +556,48 @@ class SweepResult:
     heartbeat_path: str = ""
 
 
+LifecycleKey = Tuple[str, str, int]
+
+
+def lifecycle_key(line: Mapping[str, Any]) -> Optional[LifecycleKey]:
+    """``(project_id, dispatch_id, attempt)`` of a lifecycle line, ``None`` when unkeyable."""
+    project_id, dispatch_id = line.get("project_id"), line.get("dispatch_id")
+    attempt = line.get("attempt")
+    if (isinstance(project_id, str) and project_id.strip()
+            and isinstance(dispatch_id, str) and dispatch_id.strip()
+            and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1):
+        return project_id, dispatch_id, attempt
+    return None
+
+
+def is_v3_start(line: Mapping[str, Any]) -> bool:
+    """A ``dispatch_started`` line written in ``v3``: the attempt start the sweep owns."""
+    return (str(line.get("event_type") or "").strip() == DISPATCH_STARTED_EVENT_TYPE
+            and str(line.get("lifecycle_mode") or "").strip() == MODE_V3)
+
+
+def is_lifecycle_end(line: Mapping[str, Any]) -> bool:
+    """A ``dispatch_finished``: the only event that ends an attempt (ADR-045 §2)."""
+    return str(line.get("event_type") or "").strip() == DISPATCH_FINISHED_EVENT_TYPE
+
+
+def end_keys(lines: Iterable[Mapping[str, Any]]) -> set:
+    """Every key an end line ends; a start whose key is here has already finished."""
+    return {key for key in (lifecycle_key(line) for line in lines if is_lifecycle_end(line))
+            if key is not None}
+
+
+def is_unfinished_v3_start(line: Mapping[str, Any], finished: AbstractSet[LifecycleKey]) -> bool:
+    """A ``v3`` start whose exact key has no end line among *finished*.
+
+    The one rule for "this attempt is still in flight": ``v3_in_flight`` counts
+    these, and ``compact_receipts`` keeps them out of the archive (OI-2537),
+    because a start moved out of the live ledger would read as no attempt at all.
+    """
+    key = lifecycle_key(line)
+    return is_v3_start(line) and key is not None and key not in finished
+
+
 def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
                  ) -> Tuple[Tuple[InFlightAttempt, ...], Tuple[str, ...]]:
     """The ``v3`` attempts with a start line and no end line, plus unkeyable starts.
@@ -566,9 +608,7 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     line without an ``attempt`` is no end for it (ADR-045 §2).
     """
     ledger = Path(state_dir) / LEDGER_FILENAME
-    starts: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
-    finished: set = set()
-    errors: List[str] = []
+    records: List[Dict[str, Any]] = []
     try:
         handle = ledger.open("rb")
     except FileNotFoundError:
@@ -581,37 +621,80 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
             try:
                 line = json.loads(raw)
             except (json.JSONDecodeError, UnicodeDecodeError): continue  # a torn line is no record
-            if not isinstance(line, dict):
-                continue
-            key = (line.get("project_id"), line.get("dispatch_id"))
-            attempt = line.get("attempt")
-            keyed = (all(isinstance(part, str) and part.strip() for part in key)
-                     and isinstance(attempt, int) and not isinstance(attempt, bool) and attempt >= 1)
-            kind = str(line.get("event_type") or "").strip()
-            if kind == DISPATCH_FINISHED_EVENT_TYPE:
-                if keyed: finished.add((key[0], key[1], attempt))
-            elif kind == DISPATCH_STARTED_EVENT_TYPE and \
-                    str(line.get("lifecycle_mode") or "").strip() == MODE_V3:
-                if not keyed:
-                    errors.append(f"unkeyable dispatch_started: {key!r} attempt={attempt!r}")
-                elif (key[0], key[1], attempt) not in starts:
-                    starts[(key[0], key[1], attempt)] = line
+            if isinstance(line, dict):
+                records.append(line)
+    finished = end_keys(records)
+    starts: Dict[LifecycleKey, Dict[str, Any]] = {}
+    errors: List[str] = []
+    for line in records:
+        if not is_v3_start(line):
+            continue
+        key = lifecycle_key(line)
+        if key is None:
+            errors.append(f"unkeyable dispatch_started: "
+                          f"{(line.get('project_id'), line.get('dispatch_id'))!r} "
+                          f"attempt={line.get('attempt')!r}")
+        elif key not in starts:
+            starts[key] = line
     return tuple(
         InFlightAttempt(pid, did, attempt, start)
         for (pid, did, attempt), start in starts.items()
-        if (project_id is None or pid == project_id) and (pid, did, attempt) not in finished
+        if (project_id is None or pid == project_id) and is_unfinished_v3_start(start, finished)
     ), tuple(errors)
+
+
+def _intent_dirs(root: Path, project_id: Optional[str]) -> Tuple[List[Path], List[str]]:
+    """The project intent dirs to read, plus the ones that could not be listed.
+
+    ``os.scandir`` instead of ``Path.glob``: glob swallows ``PermissionError``,
+    so an unreadable project dir would silently read as zero intents (OI-2538).
+    A missing root (or, with *project_id*, a missing project dir) is no intents,
+    never an error; any other ``OSError`` is reported and reaches the count.
+    """
+    if project_id is not None:
+        return [root / project_id], []
+    dirs: List[Path] = []
+    errors: List[str] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        dirs.append(Path(entry.path))
+                except OSError as exc:  # reported below, never dropped
+                    errors.append(f"unreadable intent dir {entry.path}: {exc}")
+    except FileNotFoundError:
+        return [], []
+    except OSError as exc:
+        errors.append(f"unreadable intent dir {root}: {exc}")
+    return sorted(dirs), errors
+
+
+def _intent_files(place: Path) -> Tuple[List[Path], List[str]]:
+    """The ``*.json`` intent files in *place* (not the ``*.spawn.json`` markers)."""
+    try:
+        with os.scandir(place) as entries:
+            found = [Path(entry.path) for entry in entries
+                     if entry.name.endswith(".json") and not entry.name.endswith(".spawn.json")]
+    except FileNotFoundError:
+        return [], []  # a project that never froze an intent
+    except OSError as exc:
+        return [], [f"unreadable intent dir {place}: {exc}"]
+    return sorted(found), []
 
 
 def open_intents(state_dir: str | Path, project_id: Optional[str] = None
                  ) -> Tuple[Tuple[Tuple[str, str, int, Path], ...], Tuple[str, ...]]:
     """The readable intents without ``published_at``, plus the unreadable ones."""
     root = Path(state_dir) / END_INTENT_DIRNAME
-    places = [root / project_id] if project_id is not None else sorted(root.glob("*/"))
+    places, errors = _intent_dirs(root, project_id)
+    files: List[Path] = []
+    for place in places:
+        found, unreadable = _intent_files(place)
+        files.extend(found)
+        errors.extend(unreadable)
     intents: List[Tuple[str, str, int, Path]] = []
-    errors: List[str] = []
-    for path in (found for place in places for found in sorted(place.glob("*.json"))
-                 if not found.name.endswith(".spawn.json")):
+    for path in files:
         try:
             document = load_end_intent(path)
         except (AppendReceiptError, EndIntentMalformed) as exc:
@@ -649,12 +732,27 @@ def _dispatch_row(state_dir: Path, project_id: str, dispatch_id: str) -> Optiona
     return dict(row) if row is not None else None
 
 
+def _legal_deadline(value: Any) -> Optional[int]:
+    """*value* when it is a legal deadline in seconds, ``None`` otherwise."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX else None
+
+
 def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
                  row: Optional[Mapping[str, Any]]) -> Tuple[int, str]:
-    """``(deadline_seconds, source)``: row bundle, staged spec, else the constant.
+    """``(deadline_seconds, source)``: the start line, row bundle, staged spec, else the constant.
 
-    A staged spec only counts when its bytes are the start line's ``spec_sha256``.
+    The start line's own ``deadline_seconds`` is the first source (OI-2539): the
+    door rewrites the staged spec after the start is written (``final_prompt_sha256``
+    on the same ``dispatch-spec.json``), so the spec's bytes stop matching
+    ``spec_sha256`` and the older candidates rarely answer. They remain the second
+    and third source for start lines written without the field. A staged spec only
+    counts when its bytes are the start line's ``spec_sha256``.
     """
+    own = _legal_deadline(start_line.get("deadline_seconds"))
+    if own is not None:
+        return own, "start_line"
     sha = start_line.get("spec_sha256")
     sha = sha.strip() if isinstance(sha, str) else None
     did = str(start_line.get("dispatch_id") or "")
@@ -666,12 +764,10 @@ def deadline_for(state_dir: str | Path, start_line: Mapping[str, Any],
     for path, kind in candidates:
         try:
             blob = path.read_bytes()
-            value = json.loads(blob).get("deadline_seconds")
+            value = _legal_deadline(json.loads(blob).get("deadline_seconds"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError, AttributeError):
             continue
-        if (not sha or hashlib.sha256(blob).hexdigest() != sha or isinstance(value, bool)
-                or not isinstance(value, int)
-                or not DEADLINE_SECONDS_MIN <= value <= DEADLINE_SECONDS_MAX):
+        if not sha or hashlib.sha256(blob).hexdigest() != sha or value is None:
             continue
         return value, f"{kind}:{path}"
     return FALLBACK_DEADLINE_SECONDS, "fallback:FALLBACK_DEADLINE_SECONDS"
