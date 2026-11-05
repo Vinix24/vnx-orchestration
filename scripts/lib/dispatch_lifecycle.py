@@ -532,6 +532,9 @@ SPEC_DIRS = ("pending", "completed", "failed")  # where a staged bundle may sit
 LIVENESS_LIVE, LIVENESS_DEAD, LIVENESS_UNKNOWN = "live", "dead", "unknown"
 _LEDGER_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 _THE_COUNTS = ("recovered", "abandoned", "live", "unknown_liveness", "lifecycle_off_in_flight", "in_flight")
+#: K-6b r4 (OI-2527/OI-2530): the two item kinds of one bounded sequence.
+KIND_INTENT, KIND_ATTEMPT = "intent", "attempt"
+_THE_KINDS = (KIND_INTENT, KIND_ATTEMPT)
 
 
 class InFlightAttempt(NamedTuple):
@@ -884,46 +887,69 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
-def _cursor_key(attempt: InFlightAttempt, offset: int) -> Dict[str, Any]:
-    """K-6b r2: where a bounded sweep stopped — its first attempt not taken."""
-    return {"project_id": attempt.project_id, "dispatch_id": attempt.dispatch_id, "attempt": attempt.attempt, "offset": offset}
+def _cursor_key(kind: str, item: Tuple[Any, ...] | InFlightAttempt, offset: int) -> Dict[str, Any]:
+    """K-6b r2/r4: where a bounded sweep stopped — its first item not taken.
+
+    An intent is ``(project_id, dispatch_id, attempt, path)`` and an attempt is an
+    ``InFlightAttempt``; their first three fields are the same key.
+    """
+    return {"kind": kind, "project_id": item[0], "dispatch_id": item[1],
+            "attempt": item[2], "offset": offset}
 
 
 def _read_cursor(state_dir: Path, project_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    """The cursor the last bounded sweep left; anything unreadable means the front."""
+    """The cursor the last bounded sweep left; anything unreadable means the front.
+
+    A heartbeat written before K-6b r4 has no ``kind``; it names an attempt (the only
+    kind the old cursor could hold), so an upgrade resumes where the old run stopped.
+    """
     path = Path(state_dir) / END_INTENT_DIRNAME / SWEEP_HEARTBEAT_FILENAME
     try:
         cursor = json.loads(path.read_text(encoding="utf-8")).get("cursor")
     except (OSError, ValueError, AttributeError):  # vnx-silent-except: a missing or malformed heartbeat starts at the front
         return None
-    kinds = {"project_id": str, "dispatch_id": str, "attempt": int, "offset": int}
-    okay = (isinstance(cursor, dict) and all(type(cursor.get(k)) is t for k, t in kinds.items())
-            and bool(cursor["project_id"]) and bool(cursor["dispatch_id"])
-            and cursor["attempt"] >= 1 and cursor["offset"] >= 0 and project_id in (None, cursor["project_id"]))
+    if not isinstance(cursor, dict):
+        return None
+    cursor = dict(cursor, kind=cursor.get("kind", KIND_ATTEMPT))
+    kinds = {"kind": str, "project_id": str, "dispatch_id": str, "attempt": int, "offset": int}
+    okay = (all(type(cursor.get(k)) is t for k, t in kinds.items())
+            and cursor["kind"] in _THE_KINDS and bool(cursor["project_id"])
+            and bool(cursor["dispatch_id"]) and cursor["attempt"] >= 1
+            and cursor["offset"] >= 0 and project_id in (None, cursor["project_id"]))
     return cursor if okay else None
 
 
-def _resume_at(flights: Tuple[InFlightAttempt, ...], cursor: Optional[Dict[str, Any]]) -> int:
+def _sequence(intents: Tuple[Tuple[str, str, int, Any], ...],
+              flights: Tuple[InFlightAttempt, ...]) -> List[Tuple[str, Any]]:
+    """K-6b r4: one sequence — the open intents, then the in-flight attempts, each in its own order."""
+    return [(KIND_INTENT, intent) for intent in intents] + [(KIND_ATTEMPT, flight) for flight in flights]
+
+
+def _resume_at(sequence: List[Tuple[str, Any]], cursor: Optional[Dict[str, Any]]) -> int:
     """Where a bounded sweep starts: the cursor's item, its old offset, else the front (a missing field is never an error)."""
-    if not flights or not isinstance(cursor, dict): return 0
-    keys = [(a.project_id, a.dispatch_id, a.attempt) for a in flights]
-    key = tuple(cursor.get(name) or "" for name in ("project_id", "dispatch_id", "attempt"))
+    if not sequence or not isinstance(cursor, dict): return 0
+    keys = [(kind, item[0], item[1], item[2]) for kind, item in sequence]
+    key = (cursor.get("kind", KIND_ATTEMPT), cursor.get("project_id"),
+           cursor.get("dispatch_id"), cursor.get("attempt"))
     offset = cursor.get("offset") if type(cursor.get("offset")) is int else 0
-    return (keys.index(key) if key in keys else offset) % len(flights)
+    return (keys.index(key) if key in keys else offset) % len(sequence)
 
 
 def _collect(state_dir: Path, project_id: Optional[str], now: datetime,
              budget_seconds: Optional[float] = None,
              cursor: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """The sweep's work: recover the open intents, then decide every attempt.
+    """The sweep's work: one sequence — the open intents, then every attempt.
 
-    The budget is read between items only; a bounded run starts at the cursor and wraps.
+    The budget is read between items only; a bounded run starts at the cursor's item
+    and wraps around the whole sequence (K-6b r4, OI-2527/OI-2530). An unbounded run
+    takes the sequence from the front and leaves no cursor.
     """
     budget_deadline = None if budget_seconds is None else _monotonic() + max(0.0, budget_seconds)
     intents, intent_errors = open_intents(state_dir, project_id)
     flights, flight_errors = v3_in_flight(state_dir, project_id)
-    start = _resume_at(flights, cursor) if budget_seconds is not None else 0
-    order = list(range(start, len(flights))) + list(range(0, start))
+    sequence = _sequence(intents, flights)
+    start = _resume_at(sequence, cursor) if budget_seconds is not None else 0
+    order = list(range(start, len(sequence))) + list(range(0, start))
     collected: Dict[str, Any] = {name: 0 for name in _THE_COUNTS}
     collected.update(errors=list(intent_errors) + list(flight_errors), sources=[],
                      in_flight=len(flights), open_intents=len(intents), enabled=lifecycle_enabled(),
@@ -933,26 +959,23 @@ def _collect(state_dir: Path, project_id: Optional[str], now: datetime,
         # ADR-045 §9: the brake refuses every append; write nothing, report them.
         collected["lifecycle_off_in_flight"] = len(flights)
         return collected
-    for index, (project, dispatch, attempt_no, _path) in enumerate(intents):
-        if budget_deadline is not None and _monotonic() >= budget_deadline:
-            collected.update(budget_exhausted=True,
-                             budget_left=len(intents) - index + len(flights),
-                             cursor=_cursor_key(flights[start], start) if flights else None)
-            return collected
-        try:
-            if recover(state_dir=state_dir, project_id=project, dispatch_id=dispatch,
-                       attempt=attempt_no, actor="sweep",
-                       reason="recover an unpublished end intent",
-                       lock_timeout=SWEEP_LOCK_TIMEOUT_SECONDS).status == STATUS_RECOVERED:
-                collected["recovered"] += 1
-        except Exception as exc:  # vnx-silent-except: one unreadable intent must not stop the other recoveries (it is counted)
-            errors.append(f"recover {dispatch}#{attempt_no}: {type(exc).__name__}: {exc}")
     for taken, position in enumerate(order):
+        kind, item = sequence[position]
         if budget_deadline is not None and _monotonic() >= budget_deadline:
-            collected.update(budget_exhausted=True, budget_left=len(flights) - taken,
-                             cursor=_cursor_key(flights[position], position))
+            collected.update(budget_exhausted=True, budget_left=len(sequence) - taken,
+                             cursor=_cursor_key(kind, item, position))
             return collected
-        attempt = flights[position]
+        if kind == KIND_INTENT:
+            try:
+                if recover(state_dir=state_dir, project_id=item[0], dispatch_id=item[1],
+                           attempt=item[2], actor="sweep",
+                           reason="recover an unpublished end intent",
+                           lock_timeout=SWEEP_LOCK_TIMEOUT_SECONDS).status == STATUS_RECOVERED:
+                    collected["recovered"] += 1
+            except Exception as exc:  # vnx-silent-except: one unreadable intent must not stop the other recoveries (it is counted)
+                errors.append(f"recover {item[1]}#{item[2]}: {type(exc).__name__}: {exc}")
+            continue
+        attempt: InFlightAttempt = item
         try:
             counter, source, error = sweep_attempt(state_dir, attempt, now)
         except Exception as exc:  # vnx-silent-except: one refused attempt is counted and reported, never silently dropped
