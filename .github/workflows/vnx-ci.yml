@@ -109,7 +109,6 @@ jobs:
               "$GITHUB_WORKSPACE/tests/test_subsystems_md_exists.py" \
               "$GITHUB_WORKSPACE/tests/test_adr_numbers_unique.py" \
               -p no:cacheprovider
-            echo "heavy=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -124,7 +123,6 @@ jobs:
           # artefact with no .git, so tests that resolve their repo root from
           # __file__ break there en masse (measured 2026-08-02: 222 failed vs 25
           # on the real checkout).
-          echo "heavy=true" >> "$GITHUB_OUTPUT"
           bash "$GITHUB_WORKSPACE/scripts/ci/profile_a_pytest_args.sh" "$PROFILE_A_EVIDENCE/args"
           if [ -f "$PROFILE_A_EVIDENCE/args/full.args" ]; then
             # VNX_CI_XDIST=0: the serial whole-tree sweep, one phase. It writes

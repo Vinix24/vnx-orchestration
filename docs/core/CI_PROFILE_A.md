@@ -3,7 +3,7 @@
 Profile A is the `profile-a` job of `.github/workflows/vnx-ci.yml`
 (`.github/workflows/vnx-ci.yml:9-10`). Since D4 (#2361) a **heavy** run is two
 pytest phases followed by a required completeness step; a **light** (docs-only)
-run still stops after four stdlib doc tests (`.github/workflows/vnx-ci.yml:90-113`).
+run still stops after four stdlib doc tests (`.github/workflows/vnx-ci.yml:90-112`).
 This note describes what `main` does now. It decides nothing new.
 
 ## How a heavy run takes shape
@@ -13,16 +13,16 @@ both run against the same pinned tools and layout
 (`.github/workflows/vnx-ci.yml:52-54`). The suite step
 (`.github/workflows/vnx-ci.yml:77`) calls one selection script,
 `scripts/ci/profile_a_pytest_args.sh`; the workflow holds no second copy of the
-pytest arguments (`.github/workflows/vnx-ci.yml:128`).
+pytest arguments (`.github/workflows/vnx-ci.yml:126`).
 
-- **Serial phase** (`.github/workflows/vnx-ci.yml:147-154`) runs `serial.args`:
+- **Serial phase** (`.github/workflows/vnx-ci.yml:145-152`) runs `serial.args`:
   the entries of `scripts/ci/serial_tests.txt` in one process with xdist off —
   `-q <the entries> -p no:xdist -p no:cacheprovider --timeout=180 -k
   "<quarantine>" <--ignore from test_exclusions.txt>`
   (`scripts/ci/profile_a_pytest_args.sh:241-242`). With an empty list the phase
   is skipped and an inactive serial manifest is written instead
-  (`.github/workflows/vnx-ci.yml:138-145`).
-- **Parallel phase** (`.github/workflows/vnx-ci.yml:156-163`) runs
+  (`.github/workflows/vnx-ci.yml:136-143`).
+- **Parallel phase** (`.github/workflows/vnx-ci.yml:154-161`) runs
   `parallel.args`: the whole-tree selection with `-q`, `-p no:cacheprovider`,
   `--timeout=180`, the `-k` quarantine and the `--ignore` list from
   `scripts/ci/test_exclusions.txt`, plus `--ignore` for every serial file entry
@@ -34,11 +34,11 @@ pytest arguments (`.github/workflows/vnx-ci.yml:128`).
 - Both phases write a JUnit XML and a collection manifest **from the same
   pytest process** (`scripts/ci/profile_a_run_phase.sh:111-115`). The XML and
   manifest are uploaded as `profile-a-evidence`, also when the suite is red
-  (`.github/workflows/vnx-ci.yml:192-201`).
+  (`.github/workflows/vnx-ci.yml:190-199`).
 
 ### The required completeness step
 
-`Check the xdist completeness (required)` (`.github/workflows/vnx-ci.yml:170-188`)
+`Check the xdist completeness (required)` (`.github/workflows/vnx-ci.yml:168-186`)
 runs only when both phases succeeded, and has no `continue-on-error`: it is a
 required check of the job. It runs
 `scripts/ci/check_xdist_parity.py completeness` over this run's own two
@@ -168,7 +168,7 @@ the repository's Actions settings, not in a file in the tree.
 With `0`, the args script emits only `full.args`, the whole-tree serial vector
 (`scripts/ci/profile_a_pytest_args.sh:269-271`); Profile A sees that file and
 runs one serial phase, writing the same JUnit XML and collection manifest as
-before (`.github/workflows/vnx-ci.yml:129-136`). The selection itself does not
+before (`.github/workflows/vnx-ci.yml:127-134`). The selection itself does not
 change: same tests, same `test_exclusions.txt` ignores, same `-k` quarantine,
 same 180 s per-test timeout. The only other thing that follows the variable is
 the job's own bound, 80 instead of 38

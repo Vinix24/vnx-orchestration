@@ -320,17 +320,89 @@ def test_unset_emits_the_xdist_shape_and_vnx_ci_xdist_0_the_serial_one(tmp_path)
     assert full[:2] == ["-q", str(REPO_ROOT / "tests")]
 
 
-def test_the_xdist_selection_fingerprint_is_the_pre_d4_one(tmp_path):
-    """Source: origin/main @ cac71ef3 (before D4), `VNX_CI_XDIST=1`, the committed constraints.
+_PIN_LINE = re.compile(r"^\s*(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*(?:\[[^\]]*\])?)\s*==(?P<version>[^\s;#]+)")
 
-    It is the same emission Profile A makes with the variable unset after D4:
-    the default emission, not the switch, is what has to reproduce it.
+
+def _mutate_first_pin(constraints_text: str) -> str:
+    """Change the version of the first ``==`` pin, and nothing else, in the text given.
+
+    The mutation is derived from the text instead of naming a literal version
+    (OI-2543 point 3): when the pin in ``profile_a_constraints.txt`` moves, the
+    mutated text moves with it. A literal ``replace("pytest==9.1.1", ...)``
+    silently becomes a no-op on that day and turns the fingerprint test red for
+    a reason that has nothing to do with the fingerprint.
     """
-    out = _emit(tmp_path, None)
-    assert (out / "parallel.args").is_file(), "the default emission is the xdist shape"
-    assert not (out / "serial.args").exists(), "the committed serial list is empty"
-    fingerprint = cxp.fingerprint_of_args_dir(out, CONSTRAINTS, str(REPO_ROOT))
-    assert fingerprint == "0ffd56308105e4ee3a6ed04cb5891e8d1fe1edf0804cefe8f336652356f72f37"
+    lines = constraints_text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        match = _PIN_LINE.match(line)
+        if match is None:
+            continue
+        version = match.group("version")
+        head, _, last = version.rpartition(".")
+        bumped = f"{head}.{int(last) + 1}" if head and last.isdigit() else f"{version}.post1"
+        start, end = match.span("version")
+        lines[index] = f"{line[:start]}{bumped}{line[end:]}"
+        return "".join(lines)
+    raise AssertionError(f"no `==` pin line in the constraints text: {constraints_text!r}")
+
+
+def test_the_xdist_selection_fingerprint_is_stable_for_one_selection_and_moves_with_its_inputs(tmp_path):
+    """What the fingerprint means, instead of one literal sha256 of today's vectors (OI-2543 point 3).
+
+    Same inputs give the same value (two emissions), and each input that
+    defines the selection moves it: the ``--ignore`` entries from
+    ``scripts/ci/test_exclusions.txt``, the ``-k`` quarantine, and the
+    constraints file (pins). A PR that repairs an excluded test or bumps a pin
+    therefore changes the value on purpose; it does not turn Profile A red.
+
+    The cutover value of the D4 merge stays on record in
+    ``claudedocs/2026-10-24-nachtrun-golf-1-3/evidence/d4-overstapregel-20261105-0251.json``.
+    """
+    first = _emit(tmp_path / "first", None)
+    second = _emit(tmp_path / "second", None)
+    fingerprint = cxp.fingerprint_of_args_dir(first, CONSTRAINTS, str(REPO_ROOT))
+    assert cxp.fingerprint_of_args_dir(second, CONSTRAINTS, str(REPO_ROOT)) == fingerprint
+
+    serial, parallel = cxp.read_args_dir(first)
+    constraints = CONSTRAINTS.read_text(encoding="utf-8")
+    quarantine = list(parallel)
+    [k_index] = [i for i, arg in enumerate(quarantine) if arg == "-k"]
+    quarantine[k_index + 1] = quarantine[k_index + 1] + " and not another_quarantined_test"
+    pin_mutation = _mutate_first_pin(constraints)
+    assert pin_mutation != constraints, "the pin mutation must change the constraints text"
+    inputs = {
+        "an exclusion from test_exclusions.txt": (serial, [*parallel, "--ignore=/tmp/tests/test_repaired.py"],
+                                                  constraints),
+        "the -k quarantine": (serial, quarantine, constraints),
+        "a constraint pin": (serial, parallel, pin_mutation),
+    }
+    for name, (case_serial, case_parallel, case_constraints) in inputs.items():
+        assert cxp.selection_fingerprint(case_serial, case_parallel, case_constraints, str(REPO_ROOT)) != fingerprint, name
+
+
+@pytest.mark.parametrize("constraints_text", [
+    "pytest==8.0.0\n",
+    "# a comment and a blank line come first\n\npytest==9.2.0\npytest-xdist==3.8.0\n",
+], ids=["one-pin", "after-comment-and-blank"])
+def test_the_pin_mutation_follows_whatever_version_the_text_pins(constraints_text, tmp_path):
+    """A version this test does not name still moves: the mutation reads the text (OI-2543 point 3)."""
+    mutated = _mutate_first_pin(constraints_text)
+    assert mutated != constraints_text, "the mutation left the constraints text unchanged"
+
+    before = constraints_text.splitlines()
+    after = mutated.splitlines()
+    assert len(before) == len(after)
+    changed = [index for index, (old, new) in enumerate(zip(before, after)) if old != new]
+    assert len(changed) == 1, f"the mutation changed more than the pinned line: {changed}"
+
+    before_path = tmp_path / "before.txt"
+    before_path.write_text(constraints_text, encoding="utf-8")
+    after_path = tmp_path / "after.txt"
+    after_path.write_text(mutated, encoding="utf-8")
+    before_pins, after_pins = cxp.read_pins(before_path), cxp.read_pins(after_path)
+    assert list(after_pins) == list(before_pins), (before_pins, after_pins)
+    moved = [name for name, version in before_pins.items() if after_pins[name] != version]
+    assert moved == [next(iter(before_pins))], (before_pins, after_pins)
 
 
 # --- the workflows ----------------------------------------------------------------------------
@@ -658,9 +730,24 @@ def test_every_nightly_job_runs_only_on_main():
     assert "!cancelled()" in jobs["parity"]["if"], "the parity job still runs when a needed job failed"
 
 
+def test_every_job_of_the_nightly_carries_the_main_guard():
+    """Every job, not only the three named above: a job added without the guard is a skipped check run on a PR head.
+
+    A dispatch on another ref skips these jobs, and GitHub still creates check
+    runs with conclusion ``skipped`` on that SHA; ``closure_verifier._rollup_all_green``
+    reads that as not green, so it blocks rather than passes (OI-2543 point 2).
+    """
+    jobs = _jobs(NIGHTLY)
+    assert jobs, "the nightly has no jobs"
+    missing = [job_id for job_id, job in jobs.items()
+               if "github.ref == 'refs/heads/main'" not in (job.get("if") or "")]
+    assert missing == [], missing
+
+
 def test_the_nightly_header_says_why_the_main_guard_exists():
     header = _nightly_text().split("\non:\n", 1)[0]
     assert "workflow_dispatch" in header and "refs/heads/main" in header
+    assert "skipped" in header and "_rollup_all_green" in header, "the header names what the guard really does"
 
 
 def test_the_serial_truth_job_allows_eighty_minutes_and_the_others_keep_theirs():
