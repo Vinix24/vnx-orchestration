@@ -29,6 +29,7 @@ from .outcome_identity import (
     _outcome_index_path_for,
 )
 from .lifecycle import check_end_line, verify_final_end_line
+from ndjson_io import TORN_TAIL_CLOSED
 
 _log = logging.getLogger(__name__)
 
@@ -86,6 +87,17 @@ def _chain_receipts_enabled() -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+_TORN_TAIL_WINDOW = 65536  # a longer fragment was not written by this path: seal it
+
+
+def _parses_as_json_object(fragment: bytes) -> bool:
+    """One complete JSON object: the closer's "the record stands" test (K-9c rule 1)."""
+    try:
+        return isinstance(json.loads(fragment.decode("utf-8")), dict)
+    except (UnicodeDecodeError, ValueError):
+        return False
+
+
 def _close_a_torn_tail(receipt_path: Path) -> bool:
     """Start the next record on its own line when the ledger tail is torn.
 
@@ -94,28 +106,36 @@ def _close_a_torn_tail(receipt_path: Path) -> bool:
     the fragment, so the new record itself is unparseable — and a caller that
     trusted its own ``appended`` status would publish a loss no later recovery
     can see. This ledger is append-only: the fragment stays on disk
-    byte-for-byte and exactly one ``\\n`` is written so the new line starts on
-    its own line. ``True`` when a terminator was written.
+    byte-for-byte; ``TORN_TAIL_CLOSED`` and one ``\\n`` follow — debris, never
+    corruption (K-9c rule 1). A COMPLETE record that only lacks its newline is
+    not torn: it parses, so it stands and gets just the ``\\n``. Only the tail
+    window is read, never the whole ledger.
 
     MUST be called while holding the append lock.
     """
     try:
         with receipt_path.open("rb") as reader:
-            reader.seek(0, os.SEEK_END)
-            if reader.tell() == 0:
+            size = reader.seek(0, os.SEEK_END)
+            if size == 0:
                 return False
             reader.seek(-1, os.SEEK_END)
             if reader.read(1) == b"\n":
                 return False
+            start = max(0, size - _TORN_TAIL_WINDOW)
+            reader.seek(start)
+            window = reader.read()
     except FileNotFoundError:
         return False
     except OSError as exc:
         raise AppendReceiptError(
             "receipt_tail_unreadable", EXIT_IO_ERROR,
             f"cannot read the ledger tail at {receipt_path}: {exc}") from exc
+    # No newline in a window that did not start at 0: too long to be a record here.
+    stands = (start == 0 or b"\n" in window) and _parses_as_json_object(
+        window.rsplit(b"\n", 1)[-1])
     try:
         with receipt_path.open("ab") as writer:
-            writer.write(b"\n")
+            writer.write(b"\n" if stands else TORN_TAIL_CLOSED + b"\n")
             writer.flush()
             _fsync_receipt_append(writer, context=f"torn tail of {receipt_path}")
     except OSError as exc:

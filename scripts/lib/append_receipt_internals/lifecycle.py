@@ -41,6 +41,7 @@ from .warning_destination import reapply_frozen_classification
 from config_registry import get_bool
 from event_outcome_semantics import end_state_status
 from ledger_schema_version import CURRENT_SCHEMA_VERSION, LIFECYCLE_SCHEMA_VERSION
+from ndjson_io import NdjsonCorruptionError, read_ndjson_strict_bytes
 from receipt_schema import (
     DISPATCH_FINISHED_EVENT_TYPE,
     LIFECYCLE_END_STATES,
@@ -134,8 +135,8 @@ def stamp_lifecycle(receipt: Dict[str, Any]) -> None:
     receipt["status"] = projected
 
 
-def _tail_lines(ledger_path: Path) -> List[bytes]:
-    """The last ``LIFECYCLE_TAIL_BYTES`` of the ledger, as whole lines."""
+def _tail_blob(ledger_path: Path) -> bytes:
+    """The last ``LIFECYCLE_TAIL_BYTES`` of the ledger, starting on a record boundary."""
     try:
         with ledger_path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -143,15 +144,14 @@ def _tail_lines(ledger_path: Path) -> List[bytes]:
             handle.seek(start)
             blob = handle.read()
     except FileNotFoundError:
-        return []
+        return b""
     except OSError as exc:
         raise AppendReceiptError(
             "lifecycle_end_lookup_failed", EXIT_IO_ERROR,
             f"cannot read the ledger tail at {ledger_path} to check for an "
             f"existing dispatch_finished: {exc}") from exc
-    lines = blob.split(b"\n")
-    lines = lines[1:] if start > 0 else lines  # the first record may be cut mid-line
-    return [line for line in lines if line.strip()]
+    # A window that opened mid-file starts with a cut record: drop it, never corruption.
+    return blob if start == 0 else b"\n".join(blob.split(b"\n")[1:])
 
 
 def find_prior_end_line(
@@ -164,18 +164,23 @@ def find_prior_end_line(
 
     The index's ``outcome_id``, the literal ``"ledger_tail"``, or None. The
     index is the whole-ledger lookup; the bounded tail scan backstops the
-    fail-open index write. A torn line (a crash mid-append) is not evidence of a
-    complete end line, so it is skipped rather than guessed at.
+    fail-open index write. A torn final line is skipped; any other broken line
+    carrying this receipt's ``dispatch_id`` refuses (it may be this key's end).
     """
     key = lifecycle_end_key(receipt)
     lifecycle_index = (index_data or {}).get("lifecycle_index")
     if isinstance(lifecycle_index, dict) and lifecycle_index.get(key):
         return str(lifecycle_index[key])
-    for raw in reversed(_tail_lines(ledger_path)):
-        try:
-            line = json.loads(raw)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            continue
+    dispatch_id = str(receipt.get("dispatch_id") or "")
+    try:
+        records = read_ndjson_strict_bytes(
+            _tail_blob(ledger_path), source=f"{ledger_path} (tail)",
+            predicate=lambda raw: dispatch_id in raw)
+    except NdjsonCorruptionError as exc:
+        raise AppendReceiptError("lifecycle_end_lookup_failed", EXIT_IO_ERROR,
+            f"ledger_corrupt: unparseable ledger line {exc.line_number} of the tail at "
+            f"{ledger_path}: {exc.detail}") from exc
+    for line in reversed(records):
         if (isinstance(line, dict) and line.get("event_type") == DISPATCH_FINISHED_EVENT_TYPE
                 and lifecycle_end_key(line) == key):
             return "ledger_tail"

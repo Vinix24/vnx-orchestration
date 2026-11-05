@@ -17,6 +17,13 @@ its sibling gate/event NDJSON streams):
                         of a file that does not end in a newline) may be
                         unparseable; an optional predicate scopes the refusal.
 
+  read_ndjson_strict_bytes
+                        The same rule over an in-memory blob (a ledger window read
+                        from an offset), for readers that never hold the whole file.
+
+  scan_ndjson_lines     The one torn-tail rule, per line; its readers (door,
+                        finalizer, append tail, sweep, report) never re-derive it.
+
 Posix-only paths (the audit trail is written with ``fcntl.flock`` on posix);
 ``os.fsync`` is available on every platform this repo targets.
 """
@@ -27,11 +34,14 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Callable, Iterator, List, Optional, Union
+from typing import Any, Callable, Iterator, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 PathLike = Union[str, "os.PathLike[str]", Path]
+
+# The append closer's seal on a crash fragment: the only line ending in this is debris.
+TORN_TAIL_CLOSED = b"\t#vnx-torn-tail-closed"
 
 
 def fsync_fileno(fh: Any, *, context: str = "") -> bool:
@@ -78,13 +88,10 @@ def iter_ndjson(path: PathLike) -> Iterator[Any]:
 
     lines = text.splitlines()
 
-    # Index of the final non-blank line. A crash mid-append leaves its partial
-    # record here, so this is the only line permitted to be unparseable.
+    # Only the final element after the last newline may be unparseable (K-9c rule 2).
     last_content_idx = -1
-    for i in range(len(lines) - 1, -1, -1):
-        if lines[i].strip():
-            last_content_idx = i
-            break
+    if not text.endswith("\n") and text.rsplit("\n", 1)[-1].strip():
+        last_content_idx = len(lines) - 1
 
     for idx, raw in enumerate(lines):
         line = raw.strip()
@@ -93,7 +100,9 @@ def iter_ndjson(path: PathLike) -> Iterator[Any]:
         try:
             yield json.loads(line)
         except json.JSONDecodeError:
-            if idx == last_content_idx:
+            if line.endswith(TORN_TAIL_CLOSED.decode()):
+                logger.warning("ndjson_io: closed torn fragment on line %d in %s", idx + 1, p)
+            elif idx == last_content_idx:
                 # Torn tail — expected after a crash mid-append. Skip quietly.
                 logger.debug("ndjson_io: skipping torn tail line in %s", p)
             else:
@@ -116,41 +125,70 @@ class NdjsonCorruptionError(ValueError):
                          f"(interior corruption, not a torn tail): {detail}")
 
 
+def scan_ndjson_lines(data: bytes) -> Iterator[Tuple[int, bytes, Any, Optional[Exception], bool]]:
+    """(number, raw, record, error, torn) per line — the ONE torn-tail rule.
+
+    ``torn`` is only the final fragment of a blob that does not end in a newline:
+    such a fragment was never written completely by a crash mid-append. A broken
+    final line that DOES end in a newline was committed whole, so it is interior
+    corruption, exactly like any broken line before it. Decided on the blob's last
+    split element, never on the last non-blank line (K-9c rule 2).
+    """
+    parts = data.split(b"\n")
+    torn_idx = len(parts) - 1 if not data.endswith(b"\n") else -1
+    for index, raw in enumerate(parts):
+        if not raw.strip():
+            continue
+        try:
+            yield index + 1, raw, json.loads(raw.decode("utf-8").strip()), None, False
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            yield index + 1, raw, None, exc, index == torn_idx
+
+
+def read_ndjson_strict_bytes(
+    data: bytes,
+    *,
+    source: PathLike = "<bytes>",
+    predicate: Optional[Callable[[str], bool]] = None,
+) -> List[Any]:
+    """Parsed records from an in-memory blob; the torn-tail decision is ``scan_ndjson_lines``.
+
+    ``predicate`` scopes the refusal: an interior break raises only when it holds for
+    that line's raw text (decoded with ``errors="replace"``, never U+FFFD silently lost),
+    and is otherwise skipped with a WARNING. A broken line ending in ``TORN_TAIL_CLOSED`` is
+    debris: skipped with a WARNING whatever the predicate says.
+    """
+    records: List[Any] = []
+    for number, raw, record, error, torn in scan_ndjson_lines(data):
+        if error is None:
+            records.append(record)
+        elif raw.endswith(TORN_TAIL_CLOSED):
+            logger.warning("ndjson_io: closed torn fragment on line %d of %s", number, source)
+        elif torn:
+            logger.debug("ndjson_io: skipping torn tail line %d in %s", number, source)
+        elif predicate is None or predicate(raw.decode("utf-8", errors="replace")):
+            raise NdjsonCorruptionError(source, number, str(error))
+        else:
+            logger.warning("ndjson_io: skipping malformed NDJSON line %d in %s", number, source)
+    return records
+
+
 def read_ndjson_strict(
     path: PathLike, predicate: Optional[Callable[[str], bool]] = None
 ) -> List[Any]:
     """Parsed records; only an unterminated final fragment (torn) may be unparseable.
 
     A broken final line that ends in a newline was written completely, so it is
-    interior corruption. A line that is not UTF-8 is unparseable too — never U+FFFD.
+    interior corruption; so is one that is not UTF-8. ``TORN_TAIL_CLOSED`` debris is skipped.
     ``predicate`` scopes the refusal: an interior break raises only when it holds for
     that line's raw text, and is otherwise skipped with a WARNING.
     """
-    p = Path(path)
     try:
-        data = p.read_bytes()
+        data = Path(path).read_bytes()
     except FileNotFoundError:
         return []
-    lines = data.split(b"\n")
-    # Only the final physical fragment — the bytes after the last "\n" — can be torn.
-    # A whitespace-only fragment is no line at all, so a break before it is interior.
-    final_idx = len(lines) - 1
-    torn_idx = final_idx if not data.endswith(b"\n") and lines[final_idx].strip() else -1
-    records: List[Any] = []
-    for idx, raw in enumerate(lines):
-        if not raw.strip():
-            continue
-        try:
-            records.append(json.loads(raw.decode("utf-8").strip()))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            if idx == torn_idx:
-                logger.debug("ndjson_io: skipping torn tail line %d in %s", idx + 1, p)
-                continue
-            if predicate is None or predicate(raw.decode("utf-8", errors="replace")):
-                raise NdjsonCorruptionError(p, idx + 1, str(exc)) from exc
-            logger.warning("ndjson_io: skipping malformed NDJSON line %d in %s", idx + 1, p)
-    return records
+    return read_ndjson_strict_bytes(data, source=path, predicate=predicate)
 
 
-__all__ = ["NdjsonCorruptionError", "fsync_fileno", "iter_ndjson", "read_ndjson",
-           "read_ndjson_strict"]
+__all__ = ["NdjsonCorruptionError", "TORN_TAIL_CLOSED", "fsync_fileno", "iter_ndjson",
+           "read_ndjson", "read_ndjson_strict", "read_ndjson_strict_bytes", "scan_ndjson_lines"]

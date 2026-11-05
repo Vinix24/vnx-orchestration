@@ -60,6 +60,7 @@ from append_receipt_internals.lifecycle import (  # noqa: E402
 from append_receipt_internals.outcome_identity import compute_outcome_id  # noqa: E402
 from append_receipt_internals.payload import append_receipt_payload  # noqa: E402
 from coordination_db import get_connection  # noqa: E402
+from ndjson_io import TORN_TAIL_CLOSED  # noqa: E402
 
 PROJECT = "vnx-dev"
 OTHER_PROJECT = "proj-beta"
@@ -870,9 +871,9 @@ def test_a_torn_tail_keeps_the_fragment_and_recover_writes_one_end_line(
 
     assert result.status == lifecycle.STATUS_RECOVERED
     assert result.line_status == "appended"
-    # The append-only ledger keeps the torn fragment byte-for-byte.
-    assert ledger.read_bytes().startswith(TORN_FRAGMENT)
-    assert ledger.read_bytes()[len(TORN_FRAGMENT):len(TORN_FRAGMENT) + 1] == b"\n"
+    # The append-only ledger keeps the torn fragment byte-for-byte, and the closer's
+    # seal — the sentinel and one newline, nothing else — follows it (K-9c rule 1).
+    assert ledger.read_bytes().startswith(TORN_FRAGMENT + TORN_TAIL_CLOSED + b"\n")
     assert len(_parseable_end_lines(state_dir)) == 1
     assert _row(state_dir)["state"] == "completed"
     assert load_end_intent(end_intent_path(state_dir, PROJECT, DISPATCH, ATTEMPT))["published_at"]

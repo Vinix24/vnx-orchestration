@@ -602,3 +602,34 @@ def test_an_excluded_end_is_not_a_second_end_inside_the_cohort(state_dir, git_re
 
     assert count["counts"]["double_end"] == 0, count
     assert count["findings"]["double_end"] == []
+
+
+# ---------------------------------------------------------------------------
+# 6b. round 3 (codex): a database path that exists is never "no database"
+# ---------------------------------------------------------------------------
+
+def test_a_database_that_is_a_directory_makes_the_count_unmeasured(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Codex's reproduction: a valid start/end pair and the db path a directory."""
+    _finish(state_dir, _begin(state_dir, "d-k9-dbdir"))
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    db_path.unlink()
+    db_path.mkdir()
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == lifecycle_count.STATUS_UNMEASURED, count
+    assert count["counts"] == {name: None for name in lifecycle_count.DEFECTS}
+    assert "exists but is not a regular file" in count["reason"], count
+
+
+def test_a_missing_database_path_still_counts_the_ledger(
+        state_dir, git_repo, writer_sha, lifecycle_on):
+    """Round 1's decision stands: a store with no database yet has no rows to read."""
+    _finish(state_dir, _begin(state_dir, "d-k9-nodb"))
+    coordination_db.db_path_from_state_dir(state_dir).unlink()
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == lifecycle_count.STATUS_MEASURED, count
+    assert count["counts"]["total"] == 0, count

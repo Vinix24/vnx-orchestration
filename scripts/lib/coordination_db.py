@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import stat
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -120,6 +122,27 @@ class DuplicateTransitionError(InvalidTransitionError):
 
 def db_path_from_state_dir(state_dir: str | Path) -> Path:
     return Path(state_dir) / DB_FILENAME
+
+
+#: The three answers for a coordination-store path (K-9c rule 2, OI-2529).
+STORE_ABSENT, STORE_PRESENT, STORE_UNREADABLE = "absent", "present", "unreadable"
+
+
+def store_state(db_path: str | Path) -> str:
+    """absent / present (regular file) / unreadable: the ONE rule for a database path.
+
+    ``is_file()`` alone folds "does not exist" into "exists but cannot be read",
+    which is how a directory where the database belongs read as "no store". Each
+    caller keeps its own meaning for absent and present and its own refusal for
+    unreadable. A path that cannot even be stat'ed is unreadable, never absent.
+    """
+    try:
+        mode = os.stat(Path(db_path)).st_mode
+    except FileNotFoundError:
+        return STORE_ABSENT
+    except OSError:
+        return STORE_UNREADABLE
+    return STORE_PRESENT if stat.S_ISREG(mode) else STORE_UNREADABLE
 
 
 @contextmanager
