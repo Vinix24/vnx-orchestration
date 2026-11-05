@@ -1715,25 +1715,43 @@ class TestRejectedDetailHistory:
         dispatch_ids = {e["dispatch_id"] for e in entries}
         assert dispatch_ids == {"20260906-stranded-a", "20260906-stranded-b"}
 
-    def test_rejected_history_capped_oldest_evicted(self, reports_dir, state_dir):
+    def test_rejected_history_capped_oldest_evicted(self, reports_dir, state_dir, monkeypatch):
         """The history never grows without bound across an unattended
-        fleet — once it exceeds the cap, the OLDEST entries are dropped
-        first, not the newest."""
-        from report_to_receipt_converter import _HEALTH_REJECTED_HISTORY_MAX
+        fleet — once the entries NOT sighted in this scan exceed the cap, the
+        OLDEST of them are dropped first, not the newest. The one entry this
+        scan just saw is kept on top of that cap (it is bounded by the reports
+        on disk), because evicting it would reset its first_rejected_at."""
+        import report_to_receipt_converter as rtc
+        from datetime import datetime, timezone
 
-        # One rejection per scan cycle, one cycle more than the cap allows.
-        for i in range(_HEALTH_REJECTED_HISTORY_MAX + 1):
+        max_entries = rtc._HEALTH_REJECTED_HISTORY_MAX
+        # Stamps are second-resolution: step one second per scan so the oldest
+        # entry is unambiguous (a real fleet scans ~30 s apart).
+        tick = {"epoch": time.time()}
+
+        class _SteppingDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.fromtimestamp(tick["epoch"], tz or timezone.utc)
+
+        monkeypatch.setattr(rtc, "datetime", _SteppingDatetime)
+
+        # One rejection per scan cycle; the last two scans push the non-sighted
+        # pool past the cap. MAX + 2 scans ends with the just-sighted entry plus
+        # MAX retained others, the oldest of which has just been evicted.
+        for i in range(max_entries + 2):
             name = f"20260906-cap-{i:04d}"
             report = reports_dir / f"{name}.md"
             _write_report_without_model(report, name)
             scan_and_convert([reports_dir], state_dir)
             assert not report.exists()  # quarantined by the scan
+            tick["epoch"] += 1
 
         entries = self._rejected_entries(state_dir)
-        assert len(entries) == _HEALTH_REJECTED_HISTORY_MAX
+        assert len(entries) == max_entries + 1
         dispatch_ids = [e["dispatch_id"] for e in entries]
         assert "20260906-cap-0000" not in dispatch_ids  # oldest evicted
-        assert f"20260906-cap-{_HEALTH_REJECTED_HISTORY_MAX:04d}" in dispatch_ids  # newest kept
+        assert f"20260906-cap-{max_entries + 1:04d}" in dispatch_ids  # newest kept
 
 
 class TestLifecycleRefusalClassification:
@@ -1851,7 +1869,8 @@ class TestLifecycleRefusalQuarantine:
         assert entry["reason"].startswith("ledger lifecycle attempt_unknown: ")
         assert entry["first_rejected_at"] == entry["rejected_at"]
 
-        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(25),
+        # Seen every hour since: the last sighting is recent, so the day is unbroken.
+        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(1),
                                           "first_rejected_at": _stamp_hours_ago(25)})
         stats = scan_and_convert([reports_dir], state_dir)
 
@@ -1911,8 +1930,11 @@ class TestLifecycleRefusalQuarantine:
         scan_and_convert([reports_dir], state_dir)
         entry = _history_dispatch(state_dir, "20260601-legacy-entry")
         legacy = {key: entry[key] for key in ("dispatch_id", "file", "reason", "kind")}
-        legacy["rejected_at"] = _stamp_hours_ago(25)
-        _seed_history_entries(state_dir, legacy)
+        # A pre-field entry, sighted hourly for the whole day (no gap).
+        _seed_history_entries(
+            state_dir,
+            *[{**legacy, "rejected_at": _stamp_hours_ago(hours)} for hours in range(25, 0, -1)],
+        )
 
         stats = scan_and_convert([reports_dir], state_dir)
 

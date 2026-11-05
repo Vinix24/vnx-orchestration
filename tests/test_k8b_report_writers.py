@@ -1049,7 +1049,7 @@ def test_the_parser_keeps_no_hint_code_of_its_own():
 
 # ---------------------------------------------------------------------------
 # K-act pre-work (OI-2542): a permanent lifecycle refusal is dead-lettered once
-# the report it refuses is older than a day; everything else keeps retrying.
+# the REFUSAL itself has lasted an unbroken day; everything else keeps retrying.
 # ---------------------------------------------------------------------------
 
 _DAY = 24 * 3600
@@ -1079,14 +1079,16 @@ def _first_refusal_entry(state_dir: Path, report: Path) -> dict:
 
 def _seed_aged_history(state_dir: Path, entry: dict, *, hours_ago: float = 25) -> None:
     """Leave the converter beacon as a scan *hours_ago* wrote this refusal: the
-    dead-letter deadline is measured on the refusal, never on the report's mtime."""
+    dead-letter deadline is measured on the refusal, never on the report's mtime.
+    The last sighting an hour ago keeps the day unbroken (continuity)."""
     from health_beacon import HealthBeacon
 
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours_ago * 3600))
+    first = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours_ago * 3600))
+    last = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 3600))
     HealthBeacon(state_dir.parent, "report_to_receipt_converter",
                  expected_interval_seconds=3600).heartbeat(
-        status="fail", details={"rejected": [{**entry, "rejected_at": stamp,
-                                              "first_rejected_at": stamp}]},
+        status="fail", details={"rejected": [{**entry, "rejected_at": last,
+                                              "first_rejected_at": first}]},
     )
 
 
