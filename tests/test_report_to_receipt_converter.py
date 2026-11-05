@@ -16,8 +16,10 @@ Covers:
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -1732,6 +1734,258 @@ class TestRejectedDetailHistory:
         dispatch_ids = [e["dispatch_id"] for e in entries]
         assert "20260906-cap-0000" not in dispatch_ids  # oldest evicted
         assert f"20260906-cap-{_HEALTH_REJECTED_HISTORY_MAX:04d}" in dispatch_ids  # newest kept
+
+
+class TestLifecycleRefusalClassification:
+    """Every ``ReportPathRefused`` code is permanent (no later ledger read can
+    undo it, so an aged one is dead-lettered) or transient (a later scan
+    resolves it). The two sets partition the codes the module raises, so a new
+    code without a classification fails here instead of silently defaulting to
+    "retried forever"."""
+
+    def _codes_the_module_raises(self) -> set:
+        source = (SCRIPTS_LIB / "report_lifecycle_mode.py").read_text(encoding="utf-8")
+        codes = set()
+        for node in ast.walk(ast.parse(source)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", "")
+            if name != "ReportPathRefused":
+                continue
+            assert len(node.args) >= 2, ast.dump(node)
+            code = node.args[1]
+            assert isinstance(code, ast.Constant) and isinstance(code.value, str), ast.dump(node)
+            codes.add(code.value)
+        return codes
+
+    def test_the_two_sets_partition_every_code_the_module_raises(self) -> None:
+        from report_to_receipt_converter import (
+            PERMANENT_LIFECYCLE_REFUSALS,
+            TRANSIENT_LIFECYCLE_REFUSALS,
+        )
+
+        raised = self._codes_the_module_raises()
+        assert raised, "the AST scan found no ReportPathRefused call"
+        assert not (PERMANENT_LIFECYCLE_REFUSALS & TRANSIENT_LIFECYCLE_REFUSALS)
+        assert raised == set(PERMANENT_LIFECYCLE_REFUSALS) | set(TRANSIENT_LIFECYCLE_REFUSALS)
+        # Pinned: a later dispatch_finished for the same key resolves
+        # end_outcome_id_missing (_narrow_end takes the LAST end line), and
+        # project_mismatch / project_unknown depend on resolve_project_id()
+        # (report_lifecycle_mode._resolve_tenant falls back to the environment),
+        # so a misconfigured tenant must never dead-letter a report (OI-2542 r3).
+        assert TRANSIENT_LIFECYCLE_REFUSALS == frozenset({
+            "ledger_unreadable", "lifecycle_mode_undecidable", "end_outcome_id_missing",
+            "project_mismatch", "project_unknown",
+        })
+        assert PERMANENT_LIFECYCLE_REFUSALS == frozenset({
+            "attempt_unknown", "attempt_ambiguous", "project_ambiguous", "missing_dispatch_id",
+        })
+
+
+_V3_TENANT = "proj-quarantine"
+
+
+def _write_v3_attempt_report(path: Path, dispatch_id: str, *, attempt: int = 3,
+                             project_id: str = _V3_TENANT) -> Path:
+    """A bookable v3 report naming an attempt no ``dispatch_started`` starts."""
+    path.write_text(
+        f"---\ndispatch_id: {dispatch_id}\nproject_id: {project_id}\nprovider: claude\n"
+        f"model: claude-sonnet-4-6\nattempt: {attempt}\n---\n\n"
+        "## Summary\n\nImplemented the feature per dispatch specification. "
+        "All tests pass and coverage is at target.\n\n"
+        "## Changes\n\n- scripts/lib/example.py: added X\n\n"
+        "## Verification\n\npytest tests/ -x: 42 passed\n\n"
+        "## Open Items\n\nNone\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _seed_v3_start(state_dir: Path, dispatch_id: str, *, attempt: int = 1,
+                   project_id: str = _V3_TENANT) -> None:
+    """The one ledger line this dispatch has: a v3 start for *attempt*."""
+    (state_dir / "t0_receipts.ndjson").write_text(
+        json.dumps({"timestamp": "2026-06-01T10:00:00Z", "event_type": "dispatch_started",
+                    "dispatch_id": dispatch_id, "project_id": project_id,
+                    "attempt": attempt, "lifecycle_mode": "v3"}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _stamp_hours_ago(hours: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - hours * 3600))
+
+
+def _seed_history_entries(state_dir: Path, *entries: dict) -> None:
+    """Leave the converter beacon as a scan that saw exactly these refusals wrote it."""
+    from health_beacon import HealthBeacon
+
+    HealthBeacon(state_dir.parent, "report_to_receipt_converter",
+                 expected_interval_seconds=3600).heartbeat(
+        status="fail", details={"rejected": list(entries)},
+    )
+
+
+def _history_dispatch(state_dir: Path, dispatch_id: str) -> dict:
+    entries = _converter_beacon(state_dir)["details"]["rejected"]
+    [entry] = [e for e in entries if e["dispatch_id"] == dispatch_id]
+    return entry
+
+
+class TestLifecycleRefusalQuarantine:
+    """OI-2542 round 3: the 24 h deadline is measured on the REFUSAL (the
+    converter's own history), never on the report's mtime, and only a
+    genuinely permanent code is ever quarantined."""
+
+    def test_a_permanent_refusal_the_history_carried_for_a_day_is_quarantined(
+        self, reports_dir, state_dir
+    ):
+        _seed_v3_start(state_dir, "20260601-aging")
+        report = _write_v3_attempt_report(reports_dir / "20260601-aging.md", "20260601-aging")
+
+        # Scan 1 is the refusal's FIRST sighting: nothing is aged yet.
+        scan_and_convert([reports_dir], state_dir)
+        assert report.is_file()
+        entry = _history_dispatch(state_dir, "20260601-aging")
+        assert entry["reason"].startswith("ledger lifecycle attempt_unknown: ")
+        assert entry["first_rejected_at"] == entry["rejected_at"]
+
+        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(25),
+                                          "first_rejected_at": _stamp_hours_ago(25)})
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-aging.md").is_file()
+
+    def test_a_permanent_refusal_first_seen_now_is_not_quarantined_however_old_the_report(
+        self, reports_dir, state_dir
+    ):
+        """The outage case: the report is three days old, but this converter is
+        refusing it for the first time — it must stay for the next scan."""
+        _seed_v3_start(state_dir, "20260601-outage")
+        report = _write_v3_attempt_report(reports_dir / "20260601-outage.md", "20260601-outage")
+        stale = time.time() - 3 * 24 * 3600
+        os.utime(report, (stale, stale))
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.error_count, stats.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_project_mismatch_is_never_quarantined_however_old_the_history(
+        self, reports_dir, state_dir
+    ):
+        """project_mismatch depends on resolve_project_id(), not only on the
+        append-only ledger (_resolve_tenant falls back to the environment): a
+        processor returning with a misconfigured tenant must move nothing."""
+        _seed_v3_start(state_dir, "20260601-tenant", project_id="proj-elsewhere")
+        report = _write_v3_attempt_report(
+            reports_dir / "20260601-tenant.md", "20260601-tenant", attempt=1)
+        stale = time.time() - 3 * 24 * 3600
+        os.utime(report, (stale, stale))
+
+        scan_and_convert([reports_dir], state_dir)
+        entry = _history_dispatch(state_dir, "20260601-tenant")
+        assert entry["reason"].startswith("ledger lifecycle project_mismatch: ")
+
+        _seed_history_entries(state_dir, {**entry, "rejected_at": _stamp_hours_ago(25),
+                                          "first_rejected_at": _stamp_hours_ago(25)})
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert (stats.error_count, stats.rejected_count) == (1, 0)
+        assert report.is_file()
+        assert not (state_dir / "receipt_deadletter").exists()
+
+    def test_a_history_entry_without_first_rejected_at_uses_its_own_rejected_at(
+        self, reports_dir, state_dir
+    ):
+        """An entry written before first_rejected_at existed still counts: its
+        rejected_at IS the first time that key was seen."""
+        _seed_v3_start(state_dir, "20260601-legacy-entry")
+        report = _write_v3_attempt_report(
+            reports_dir / "20260601-legacy-entry.md", "20260601-legacy-entry")
+
+        scan_and_convert([reports_dir], state_dir)
+        entry = _history_dispatch(state_dir, "20260601-legacy-entry")
+        legacy = {key: entry[key] for key in ("dispatch_id", "file", "reason", "kind")}
+        legacy["rejected_at"] = _stamp_hours_ago(25)
+        _seed_history_entries(state_dir, legacy)
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        assert stats.rejected_count == 1
+        assert not report.exists()
+        assert (state_dir / "receipt_deadletter" / "20260601-legacy-entry.md").is_file()
+
+    def test_one_hanging_refusal_never_evicts_a_model_rejection_from_the_history(
+        self, reports_dir, state_dir
+    ):
+        """300 scans with one hanging young attempt_unknown refusal is ~100
+        minutes at the ~30 s cadence: appended once per scan, it filled the
+        whole 200-entry history and every model rejection fell out of it."""
+        from report_to_receipt_converter import _HEALTH_REJECTED_HISTORY_MAX
+
+        _seed_v3_start(state_dir, "20260601-hangs")
+        hanging = _write_v3_attempt_report(reports_dir / "20260601-hangs.md", "20260601-hangs")
+        _write_report_without_model(reports_dir / "20260601-no-model.md", "20260601-no-model")
+
+        scan_and_convert([reports_dir], state_dir)
+        first_stamp = _history_dispatch(state_dir, "20260601-hangs")["rejected_at"]
+        for _ in range(299):
+            scan_and_convert([reports_dir], state_dir)
+
+        entries = _converter_beacon(state_dir)["details"]["rejected"]
+        assert len(entries) <= _HEALTH_REJECTED_HISTORY_MAX
+        assert {e["dispatch_id"] for e in entries} == {"20260601-hangs", "20260601-no-model"}
+        hanging_entry = _history_dispatch(state_dir, "20260601-hangs")
+        assert hanging_entry["first_rejected_at"] == first_stamp
+        assert hanging_entry["rejected_at"] >= first_stamp
+        assert hanging.is_file()  # young refusal: still retried, never quarantined
+
+
+class TestMergeRejectedHistory:
+    """The merge rule itself, on fixed stamps (no clock): one entry per key."""
+
+    def test_newest_rejected_at_with_the_earliest_first_rejected_at(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        prior = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T10:00:00Z",
+                  "first_rejected_at": "2026-05-01T10:00:00Z"}]
+        fresh = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T12:00:00Z"}]
+
+        assert _merge_rejected_history(prior, fresh) == [{
+            "dispatch_id": "d", "file": "f.md", "reason": "r",
+            "rejected_at": "2026-06-01T12:00:00Z",
+            "first_rejected_at": "2026-05-01T10:00:00Z",
+        }]
+
+    def test_an_older_sighting_never_moves_rejected_at_backwards(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        prior = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T12:00:00Z",
+                  "first_rejected_at": "2026-06-01T12:00:00Z"}]
+        fresh = [{"dispatch_id": "d", "file": "f.md", "reason": "r",
+                  "rejected_at": "2026-06-01T10:00:00Z"}]
+
+        [merged] = _merge_rejected_history(prior, fresh)
+        assert merged["rejected_at"] == "2026-06-01T12:00:00Z"
+        assert merged["first_rejected_at"] == "2026-06-01T10:00:00Z"
+
+    def test_different_reasons_for_one_report_stay_separate(self):
+        from report_to_receipt_converter import _merge_rejected_history
+
+        merged = _merge_rejected_history([], [
+            {"dispatch_id": "d", "file": "f.md", "reason": "a", "rejected_at": "2026-06-01T10:00:00Z"},
+            {"dispatch_id": "d", "file": "f.md", "reason": "b", "rejected_at": "2026-06-01T11:00:00Z"},
+        ])
+
+        assert [entry["reason"] for entry in merged] == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
