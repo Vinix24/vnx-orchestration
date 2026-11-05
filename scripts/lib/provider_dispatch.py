@@ -41,6 +41,7 @@ from fail_closed_evidence import (
     with_block_or_raise as _with_block_or_raise,
 )
 from report_body_contract import with_directive as _rbc_with_directive
+from skill_application import skill_receipt_fields
 
 _EX_USAGE = 64  # sysexits.h EX_USAGE
 
@@ -395,6 +396,10 @@ def _enrich_instruction(args: argparse.Namespace) -> str:
     # but dispatch_metadata carries a real role. Stash the enriched instruction so
     # _emit_governance can re-verify with the RESOLVED role after resolution.
     args._role_application = _verify_role_application(enriched, args)
+    # RS-3 (ADR-048 §3): the spec-bound skill is proven on the SAME final prompt.
+    args._skill_application = _verify_skill_application(
+        enriched, {"skill": getattr(args, "skill", None)}, role,
+    )
     args._enriched_instruction = enriched
 
     args._final_prompt_integrity = _record_final_prompt_integrity(
@@ -426,6 +431,56 @@ def _verify_role_application(final_prompt: str, args: argparse.Namespace):
             exc,
         )
         return None
+
+
+def _verify_skill_application(final_prompt: str, dispatch_metadata: "dict | None", role):
+    """Best-effort: run the deterministic skill-applied control for *final_prompt*.
+
+    Returns a SkillApplicationVerdict, or None on any failure — the control must
+    never break a dispatch. None is also the verdict when the spec names no
+    skill. Stashed on ``args._skill_application`` for ``_emit_governance``.
+    """
+    try:
+        from skill_application import verify_skill_applied  # noqa: PLC0415
+        return verify_skill_applied(final_prompt, dispatch_metadata, role)
+    except Exception as exc:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "_verify_skill_application: verification failed (non-fatal): %s", exc,
+        )
+        return None
+
+
+def _application_verdicts(args: argparse.Namespace, enriched_instruction, resolved_role, role_app):
+    """Role + skill verdicts re-checked against the RESOLVED role (OI-983, RS-3).
+
+    Both verdicts were first computed in ``_enrich_instruction`` against the RAW
+    ``args.role``; the receipt stamps the RESOLVED role, so when the two differ
+    both are re-verified against the same value the receipt carries. A
+    re-verification error is fail-open: the raw verdicts stay in place.
+
+    ``_emit_governance`` calls this in one line so neither a large govern
+    function nor the skill fields add a branch of their own.
+    """
+    skill_app = vars(args).get("_skill_application")
+    if enriched_instruction is None or resolved_role == getattr(args, "role", None):
+        return role_app, skill_app
+    try:
+        from role_application import verify_role_applied  # noqa: PLC0415
+        role_app = verify_role_applied(
+            enriched_instruction,
+            getattr(args, "terminal_id", ""),
+            resolved_role,
+        )
+    except Exception:  # noqa: BLE001 — verification must never break a dispatch
+        logger.debug(
+            "_emit_governance: role_applied re-verify failed open dispatch=%s (non-fatal)",
+            getattr(args, "dispatch_id", "?"),
+            exc_info=True,
+        )
+    skill_app = _verify_skill_application(
+        enriched_instruction, {"skill": getattr(args, "skill", None)}, resolved_role,
+    )
+    return role_app, skill_app
 
 
 def _extract_response_text(result: Any) -> str:
@@ -1657,25 +1712,10 @@ def _emit_governance(
         )
         _role = _IDENTITY_UNRESOLVED
 
-    # OI-983: re-verify role_applied with the resolved _role when the enriched
-    # instruction is available and the resolved role differs from the raw one.
-    # This guarantees the role_applied field on the receipt was checked against
-    # the SAME role value stamped as "role". FAIL-OPEN — a verification error
-    # leaves _role_app at its raw value (from _enrich_instruction).
-    if _enriched_instruction is not None and _role != getattr(args, "role", None):
-        try:
-            from role_application import verify_role_applied  # noqa: PLC0415
-            _role_app = verify_role_applied(
-                _enriched_instruction,
-                getattr(args, "terminal_id", ""),
-                _role,
-            )
-        except Exception:  # noqa: BLE001 — verification must never break a dispatch
-            logger.debug(
-                "_emit_governance: role_applied re-verify failed open dispatch=%s (non-fatal)",
-                getattr(args, "dispatch_id", "?"),
-                exc_info=True,
-            )
+    # OI-983 + RS-3: re-verify role_applied AND skill_applied with the resolved
+    # _role when it differs from the raw one, so both fields were checked
+    # against the SAME role value stamped as "role". FAIL-OPEN.
+    _role_app, _skill_app = _application_verdicts(args, _enriched_instruction, _role, _role_app)
 
     # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
     # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
@@ -1805,6 +1845,7 @@ def _emit_governance(
                 role_source_path=(
                     getattr(_role_app, "source_path", None) if _role_app is not None else None
                 ),
+                **skill_receipt_fields(_skill_app),
                 # receipt-quality PR-B1: threaded through so the claude-lane
                 # benchmark exemption path (the only route that reaches this
                 # provider="claude" case) can backfill token_usage from the

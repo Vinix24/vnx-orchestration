@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from envelope_types import EnvelopeSpec
+from envelope_types import PHANTOM_REJECTED_STATUS, EnvelopeSpec
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +46,24 @@ def _is_lane_completion_receipt(entry: Any, dispatch_id: str) -> bool:
     is optional and so not part of the test). Review-gate,
     report_parser, converter, restore and corrective (``pr_enforcement`` /
     ``phantom_guard``) records are not lane completion receipts.
+
+    A REFUSAL is never a lane completion (ADR-045 K-4c round 3). A refused start
+    (``dispatch_cli._record_door_refusal_receipt``) and a refused provider family
+    share one shape: ``blocked``, ``delivery_state: delivery_refused``, nothing
+    spent — and because it is written through ``emit_dispatch_receipt`` it also
+    carries the ReceiptV2 fields, which made it indistinguishable here. Counted as
+    a completion, it made the following refire's GOVERN skip its own receipt and
+    left the refusal as the dispatch's only completion evidence. Only that exact
+    positive value excludes an entry: every other state (``session_ready``,
+    ``submit_failed``, ``deliver_failed``, absent) keeps the decision it had.
     """
     if not isinstance(entry, dict):
         return False
     if entry.get("dispatch_id") != dispatch_id:
         return False
     if entry.get("receipt_kind") != "dispatch":
+        return False
+    if entry.get("delivery_state") == "delivery_refused":
         return False
     source = entry.get("source")
     if source == "subprocess":
@@ -150,6 +162,19 @@ def _resolve_fix_forward_diff(
         )
         return own_diff
     return pushed_diff if pushed_diff.strip() else own_diff
+
+
+def _publish_phantom_verdict(verdict: Any, adapter_result: Any) -> None:
+    """Publish a phantom verdict as the governed status (OI-2519, K-5b r2).
+
+    Only a phantom verdict about a worker ``success`` publishes anything, it WINS
+    over ``contract_invalid``, and a guard that raised never reaches this call (a
+    guard ERROR, not a rejection). ``adapter_result.status`` is never rewritten
+    (OI-1179); without this, ``_govern`` discarded the verdict and the lane exit
+    froze a delivery the guard had rejected as ``completed``.
+    """
+    if verdict is not None and verdict.is_phantom and adapter_result.status == "success":
+        adapter_result.governed_status = PHANTOM_REJECTED_STATUS
 
 
 def _resolve_phantom_diff(
@@ -378,6 +403,39 @@ def _archive_dispatch_events(
             terminal, dispatch_id, exc,
         )
         return None, False
+
+
+def _archive_late_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:
+    """Archive the events written AFTER the end-of-dispatch archive (ADR-045 K-5).
+
+    The lane's exit order is ``_govern`` → end line → teardown, because the
+    teardown releases the occupancy flock and must carry the governed outcome.
+    The ``provider_teardown_worktree`` event the teardown emits therefore lands
+    in the live stream after ``_archive_dispatch_events`` archived it. This
+    pass adds those late events to the archive the dispatch already has and
+    leaves no live stream of this dispatch behind, so a per-run terminal does
+    not accumulate one stale live file per dispatch and the archive carries the
+    teardown event a reader expects last.
+
+    Best effort, like ``_archive_dispatch_events``: a failure is logged with the
+    dispatch id and terminal and never changes the governed status, the end
+    line or the ``EnvelopeResult``. The caller runs this after the teardown
+    returned or raised, so it can never keep the occupancy flock from being
+    released. A live stream holding another dispatch's events is never touched.
+    """
+    if not terminal or not dispatch_id:
+        return
+    try:
+        from event_store import EventStore  # noqa: PLC0415
+
+        archived = EventStore().archive_late_events(terminal, dispatch_id)
+        if archived is not None:
+            logger.info("envelope: late event archive dispatch=%s -> %s", dispatch_id, archived)
+    except Exception as exc:  # noqa: BLE001 — teardown must never break the dispatch
+        logger.warning(
+            "envelope: late event archive failed terminal=%s dispatch=%s (non-fatal): %s",
+            terminal, dispatch_id, exc,
+        )
 
 
 def _clear_dispatch_events(terminal: Optional[str], dispatch_id: str) -> None:

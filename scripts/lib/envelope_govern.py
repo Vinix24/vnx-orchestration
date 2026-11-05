@@ -33,10 +33,12 @@ from typing import Any, Dict, List, Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 from envelope_types import EnvelopeSpec, _AdapterResult
-from envelope_prepare import _verify_role_application
+from envelope_prepare import _verify_role_application, _verify_skill_application
+from skill_application import skill_receipt_fields
 from envelope_govern_support import (
     _archive_dispatch_events,
     _clear_dispatch_events,
+    _publish_phantom_verdict,
     _receipt_exists_for_dispatch,
     _resolve_fix_forward_diff,
     _verification_from_report,
@@ -421,7 +423,10 @@ def _govern(
                     "message": _violation_msg,
                 })
                 if adapter_result.status == "success":
-                    _effective_status = CONTRACT_INVALID_STATUS
+                    # OI-2519: publish the governed verdict as its own field
+                    # (``status`` above is never rewritten, OI-1179) so the lane
+                    # exit can publish the end line governance decided.
+                    _effective_status = adapter_result.governed_status = CONTRACT_INVALID_STATUS
         except OSError:
             pass  # can't read report file — skip validation, don't break receipt
 
@@ -496,9 +501,10 @@ def _govern(
                 # _role that is stamped on the receipt so role_applied is truthful.
                 # FAIL-OPEN — a verification error must never break receipt
                 # emission; the fields simply stay None (omitted).
-                _role_app = _verify_role_application(
-                    spec.instruction, spec.terminal_id, _role,
-                )
+                _role_app = _verify_role_application(spec.instruction, spec.terminal_id, _role)
+                # RS-3 (ADR-048 §3): the same final prompt, the same resolved
+                # role — a spec-bound skill is proven, or its absence reasoned.
+                _skill_app = _verify_skill_application(spec.instruction, {"skill": spec.skill}, _role)
 
                 # receipt-quality PR-B2 fix-forward (Finding C): aggregate
                 # PreToolUse-hook tool-call signals for this dispatch
@@ -606,6 +612,7 @@ def _govern(
                     role_source_path=(
                         getattr(_role_app, "source_path", None) if _role_app is not None else None
                     ),
+                    **skill_receipt_fields(_skill_app),
                     session_id=adapter_result.session_id,
                     model_resolved=getattr(adapter_result, "model_resolved", None),
                     tool_call_count=_toolcall_signals.get("tool_call_count"),
@@ -717,7 +724,9 @@ def _govern(
         # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
         # instead — resolve the pushed branch and use its diff when the own diff is empty.
         _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
-        record_phantom_if_any(
+        # OI-2519 (K-5b r2): the publish wraps the call — a guard that raises
+        # publishes nothing, a phantom verdict becomes the governed status.
+        _publish_phantom_verdict(record_phantom_if_any(
             dispatch_id=spec.dispatch_id,
             context=PhantomDecisionContext(
                 role=spec.role,
@@ -732,7 +741,11 @@ def _govern(
                 # omitted keyword) records that this lane looked and found nothing,
                 # not that it forgot to ask (see PhantomDecisionContext docstring).
                 read_only=None,
-                status=_effective_status,
+                # OI-2519 (K-5b r2): the WORKER's own claim, never the downgraded
+                # ``_effective_status`` above — the guard asks whether a completion
+                # claim is backed by a deliverable, so a contract refusal must not
+                # make it abstain from an equally empty diff.
+                status=adapter_result.status,
                 worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
             ),
             token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
@@ -746,7 +759,7 @@ def _govern(
             # sentinel "unknown". Never overwritten by enrichment.
             provider=spec.provider,
             terminal=spec.terminal_id,
-        )
+        ), adapter_result)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "envelope._govern: phantom-guard check failed (non-fatal) dispatch=%s: %s",

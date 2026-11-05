@@ -62,7 +62,8 @@
 #                      [--skip-wrap-reason "<text>" [--transcript PATH]]
 #
 # Timing knobs (env, seconds): VNX_T0_ROTATE_FOOTER_TIMEOUT (60), VNX_T0_ROTATE_POLL_SECONDS (1),
-# VNX_T0_ROTATE_SETTLE_SECONDS (2), VNX_T0_ROTATE_TURN_TIMEOUT (1800),
+# VNX_T0_ROTATE_SETTLE_SECONDS (2), VNX_T0_ROTATE_CHUNK_PAUSE (0.3, between the pieces of a
+# line typed in pieces), VNX_T0_ROTATE_TURN_TIMEOUT (1800),
 # VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT (20), VNX_T0_ROTATE_DELIVERY_TIMEOUT (120),
 # VNX_T0_ROTATE_DELIVERY_POLL (1).
 # Screen patterns (env, grep -E): VNX_T0_ROTATE_FOOTER_PATTERN ("auto mode"),
@@ -96,6 +97,8 @@ PYTHON="${VNX_PYTHON:-python3}"
 
 POLL="${VNX_T0_ROTATE_POLL_SECONDS:-1}"
 SETTLE="${VNX_T0_ROTATE_SETTLE_SECONDS:-2}"
+# Seconds between the pieces of a line long enough to be typed in pieces (see type_line).
+CHUNK_PAUSE="${VNX_T0_ROTATE_CHUNK_PAUSE:-0.3}"
 FOOTER_TIMEOUT="${VNX_T0_ROTATE_FOOTER_TIMEOUT:-60}"
 TURN_TIMEOUT="${VNX_T0_ROTATE_TURN_TIMEOUT:-1800}"
 GOAL_CONFIRM_TIMEOUT="${VNX_T0_ROTATE_GOAL_CONFIRM_TIMEOUT:-20}"
@@ -127,10 +130,27 @@ wait_for_screen() {
   done
 }
 
+# Pieces the last type_line call typed: 0 for one burst, 1 for a line typed in pieces.
+TYPED_PIECES=0
+
 # Type one line into the pane, then Enter as its own keystroke (a combined send-keys misses).
+# A line of at most GOAL_TYPED_MAX_BYTES UTF-8 bytes goes in as one burst, as it always did.
+# A longer one is typed in pieces: Claude Code reads a single long burst as a paste, and a pasted
+# /goal never runs (03-11 13:17Z: 913 bytes stored as <pasted_content>, no /goal record). The
+# split is Python's (`t0_rotation_state.py split-line`): bash under the tmux server's locale
+# slices bytes and can cut a multibyte character in half. The pieces concatenate to the line.
 type_line() {
-  local target="$1" text="$2"
-  tmux send-keys -t "$target" -l "$text"
+  local target="$1" text="$2" piece count=0
+  while IFS= read -r piece; do
+    count=$((count + 1))
+    if [ "$count" -gt 1 ]; then sleep "$CHUNK_PAUSE"; fi
+    tmux send-keys -t "$target" -l "$piece"
+  done < <(printf '%s' "$text" | "$PYTHON" "$STATE_PY" split-line)
+  if [ "$count" -eq 0 ]; then
+    log "type-line: the splitter produced no piece (empty line or a refused split); nothing typed"
+    return 1
+  fi
+  if [ "$count" -gt 1 ]; then TYPED_PIECES=1; else TYPED_PIECES=0; fi
   sleep "$SETTLE"
   tmux send-keys -t "$target" Enter
 }
@@ -206,8 +226,11 @@ goal_followup() {
     esac
   done
   [ -n "$transcript" ] || { log "goal-followup: --transcript is required (the successor's transcript from delivery.json)"; return 2; }
-  local goal outcome="confirmed" fallback="none"
+  local goal outcome="confirmed" fallback="none" goal_bytes goal_pieces=0
   goal="$(cat "$goal_file")"
+  # The measurement the receipt carries: the UTF-8 size of the line that was typed, and whether
+  # it went in as one burst or in pieces. Measured in Python for the same reason the split is.
+  goal_bytes="$(printf '%s' "$goal" | "$PYTHON" "$STATE_PY" utf8-bytes)"
 
   # /goal is a native slash command, typed only once the kickoff turn is over: a line submitted
   # during a turn is queued and handed to that turn as plain text, so the command never runs.
@@ -216,11 +239,13 @@ goal_followup() {
     outcome="turn_timeout"
   else
     type_line "$target" "$goal"
+    goal_pieces=$TYPED_PIECES
     if ! wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT"; then
       if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
         outcome="turn_timeout"
       elif ! transcript_says goal "$transcript"; then
         retry_goal "$target" "$transcript" "$goal_file"
+        goal_pieces=$TYPED_PIECES
         wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT" || outcome="unconfirmed"
       fi
     fi
@@ -243,7 +268,8 @@ goal_followup() {
   fi
   "$PYTHON" "$STATE_PY" event --trigger t0_context_rotation_goal_followup \
     --file "${state_file:-$goal_file}" --field "outcome=$outcome" --field "window=$target" \
-    --field "fallback=$fallback" --field "screen_goal_active=$GOAL_SCREEN" || true
+    --field "fallback=$fallback" --field "screen_goal_active=$GOAL_SCREEN" \
+    --field "goal_bytes=$goal_bytes" --field "typed_in_pieces=$goal_pieces" || true
   [ "$outcome" = "confirmed" ]
 }
 

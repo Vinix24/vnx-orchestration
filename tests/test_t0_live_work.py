@@ -247,7 +247,6 @@ def test_locked_db_gives_available_false_with_reason_and_degraded_health(
     # Only the live-work read is under test; schema init and the terminal
     # lease read would otherwise wait out their own 10 s timeouts.
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
-    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
     holder = sqlite3.connect(str(db), timeout=0, isolation_level=None)
     holder.execute("BEGIN EXCLUSIVE")
     try:
@@ -632,7 +631,6 @@ def test_unreadable_pending_dir_is_not_zero_and_degrades_health(tmp_path, monkey
     (staged / "dispatch-spec.json").write_text("{}", encoding="utf-8")
     b_state, b_dispatch = _second_project_with_staged(tmp_path, "20260929-shared")
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
-    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
     _unreadable(monkeypatch, dispatch_dir / "pending")
 
     state = bts.build_t0_state(state_dir, dispatch_dir)
@@ -670,7 +668,6 @@ def test_unreadable_conflicts_dir_is_not_zero_and_degrades_health(tmp_path, monk
     (dispatch_dir / "conflicts" / "20260929-shared.md").write_text("x", encoding="utf-8")
     b_state, b_dispatch = _second_project_with_staged(tmp_path, "20260929-shared")
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
-    monkeypatch.setattr(bts, "_build_terminals", lambda _sd: {})
     _unreadable(monkeypatch, dispatch_dir / "conflicts")
 
     state = bts.build_t0_state(state_dir, dispatch_dir)

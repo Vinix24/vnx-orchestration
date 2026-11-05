@@ -38,6 +38,14 @@ from the PR (``baseRefName``) as ``base_branch``; without one the class is
 (``seats=``) keeps every seat at every class, and a merge record under the
 older :data:`SEAT_RULE` is judged without a class (``by_risk=False``).
 
+**One key switches the rule (track ``tweede-stoel-op-signaal``, PR 4).**
+:func:`active_seat_rule` reads ``VNX_REVIEW_SEAT_RULE`` through the same
+``config_runtime`` path as the stack: unset or ``first_seat_or_every_seat_by_risk``
+keep :func:`seats_for_risk`, ``first_seat_or_every_seat_on_signal`` narrows a
+resolved stack with :func:`seats_for_signals`, and an unknown value fails
+closed to the risk rule and is recorded by name. A receipt is judged under the
+rule its own record names, never under the key.
+
 **Which seat a record answers for** (:func:`seat_for`). The ``seat`` its own
 request on this head states (stamped since R5a), else ``takeover_path[0]``
 (the seat the takeover walk started from), else its own gate.
@@ -88,7 +96,10 @@ side needs (``closure_verifier``, ``gate_status``, ``review_seats``,
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -97,6 +108,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 REVIEW_STACK_KEY = "VNX_DEFAULT_REVIEW_STACK"
 REVIEW_STACK_OVERRIDE_KEY = "VNX_OVERRIDE_DEFAULT_REVIEW_STACK"
 TAKEOVER_CHAIN_KEY = "VNX_REVIEW_GATE_TAKEOVER_CHAIN"
+#: The one key that switches the seat rule (track ``tweede-stoel-op-signaal``, PR 4).
+SEAT_RULE_KEY = "VNX_REVIEW_SEAT_RULE"
+
+logger = logging.getLogger(__name__)
 
 #: The rule a merge record was judged under. Its presence on a ``pr_merged``
 #: receipt is how track closure tells a PR merged under the seat rule from one
@@ -106,10 +121,66 @@ SEAT_RULE = "every_seat_distinct_reviewer"
 #: for the class of the merged head. A merge record under :data:`SEAT_RULE`
 #: keeps being judged by that older rule.
 RISK_SEAT_RULE = "first_seat_or_every_seat_by_risk"
+#: The rule of the signal seat (track ``tweede-stoel-op-signaal``, PR 2): after
+#: a clean PASS of seat 1, seat 2 is asked only when a signal fires; an
+#: ``UNKNOWN`` field, no outcome or a FAIL requires every seat. PR 2 computes it
+#: in shadow only (``pr_merge`` records the outcome, decides by RISK_SEAT_RULE).
+SIGNAL_SEAT_RULE = "first_seat_or_every_seat_on_signal"
 
 #: The classes at which only the first seat of the stack is required. Every
 #: other value, an unknown one or none at all included, requires every seat.
 _FIRST_SEAT_CLASSES = frozenset({"low", "medium"})
+
+#: The value every contract field of :class:`SeatSignalInput` carries when its
+#: source could not be read. It is never read as zero, ``False`` or "no signal".
+UNKNOWN = "unknown"
+
+#: The fixed names of the signals that ask the second seat (plan, Approach 1-5).
+SIGNAL_NAMES = ("real_warning", "security_path", "schema", "irreversible", "sample")
+
+
+@dataclass(frozen=True)
+class ActiveSeatRule:
+    """The rule :data:`SEAT_RULE_KEY` names now, the raw value, and whether it was understood.
+
+    ``rule`` is the rule to decide by (fail-closed to :data:`RISK_SEAT_RULE` for
+    every value nobody understands), ``value`` is the configured value verbatim
+    so a record can name an unknown one, and ``recognised`` is False exactly for
+    that unknown value.
+    """
+
+    rule: str
+    value: str
+    recognised: bool
+
+
+def active_seat_rule() -> ActiveSeatRule:
+    """The seat rule this project's key names (the one reader of :data:`SEAT_RULE_KEY`).
+
+    Read through ``config_runtime.get``, never a second config reader. Only the
+    door calls this; closure and enforcement judge a receipt under the rule its
+    own record names.
+    """
+    import config_runtime
+
+    raw = config_runtime.get(SEAT_RULE_KEY)
+    value = (raw or "").strip()
+    if value == SIGNAL_SEAT_RULE:
+        return ActiveSeatRule(SIGNAL_SEAT_RULE, value, True)
+    if value in ("", RISK_SEAT_RULE):
+        return ActiveSeatRule(RISK_SEAT_RULE, value, True)
+    logger.warning(
+        "review seat rule: %s=%r is not a known rule; keeping %s (fail-closed)",
+        SEAT_RULE_KEY, raw, RISK_SEAT_RULE,
+    )
+    return ActiveSeatRule(RISK_SEAT_RULE, value, False)
+
+
+_KNOWN_CLASSES = frozenset({"low", "medium", "high", "critical"})
+_PASS = "pass"
+_FAIL = "fail"
+_SAMPLE_MODULUS = 5
+_SHA40 = re.compile(r"[0-9a-fA-F]{40}")
 
 SOURCE_RECORDED = "config"
 SOURCE_FRESH = "config_fresh"
@@ -120,6 +191,8 @@ ROUTE_DIRECT = "direct"
 ROUTE_TAKEOVER = "takeover"
 ROUTE_BOOKING = "takeover_booking"
 ROUTE_PEER = "independent_peer"
+#: The codex seat filled by a standing ``mergen-met-OI`` verdict (R2c, RG-4).
+ROUTE_MERGE_WITH_OI = "merge_with_oi"
 
 HOW_STATED = "stated"
 HOW_TAKEOVER = "takeover_path"
@@ -250,6 +323,9 @@ class RequiredSeats:
     stack: Tuple[str, ...] = ()
     risk: Optional[Dict[str, Any]] = None
     rule: str = SEAT_RULE
+    #: The raw :data:`SEAT_RULE_KEY` value this decision was made under; empty
+    #: when the key was unset (the default, and every merge before PR 4).
+    rule_value: str = ""
 
     def risk_text(self) -> str:
         """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
@@ -277,6 +353,251 @@ def seats_for_risk(stack: Sequence[str], risk: Any) -> Tuple[str, ...]:
     value = getattr(risk, "risk_class", risk)
     known = value.strip().lower() if isinstance(value, str) else ""
     return named[:1] if known in _FIRST_SEAT_CLASSES else named
+
+
+@dataclass(frozen=True)
+class SeatSignalInput:
+    """The one typed input of :func:`seats_for_signals` (plan, Invoercontract).
+
+    ``stack`` is the project's review stack in order. Every other field is a
+    row of the input contract and carries :data:`UNKNOWN` when its source could
+    not be read; a missing count is ``None`` and a missing boolean ``None``,
+    never zero or ``False``.
+
+    ``seat1_takeover_from`` is ``""`` for a seat 1 filled by its own reviewer,
+    the route or gate a takeover walked from when it was filled through another
+    reviewer, and :data:`UNKNOWN` when that cannot be told. ``risk_paths`` are
+    the ``(path, category)`` pairs the risk reading decided on; they are only
+    trusted when ``risk_class`` is a known class. ``path_signal`` is ``""``
+    when every deciding path can be classified and :data:`UNKNOWN` when one
+    cannot (an unnormalisable path, a blank path or category): the signal such
+    a path would fire cannot be told, so the rule keeps every seat. ``head_sha``
+    is the exact 40-character head the outcome is bound to, and the sha the
+    sample is drawn from; a sha that is not one is :data:`UNKNOWN`.
+    """
+
+    stack: Tuple[str, ...] = ()
+    seat1_outcome: str = UNKNOWN
+    seat1_reviewer: str = UNKNOWN
+    seat1_takeover_from: str = UNKNOWN
+    real_warning_count: Optional[int] = None
+    prescan_count: Optional[int] = None
+    risk_class: str = UNKNOWN
+    risk_paths: Tuple[Tuple[str, str], ...] = ()
+    path_signal: str = ""
+    irreversible: Optional[bool] = None
+    head_sha: str = UNKNOWN
+
+    def unknown_fields(self) -> Tuple[str, ...]:
+        """The contract fields whose value is :data:`UNKNOWN`, by name, in contract order."""
+        checks = (
+            ("seat1_outcome", self.seat1_outcome in (_PASS, _FAIL)),
+            ("seat1_reviewer", bool(self.seat1_reviewer) and self.seat1_reviewer != UNKNOWN),
+            ("seat1_takeover_from", self.seat1_takeover_from != UNKNOWN),
+            ("real_warning_count", _is_count(self.real_warning_count)),
+            ("prescan_count", _is_count(self.prescan_count)),
+            ("risk_class", _known_class(self.risk_class)),
+            ("path_signal", self.path_signal != UNKNOWN),
+            ("irreversible", isinstance(self.irreversible, bool)),
+            ("head_sha", _full_sha(self.head_sha)),
+        )
+        return tuple(name for name, known in checks if not known)
+
+
+@dataclass(frozen=True)
+class SignalSeatDecision:
+    """The output of :func:`seats_for_signals`: required seats, rule name, signals, unknown fields."""
+
+    rule: str
+    seats: Tuple[str, ...]
+    signals: Tuple[str, ...]
+    unknown: Tuple[str, ...]
+
+    def to_record(self) -> Dict[str, Any]:
+        """The shape the door's ``shadow_seat_rule`` carries."""
+        return {
+            "rule": self.rule, "seats": list(self.seats),
+            "signals": list(self.signals), "unknown": list(self.unknown),
+        }
+
+
+def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
+    """The seats a review needs on this head under the signal rule (the one copy of that rule).
+
+    Seat 1 only after a clean PASS of seat 1 on the exact head and no signal;
+    every seat of the stack when a signal fired. Fail-closed: every seat when
+    any contract field is :data:`UNKNOWN`, when seat 1 gave no outcome or a
+    FAIL, when seat 1 was filled through a takeover, or when the risk class is
+    unknown. A ``gate-merge`` path on its own is not a signal. Pure: no I/O here
+    — the caller reads the store and hands the result in.
+    """
+    stack = _seat_names(list(signal_input.stack))
+    signals = _fired_signals(signal_input)
+    unknown = signal_input.unknown_fields()
+    fail_closed = (
+        bool(unknown)
+        or signal_input.seat1_outcome != _PASS
+        or bool(signal_input.seat1_takeover_from)
+    )
+    seats = stack if fail_closed or signals else stack[:1]
+    return SignalSeatDecision(SIGNAL_SEAT_RULE, seats, signals, unknown)
+
+
+def signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    """``(class, (path, category) pairs)`` from a recorded risk reading; ``UNKNOWN`` when it is unreadable.
+
+    A reading whose own diff could not be read is ``UNKNOWN``, never a known
+    ``high``: that is exactly ``high`` with a fail-closed reason and no deciding
+    path.
+    """
+    if not isinstance(risk, dict):
+        return UNKNOWN, ()
+    deciding = risk.get("deciding")
+    paths = tuple(
+        (str(item.get("path") or ""), str(item.get("category") or ""))
+        for item in (deciding if isinstance(deciding, list) else ())
+        if isinstance(item, dict)
+    )
+    derived = str(risk.get("derived") or "").strip().lower()
+    reason = str(risk.get("reason") or "")
+    if derived not in _KNOWN_CLASSES:
+        return UNKNOWN, paths
+    if derived == "high" and not paths and reason.startswith("fail-closed:"):
+        return UNKNOWN, paths
+    cls = str(risk.get("risk_class") or "").strip().lower()
+    return (cls if cls in _KNOWN_CLASSES else UNKNOWN), paths
+
+
+def _rounds_lines(rounds: Any) -> Tuple[Any, ...]:
+    return tuple(getattr(rounds, "lines", ()) or ()) if rounds is not None else ()
+
+
+def _accepted_seat_line(
+    fills: Sequence[Any], seat: str, head: str, rounds: Any,
+) -> Any:
+    """The ledger line of the record the door accepted for ``seat``; ``None`` when there is none.
+
+    Matched the way :func:`counted_fill` matches it: exact head, seat, the
+    reviewer's gate, a PASS and the record's own report.
+    """
+    if not seat or rounds is None:
+        return None
+    fill = next((item for item in fills if item.seat == seat), None)
+    if fill is None or not fill.filled or not isinstance(fill.record, dict):
+        return None
+    gate = str(fill.record.get("gate") or fill.reviewer or "")
+    report = Path(str(fill.record.get("report_path") or "")).name
+    matches = [
+        line for line in _rounds_lines(rounds)
+        if line.head_sha == head and line.seat == seat and line.reviewer == gate
+        and line.verdict == "pass" and line.report_name == report
+    ]
+    return matches[-1] if matches else None
+
+
+def signal_input_for(
+    required: RequiredSeats, fills: Sequence[Any], rounds: Any, head_sha: str,
+) -> SeatSignalInput:
+    """The typed input of :func:`seats_for_signals` from one seat evaluation.
+
+    The first seat of the stack supplies outcome, reviewer, warning counts and
+    route; the risk reading supplies class, paths and ``irreversible``. Every
+    field the store cannot answer stays :data:`UNKNOWN`. A deciding path the
+    classifier could not read makes the path signal :data:`UNKNOWN`: whether it
+    fires a security or schema signal cannot be told, so the rule keeps every
+    seat instead of reading "no signal".
+    """
+    stack = tuple(required.stack)
+    seat = stack[0] if stack else ""
+    accepted = _accepted_seat_line(fills, seat, head_sha, rounds)
+    verdicts = {line.verdict for line in _rounds_lines(rounds) if seat and line.head_sha == head_sha and line.seat == seat}
+    risk = required.risk if isinstance(required.risk, dict) else {}
+    risk_class, risk_paths = signal_risk(risk)
+    path_signal = "" if all(_path_classifiable(path, kind) for path, kind in risk_paths) else UNKNOWN
+    takeover = UNKNOWN
+    if accepted is not None:
+        fill = next((item for item in fills if item.seat == seat), None)
+        route = fill.route if fill is not None else ""
+        takeover = accepted.takeover_from or ("" if route == ROUTE_DIRECT else (route or UNKNOWN))
+    return SeatSignalInput(
+        stack=stack,
+        seat1_outcome=next(iter(verdicts)) if len(verdicts) == 1 else UNKNOWN,
+        seat1_reviewer=(accepted.reviewer or UNKNOWN) if accepted is not None else UNKNOWN,
+        seat1_takeover_from=takeover,
+        real_warning_count=accepted.warning_count if accepted is not None else None,
+        prescan_count=accepted.prescan_notice_count if accepted is not None else None,
+        risk_class=risk_class,
+        risk_paths=risk_paths,
+        path_signal=path_signal,
+        irreversible=risk.get("irreversible") if isinstance(risk.get("irreversible"), bool) else None,
+        head_sha=head_sha or UNKNOWN,
+    )
+
+
+def _path_classifiable(path: Any, category: Any) -> bool:
+    """Whether one deciding path can be classified: a blank path or category, or an
+    unnormalisable path, cannot, and no signal can be read from such a pair."""
+    from review_risk_class import CATEGORY_UNNORMALISABLE, path_is_unnormalisable
+
+    kind = str(category or "").strip().lower()
+    return bool(kind) and kind != CATEGORY_UNNORMALISABLE and not path_is_unnormalisable(path)
+
+
+def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
+    """The signals that fired from the fields that are known, in :data:`SIGNAL_NAMES` order."""
+    fired: List[str] = []
+    if _is_count(signal_input.real_warning_count) and signal_input.real_warning_count > 0:
+        fired.append("real_warning")
+    if _known_class(signal_input.risk_class):
+        # Only pairs that can be classified may fire a path signal; an
+        # unclassifiable one is reported through ``path_signal`` instead.
+        paths = [(path, kind) for path, kind in signal_input.risk_paths if _path_classifiable(path, kind)]
+        if any(_is_security_path(path, category) for path, category in paths):
+            fired.append("security_path")
+        if any(_is_category(category, "schema") for _path, category in paths):
+            fired.append("schema")
+    if signal_input.irreversible is True:
+        fired.append("irreversible")
+    if _sample_fires(signal_input.head_sha):
+        fired.append("sample")
+    return tuple(fired)
+
+
+def _is_security_path(path: Any, category: Any) -> bool:
+    """A security path by the risk category or by ``smart_router.security_path_kind``."""
+    if _is_category(category, "security"):
+        return True
+    text = str(path or "").strip()
+    if not text:
+        return False
+    import smart_router
+
+    return smart_router.security_path_kind(text) is not None
+
+
+def _is_category(category: Any, wanted: str) -> bool:
+    return str(category or "").strip().lower() == wanted
+
+
+def _sample_fires(head_sha: Any) -> bool:
+    """``int(sha256(head_sha), 16) % 5 == 0`` on the full 40-character head sha; ``False`` when it is not one."""
+    sha = str(head_sha or "").strip().lower()
+    if not _full_sha(sha):
+        return False
+    return int(hashlib.sha256(sha.encode("ascii")).hexdigest(), 16) % _SAMPLE_MODULUS == 0
+
+
+def _full_sha(value: Any) -> bool:
+    text = str(value or "").strip()
+    return bool(_SHA40.fullmatch(text))
+
+
+def _known_class(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _KNOWN_CLASSES
+
+
+def _is_count(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def _seat_names(raw: Any) -> Tuple[str, ...]:
@@ -840,6 +1161,23 @@ def could_fill(seat: str, excluded: frozenset) -> Tuple[str, ...]:
 
 
 @dataclass(frozen=True)
+class RecordedMerge:
+    """The ``mergen-met-OI`` verdict a merge record carries (RG-4 round 3, OI-2506).
+
+    Read back from ``review_seats.round_ledger.merge_with_oi`` on the
+    ``pr_merged`` receipt: the verdict the door counted when it merged, with the
+    head it was given for. Closure fills the codex seat with it and lifts that
+    seat's veto on that head only — the same judgement the door made, never a
+    second one.
+    """
+
+    verdict_id: str
+    head_sha: str
+    cap_rule: str
+    oi_ids: Tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class DoorRounds:
     """The round ledger as the door reads it for one PR (``review_rounds``).
 
@@ -851,8 +1189,13 @@ class DoorRounds:
     count over the codex seat, ``override`` the reason of the door's
     ``--override-b3``, ``override_carrier`` what carried it (``flag`` or
     ``env``, RG-5), and ``grant`` the extra round a tiebreaker's
-    ``verkleinen`` granted past the cap (R2a): only the codex-seat verdict
-    the ledger booked as its use counts.
+    ``verkleinen`` granted past the cap (R2a); ``merge_with_oi`` the standing
+    ``mergen-met-OI`` verdict that lets the codex seat count on this head
+    without a PASS, with ``merge_refusal`` saying why a verdict that stands
+    here does not count (R2c, RG-4). ``recorded`` (RG-4 round 3) says the
+    ledger was read from a merge record, not from the live ledger: track
+    closure judges the merge under the verdict it merged with, and the PASSes
+    it merged past are not counted again (:func:`merge_record_rounds`).
     """
 
     path: str
@@ -863,13 +1206,16 @@ class DoorRounds:
     override: str = ""
     override_carrier: str = ""
     grant: Any = None
+    merge_with_oi: Any = None
+    merge_refusal: str = ""
+    recorded: bool = False
 
     @property
     def capped(self) -> bool:
         return self.cap is not None and self.cap.capped
 
     def to_record(self) -> Dict[str, Any]:
-        """What the merge record (``pr_merged``) carries about the ledger and the override."""
+        """What the merge record (``pr_merged``) carries about the ledger, the override and the OI verdict."""
         record: Dict[str, Any] = {"path": self.path, "lines": len(self.lines), "refusal": self.refusal}
         if self.cap is not None:
             record["cap"] = self.cap.to_record()
@@ -880,6 +1226,13 @@ class DoorRounds:
             }
         if self.grant is not None:
             record["granted_round"] = {"verdict_id": self.grant.verdict_id, "dispatch_id": self.grant.dispatch_id}
+        if self.merge_with_oi is not None:
+            standing = self.merge_with_oi
+            record["merge_with_oi"] = {
+                "verdict_id": standing.verdict_id, "pr_number": standing.pr_number, "head_sha": standing.head_sha,
+                "cap_rule": standing.cap_rule, "outcome": standing.outcome, "approved": True,
+                "oi_ids": list(standing.oi_ids),
+            }
         return record
 
 
@@ -930,16 +1283,83 @@ def door_rounds(
     since = ledger.since(project_id, pr_number)
     grant = _door_grant(path.parent.parent, cap, since) if cap.capped else None
     returned = _returned_to_plan(path.parent.parent, cap, since) if cap.capped else ""
+    merge_with_oi, merge_refusal = None, ""
+    if cap.capped and not returned:
+        # A store the door could not read is already a refusal above: it names no verdict here either.
+        merge_with_oi, merge_refusal = _door_merge_with_oi(path.parent.parent, cap, scope.head_sha or "", since)
     return DoorRounds(
         str(path), pr_number, lines, refusal=returned, cap=cap, override=b3_override.strip(),
-        override_carrier=b3_override_carrier, grant=grant,
+        override_carrier=b3_override_carrier, grant=grant, merge_with_oi=merge_with_oi,
+        merge_refusal=merge_refusal,
     )
+
+
+def merge_record_rounds(scope: SeatScope, recorded: Any) -> Optional[DoorRounds]:
+    """The round ledger as a merge record carries it, for track closure (RG-4 round 3, OI-2506).
+
+    ``recorded`` is the ``merge_with_oi`` block of the record's
+    ``review_seats.round_ledger``, read as the door wrote it. ``None`` — a
+    merge without a verdict, or a record from before RG-4 — keeps closure
+    judging exactly as it did: no fill, no veto lift.
+
+    A block that cannot be read, does not say the operator approved it, or
+    names another head than the one the merge record carries, fills and lifts
+    nothing and puts the reason in ``merge_refusal``. The head is the binding:
+    a verdict counts on the head it names and on no other, at the door and at
+    closure alike.
+    """
+    if recorded is None:
+        return None
+    pr_number = int(scope.pr_id) if scope.pr_id.isdigit() else 0
+
+    def refusal(message: str) -> DoorRounds:
+        return DoorRounds("", pr_number, recorded=True, merge_refusal=message)
+
+    if not isinstance(recorded, dict):
+        return refusal(
+            f"het merge-record draagt een mergen-met-OI-blok dat geen object is ({recorded!r}): "
+            "het oordeel telt hier niet")
+    verdict_id = str(recorded.get("verdict_id") or "").strip()
+    head = str(recorded.get("head_sha") or "").strip()
+    cap_rule = str(recorded.get("cap_rule") or "").strip()
+    oi_ids = recorded.get("oi_ids")
+    if not verdict_id or not head or not isinstance(oi_ids, list) or not all(isinstance(i, str) for i in oi_ids):
+        return refusal(
+            f"het mergen-met-OI-blok op het merge-record is onvolledig (verdict_id {verdict_id or 'geen'}, "
+            f"kop {head[:12] or 'geen'}, oi_ids {oi_ids!r}): het oordeel telt hier niet")
+    if recorded.get("approved") is not True:
+        return refusal(
+            f"het merge-record draagt {verdict_id} zonder akkoord van de operator (approved is niet true): "
+            "het oordeel telt hier niet")
+    record_head = scope.head_sha or ""
+    if head != record_head:
+        return refusal(
+            f"het merge-record draagt het mergen-met-OI-oordeel {verdict_id} op kop {head[:12]}, maar deze "
+            f"merge ging over kop {record_head[:12] or 'onbekend'}: een oordeel telt alleen op de kop die het noemt")
+    return DoorRounds("", pr_number, recorded=True, merge_with_oi=RecordedMerge(verdict_id, head, cap_rule, tuple(oi_ids)))
 
 
 def _door_grant(state_dir: Path, cap: Any, since: str) -> Any:
     import review_cap_verdicts
 
     return review_cap_verdicts.door_grant(state_dir, cap, since=since)
+
+
+def _door_merge_with_oi(state_dir: Path, cap: Any, head_sha: str, since: str) -> Tuple[Any, str]:
+    """The standing ``mergen-met-OI`` verdict for ``head_sha`` and why it does not count (R2c, RG-4).
+
+    A store that cannot be read is a refusal for the codex seat, never a counted
+    verdict: whether one stands and was approved cannot be told.
+    """
+    import review_cap_verdicts
+
+    try:
+        standing = review_cap_verdicts.standing_merge(state_dir, cap, head_sha, since=since)
+    except review_cap_verdicts.CapVerdictError as exc:
+        return None, (
+            f"PR #{cap.pr_number} staat op de B3-cap en de uitspraken van de tiebreaker zijn onleesbaar ({exc}): "
+            f"of een mergen-met-OI-oordeel op kop {head_sha[:12]} telt, is niet vast te stellen")
+    return standing.verdict, standing.refusal
 
 
 def _returned_to_plan(state_dir: Path, cap: Any, since: str) -> str:
@@ -977,14 +1397,41 @@ def _uncounted(fill: SeatFill, message: str) -> SeatFill:
     return replace(fill, filled=False, reviewer="", route="", message=message, spoke=True, could_fill=(), evidence_via="")
 
 
+def _filled_by_merge(fill: SeatFill, rounds: DoorRounds) -> SeatFill:
+    """The codex seat as a standing ``mergen-met-OI`` verdict counts it: filled, on that head only.
+
+    The verdict, its approval and its complete aftermath were read for this head
+    by ``review_cap_verdicts.standing_merge``; the remaining blockers are open
+    items, so no PASS exists to point at. The record that answered for the seat
+    stays its evidence (it is the counted round); the route names what fills it.
+    """
+    verdict = rounds.merge_with_oi
+    reviewer = str((fill.record or {}).get("gate") or fill.seat)
+    return replace(fill, filled=True, reviewer=reviewer, route=ROUTE_MERGE_WITH_OI, spoke=True, could_fill=(),
+                   evidence_via=ROUTE_MERGE_WITH_OI, message=(
+                       f"seat {fill.seat}: het mergen-met-OI-oordeel {verdict.verdict_id} ({verdict.cap_rule}) op "
+                       f"kop {verdict.head_sha[:12]} is goedgekeurd en zijn nasleep staat geboekt: "
+                       f"{len(verdict.oi_ids)} resterende blocker(s) zijn open items, dus de codex-seat telt hier "
+                       f"zonder PASS"))
+
+
 def _cap_refusal(fill: SeatFill, rounds: DoorRounds, head_sha: str) -> str:
-    """Why the codex seat of a PR at the B3 cap is not filled; ``""`` when the cap does not hold it."""
+    """Why the codex seat of a PR at the B3 cap is not filled; ``""`` when the cap does not hold it.
+
+    A standing ``mergen-met-OI`` verdict on this head fills the seat instead
+    (``_filled_by_merge``); a verdict that stands but does not count is its own
+    refusal, in its own words (R2c, RG-4).
+    """
     import review_rounds
 
     if fill.seat != review_rounds.CODEX_SEAT or not rounds.capped or rounds.override:
         return ""
+    if rounds.merge_with_oi is not None:
+        return ""
     if review_rounds.round_granted_past_cap(rounds.cap, head_sha=head_sha, grant=rounds.grant, lines=rounds.lines):
         return ""
+    if rounds.merge_refusal:
+        return rounds.merge_refusal
     return (
         f"PR #{rounds.pr_number} staat op de B3-cap ({rounds.cap.summary()}): een PASS in de codex-seat "
         f"telt dan alleen als hij de extra ronde van een tiebreaker-uitspraak is "
@@ -1000,11 +1447,27 @@ def counted_fill(fill: SeatFill, rounds: DoorRounds, scope: SeatScope, stated: D
     given in (the seat its request stated, else the takeover origin, else its
     gate), by that reviewer, with that report, and a PASS. A PASS put in
     ``results/`` outside the gate has no line and fills nothing.
+
+    The codex seat of a PR at the cap is filled by a standing
+    ``mergen-met-OI`` verdict instead of a PASS (:func:`_filled_by_merge`), on
+    that head only (R2c, RG-4). A ledger read from a merge record
+    (``rounds.recorded``) counts no PASS again: the door counted them when it
+    merged, and closure judges the merge under that count.
     """
-    if not fill.filled:
-        return fill
+    import review_rounds
+
     if rounds.refusal:
-        return _uncounted(fill, rounds.refusal)
+        return _uncounted(fill, rounds.refusal) if fill.filled else fill
+    if fill.seat == review_rounds.CODEX_SEAT and rounds.merge_with_oi is not None:
+        return _filled_by_merge(fill, rounds)
+    if not fill.filled:
+        # A verdict that stands but does not count (no per-use approval, aftermath not
+        # complete) speaks for itself; the generic "seat unfilled" does not.
+        if fill.seat == review_rounds.CODEX_SEAT and rounds.merge_refusal and not rounds.override:
+            return replace(fill, message=rounds.merge_refusal)
+        return fill
+    if rounds.recorded:
+        return fill
     record = fill.record or {}
     head_sha = scope.head_sha or str(record.get("commit_sha") or "")
     cap_text = _cap_refusal(fill, rounds, head_sha)
@@ -1045,6 +1508,9 @@ class SeatEvaluation:
     blocking: Tuple[Rejection, ...]
     hints: Dict[str, str]
     rounds: Optional[DoorRounds] = None
+    #: The signal decision this evaluation was narrowed by, under
+    #: :data:`SIGNAL_SEAT_RULE`; ``None`` for every other rule.
+    signal: Optional[SignalSeatDecision] = None
 
     @property
     def seats(self) -> Tuple[str, ...]:
@@ -1070,10 +1536,19 @@ class SeatEvaluation:
             parts = [_filled_text(self)]
         if self.required.risk_text():
             parts.insert(0, self.required.risk_text())
+        if self.required.rule == SIGNAL_SEAT_RULE and self.signal is not None:
+            signals = ", ".join(self.signal.signals) or "geen"
+            unknown = ", ".join(self.signal.unknown)
+            parts.insert(0, f"signaalregel: signalen {signals}" + (f"; onbekend: {unknown}" if unknown else ""))
         if self.required.note:
             parts.append(self.required.note)
         if self.rounds is not None and self.rounds.override and self.rounds.capped:
             parts.append(f"OVERRIDE B3: de cap ({self.rounds.cap.rule}) is overruled, reden: {self.rounds.override}")
+        if self.rounds is not None and self.rounds.merge_with_oi is not None:
+            standing = self.rounds.merge_with_oi
+            parts.append(
+                f"MERGEN-MET-OI: {standing.verdict_id} telt op kop {standing.head_sha[:12]} met het akkoord van de "
+                f"operator en een geboekte nasleep; alleen de codex-seat wordt hierdoor geheven")
         return "; ".join(parts)
 
     def to_record(self) -> Dict[str, Any]:
@@ -1093,6 +1568,8 @@ class SeatEvaluation:
             "blocking": [rejection.gate for rejection in self.blocking],
             "verdict": "GO" if self.go else "NO-GO",
         }
+        if self.required.rule_value:
+            record["rule_value"] = self.required.rule_value
         if self.required.rule == RISK_SEAT_RULE:
             risk = self.required.risk or {}
             record.update({
@@ -1103,6 +1580,17 @@ class SeatEvaluation:
                 "risk_reason": risk.get("reason") or "geen risicoklasse vastgesteld (fail-closed)",
                 "risk_source": risk.get("source") or "",
                 "risk": risk or None,
+            })
+        if self.required.rule == SIGNAL_SEAT_RULE:
+            decision = self.signal
+            risk = self.required.risk or {}
+            record.update({
+                "base_branch": self.scope.base_branch,
+                "stack": list(self.required.stack),
+                "required_seats": list(self.seats),
+                "signals": list(decision.signals) if decision is not None else [],
+                "unknown": list(decision.unknown) if decision is not None else [],
+                "risk_class": risk.get("risk_class") or "high",
             })
         if self.rounds is not None:
             record["round_ledger"] = self.rounds.to_record()
@@ -1215,9 +1703,12 @@ def evaluate_review_seats(
     b3_override: str = "",
     b3_override_carrier: str = "",
     round_ledger: bool = True,
+    merge_with_oi: Any = None,
     checkout: Optional[Path] = None,
     by_risk: bool = True,
     base_branch: Optional[str] = None,
+    rule: str = RISK_SEAT_RULE,
+    rule_value: str = "",
 ) -> SeatEvaluation:
     """The seat answer for ``pr_id`` on ``head_sha``: the one function every evaluator calls.
 
@@ -1239,20 +1730,58 @@ def evaluate_review_seats(
     (the door's ``--override-b3`` reason) says why. ``b3_override_carrier``
     (``flag`` or ``env``, RG-5) is recorded with it. ``round_ledger=False`` skips
     that count: track closure judges a merged PR under the rule it merged under.
+
+    ``rule`` (track ``tweede-stoel-op-signaal``, PR 4) is the rule the door
+    reads through :func:`active_seat_rule`; :data:`SIGNAL_SEAT_RULE` narrows a
+    resolved stack with :func:`seats_for_signals` and records the rule, the
+    signals and every ``UNKNOWN`` field. An explicit ``seats`` list is judged
+    as named, and any other value keeps the risk rule. ``rule_value`` is the raw
+    key value, recorded so an unknown one is named rather than read as "off".
+
+    ``merge_with_oi`` (RG-4 round 3, OI-2506) is the ``merge_with_oi`` block of
+    the merge record closure is judging. With ``round_ledger=False`` it is read
+    through :func:`merge_record_rounds`: the codex seat is filled and its veto
+    lifted exactly as the door did on that head, and a block that names another
+    head (or cannot be read) refuses instead. ``None`` — every other caller,
+    and every merge record without the block — changes nothing.
     """
     scope = SeatScope(str(pr_id), Path(results_dir), branch, project_id, head_sha, base_branch)
+    signal_rule = rule == SIGNAL_SEAT_RULE and seats is None
     by_risk = by_risk and seats is None
     required = required_seats(
         requests_dir_for(scope.results_dir), scope.pr_id, head_sha, seats=seats, seats_source=seats_source,
-        risk=head_risk(scope, checkout) if by_risk else None, by_risk=by_risk,
+        risk=head_risk(scope, checkout) if (by_risk or signal_rule) else None, by_risk=by_risk,
     )
-    gates = reviewer_gates(required.seats)
+    if rule_value:
+        required = replace(required, rule_value=rule_value)
+    # Under the signal rule every seat of the stack must be read before the
+    # rule can narrow; the decision then keeps the fills of the seats it names.
+    fill_seats_for = required.stack if signal_rule else required.seats
+    gates = reviewer_gates(fill_seats_for)
     stated = stated_seats_on_head(scope, gates)
     on_head = records_on_head(scope, stated, gates)
     seated = seated_records(on_head)
-    fills = fill_seats(scope, required.seats, seated, stated) if required.seats else ()
-    rounds = door_rounds(scope, b3_override, b3_override_carrier) if round_ledger else None
+    fills = fill_seats(scope, fill_seats_for, seated, stated) if fill_seats_for else ()
+    import review_rounds
+
+    rounds = (
+        door_rounds(scope, b3_override, b3_override_carrier) if round_ledger
+        else merge_record_rounds(scope, merge_with_oi)
+    )
+    blocking = blocking_records(on_head)
+    if rounds is not None and rounds.merge_with_oi is not None:
+        # The verdict lifts the codex seat's veto on this head only (revision 1b
+        # point 4): the second seat's rejection and every other one stay vetoes.
+        blocking = tuple(rejection for rejection in blocking if rejection.seat != review_rounds.CODEX_SEAT)
     if rounds is not None:
         fills = tuple(counted_fill(fill, rounds, scope, stated) for fill in fills)
+    decision: Optional[SignalSeatDecision] = None
+    if signal_rule:
+        if required.stack:
+            decision = seats_for_signals(signal_input_for(required, fills, rounds, scope.head_sha or UNKNOWN))
+            required = replace(required, seats=decision.seats, rule=SIGNAL_SEAT_RULE)
+            fills = tuple(fill for fill in fills if fill.seat in decision.seats)
+        else:
+            required = replace(required, rule=SIGNAL_SEAT_RULE)
     hints = {fill.seat: _unfilled_hint(scope, fill.seat, seated) for fill in fills if not fill.filled}
-    return SeatEvaluation(scope, required, fills, blocking_records(on_head), hints, rounds)
+    return SeatEvaluation(scope, required, fills, blocking, hints, rounds, decision)

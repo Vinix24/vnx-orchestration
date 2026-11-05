@@ -113,10 +113,12 @@ def _read(state_dir: Path, dispatch_id: str) -> Dict[str, Any]:
 def _patch(monkeypatch, manager: _ScriptedManager, head: Dict[str, str]) -> None:
     """Hermetic: no git, no gh, no real gate. The PR is open and its head is ``head["sha"]``."""
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda state_dir: "Vinix24/vnx-orchestration")
+    # OI-2459: hermetic — the tick snapshot must never hit real gh here.
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr_number: head["sha"])
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: "OPEN")
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: "OPEN")
     monkeypatch.setattr(runner, "_list_open_prs", lambda owner_repo: {"prs": [], "suspect": False})
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
@@ -318,7 +320,7 @@ class TestForceRerun:
         head = {"sha": HEAD_A}
         manager = _ScriptedManager(state_dir, [DEGENERATE], head)
         _patch(monkeypatch, manager, head)
-        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: "MERGED")
+        monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: "MERGED")
 
         runner.run(state_dir, dispatch_prefix="dlv-r10-force-merged", force_rerun="rerun")
 

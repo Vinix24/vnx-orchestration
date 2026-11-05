@@ -82,11 +82,23 @@ any other machine state, and it always refuses to act on the worktree it is
 currently running from (via ``VNX_DISPATCH_ID``/``VNX_CURRENT_DISPATCH_ID``
 and via cwd).
 
+Two flags widen what the sweep may release, both OFF by default:
+``--max-age-days N`` makes a tree a candidate only when ``worktree_inventory``
+measures it older than N days; ``--include-dirty`` salvages a dirty or
+unpushed tree (bundle, patches, untracked archive), verifies exactly what the
+salvage wrote, and only then removes. With either flag an OPEN pull request
+keeps a tree (an unmeasurable PR state — no ``gh``, a failing lookup, an
+unreadable reply — is never a green light), and so does a live or unmeasurable
+process. The dirty route keeps the local branch; neither flag is in the
+launchd template, because turning them on for the fleet is Vincent's call.
+
 Usage::
 
     python3 scripts/cleanup_reviewed_worktrees.py --repo-root DIR
                                                     [--only DISPATCH_ID ...]
                                                     [--apply] [--json] [--all]
+                                                    [--max-age-days N]
+                                                    [--include-dirty]
 
 ``--all`` prints ``scripts/lib/worktree_inventory.py``'s read-only inventory of
 EVERY worktree git knows about in the repo (dispatch, gate, pool, bench and
@@ -108,9 +120,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Callable, NotRequired, TypedDict
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_LIB_DIR) not in sys.path:
@@ -124,6 +137,14 @@ REASON_NO_GH = "no_gh"
 REASON_OPEN_PR = "open_pr"
 REASON_COMMITS_OUTSIDE_ORIGIN = "commits_outside_origin"
 REASON_UNLOCK_FAILED = "unlock_failed"
+# PR-5: the age gate and the salvage route. The guard names its own refusals.
+REASON_TOO_YOUNG = "too_young"
+REASON_AGE_UNMEASURABLE = "age_unmeasurable"
+REASON_SALVAGE_FAILED = "salvage_failed"
+REASON_SALVAGE_UNVERIFIED = "salvage_unverified"
+# An empty envelope dispatch id keeps the store's boundary guard from archiving
+# a live T0 stream; the removed dispatch is named inside ``data`` instead.
+TEARDOWN_EVENT_TERMINAL = "T0"
 
 
 def _run(args: list[str], cwd: Path | str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
@@ -196,6 +217,8 @@ class ReleaseResult:
     reason: str = ""
     detail: str = ""
     errors: list[str] = field(default_factory=list)
+    # True only when a local branch was actually deleted after the removal.
+    branch_deleted: bool = False
 
 
 def discover_candidates(repo_root: Path) -> list[Candidate]:
@@ -421,11 +444,14 @@ def open_pr_refusal(repo_slug: str | None, branch: str) -> str:
     """``""`` when *branch* has no OPEN pull request; otherwise the named reason.
 
     Fail-closed: no recognised origin slug, no usable ``gh`` (its reply is
-    ``""`` when it is missing) or an unreadable reply all mean the open-PR
-    state is unmeasurable — ``no_gh``, never "no open PR"."""
+    ``""`` when it is missing), a lookup that raises, or an unreadable reply
+    all mean the open-PR state is unmeasurable — ``no_gh``, never "no open PR"."""
     if repo_slug is None:
         return REASON_NO_GH
-    entries = _parse_pr_json(run_gh_pr_list(repo_slug, branch))
+    try:
+        entries = _parse_pr_json(run_gh_pr_list(repo_slug, branch))
+    except Exception as exc:  # the lookup is the boundary: any failure keeps the tree
+        return f"{REASON_NO_GH}: gh-lookup faalde ({exc})"
     if entries is None:
         return REASON_NO_GH
     for entry in entries:
@@ -514,6 +540,7 @@ def remove_candidate(
     expected_head: str,
     delete_branch: bool,
     dry_run: bool,
+    dirty_proof: Callable[[], str] | None = None,
 ) -> ReleaseResult:
     """Remove *wt* through the one guard and report the guard's verdict.
 
@@ -524,6 +551,10 @@ def remove_candidate(
     The lock is dropped by the guard as its last step before the removal; if
     the removal itself then fails, the lock is put back so a tree that stays
     also stays locked.
+
+    *dirty_proof* is the verified-salvage proof of ``--include-dirty``; the
+    guard re-runs it under the repository lock, so work written after the
+    salvage refuses the removal instead of riding along.
     """
     from worktree_removal_guard import guarded_remove
 
@@ -542,6 +573,7 @@ def remove_candidate(
             repo_root=repo_root,
             dry_run=dry_run,
             before_remove=before_remove if wt.lock_reason is not None else None,
+            dirty_proof=dirty_proof,
         )
     except OSError as exc:  # an unlock the guard could not do never removes
         return ReleaseResult(False, REASON_UNLOCK_FAILED, str(exc), [str(exc)])
@@ -550,11 +582,160 @@ def remove_candidate(
         relock = run_git(["worktree", "lock", "--reason", wt.lock_reason or "", str(wt.path)], cwd=repo_root)
         if relock.returncode != 0:
             errors.append(f"re-lock failed (tree kept, lock dropped): {(relock.stderr or '').strip()}")
+    branch_deleted = False
     if result.removed and delete_branch and wt.branch:
         branch_delete = run_git(["branch", "-D", wt.branch], cwd=repo_root)
         if branch_delete.returncode != 0:
             errors.append(f"branch delete failed (worktree already removed): {(branch_delete.stderr or '').strip()}")
-    return ReleaseResult(result.removed, result.reason, result.detail, errors)
+        else:
+            branch_deleted = True
+    return ReleaseResult(result.removed, result.reason, result.detail, errors, branch_deleted)
+
+
+def _non_negative_int(text: str) -> int:
+    value = int(text)
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"moet 0 of hoger zijn, niet {value}")
+    return value
+
+
+def live_holder_refusal(repo_root: Path, wt: Candidate) -> str:
+    """Named reason a live or unmeasurable holder keeps *wt*; ``""`` when none does.
+
+    The guard's own liveness measure and the dispatch occupancy slot are both
+    consulted; an unmeasurable answer keeps the tree like a live one. A gate,
+    pool or bench tree has no dispatch id — its seat is a lifetime flock the
+    guard measures at the removal itself.
+    """
+    from dispatch_worktree_isolation import _claim_dir, probe_occupancy
+    from worktree_removal_guard import liveness_refusal
+
+    reason, detail = liveness_refusal(wt.dispatch_dir_id or "", repo_root)
+    if reason:
+        return f"{reason}: {detail}"
+    if not wt.dispatch_dir_id:
+        return ""
+    try:
+        state = probe_occupancy(_claim_dir(repo_root), wt.dispatch_dir_id)
+    except (OSError, RuntimeError) as exc:
+        return f"slot_unavailable: bezettingsslot onleesbaar ({exc})"
+    if state == "held":
+        return f"occupied: dispatch {wt.dispatch_dir_id!r} houdt het bezettingsslot"
+    if state not in ("absent", "released"):
+        return f"slot_unavailable: bezettingsstatus {state!r}"
+    return ""
+
+
+def pre_gate_refusal(
+    repo_root: Path, wt: Candidate, repo_slug: str | None, max_age_days: int | None,
+) -> str:
+    """The PR-5 gates before any evidence work or salvage: ``""`` when all pass.
+
+    The age is ``worktree_inventory``'s own measure and an unmeasurable one
+    keeps the tree; a detached tree has no branch that could carry a PR."""
+    from worktree_inventory import age_days
+
+    if max_age_days is not None:
+        age = age_days(wt.path)
+        if age is None:
+            return f"{REASON_AGE_UNMEASURABLE}: leeftijd van {wt.path} niet meetbaar — niets verwijderd"
+        if age <= max_age_days:
+            return f"{REASON_TOO_YOUNG}: {age} dag(en) oud, --max-age-days {max_age_days} vraagt ouder"
+    if wt.branch is not None:
+        refusal = open_pr_refusal(repo_slug, wt.branch)
+        if refusal:
+            return refusal
+    return live_holder_refusal(repo_root, wt)
+
+
+@dataclass
+class SalvageOutcome:
+    """A verified salvage the sweep may remove after, or the named reason it may not."""
+
+    refusal: str = ""
+    note: str = ""
+    dir: str = ""
+    artifacts: list[str] = field(default_factory=list)
+    verified: bool = False
+    proof: Callable[[], str] | None = None
+
+
+def salvage_for_removal(repo_root: Path, wt: Candidate, *, apply: bool) -> SalvageOutcome:
+    """Preserve a dirty or unpushed tree and prove it, before anything is removed.
+
+    A dry run writes nothing. An ``--apply`` run writes the artifacts and runs
+    ``worktree_salvage.verify`` on exactly those; only ``[]`` lets the caller
+    remove. Any failure is a named refusal: the tree stays, the sweep goes on.
+    """
+    import vnx_paths
+    from worktree_salvage import salvage, verify
+
+    stamp = time.strftime("worktrees-%Y-%m-%d", time.gmtime())
+    dest = vnx_paths.resolve_data_root(repo_root) / "salvage" / stamp
+    try:
+        result = salvage(wt.path, dest, repo_root=repo_root, dry_run=not apply)
+    except Exception as exc:  # the sweep's fail-closed boundary: keep the tree, name why
+        return SalvageOutcome(refusal=f"{REASON_SALVAGE_FAILED}: {exc}")
+    outcome = SalvageOutcome(
+        dir=str(result.salvage_dir),
+        artifacts=[str(dest / artifact) for artifact in result.artifacts],
+        note=f"salvage van {len(result.artifacts)} artifact(en) in {result.salvage_dir}",
+    )
+    if not apply:
+        outcome.note += " (dry-run: niets geschreven; verify volgt bij --apply)"
+        return outcome
+    try:
+        problems = verify(result, dest, repo_root=repo_root)
+    except Exception as exc:  # verify only ever answers problems; a raise is one too
+        problems = [f"verify raised {exc}"]
+    if problems:
+        outcome.refusal = f"{REASON_SALVAGE_UNVERIFIED}: " + "; ".join(problems)
+        return outcome
+    outcome.verified = True
+    outcome.note += "; verify geslaagd"
+
+    def proof() -> str:
+        try:
+            return "; ".join(verify(result, dest, repo_root=repo_root))
+        except Exception as exc:  # a re-proof that raises is a problem, never a pass
+            return f"{REASON_SALVAGE_UNVERIFIED}: verify raised {exc}"
+
+    outcome.proof = proof
+    return outcome
+
+
+def emit_teardown_event(
+    repo_root: Path, wt: Candidate, *, salvaged: bool, preserved_path: str, branch_deleted: bool,
+) -> str:
+    """Append the existing ``provider_teardown_worktree`` event; ``""`` on success.
+
+    No new event type (that belongs to ``audit-spoor-volledig``). A failure is
+    returned as the named reason; it never undoes a removal already made.
+    """
+    try:
+        import vnx_paths
+        from event_store import EventStore
+
+        store = EventStore(events_dir=vnx_paths.resolve_data_root(repo_root) / "events")
+        store.append(
+            TEARDOWN_EVENT_TERMINAL,
+            {
+                "type": "provider_teardown_worktree",
+                "data": {
+                    "dispatch_id": wt.dispatch_dir_id or "",
+                    "worktree_kind": wt.kind,
+                    "worktree_state": "salvaged" if salvaged else "clean",
+                    "branch_kept_local": bool(wt.branch) and not branch_deleted,
+                    "branch_kept_remote": None,  # never measured: the sweep deletes no remote ref
+                    "preserved_path": preserved_path or None,
+                    "source": "cleanup_reviewed_worktrees",
+                },
+            },
+            dispatch_id="",
+        )
+    except Exception as exc:  # an event failure is reported, never a reason to hide a removal
+        return f"teardown event niet geschreven: {exc}"
+    return ""
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -571,6 +752,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="beperk tot deze dispatch-id('s) (bv. D-4cbc8faf); mag meerdere keren opgegeven worden",
     )
     parser.add_argument("--apply", action="store_true", help="release SAFE_TO_RELEASE-worktrees echt (default: dry-run)")
+    parser.add_argument(
+        "--max-age-days",
+        type=_non_negative_int,
+        default=None,
+        metavar="N",
+        help="alleen bomen die de inventaris ouder dan N dagen meet zijn kandidaat (default: uit)",
+    )
+    parser.add_argument(
+        "--include-dirty",
+        action="store_true",
+        help="een vuile of ongepushte boom eerst salveren en verifiëren, dan pas verwijderen (default: uit)",
+    )
     parser.add_argument("--json", action="store_true", help="schrijf het rapport als JSON naar stdout")
     parser.add_argument(
         "--all",
@@ -599,6 +792,11 @@ class WorktreeReportEntry(TypedDict):
     released: bool
     errors: list[str]
     delete_branch: bool
+    # --include-dirty only: absent everywhere else, so the default JSON report
+    # keeps exactly the shape its consumers already parse.
+    salvage_dir: NotRequired[str]
+    salvage_artifacts: NotRequired[list[str]]
+    salvage_verified: NotRequired[bool]
 
 
 def resolve_project_id(repo_root: Path) -> tuple[str, str | None]:
@@ -701,7 +899,12 @@ def main(argv: list[str] | None = None) -> int:
         if is_current_worktree(wt):
             skipped_self += 1
             continue
-        report.append(_sweep_candidate(repo_root, wt, repo_slug, decisions, apply=args.apply))
+        report.append(_sweep_candidate(
+            repo_root, wt, repo_slug, decisions,
+            apply=args.apply,
+            max_age_days=args.max_age_days,
+            include_dirty=args.include_dirty,
+        ))
         if report[-1]["released"]:
             released += 1
 
@@ -727,23 +930,8 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _sweep_candidate(
-    repo_root: Path,
-    wt: Candidate,
-    repo_slug: str | None,
-    decisions: dict[str, dict[str, Any]],
-    *,
-    apply: bool,
-) -> WorktreeReportEntry:
-    """One candidate: evidence first, then (only when it passes) the guard.
-
-    A tree the evidence refuses is never handed to the guard — it could not be
-    removed this run anyway — and its reason is the evidence's own. A tree
-    that passes goes through ``guarded_remove``, and every refusal there is
-    reported in the guard's words (``guard_reason``/``guard_detail``).
-    """
-    verdict = evaluate_candidate(repo_root, wt, repo_slug, decisions)
-    entry: WorktreeReportEntry = {
+def _report_entry(wt: Candidate, verdict: Verdict) -> WorktreeReportEntry:
+    return {
         "dispatch_id": wt.dispatch_dir_id,
         "path": str(wt.path),
         "branch": wt.branch,
@@ -758,20 +946,117 @@ def _sweep_candidate(
         "errors": [],
         "delete_branch": verdict.delete_branch,
     }
-    if not verdict.safe:
+
+
+def _finish_removal(
+    entry: WorktreeReportEntry,
+    result: ReleaseResult,
+    repo_root: Path,
+    wt: Candidate,
+    *,
+    salvaged: bool,
+) -> None:
+    """Record the guard's verdict and emit the teardown event of a removal."""
+    entry["guard_reason"] = result.reason
+    entry["guard_detail"] = result.detail
+    entry["released"] = result.released
+    entry["errors"] = list(result.errors)
+    if not result.released:
+        return
+    failure = emit_teardown_event(
+        repo_root, wt,
+        salvaged=salvaged,
+        preserved_path=entry.get("salvage_dir", ""),
+        branch_deleted=result.branch_deleted,
+    )
+    if failure:
+        entry["errors"].append(failure)
+
+
+def _salvage_route(
+    repo_root: Path, wt: Candidate, entry: WorktreeReportEntry, verdict: Verdict, *, apply: bool,
+) -> WorktreeReportEntry:
+    """``--include-dirty``: preserve the work, prove it, and only then remove."""
+    from worktree_inventory import dirty_count, unpushed_count
+    from worktree_removal_guard import REASON_DRY_RUN
+
+    # Unknown never reads as zero: an unmeasurable worktree keeps its tree.
+    dirty = dirty_count(wt.path, repo_root)
+    unpushed = None if dirty is None else unpushed_count(repo_root, wt.head_sha)
+    if dirty is None or unpushed is None:
+        what = "werkmap-status" if dirty is None else "commits buiten origin"
+        entry["reason"] = f"{what} onmeetbaar (meting faalde) — niets verwijderd"
+        return entry
+    if dirty == 0 and unpushed == 0:
+        entry["reason"] = verdict.reason  # nothing to preserve: the evidence's own refusal stands
+        return entry
+    outcome = salvage_for_removal(repo_root, wt, apply=apply)
+    entry["salvage_dir"] = outcome.dir
+    entry["salvage_artifacts"] = outcome.artifacts
+    entry["salvage_verified"] = outcome.verified
+    if outcome.refusal:
+        entry["reason"] = outcome.refusal
+        return entry
+    entry["safe_to_release"] = True
+    entry["delete_branch"] = False
+    if not apply:
+        entry["reason"] = (
+            f"{outcome.note}: {dirty} gewijzigd pad(en), {unpushed} commit(s) buiten origin "
+            "— nog niets verwijderd"
+        )
+        entry["guard_reason"] = REASON_DRY_RUN
         return entry
     result = remove_candidate(
         repo_root,
         wt,
-        expected_head=verdict.evaluated_head or "",
-        delete_branch=verdict.delete_branch,
-        dry_run=not apply,
+        expected_head=wt.head_sha or "",
+        delete_branch=False,
+        dry_run=False,
+        dirty_proof=outcome.proof,
     )
-    entry["guard_reason"] = result.reason
-    entry["guard_detail"] = result.detail
-    entry["released"] = result.released
-    entry["errors"] = result.errors
+    _finish_removal(entry, result, repo_root, wt, salvaged=True)
+    entry["reason"] = f"{outcome.note}; {result.reason}"
     return entry
+
+
+def _sweep_candidate(
+    repo_root: Path,
+    wt: Candidate,
+    repo_slug: str | None,
+    decisions: dict[str, dict[str, Any]],
+    *,
+    apply: bool,
+    max_age_days: int | None = None,
+    include_dirty: bool = False,
+) -> WorktreeReportEntry:
+    """One candidate: PR-5 gates, evidence, then (only when it passes) the guard.
+
+    A tree the evidence refuses is never handed to the guard and keeps the
+    evidence's own reason; a refusal there is reported in the guard's words.
+    The PR-5 gates run only when one of the two flags is set, so the default
+    run is unchanged.
+    """
+    verdict = evaluate_candidate(repo_root, wt, repo_slug, decisions)
+    entry = _report_entry(wt, verdict)
+    if max_age_days is not None or include_dirty:
+        refusal = pre_gate_refusal(repo_root, wt, repo_slug, max_age_days)
+        if refusal:
+            entry["reason"] = refusal
+            return entry
+    if verdict.safe:
+        result = remove_candidate(
+            repo_root,
+            wt,
+            expected_head=verdict.evaluated_head or "",
+            delete_branch=verdict.delete_branch,
+            dry_run=not apply,
+        )
+        _finish_removal(entry, result, repo_root, wt, salvaged=False)
+        return entry
+    if not include_dirty:
+        entry["reason"] = verdict.reason
+        return entry
+    return _salvage_route(repo_root, wt, entry, verdict, apply=apply)
 
 
 if __name__ == "__main__":

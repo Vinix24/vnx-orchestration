@@ -420,7 +420,6 @@ def test_skip_enrichment_true_still_emits_dispatch_register(tmp_path, ar):
          patch.object(ar, "generate_quality_advisory", return_value={"t0_recommendation": {"open_items": []}}), \
          patch.object(ar, "get_changed_files", return_value=[]), \
          patch.object(ar, "calculate_cqs", return_value=None), \
-         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
          patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
          patch.object(ar, "current_project_id", return_value="vnx-dev"), \
          patch.object(ar, "_register_quality_open_items", return_value=0), \
@@ -466,7 +465,6 @@ def test_skip_enrichment_false_emits_exactly_once(tmp_path, ar):
          patch.object(ar, "generate_quality_advisory", return_value={"t0_recommendation": {"open_items": []}}), \
          patch.object(ar, "get_changed_files", return_value=[]), \
          patch.object(ar, "calculate_cqs", return_value=None), \
-         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
          patch.object(ar, "resolve_state_dir", return_value=Path("/tmp/fake_state")), \
          patch.object(ar, "current_project_id", return_value="vnx-dev"), \
          patch.object(ar, "_register_quality_open_items", return_value=0), \
@@ -998,7 +996,6 @@ def test_enrich_sets_open_items_created_internally(ar):
          patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
          patch.object(ar, "enrich_receipt_provenance"), \
          patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])), \
-         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
          patch.object(ar, "_get_open_items_manager", return_value=MagicMock(
              count_items_closed_by_dispatch=lambda _: 0,
              load_items=lambda: {"items": []},
@@ -1061,7 +1058,6 @@ def test_enrich_open_items_created_uses_registration_count_not_advisory_count(ar
          patch.object(ar, "_build_session_metadata", return_value={"session_id": "s1"}), \
          patch.object(ar, "enrich_receipt_provenance"), \
          patch.object(ar, "validate_receipt_provenance", return_value=MagicMock(gaps=[])), \
-         patch.object(ar, "collect_terminal_snapshot", return_value=MagicMock(to_dict=lambda: {})), \
          patch.object(ar, "get_changed_files", return_value=[Path("a.py"), Path("b.py")]), \
          patch.object(ar, "generate_quality_advisory", return_value=fake_advisory), \
          patch.object(ar, "_get_open_items_manager", return_value=MagicMock(

@@ -198,6 +198,14 @@ def _age_days(wt_path: Path, now: float) -> int | None:
     return max(0, int((now - mtime) // _SECONDS_PER_DAY))
 
 
+def age_days(wt_path: Path | str, *, now: float | None = None) -> int | None:
+    """Whole days since the mtime of the tree's ``.git``, ``None`` when unreadable.
+
+    The one age measure this inventory reports and ``--max-age-days`` compares
+    against: a tree cannot be young in one and old in the other."""
+    return _age_days(Path(wt_path), time.time() if now is None else now)
+
+
 def _bench_worktree_root() -> Path | None:
     raw = os.environ.get(BENCH_ROOT_ENV, "").strip()
     if not raw:

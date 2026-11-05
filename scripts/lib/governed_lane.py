@@ -1109,7 +1109,9 @@ def _build_record(state: GateRunState, facts: VerdictFacts, contract_hash: str, 
         "residual_risk": facts.residual,
         "failure_reason": facts.lifted_reason or "",
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        gate_status.EVIDENCE_SOURCE_FIELD: "reprocessed" if state.args.reprocess else "live",
+        gate_status.EVIDENCE_SOURCE_FIELD: (
+            gate_status.EVIDENCE_SOURCE_REPROCESSED if state.args.reprocess else "live"
+        ),
     }
     if state.execution_id:
         record[gate_status.EXECUTION_ID_FIELD] = state.execution_id

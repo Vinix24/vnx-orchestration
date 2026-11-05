@@ -21,15 +21,17 @@ jobs:
     # limit. Measured baseline over 6 completed runs (18-08/19-08 2026):
     # 16-21 min end to end; by 2026-10-16 the suite had doubled (run
     # 38911196655 on b39838cf: 35.4 min, pytest 2089 s). D4 switched Profile A
-    # to the two-phase xdist shape and set this from the measured wall time of
-    # the cutover window: the shadow runs took 740, 916, 1008 and 1033 s
-    # (2026-10-30, the last four measurable runs), so 2 x 1033 s = 2066 s =
-    # 34.43 min, rounded up to whole minutes: 35. Still the vangnet for
-    # whatever hangs next, not a fix for the apt-mirror hang fixed in the
-    # prelude.
+    # to the two-phase xdist shape and set this from the merge window it lands
+    # on: `xdist_parity_history.py --last-d3-merge 983c944f` reads 23 in-window
+    # runs, all exit 0, and the longest shadow suite wall time is 1134 s (run
+    # 41827919472 on 65b7aa65, 2026-11-04), so 2 x 1134 s = 2268 s = 37.8 min,
+    # rounded up to whole minutes: 38. Still the vangnet for whatever hangs
+    # next, not a fix for the apt-mirror hang fixed in the prelude.
     # VNX_CI_XDIST=0 is the way back to the serial sweep; on main that shape
-    # takes 52 to 54.8 minutes (OI-2523), so that branch gets 80 (OI-2525).
-    timeout-minutes: ${{ vars.VNX_CI_XDIST == '0' && 80 || 35 }}
+    # takes 52 to 54.8 minutes (OI-2523), so that branch gets 80 (OI-2525) --
+    # the bridge D3c (#2378) set on 2026-11-03, kept as the rollback's bound
+    # now that D4 sizes the xdist branch from the measured window.
+    timeout-minutes: ${{ vars.VNX_CI_XDIST == '0' && 80 || 38 }}
 
     steps:
       - name: Checkout

@@ -107,11 +107,16 @@ Receipt written to t0_receipts.ndjson:
                                  "Preflight ledger" below>
     review_seats: <dict — the seat rule the merge was judged under (OI-2058,
                                  R5b; since R3b rule
-                                 ``first_seat_or_every_seat_by_risk``):
+                                 ``first_seat_or_every_seat_by_risk``, and since
+                                 track tweede-stoel-op-signaal PR 4 the rule the
+                                 key ``VNX_REVIEW_SEAT_RULE`` named, with that raw
+                                 value in ``rule_value`` when the key was set):
                                  rule, pr_id, head_sha, the stack, the
                                  required seats and their source, the risk
                                  class with its reason and source, who
-                                 filled which seat; ``seats`` empty with ``verdict``
+                                 filled which seat; under the signal rule also
+                                 the signals that fired and every UNKNOWN input
+                                 field; ``seats`` empty with ``verdict``
                                  ``overridden`` or ``not_evaluated`` when the
                                  review gate did not judge. Always written,
                                  so track closure tells a merge under the
@@ -224,7 +229,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 log = logging.getLogger(__name__)
@@ -678,6 +683,11 @@ B3_OVERRIDE_ENV = "VNX_OVERRIDE_B3"
 B3_OVERRIDE_REASON_ENV = "VNX_OVERRIDE_B3_REASON"
 B3_OVERRIDE_CARRIER_FLAG = "flag"
 B3_OVERRIDE_CARRIER_ENV = "env"
+#: The label the refreshed ``vnx-gate/review`` summary gives its evidence (RG-4 round 3,
+#: OI-2506): an actual ``--override-b3`` says so, a standing ``mergen-met-OI`` verdict
+#: names itself instead of borrowing the override's words.
+B3_OVERRIDE_LABEL = "B3 override"
+VERDICT_EVIDENCE_LABEL = "mergen-met-OI"
 
 
 def _b3_override_env_on() -> bool:
@@ -721,7 +731,7 @@ def _run_review_gate(
     pr_number: int,
     *,
     override_reason: Optional[str] = None,
-    b3_override: Optional[str] = None, b3_carrier: str = "",
+    b3_override: Optional[str] = None, b3_carrier: str = "", dry_run: bool = False,
 ) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
     """Fail-closed review-gate check: every review seat of the project is filled
     on this PR head before merge (OI-2058, R5b).
@@ -750,7 +760,8 @@ def _run_review_gate(
     only lets the codex seat of a PR at the B3 cap count, and the merge record
     carries it with its reason (``review_seats.round_ledger.override``).
     ``b3_carrier`` (``flag`` or ``env``, RG-5) says which carrier supplied it
-    and lands in the same record.
+    and lands in the same record. ``dry_run`` (RG-4 round 3) is the door's own
+    ``--dry-run``: the required check is then only rehearsed, never published.
     """
     pr_data = _query_pr(pr_number)
     if pr_data is None:
@@ -827,13 +838,13 @@ def _run_review_gate(
     # as read: a missing or malformed base makes the class high, never main.
     return _review_seats_verdict(
         pr_number, gate_name, state_dir, branch=branch, head_sha=head_sha, b3_override=b3_override,
-        b3_carrier=b3_carrier, base_branch=pr_data.get("baseRefName"),
+        b3_carrier=b3_carrier, base_branch=pr_data.get("baseRefName"), dry_run=dry_run,
     ), pr_data
 
 
 def _review_seats_verdict(
     pr_number: int, gate_name: str, state_dir: Path, *, branch: str, head_sha: str, b3_override: Optional[str],
-    b3_carrier: str = "", base_branch: Any = None,
+    b3_carrier: str = "", base_branch: Any = None, dry_run: bool = False,
 ) -> Dict[str, Any]:
     """The seat evaluation of the review gate, with the ``--override-b3`` reason when one was given (R1).
 
@@ -847,6 +858,7 @@ def _review_seats_verdict(
     if refusal is not None:
         return refusal
     from closure_verifier import check_review_gate_for_merge
+    from review_seat_evaluation import RISK_SEAT_RULE, active_seat_rule
 
     override_b3 = (
         {"b3_override": b3_override.strip(), "b3_override_carrier": b3_carrier} if b3_override else {}
@@ -854,9 +866,265 @@ def _review_seats_verdict(
     # R3b: the risk class is read in the checkout being merged into. Outside
     # main() no target is active and the evaluation reads the store's own checkout.
     checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
-    return check_review_gate_for_merge(
+    # PR 4: the one key, read through the one helper. A key-off call passes no
+    # keyword at all, so it is byte-for-byte the call on main.
+    seat_rule = active_seat_rule()
+    rule_kwargs = (
+        {"rule": seat_rule.rule, "rule_value": seat_rule.value}
+        if seat_rule.rule != RISK_SEAT_RULE or seat_rule.value else {}
+    )
+    gate = check_review_gate_for_merge(
         str(pr_number), gate_name, state_dir / "review_gates" / "results", branch=branch, head_sha=head_sha,
-        base_branch=base_branch, **override_b3, **checkout,
+        base_branch=base_branch, **rule_kwargs, **override_b3, **checkout,
+    )
+    return _refreshed_review_gate(
+        gate, pr_number, head_sha, b3_override=b3_override or "", branch=branch, base_branch=base_branch,
+        results_dir=state_dir / "review_gates" / "results", dry_run=dry_run,
+    )
+
+
+def _merge_evidence_reason(gate: Dict[str, Any]) -> str:
+    """The evidence a GO under a standing ``mergen-met-OI`` verdict gives the refreshed check; ``""`` without one."""
+    standing = ((gate.get("review_seats") or {}).get("round_ledger") or {}).get("merge_with_oi") or {}
+    verdict_id = str(standing.get("verdict_id") or "")
+    if not verdict_id:
+        return ""
+    return (f"mergen-met-OI {verdict_id} op kop {str(standing.get('head_sha') or '')[:12]}, goedgekeurd door de "
+            f"operator op verdict, PR en kop, met de nasleep als geboekte open items")
+
+
+def _refreshed_review_gate(
+    gate: Dict[str, Any], pr_number: int, head_sha: str, *, b3_override: str, branch: str, base_branch: Any,
+    results_dir: Path, dry_run: bool = False,
+) -> Dict[str, Any]:
+    """``gate`` GO with ``vnx-gate/review`` republished for this head first; NO-GO when that did not go out (RG-4).
+
+    A merge under ``--override-b3`` or under a standing ``mergen-met-OI``
+    verdict writes no gate record, so the required check would stay red on a head
+    the door just cleared and branch protection would block the merge. The door
+    calls RG-2's ``refresh_review_summary`` with the override reason or the
+    verdict as evidence and refuses, naming the check, when nothing went out or
+    what went out is not green.
+
+    The evidence says what it is: an actual ``--override-b3`` keeps the
+    ``B3 override`` label, and a verdict-driven refresh is labelled with the
+    verdict (RG-4 round 3, OI-2506). A ``dry_run`` rehearses the same refresh —
+    the publisher is not called, so no check-run leaves the machine, and the
+    gate keeps the verdict it already had.
+
+    A publication that went out is not a pass (RG-4 round 2): the required check
+    can be republished red (``conclusion`` ``failure``/``action_required`` — the
+    publisher and this door read the same records by different rules, and only a
+    green check lets the merge through branch protection). The conclusion the
+    publisher wrote is read from the payload ``refresh_review_summary`` returns;
+    anything that is not ``success`` — including a missing or malformed
+    conclusion — keeps the door NO-GO.
+    """
+    if gate.get("verdict") != "GO":
+        return gate
+    override = (b3_override or "").strip()
+    reason = override or _merge_evidence_reason(gate)
+    if not reason:
+        return gate
+    label = B3_OVERRIDE_LABEL if override else VERDICT_EVIDENCE_LABEL
+    from forge_gate_publisher import CONCLUSION_SUCCESS, REVIEW_SUMMARY_CHECK_NAME, refresh_review_summary
+
+    why = "de publicatie ging niet uit"
+    try:
+        publication = refresh_review_summary(
+            pr_number, head_sha, b3_override=reason, results_dir=results_dir, branch=branch,
+            base_branch=base_branch, b3_override_label=label, dry_run=dry_run,
+        )
+    # vnx-silent-except: a forge failure mid-merge is a refusal that names the
+    # check, never a traceback that leaves the door without a verdict.
+    except Exception as exc:
+        publication, why = None, f"{type(exc).__name__}: {exc}"
+    conclusion = str(publication.get("conclusion") or "") if isinstance(publication, dict) else ""
+    if conclusion == CONCLUSION_SUCCESS:
+        return gate
+    if isinstance(publication, dict):
+        why = f"de gepubliceerde check kreeg conclusie {conclusion or 'onbekend'!r}, niet success"
+    return {
+        **gate,
+        "verdict": "NO-GO",
+        "message": (
+            f"de review-seats gaven GO, maar het verversen van de verplichte check {REVIEW_SUMMARY_CHECK_NAME} "
+            f"voor kop {head_sha[:12]} leverde geen groene check op ({why}): de merge gaat niet door zolang "
+            f"die check niet groen voor deze kop staat"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Shadow seat rule (track tweede-stoel-op-signaal, PR 2)
+# ---------------------------------------------------------------------------
+
+#: A full git head sha: the sample is drawn from exactly 40 hex characters.
+_SIGNAL_SHA_RE = re.compile(r"[0-9a-fA-F]{40}")
+
+
+def _signal_sha(value: Any) -> str:
+    """``value`` as a full head sha, or ``UNKNOWN`` when it is none."""
+    from review_seat_evaluation import UNKNOWN
+
+    text = str(value or "").strip()
+    return text if _SIGNAL_SHA_RE.fullmatch(text) else UNKNOWN
+
+
+def _record_stack(record: Any) -> Tuple[str, ...]:
+    """The review stack a seat record names (``stack``, else ``seats``); ``()`` when it names none."""
+    raw = (record.get("stack") or record.get("seats")) if isinstance(record, dict) else None
+    names: List[str] = []
+    for item in raw if isinstance(raw, (list, tuple)) else ():
+        name = str(item or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return tuple(names)
+
+
+def _signal_evaluation(
+    pr_number: int, head_sha: str, *, branch: str, base_branch: Any, state_dir: Path,
+    b3_override: str, b3_carrier: str,
+) -> Any:
+    """The seat evaluation the shadow reads, gathered the way the review gate gathers it."""
+    from review_seat_evaluation import evaluate_review_seats
+
+    checkout = {"checkout": _ACTIVE_TARGET.project_root} if _ACTIVE_TARGET is not None else {}
+    return evaluate_review_seats(
+        str(pr_number), Path(state_dir) / "review_gates" / "results",
+        branch=branch or None, head_sha=head_sha or None,
+        b3_override=b3_override, b3_override_carrier=b3_carrier,
+        base_branch=base_branch, **checkout,
+    )
+
+
+def _signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
+    """``(class, (path, category) pairs)`` from a recorded risk reading; ``UNKNOWN`` when it is unreadable.
+
+    Kept as a name for the shadow gatherer's callers; the one copy of the
+    reading is ``review_seat_evaluation.signal_risk``.
+    """
+    from review_seat_evaluation import signal_risk
+
+    return signal_risk(risk)
+
+
+def _seat_signal_input(
+    pr_number: int, head_sha: str, *, branch: str = "", base_branch: Any = None,
+    state_dir: Path, b3_override: str = "", b3_carrier: str = "",
+    review_seats: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """The typed input of ``seats_for_signals`` for this merge, read from the seat evaluation.
+
+    Every field the store cannot answer stays ``UNKNOWN``; the door's own
+    record names no stack when the review gate did not judge it, and then the
+    outcome, reviewer, counts and risk are ``UNKNOWN`` too.
+    """
+    from review_seat_evaluation import SeatSignalInput, UNKNOWN
+
+    head = _signal_sha(head_sha)
+    if head == UNKNOWN:
+        # No exact head, no bound outcome: the empty scope would match every
+        # head, so the evaluation is not attempted at all.
+        return SeatSignalInput(stack=_record_stack(review_seats), head_sha=UNKNOWN)
+    if not isinstance(review_seats, dict) or not review_seats:
+        return SeatSignalInput(head_sha=head)
+    if review_seats.get("verdict") in ("overridden", "not_evaluated"):
+        return SeatSignalInput(stack=_record_stack(review_seats), head_sha=head)
+    evaluation = _signal_evaluation(
+        pr_number, head, branch=branch, base_branch=base_branch, state_dir=state_dir,
+        b3_override=b3_override, b3_carrier=b3_carrier,
+    )
+    return _signal_input_from_evaluation(evaluation, head)
+
+
+def _signal_input_from_evaluation(evaluation: Any, head: str) -> Any:
+    """The typed input, from the seat evaluation and its round ledger (one copy, in review_seat_evaluation)."""
+    from review_seat_evaluation import signal_input_for
+
+    return signal_input_for(evaluation.required, evaluation.fills, evaluation.rounds, head)
+
+
+def _shadow_seat_rule(
+    pr_number: int, head_sha: str, *, branch: str = "", base_branch: Any = None,
+    state_dir: Path, b3_override: str = "", b3_carrier: str = "",
+    review_seats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The shadow reading of ``seats_for_signals`` for this merge: recorded, never acted on.
+
+    Returns the rule name, the seats it would require, the signals that fired,
+    the ``UNKNOWN`` input fields by name and the head. A failure while
+    gathering the input is recorded as UNKNOWN fields: this function never
+    raises and never blocks the merge.
+    """
+    from review_seat_evaluation import seats_for_signals
+
+    head = _signal_sha(head_sha)
+    try:
+        signal_input = _seat_signal_input(
+            pr_number, head_sha, branch=branch, base_branch=base_branch, state_dir=state_dir,
+            b3_override=b3_override, b3_carrier=b3_carrier, review_seats=review_seats,
+        )
+        decision = seats_for_signals(signal_input)
+    except Exception as exc:  # vnx-silent-except: the shadow is recorded evidence, never a reason to block a merge
+        log.warning("shadow seat rule: the signal input could not be gathered: %s", exc)
+        return _unknown_shadow_record(review_seats, head)
+    return {**decision.to_record(), "head_sha": signal_input.head_sha}
+
+
+def _unknown_shadow_record(review_seats: Any, head: str) -> Dict[str, Any]:
+    """The shadow record of a gathering that failed: every readable field ``UNKNOWN``, never a raise."""
+    from review_seat_evaluation import SIGNAL_SEAT_RULE, SeatSignalInput, seats_for_signals
+
+    signal_input = SeatSignalInput(stack=_record_stack(review_seats), head_sha=head)
+    try:
+        return {**seats_for_signals(signal_input).to_record(), "head_sha": signal_input.head_sha}
+    except Exception as exc:  # vnx-silent-except: even the all-UNKNOWN reading may not fail a merge
+        log.warning("shadow seat rule: the all-UNKNOWN reading failed too: %s", exc)
+        return {
+            "rule": SIGNAL_SEAT_RULE, "seats": [], "signals": [],
+            "unknown": list(signal_input.unknown_fields()), "head_sha": head,
+        }
+
+
+def _door_shadow_seat_rule(
+    args: argparse.Namespace,
+    head_sha: str,
+    pr_data: Optional[Dict[str, Any]],
+    review_gate: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The shadow seat rule of one door run: recorded, never acted on.
+
+    When the key is on, the review gate already evaluated the seats under the
+    signal rule: that one evaluation feeds both the decision and this record
+    (PR 4 folds the duplicate seat evaluation PR 2 left). With the key off the
+    record stays exactly as PR 2 made it — a second, shadow-only reading. A
+    failure while gathering lands as ``UNKNOWN`` fields inside
+    ``_shadow_seat_rule`` and never blocks the merge.
+    """
+    from review_seat_evaluation import SIGNAL_SEAT_RULE
+
+    record = (review_gate or {}).get("review_seats")
+    if (
+        isinstance(record, dict)
+        and record.get("rule") == SIGNAL_SEAT_RULE
+        and isinstance(record.get("signals"), list)
+        and isinstance(record.get("unknown"), list)
+    ):
+        return {
+            "rule": record["rule"],
+            "seats": list(record.get("seats") or []),
+            "signals": list(record["signals"]),
+            "unknown": list(record["unknown"]),
+            "head_sha": record.get("head_sha") or head_sha,
+        }
+    return _shadow_seat_rule(
+        args.pr, head_sha,
+        branch=(pr_data or {}).get("headRefName") or "",
+        base_branch=(pr_data or {}).get("baseRefName"),
+        state_dir=Path(ensure_env()["VNX_STATE_DIR"]),
+        b3_override=_b3_override_arg(args) or "", b3_carrier=_b3_override_carrier(args),
+        review_seats=review_gate.get("review_seats"),
     )
 
 
@@ -1634,6 +1902,7 @@ def _emit_receipt(
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
     review_seats: Optional[Dict[str, Any]] = None,
+    shadow_seat_rule: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -1664,6 +1933,11 @@ def _emit_receipt(
     reads its presence to tell a merge under the seat rule from one before it,
     so a caller that ran no gate records ``verdict: not_evaluated`` and no
     seats rather than nothing.
+
+    ``shadow_seat_rule`` (track tweede-stoel-op-signaal, PR 2) is the shadow
+    reading the door computed next to that seat record. Written only when the
+    door supplied one; a direct caller that ran no door omits it rather than
+    claiming a shadow it never computed.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1684,6 +1958,8 @@ def _emit_receipt(
         [], unevaluated_message=GATES_NOT_RUN_MESSAGE,
     )
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
+    if shadow_seat_rule is not None:
+        kwargs["shadow_seat_rule"] = shadow_seat_rule
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -1871,6 +2147,20 @@ def _emit_register_event(
         return False
 
 
+def _branch_overlaps(pr_number: int, branch: str) -> list[Dict[str, Any]]:
+    """OI-1091: other OPEN dispatch branches touching the files of ``branch``; ``[]`` when unreadable.
+
+    Best-effort by contract: a git/network failure degrades to no warning,
+    never to a blocked merge.
+    """
+    try:
+        from file_scope_overlap import warn_overlaps
+        return warn_overlaps(branch, repo=_target_root())
+    except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
+        log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
+        return []
+
+
 def merge_pr(
     pr_number: int,
     *,
@@ -1883,6 +2173,7 @@ def merge_pr(
     contract_invalid_override: Optional[Dict[str, Any]] = None,
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
     review_seats: Optional[Dict[str, Any]] = None,
+    shadow_seat_rule: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
@@ -1898,7 +2189,9 @@ def merge_pr(
 
     ``review_seats`` (OI-2058, R5b): the seat record the review preflight
     returned, forwarded onto the ``pr_merged`` receipt. ``None`` records
-    ``verdict: not_evaluated`` for the head merged.
+    ``verdict: not_evaluated`` for the head merged. ``shadow_seat_rule``
+    (track tweede-stoel-op-signaal, PR 2) is the shadow rule the door computed
+    beside it; it is forwarded only when given, and no reader decides by it.
 
     ``head_sha`` is the exact commit the gates approved; it is threaded into
     ``gh pr merge --match-head-commit`` so the merge refuses any other commit.
@@ -1934,6 +2227,7 @@ def merge_pr(
         "error": "",
         "dry_run": dry_run,
         "overlaps": [],
+        "shadow_seat_rule": shadow_seat_rule,
     }
 
     # PR metadata for the receipt (title/branch). Reuse what the caller
@@ -1951,11 +2245,7 @@ def merge_pr(
     # fetch/gh-call per branch, plus a per-command timeout and a wall-clock scan ceiling) so it
     # can no longer turn into minutes of serial network round-trips on every merge.
     if result["branch"]:
-        try:
-            from file_scope_overlap import warn_overlaps  # noqa: PLC0415
-            result["overlaps"] = warn_overlaps(result["branch"], repo=_target_root())
-        except Exception as exc:  # noqa: BLE001 — an overlap check must never block a merge
-            log.warning("file-scope overlap check failed for PR #%s: %s", pr_number, exc)
+        result["overlaps"] = _branch_overlaps(pr_number, result["branch"])
 
     if dry_run:
         result["success"] = True
@@ -1996,6 +2286,7 @@ def merge_pr(
             contract_invalid_override=contract_invalid_override,
             preflight_gates=preflight_gates,
             review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
+            shadow_seat_rule=shadow_seat_rule,
         )
         append_status = (receipt or {}).get("append_status", "unknown")
         result["receipt_status"] = append_status
@@ -2119,6 +2410,31 @@ def _run_with_target(args: argparse.Namespace) -> int:
         _ACTIVE_TARGET = None
 
 
+def _door_refuser(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+) -> Callable[[str, Dict[str, Any], str], int]:
+    """The door's ``refuse(gate_name, gate_result, json_key)``, bound to one run's state.
+
+    Every preflight NO-GO goes through it, so the ledger it names, the head it
+    pins and the CLI shape it answers in stay those of the door that decided
+    the refusal.
+    """
+    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
+        return _refuse_merge(
+            pr_number=args.pr,
+            dispatch_id=args.dispatch_id or "",
+            gate_name=gate_name,
+            gate=gate_result,
+            evaluated=evaluated,
+            head_sha=head_sha,
+            json_output=args.json,
+            json_key=json_key,
+            dry_run=args.dry_run,
+        )
+
+    return refuse
+
+
 def _run_door(args: argparse.Namespace) -> int:
     """The five preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
@@ -2136,18 +2452,7 @@ def _run_door(args: argparse.Namespace) -> int:
     head_sha = (pr_data or {}).get("headRefOid") or ""
     evaluated.append(_preflight_record("ci", gate, head_sha))
 
-    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
-        return _refuse_merge(
-            pr_number=args.pr,
-            dispatch_id=args.dispatch_id or "",
-            gate_name=gate_name,
-            gate=gate_result,
-            evaluated=evaluated,
-            head_sha=head_sha,
-            json_output=args.json,
-            json_key=json_key,
-            dry_run=args.dry_run,
-        )
+    refuse = _door_refuser(args, evaluated, head_sha)
 
     if gate["verdict"] != "GO":
         return refuse("ci", gate, "ci_gate")
@@ -2157,7 +2462,7 @@ def _run_door(args: argparse.Namespace) -> int:
         print(f"CI gate: {gate['message']}")
 
     # ── Review gate: a passing, evidenced review-gate result must exist ────
-    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, **_b3_override_kwargs(args))
+    review_gate, _ = _run_review_gate(args.pr, override_reason=args.override_reason, dry_run=args.dry_run, **_b3_override_kwargs(args))
     evaluated.append(_preflight_record("review", review_gate, head_sha))
     if review_gate["verdict"] != "GO":
         return refuse("review", review_gate, "review_gate")
@@ -2217,12 +2522,19 @@ def _run_door(args: argparse.Namespace) -> int:
         if contract_gate.get("overridden") else None
     )
 
+    # ── Shadow seat rule (track tweede-stoel-op-signaal, PR 2) ─────────────
+    # Gathered in one helper and handed to merge_pr, which records it in its
+    # result: nothing in this door reads it, and a failure while gathering
+    # lands as UNKNOWN fields inside it.
+    shadow_seat_rule = _door_shadow_seat_rule(args, head_sha, pr_data, review_gate)
+
     result = merge_pr(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
         dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
         preflight_gates=preflight_gates,
         review_seats=review_gate.get("review_seats"),
+        shadow_seat_rule=shadow_seat_rule,
     )
 
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""

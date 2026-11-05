@@ -204,7 +204,7 @@ def spawn_claude(
     requires_mcp: bool = False,
     scrub_env_keys: frozenset,
     base_url_family: Optional[str] = None,
-    scope_args: Optional[List[str]] = None,
+    scope_args: Optional[List[str]] = None, on_spawn: Optional[Callable[[int], None]] = None,
     **kwargs: Any,
 ) -> ClaudeSpawnResult:
     """Spawn ``claude -p --output-format stream-json`` and consume the event stream.
@@ -291,6 +291,11 @@ def spawn_claude(
         ``--dangerously-skip-permissions`` nor a role allow-list is added. The
         claude review seat (claude_gate_lane) passes its read-only allow-list here.
         None (every other caller) keeps the role's scope, byte-identical argv.
+    on_spawn:
+        Optional ``(child_pid) -> None`` hook forwarded to SubprocessAdapter.deliver;
+        called once right after the child exists (ADR-045 §5). A raising hook is
+        logged and never fails the spawn. None (every caller but the K-4c claude
+        headless lane) adds nothing to the spawn.
     **kwargs:
         Accepted for forward-compatibility; ignored.
 
@@ -329,7 +334,8 @@ def spawn_claude(
         role=role,
         requires_mcp=requires_mcp,
         scrub_env_keys=scrub_env_keys,
-        scope_args=scope_args,
+        # K-4c (ADR-045 §5): the child's pid, the moment it exists.
+        scope_args=scope_args, on_spawn=on_spawn,
     )
 
     if not deliver_result.success:

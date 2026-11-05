@@ -58,8 +58,11 @@ def _no_gh_network(monkeypatch):
     """
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
+    # OI-2459: no tick snapshot in this file — every PR/branch lookup is
+    # stubbed below, and the snapshot call only exists to feed those.
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: True)
 
 
 def _state_dir(tmp_path: Path) -> Path:

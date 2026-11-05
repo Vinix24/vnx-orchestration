@@ -114,11 +114,12 @@ def _patch_resolved_linkage(monkeypatch, manager, *, pr_number: int, branch: str
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     # The record has no pr_number, metadata has none — GitHub finds it:
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: pr_number)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: branch)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: pr_number)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: branch)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr: head_sha)
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: pr_state, raising=False)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: pr_state, raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -193,9 +194,10 @@ def test_obligation_without_linkage_stays_pending_when_no_pr_exists(tmp_path, mo
     # (the dispatch is running and has pushed). Honest AWAITING wait.
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: True)
     monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: None, raising=False)
 
     summary = runner.run(state_dir)
@@ -228,11 +230,12 @@ def test_obligation_acquires_linkage_from_dispatch_metadata(tmp_path, monkeypatc
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: 1880)
     # GitHub would also find it, but metadata wins (returns first).
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: 1880)
-    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo: f"dispatch/{dispatch_id}")
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: 1880)
+    monkeypatch.setattr(runner, "_branch_from_github", lambda pr, owner_repo, snapshot=None: f"dispatch/{dispatch_id}")
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
     monkeypatch.setattr(runner, "_get_pr_head_sha_for_gate", lambda pr: _DEFAULT_TEST_HEAD_SHA)
-    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo: "OPEN", raising=False)
+    monkeypatch.setattr(runner, "_pr_state_from_github", lambda pr_number, owner_repo, snapshot=None: "OPEN", raising=False)
     fake_rgm = types.ModuleType("review_gate_manager")
     fake_rgm._compute_changed_files = lambda branch: ["scripts/lib/foo.py"]
     monkeypatch.setitem(sys.modules, "review_gate_manager", fake_rgm)
@@ -317,9 +320,10 @@ def test_red_proof_v15_form_breaks_forward_linkage(tmp_path, monkeypatch):
     # the obligation pending with no fabricated linkage.
     monkeypatch.setattr(runner, "_build_manager", lambda state_dir: manager)
     monkeypatch.setattr(runner, "_pr_from_dispatch_metadata", lambda sd, did: None)
-    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo: None)
+    monkeypatch.setattr(runner, "_pr_from_github", lambda did, owner_repo, snapshot=None: None)
     monkeypatch.setattr(runner, "_resolve_github_owner_repo", lambda sd: "Vinix24/vnx-orchestration")
-    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo: True)
+    monkeypatch.setattr(runner, "_new_github_snapshot", lambda owner_repo: None)
+    monkeypatch.setattr(runner, "_branch_exists_on_github", lambda did, owner_repo, snapshot=None: True)
     monkeypatch.setattr(runner, "_dispatch_is_live", lambda sd, did: None, raising=False)
 
     runner.run(state_dir)

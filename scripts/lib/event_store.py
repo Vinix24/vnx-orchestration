@@ -235,6 +235,42 @@ def _replace_from_scratch(dest: Path, mode: int, *chunks: bytes) -> None:
         raise
 
 
+def _own_event_lines(content: bytes, dispatch_id: str) -> bytes:
+    """The lines of *content* whose event names *dispatch_id*, NDJSON re-terminated.
+
+    A line that is not a JSON object (a torn write) names no dispatch and is
+    dropped: it cannot be filed under any dispatch's archive.
+    """
+    kept = []
+    for line in content.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if isinstance(event, dict) and event.get("dispatch_id") == dispatch_id:
+            kept.append(line.rstrip(b"\r"))
+    return b"".join(line + b"\n" for line in kept)
+
+
+def _append_to_archive_file(dest: Path, mode: int, payload: bytes) -> None:
+    """Add *payload* to an existing plain or ``.gz`` archive without rewriting its head.
+
+    Written through ``_replace_from_scratch`` so a concurrent reader never sees
+    a half-appended archive. A ``.gz`` archive gains a new gzip member, which
+    ``gzip``/``open_archive_text`` read back in order after the members already
+    there.
+    """
+    head = dest.read_bytes()
+    if dest.name.endswith(".gz"):
+        _replace_from_scratch(dest, mode, head, gzip.compress(payload))
+        return
+    if head and not head.endswith(b"\n"):
+        head += b"\n"
+    _replace_from_scratch(dest, mode, head, payload)
+
+
 def _events_dir() -> Path:
     """Resolve the events directory, failing loud on a read-only version store.
 
@@ -821,6 +857,74 @@ class EventStore:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
             try:
                 f.truncate(0)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+    def archive_late_events(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Append the events written AFTER the end-of-run archive to this dispatch's archive.
+
+        ADR-045 K-5: the lane tears the worktree down after ``_govern`` archived
+        the stream, because that teardown releases the occupancy flock and must
+        carry the GOVERNED outcome. The ``provider_teardown_worktree`` event it
+        emits (and ``provider_teardown_preserved`` when the worktree is kept) is
+        therefore written after the archive step and would otherwise never
+        reach the archive — and on a per-run terminal it would leave a fresh
+        live file behind for every dispatch.
+
+        A per-run terminal moves the run's own stream into its archive through
+        ``_archive_run_stream``: the archive is extended, never replaced, and
+        the live file is removed in the same locked step, as ``archive()`` does.
+
+        A terminal-pinned stream is appended, never copied over. Only the lines
+        naming *dispatch_id* are added to the archive the dispatch already has
+        (plain, else ``.gz``; a ``.gz`` archive gains a new gzip member that
+        ``open_archive_text`` reads back in order), and the live file is
+        emptied only when every event it holds names this dispatch. A live
+        stream holding an event of another dispatch is left byte for byte
+        untouched, and no archive is created for it. The read, the archive
+        write and the truncate run under the one LOCK_EX on the live file that
+        every appender takes, so no event lands between them.
+
+        Returns the archive path, or None when there was nothing to append.
+        Raises on a failed write; the live stream then stays as it was and the
+        caller's best-effort wrapper leaves it for the boundary guard.
+        """
+        if not terminal or not dispatch_id:
+            return None
+        run_id = self._run_id(terminal, dispatch_id)
+        if run_id is not None:
+            return self._archive_run_stream(terminal, run_id, owned_only=True)
+        return self._append_late_to_pinned_archive(terminal, dispatch_id)
+
+    def _append_late_to_pinned_archive(self, terminal: str, dispatch_id: str) -> Optional[Path]:
+        """Add this dispatch's late lines to its terminal-pinned archive (never a replacing copy)."""
+        path = self._terminal_path(terminal)
+        try:
+            f = open(path, "rb+")
+        except FileNotFoundError:
+            return None
+        with f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                content = f.read()
+                if not _stream_belongs_to(content, dispatch_id):
+                    return None
+                late = _own_event_lines(content, dispatch_id)
+                if not late:
+                    return None
+                mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
+                dest = resolve_archive_file(self.archive_dir(terminal), dispatch_id)
+                if dest is None:
+                    dest = self.archive_dir(terminal) / f"{dispatch_id}{ARCHIVE_SUFFIX}"
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    _replace_from_scratch(dest, mode, late)
+                else:
+                    _append_to_archive_file(dest, mode, late)
+                f.seek(0)
+                f.truncate(0)
+                f.flush()
+                logger.info("event_store: late-archived %s events -> %s", dispatch_id, dest)
+                return dest
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 

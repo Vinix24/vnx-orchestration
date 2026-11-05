@@ -48,6 +48,17 @@ HAS no cost, and must not be silently exempted from the cap because its own
 receipts carry no number. The scan keeps such receipts out of the total and
 reports how many there were (``SpendToday.unknown_cost_count``).
 
+The switch (K5c, ADR-043 §8)
+----------------------------
+The ceiling reads the cost ledger only once the measurement gate passes
+(:mod:`cost_ledger_meetpoort`). Then today's known spend is the sum of
+``cost_usd`` over today's effective metered runs of paid-lane providers, and an
+``unavailable:*`` run counts in ``unknown_cost_count`` and is logged, never
+summed as 0. Otherwise the receipts, as before, and the door warns once per call
+with the reason. Fail-closed means the OLD path, never a lower number: an
+unreadable ledger, an evaluation error or an incomplete read keeps the receipts
+sum and says why, so the ledger is never read as "spent nothing".
+
 Call sites (both un-evadable pre-flight points, before any worker spawns):
   - ``dispatch_envelope.run_envelope_plan`` — the door's provider lane
     (``dispatch_cli.py`` calls this directly for every kimi/glm/deepseek
@@ -61,16 +72,21 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 _LIB_DIR = str(Path(__file__).resolve().parent)
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
+
+import cost_ledger  # noqa: E402
+import cost_ledger_meetpoort as meetpoort  # noqa: E402
+import provider_costs  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -218,41 +234,81 @@ def _receipt_date_utc(raw_ts) -> Optional[str]:
     return None
 
 
-def _today_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
 @dataclass(frozen=True)
 class SpendToday:
-    """Today's known paid-lane spend, plus receipts whose price is unknown."""
+    """Today's known paid-lane spend, plus runs whose price is unknown."""
 
     total_usd: float
     unknown_cost_count: int
 
 
-def spent_today_usd(state_dir: Path) -> float:
-    """Known paid-lane spend today in USD; ``spent_today`` also counts the unknowns."""
-    return spent_today(state_dir).total_usd
+@dataclass(frozen=True)
+class _Ceiling:
+    """Today's spend, the gate's answer, and whether the ledger read was unusable (decision 5)."""
+
+    spend: SpendToday
+    gate: meetpoort.Meetpoort
+    degraded: bool
 
 
-def spent_today(state_dir: Path) -> SpendToday:
-    """Sum cost_usd across today's (UTC) receipts for paid-lane providers.
+def cost_ledger_path(state_dir: Path) -> Path:
+    """The cost ledger of the store this state dir belongs to: beside ``state/``, not in it.
 
-    Reads the append-only receipts ledger directly (see module docstring for
-    why this is preferred over a separately-maintained counter). Missing or
-    unparseable lines/timestamps are skipped, never treated as an excuse to
-    abort the whole scan — a single malformed line must not blind the cap to
-    every other real charge on the same day.
-
-    A ``cost_usd: null`` is an unknown price, not a free run: it stays out of
-    ``total_usd``, is counted in ``unknown_cost_count`` and is logged, so the
-    total reads as the known spend and never as the whole of it.
+    A store keeps its receipts in ``<data dir>/state/`` and its ledger in
+    ``<data dir>/events/provider_costs.ndjson``, so its store is the parent
+    (``gate_runner.py`` derives it the same way). Never the environment resolver
+    (``provider_costs._resolve_costs_path()``): a caller with its own store would
+    read another store's ledger. A state dir that is not a store's ``state/``
+    yields no ledger and the gate shuts (fail-closed: the receipts).
     """
+    return provider_costs.costs_path_in(Path(state_dir).parent)
+
+
+def spent_today_usd(state_dir: Path, *, ledger_path: Optional[Path] = None) -> float:
+    """Known paid-lane spend today in USD; ``spent_today`` also counts the unknowns."""
+    return spent_today(state_dir, ledger_path=ledger_path).total_usd
+
+
+def spent_today(state_dir: Path, *, ledger_path: Optional[Path] = None) -> SpendToday:
+    """Today's known paid-lane spend: the cost ledger once the measurement gate passes, else the receipts.
+
+    The receipts path (the pre-K5c behaviour, decision 5's fallback) sums
+    ``cost_usd`` across today's (UTC) receipts for paid-lane providers; a
+    malformed line is skipped rather than blinding the cap to every other charge
+    of the day, and a ``cost_usd: null`` is an unknown price (counted, logged,
+    never summed as 0). ``ledger_path`` overrides the ledger explicitly (tests,
+    migrations, another store); it defaults to :func:`cost_ledger_path`.
+    """
+    ceiling = _ceiling_today(state_dir, ledger_path)
+    if ceiling.degraded:
+        logger.warning("paid_lane_budget: keeping to the receipts, not the cost ledger: %s", ceiling.gate.reason)
+    return ceiling.spend
+
+
+def _ceiling_today(state_dir: Path, ledger_path: Optional[Path] = None) -> _Ceiling:
+    """Decide today's ceiling once: the ledger when the gate passes, the receipts otherwise."""
+    today = datetime.now(timezone.utc).date()
+    ledger = Path(ledger_path) if ledger_path is not None else cost_ledger_path(state_dir)
+    if not ledger.exists():
+        gate = meetpoort.evaluate(ledger, today)
+        return _Ceiling(_spent_from_receipts(state_dir, today), gate, degraded=False)
+    try:
+        totals = cost_ledger.aggregate_runs(ledger)
+        gate = meetpoort.verdict(totals, today)
+    except Exception as exc:  # vnx-silent-except: logged by the caller; the receipts are the fallback
+        return _Ceiling(_spent_from_receipts(state_dir, today), meetpoort.read_failure(today, exc), True)
+    if not gate.passed:
+        return _Ceiling(_spent_from_receipts(state_dir, today), gate, degraded=bool(totals.incomplete))
+    return _Ceiling(_spent_from_ledger(totals, today), gate, degraded=False)
+
+
+def _spent_from_receipts(state_dir: Path, today: date) -> SpendToday:
+    """The receipts sum of one UTC day (the pre-K5c ceiling), unchanged by the switch."""
     receipts_path = Path(state_dir) / RECEIPTS_FILE_NAME
     if not receipts_path.is_file():
         return SpendToday(0.0, 0)
 
-    today = _today_str()
+    today_str = today.isoformat()
     total = 0.0
     unknown = 0
     try:
@@ -269,7 +325,7 @@ def spent_today(state_dir: Path) -> SpendToday:
                     continue
                 if not is_paid_lane(receipt.get("provider")):
                     continue
-                if _receipt_date_utc(receipt.get("timestamp")) != today:
+                if _receipt_date_utc(receipt.get("timestamp")) != today_str:
                     continue
                 if "cost_usd" not in receipt:
                     continue
@@ -292,7 +348,41 @@ def spent_today(state_dir: Path) -> SpendToday:
     return SpendToday(round(total, 8), unknown)
 
 
-def is_budget_exhausted(provider: Optional[str], state_dir: Optional[Path] = None) -> bool:
+def _spent_from_ledger(totals: cost_ledger.LedgerTotals, today: date) -> SpendToday:
+    """Sum today's effective metered paid-lane runs from one ledger read (decision 4).
+
+    A run whose price is ``unavailable:*``, missing, not finite or negative counts
+    as unknown and is logged: never summed as 0, never a lower total.
+    """
+    total = 0.0
+    unknown = 0
+    today_str = today.isoformat()
+    for record in totals.runs.values():
+        if record.get("billing") != "metered" or not is_paid_lane(record.get("provider")):
+            continue
+        if cost_ledger.utc_day(record.get("occurred_from")) != today_str:
+            continue
+        source = record.get("cost_source")
+        cost = record.get("cost_usd")
+        if isinstance(source, str) and source.startswith(meetpoort.UNKNOWN_COST_PREFIX):
+            unknown += 1
+            continue
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)) or not math.isfinite(cost) or cost < 0:
+            unknown += 1
+            continue
+        total += float(cost)
+    if unknown:
+        logger.warning(
+            "paid_lane_budget: %d metered paid-lane run(s) today carry no price in the "
+            "cost ledger (unavailable:*); spent_today_usd=%.6f counts known prices only",
+            unknown, total,
+        )
+    return SpendToday(round(total, 8), unknown)
+
+
+def is_budget_exhausted(
+    provider: Optional[str], state_dir: Optional[Path] = None, *, ledger_path: Optional[Path] = None,
+) -> bool:
     """True when `provider` is a paid lane AND today's cumulative spend for
     paid lanes already meets/exceeds the daily budget. Always False for a
     non-paid-lane provider (mirrors receipt_classifier: a budget of 0 or
@@ -303,23 +393,38 @@ def is_budget_exhausted(provider: Optional[str], state_dir: Optional[Path] = Non
     budget = get_daily_budget_usd()
     if budget <= 0:
         return True
-    spent = spent_today_usd(state_dir or default_state_dir())
+    spent = spent_today_usd(state_dir or default_state_dir(), ledger_path=ledger_path)
     return spent >= budget
 
 
-def enforce_daily_budget(provider: Optional[str], state_dir: Optional[Path] = None) -> None:
+def enforce_daily_budget(
+    provider: Optional[str], state_dir: Optional[Path] = None, *, ledger_path: Optional[Path] = None,
+) -> None:
     """Raise PaidLaneBudgetExceededError when the daily cap is already spent
     for a paid-lane `provider`. No-op for non-paid-lane providers.
 
-    Honors an explicit operator override (ENV_OVERRIDE=1), logged loudly —
-    the same escape-hatch convention every other blocking constraint in this
-    fabric uses (see provider_constraints.md), never a silent bypass.
+    While the measurement gate has not passed, the ceiling reads the receipts
+    and this logs one warning per call naming the gate's reason (decision 6).
+    After the switch an ``unavailable`` metered run of today only warns: it is in
+    ``unknown_cost_count``, never in the sum compared with the budget, so it can
+    never refuse a dispatch by itself.
+
+    Honors an explicit operator override (ENV_OVERRIDE=1), logged loudly — the
+    same escape hatch every other blocking constraint here uses, never a silent
+    bypass (see provider_constraints.md).
     """
     if not is_paid_lane(provider):
         return
     budget = get_daily_budget_usd()
     resolved_dir = state_dir or default_state_dir()
-    spent = spent_today_usd(resolved_dir)
+    ceiling = _ceiling_today(resolved_dir, ledger_path)
+    spent = ceiling.spend.total_usd
+    if not ceiling.gate.passed:
+        logger.warning(
+            "paid_lane_budget: provider=%s — the daily ceiling reads the receipts, not the "
+            "cost ledger: %s",
+            provider, ceiling.gate.reason,
+        )
     exhausted = budget <= 0 or spent >= budget
     if not exhausted:
         return
