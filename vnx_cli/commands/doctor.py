@@ -1251,45 +1251,46 @@ def _check_installed_plist_placeholders() -> list[Check]:
     return checks
 
 
-def _check_embedded_path_assumptions() -> Check:
-    """WARN on __file__-anchored .vnx-data/ROADMAP.yaml AND repo-root derivations.
+# Per-process memo of the embedded-path census (test-suite-kosten TSK-2). One
+# AST sweep of scripts/lib costs 9-10 s; `vnx doctor` runs it once per call, and
+# a process that doctors several times (tests, `vnx doctor` in a loop) paid it
+# every time. The key is the resolved engine root plus (path, size, mtime_ns)
+# for every file the census reads, so any tree change is a miss; there is no
+# time limit. clear_embedded_path_cache() is how a caller forces a rescan.
+_EMBEDDED_PATH_SCAN_CACHE: dict[tuple, "Check"] = {}
 
-    Central-mode-path-correctness (#1023/#1024) plus OI-1145: a bare
-    ``Path(__file__)….parent…`` walk that builds a ``.vnx-data``/``ROADMAP.yaml``
-    path, OR that resolves the REPO ROOT (``resolve_project_root(__file__)`` /
-    a ``.git``-marker finder fed ``__file__``), resolves the KEYSTONE
-    (``~/.vnx-system/versions/<v>/``) instead of the project in a central
-    install. Delegates to the AST-based
-    ``scripts/check_no_file_derived_data_paths.py`` detector — which carries a
-    grandfathered allowlist for already-migrated last-resort fallbacks and traces
-    module-level marker constants (e.g. ``_DEFAULT_RELATIVE_PATH = Path(".vnx-data/x")``
-    joined against a file-anchored root elsewhere) — so this stays advisory-accurate
-    with no false positives on doc literals or intentional defensive fallbacks.
 
-    Scans the resolved engine root (VNX_HOME-equivalent: the central symlink
-    target, the embedded project copy, or the dev checkout), NOT project_dir —
-    ``scripts/lib`` is framework code, not project code, and only exists inside
-    the engine tree.
+def clear_embedded_path_cache() -> None:
+    """Forget every memoized embedded-path census in this process."""
+    _EMBEDDED_PATH_SCAN_CACHE.clear()
+
+
+def _embedded_path_scan_key(engine_root: Path, checker) -> tuple | None:
+    """Cache key for the census: resolved root + (path, size, mtime_ns) per file.
+
+    Mirrors ``checker.scan_dir``'s file set (``SCAN_DIR`` recursively, minus
+    ``EXEMPT_FILES``) by stat only — never by parsing. ``None`` means a file
+    could not be stat'ed, so the caller takes an uncached path rather than
+    keying a partial set.
     """
-    try:
-        engine_root = _engine.ensure_engine_on_path()
-        import check_no_file_derived_data_paths as _checker
-    except Exception as exc:
-        return Check(
-            name="paths:embedded-assumptions",
-            status=WARN,
-            detail=f"could not load central-mode path checker: {exc}",
-        )
+    root = Path(engine_root).resolve()
+    scan_root = root / checker.SCAN_DIR
+    if not scan_root.is_dir():
+        return (str(root), ())
+    entries = []
+    for py in sorted(scan_root.rglob("*.py")):
+        if py.name in checker.EXEMPT_FILES:
+            continue
+        try:
+            st = py.stat()
+        except OSError:
+            return None
+        entries.append((str(py), st.st_size, st.st_mtime_ns))
+    return (str(root), tuple(entries))
 
-    try:
-        violations = _checker.scan_dir(engine_root)
-    except Exception as exc:
-        return Check(
-            name="paths:embedded-assumptions",
-            status=WARN,
-            detail=f"central-mode path checker failed: {exc}",
-        )
 
+def _embedded_path_violation_check(violations) -> Check:
+    """Render the census result as the ``paths:embedded-assumptions`` Check."""
     if violations:
         shown = "; ".join(f"{rel}:{lineno} ({seg})" for rel, lineno, seg in violations[:5])
         more = f" (+{len(violations) - 5} more)" if len(violations) > 5 else ""
@@ -1312,6 +1313,62 @@ def _check_embedded_path_assumptions() -> Check:
             "derivations in scripts/lib"
         ),
     )
+
+
+def _check_embedded_path_assumptions() -> Check:
+    """WARN on __file__-anchored .vnx-data/ROADMAP.yaml AND repo-root derivations.
+
+    Central-mode-path-correctness (#1023/#1024) plus OI-1145: a bare
+    ``Path(__file__)….parent…`` walk that builds a ``.vnx-data``/``ROADMAP.yaml``
+    path, OR that resolves the REPO ROOT (``resolve_project_root(__file__)`` /
+    a ``.git``-marker finder fed ``__file__``), resolves the KEYSTONE
+    (``~/.vnx-system/versions/<v>/``) instead of the project in a central
+    install. Delegates to the AST-based
+    ``scripts/check_no_file_derived_data_paths.py`` detector — which carries a
+    grandfathered allowlist for already-migrated last-resort fallbacks and traces
+    module-level marker constants (e.g. ``_DEFAULT_RELATIVE_PATH = Path(".vnx-data/x")``
+    joined against a file-anchored root elsewhere) — so this stays advisory-accurate
+    with no false positives on doc literals or intentional defensive fallbacks.
+
+    Scans the resolved engine root (VNX_HOME-equivalent: the central symlink
+    target, the embedded project copy, or the dev checkout), NOT project_dir —
+    ``scripts/lib`` is framework code, not project code, and only exists inside
+    the engine tree.
+
+    The result is memoized per process in ``_EMBEDDED_PATH_SCAN_CACHE``, keyed
+    on the tree's file stats, so a second doctor run on an unchanged tree skips
+    the 9-10 s AST sweep (test-suite-kosten TSK-2). ``scan_dir`` itself stays a
+    pure function; ``clear_embedded_path_cache()`` forces a rescan.
+    """
+    try:
+        engine_root = _engine.ensure_engine_on_path()
+        import check_no_file_derived_data_paths as _checker
+    except Exception as exc:
+        return Check(
+            name="paths:embedded-assumptions",
+            status=WARN,
+            detail=f"could not load central-mode path checker: {exc}",
+        )
+
+    cache_key = _embedded_path_scan_key(Path(engine_root), _checker)
+    if cache_key is not None:
+        cached = _EMBEDDED_PATH_SCAN_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    try:
+        violations = _checker.scan_dir(engine_root)
+    except Exception as exc:
+        return Check(
+            name="paths:embedded-assumptions",
+            status=WARN,
+            detail=f"central-mode path checker failed: {exc}",
+        )
+
+    result = _embedded_path_violation_check(violations)
+    if cache_key is not None:
+        _EMBEDDED_PATH_SCAN_CACHE[cache_key] = result
+    return result
 
 
 def _check_t0_state_freshness(project_dir: Path, data_root: Path) -> list[Check]:
