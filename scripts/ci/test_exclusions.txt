@@ -20,6 +20,12 @@
 # the minimal CI image (undeclared heavy dependency stack); each names the
 # missing stack and the repair path to rejoin the sweep.
 #
+# Entries with an "ADR-053" reason are green everywhere: the whole file already runs
+# as its own blocking Profile A step in the same job, so the parallel copy was pure
+# duplicate time. Allowed only with the step and its file:line named, and
+# tests/test_ci_gates_still_exist.py fails when that step or its command goes away
+# (idem for the single tests ADR-053 removed instead of a whole file).
+#
 # Tracking item: OI-906 ("CI draait 18 van de 904 testbestanden"). Each
 # entry needs its own repair dispatch before it can rejoin the suite.
 #
@@ -106,6 +112,7 @@ tests/test_adr007_dispatches_repair.py  # OI-1227: red solo — 70-line gate fla
 tests/test_adr007_structural_conformance.py  # OI-1227: red solo — sqlite3: cannot start a transaction within a transaction (1 failed, 1 passed)
 tests/test_agent_stream_sse.py  # OI-1227: hangs — exceeds 90s wall-cap solo (per-test --timeout=180), no output within cap
 tests/test_agent_validation.py  # OI-1227: red solo — T0IntelligenceGatherer: 'Developer' not valid (1 failed)
+tests/test_architecture_doc_drift.py  # ADR-053 (tsk-5): NOT red — this whole file already runs as its own blocking Profile A step "Run architecture doc drift guard unit tests" (.github/workflows/vnx-ci.yml:292) on every PR; the parallel-phase copy cost ~8 s and proved nothing extra. tests/test_ci_gates_still_exist.py fails if that step (or its command) disappears.
 tests/test_auto_commit_stash_isolation.py  # OI-1227: exceeds 90s wall-cap solo (per-test --timeout=180)
 tests/test_auto_report_integration.py  # OI-1227: red solo — manual report status parsed 'contract_invalid' not 'success' (1 failed, 38 passed)
 tests/test_behavior_contracts.py  # OI-1227: red solo — routing_policy lanes missing BehaviorContract: kimi x4 (1 failed, 22 passed)
@@ -191,6 +198,7 @@ tests/test_schema_init_view_ordering.py  # OI-1227: red solo — legacy v21 boot
 tests/test_semantics_cleanup.py  # OI-1227: red solo — ValueError: substring not found in 8 setup errors (5 passed)
 tests/test_serve_dashboard_api.py  # OI-1227: red solo — serve_dashboard._read_gate_config missing (4 failed, 63 passed)
 tests/test_session_ids_staleness.py  # OI-1227: red solo — read_events_with_timeout does not refresh session_id (1 failed, 5 passed)
+tests/test_status_vocab_drift.py  # ADR-053 (tsk-5): NOT red — this whole file already runs as its own blocking Profile A step "Run status vocabulary drift guard unit tests" (.github/workflows/vnx-ci.yml:310) on every PR; the parallel-phase copy cost ~8 s and proved nothing extra. tests/test_ci_gates_still_exist.py fails if that step (or its command) disappears.
 tests/test_strategy_roadmap.py  # OI-1227: red solo — roadmap file not found (RoadmapValidationError) (1 failed, 33 passed)
 tests/test_strategy_roadmap_real_file.py  # OI-1227: red solo — committed roadmap not found (RoadmapValidationError) (1 failed)
 tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes to kimi, expected None (5 failed, 30 passed)
