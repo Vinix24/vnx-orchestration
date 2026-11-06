@@ -245,6 +245,17 @@ def _start_heartbeat(
     return lease_stop, lease_thread, silence_stop, silence_thread
 
 
+def _stop_silence_heartbeat(
+    silence_stop: "threading.Event | None",
+    silence_thread: "threading.Thread | None",
+) -> None:
+    """Set the silence stop event, then join the thread (5 s upper bound)."""
+    if silence_stop is not None:
+        silence_stop.set()
+    if silence_thread is not None:
+        silence_thread.join(timeout=5)
+
+
 def _mark_handover_processed(pending_handover: "Path | None") -> None:
     """Rename the handover file with .processed suffix after successful delivery."""
     if pending_handover is None or not pending_handover.exists():
@@ -474,10 +485,7 @@ def deliver_via_subprocess(
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
         # Stop the silence heartbeat thread.
-        if silence_stop is not None:
-            silence_stop.set()
-        if silence_thread is not None:
-            silence_thread.join(timeout=5)
+        _stop_silence_heartbeat(silence_stop, silence_thread)
         # Event archive + report-pipeline trigger using the same adapter instance
         # that ran the dispatch (via spawn_result._adapter).  This preserves
         # session_id in the trigger file — byte-identical with the pre-4.6.2 path.
