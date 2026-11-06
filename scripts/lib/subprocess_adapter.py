@@ -80,7 +80,11 @@ _LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
 # worker gets from build_claude_scope_args(); the fallback tests pin the parity.
 _FALLBACK_MCP_NAMESPACE_DENY = "mcp__*"          # worker_permissions.MCP_NAMESPACE_DENY
 _FALLBACK_EMPTY_MCP_CONFIG = '{"mcpServers":{}}'  # worker_permissions.EMPTY_MCP_CONFIG
-_FALLBACK_DENIED_TOOLS = ["WebSearch", "WebFetch"]
+# Mirrors worker_permissions.WORKER_CLI_DENIED_TOOLS (OI-1447: the stash is
+# shared by every worktree) in the import-failure posture. The parity test
+# compares this whole argv with build_claude_scope_args(), so the entry and its
+# position must stay identical.
+_FALLBACK_DENIED_TOOLS = ["WebSearch", "WebFetch", "Bash(git stash:*)"]
 _FALLBACK_CODE_WORKER_TOOLS = [                  # worker_permissions.DEFAULT_CODE_WORKER_TOOLS
     "Read", "Write", "Edit", "MultiEdit", "Bash", "Grep", "Glob",
     "Bash(git:*)", "Bash(gh:*)", "Bash(python3:*)", "Bash(pytest:*)",
