@@ -33,8 +33,9 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 _LIB = _HERE / "lib"
-if str(_LIB) not in sys.path:
-    sys.path.insert(0, str(_LIB))
+# scripts/lib must win over this script's own directory (same-name module), also when it is already on PYTHONPATH.
+sys.path[:] = [p for p in sys.path if os.path.realpath(p or '.') != os.path.realpath(_LIB)]
+sys.path.insert(0, str(_LIB))
 
 from crash_recovery_sweep import DEFAULT_MAX_ORPHANS, sweep  # noqa: E402
 
