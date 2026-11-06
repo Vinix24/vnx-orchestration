@@ -200,7 +200,11 @@ def _append_end_line(document: Mapping[str, Any], *,
     that bounds ``recover`` never waits longer on the append lock than its own
     ``lock_timeout``.
     """
-    from append_receipt_internals.payload import append_receipt_payload
+    # Through the registered facade (governance_receipts loads and registers
+    # scripts/append_receipt.py): the internals module alone leaves the
+    # ``common.facade`` proxy empty, so ``_prepare_receipt`` would refuse this
+    # line in a real process (K-act regression).
+    from governance_receipts import append_receipt_payload  # noqa: PLC0415
 
     ledger = Path(document["ledger_path"])
     if _find_end_line(ledger, document) is not None:

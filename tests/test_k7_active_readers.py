@@ -78,6 +78,9 @@ def _hermetic_append(monkeypatch: pytest.MonkeyPatch) -> None:
         return real(receipt, **kwargs)
 
     monkeypatch.setattr(payload_module, "append_receipt_payload", _append)
+    # The lifecycle writers (dispatch_start / dispatch_lifecycle) resolve the
+    # append through the registered facade, so the same wrapper goes there too.
+    monkeypatch.setattr("governance_receipts.append_receipt_payload", _append)
     monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
 
 

@@ -318,7 +318,11 @@ def _spec_deadline_seconds(blob: bytes) -> Optional[int]:
 def _append_start_line(handover: Handover, *, role: str, base_sha: str, spec_file: str | Path,
                        target_slot: Optional[str], state_dir: Path) -> None:
     """Write the v3 start line; a ``duplicate`` verdict means another hand-over owns the key."""
-    from append_receipt_internals.payload import append_receipt_payload  # noqa: PLC0415
+    # Through the registered facade (governance_receipts loads and registers
+    # scripts/append_receipt.py): the internals module alone leaves the
+    # ``common.facade`` proxy empty, so ``_prepare_receipt`` would refuse this
+    # line in a real process (K-act regression).
+    from governance_receipts import append_receipt_payload  # noqa: PLC0415
     slot = (target_slot or "").strip()
     try:
         spec_bytes = Path(spec_file).read_bytes()
