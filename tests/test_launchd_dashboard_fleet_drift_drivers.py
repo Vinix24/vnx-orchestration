@@ -235,7 +235,10 @@ class TestInstallableByReloadPlist:
         data = self._installed(tmp_path, "com.vnx.fleet-role-drift")
         assert data["EnvironmentVariables"]["VNX_PROJECT_ID"] == self.PROJECT
         assert data["StartInterval"] == _load(FLEET_TEMPLATE)["StartInterval"]
-        assert f"cd {tmp_path / 'engine'} && exec python3 scripts/fleet_role_drift.py --write-state" in data["ProgramArguments"][2]
+        engine = tmp_path / "engine"
+        command = data["ProgramArguments"][2]
+        assert f"cd {engine} && PY=$(bash {engine}/scripts/launchd/vnx_python.sh {engine}) || exit 78;" in command
+        assert 'exec "$PY" scripts/fleet_role_drift.py --write-state' in command
 
 
 @pytest.mark.skipif(shutil.which("flock") is None, reason="enforce_singleton needs flock(1)")

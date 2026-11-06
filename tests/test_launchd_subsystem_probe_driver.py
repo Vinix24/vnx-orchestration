@@ -262,14 +262,18 @@ class TestCommand:
     def test_the_parity_guard_can_see_the_interpreter(self) -> None:
         """Behind bin/vnx the interpreter is invisible to the PATH-parity guard
         ("no python invocation found"). Naming python3 in the command is what
-        lets it check the interpreter against requires-python."""
+        lets it check the interpreter against requires-python. Since OI-2564 the
+        command asks vnx_python.sh, and the guard resolves that call to the
+        interpreter the resolver would pick."""
         path_parity = _lib("path_parity")
         report = path_parity.check_repo_launchd_templates(
             LAUNCHD_DIR, REPO, path_parity.parse_requires_python(REPO / "pyproject.toml")
         )
         entry = next(c for c in report["consumers"] if c["file"] == TEMPLATE.name)
-        assert "bare python3" in entry["reason"], entry
-        assert report["ok"], report["xml_errors"] + report["mismatches"]
+        assert entry["interpreter"] == path_parity.launchd_engine_interpreter(REPO), entry
+        assert entry["relevant"] is True and entry["in_range"] is True, entry
+        assert not report["xml_errors"], report["xml_errors"]
+        assert [m for m in report["mismatches"] if m["file"] == TEMPLATE.name] == []
 
 
 class TestInstallableByReloadPlist:
@@ -279,7 +283,9 @@ class TestInstallableByReloadPlist:
         assert data["EnvironmentVariables"]["VNX_PROJECT_ID"] == PROJECT
         assert data["EnvironmentVariables"]["VNX_HOME"] == str(engine)
         assert data["StartInterval"] == _load(TEMPLATE)["StartInterval"]
-        assert f"cd {engine} && exec python3 -m vnx_cli.main subsystems --probe" in data["ProgramArguments"][2]
+        command = data["ProgramArguments"][2]
+        assert f"cd {engine} && PY=$(bash {engine}/scripts/launchd/vnx_python.sh {engine}) || exit 78;" in command
+        assert 'exec "$PY" -m vnx_cli.main subsystems --probe' in command
 
 
 class TestExpectedByT0State:

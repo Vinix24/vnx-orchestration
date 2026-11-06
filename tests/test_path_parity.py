@@ -419,3 +419,62 @@ def test_check_parity_raw_probe_is_informational_only(tmp_path, monkeypatch) -> 
     assert result["parity"] is True
     assert result["mismatches"] == []
     assert result["consumer_scan"]["requires_python"] == ">=3.11,<3.14"
+
+
+# ── vnx_python.sh resolver (OI-2564): the guard sees the interpreter it picks ──
+
+_RESOLVER_SH = REPO_ROOT / "scripts" / "launchd" / "vnx_python.sh"
+_RESOLVER_CALL = 'PY=$(bash ${VNX_HOME}/scripts/launchd/vnx_python.sh ${VNX_HOME}) || exit 78; exec "$PY" x.py'
+
+
+def _fake_engine(tmp_path, venv: bool) -> Path:
+    root = tmp_path / ("with-venv" if venv else "no-venv")
+    root.mkdir()
+    (root / "pyproject.toml").write_text('[project]\nrequires-python = ">=3.0"\n', encoding="utf-8")
+    if venv:
+        py = root / ".venv" / "bin" / "python"
+        py.parent.mkdir(parents=True)
+        py.write_text('#!/bin/sh\necho "Python 3.12.0"\n', encoding="utf-8")
+        py.chmod(0o755)
+    return root
+
+
+def test_engine_interpreter_twin_matches_vnx_python_sh(tmp_path) -> None:
+    """The Python function and the bash resolver pick the same interpreter on the same root."""
+    import subprocess
+
+    for venv in (True, False):
+        root = _fake_engine(tmp_path, venv)
+        picked = subprocess.run(
+            ["bash", str(_RESOLVER_SH), str(root)], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        expected = path_parity.launchd_engine_interpreter(root)
+        if picked == "python3":
+            expected = "python3" if expected is None else Path(expected).name
+        assert expected == picked, (venv, expected, picked)
+
+
+def test_inline_resolver_call_resolves_to_the_pick_for_that_root(tmp_path) -> None:
+    root = _fake_engine(tmp_path, venv=True)
+    out = path_parity.resolve_consumer_interpreter(["/bin/bash", "-c", f"cd {root} && {_RESOLVER_CALL}"], root)
+    assert out["relevant"] is True
+    assert out["interpreter"] == str(root / ".venv" / "bin" / "python")
+
+
+def test_inline_resolver_call_without_venv_follows_the_precedence(tmp_path) -> None:
+    root = _fake_engine(tmp_path, venv=False)
+    out = path_parity.resolve_consumer_interpreter(["/bin/bash", "-c", f"cd {root} && {_RESOLVER_CALL}"], root)
+    assert out["interpreter"] == path_parity.launchd_engine_interpreter(root)
+    assert out["interpreter"] is not None
+
+
+def test_pinned_launcher_reports_the_engine_interpreter_not_bare_python3(tmp_path) -> None:
+    root = _fake_engine(tmp_path, venv=True)
+    launcher = root / "scripts" / "launchd" / "vnx_pinned_launcher.sh"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text((REPO_ROOT / "scripts" / "launchd" / "vnx_pinned_launcher.sh").read_text(encoding="utf-8"))
+    out = path_parity.resolve_consumer_interpreter(
+        ["/bin/bash", str(launcher), "vnx-dev", "scripts/job.py"], root
+    )
+    assert out["relevant"] is True
+    assert out["interpreter"] == str(root / ".venv" / "bin" / "python")

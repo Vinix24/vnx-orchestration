@@ -444,6 +444,42 @@ def _extract_pinned_python_path(text: str) -> Optional[str]:
     return None
 
 
+_HOMEBREW_PYTHON = "/opt/homebrew/opt/python@3.12/bin/python3.12"
+_PINNED_LAUNCHER = "vnx_pinned_launcher.sh"
+_VNX_PYTHON_CALL = re.compile(r"scripts/launchd/vnx_python\.sh\s+[\"']?([^\s\"';&|)]+)")
+
+
+def launchd_engine_interpreter(root: Path, search_path: str = BACKGROUND_PATH) -> Optional[str]:
+    """The interpreter ``scripts/launchd/vnx_python.sh <root>`` picks, without running it.
+
+    Twin of that script's precedence (a test pins that both agree): the root's
+    ``.venv/bin/python`` when executable, else Homebrew 3.12, else a bare ``python3``
+    looked up on ``search_path`` (None when there is none).
+    """
+    venv = Path(root) / ".venv" / "bin" / "python"
+    if os.access(venv, os.X_OK):
+        return str(venv)
+    if os.access(_HOMEBREW_PYTHON, os.X_OK):
+        return _HOMEBREW_PYTHON
+    return shutil.which("python3", path=search_path)
+
+
+def _resolver_pick(root: Path, search_path: str, script_desc: str) -> Dict[str, Any]:
+    found = launchd_engine_interpreter(root, search_path)
+    return {
+        "interpreter": found,
+        "relevant": found is not None,
+        "reason": f"{script_desc}: vnx_python.sh pick for {root}",
+    }
+
+
+def _inline_resolver_root(text: str, repo_root: Path) -> Optional[Path]:
+    """The engine root an inline script hands to vnx_python.sh, None when not a literal path."""
+    match = _VNX_PYTHON_CALL.search(text)
+    root = match.group(1).replace(_VNX_HOME_PLACEHOLDER, str(repo_root)) if match else ""
+    return Path(root) if os.path.isabs(root) else None
+
+
 def resolve_consumer_interpreter(
     argv: List[str],
     repo_root: Path,
@@ -482,6 +518,7 @@ def resolve_consumer_interpreter(
         text = argv[2]
         script_desc = "inline -c script"
         in_repo = str(repo_root) in text
+        launcher = False
     else:
         script_path = next((Path(a) for a in argv[1:] if a.endswith((".sh", ".py"))), None)
         if script_path is None:
@@ -489,6 +526,7 @@ def resolve_consumer_interpreter(
         if not script_path.is_absolute():
             script_path = (repo_root / script_path).resolve()
         script_desc = script_path.name
+        launcher = script_path.name == _PINNED_LAUNCHER
         try:
             in_repo = script_path.resolve().is_relative_to(repo_root)
         except AttributeError:  # pragma: no cover - Python <3.9 fallback, unreachable on this fleet
@@ -514,6 +552,12 @@ def resolve_consumer_interpreter(
             "relevant": False,
             "reason": f"{script_desc}: outside {repo_root.name} — not this project's requires-python to judge",
         }
+
+    if launcher:
+        return _resolver_pick(repo_root, search_path, script_desc)
+    resolver_root = _inline_resolver_root(text, repo_root)
+    if resolver_root is not None:
+        return _resolver_pick(resolver_root, search_path, script_desc)
 
     venv_python = repo_root / ".venv" / "bin" / "python"
     if ".venv/bin/python" in text and venv_python.exists():
