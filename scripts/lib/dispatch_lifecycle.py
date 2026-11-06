@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import AbstractSet, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
+from typing import AbstractSet, Any, Dict, Iterable, List, Mapping, NamedTuple, Optional, Set, Tuple
 
 from append_receipt_internals.common import (
     EXIT_IO_ERROR,
@@ -51,7 +51,7 @@ from append_receipt_internals.lifecycle import (
 from atomic_io import atomic_write_json
 from coordination_db import STORE_ABSENT, STORE_UNREADABLE, TERMINAL_DISPATCH_STATES, db_path_from_state_dir, get_connection, store_state
 from dispatch_spec import DEADLINE_SECONDS_MAX, DEADLINE_SECONDS_MIN
-from ndjson_io import NdjsonCorruptionError, TORN_TAIL_CLOSED, read_ndjson_strict_bytes, scan_ndjson_lines
+from ndjson_io import NdjsonCorruptionError, TORN_TAIL_CLOSED, read_ndjson_strict_bytes, scan_ndjson_stream
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
 from runtime_state_machine import transition_dispatch_idempotent
 
@@ -617,10 +617,10 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     An attempt ends only on its own lifecycle end: a ``dispatch_finished`` whose
     ``project_id``, ``dispatch_id`` and ``attempt`` are exactly its key. A legacy
     ``task_complete`` (also one refusing delivery), another completion type or a
-    line without an ``attempt`` is no end for it (ADR-045 §2).
+    line without an ``attempt`` is no end for it (ADR-045 §2). The ledger is read
+    as a stream; only the end keys and the first start per key are kept (OI-2559).
     """
     ledger = Path(state_dir) / LEDGER_FILENAME
-    records: List[Dict[str, Any]] = []
     try:
         handle = ledger.open("rb")
     except FileNotFoundError:
@@ -628,27 +628,32 @@ def v3_in_flight(state_dir: str | Path, project_id: Optional[str] = None
     except OSError as exc:
         raise AppendReceiptError(
             "ledger_unreadable", EXIT_IO_ERROR, f"cannot read {ledger}: {exc}") from exc
-    errors: List[str] = []
+    corrupt_errors: List[str] = []
+    unkeyable_errors: List[str] = []
+    finished: Set[LifecycleKey] = set()
+    starts: Dict[LifecycleKey, Dict[str, Any]] = {}
     with handle:
-        for number, raw, line, error, torn in scan_ndjson_lines(handle.read()):
+        for number, raw, line, error, torn in scan_ndjson_stream(handle):
             if error is not None:
                 if not torn and not raw.endswith(TORN_TAIL_CLOSED):  # sealed debris, not a hole
-                    errors.append(f"ledger_corrupt line {number}")
+                    corrupt_errors.append(f"ledger_corrupt line {number}")
                 continue
-            if isinstance(line, dict):
-                records.append(line)
-    finished = end_keys(records)
-    starts: Dict[LifecycleKey, Dict[str, Any]] = {}
-    for line in records:
-        if not is_v3_start(line):
-            continue
-        key = lifecycle_key(line)
-        if key is None:
-            errors.append(f"unkeyable dispatch_started: "
-                          f"{(line.get('project_id'), line.get('dispatch_id'))!r} "
-                          f"attempt={line.get('attempt')!r}")
-        elif key not in starts:
-            starts[key] = line
+            if not isinstance(line, dict):
+                continue
+            if is_lifecycle_end(line):
+                key = lifecycle_key(line)
+                if key is not None:
+                    finished.add(key)
+            if is_v3_start(line):
+                key = lifecycle_key(line)
+                if key is None:
+                    unkeyable_errors.append(
+                        f"unkeyable dispatch_started: "
+                        f"{(line.get('project_id'), line.get('dispatch_id'))!r} "
+                        f"attempt={line.get('attempt')!r}")
+                elif key not in starts:
+                    starts[key] = line
+    errors = corrupt_errors + unkeyable_errors  # the pre-stream order: corrupt first
     return tuple(
         InFlightAttempt(pid, did, attempt, start)
         for (pid, did, attempt), start in starts.items()
