@@ -4,6 +4,13 @@ This is the regression gate for PR-11 (the single-entry flip): if a NEW file inv
 script as a delivery path without going through dispatch_bridge, this test fails — forcing it
 to be audited + wired before the flag can flip. Turns the review's "prove exhaustiveness, do
 not assert it" finding into an executable check.
+
+The two whole-tree verdicts (``test_no_unaudited_side_door_callers`` and
+``test_no_unaudited_raw_claude_spawns``) left this file in ADR-053: the blocking Profile A
+step "Side-door exhaustiveness audit" (``.github/workflows/vnx-ci.yml``) already runs
+``dispatch_sidedoor_audit.py`` over the same tree, and ``tests/test_ci_gates_still_exist.py``
+fails when that step disappears. What stays here is the scanner's own behaviour on planted
+and known callers — the unit level the step cannot report on.
 """
 from __future__ import annotations
 
@@ -15,15 +22,6 @@ if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 
 import dispatch_sidedoor_audit as audit_mod  # noqa: E402
-
-
-def test_no_unaudited_side_door_callers():
-    result = audit_mod.audit()
-    assert result["unaudited"] == set(), (
-        "New direct lane-script delivery caller(s) appeared — audit them and wire through "
-        "dispatch_bridge before flipping VNX_SINGLE_ENTRY_DISPATCH: "
-        + ", ".join(sorted(result["unaudited"]))
-    )
 
 
 def test_scan_still_detects_known_callers():
@@ -47,14 +45,6 @@ def test_docstring_mention_is_not_a_caller():
         "scripts/lib/dispatch_cli.py",      # the door itself (excluded)
     ):
         assert reference_only not in found, f"{reference_only} false-flagged as a caller"
-
-
-def test_no_unaudited_raw_claude_spawns():
-    result = audit_mod.audit()
-    assert result["raw_claude_unaudited"] == set(), (
-        "New raw claude -p/--print spawn(s) appeared — route via a governed lane or audit them: "
-        + ", ".join(sorted(result["raw_claude_unaudited"]))
-    )
 
 
 def test_process_cleanup_detector_is_not_flagged_as_raw_claude_spawn():
