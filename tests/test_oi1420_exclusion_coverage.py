@@ -52,6 +52,9 @@ def _run(repo: Path, *args: str) -> subprocess.CompletedProcess:
 def _repo(tmp_path: Path, exclusions: str | None, files: dict[str, str] | None = None) -> Path:
     repo = tmp_path / "repo"
     (repo / "scripts" / "ci").mkdir(parents=True)
+    (repo / "scripts" / "ci" / "profile_a_pytest_args.sh").write_text(
+        'QUARANTINE_K="not flaky"\n', encoding="utf-8"
+    )
     if exclusions is not None:
         (repo / "scripts" / "ci" / "test_exclusions.txt").write_text(exclusions, encoding="utf-8")
     (repo / "tests").mkdir()
@@ -272,6 +275,107 @@ def test_summary_is_unmeasured_when_a_listed_file_is_gone(tmp_path: Path):
     check = _run(repo)
     assert check.returncode == 1, check.stdout
     assert "path does not exist" in check.stdout, check.stdout
+
+
+# ---------------------------------------------------------------------------
+# --summary: the -k quarantine and the serial selections of the args script
+# ---------------------------------------------------------------------------
+
+
+def test_summary_names_the_profile_a_quarantine_expression():
+    """The real -k expression, read from the args script, not copied into the checker."""
+    script = REPO / "scripts" / "ci" / "profile_a_pytest_args.sh"
+    match = re.search(r'^QUARANTINE_K="([^"]*)"', script.read_text(encoding="utf-8"), re.MULTILINE)
+    assert match, "profile_a_pytest_args.sh no longer defines QUARANTINE_K"
+
+    result = _run(REPO, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert f"also not swept: -k {match.group(1)} deselects tests" in result.stdout, result.stdout
+
+
+def test_summary_names_the_args_script_quarantine_and_extra_selections(tmp_path: Path):
+    repo = _repo(
+        tmp_path,
+        "tests/test_a.py  # OI-1: red solo\n",
+        {"tests/test_a.py": "def test_one(): pass\n"},
+    )
+    (repo / "scripts" / "ci" / "profile_a_pytest_args.sh").write_text(
+        'QUARANTINE_K="not flaky"\n'
+        'ARGS=(-k "$QUARANTINE_K" --ignore=tests/test_extra.py '
+        '--deselect=tests/test_x.py::test_y )\n',
+        encoding="utf-8",
+    )
+
+    result = _run(repo, "--summary")
+    out = result.stdout
+
+    assert result.returncode == 0, result.stderr
+    assert "also not swept: -k not flaky deselects tests" in out, out
+    assert "also not swept: --ignore tests/test_extra.py deselects tests" in out, out
+    assert "also not swept: --deselect tests/test_x.py::test_y deselects tests" in out, out
+
+
+def test_summary_names_serial_entries_as_ignore_and_deselect(tmp_path: Path):
+    repo = _repo(
+        tmp_path,
+        "tests/test_a.py  # OI-1: red solo\n",
+        {"tests/test_a.py": "def test_one(): pass\n"},
+    )
+    (repo / "scripts" / "ci" / "serial_tests.txt").write_text(
+        "tests/test_serial.py  # OI-2: xdist-only failure\n"
+        "tests/test_z.py::test_node  # OI-3: order dependent\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, "--summary")
+    out = result.stdout
+
+    assert result.returncode == 0, result.stderr
+    assert "also not swept: --ignore tests/test_serial.py deselects tests" in out, out
+    assert "also not swept: --deselect tests/test_z.py::test_node deselects tests" in out, out
+
+
+def test_summary_is_unmeasured_when_the_args_script_cannot_be_read(tmp_path: Path):
+    repo = _repo(
+        tmp_path,
+        "tests/test_a.py  # OI-1: red solo\n",
+        {"tests/test_a.py": "def test_one(): pass\n"},
+    )
+    (repo / "scripts" / "ci" / "profile_a_pytest_args.sh").write_bytes(b'QUARANTINE_K="\xff\xfe"\n')
+
+    result = _run(repo, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert re.search(r"^test exclusions: unmeasured \(.+\)$", result.stdout, re.MULTILINE), result.stdout
+    assert not _COUNTED_LINE.search(result.stdout), "a partial list must never print a number"
+    assert "also not swept" not in result.stdout, result.stdout
+
+
+def test_summary_does_not_treat_a_non_pytest_dash_m_as_a_deselection(tmp_path: Path):
+    repo = _repo(
+        tmp_path,
+        "tests/test_a.py  # OI-1: red solo\n",
+        {"tests/test_a.py": "def test_one(): pass\n"},
+    )
+    workflow = repo / ".github" / "workflows" / "vnx-ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "jobs:\n"
+        "  profile-a:\n"
+        "    steps:\n"
+        "      - run: |\n"
+        '          git commit -m "x"\n'
+        "          pytest tests\n",
+        encoding="utf-8",
+    )
+
+    result = _run(repo, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert _COUNTED_LINE.search(result.stdout), result.stdout
+    assert not re.search(r"^also not swept: -m ", result.stdout, re.MULTILINE), result.stdout
+    assert '-m "x"' not in result.stdout, result.stdout
 
 
 # ---------------------------------------------------------------------------
