@@ -113,12 +113,16 @@ def worktree_head(wt_path: Any) -> Tuple[Optional[str], Optional[str]]:
 
 
 def build_end_line(
-    handover: Any, *, end_state: str, reason: Optional[str] = None,
+    handover: Any, *, role: str, end_state: str, reason: Optional[str] = None,
     head_sha: Optional[str] = None, no_push: Optional[str] = None,
     spawned_at: Optional[str] = None, session_id: Optional[str] = None,
     timestamp: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The end line for this attempt, keyed on the hand-over (ADR-045 §2/§8).
+
+    ``role`` is keyword-only and has no default: the end line carries the same
+    identity fields as the start line, so a writer that forgets it fails at once
+    instead of publishing a line that cannot be joined to its start.
 
     Optional fields are OMITTED when absent, never written as ``null``: the frozen
     intent is compared field by field, and a pre-spawn ``spawned_at`` must read as
@@ -130,6 +134,7 @@ def build_end_line(
         "project_id": handover.project_id,
         "dispatch_id": handover.dispatch_id,
         "attempt": handover.attempt,
+        "role": role,
         "end_state": end_state,
     }
     for key, value in (("head_sha", head_sha), ("no_push", no_push),
@@ -161,7 +166,7 @@ def finalize_exit(
     reason = reason or default_reason
     head_sha, absent = worktree_head(wt_path)
     line = build_end_line(
-        handover, end_state=end_state, reason=reason, head_sha=head_sha,
+        handover, role=handover.role, end_state=end_state, reason=reason, head_sha=head_sha,
         no_push=None if head_sha else f"{NO_PUSH_PREFIX}{absent}",
         spawned_at=spawned_at, session_id=session_id,
     )

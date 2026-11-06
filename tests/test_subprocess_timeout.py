@@ -27,6 +27,25 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from subprocess_adapter import StreamEvent, SubprocessAdapter
 
+# The stall floor of the production reader (``coerce_chunk_stall``) keeps the chunk timeout at no
+# less than half the total deadline: 0.2 s of silence against a 0.4 s deadline is the smallest
+# pair in which the chunk timeout, and not the deadline, is what fires.
+CHUNK_TIMEOUT_SECONDS = 0.2
+DEADLINE_SECONDS = 0.4
+# One line of output per drip in the deadline test, well inside the deadline above.
+DRIP_SECONDS = 0.05
+
+
+@pytest.fixture(autouse=True)
+def _the_bounds_are_the_ones_the_test_names(monkeypatch):
+    """``read_events_with_timeout`` lets ``VNX_CHUNK_TIMEOUT``/``VNX_TOTAL_DEADLINE`` override its arguments.
+
+    A test that names a bound must not inherit the caller's shell: an orchestrated shell exports
+    ``VNX_TOTAL_DEADLINE`` for its agents, which turned the 0.2 s bound below into a multi-hour wait.
+    """
+    monkeypatch.delenv("VNX_CHUNK_TIMEOUT", raising=False)
+    monkeypatch.delenv("VNX_TOTAL_DEADLINE", raising=False)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,7 +105,7 @@ class TestChunkTimeout:
         adapter._processes["T1"] = proc
 
         events = list(adapter.read_events_with_timeout(
-            "T1", chunk_timeout=0.2, total_deadline=5.0,
+            "T1", chunk_timeout=CHUNK_TIMEOUT_SECONDS, total_deadline=DEADLINE_SECONDS,
         ))
 
         assert events == []
@@ -110,14 +129,17 @@ class TestTotalDeadline:
         proc.returncode = None
         proc.stdout = os.fdopen(r_fd, "rb")
         adapter._processes["T1"] = proc
+        finished = threading.Event()
 
-        # Background thread: drip one event every 0.15s
+        # Background thread: drip one event every DRIP_SECONDS until the read ends.
         def drip():
             try:
-                for i in range(50):  # more than enough to exceed deadline
+                for i in range(50):  # more than enough to exceed the deadline
+                    if finished.is_set():
+                        return
                     line = _event_line("text", text=f"msg-{i}")
                     os.write(w_fd, line)
-                    time.sleep(0.15)
+                    time.sleep(DRIP_SECONDS)
             except OSError:
                 pass  # pipe closed by stop()
             finally:
@@ -130,7 +152,7 @@ class TestTotalDeadline:
         t.start()
 
         events = list(adapter.read_events_with_timeout(
-            "T1", chunk_timeout=2.0, total_deadline=0.5,
+            "T1", chunk_timeout=1.0, total_deadline=DEADLINE_SECONDS,
         ))
 
         # Should have gotten some events but not all 50
@@ -138,7 +160,9 @@ class TestTotalDeadline:
         assert len(events) < 50
         assert "T1" not in adapter._processes
 
+        finished.set()
         t.join(timeout=2)
+        assert not t.is_alive(), "the drip thread writes after the reader is gone"
 
 
 class TestNormalCompletion:

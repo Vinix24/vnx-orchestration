@@ -177,7 +177,7 @@ def _begin(state_dir: Path, dispatch_id: str) -> dispatch_start.Handover:
 def _handover(dispatch_id: str, attempt: int = 1) -> dispatch_start.Handover:
     return dispatch_start.Handover(project_id=PROJECT, dispatch_id=dispatch_id, attempt=attempt,
                                    lifecycle_mode="v3", door_pid=0, door_started_at="",
-                                   started_at=START)
+                                   started_at=START, role=ROLE)
 
 
 def _finish(state_dir: Path, handover, end_state: str = "completed", **extra):
@@ -186,7 +186,8 @@ def _finish(state_dir: Path, handover, end_state: str = "completed", **extra):
     return lifecycle.finalize(
         state_dir=state_dir, project_id=handover.project_id,
         dispatch_id=handover.dispatch_id, attempt=handover.attempt, end_state=end_state,
-        end_line=dispatch_exit.build_end_line(handover, end_state=end_state, **extra),
+        end_line=dispatch_exit.build_end_line(handover, role=handover.role,
+                                              end_state=end_state, **extra),
     )
 
 

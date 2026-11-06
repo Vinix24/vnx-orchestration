@@ -3,11 +3,16 @@
 
 Covers:
 - The scanner flags a planted ``__file__``-derived ``.vnx-data`` literal.
-- The current repo tree passes (all remaining sites grandfathered/exempt).
 - A ``state_dir.parent.parent`` derived from a runtime Path param is NOT flagged.
 - Comments and docstrings mentioning ``.vnx-data`` never trip the AST scanner.
 - The canonical resolvers (vnx_paths.py / project_root.py) are exempt.
 - A call routed through the resolver is not flagged.
+
+The live-tree verdict (``test_current_tree_passes``) left this file in ADR-053: the blocking
+Profile A step "Central-mode path gate" (``.github/workflows/vnx-ci.yml``) already runs
+``scripts/check_no_file_derived_data_paths.py`` over the same tree, and
+``tests/test_ci_gates_still_exist.py`` fails when that step disappears. What stays here is
+the scanner's behaviour on planted trees, which the step cannot report on.
 """
 from __future__ import annotations
 
@@ -318,17 +323,6 @@ def test_grandfathered_resolver_anchor_allows_current_but_new_line_fails(tmp_pat
 # ---------------------------------------------------------------------------
 # scan_dir integration tests
 # ---------------------------------------------------------------------------
-
-
-def test_current_tree_passes() -> None:
-    """The live tree must be clean: every remaining site is grandfathered/exempt."""
-    violations = scan_dir(VNX_ROOT)
-    if violations:
-        lines = [f"  {rel}:{ln}: {seg}" for rel, ln, seg in violations]
-        pytest.fail(
-            "central-mode path gate found un-grandfathered violation(s):\n"
-            + "\n".join(lines)
-        )
 
 
 def test_planted_literal_in_lib_fails(tmp_path: Path) -> None:

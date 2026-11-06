@@ -4032,6 +4032,641 @@ def _fulfill_retire(
     outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
     return outcome
 
+
+def _fulfill_stay_pending_live(
+    path: Path,
+    decision: Dict[str, Any],
+    outcome: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # OI-1532: the branch is gone on GitHub but the dispatch is still
+    # RUNNING (its occupancy lock is held by a live process). It has simply
+    # not pushed its branch yet. Retiring here was the defect this dispatch
+    # fixes (live on 20260830-124500-sidedoor, 13 min runtime, held by
+    # pid 82207). Stays pending — NEVER retired — with a named reason so
+    # the recorded state says "live, not pushed" and not a generic wait.
+    branch_name = f"dispatch/{dispatch_id}"
+    mismatch_note = _rejected_evidence_note(gate, decision)
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        branch=branch_name,
+        attempts=attempts,
+        last_attempt_at=now,
+        reason=REASON_NO_PR_BRANCH_GONE_LIVE,
+        reason_detail=(
+            f"dispatch {dispatch_id} has no PR yet and its head branch "
+            f"{branch_name} is not on GitHub, but the dispatch's occupancy "
+            f"lock is held by a live process — it is still running and has "
+            f"not pushed yet. Staying pending; a live dispatch must never be "
+            f"retired (OI-1532).{mismatch_note}"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = (
+        "dispatch still running (occupancy lock held) — not pushed yet, "
+        "NOT retired (OI-1532)"
+    )
+    return outcome
+
+
+def _fulfill_stay_pending_dispatch_live(
+    path: Path,
+    decision: Dict[str, Any],
+    resolution: PrResolution,
+    outcome: Dict[str, Any],
+    *,
+    state_dir: Path,
+    dispatch_id: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # Fix-forward defect (2026-09-30): the PR is resolved and OPEN, but
+    # the obligation's OWN dispatch is positively live — a held occupancy
+    # lock. A fix-forward dispatch binds to the existing PR immediately,
+    # so the current head is the PREVIOUS round's code until it pushes.
+    # Gating that head would waste a full run and book the new obligation
+    # with a verdict about code that does not contain the dispatch's
+    # changes. Stays pending under its own reason, never terminal, and is
+    # deliberately UNBOUNDED by attempts (the kernel releases the lock the
+    # instant the holder exits, so the state self-corrects without a
+    # timer — same reasoning as the AWAITING branch's stay_pending_live).
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        attempts=attempts,
+        last_attempt_at=now,
+        reason=REASON_DISPATCH_STILL_RUNNING,
+        reason_detail=(
+            f"dispatch {dispatch_id} is still running (its occupancy lock "
+            f"at {_occupancy_lock_path(state_dir, dispatch_id)} is held by "
+            f"a live process) and has not pushed yet, so PR "
+            f"#{resolution.pr_number}'s current head is the previous "
+            f"round's code. Not gating it and not booking any verdict "
+            f"against it — the obligation stays pending until the dispatch "
+            f"has pushed and exited, then it is evaluated against the new "
+            f"head."
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = decision.get("detail") or (
+        "dispatch still running (occupancy lock held) — not gated against "
+        "the previous head"
+    )
+    return outcome
+
+
+def _fulfill_stay_pending_unmeasured(
+    path: Path,
+    decision: Dict[str, Any],
+    outcome: Dict[str, Any],
+    *,
+    state_dir: Path,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # OI-1532 third state: the branch is gone but liveness could not be
+    # measured (no occupancy lock file — the dispatch never created a
+    # worktree, a dry-run, a hand-registered obligation, or a lane without
+    # occupancy locks — or the flock probe itself failed). This is NOT
+    # "dead" and NOT "alive": it is a THIRD answer. Retiring would
+    # reintroduce the defect for a live dispatch whose lock file is absent;
+    # a silent stay_pending would hide a genuinely dead dispatch. The safe
+    # choice is to stay pending (never close on ambiguous evidence, per
+    # the OI-1388 docstring) and record the unmeasured state VISIBLY so
+    # the freshness monitor and any reader can tell it apart from a normal
+    # wait. OI-1587: this wait IS bounded — the decision above escalates
+    # it to ``escalate_stay_pending_unmeasured`` once the measurement has
+    # failed ``_STAY_PENDING_ESCALATION_ATTEMPTS`` times in a row (the SAME
+    # bound the genuine-wait branch uses, never a second one).
+    branch_name = f"dispatch/{dispatch_id}"
+    mismatch_note = _rejected_evidence_note(gate, decision)
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        branch=branch_name,
+        attempts=attempts,
+        last_attempt_at=now,
+        reason=REASON_NO_PR_BRANCH_GONE_UNMEASURED,
+        reason_detail=(
+            f"dispatch {dispatch_id} has no PR yet and its head branch "
+            f"{branch_name} is not on GitHub, and liveness could not be "
+            f"measured (no occupancy lock file at "
+            f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
+            f"failed). Staying pending rather than retiring on ambiguous "
+            f"evidence — a live dispatch must never be closed unmeasured "
+            f"(OI-1532).{mismatch_note}"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = (
+        "dispatch branch gone but liveness unmeasurable — staying pending "
+        "rather than retiring on ambiguous evidence (OI-1532)"
+    )
+    return outcome
+
+
+def _fulfill_escalate_stay_pending_unmeasured(
+    path: Path,
+    decision: Dict[str, Any],
+    outcome: Dict[str, Any],
+    *,
+    state_dir: Path,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # OI-1587: the branch is gone AND liveness could not be measured for
+    # _STAY_PENDING_ESCALATION_ATTEMPTS consecutive attempts (≈24h at the
+    # 900s cadence). An unmeasured state once is "unknown"; unmeasured 96
+    # times in a row is a defect in the MEASUREMENT itself — no amount of
+    # extra waiting fixes a probe that never answers, and retiring is
+    # still forbidden (ambiguous evidence never closes a live dispatch).
+    # Escalate to the SAME loud terminal not_executable the other bounded
+    # branches book, under its OWN reason so the record says the liveness
+    # measurement failed — never the generic stay_pending_timeout, which
+    # would read as "the dispatch simply outwaited a PR".
+    branch_name = f"dispatch/{dispatch_id}"
+    mismatch_note = _rejected_evidence_note(gate, decision)
+    update_obligation(
+        path,
+        status=STATUS_NOT_EXECUTABLE,
+        branch=branch_name,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=now,
+        reason="stay_pending_unmeasured_timeout",
+        reason_detail=(
+            f"dispatch {dispatch_id} has no PR, its head branch "
+            f"{branch_name} is not on GitHub, and liveness could not be "
+            f"measured (no occupancy lock file at "
+            f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
+            f"failed) for {attempts} consecutive attempts (≈ "
+            f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence). An "
+            "unmeasurable state that never resolves is a measurement "
+            "defect, not a wait (OI-1587). Restore the occupancy lock "
+            "lane for this dispatch class, or reset this obligation to "
+            f"pending if the dispatch is known to be live.{mismatch_note}"
+        ),
+    )
+    outcome["action"] = "not_executable"
+    outcome["detail"] = (
+        f"liveness unmeasurable for {attempts} consecutive attempts — "
+        "escalating the unbounded unmeasured wait to a loud terminal "
+        "outcome (OI-1587)"
+    )
+    return outcome
+
+
+def _fulfill_escalate_stay_pending(
+    path: Path,
+    outcome: Dict[str, Any],
+    *,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # OI-1532: the genuine-wait branch (branch exists or its existence
+    # undetermined) used to retry FOREVER — no bound, no escalation.
+    # Measured on mission-control 2026-08-30: 11 obligations on 776
+    # attempts (8+ days) with nothing alarming. After the stay-pending
+    # threshold a wait that never produced a PR escalates to the SAME loud
+    # terminal not_executable the other bounded branches use, reusing the
+    # SAME constant — never a second, drift-prone bound. (The two sibling
+    # branches are NOT escalated here: stay_pending_live is deliberately
+    # unbounded — kernel-enforced proof of a live process — and
+    # stay_pending_unmeasured escalates under its own reason just above,
+    # OI-1587.)
+    update_obligation(
+        path,
+        status=STATUS_NOT_EXECUTABLE,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=now,
+        reason="stay_pending_timeout",
+        reason_detail=(
+            f"obligation waited {attempts} attempts (≈ "
+            f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence) for "
+            f"a PR that never appeared, with the branch existing or "
+            f"undetermined. The unbounded wait is closed loudly: either "
+            f"the dispatch is stuck (its gate will never run) or it was "
+            f"never going to produce a PR. Reset to pending if the "
+            f"dispatch is known to be live (OI-1532)."
+        ),
+    )
+    outcome["action"] = "not_executable"
+    outcome["detail"] = (
+        f"obligation waited {attempts} attempts for a PR that never "
+        f"appeared — escalating the unbounded wait to a loud terminal "
+        f"outcome (OI-1532)"
+    )
+    return outcome
+
+
+def _fulfill_stay_pending(
+    path: Path,
+    outcome: Dict[str, Any],
+    *,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # The repo resolves and gh works, but no PR exists yet for the head
+    # branch, and the branch is still there (or its existence could not be
+    # determined) — a genuine wait: stays pending for the freshness
+    # monitor, never closed on ambiguous evidence. OI-1532: now bounded
+    # — past _STAY_PENDING_ESCALATION_ATTEMPTS the decision above
+    # escalates loudly instead of retrying forever.
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        attempts=attempts,
+        last_attempt_at=now,
+    )
+    outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
+    return outcome
+
+
+def _fulfill_by_takeover(
+    path: Path,
+    outcome: Dict[str, Any],
+    takeover_hit: Tuple[str, Path, Dict[str, Any], List[str]],
+    *,
+    manager: Any,
+    gate: str,
+    pr_number: int,
+    branch: str,
+    attempts: int, now: str,
+) -> Dict[str, Any]:
+    """D2e: book the successor gate's decided verdict against the declared gate's obligation."""
+    successor_gate, successor_path, successor_record, hops = takeover_hit
+    passed, verdict_reason = _gate_is_pass(successor_record)
+    terminal = STATUS_FULFILLED if passed else STATUS_FAILED
+    hop_chain = " -> ".join(hops)
+    reason = REASON_FULFILLED_BY_TAKEOVER if passed else REASON_FAILED_BY_TAKEOVER
+    reason_detail = (
+        f"{gate} never produced a decided verdict of its own for PR "
+        f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
+        f"already substituted {successor_gate} as the reader, and "
+        f"{successor_gate} produced a complete-evidence verdict "
+        f"({verdict_reason}). Booked against {gate}'s obligation with "
+        f"resolved_by_gate={successor_gate!r} (D2e)."
+    )
+    updated = _book_obligation_outcome(
+        path,
+        status=terminal,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(successor_path),
+        resolved_by_gate=successor_gate,
+        takeover_hops=hops,
+        fulfilled_by=successor_gate,
+        takeover_gate=successor_gate,
+        evidence_result_path=str(successor_path),
+        reason=reason,
+        reason_detail=reason_detail,
+    )
+    outcome["action"] = updated.get("status", terminal)
+    outcome["request_path"] = updated.get("request_path")
+    outcome["result_path"] = updated.get("result_path")
+    outcome["resolved_by_gate"] = successor_gate
+    outcome["has_required_failure"] = not passed
+    return outcome
+
+
+def _drop_provider_not_installed_result(
+    result_file: Path,
+    result_status: str,
+    result_reason: str,
+    *,
+    gate: str, pr_number: int,
+) -> None:
+    """OI-1469: drop the provider_not_installed record this run wrote — an environment fact, not PR evidence."""
+    # OI-1469: "provider_not_installed" means the required CLI binary was
+    # missing from THIS RUNNER's own process environment (e.g. a
+    # launchd/cron PATH that never sourced it) at the moment the shared
+    # gate engine checked ``shutil.which`` — a fact about the runner, not
+    # about the PR. Booking it in results/ would let a merge-blocking
+    # evidence trail be polluted by whichever process happened to run
+    # last without the binary on PATH (measured live: PR #1694). Remove
+    # the record this fulfilment attempt just caused the engine to write
+    # for exactly that reason — the obligation still stays pending below
+    # with a named reason, so a later run from a properly configured
+    # environment can still fulfil it and write a real result.
+    if result_status == STATUS_NOT_EXECUTABLE and result_reason == "provider_not_installed":
+        try:
+            if result_file.exists():
+                result_file.unlink()
+                _LOG.warning(
+                    "gate_obligation_runner: removed provider_not_installed "
+                    "result for pr=%s gate=%s — provider availability is an "
+                    "environment fact, not PR evidence (OI-1469)",
+                    pr_number, gate,
+                )
+        except OSError as exc:
+            _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
+
+
+def _fulfill_temporary_refusal(
+    path: Path,
+    outcome: Dict[str, Any],
+    temp_reason: str,
+    temp_detail: str,
+    *,
+    manager: Any, gate: str, pr_number: int,
+    branch: str, attempts: int, now: str,
+    result_file: Path, result_status: str, result_reason: str,
+    result_data: Optional[Dict[str, Any]],
+    head_sha_before_run: str, dispatch_id: str,
+) -> Dict[str, Any]:
+    """A temporary refusal stays pending under a bounded retry term, then escalates loudly."""
+    # Same shape as the `unresolvable` PR-resolution path: stays
+    # pending under a bounded retry term, then escalates loudly
+    # (OI-1384) — never burns the obligation on the first temporary
+    # refusal.
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason=temp_reason,
+        reason_detail=temp_detail,
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = temp_detail
+    if attempts >= _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS:
+        escalation_detail = (
+            f"{gate} stayed temporarily unavailable ({temp_reason}) for "
+            f"{attempts} attempts (last status={result_status!r}, "
+            f"reason={result_reason!r}) — escalating to a loud terminal failure"
+        )
+        # OI-1721: the parked case must read the shared composed
+        # constant so the reopen script and this writer can never
+        # drift on the literal string; the other temporary refusals
+        # keep the generic "<temp_reason>_timeout" composition.
+        escalation_reason = (
+            REASON_GATE_PARKED_TIMEOUT
+            if temp_reason == REASON_GATE_PARKED
+            else f"{temp_reason}_timeout"
+        )
+        _book_obligation_outcome(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            pr_number=pr_number,
+            branch=branch,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=utc_now_iso(),
+            request_path=str(manager._request_path(gate, pr_number)),
+            result_path=str(result_file),
+            reason=escalation_reason,
+            reason_detail=escalation_detail,
+        )
+        outcome["action"] = "not_executable"
+        outcome["detail"] = escalation_detail
+    # R10: a reviewer that ran without a bookable verdict counts toward
+    # the retry cap of this head; the run that reaches it parks the obligation.
+    _book_reviewer_run(
+        path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
+        dispatch_id=dispatch_id,
+    )
+    return outcome
+
+
+def _fulfill_runner_error(
+    state_dir: Path,
+    path: Path,
+    outcome: Dict[str, Any],
+    exc: BaseException,
+    *,
+    gate: str,
+    pr_number: int,
+    dispatch_id: str,
+    branch: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """A gate that cannot run is a loud registered outcome, never an exception."""
+    result_payload = _record_loud_not_executable(
+        state_dir,
+        gate=gate,
+        pr_number=pr_number,
+        dispatch_id=dispatch_id,
+        reason="runner_error",
+        reason_detail=f"{type(exc).__name__}: {exc}",
+    )
+    _book_obligation_outcome(
+        path,
+        status=STATUS_NOT_EXECUTABLE,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        result_path=str(
+            Path(state_dir) / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+        ),
+        reason="runner_error",
+        reason_detail=result_payload.get("reason_detail"),
+    )
+    outcome["action"] = "not_executable"
+    outcome["detail"] = result_payload.get("reason_detail")
+    return outcome
+
+
+def _fulfill_declared_sha_mismatch(
+    path: Path, outcome: Dict[str, Any], declared_detail: str, *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path,
+) -> Dict[str, Any]:
+    """A declared verdict about another commit, with no current successor, stays pending."""
+    # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
+    # record looks decided enough to fall straight through to the
+    # unconditional booking below (its status is a pass/known-terminal
+    # shape) -- but "looks decided" is not "is current". A MISMATCH or
+    # UNKNOWN_SHA declared_kind here means the takeover walk above ALSO
+    # found nothing usable (a match would have short-circuited via
+    # takeover_hit, or declared_kind itself would already be USABLE and
+    # skip this branch entirely) -- so this is the dead end: neither the
+    # declared gate's own evidence nor any successor's is provably about
+    # the current head. Never fall through to the unconditional
+    # STATUS_FULFILLED default on that basis (measured live, PR #1736: a
+    # stale codex_gate PASS from an earlier dispatch against the same PR
+    # booked fulfilled with zero takeover, zero rescue markers).
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="stale_evidence_sha_mismatch",
+        reason_detail=(
+            f"{gate}'s own result for PR #{pr_number} is decided but "
+            f"about a DIFFERENT commit than the PR head "
+            f"({declared_detail}) and no takeover successor produced "
+            "current evidence either — staying pending, never booking "
+            "a verdict about other code (OI-1571 tak 3)"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = declared_detail
+    return outcome
+
+
+def _fulfill_declared_unknown_sha(
+    path: Path, outcome: Dict[str, Any], declared_detail: str, *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path,
+) -> Dict[str, Any]:
+    """A declared verdict whose sha binding cannot be verified, with no successor, stays pending."""
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="sha_binding_unverifiable",
+        reason_detail=(
+            f"{gate}'s own result for PR #{pr_number} is decided but "
+            f"its sha binding to the PR head could not be verified "
+            f"({declared_detail}) and no takeover successor produced "
+            "verifiable evidence either — suspending judgement "
+            "(OI-1571 tak 3) rather than silently accepting or "
+            "refusing it"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = declared_detail
+    return outcome
+
+
+def _fulfill_result_head_moved(
+    path: Path, outcome: Dict[str, Any], *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path, result_commit_sha: str, head_sha: str,
+    head_sha_before_run: str,
+) -> Dict[str, Any]:
+    """A result about a commit the re-resolved head no longer is stays pending."""
+    # Fix-forward defect (2026-09-30): the result is judged against the
+    # head re-resolved AFTER the run. A result whose recorded commit is
+    # provably not that head is about superseded code — it must never be
+    # booked, even when its evidence is too incomplete for
+    # _has_decided_evidence to classify it as a decided MISMATCH above
+    # (the two branches above cover complete-evidence records; this one
+    # covers the rest without ever weakening them). An UNKNOWN binding
+    # (empty sha on either side) is deliberately NOT a mismatch: it keeps
+    # the existing "binding unverifiable" handling, exactly as a complete
+    # record with a missing sha does above.
+    head_moved_detail = (
+        f"{gate} result for PR #{pr_number} records commit "
+        f"{result_commit_sha[:8] or '?'} but the PR head was "
+        f"re-resolved as {head_sha[:8] or '?'} after the gate ran (it "
+        f"was {head_sha_before_run[:8] or '?'} before) — the head "
+        "moved while the gate ran, so this verdict is about "
+        "superseded code and is never booked"
+    )
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="stale_evidence_sha_mismatch",
+        reason_detail=(
+            f"{head_moved_detail} and no takeover successor produced "
+            "current evidence either — staying pending, never booking "
+            "a verdict about other code (defect fixed 2026-09-30)"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = head_moved_detail
+    return outcome
+
+
+def _fulfill_book_declared_result(
+    path: Path, outcome: Dict[str, Any], *,
+    result: Dict[str, Any], result_data: Optional[Dict[str, Any]], result_status: str,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path, dispatch_id: str,
+) -> Dict[str, Any]:
+    """Book the declared gate's own run result, mirroring the status actually persisted."""
+    # OI-1943: a review rejection is written as status ``completed`` plus
+    # blocking findings, so the status string alone would book it fulfilled.
+    # The shared predicate decides; the reason is never null for it.
+    rejected = (
+        result_data is not None
+        and result_status not in TERMINAL_STATUSES
+        and _gate_decided_verdict(result_data) == "fail"
+    )
+    if rejected:
+        terminal = STATUS_FAILED
+        booking_reason = (
+            "required_failure" if result.get("has_required_failure")
+            else REASON_FAILED_BY_GATE_VERDICT
+        )
+        booking_detail = _gate_is_pass(result_data)[1]
+    else:
+        terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
+        booking_reason = None if not result.get("has_required_failure") else "required_failure"
+        booking_detail = None if terminal == STATUS_FULFILLED else f"result status: {result_status}"
+    fast_fulfillment_warning = None
+    if terminal in (STATUS_FULFILLED, STATUS_FAILED):
+        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+            result_file, gate, pr_number, dispatch_id,
+        )
+    updated = _book_obligation_outcome(
+        path,
+        status=terminal,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason=booking_reason,
+        reason_detail=booking_detail,
+        fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
+        takeover_gate=None,
+        evidence_result_path=(
+            str(result_file) if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None
+        ),
+    )
+    # Mirror the status actually persisted to disk — never a hardcoded
+    # "fulfilled" label, which would lie about a not_executable/failed
+    # record and let a caller reading only the label count a burned
+    # obligation as vervuld (OI-1400 residu, defect 2).
+    outcome["action"] = updated.get("status", terminal)
+    outcome["request_path"] = updated.get("request_path")
+    outcome["result_path"] = updated.get("result_path")
+    outcome["has_required_failure"] = bool(result.get("has_required_failure"))
+    if fast_fulfillment_warning:
+        outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
+    return outcome
+
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
@@ -4104,206 +4739,26 @@ def fulfill_obligation(
         return _fulfill_retire(path, decision, resolution, outcome, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending_live":
-        # OI-1532: the branch is gone on GitHub but the dispatch is still
-        # RUNNING (its occupancy lock is held by a live process). It has simply
-        # not pushed its branch yet. Retiring here was the defect this dispatch
-        # fixes (live on 20260830-124500-sidedoor, 13 min runtime, held by
-        # pid 82207). Stays pending — NEVER retired — with a named reason so
-        # the recorded state says "live, not pushed" and not a generic wait.
-        branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = _rejected_evidence_note(gate, decision)
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            branch=branch_name,
-            attempts=attempts,
-            last_attempt_at=now,
-            reason=REASON_NO_PR_BRANCH_GONE_LIVE,
-            reason_detail=(
-                f"dispatch {dispatch_id} has no PR yet and its head branch "
-                f"{branch_name} is not on GitHub, but the dispatch's occupancy "
-                f"lock is held by a live process — it is still running and has "
-                f"not pushed yet. Staying pending; a live dispatch must never be "
-                f"retired (OI-1532).{mismatch_note}"
-            ),
-        )
-        outcome["action"] = "pending"
-        outcome["detail"] = (
-            "dispatch still running (occupancy lock held) — not pushed yet, "
-            "NOT retired (OI-1532)"
-        )
-        return outcome
+        return _fulfill_stay_pending_live(
+            path, decision, outcome, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending_dispatch_live":
-        # Fix-forward defect (2026-09-30): the PR is resolved and OPEN, but
-        # the obligation's OWN dispatch is positively live — a held occupancy
-        # lock. A fix-forward dispatch binds to the existing PR immediately,
-        # so the current head is the PREVIOUS round's code until it pushes.
-        # Gating that head would waste a full run and book the new obligation
-        # with a verdict about code that does not contain the dispatch's
-        # changes. Stays pending under its own reason, never terminal, and is
-        # deliberately UNBOUNDED by attempts (the kernel releases the lock the
-        # instant the holder exits, so the state self-corrects without a
-        # timer — same reasoning as the AWAITING branch's stay_pending_live).
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            attempts=attempts,
-            last_attempt_at=now,
-            reason=REASON_DISPATCH_STILL_RUNNING,
-            reason_detail=(
-                f"dispatch {dispatch_id} is still running (its occupancy lock "
-                f"at {_occupancy_lock_path(state_dir, dispatch_id)} is held by "
-                f"a live process) and has not pushed yet, so PR "
-                f"#{resolution.pr_number}'s current head is the previous "
-                f"round's code. Not gating it and not booking any verdict "
-                f"against it — the obligation stays pending until the dispatch "
-                f"has pushed and exited, then it is evaluated against the new "
-                f"head."
-            ),
-        )
-        outcome["action"] = "pending"
-        outcome["detail"] = decision.get("detail") or (
-            "dispatch still running (occupancy lock held) — not gated against "
-            "the previous head"
-        )
-        return outcome
+        return _fulfill_stay_pending_dispatch_live(
+            path, decision, resolution, outcome, state_dir=state_dir, dispatch_id=dispatch_id, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending_unmeasured":
-        # OI-1532 third state: the branch is gone but liveness could not be
-        # measured (no occupancy lock file — the dispatch never created a
-        # worktree, a dry-run, a hand-registered obligation, or a lane without
-        # occupancy locks — or the flock probe itself failed). This is NOT
-        # "dead" and NOT "alive": it is a THIRD answer. Retiring would
-        # reintroduce the defect for a live dispatch whose lock file is absent;
-        # a silent stay_pending would hide a genuinely dead dispatch. The safe
-        # choice is to stay pending (never close on ambiguous evidence, per
-        # the OI-1388 docstring) and record the unmeasured state VISIBLY so
-        # the freshness monitor and any reader can tell it apart from a normal
-        # wait. OI-1587: this wait IS bounded — the decision above escalates
-        # it to ``escalate_stay_pending_unmeasured`` once the measurement has
-        # failed ``_STAY_PENDING_ESCALATION_ATTEMPTS`` times in a row (the SAME
-        # bound the genuine-wait branch uses, never a second one).
-        branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = _rejected_evidence_note(gate, decision)
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            branch=branch_name,
-            attempts=attempts,
-            last_attempt_at=now,
-            reason=REASON_NO_PR_BRANCH_GONE_UNMEASURED,
-            reason_detail=(
-                f"dispatch {dispatch_id} has no PR yet and its head branch "
-                f"{branch_name} is not on GitHub, and liveness could not be "
-                f"measured (no occupancy lock file at "
-                f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
-                f"failed). Staying pending rather than retiring on ambiguous "
-                f"evidence — a live dispatch must never be closed unmeasured "
-                f"(OI-1532).{mismatch_note}"
-            ),
-        )
-        outcome["action"] = "pending"
-        outcome["detail"] = (
-            "dispatch branch gone but liveness unmeasurable — staying pending "
-            "rather than retiring on ambiguous evidence (OI-1532)"
-        )
-        return outcome
+        return _fulfill_stay_pending_unmeasured(
+            path, decision, outcome, state_dir=state_dir, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "escalate_stay_pending_unmeasured":
-        # OI-1587: the branch is gone AND liveness could not be measured for
-        # _STAY_PENDING_ESCALATION_ATTEMPTS consecutive attempts (≈24h at the
-        # 900s cadence). An unmeasured state once is "unknown"; unmeasured 96
-        # times in a row is a defect in the MEASUREMENT itself — no amount of
-        # extra waiting fixes a probe that never answers, and retiring is
-        # still forbidden (ambiguous evidence never closes a live dispatch).
-        # Escalate to the SAME loud terminal not_executable the other bounded
-        # branches book, under its OWN reason so the record says the liveness
-        # measurement failed — never the generic stay_pending_timeout, which
-        # would read as "the dispatch simply outwaited a PR".
-        branch_name = f"dispatch/{dispatch_id}"
-        mismatch_note = _rejected_evidence_note(gate, decision)
-        update_obligation(
-            path,
-            status=STATUS_NOT_EXECUTABLE,
-            branch=branch_name,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            reason="stay_pending_unmeasured_timeout",
-            reason_detail=(
-                f"dispatch {dispatch_id} has no PR, its head branch "
-                f"{branch_name} is not on GitHub, and liveness could not be "
-                f"measured (no occupancy lock file at "
-                f"{_occupancy_lock_path(state_dir, dispatch_id)} or the probe "
-                f"failed) for {attempts} consecutive attempts (≈ "
-                f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence). An "
-                "unmeasurable state that never resolves is a measurement "
-                "defect, not a wait (OI-1587). Restore the occupancy lock "
-                "lane for this dispatch class, or reset this obligation to "
-                f"pending if the dispatch is known to be live.{mismatch_note}"
-            ),
-        )
-        outcome["action"] = "not_executable"
-        outcome["detail"] = (
-            f"liveness unmeasurable for {attempts} consecutive attempts — "
-            "escalating the unbounded unmeasured wait to a loud terminal "
-            "outcome (OI-1587)"
-        )
-        return outcome
+        return _fulfill_escalate_stay_pending_unmeasured(
+            path, decision, outcome, state_dir=state_dir, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "escalate_stay_pending":
-        # OI-1532: the genuine-wait branch (branch exists or its existence
-        # undetermined) used to retry FOREVER — no bound, no escalation.
-        # Measured on mission-control 2026-08-30: 11 obligations on 776
-        # attempts (8+ days) with nothing alarming. After the stay-pending
-        # threshold a wait that never produced a PR escalates to the SAME loud
-        # terminal not_executable the other bounded branches use, reusing the
-        # SAME constant — never a second, drift-prone bound. (The two sibling
-        # branches are NOT escalated here: stay_pending_live is deliberately
-        # unbounded — kernel-enforced proof of a live process — and
-        # stay_pending_unmeasured escalates under its own reason just above,
-        # OI-1587.)
-        update_obligation(
-            path,
-            status=STATUS_NOT_EXECUTABLE,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            reason="stay_pending_timeout",
-            reason_detail=(
-                f"obligation waited {attempts} attempts (≈ "
-                f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence) for "
-                f"a PR that never appeared, with the branch existing or "
-                f"undetermined. The unbounded wait is closed loudly: either "
-                f"the dispatch is stuck (its gate will never run) or it was "
-                f"never going to produce a PR. Reset to pending if the "
-                f"dispatch is known to be live (OI-1532)."
-            ),
-        )
-        outcome["action"] = "not_executable"
-        outcome["detail"] = (
-            f"obligation waited {attempts} attempts for a PR that never "
-            f"appeared — escalating the unbounded wait to a loud terminal "
-            f"outcome (OI-1532)"
-        )
-        return outcome
+        return _fulfill_escalate_stay_pending(path, outcome, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending":
-        # The repo resolves and gh works, but no PR exists yet for the head
-        # branch, and the branch is still there (or its existence could not be
-        # determined) — a genuine wait: stays pending for the freshness
-        # monitor, never closed on ambiguous evidence. OI-1532: now bounded
-        # — past _STAY_PENDING_ESCALATION_ATTEMPTS the decision above
-        # escalates loudly instead of retrying forever.
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            attempts=attempts,
-            last_attempt_at=now,
-        )
-        outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
-        return outcome
+        return _fulfill_stay_pending(path, outcome, attempts=attempts, now=now)
 
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
@@ -4425,304 +4880,53 @@ def fulfill_obligation(
             takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
 
         if takeover_hit is not None:
-            successor_gate, successor_path, successor_record, hops = takeover_hit
-            passed, verdict_reason = _gate_is_pass(successor_record)
-            terminal = STATUS_FULFILLED if passed else STATUS_FAILED
-            hop_chain = " -> ".join(hops)
-            reason = REASON_FULFILLED_BY_TAKEOVER if passed else REASON_FAILED_BY_TAKEOVER
-            reason_detail = (
-                f"{gate} never produced a decided verdict of its own for PR "
-                f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
-                f"already substituted {successor_gate} as the reader, and "
-                f"{successor_gate} produced a complete-evidence verdict "
-                f"({verdict_reason}). Booked against {gate}'s obligation with "
-                f"resolved_by_gate={successor_gate!r} (D2e)."
+            return _fulfill_by_takeover(
+                path, outcome, takeover_hit, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now,
             )
-            updated = _book_obligation_outcome(
-                path,
-                status=terminal,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                resolved_at=utc_now_iso(),
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(successor_path),
-                resolved_by_gate=successor_gate,
-                takeover_hops=hops,
-                fulfilled_by=successor_gate,
-                takeover_gate=successor_gate,
-                evidence_result_path=str(successor_path),
-                reason=reason,
-                reason_detail=reason_detail,
-            )
-            outcome["action"] = updated.get("status", terminal)
-            outcome["request_path"] = updated.get("request_path")
-            outcome["result_path"] = updated.get("result_path")
-            outcome["resolved_by_gate"] = successor_gate
-            outcome["has_required_failure"] = not passed
-            return outcome
 
-        # OI-1469: "provider_not_installed" means the required CLI binary was
-        # missing from THIS RUNNER's own process environment (e.g. a
-        # launchd/cron PATH that never sourced it) at the moment the shared
-        # gate engine checked ``shutil.which`` — a fact about the runner, not
-        # about the PR. Booking it in results/ would let a merge-blocking
-        # evidence trail be polluted by whichever process happened to run
-        # last without the binary on PATH (measured live: PR #1694). Remove
-        # the record this fulfilment attempt just caused the engine to write
-        # for exactly that reason — the obligation still stays pending below
-        # with a named reason, so a later run from a properly configured
-        # environment can still fulfil it and write a real result.
-        if result_status == STATUS_NOT_EXECUTABLE and result_reason == "provider_not_installed":
-            try:
-                if result_file.exists():
-                    result_file.unlink()
-                    _LOG.warning(
-                        "gate_obligation_runner: removed provider_not_installed "
-                        "result for pr=%s gate=%s — provider availability is an "
-                        "environment fact, not PR evidence (OI-1469)",
-                        pr_number, gate,
-                    )
-            except OSError as exc:
-                _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
+        _drop_provider_not_installed_result(
+            result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
         temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
         if temp_reason is not None:
-            # Same shape as the `unresolvable` PR-resolution path: stays
-            # pending under a bounded retry term, then escalates loudly
-            # (OI-1384) — never burns the obligation on the first temporary
-            # refusal.
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason=temp_reason,
-                reason_detail=temp_detail,
+            return _fulfill_temporary_refusal(
+                path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,
+                pr_number=pr_number, branch=branch, attempts=attempts, now=now,
+                result_file=result_file, result_status=result_status, result_reason=result_reason,
+                result_data=result_data, head_sha_before_run=head_sha_before_run, dispatch_id=dispatch_id,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = temp_detail
-            if attempts >= _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS:
-                escalation_detail = (
-                    f"{gate} stayed temporarily unavailable ({temp_reason}) for "
-                    f"{attempts} attempts (last status={result_status!r}, "
-                    f"reason={result_reason!r}) — escalating to a loud terminal failure"
-                )
-                # OI-1721: the parked case must read the shared composed
-                # constant so the reopen script and this writer can never
-                # drift on the literal string; the other temporary refusals
-                # keep the generic "<temp_reason>_timeout" composition.
-                escalation_reason = (
-                    REASON_GATE_PARKED_TIMEOUT
-                    if temp_reason == REASON_GATE_PARKED
-                    else f"{temp_reason}_timeout"
-                )
-                _book_obligation_outcome(
-                    path,
-                    status=STATUS_NOT_EXECUTABLE,
-                    pr_number=pr_number,
-                    branch=branch,
-                    attempts=attempts,
-                    last_attempt_at=now,
-                    resolved_at=utc_now_iso(),
-                    request_path=str(manager._request_path(gate, pr_number)),
-                    result_path=str(result_file),
-                    reason=escalation_reason,
-                    reason_detail=escalation_detail,
-                )
-                outcome["action"] = "not_executable"
-                outcome["detail"] = escalation_detail
-            # R10: a reviewer that ran without a bookable verdict counts toward
-            # the retry cap of this head; the run that reaches it parks the obligation.
-            _book_reviewer_run(
-                path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
-                dispatch_id=dispatch_id,
-            )
-            return outcome
 
-        # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
-        # record looks decided enough to fall straight through to the
-        # unconditional booking below (its status is a pass/known-terminal
-        # shape) -- but "looks decided" is not "is current". A MISMATCH or
-        # UNKNOWN_SHA declared_kind here means the takeover walk above ALSO
-        # found nothing usable (a match would have short-circuited via
-        # takeover_hit, or declared_kind itself would already be USABLE and
-        # skip this branch entirely) -- so this is the dead end: neither the
-        # declared gate's own evidence nor any successor's is provably about
-        # the current head. Never fall through to the unconditional
-        # STATUS_FULFILLED default on that basis (measured live, PR #1736: a
-        # stale codex_gate PASS from an earlier dispatch against the same PR
-        # booked fulfilled with zero takeover, zero rescue markers).
         if declared_kind == _EVIDENCE_MISMATCH:
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="stale_evidence_sha_mismatch",
-                reason_detail=(
-                    f"{gate}'s own result for PR #{pr_number} is decided but "
-                    f"about a DIFFERENT commit than the PR head "
-                    f"({declared_detail}) and no takeover successor produced "
-                    "current evidence either — staying pending, never booking "
-                    "a verdict about other code (OI-1571 tak 3)"
-                ),
+            return _fulfill_declared_sha_mismatch(
+                path, outcome, declared_detail, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now, result_file=result_file,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = declared_detail
-            return outcome
 
         if declared_kind == _EVIDENCE_UNKNOWN_SHA:
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="sha_binding_unverifiable",
-                reason_detail=(
-                    f"{gate}'s own result for PR #{pr_number} is decided but "
-                    f"its sha binding to the PR head could not be verified "
-                    f"({declared_detail}) and no takeover successor produced "
-                    "verifiable evidence either — suspending judgement "
-                    "(OI-1571 tak 3) rather than silently accepting or "
-                    "refusing it"
-                ),
+            return _fulfill_declared_unknown_sha(
+                path, outcome, declared_detail, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now, result_file=result_file,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = declared_detail
-            return outcome
 
-        # Fix-forward defect (2026-09-30): the result is judged against the
-        # head re-resolved AFTER the run. A result whose recorded commit is
-        # provably not that head is about superseded code — it must never be
-        # booked, even when its evidence is too incomplete for
-        # _has_decided_evidence to classify it as a decided MISMATCH above
-        # (the two branches above cover complete-evidence records; this one
-        # covers the rest without ever weakening them). An UNKNOWN binding
-        # (empty sha on either side) is deliberately NOT a mismatch: it keeps
-        # the existing "binding unverifiable" handling, exactly as a complete
-        # record with a missing sha does above.
         if result_sha_binding == "mismatch":
-            head_moved_detail = (
-                f"{gate} result for PR #{pr_number} records commit "
-                f"{result_commit_sha[:8] or '?'} but the PR head was "
-                f"re-resolved as {head_sha[:8] or '?'} after the gate ran (it "
-                f"was {head_sha_before_run[:8] or '?'} before) — the head "
-                "moved while the gate ran, so this verdict is about "
-                "superseded code and is never booked"
+            return _fulfill_result_head_moved(
+                path, outcome, manager=manager, gate=gate, pr_number=pr_number, branch=branch,
+                attempts=attempts, now=now, result_file=result_file,
+                result_commit_sha=result_commit_sha, head_sha=head_sha,
+                head_sha_before_run=head_sha_before_run,
             )
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="stale_evidence_sha_mismatch",
-                reason_detail=(
-                    f"{head_moved_detail} and no takeover successor produced "
-                    "current evidence either — staying pending, never booking "
-                    "a verdict about other code (defect fixed 2026-09-30)"
-                ),
-            )
-            outcome["action"] = "pending"
-            outcome["detail"] = head_moved_detail
-            return outcome
 
-        # OI-1943: a review rejection is written as status ``completed`` plus
-        # blocking findings, so the status string alone would book it fulfilled.
-        # The shared predicate decides; the reason is never null for it.
-        rejected = (
-            result_data is not None
-            and result_status not in TERMINAL_STATUSES
-            and _gate_decided_verdict(result_data) == "fail"
+        return _fulfill_book_declared_result(
+            path, outcome, result=result, result_data=result_data, result_status=result_status,
+            manager=manager, gate=gate, pr_number=pr_number, branch=branch, attempts=attempts,
+            now=now, result_file=result_file, dispatch_id=dispatch_id,
         )
-        if rejected:
-            terminal = STATUS_FAILED
-            booking_reason = (
-                "required_failure" if result.get("has_required_failure")
-                else REASON_FAILED_BY_GATE_VERDICT
-            )
-            booking_detail = _gate_is_pass(result_data)[1]
-        else:
-            terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
-            booking_reason = None if not result.get("has_required_failure") else "required_failure"
-            booking_detail = None if terminal == STATUS_FULFILLED else f"result status: {result_status}"
-        fast_fulfillment_warning = None
-        if terminal in (STATUS_FULFILLED, STATUS_FAILED):
-            fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
-                result_file, gate, pr_number, dispatch_id,
-            )
-        updated = _book_obligation_outcome(
-            path,
-            status=terminal,
-            pr_number=pr_number,
-            branch=branch,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=utc_now_iso(),
-            request_path=str(manager._request_path(gate, pr_number)),
-            result_path=str(result_file),
-            reason=booking_reason,
-            reason_detail=booking_detail,
-            fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
-            takeover_gate=None,
-            evidence_result_path=(
-                str(result_file) if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None
-            ),
-        )
-        # Mirror the status actually persisted to disk — never a hardcoded
-        # "fulfilled" label, which would lie about a not_executable/failed
-        # record and let a caller reading only the label count a burned
-        # obligation as vervuld (OI-1400 residu, defect 2).
-        outcome["action"] = updated.get("status", terminal)
-        outcome["request_path"] = updated.get("request_path")
-        outcome["result_path"] = updated.get("result_path")
-        outcome["has_required_failure"] = bool(result.get("has_required_failure"))
-        if fast_fulfillment_warning:
-            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
-        return outcome
     except Exception as exc:  # noqa: BLE001 — a gate that cannot run is a loud registered outcome
-        result_payload = _record_loud_not_executable(
-            state_dir,
-            gate=gate,
-            pr_number=pr_number,
-            dispatch_id=dispatch_id,
-            reason="runner_error",
-            reason_detail=f"{type(exc).__name__}: {exc}",
+        return _fulfill_runner_error(
+            state_dir, path, outcome, exc, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id,
+            branch=branch, attempts=attempts, now=now,
         )
-        _book_obligation_outcome(
-            path,
-            status=STATUS_NOT_EXECUTABLE,
-            pr_number=pr_number,
-            branch=branch,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=utc_now_iso(),
-            result_path=str(
-                Path(state_dir) / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
-            ),
-            reason="runner_error",
-            reason_detail=result_payload.get("reason_detail"),
-        )
-        outcome["action"] = "not_executable"
-        outcome["detail"] = result_payload.get("reason_detail")
-        return outcome
     finally:
         launch.lock.release()
 

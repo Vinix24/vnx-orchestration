@@ -158,8 +158,8 @@ def _begin(state_dir: Path, spec_file: Path, dispatch_id: str,
 
 def _finalize(state_dir: Path, handover: dispatch_start.Handover, end_state: str
               ) -> dispatch_lifecycle.LifecycleResult:
-    line = dispatch_exit.build_end_line(handover, end_state=end_state, head_sha=HEAD_SHA,
-                                        timestamp=END_TS)
+    line = dispatch_exit.build_end_line(handover, role=handover.role, end_state=end_state,
+                                        head_sha=HEAD_SHA, timestamp=END_TS)
     return dispatch_lifecycle.finalize(
         state_dir=state_dir, project_id=handover.project_id,
         dispatch_id=handover.dispatch_id, attempt=handover.attempt,

@@ -61,7 +61,8 @@ if mode == "start":
     handover = dispatch_start.Handover(
         project_id=project, dispatch_id=dispatch_id, attempt=1,
         lifecycle_mode=dispatch_start.MODE_V3, door_pid=123456,
-        door_started_at="Mon Nov  3 10:00:00 2026", started_at="2026-11-03T10:00:00Z")
+        door_started_at="Mon Nov  3 10:00:00 2026", started_at="2026-11-03T10:00:00Z",
+        role="backend-developer")
     dispatch_start._append_start_line(
         handover, role="backend-developer", base_sha="a" * 40, spec_file=spec_file,
         target_slot="T1", state_dir=state_dir)

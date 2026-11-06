@@ -2,7 +2,11 @@
 """Tests for vnx doctor --strict: central-mode detection and pre-flight validation."""
 
 import argparse
+import json
 import sqlite3
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -65,6 +69,69 @@ def _make_coordination_db(state_dir: Path, active_count: int = 0, schema_version
     conn.commit()
     conn.close()
     return db_path
+
+
+def _write_ledger_health_beacon(data_root: Path) -> None:
+    """A fresh, healthy ledger-health beacon: absent one is a strict WARN."""
+    health_dir = data_root / "health"
+    health_dir.mkdir(parents=True, exist_ok=True)
+    (health_dir / "ledger_health.json").write_text(
+        json.dumps({
+            "component": "ledger_health",
+            "last_run_ts": int(time.time()),
+            "last_run_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status": "ok",
+            "details": {"checks": {}},
+            "expected_interval_seconds": 86400,
+        }),
+        encoding="utf-8",
+    )
+
+
+def _inject_launchd(monkeypatch, project_id: str) -> None:
+    """Every required per-project launchd job loaded for ``project_id``.
+
+    Injected through ``launchd_project_scope``'s own reader, the same seam
+    ``tests/test_doctor_launchd_agents.py`` uses — the host's launchd is never
+    read.
+    """
+    _engine.ensure_engine_on_path()
+    launchd_dir = Path(_engine.engine_root()) / "scripts" / "launchd"
+    if str(launchd_dir) not in sys.path:
+        sys.path.insert(0, str(launchd_dir))
+    import launchd_project_scope as lps
+
+    labels = [f"{family}.{project_id}" for family in lps.REQUIRED_PER_PROJECT_FAMILIES]
+    output = "\n".join(["PID\tStatus\tLabel"] + [f"-\t0\t{label}" for label in labels])
+    monkeypatch.setattr(lps, "_run_real_launchctl_list", lambda: output)
+
+
+def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
+    """A project on which every ``vnx doctor --strict`` check is PASS.
+
+    The minimal skeleton leaves six WARN sources that strict mode turns into
+    exit 1: two missing schema databases, the pending-dispatch directory, a
+    non-git tree, the ledger-health beacon and this project's launchd jobs.
+    Each is materialized here so the strict test can assert the real exit code.
+    Tool availability and ``sys.platform`` are host facts, pinned so the
+    assertion holds on CI (no jq/shellcheck/worker CLI, Linux) as on a Mac.
+    """
+    from vnx_cli.commands import doctor as doctor_module
+
+    project = _make_project(tmp_path)
+    data_root = _engine.resolve_data_root(project)
+    state_dir = data_root / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _make_coordination_db(state_dir, active_count=0, schema_version=10)
+    sqlite3.connect(str(state_dir / "quality_intelligence.db")).close()
+    (data_root / "dispatches" / "pending").mkdir(parents=True, exist_ok=True)
+    _write_ledger_health_beacon(data_root)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    (project / _engine.PROJECT_FILE_NAME).write_text("vnx-dev\n", encoding="utf-8")
+    _inject_launchd(monkeypatch, "vnx-dev")
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    return project
 
 
 # ---------------------------------------------------------------------------
@@ -850,15 +917,13 @@ class TestActiveDrain:
 
 class TestVnxDoctorIntegration:
     def test_strict_flag_exit_0_on_clean_project(self, tmp_path, monkeypatch):
-        project = _make_project(tmp_path)
-        _make_coordination_db(project / ".vnx-data" / "state", active_count=0, schema_version=10)
+        project = _make_clean_project(tmp_path, monkeypatch)
         monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
 
         exit_code = vnx_doctor(_make_args(str(project), strict=True))
 
-        # No FAIL; WARNs may exist (agents/, install:mode) but strict catches them
-        # Accept exit 0 or 1 — key check is no crash + sensible output
-        assert exit_code in (0, 1)
+        # A clean tree has neither FAILs nor WARNs, so --strict must exit 0.
+        assert exit_code == 0
 
     def test_non_strict_exit_0_with_warnings(self, tmp_path, monkeypatch):
         project = _make_project(tmp_path)

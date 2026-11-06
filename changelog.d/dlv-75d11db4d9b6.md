@@ -1,0 +1,1 @@
+- Receipts (ADR-054): the envelope's governance record of a v3 dispatch is written as the non-completion `dispatch_governed` instead of `task_complete`, so a v3 dispatch has exactly one end line. The record keeps its 17 unique fields (role/skill evidence and per-dispatch cost); legacy dispatches are unchanged.

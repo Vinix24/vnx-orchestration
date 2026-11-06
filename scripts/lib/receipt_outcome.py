@@ -96,7 +96,10 @@ OUTCOME_EVENT_TYPES = frozenset({
     "dispatch_finished",
 })
 REPORT_EVENT_TYPES = frozenset({"task_complete", "task_completed", "report_ingested"})
-NON_OUTCOME_EVENT_TYPES = frozenset({"dispatch_started", "report_ingested"})
+# ADR-054: the envelope's v3 governance record carries cost/role evidence but is
+# never writer A or B and never an outcome -- the end is its dispatch_finished.
+NON_OUTCOME_EVENT_TYPES = frozenset({
+    "dispatch_started", "report_ingested", "dispatch_governed"})
 
 INVALID_DISPATCH_IDS = frozenset({"", "unknown", "?", "none", "null"})
 GATE_DISPATCH_RE = re.compile(r"^(?P<gate>[a-z0-9]+)-gate-pr(?P<pr>\d+)-\d+$")

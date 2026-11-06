@@ -22,6 +22,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
+from provider_worktree_support import provider_worktree_stub
+
 
 # ---------------------------------------------------------------------------
 # Fix 1: Claude cost side-channel survives recovery consumption
@@ -157,6 +159,41 @@ class TestKimiAuditGapStatus:
 
         assert rc == 0, f"expected rc=0 for clean dispatch, got {rc}"
         assert governance_calls == ["success"]
+
+
+def test_kimi_dispatch_does_not_create_a_real_worktree(provider_worktree_stub):
+    """The audit-gap assertions above read no checkout, so this module runs on the
+    stubbed isolation seam (tests/provider_worktree_support.py). The real
+    create/remove path is pinned by
+    tests/test_provider_dispatch_worktree_isolation.py::test_isolated_worktree_creates_and_removes.
+    """
+    result = SimpleNamespace(
+        completion_text="done",
+        token_usage={"input_tokens": 100, "output_tokens": 50},
+        event_writer_failures=0,
+        returncode=0,
+        timed_out=False,
+        error=None,
+    )
+
+    with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+         patch("event_store.EventStore", return_value=MagicMock(append=MagicMock())), \
+         patch("provider_dispatch._emit_governance"), \
+         patch.dict(os.environ, {"VNX_KIMI_MODEL": "kimi-k3"}):
+        from provider_dispatch import _dispatch_kimi
+
+        args = argparse.Namespace(
+            dispatch_id="test-kimi-no-worktree-001",
+            terminal_id="T1",
+            instruction="test instruction",
+            provider="kimi",
+            model="kimi-k3",
+            pr_id=None,
+        )
+        assert _dispatch_kimi(args) == 0, "clean kimi dispatch must return 0"
+
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 # ---------------------------------------------------------------------------

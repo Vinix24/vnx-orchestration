@@ -4873,6 +4873,152 @@ def _panel_weight_lines(weight) -> list[str]:
     return lines
 
 
+def _resolve_gate_plan_source(
+    *, doc, track, state_dir, project_id, track_id, min_goal_chars,
+    stderr_lines, error,
+):
+    """Resolve the plan text one gate run reviews, and say where it came from.
+
+    ``--doc`` wins explicitly over the track's ``goal_state``; without ``--doc``
+    the plan is the ``goal_state`` PLUS the track's deliverables (the
+    deliverables are fetched here, not inside ``resolve_plan_source``, which
+    stays a plain DB-free function — same contract as ``goal_state`` arriving
+    already read from ``track``).
+
+    Returns the finished ``PlanGateRunResult`` when no plan source can be
+    resolved: a missing or unreadable doc goes through the caller's ``error``
+    (exit 1, outcome ERROR, an infra failure and never a weight decision), and a
+    ``PlanRefusal`` carries its own exit 2 with ``REFUSED_NO_DELIVERABLES`` or
+    ``REFUSED_THIN`` plus the measured length and the threshold. Otherwise it
+    returns ``(plan_text, source, ignored_goal, deliverables, plan_source_info)``.
+
+    ``stderr_lines`` is the caller's own list, so the refusal message and the
+    source note land on it in the order they always did.
+    """
+    source = "goal"
+    ignored_goal = False
+    doc_path: Optional[Path] = None
+    deliverables: list = []
+    if doc:
+        doc_path = Path(doc)
+        if not doc_path.is_file():
+            return error(f"plan doc not found: {doc_path}")
+        # An unreadable doc is an infra error, never a weight decision.
+        try:
+            plan_text = doc_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return error(f"plan doc unreadable: {doc_path}: {exc}")
+        source = "doc"
+        ignored_goal = bool((track.get("goal_state") or "").strip())
+    else:
+        deliverables = _fetch_deliverable_records(
+            state_dir, project_id, track_id, include_metadata=True,
+        )
+        try:
+            resolved = resolve_plan_source(
+                doc_text=None,
+                goal_state=track.get("goal_state"),
+                deliverables=deliverables,
+                min_goal_chars=min_goal_chars,
+                track_id=track_id,
+            )
+        except PlanRefusal as exc:
+            stderr_lines.append(str(exc))
+            outcome = "REFUSED_NO_DELIVERABLES" if exc.kind == "no_deliverables" else "REFUSED_THIN"
+            return PlanGateRunResult(
+                track_id=track_id, project_id=project_id, exit_code=2,
+                outcome=outcome, error=str(exc),
+                thin_length=exc.length, thin_threshold=exc.threshold,
+                stderr_lines=stderr_lines,
+            )
+        plan_text = resolved.plan_text
+
+    if source == "doc":
+        note = f"plan-gate source: doc {doc_path}"
+        if ignored_goal:
+            note += " (track goal_state ignored)"
+        stderr_lines.append(note)
+    else:
+        stderr_lines.append(
+            f"plan-gate source: track goal_state + {len(deliverables)} deliverable(s) "
+            f"({len(plan_text.strip())} chars total)"
+        )
+
+    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
+    if source == "doc":
+        plan_source_info["doc_path"] = str(doc_path)
+    else:
+        plan_source_info["goal_chars"] = len((track.get("goal_state") or "").strip())
+        plan_source_info["deliverable_count"] = len(deliverables)
+    return plan_text, source, ignored_goal, deliverables, plan_source_info
+
+
+def _append_verdict_text(stdout_text: list, result: dict) -> None:
+    """Append the human verdict text of one panel result to ``stdout_text``.
+
+    The decision with its tally, the truncation warning when the gate read only
+    part of the document (a verdict on an incomplete plan must say so), the
+    panel's rationale, then one line per seat — its verdict, or NO-VERDICT when
+    the lane never answered — with every blocking finding under it.
+    ``result["panelists"]`` is ``run_panel``'s own list.
+    """
+    s = result["summary"]
+    stdout_text.append(
+        f"Plan gate: {result['decision']}  "
+        f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
+    )
+    trunc = result.get("doc_truncation") or {}
+    if trunc.get("truncated"):
+        pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
+        stdout_text.append(
+            f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
+            f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
+            "on an incomplete plan **"
+        )
+    stdout_text.append(f"  {s['rationale']}")
+    for p in result["panelists"]:
+        mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
+        detail = p.get("rationale") or p.get("error") or ""
+        stdout_text.append(f"  - {p['label']:16} {mark}  {detail}")
+        for finding in p.get("blocking_findings", []):
+            stdout_text.append(f"      · {finding}")
+
+
+def _record_plan_gate_pass(
+    *, repo_root, track_id, project_id, resolved, seats, scope, weight, stderr_lines,
+) -> None:
+    """Write the durable ``plan_gate_pass`` record for a PASS that clears the gate.
+
+    A PASS that CLEARS is a real pass: the hash-chained record carries
+    resolver="run" and the seat count + derived weight (scope=governance
+    variant) that certified it. Before this, only ``plan-gate attest`` ever
+    wrote a record, so the ledger was all-attest and the effectiveness probe
+    read every gate as manually overridden even when the panel had actually
+    converged.
+
+    Nothing is written when the blocker did not resolve (``resolved`` false:
+    another blocker or a hard dependency still holds the track). A record the
+    ledger refused is reported on ``stderr_lines`` and never raised — the
+    blocker IS resolved either way, and the missing evidence is the merge
+    gate's problem, not the run's.
+    """
+    if not resolved:
+        return
+    wrote = _emit_plan_gate_pass_record(
+        repo_root=repo_root, track_id=track_id, project_id=project_id,
+        resolver="run", seats=seats, scope=scope,
+        reason=weight["gov_trace"],
+        governance_variant=scope, gov_trace=weight["gov_trace"],
+    )
+    if not wrote:
+        stderr_lines.append(
+            f"WARNING: plan_gate_pass evidence NOT written for track "
+            f"{track_id} (resolver=run, seats={seats}, scope={scope}). "
+            "The plan blocker IS resolved, but the durable pass record is "
+            "missing - the merge gate may not recognize this pass."
+        )
+
+
 def run_plan_gate_for_track(
     *,
     state_dir,
@@ -4926,65 +5072,18 @@ def run_plan_gate_for_track(
         data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
 
     # Resolve the plan source: --doc wins explicitly over the track's goal_state;
-    # without --doc the plan is the goal_state PLUS the track's deliverables (the
-    # deliverables are fetched here, not inside resolve_plan_source, which stays
-    # a plain DB-free function — same contract as goal_state coming in already
-    # read from `track`).
-    source = "goal"
-    ignored_goal = False
-    doc_path: Optional[Path] = None
-    deliverables: list = []
-    if doc:
-        doc_path = Path(doc)
-        if not doc_path.is_file():
-            return _error(f"plan doc not found: {doc_path}")
-        # An unreadable doc is an infra error, never a weight decision.
-        try:
-            plan_text = doc_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            return _error(f"plan doc unreadable: {doc_path}: {exc}")
-        source = "doc"
-        ignored_goal = bool((track.get("goal_state") or "").strip())
-    else:
-        deliverables = _fetch_deliverable_records(
-            state_dir, project_id, track_id, include_metadata=True,
-        )
-        try:
-            resolved = resolve_plan_source(
-                doc_text=None,
-                goal_state=track.get("goal_state"),
-                deliverables=deliverables,
-                min_goal_chars=min_goal_chars,
-                track_id=track_id,
-            )
-        except PlanRefusal as exc:
-            stderr_lines.append(str(exc))
-            outcome = "REFUSED_NO_DELIVERABLES" if exc.kind == "no_deliverables" else "REFUSED_THIN"
-            return PlanGateRunResult(
-                track_id=track_id, project_id=project_id, exit_code=2,
-                outcome=outcome, error=str(exc),
-                thin_length=exc.length, thin_threshold=exc.threshold,
-                stderr_lines=stderr_lines,
-            )
-        plan_text = resolved.plan_text
-
-    if source == "doc":
-        note = f"plan-gate source: doc {doc_path}"
-        if ignored_goal:
-            note += " (track goal_state ignored)"
-        stderr_lines.append(note)
-    else:
-        stderr_lines.append(
-            f"plan-gate source: track goal_state + {len(deliverables)} deliverable(s) "
-            f"({len(plan_text.strip())} chars total)"
-        )
-
-    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
-    if source == "doc":
-        plan_source_info["doc_path"] = str(doc_path)
-    else:
-        plan_source_info["goal_chars"] = len((track.get("goal_state") or "").strip())
-        plan_source_info["deliverable_count"] = len(deliverables)
+    # without --doc the plan is the goal_state PLUS the track's deliverables.
+    resolved_source = _resolve_gate_plan_source(
+        doc=doc, track=track, state_dir=state_dir, project_id=project_id,
+        track_id=track_id, min_goal_chars=min_goal_chars,
+        stderr_lines=stderr_lines, error=_error,
+    )
+    if isinstance(resolved_source, PlanGateRunResult):
+        return resolved_source
+    plan_text, source, ignored_goal, deliverables, plan_source_info = resolved_source
+    # The panel and the tiebreaker take the doc path, not the doc text; the helper
+    # resolved what to READ from it, this is the same Path it built.
+    doc_path = Path(doc) if doc else None
 
     try:
         weight = _derive_panel_weight(
@@ -5103,26 +5202,7 @@ def run_plan_gate_for_track(
     out["plan_source"] = plan_source_info
     stdout_json = json.dumps(out, indent=2)
 
-    s = result["summary"]
-    stdout_text.append(
-        f"Plan gate: {result['decision']}  "
-        f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
-    )
-    trunc = result.get("doc_truncation") or {}
-    if trunc.get("truncated"):
-        pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
-        stdout_text.append(
-            f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
-            f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
-            "on an incomplete plan **"
-        )
-    stdout_text.append(f"  {s['rationale']}")
-    for p in result["panelists"]:
-        mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
-        detail = p.get("rationale") or p.get("error") or ""
-        stdout_text.append(f"  - {p['label']:16} {mark}  {detail}")
-        for finding in p.get("blocking_findings", []):
-            stdout_text.append(f"      · {finding}")
+    _append_verdict_text(stdout_text, result)
 
     if result["decision"] == "PASS":
         # A PASS verdict only counts as "unblocked" if the track actually reconciled
@@ -5157,26 +5237,11 @@ def run_plan_gate_for_track(
                 exit_code=2, outcome="PASS", decision=result["decision"],
                 resolved=resolved, derived_status=derived, still_blocked=True, result=result,
             )
-        if resolved:
-            # A PASS that CLEARS the gate is a real pass: write the durable,
-            # hash-chained plan_gate_pass record with resolver="run" and the seat
-            # count + derived weight (scope=governance variant) that certified it.
-            # Before this, only `plan-gate attest` ever wrote a record, so the
-            # ledger was all-attest and the effectiveness probe read every gate as
-            # manually overridden even when the panel had actually converged.
-            wrote = _emit_plan_gate_pass_record(
-                repo_root=repo_root, track_id=track_id, project_id=project_id,
-                resolver="run", seats=len(panel), scope=variant,
-                reason=weight["gov_trace"],
-                governance_variant=variant, gov_trace=weight["gov_trace"],
-            )
-            if not wrote:
-                stderr_lines.append(
-                    f"WARNING: plan_gate_pass evidence NOT written for track "
-                    f"{track_id} (resolver=run, seats={len(panel)}, scope={variant}). "
-                    "The plan blocker IS resolved, but the durable pass record is "
-                    "missing - the merge gate may not recognize this pass."
-                )
+        _record_plan_gate_pass(
+            repo_root=repo_root, track_id=track_id, project_id=project_id,
+            resolved=resolved, seats=len(panel), scope=variant, weight=weight,
+            stderr_lines=stderr_lines,
+        )
         stdout_text.append(
             f"PASS — plan gate cleared. {_plan_blocker_oi(track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
@@ -6349,14 +6414,125 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
     p_attest.set_defaults(func=cmd_plan_gate_attest)
 
 
-def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> Any:
-    """The `plan-gate` parser with its action subparsers; returns them.
+def _add_plan_gate_missing_reasons_parser(
+    pg_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`plan-gate missing-reasons`: list resolved blockers without a reason."""
+    p_pmiss = pg_sub.add_parser(
+        "missing-reasons",
+        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
+    )
+    common(p_pmiss)
+    p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
+
+
+def _add_plan_gate_backfill_reason_parser(
+    pg_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`plan-gate backfill-reason`: record a missing reason on a resolved blocker."""
+    p_pbackfill = pg_sub.add_parser(
+        "backfill-reason",
+        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
+    )
+    common(p_pbackfill)
+    p_pbackfill.add_argument("track_id")
+    p_pbackfill.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_pbackfill.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_pbackfill.set_defaults(func=cmd_plan_gate_backfill_reason)
+
+
+def _add_plan_gate_reblock_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate reblock`: put a wrongly-lifted blocker back on the track."""
+    p_preblock = pg_sub.add_parser(
+        "reblock",
+        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
+    )
+    common(p_preblock)
+    p_preblock.add_argument("track_id")
+    p_preblock.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_preblock.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_preblock.set_defaults(func=cmd_plan_gate_reblock)
+
+
+def _add_plan_gate_batch_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate batch`: run the gate over a set of OI-PLAN-blocked tracks."""
+    p_pbatch = pg_sub.add_parser(
+        "batch",
+        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
+             "--dry-run first shows the class + seat count WITHOUT calling a model)",
+    )
+    common(p_pbatch)
+    p_pbatch.add_argument(
+        "--track", action="append", default=None, metavar="TRACK_ID",
+        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
+             "Default: every track with an open OI-PLAN blocker.",
+    )
+    p_pbatch.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="cap the number of tracks processed; composes with --track (not "
+             "mutually exclusive).",
+    )
+    p_pbatch.add_argument(
+        "--restart", action="store_true",
+        help="re-run all selected tracks, ignoring the resume store.",
+    )
+    p_pbatch.add_argument(
+        "--dry-run", action="store_true",
+        help="show each track's gate class + seat count without calling any "
+             "model. Standard first step before a real batch.",
+    )
+    p_pbatch.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
+    )
+    p_pbatch.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+    )
+    p_pbatch.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace, not the seat count.",
+    )
+    p_pbatch.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
+    )
+    p_pbatch.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict in the trace, not more seats.",
+    )
+    p_pbatch.set_defaults(func=cmd_plan_gate_batch)
+
+
+def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> None:
+    """The `plan-gate` parser, built one action builder at a time.
 
     Extracted from ``_build_parser`` (the functies-onder-200 track): that function
     is far past the 70-executable-line ratchet, so the domain moves out one
-    builder per action. The caller keeps building the remaining plan-gate
-    actions (``missing-reasons``, ``backfill-reason``, ``reblock``, ``batch``)
-    on the returned subparsers object.
+    builder per action, in the order the actions were originally added.
     """
     pg = sub.add_parser(
         "plan-gate",
@@ -6367,7 +6543,215 @@ def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> Any:
     _add_plan_gate_run_parser(pg_sub, common)
     _add_plan_gate_status_parser(pg_sub, common)
     _add_plan_gate_attest_parser(pg_sub, common)
-    return pg_sub
+    _add_plan_gate_missing_reasons_parser(pg_sub, common)
+    _add_plan_gate_backfill_reason_parser(pg_sub, common)
+    _add_plan_gate_reblock_parser(pg_sub, common)
+    _add_plan_gate_batch_parser(pg_sub, common)
+
+
+def _add_objective_close_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective close`: advance a track's declared phase to a terminal status."""
+    p_close = obj_sub.add_parser(
+        "close",
+        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
+    )
+    common(p_close)
+    p_close.add_argument("track_id")
+    p_close.add_argument("--apply", action="store_true",
+                         help="write the transition (default: dry-run check)")
+    p_close.add_argument("--approval-id", default="",
+                         help="operator approval token (REQUIRED with --apply)")
+    p_close.add_argument("--include-parked", action="store_true",
+                         help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
+    p_close.add_argument(
+        "--attest", default=None, metavar="REASON",
+        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
+             "--approval-id). Appends the real PR via --pr when given, else fails open by "
+             "appending ops-attest:<date>; refs already on the track are kept",
+    )
+    p_close.add_argument(
+        "--pr", action="append", default=None, metavar="NNN",
+        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
+             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
+             "order kept, nothing replaced) instead of ops-attest:<date>. "
+             "Without --attest, use `vnx objective link-pr` instead.",
+    )
+    p_close.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
+        metavar="N",
+        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
+             "close handles one track so the cap is rarely reached). Bounds the "
+             "evidence gather so it is explicit rather than unbounded.",
+    )
+    p_close.set_defaults(func=cmd_objective_close)
+
+
+def _add_objective_link_pr_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective link-pr`: attach PR ref(s) to a track, retroactively."""
+    p_link_pr = obj_sub.add_parser(
+        "link-pr",
+        help="manually link PR ref(s) to a track (retroactive/override; audited)",
+    )
+    common(p_link_pr)
+    p_link_pr.add_argument("track_id")
+    p_link_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_link_pr.add_argument(
+        "--delivery", choices=("partial", "complete"), default="partial",
+        help=_LINK_PR_DELIVERY_HELP,
+    )
+    p_link_pr.set_defaults(func=cmd_objective_link_pr)
+
+
+def _add_objective_unlink_pr_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective unlink-pr`: remove PR ref(s) and their delivery markers."""
+    p_unlink_pr = obj_sub.add_parser(
+        "unlink-pr",
+        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; "
+             "audited); also removes their delivery markers",
+    )
+    common(p_unlink_pr)
+    p_unlink_pr.add_argument("track_id")
+    p_unlink_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unlink_pr.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this PR reference is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
+
+
+def _add_objective_remove_dependency_parser(
+    obj_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`objective remove-dependency`: drop one dependency edge from a track."""
+    p_remove_dep = obj_sub.add_parser(
+        "remove-dependency",
+        help="remove one dependency edge from a track, by its full key "
+             "(operator-gated; audited)",
+    )
+    common(p_remove_dep)
+    p_remove_dep.add_argument("track_id", help="the dependent (from) track")
+    p_remove_dep.add_argument("to_track_id", help="the track it depends on")
+    p_remove_dep.add_argument(
+        "--to-project-id", default="", dest="to_project_id",
+        help="project of the to-track (default: --project-id)",
+    )
+    p_remove_dep.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this edge is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_remove_dep.set_defaults(func=cmd_objective_remove_dependency)
+
+
+def _add_objective_unmark_delivery_parser(
+    obj_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`objective unmark-delivery`: strip the delivery marker of PR(s) on a track."""
+    p_unmark_delivery = obj_sub.add_parser(
+        "unmark-delivery",
+        help="remove the delivery marker (partial|complete) of PR(s) on a track, returning "
+             "them to unmarked; pr_ref is left alone (operator-gated; audited)",
+    )
+    common(p_unmark_delivery)
+    p_unmark_delivery.add_argument("track_id")
+    p_unmark_delivery.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unmark_delivery.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this delivery marker is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unmark_delivery.set_defaults(func=cmd_objective_unmark_delivery)
+
+
+def _add_objective_reopen_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective reopen`: move a done track back to active."""
+    p_reopen = obj_sub.add_parser(
+        "reopen",
+        help="reopen a done track: done -> active (operator-gated, audited)",
+    )
+    common(p_reopen)
+    p_reopen.add_argument("track_id")
+    p_reopen.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_reopen.add_argument(
+        "--reason", default="",
+        help="reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
+    )
+    p_reopen.set_defaults(func=cmd_objective_reopen)
+
+
+def _add_objective_add_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective add`: create one ad-hoc track."""
+    p_add = obj_sub.add_parser(
+        "add",
+        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
+    )
+    common(p_add)
+    p_add.add_argument("track_id")
+    p_add.add_argument("title")
+    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
+    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
+    p_add.add_argument(
+        "--plan-scope", choices=plan_scope.PLAN_SCOPES, default=None, dest="plan_scope",
+        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
+             "plan-gate runs) or light (no plan-gate)",
+    )
+    p_add.set_defaults(func=cmd_objective_add)
+
+
+def _add_objective_set_goal_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective set-goal`: repair a too-thin goal on an existing track."""
+    p_set_goal = obj_sub.add_parser(
+        "set-goal",
+        help="repair a too-thin track goal: set goal_state on an existing track "
+             "(validated against the plan-gate's goal_min_chars threshold)",
+    )
+    common(p_set_goal)
+    p_set_goal.add_argument("track_id")
+    p_set_goal.add_argument(
+        "goal",
+        help="what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
+    )
+    p_set_goal.set_defaults(func=cmd_objective_set_goal)
+
+
+def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """The eight `objective` write actions, one builder each.
+
+    Extracted from ``_build_parser`` (the functies-onder-200 track): that function
+    is far past the 70-executable-line ratchet, so the domain moves out in the
+    order the actions were originally added.
+    """
+    _add_objective_close_parser(obj_sub, common)
+    _add_objective_link_pr_parser(obj_sub, common)
+    _add_objective_unlink_pr_parser(obj_sub, common)
+    _add_objective_remove_dependency_parser(obj_sub, common)
+    _add_objective_unmark_delivery_parser(obj_sub, common)
+    _add_objective_reopen_parser(obj_sub, common)
+    _add_objective_add_parser(obj_sub, common)
+    _add_objective_set_goal_parser(obj_sub, common)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -6438,165 +6822,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reconcile.set_defaults(func=cmd_objective_reconcile)
 
-    p_close = obj_sub.add_parser(
-        "close",
-        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
-    )
-    _common(p_close)
-    p_close.add_argument("track_id")
-    p_close.add_argument("--apply", action="store_true",
-                         help="write the transition (default: dry-run check)")
-    p_close.add_argument("--approval-id", default="",
-                         help="operator approval token (REQUIRED with --apply)")
-    p_close.add_argument("--include-parked", action="store_true",
-                         help="allow closing a PARKED track (un-parks it; off by default)")
-    p_close.add_argument(
-        "--repo-root", default="", dest="repo_root",
-        metavar="PATH",
-        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
-    )
-    p_close.add_argument(
-        "--attest", default=None, metavar="REASON",
-        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
-             "--approval-id). Appends the real PR via --pr when given, else fails open by "
-             "appending ops-attest:<date>; refs already on the track are kept",
-    )
-    p_close.add_argument(
-        "--pr", action="append", default=None, metavar="NNN",
-        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
-             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
-             "order kept, nothing replaced) instead of ops-attest:<date>. "
-             "Without --attest, use `vnx objective link-pr` instead.",
-    )
-    p_close.add_argument(
-        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
-        metavar="N",
-        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
-             "close handles one track so the cap is rarely reached). Bounds the "
-             "evidence gather so it is explicit rather than unbounded.",
-    )
-    p_close.set_defaults(func=cmd_objective_close)
-
-    p_link_pr = obj_sub.add_parser(
-        "link-pr",
-        help="manually link PR ref(s) to a track (retroactive/override; audited)",
-    )
-    _common(p_link_pr)
-    p_link_pr.add_argument("track_id")
-    p_link_pr.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_link_pr.add_argument(
-        "--delivery", choices=("partial", "complete"), default="partial",
-        help=_LINK_PR_DELIVERY_HELP,
-    )
-    p_link_pr.set_defaults(func=cmd_objective_link_pr)
-
-    p_unlink_pr = obj_sub.add_parser(
-        "unlink-pr",
-        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; "
-             "audited); also removes their delivery markers",
-    )
-    _common(p_unlink_pr)
-    p_unlink_pr.add_argument("track_id")
-    p_unlink_pr.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_unlink_pr.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this PR reference is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
-
-    p_remove_dep = obj_sub.add_parser(
-        "remove-dependency",
-        help="remove one dependency edge from a track, by its full key "
-             "(operator-gated; audited)",
-    )
-    _common(p_remove_dep)
-    p_remove_dep.add_argument("track_id", help="the dependent (from) track")
-    p_remove_dep.add_argument("to_track_id", help="the track it depends on")
-    p_remove_dep.add_argument(
-        "--to-project-id", default="", dest="to_project_id",
-        help="project of the to-track (default: --project-id)",
-    )
-    p_remove_dep.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this edge is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_remove_dep.set_defaults(func=cmd_objective_remove_dependency)
-
-    p_unmark_delivery = obj_sub.add_parser(
-        "unmark-delivery",
-        help="remove the delivery marker (partial|complete) of PR(s) on a track, returning "
-             "them to unmarked; pr_ref is left alone (operator-gated; audited)",
-    )
-    _common(p_unmark_delivery)
-    p_unmark_delivery.add_argument("track_id")
-    p_unmark_delivery.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_unmark_delivery.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this delivery marker is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_unmark_delivery.set_defaults(func=cmd_objective_unmark_delivery)
-
-    p_reopen = obj_sub.add_parser(
-        "reopen",
-        help="reopen a done track: done -> active (operator-gated, audited)",
-    )
-    _common(p_reopen)
-    p_reopen.add_argument("track_id")
-    p_reopen.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_reopen.add_argument(
-        "--reason", default="",
-        help="reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
-    )
-    p_reopen.set_defaults(func=cmd_objective_reopen)
-
-    p_add = obj_sub.add_parser(
-        "add",
-        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
-    )
-    _common(p_add)
-    p_add.add_argument("track_id")
-    p_add.add_argument("title")
-    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
-    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
-    p_add.add_argument("--priority", default=None)
-    p_add.add_argument(
-        "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
-        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
-    )
-    p_add.add_argument(
-        "--plan-scope", choices=plan_scope.PLAN_SCOPES, default=None, dest="plan_scope",
-        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
-             "plan-gate runs) or light (no plan-gate)",
-    )
-    p_add.set_defaults(func=cmd_objective_add)
-
-    p_set_goal = obj_sub.add_parser(
-        "set-goal",
-        help="repair a too-thin track goal: set goal_state on an existing track "
-             "(validated against the plan-gate's goal_min_chars threshold)",
-    )
-    _common(p_set_goal)
-    p_set_goal.add_argument("track_id")
-    p_set_goal.add_argument(
-        "goal",
-        help="what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
-    )
-    p_set_goal.set_defaults(func=cmd_objective_set_goal)
+    _add_objective_write_parsers(obj_sub, _common)
 
     p_lane_hint = obj_sub.add_parser(
         "set-lane-hint",
@@ -6644,104 +6870,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)
     # ------------------------------------------------------------------
-    pg_sub = _add_plan_gate_parsers(sub, _common)
-
-    p_pmiss = pg_sub.add_parser(
-        "missing-reasons",
-        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
-    )
-    _common(p_pmiss)
-    p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
-
-    p_pbackfill = pg_sub.add_parser(
-        "backfill-reason",
-        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
-    )
-    _common(p_pbackfill)
-    p_pbackfill.add_argument("track_id")
-    p_pbackfill.add_argument("--reason", default="", help="operator reason (REQUIRED)")
-    p_pbackfill.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_pbackfill.set_defaults(func=cmd_plan_gate_backfill_reason)
-
-    p_preblock = pg_sub.add_parser(
-        "reblock",
-        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
-    )
-    _common(p_preblock)
-    p_preblock.add_argument("track_id")
-    p_preblock.add_argument("--reason", default="", help="operator reason (REQUIRED)")
-    p_preblock.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_preblock.set_defaults(func=cmd_plan_gate_reblock)
-
-    p_pbatch = pg_sub.add_parser(
-        "batch",
-        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
-             "--dry-run first shows the class + seat count WITHOUT calling a model)",
-    )
-    _common(p_pbatch)
-    p_pbatch.add_argument(
-        "--track", action="append", default=None, metavar="TRACK_ID",
-        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
-             "Default: every track with an open OI-PLAN blocker.",
-    )
-    p_pbatch.add_argument(
-        "--limit", type=int, default=None, metavar="N",
-        help="cap the number of tracks processed; composes with --track (not "
-             "mutually exclusive).",
-    )
-    p_pbatch.add_argument(
-        "--restart", action="store_true",
-        help="re-run all selected tracks, ignoring the resume store.",
-    )
-    p_pbatch.add_argument(
-        "--dry-run", action="store_true",
-        help="show each track's gate class + seat count without calling any "
-             "model. Standard first step before a real batch.",
-    )
-    p_pbatch.add_argument(
-        "--panel-seats",
-        dest="panel_seats",
-        default="",
-        help="comma-separated seat labels to run instead of the default seat; "
-             "logged as an override, unknown labels fail loud. Default: default_seat.",
-    )
-    p_pbatch.add_argument(
-        "--seat-timeout",
-        dest="seat_timeout",
-        type=int,
-        default=None,
-        help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
-    )
-    p_pbatch.add_argument(
-        "--dispatch-paths",
-        dest="dispatch_paths",
-        default=None,
-        help="comma-separated repo paths the plan touches; they derive the governance "
-             "weight (variant) in the trace, not the seat count.",
-    )
-    p_pbatch.add_argument(
-        "--task-class",
-        dest="task_class",
-        default=None,
-        help="task class for the plan from the smart-router closed set; it feeds "
-             "the governance weight in the trace. A new feature no longer gets "
-             "more seats.",
-    )
-    p_pbatch.add_argument(
-        "--irreversible",
-        dest="irreversible",
-        action="store_true",
-        help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict in the trace, not more seats.",
-    )
-    p_pbatch.set_defaults(func=cmd_plan_gate_batch)
+    _add_plan_gate_parsers(sub, _common)
 
     return parser
 

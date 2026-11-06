@@ -2502,6 +2502,71 @@ def _check_stop_conditions_verdict(
     )
 
 
+def _apply_raw_model_guard(
+    *,
+    spec: DispatchSpec,
+    effective_model: str,
+    provider_value: str,
+    sub_provider: Optional[str],
+    via: str,
+    constraint_verdicts: "tuple[ConstraintVerdict, ...]",
+) -> "tuple[ConstraintVerdict, ...]":
+    """Fold the raw-model guard's blocking verdicts into ``constraint_verdicts``.
+
+    Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): a worker-model
+    pin (workers-kimi-pinned, currently sonnet) replaces spec.model with
+    effective_model BEFORE the primary check ever runs, so a cross-provider
+    requested model (e.g. --model kimi resolved onto the claude lane) is invisible
+    to the kimi-via-cli-only guard by the time it inspects effective_model. A
+    mismatched requested model is already caught by check_registry in that primary
+    check when the pin coerces it, so this raw-model re-check is belt-and-suspenders
+    for any target_slot outside the SSOT pin dict. Re-run the check against the RAW
+    requested model too, so the pin can never mask a mismatched provider. Only
+    BLOCKING verdicts are folded in — warn-only pin noise (e.g. --model opus pinned
+    to sonnet) is already reported once via D4's own warning.
+
+    The guard runs only when the raw model differs from the effective model. A
+    raised check is fail-closed: one ``registry-unavailable`` blocking verdict, and
+    the existing verdicts are kept.
+    """
+    from providers.constraint_enforcer import check_constraints as _constraint_check  # noqa: PLC0415
+
+    raw_model = spec.model
+    if not raw_model or raw_model == effective_model:
+        return constraint_verdicts
+
+    try:
+        raw_violations = _constraint_check(
+            provider=provider_value,
+            sub_provider=sub_provider,
+            model=raw_model,
+            terminal_id=spec.target_slot,
+            role=spec.role,
+            via=via,
+            env=os.environ,
+            check_registry=False,
+        )
+    except Exception as exc:
+        raw_violations = []
+        constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+            code="registry-unavailable",
+            severity="blocking",
+            message=f"Constraint registry unavailable (raw-model guard) — fail-closed: {exc}",
+        ),)
+
+    existing_codes = {v.code for v in constraint_verdicts}
+    for v in raw_violations:
+        if v.severity == "blocking" and v.code not in existing_codes:
+            constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
+                code=v.code,
+                severity=v.severity,
+                message=f"[raw-model guard] {v.message}",
+                override_applied=v.override_applied,
+            ),)
+            existing_codes.add(v.code)
+    return constraint_verdicts
+
+
 def build_runtime_snapshot(
     vspec: ValidatedSpec,
     *,
@@ -2638,47 +2703,16 @@ def build_runtime_snapshot(
             message=f"Constraint registry unavailable — fail-closed: {exc}",
         ),)
 
-    # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): a worker-model pin
-    # (workers-kimi-pinned, currently sonnet) replaces spec.model with effective_model
-    # BEFORE the check above ever runs, so a cross-provider requested model (e.g. --model
-    # kimi resolved onto the claude lane) is invisible to the kimi-via-cli-only guard by
-    # the time it inspects effective_model. A mismatched requested model is already
-    # caught by check_registry in the block above when the pin coerces it, so this
-    # raw-model re-check is belt-and-suspenders for any target_slot outside the SSOT pin
-    # dict. Re-run the check against the RAW requested model too, so the pin can never
-    # mask a mismatched provider. Only BLOCKING verdicts are folded in — warn-only pin
-    # noise (e.g. --model opus pinned to sonnet) is already reported once via D4's own
-    # warning.
-    raw_model = spec.model
-    if raw_model and raw_model != effective_model:
-        try:
-            raw_violations = _constraint_check(
-                provider=provider_value,
-                sub_provider=sub_provider,
-                model=raw_model,
-                terminal_id=spec.target_slot,
-                role=spec.role,
-                via=via,
-                env=os.environ,
-                check_registry=False,
-            )
-        except Exception as exc:
-            raw_violations = []
-            constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-                code="registry-unavailable",
-                severity="blocking",
-                message=f"Constraint registry unavailable (raw-model guard) — fail-closed: {exc}",
-            ),)
-        existing_codes = {v.code for v in constraint_verdicts}
-        for v in raw_violations:
-            if v.severity == "blocking" and v.code not in existing_codes:
-                constraint_verdicts = constraint_verdicts + (ConstraintVerdict(
-                    code=v.code,
-                    severity=v.severity,
-                    message=f"[raw-model guard] {v.message}",
-                    override_applied=v.override_applied,
-                ),)
-                existing_codes.add(v.code)
+    # Defense-in-depth (dispatch-agent-lane-coercion, OI-LANECOERCE): re-check the
+    # RAW requested model so the pin can never mask a mismatched provider.
+    constraint_verdicts = _apply_raw_model_guard(
+        spec=spec,
+        effective_model=effective_model,
+        provider_value=provider_value,
+        sub_provider=sub_provider,
+        via=via,
+        constraint_verdicts=constraint_verdicts,
+    )
 
     # worker-claude-override verdicts: a gate refusal (reason required) is
     # prepended so it surfaces as THE reject; an applied override is recorded as an

@@ -12,7 +12,8 @@ Two shapes carry a completion, and the analysis readers read both:
 
 ``dispatch_started`` and ``report_ingested`` are lifecycle lines: never a
 completion, never a success, never a cost line of their own, so every helper
-here answers ``False``/``None`` for them. Line-level counterpart of K-2a's
+here answers ``False``/``None`` for them, and the same for ADR-054's
+``dispatch_governed``: that record is evidence, not an end. Line-level counterpart of K-2a's
 ``ledger_end_line``: these readers walk the ledger themselves.
 """
 
@@ -39,9 +40,11 @@ from event_outcome_semantics import (  # noqa: E402
 # count a failed end line as a success, the defect ADR-045 §4 closes.
 DISPATCH_FINISHED_EVENT_TYPE = "dispatch_finished"
 
-# ADR-045 §2: the two lifecycle lines that are never an outcome. Kept identical
-# to ``receipt_outcome.NON_OUTCOME_EVENT_TYPES`` (K-1) by a test.
-NON_OUTCOME_EVENT_TYPES = frozenset({"dispatch_started", "report_ingested"})
+# ADR-045 §2 + ADR-054: lines that are never an outcome — the two lifecycle lines
+# and the envelope's ``dispatch_governed`` record (evidence, not an end). Kept
+# identical to ``receipt_outcome.NON_OUTCOME_EVENT_TYPES``.
+NON_OUTCOME_EVENT_TYPES = frozenset({
+    "dispatch_started", "report_ingested", "dispatch_governed"})
 
 # What a reader filters the ledger by: the canonical set, never a local copy.
 COMPLETION_TYPES: FrozenSet[str] = COMPLETION_EVENT_TYPES
@@ -64,7 +67,8 @@ def is_completion(record: Mapping[str, Any]) -> bool:
 
 
 def is_non_outcome_lifecycle(record: Mapping[str, Any]) -> bool:
-    """True for a start line or a report line — never an outcome (ADR-045 §2)."""
+    """True for a start line, a report line (ADR-045 §2) or the v3
+    ``dispatch_governed`` record (ADR-054) — never an outcome."""
     return event_type_of(record) in NON_OUTCOME_EVENT_TYPES
 
 

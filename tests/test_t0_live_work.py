@@ -37,6 +37,18 @@ from fixtures.dispatches_schema_fixture import dispatches_ddl  # noqa: E402
 PROJECT_A = "fshd5-alpha"
 PROJECT_B = "fshd5-bravo"
 
+# The live-work read opens runtime_coordination.db with a bounded busy timeout
+# taken from the module constant production reads
+# (build_t0_state._LIVE_WORK_DB_BUSY_TIMEOUT_MS, 2 s on this base). The locked
+# test injects a short bound through that same seam so the read gives up fast,
+# then asserts the whole build returned inside a small deadline. The track
+# reconcile also opens that locked DB, but its timeouts are hard-coded with no
+# seam (scripts/lib/tracks.py::_get_conn ``timeout=10.0`` plus
+# scripts/lib/qi_db_health.py::count_tables ``timeout=5``), so that unrelated
+# wait is isolated the same way schema init already is below.
+_LOCKED_DB_BUSY_TIMEOUT_MS = 50
+_LOCKED_DB_BUILD_DEADLINE_S = 1.5
+
 
 def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
@@ -244,14 +256,31 @@ def test_locked_db_gives_available_false_with_reason_and_degraded_health(
     # Rollback-journal mode: an EXCLUSIVE transaction blocks every reader.
     with sqlite3.connect(str(db)) as conn:
         conn.execute("PRAGMA journal_mode = DELETE")
-    # Only the live-work read is under test; schema init and the terminal
-    # lease read would otherwise wait out their own 10 s timeouts.
+    # Only the live-work read is under test; schema init, the terminal
+    # lease read and the track reconcile would otherwise wait out their own
+    # hard-coded timeouts. The reconcile's 10 s (tracks._get_conn) plus 5 s
+    # (qi_db_health.count_tables) is the bulk of this test's old ~18 s.
     monkeypatch.setattr(bts, "_init_and_check_db", lambda _sd, _skip=None: True)
+    monkeypatch.setattr(
+        bts,
+        "_reconcile_tracks_fresh",
+        lambda _sd, _pid, *, store=None: {
+            "derived_refreshed": False,
+            "reason": "isolated: locked store, not under test",
+        },
+    )
+    # Inject the live-work read's own busy timeout through the seam
+    # production reads, so the locked read gives up in a short bound.
+    monkeypatch.setattr(
+        bts, "_LIVE_WORK_DB_BUSY_TIMEOUT_MS", _LOCKED_DB_BUSY_TIMEOUT_MS
+    )
     holder = sqlite3.connect(str(db), timeout=0, isolation_level=None)
     holder.execute("BEGIN EXCLUSIVE")
+    build_started = time.monotonic()
     try:
         state = bts.build_t0_state(state_dir, dispatch_dir)
     finally:
+        build_elapsed = time.monotonic() - build_started
         holder.execute("ROLLBACK")
         holder.close()
 
@@ -259,9 +288,18 @@ def test_locked_db_gives_available_false_with_reason_and_degraded_health(
     live = _index_live(index)
     assert live.get("available") is False
     assert "locked" in (live.get("reason") or "")
+    # A read that raised is a read error, never an empty "nothing running".
+    assert state["live_work"]["read_error"] is True
     assert state["system_health"]["status"] in ("degraded", "failed")
     assert any(
         "live_work" in r for r in state["system_health"].get("degraded_reasons", [])
+    )
+    # The wait IS the assertion: with the injected bound the locked read must
+    # give up inside the deadline, not after the 2 s (or ~15 s) default.
+    assert build_elapsed < _LOCKED_DB_BUILD_DEADLINE_S, (
+        f"the locked build returned in {build_elapsed:.2f}s; the busy-timeout "
+        f"bound under test is {_LOCKED_DB_BUSY_TIMEOUT_MS} ms and the whole "
+        f"build must give up inside {_LOCKED_DB_BUILD_DEADLINE_S}s"
     )
 
 

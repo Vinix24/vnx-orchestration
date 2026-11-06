@@ -33,6 +33,56 @@
       "state_dir": "",
       "track_id": "x"
     },
+    "plan-gate backfill-reason t --reason why --approval-id AP-1": {
+      "action": "backfill-reason",
+      "approval_id": "AP-1",
+      "domain": "plan-gate",
+      "func": "cmd_plan_gate_backfill_reason",
+      "json": false,
+      "project_id": "vnx-dev",
+      "reason": "why",
+      "state_dir": "",
+      "track_id": "t"
+    },
+    "plan-gate batch --track a --track b --limit 2 --restart --dry-run --panel-seats codex --seat-timeout 120 --dispatch-paths scripts/x.py --task-class 03_refactoring --irreversible": {
+      "action": "batch",
+      "dispatch_paths": "scripts/x.py",
+      "domain": "plan-gate",
+      "dry_run": true,
+      "func": "cmd_plan_gate_batch",
+      "irreversible": true,
+      "json": false,
+      "limit": 2,
+      "panel_seats": "codex",
+      "project_id": "vnx-dev",
+      "restart": true,
+      "seat_timeout": 120,
+      "state_dir": "",
+      "task_class": "03_refactoring",
+      "track": [
+        "a",
+        "b"
+      ]
+    },
+    "plan-gate missing-reasons": {
+      "action": "missing-reasons",
+      "domain": "plan-gate",
+      "func": "cmd_plan_gate_missing_reasons",
+      "json": false,
+      "project_id": "vnx-dev",
+      "state_dir": ""
+    },
+    "plan-gate reblock t --reason why --approval-id AP-2": {
+      "action": "reblock",
+      "approval_id": "AP-2",
+      "domain": "plan-gate",
+      "func": "cmd_plan_gate_reblock",
+      "json": false,
+      "project_id": "vnx-dev",
+      "reason": "why",
+      "state_dir": "",
+      "track_id": "t"
+    },
     "plan-gate run t --doc d --panel-seats codex": {
       "action": "run",
       "dispatch_paths": null,
