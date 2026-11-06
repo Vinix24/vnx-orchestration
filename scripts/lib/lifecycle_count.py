@@ -218,13 +218,16 @@ def _unmeasured(reason: str) -> dict:
 
 
 def briefing_line(count: dict) -> str:
-    """The one SessionStart line: the five numbers and the heartbeat's age."""
+    """The one SessionStart line: the cohort, the five numbers and the heartbeat's age."""
     if count.get("status") != STATUS_MEASURED:
         return f"lifecycle: unmeasured ({count.get('reason') or 'not measured'}); sweep unknown"
     counts, age = count.get("counts") or {}, count.get("sweep_heartbeat_age_seconds")
     sweep = (f"{int(age)}s" if isinstance(age, (int, float)) and not isinstance(age, bool)
              else f"unknown ({count.get('sweep_heartbeat_reason') or 'no reason'})")
-    return (f"lifecycle: {counts.get('start_without_end')} start-without-end, "
+    cohort = count.get("cohort")  # an absent or blank cohort is named unknown, never guessed
+    label = ("unknown" if not isinstance(cohort, str) or not cohort.strip()
+             else cohort if cohort == COHORT_ALL else f"since {cohort.strip()[:8]}")
+    return (f"lifecycle [cohort {label}]: {counts.get('start_without_end')} start-without-end, "
             f"{counts.get('end_without_start')} end-without-start, "
             f"{counts.get('double_end')} double, {counts.get('projection_conflict')} conflict, "
             f"{counts.get('provenance_unknown')} provenance-unknown; sweep {sweep}")
