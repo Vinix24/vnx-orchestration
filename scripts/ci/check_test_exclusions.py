@@ -15,10 +15,13 @@ Exit 0 when clean, exit 1 with violation details.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
 EXCLUSIONS_REL = Path("scripts/ci/test_exclusions.txt")
+WORKFLOW_REL = Path(".github/workflows/vnx-ci.yml")
+TEST_DEF_RE = re.compile(r"^\s*(async )?def test_", re.MULTILINE)
 
 
 def parse_entries(text: str) -> list[tuple[int, str, str]]:
@@ -76,9 +79,56 @@ def check_file(exclusions_path: Path, repo_root: Path) -> list[str]:
     return violations
 
 
+def profile_a_job(text: str) -> str:
+    """The ``profile-a`` job block of a workflow, or "" when it has none."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if re.match(r"^  profile-a:\s*$", line)), None)
+    if start is None:
+        return ""
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^  [\w-]+:\s*$", lines[i])), len(lines))
+    return "\n".join(lines[start:end])
+
+
+def other_deselections(root: Path) -> list[str]:
+    try:
+        job = profile_a_job((root / WORKFLOW_REL).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return []
+    job = "\n".join(line for line in job.splitlines() if not line.lstrip().startswith("#"))
+    notes: list[str] = []
+    if re.search(r'CI_PROFILE[^\n]*light', job):
+        notes.append("also not swept when CI_PROFILE=light: the docs-only profile runs a fixed file list, not the tree")
+    notes.extend(
+        f"also not swept: {flag} {raw} deselects tests"
+        for flag, raw in re.findall(r'(?<![\w-])(--deselect|--ignore|-m)[=\s]+("[^"]*"|\'[^\']*\'|\S+)', job)
+    )
+    return notes
+
+
+def summarize(root: Path) -> list[str]:
+    exclusions = root / EXCLUSIONS_REL
+    try:
+        if not exclusions.is_file():
+            raise FileNotFoundError(EXCLUSIONS_REL)
+        entries = parse_entries(exclusions.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError) as exc:
+        return [f"test exclusions: unmeasured ({getattr(exc, 'strerror', None) or exc})"]
+    functions = 0
+    for _lineno, path, _reason in entries:
+        try:
+            functions += len(TEST_DEF_RE.findall((root / path).read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError) as exc:
+            return [f"test exclusions: unmeasured (cannot read {path}: {getattr(exc, 'strerror', None) or exc})"]
+    return [f"test exclusions: {len(entries)} files, {functions} test functions outside the Profile A sweep ({EXCLUSIONS_REL})"] + other_deselections(root)
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = argv if argv is not None else sys.argv[1:]
-    root = Path(args[0]).resolve() if args else Path.cwd()
+    args = list(argv if argv is not None else sys.argv[1:])
+    summary = "--summary" in args
+    root = Path(next((arg for arg in args if arg != "--summary"), ".")).resolve()
+    if summary:
+        print("\n".join(summarize(root)))
+        return 0
 
     exclusions = root / EXCLUSIONS_REL
     if not exclusions.is_file():
