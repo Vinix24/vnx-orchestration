@@ -44,8 +44,20 @@ _MODULE_PATH = Path(__file__).resolve().parent.parent / "scripts" / "lib" / "dis
 
 @pytest.fixture(autouse=True)
 def isolated_data_dir(monkeypatch, tmp_path):
-    """Route all register I/O into a fresh tmp dir for every test."""
+    """Route all register I/O into a fresh tmp dir for every test.
+
+    Hermetic against the operator's shell (OI-2584): the register resolves its
+    path through ``vnx_paths.resolve_paths`` (honours ``VNX_DATA_DIR`` only with
+    ``VNX_DATA_DIR_EXPLICIT=1``) and ``read_events`` merge-reads the central
+    register of ``$VNX_PROJECT_ID``. The test therefore pins the first and
+    removes the ambient values of the others; tests that need them set them
+    again themselves.
+    """
     data_dir = tmp_path / ".vnx-data"
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+    monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "account-home"))
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_STATE_DIR", str(data_dir / "state"))
     return data_dir
