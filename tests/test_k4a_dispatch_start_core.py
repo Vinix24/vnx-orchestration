@@ -177,7 +177,8 @@ def _metadata(row: dict) -> dict:
 def test_handover_is_frozen_and_refusal_names_its_code():
     handover = dispatch_start.Handover(
         project_id=PROJECT, dispatch_id=DISPATCH, attempt=1, lifecycle_mode="v3",
-        door_pid=os.getpid(), door_started_at="Mon Nov  3 10:00:00 2026", started_at="2026-11-03T10:00:00Z")
+        door_pid=os.getpid(), door_started_at="Mon Nov  3 10:00:00 2026", started_at="2026-11-03T10:00:00Z",
+        role=ROLE)
     assert handover.is_v3 is True and handover.mode_write == "ok"
     with pytest.raises(FrozenInstanceError):
         handover.attempt = 2

@@ -456,7 +456,7 @@ def test_failed_projection_is_named_and_the_dispatch_proceeds(tmp_path, monkeypa
         project_id=PROJECT, dispatch_id=dispatch_id, attempt=1,
         lifecycle_mode=dispatch_start.MODE_LEGACY, door_pid=os.getpid(),
         door_started_at="", started_at="2026-11-03T00:00:00Z",
-        mode_write=dispatch_start.MODE_WRITE_FAILED,
+        role="backend-developer", mode_write=dispatch_start.MODE_WRITE_FAILED,
     )
     entered = {"slot": False}
 

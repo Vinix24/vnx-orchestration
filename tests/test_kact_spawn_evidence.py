@@ -187,7 +187,7 @@ def _handover(door_pid: int, door_started_at: str) -> dispatch_start.Handover:
     """The attempt-1 hand-over the seeded start line describes (attempt 1, v3)."""
     return dispatch_start.Handover(project_id=PROJECT, dispatch_id=DISPATCH, attempt=1,
                                    lifecycle_mode="v3", door_pid=door_pid,
-                                   door_started_at=door_started_at, started_at=T0)
+                                   door_started_at=door_started_at, started_at=T0, role=ROLE)
 
 
 def _spawn_path(state_dir: Path) -> Path:

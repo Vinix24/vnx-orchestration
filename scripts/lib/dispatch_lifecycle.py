@@ -883,10 +883,12 @@ def sweep_attempt(state_dir: Path, attempt: InFlightAttempt, now: datetime) -> T
         return "open", source, f"{attempt.dispatch_id}#{attempt.attempt}: start line has no timestamp"
     if now <= started + timedelta(seconds=deadline + ABANDON_GRACE_SECONDS):
         return "open", source, None
+    # The end line carries the start line's role: both lines describe one attempt.
+    role = str(attempt.start_line.get("role") or "")
     # K-3c's intent is exclusive: a sweep that loses the race books nothing.
     booked = finalize(state_dir=state_dir, project_id=attempt.project_id, dispatch_id=attempt.dispatch_id,
              attempt=attempt.attempt, end_state="abandoned", actor="sweep",
-             end_line=build_end_line(attempt, end_state="abandoned",
+             end_line=build_end_line(attempt, role=role, end_state="abandoned",
                                      reason=REASON_SWEEP_ABANDONED,
                                      no_push=NO_PUSH_ABANDONED),
              reason=f"{REASON_SWEEP_ABANDONED} (deadline {deadline}s from {source})",

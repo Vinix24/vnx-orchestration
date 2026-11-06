@@ -274,7 +274,7 @@ def test_record_lifecycle_mode_takes_its_loud_failure_path_for_a_directory(tmp_p
     handover = dispatch_start.Handover(
         project_id=PROJECT, dispatch_id=DISPATCH, attempt=1,
         lifecycle_mode=dispatch_start.MODE_V3, door_pid=1,
-        door_started_at=T0, started_at=T0)
+        door_started_at=T0, started_at=T0, role=ROLE)
 
     mode = dispatch_start._record_lifecycle_mode(handover, state_dir=state, write_attempt=True)
 
@@ -289,7 +289,7 @@ def test_record_lifecycle_mode_with_no_store_is_still_write_ok(tmp_path):
     handover = dispatch_start.Handover(
         project_id=PROJECT, dispatch_id=DISPATCH, attempt=1,
         lifecycle_mode=dispatch_start.MODE_V3, door_pid=1,
-        door_started_at=T0, started_at=T0)
+        door_started_at=T0, started_at=T0, role=ROLE)
 
     mode = dispatch_start._record_lifecycle_mode(handover, state_dir=state, write_attempt=True)
 
