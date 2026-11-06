@@ -239,3 +239,117 @@ def test_snapshot_detects_a_changed_help_text(monkeypatch, frozen_snapshot) -> N
     difference = _first_difference(live, frozen_snapshot["parser"], "parser")
     assert difference is not None
     assert "help text deliberately changed" in difference
+
+
+# One full command line per `objective` write action, carrying every argument
+# that action accepts plus the three common flags. Frozen against the unchanged
+# `_build_parser` before the eight write actions got their own builders
+# (functies-onder-200 G2-4): a move that drops an argument, changes a dest or
+# loses the `func` default changes one of these Namespaces.
+WRITE_COMMAND_LINES: Dict[str, tuple] = {
+    "close": (
+        [
+            "objective", "close", "t-1", "--apply", "--approval-id", "AP-1",
+            "--include-parked", "--repo-root", "/repo", "--attest", "why",
+            "--pr", "#1", "--pr", "2", "--max-gh-calls", "7",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "close", "apply": True, "approval_id": "AP-1", "attest": "why",
+            "domain": "objective", "func": "cmd_objective_close", "include_parked": True,
+            "json": True, "max_gh_calls": 7, "pr": ["#1", "2"], "project_id": "proj",
+            "repo_root": "/repo", "state_dir": "/state", "track_id": "t-1",
+        },
+    ),
+    "link-pr": (
+        [
+            "objective", "link-pr", "t-1", "#1", "2", "--delivery", "complete",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "link-pr", "delivery": "complete", "domain": "objective",
+            "func": "cmd_objective_link_pr", "json": True, "pr": ["#1", "2"],
+            "project_id": "proj", "state_dir": "/state", "track_id": "t-1",
+        },
+    ),
+    "unlink-pr": (
+        [
+            "objective", "unlink-pr", "t-1", "#1", "--reason", "wrong PR",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "unlink-pr", "domain": "objective", "func": "cmd_objective_unlink_pr",
+            "json": True, "pr": ["#1"], "project_id": "proj", "reason": "wrong PR",
+            "state_dir": "/state", "track_id": "t-1",
+        },
+    ),
+    "remove-dependency": (
+        [
+            "objective", "remove-dependency", "t-1", "t-2", "--to-project-id", "other",
+            "--reason", "no longer needed", "--project-id", "proj",
+            "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "remove-dependency", "domain": "objective",
+            "func": "cmd_objective_remove_dependency", "json": True, "project_id": "proj",
+            "reason": "no longer needed", "state_dir": "/state", "to_project_id": "other",
+            "to_track_id": "t-2", "track_id": "t-1",
+        },
+    ),
+    "unmark-delivery": (
+        [
+            "objective", "unmark-delivery", "t-1", "#1", "--reason", "re-link",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "unmark-delivery", "domain": "objective",
+            "func": "cmd_objective_unmark_delivery", "json": True, "pr": ["#1"],
+            "project_id": "proj", "reason": "re-link", "state_dir": "/state",
+            "track_id": "t-1",
+        },
+    ),
+    "reopen": (
+        [
+            "objective", "reopen", "t-1", "--approval-id", "AP-2", "--reason", "came back",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "reopen", "approval_id": "AP-2", "domain": "objective",
+            "func": "cmd_objective_reopen", "json": True, "project_id": "proj",
+            "reason": "came back", "state_dir": "/state", "track_id": "t-1",
+        },
+    ),
+    "add": (
+        [
+            "objective", "add", "t-1", "Title", "Done looks like this", "--horizon", "now",
+            "--priority", "high", "--lane-hint", "governed", "--plan-scope", "light",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "add", "domain": "objective", "func": "cmd_objective_add",
+            "goal_state": "Done looks like this", "horizon": "now", "json": True,
+            "lane_hint": "governed", "plan_scope": "light", "priority": "high",
+            "project_id": "proj", "state_dir": "/state", "title": "Title",
+            "track_id": "t-1",
+        },
+    ),
+    "set-goal": (
+        [
+            "objective", "set-goal", "t-1", "a much clearer goal statement",
+            "--project-id", "proj", "--state-dir", "/state", "--json",
+        ],
+        {
+            "action": "set-goal", "domain": "objective", "func": "cmd_objective_set_goal",
+            "goal": "a much clearer goal statement", "json": True, "project_id": "proj",
+            "state_dir": "/state", "track_id": "t-1",
+        },
+    ),
+}
+
+
+@pytest.mark.parametrize("action", sorted(WRITE_COMMAND_LINES))
+def test_write_actions_parse_every_argument(action: str) -> None:
+    """Each write action parses a full command line to the frozen Namespace."""
+    argv, expected = WRITE_COMMAND_LINES[action]
+    parser = planning_cli._build_parser()
+    assert _namespace(parser, list(argv)) == expected
