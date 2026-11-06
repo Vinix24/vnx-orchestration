@@ -48,6 +48,8 @@ from typing import Optional
 
 import pytest
 
+from conftest import RepoPythonCensus, repo_python_census
+
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "scripts" / "lib"
 sys.path.insert(0, str(LIB))
@@ -57,30 +59,6 @@ _DELIVER_TARGET = "deliver"
 _ADAPTER_CTOR = "SubprocessAdapter"
 _SCRUB_KWARG = "scrub_env_keys"
 _EXCLUDE_DIRS = frozenset({"tests"})
-
-
-def _git_tracked_py_files(root: Path) -> list[Path]:
-    """Absolute paths to every git-tracked ``.py`` file under ``root``.
-
-    Tracked-ness, not a directory namelist, keeps a build artifact / nested worktree /
-    CI rollout copy out of the scan regardless of what it's named or where it lives.
-    Fails CLOSED — raises ``RuntimeError`` — when git is unavailable, rather than
-    silently falling back to an incomplete namelist (OI-1597 precedent).
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.py"],
-            cwd=str(root), capture_output=True, timeout=10,
-        )
-    except OSError as exc:
-        raise RuntimeError(
-            f"git is not available to determine tracked .py files under {root}"
-        ) from exc
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"`git ls-files` failed under {root} (not a git work tree?): {stderr}")
-    stdout = result.stdout.decode("utf-8")
-    return [root / rel for rel in stdout.split("\0") if rel]
 
 
 def _call_target_name(node: ast.Call) -> Optional[str]:
@@ -115,6 +93,7 @@ def _subprocess_adapter_var_names(tree: ast.Module) -> set[str]:
 
 def _find_scrub_call_sites(
     root: Path, exclude_dirs: frozenset[str] = _EXCLUDE_DIRS,
+    *, census: RepoPythonCensus | None = None,
 ) -> dict[str, list[tuple[str, ast.Call]]]:
     """Map of relative-path -> list of (category, ast.Call) for every real call to
     ``spawn_claude(...)`` or ``<SubprocessAdapter instance>.deliver(...)``, over the
@@ -124,17 +103,17 @@ def _find_scrub_call_sites(
     site — this guard only owns the one ``deliver()`` implementation that actually
     builds a Popen env from the ambient environment.
 
-    An unparseable or non-UTF-8 file raises a clean AssertionError naming the file,
-    instead of letting the raw SyntaxError/UnicodeDecodeError traceback escape.
+    The tree of each file comes from ``repo_python_census`` (the caller's census,
+    else a fresh one over ``root``); an unparseable or non-UTF-8 file still raises
+    a clean AssertionError naming it.
     """
+    census = census if census is not None else repo_python_census(root)
     found: dict[str, list[tuple[str, ast.Call]]] = {}
-    for full_path in _git_tracked_py_files(root):
-        rel = full_path.relative_to(root)
-        if any(part in exclude_dirs for part in rel.parts[:-1]):
+    for rel, entry in census.entries().items():
+        if any(part in exclude_dirs for part in Path(rel).parts[:-1]):
             continue
         try:
-            source = full_path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(full_path))
+            tree = entry.tree
         except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
             raise AssertionError(
                 f"cannot parse {rel} while scanning for scrub_env_keys call sites: {exc}"
@@ -160,7 +139,7 @@ def _find_scrub_call_sites(
                 if is_adapter:
                     sites.append(("SubprocessAdapter.deliver", node))
         if sites:
-            found[str(rel)] = sites
+            found[rel] = sites
     return found
 
 
@@ -193,13 +172,13 @@ class TestEveryCallSiteSuppliesScrubEnvKeys:
     brand-new lane is picked up automatically by the git-tracked-.py scan and held to
     the same bar, without this test needing to be edited."""
 
-    def test_known_call_sites_are_found(self):
-        sites = _find_scrub_call_sites(REPO)
+    def test_known_call_sites_are_found(self, repo_python_census):
+        sites = _find_scrub_call_sites(REPO, census=repo_python_census)
         missing = _KNOWN_CALL_SITES - set(sites)
         assert not missing, f"expected call site(s) not found by the scan: {missing}"
 
-    def test_every_call_site_supplies_non_none_scrub_env_keys(self):
-        sites = _find_scrub_call_sites(REPO)
+    def test_every_call_site_supplies_non_none_scrub_env_keys(self, repo_python_census):
+        sites = _find_scrub_call_sites(REPO, census=repo_python_census)
         assert sites, "expected at least the seven known call sites"
         problems = []
         for rel, calls in sites.items():

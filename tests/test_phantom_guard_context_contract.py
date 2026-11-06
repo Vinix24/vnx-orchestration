@@ -40,6 +40,8 @@ from typing import Optional
 
 import pytest
 
+from conftest import RepoPythonCensus, repo_python_census
+
 REPO = Path(__file__).resolve().parent.parent
 LIB = REPO / "scripts" / "lib"
 sys.path.insert(0, str(LIB))
@@ -50,30 +52,6 @@ _TARGET_CALL = "record_phantom_if_any"
 _CONTEXT_CTOR = "PhantomDecisionContext"
 _REQUIRED_CONTEXT_FIELDS = frozenset({"role", "task_class", "read_only", "status", "worktree_diff"})
 _EXCLUDE_DIRS = frozenset({"tests"})
-
-
-def _git_tracked_py_files(root: Path) -> list[Path]:
-    """Absolute paths to every git-tracked ``.py`` file under ``root``.
-
-    Same property as the beacon test's identically-named helper (OI-1597): tracked-ness, not a
-    directory namelist, keeps a build artifact / nested worktree / CI rollout copy out of the
-    scan regardless of what it's named or where it lives. Fails CLOSED — raises ``RuntimeError``
-    — when git is unavailable, rather than silently falling back to an incomplete namelist.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.py"],
-            cwd=str(root), capture_output=True, timeout=10,
-        )
-    except OSError as exc:
-        raise RuntimeError(
-            f"git is not available to determine tracked .py files under {root}"
-        ) from exc
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(f"`git ls-files` failed under {root} (not a git work tree?): {stderr}")
-    stdout = result.stdout.decode("utf-8")
-    return [root / rel for rel in stdout.split("\0") if rel]
 
 
 def _call_target_name(node: ast.Call) -> Optional[str]:
@@ -88,23 +66,24 @@ def _call_target_name(node: ast.Call) -> Optional[str]:
 
 def _find_record_phantom_call_sites(
     root: Path, exclude_dirs: frozenset[str] = _EXCLUDE_DIRS,
+    *, census: RepoPythonCensus | None = None,
 ) -> dict[str, list[ast.Call]]:
     """Map of relative-path -> list of ast.Call nodes invoking record_phantom_if_any(...),
     over the git-tracked .py files rooted at ``root``. A name that only appears in a
     docstring/comment (e.g. this file's own module docstring above) is not a call site — an
     AST scan for real ast.Call nodes can tell the two apart, a grep cannot (OI-1594).
 
-    An unparseable or non-UTF-8 file raises a clean AssertionError naming the file, instead of
-    letting the raw SyntaxError/UnicodeDecodeError traceback escape (OI-1597 advisory).
+    The tree of each file comes from ``repo_python_census`` (the caller's census,
+    else a fresh one over ``root``); an unparseable or non-UTF-8 file still raises
+    a clean AssertionError naming it (OI-1597 advisory).
     """
+    census = census if census is not None else repo_python_census(root)
     found: dict[str, list[ast.Call]] = {}
-    for full_path in _git_tracked_py_files(root):
-        rel = full_path.relative_to(root)
-        if any(part in exclude_dirs for part in rel.parts[:-1]):
+    for rel, entry in census.entries().items():
+        if any(part in exclude_dirs for part in Path(rel).parts[:-1]):
             continue
         try:
-            source = full_path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(full_path))
+            tree = entry.tree
         except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
             raise AssertionError(
                 f"cannot parse {rel} while scanning for record_phantom_if_any call sites: {exc}"
@@ -114,7 +93,7 @@ def _find_record_phantom_call_sites(
             if isinstance(node, ast.Call) and _call_target_name(node) == _TARGET_CALL
         ]
         if calls:
-            found[str(rel)] = calls
+            found[rel] = calls
     return found
 
 
@@ -164,13 +143,13 @@ class TestEveryCallSiteCarriesAllDecisionRelevantFields:
     fourth lane that calls record_phantom_if_any is picked up automatically by the
     git-tracked-.py scan and held to the same bar, without this test needing to be edited."""
 
-    def test_known_lane_call_sites_are_found(self):
-        sites = _find_record_phantom_call_sites(REPO)
+    def test_known_lane_call_sites_are_found(self, repo_python_census):
+        sites = _find_record_phantom_call_sites(REPO, census=repo_python_census)
         missing = _KNOWN_LANE_CALL_SITES - set(sites)
         assert not missing, f"expected call site(s) not found by the scan: {missing}"
 
-    def test_every_call_site_supplies_all_required_context_fields(self):
-        sites = _find_record_phantom_call_sites(REPO)
+    def test_every_call_site_supplies_all_required_context_fields(self, repo_python_census):
+        sites = _find_record_phantom_call_sites(REPO, census=repo_python_census)
         assert sites, "expected at least the known lane call sites"
         problems = []
         for rel, calls in sites.items():

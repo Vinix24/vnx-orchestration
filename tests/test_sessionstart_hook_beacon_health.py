@@ -83,6 +83,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import RepoPythonCensus, repo_python_census
+
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "sessionstart.sh"
 LIB = REPO / "scripts" / "lib"
@@ -351,39 +353,10 @@ _CALL_SITE_TARGETS = frozenset({"all_beacons", "beacon_summary"})
 _CALL_SITE_EXCLUDE_DIRS = frozenset({"tests"})
 
 
-def _git_tracked_py_files(root: Path) -> list[Path]:
-    """Absolute paths to every git-tracked `.py` file under `root`.
-
-    Tracked-ness (not a directory namelist) is the property that keeps a
-    build artifact, a nested worktree, or a CI rollout copy out of the
-    count: none of them is ever `git add`-ed, so `git ls-files` never
-    returns them, regardless of what they're named or where they live
-    (OI-1597).
-
-    Fails CLOSED — raises `RuntimeError` — when git is unavailable or
-    `root` is not inside a git work tree, rather than silently falling
-    back to a namelist. A silent fallback would reintroduce the exact
-    defect this replaces: a namelist that is never complete.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "ls-files", "-z", "--", "*.py"],
-            cwd=str(root), capture_output=True, timeout=10,
-        )
-    except OSError as exc:
-        raise RuntimeError(
-            f"git is not available to determine tracked .py files under {root}"
-        ) from exc
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"`git ls-files` failed under {root} (not a git work tree?): {stderr}"
-        )
-    stdout = result.stdout.decode("utf-8")
-    return [root / rel for rel in stdout.split("\0") if rel]
-
-
-def _find_call_sites(root: Path, exclude_dirs: frozenset[str] = _CALL_SITE_EXCLUDE_DIRS) -> set[str]:
+def _find_call_sites(
+    root: Path, exclude_dirs: frozenset[str] = _CALL_SITE_EXCLUDE_DIRS,
+    *, census: RepoPythonCensus | None = None,
+) -> set[str]:
     """AST scan for real `ast.Call` nodes targeting `all_beacons`/
     `beacon_summary`, over the git-tracked `.py` files rooted at `root`.
 
@@ -395,18 +368,18 @@ def _find_call_sites(root: Path, exclude_dirs: frozenset[str] = _CALL_SITE_EXCLU
     dispatch's literal `beacon_summary\\|all_beacons` grep pattern matched
     too — this only narrows *which* matches count, not what they match on.
 
-    An unparseable or non-UTF-8 file raises a clean `AssertionError`
-    naming the file, instead of letting the raw `SyntaxError`/
-    `UnicodeDecodeError` traceback escape (OI-1597 advisory).
+    The tree of each tracked file comes from the shared `repo_python_census`
+    (the session fixture's census when the caller passes one, else a fresh
+    census over `root`); an unparseable or non-UTF-8 file still raises a clean
+    `AssertionError` naming it (OI-1597 advisory).
     """
+    census = census if census is not None else repo_python_census(root)
     found: set[str] = set()
-    for full_path in _git_tracked_py_files(root):
-        rel = full_path.relative_to(root)
-        if any(part in exclude_dirs for part in rel.parts[:-1]):
+    for rel, entry in census.entries().items():
+        if any(part in exclude_dirs for part in Path(rel).parts[:-1]):
             continue
         try:
-            source = full_path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=str(full_path))
+            tree = entry.tree
         except (SyntaxError, UnicodeDecodeError, ValueError) as exc:
             raise AssertionError(
                 f"cannot parse {rel} while scanning for beacon call sites: {exc}"
@@ -512,14 +485,14 @@ class TestCallSiteCountDoesNotGrow:
         "./vnx_cli/commands/subsystems.py",
     }
 
-    def test_call_site_count_matches_baseline(self):
-        matched = _find_call_sites(REPO)
+    def test_call_site_count_matches_baseline(self, repo_python_census):
+        matched = _find_call_sites(REPO, census=repo_python_census)
         assert matched == self._BASELINE, (
             f"caller set changed: added={matched - self._BASELINE}, "
             f"removed={self._BASELINE - matched}"
         )
 
-    def test_call_site_count_is_unchanged_with_a_build_artifact_present(self):
+    def test_call_site_count_is_unchanged_with_a_build_artifact_present(self, repo_python_census):
         """OI-1597: `build/` is a local `pip install -e`/`setup.py build`
         artifact — gitignored (`.gitignore:75`), absent on CI and on a
         fresh clone, but present on any machine that ever built the
@@ -536,7 +509,7 @@ class TestCallSiteCountDoesNotGrow:
             marker.write_text(
                 "from health_beacon import all_beacons\nall_beacons(x)\n", encoding="utf-8",
             )
-            matched = _find_call_sites(REPO)
+            matched = _find_call_sites(REPO, census=repo_python_census)
             assert matched == self._BASELINE, (
                 f"a build/ artifact changed the caller set: "
                 f"added={matched - self._BASELINE}, removed={self._BASELINE - matched}"

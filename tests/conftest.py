@@ -6,8 +6,10 @@ test_vnx_snapshot_tooling.py, and the burn-in CI workflow tests.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -187,6 +189,143 @@ _SCHEMAS_DIR = _ROOT_DIR / "schemas"
 
 if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
+
+
+# ---------------------------------------------------------------------------
+# Session-wide census of the repo's git-tracked .py files (test-suite-kosten TSK-3)
+# ---------------------------------------------------------------------------
+# The three call-site contracts each scan every git-tracked .py file and parse
+# it. The scan IS their assertion, so it stays; one census per session, keyed per
+# file on (path, size, mtime_ns), stops them re-reading and re-parsing the same
+# files three times over (measured: 935 parses per contract file, 935 in total).
+
+def _git_tracked_py_files(root: Path) -> list[str]:
+    """Repo-relative paths of every git-tracked ``.py`` file under ``root``.
+
+    Tracked-ness keeps build artifacts, nested worktrees and CI rollout copies
+    out (OI-1597); an unavailable git fails CLOSED with ``RuntimeError``, never
+    an incomplete namelist.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.py"],
+            cwd=str(root), capture_output=True, timeout=10,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"git is not available to determine tracked .py files under {root}"
+        ) from exc
+    if result.returncode != 0:
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()
+        raise RuntimeError(f"`git ls-files` failed under {root} (not a git work tree?): {stderr}")
+    return [rel for rel in result.stdout.decode("utf-8").split("\0") if rel]
+
+
+class CensusEntry:
+    """One git-tracked ``.py`` file: ``source`` and ``tree`` load lazily and are memoised.
+
+    A file that cannot be read or parsed stays an entry with ``error`` set —
+    ``source``/``tree`` raise it and the caller decides; never silently dropped.
+    """
+
+    __slots__ = ("key", "path", "rel", "_error", "_loaded", "_source", "_tree")
+
+    def __init__(self, *, path: Path, rel: str, key: tuple[int, int] | None) -> None:
+        self.path = path
+        self.rel = rel
+        self.key = key
+        self._source: str | None = None
+        self._tree: ast.Module | None = None
+        self._error: BaseException | None = None
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            source = self.path.read_text(encoding="utf-8")
+            self._tree = ast.parse(source, filename=str(self.path))
+            self._source = source
+        except (OSError, SyntaxError, ValueError) as exc:
+            self._error = exc
+
+    @property
+    def error(self) -> BaseException | None:
+        """The read/parse failure for this file, or ``None`` when it loaded."""
+        self._load()
+        return self._error
+
+    @property
+    def source(self) -> str:
+        self._load()
+        if self._error is not None:
+            raise self._error
+        assert self._source is not None
+        return self._source
+
+    @property
+    def tree(self) -> ast.Module:
+        self._load()
+        if self._error is not None:
+            raise self._error
+        assert self._tree is not None
+        return self._tree
+
+
+class RepoPythonCensus:
+    """The git-tracked ``.py`` files of one root, read and parsed once.
+
+    ``git ls-files`` runs once; every :meth:`entries` call re-stats each file and
+    rebuilds the entry whose ``(size, mtime_ns)`` key changed, so a file rewritten
+    between two scans is parsed again.
+    """
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root).resolve()
+        self._tracked: tuple[str, ...] | None = None
+        self._entries: dict[str, CensusEntry] = {}
+
+    def entries(self) -> dict[str, CensusEntry]:
+        """Map of repo-relative path -> entry, reusing entries whose stat key is unchanged."""
+        if self._tracked is None:
+            self._tracked = tuple(_git_tracked_py_files(self.root))
+        entries: dict[str, CensusEntry] = {}
+        for rel in self._tracked:
+            path = self.root / rel
+            try:
+                stat = path.stat()
+            except OSError:
+                key: tuple[int, int] | None = None
+            else:
+                key = (stat.st_size, stat.st_mtime_ns)
+            cached = self._entries.get(rel)
+            if cached is None or key is None or cached.key != key:
+                cached = CensusEntry(path=path, rel=rel, key=key)
+            entries[rel] = cached
+        self._entries = entries
+        return dict(entries)
+
+
+def repo_python_census(root: Path | None = None) -> RepoPythonCensus:
+    """Build a census over ``root`` (default: this repo). TSK-4 and the tests import this.
+
+    Each call returns a NEW census, so a caller that mutates its tree between
+    scans (the fixture-tree tests) gets a fresh ``git ls-files``; the session
+    fixture below is the one the three contract files share.
+    """
+    return RepoPythonCensus(_ROOT_DIR if root is None else Path(root))
+
+
+@pytest.fixture(scope="session", name="repo_python_census")
+def _repo_python_census_fixture() -> RepoPythonCensus:
+    """One census for the whole session.
+
+    Under xdist every worker process runs its own session, so the census is per
+    worker: expected, not a bug. The saving is one parse per file per worker
+    instead of one per test file, and each worker's count stays deterministic.
+    """
+    return repo_python_census()
 
 
 def pytest_configure(config: pytest.Config) -> None:
