@@ -4040,6 +4040,55 @@ def _dispatch_local_gemma(args: argparse.Namespace) -> int:
     return 0 if result.returncode == 0 else 1
 
 
+def _apply_auto_route(args: argparse.Namespace, provider: str) -> str:
+    """Run the opt-in smart-router step and return the provider ``main`` continues with.
+
+    PR-SR-3/4: the end-to-end smart_router pipeline, opt-in via ``--auto-route``. Uses
+    explicit decide() + parse + write_route_decision() so NDJSON persistence is never
+    silently swallowed by a bundled route() failure. With no ``--auto-route`` nothing
+    runs and nothing is imported. The recovered decision mutates ``args.provider`` /
+    ``args.model`` and sets VNX_ROUTE_STRATEGY / VNX_TASK_CLASS, but only when there is
+    a primary. Any failure falls back to the ``--provider`` / ``--model`` seeds with a
+    warning and never raises.
+    """
+    if not getattr(args, "auto_route", False):
+        return provider
+    try:
+        from smart_router import decide as _smart_decide, parse_route_model_id, write_route_decision  # noqa: PLC0415
+
+        _dp = _resolve_dispatch_paths(args.dispatch_paths)
+        _route_decision = _smart_decide(
+            instruction=args.instruction,
+            role=args.role,
+            dispatch_paths=_dp,
+            tags=getattr(args, "tags", []),
+        )
+
+        if _route_decision.primary:
+            _r_provider, _r_model = parse_route_model_id(
+                _route_decision.primary.model_id,
+            )
+            provider = _r_provider
+            args.provider = _r_provider
+            args.model = _r_model
+            os.environ["VNX_ROUTE_STRATEGY"] = "smart_router"
+            os.environ["VNX_TASK_CLASS"] = _route_decision.task_class
+
+        _state_dir = _resolve_state_dir()
+        write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
+
+        logger.info(
+            "smart_router: auto-route provider=%s model=%s (task_class=%s)",
+            provider, args.model, _route_decision.task_class,
+        )
+    except Exception as _route_exc:
+        logger.warning(
+            "smart_router: auto-route failed (%s); falling back to --provider=%s --model=%s",
+            _route_exc, args.provider, args.model,
+        )
+    return provider
+
+
 def main(argv: list[str] | None = None) -> int:
     """Parse args, route to the correct provider handler, return exit code."""
     from env_loader import load_env
@@ -4055,45 +4104,7 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "no_repo_map", False):
         os.environ["VNX_NO_REPO_MAP"] = "1"
 
-    provider = args.provider
-
-    # PR-SR-3/4: smart_router end-to-end pipeline (opt-in via --auto-route).
-    # Uses explicit decide() + parse + write_route_decision() to ensure NDJSON
-    # persistence is never silently swallowed by a bundled route() failure.
-    if getattr(args, "auto_route", False):
-        try:
-            from smart_router import decide as _smart_decide, parse_route_model_id, write_route_decision  # noqa: PLC0415
-
-            _dp = _resolve_dispatch_paths(args.dispatch_paths)
-            _route_decision = _smart_decide(
-                instruction=args.instruction,
-                role=args.role,
-                dispatch_paths=_dp,
-                tags=getattr(args, "tags", []),
-            )
-
-            if _route_decision.primary:
-                _r_provider, _r_model = parse_route_model_id(
-                    _route_decision.primary.model_id,
-                )
-                provider = _r_provider
-                args.provider = _r_provider
-                args.model = _r_model
-                os.environ["VNX_ROUTE_STRATEGY"] = "smart_router"
-                os.environ["VNX_TASK_CLASS"] = _route_decision.task_class
-
-            _state_dir = _resolve_state_dir()
-            write_route_decision(args.dispatch_id, _route_decision, state_dir=_state_dir)
-
-            logger.info(
-                "smart_router: auto-route provider=%s model=%s (task_class=%s)",
-                provider, args.model, _route_decision.task_class,
-            )
-        except Exception as _route_exc:
-            logger.warning(
-                "smart_router: auto-route failed (%s); falling back to --provider=%s --model=%s",
-                _route_exc, args.provider, args.model,
-            )
+    provider = _apply_auto_route(args, args.provider)
 
     if provider not in _IMPLEMENTED_PROVIDERS and not provider.startswith("litellm:"):
         parser.error(

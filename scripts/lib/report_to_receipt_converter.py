@@ -1103,6 +1103,70 @@ def _lifecycle_report_line(
     return receipt if line is hint else line
 
 
+def _reject_unknown_filename_id(
+    dispatch_id: str, report_path: Path, state_dir: Optional[Path], *,
+    content_id_valid: bool, dry_run: bool,
+) -> bool:
+    """OI-1102: reject a filename-only dispatch_id the register does not know.
+
+    Returns True when the caller must stop: no receipt may be built for an
+    identity the dispatch register has never seen. A content-side dispatch_id
+    is authoritative and is never cross-checked; ``state_dir=None`` keeps the
+    pre-existing "no store, no cross-check" behaviour. The register lookup
+    itself fails open on a missing/unreadable register (``_is_known_dispatch``),
+    so a transient I/O error never quarantines a healthy report.
+
+    ``dry_run=True`` logs the would-be dead-letter instead of moving the file,
+    so a measuring scan never mutates the store it reads (OI-1744).
+    """
+    if content_id_valid or state_dir is None:
+        return False
+    if _is_known_dispatch(dispatch_id, state_dir):
+        return False
+    if dry_run:
+        logger.info(
+            "report_to_receipt_converter: [dry-run] would dead-letter "
+            "dispatch_id=%r (from filename %s) — not found in dispatch "
+            "register; no file moved",
+            dispatch_id, report_path.name,
+        )
+        return True
+    logger.warning(
+        "report_to_receipt_converter: dispatch_id=%r (from filename %s) "
+        "not found in dispatch register — dead-lettering",
+        dispatch_id, report_path.name,
+    )
+    _deadletter_report(report_path, "unknown_dispatch", state_dir)
+    return True
+
+
+def _resolve_lane_identity(
+    dispatch_id: str, merged: Dict[str, Any], state_dir: Optional[Path],
+    contract_violations: List[str],
+) -> Tuple[str, str]:
+    """Resolve ``(provider, model)`` from the lane, booking a refusal in place.
+
+    ``_resolve_report_provider_model`` raises ``UnrecognizedProviderError``
+    when NEITHER the lane nor the body yields a provider the closed
+    ``ProviderIdentity`` vocabulary recognises. The core's contract is "never
+    raises", so the refusal is appended to the caller's own
+    ``contract_violations`` list (the same object, so the violation order is
+    unchanged) and the receipt falls back to the closed ``UNKNOWN`` value with
+    an empty model — never an invented provider string.
+    """
+    try:
+        return _resolve_report_provider_model(dispatch_id, merged, state_dir)
+    except UnrecognizedProviderError as exc:
+        logger.warning(
+            "report_to_receipt_converter: unrecognized provider for dispatch=%s: "
+            "%s -- booking as report_contract_invalid instead of inventing a value",
+            dispatch_id, exc,
+        )
+        provider, model = ProviderIdentity.UNKNOWN.value, ""
+        contract_violations.append("unrecognized_provider")
+        return provider, model
+
+
 def _build_receipt_from_report_core(
     report_path: Path, text: str, *, state_dir: Optional[Path] = None,
     dry_run: bool = False,
@@ -1190,23 +1254,11 @@ def _build_receipt_from_report_core(
     # dispatch identity that never existed — the register won't know it,
     # and it must not enter the grootboek.  Dead-letter the report so no
     # lane retries it.
-    if not content_id_valid and state_dir is not None:
-        if not _is_known_dispatch(dispatch_id, state_dir):
-            if dry_run:
-                logger.info(
-                    "report_to_receipt_converter: [dry-run] would dead-letter "
-                    "dispatch_id=%r (from filename %s) — not found in dispatch "
-                    "register; no file moved",
-                    dispatch_id, report_path.name,
-                )
-                return None
-            logger.warning(
-                "report_to_receipt_converter: dispatch_id=%r (from filename %s) "
-                "not found in dispatch register — dead-lettering",
-                dispatch_id, report_path.name,
-            )
-            _deadletter_report(report_path, "unknown_dispatch", state_dir)
-            return None
+    if _reject_unknown_filename_id(
+        dispatch_id, report_path, state_dir,
+        content_id_valid=content_id_valid, dry_run=dry_run,
+    ):
+        return None
 
     timestamp = (
         merged.get("timestamp")
@@ -1239,18 +1291,9 @@ def _build_receipt_from_report_core(
     # function's contract is "never raises" (see the caller-hardening comment
     # in _convert_one_detailed), and inventing a provider string no source
     # ever reported would be exactly the fail-open passthrough this replaces.
-    try:
-        _resolved_provider, _resolved_model = _resolve_report_provider_model(
-            dispatch_id, merged, state_dir,
-        )
-    except UnrecognizedProviderError as exc:
-        logger.warning(
-            "report_to_receipt_converter: unrecognized provider for dispatch=%s: "
-            "%s -- booking as report_contract_invalid instead of inventing a value",
-            dispatch_id, exc,
-        )
-        _resolved_provider, _resolved_model = ProviderIdentity.UNKNOWN.value, ""
-        contract_violations.append("unrecognized_provider")
+    _resolved_provider, _resolved_model = _resolve_lane_identity(
+        dispatch_id, merged, state_dir, contract_violations,
+    )
 
     base: Dict[str, Any] = {
         "dispatch_id": dispatch_id,

@@ -1,0 +1,1 @@
+- Refactor (golf 2, G2-13): the report-to-receipt core keeps its two self-contained steps in private helpers, `_reject_unknown_filename_id` (the OI-1102 register cross-check) and `_resolve_lane_identity` (lane identity). `_build_receipt_from_report_core` drops from 212 to 191 executable lines; receipt bytes, log lines, dead-letter moves and contract-violation order are unchanged.
