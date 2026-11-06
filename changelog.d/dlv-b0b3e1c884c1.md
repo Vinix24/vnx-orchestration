@@ -1,0 +1,1 @@
+- Handover-helper in test_envelope_governed_record.py geeft de verplichte role mee (audit-spoor-kern E1-fix, OI-2598).
