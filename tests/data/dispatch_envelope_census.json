@@ -799,6 +799,48 @@
       "symbol": "_receipt_exists_for_dispatch"
     },
     {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 43,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 44,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 139,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_archive_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 141,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_clear_dispatch_events"
+    },
+    {
+      "file": "tests/test_envelope_govern_report_steps.py",
+      "line": 143,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_receipt_exists_for_dispatch"
+    },
+    {
       "file": "tests/test_envelope_govern_spawn_error.py",
       "line": 29,
       "mechanism": "direct-call",
@@ -2363,8 +2405,11 @@
     "envelope_adapters_provider::_map_generic_spawn_result",
     "envelope_adapters_provider::_map_harness_spawn_result",
     "envelope_adapters_provider::_plan_worker_env",
+    "envelope_govern::_adopt_stray_report",
     "envelope_govern::_book_ledger_run",
+    "envelope_govern::_check_report_contract",
     "envelope_govern::_clear_archived_event_stream",
+    "envelope_govern::_emit_govern_report",
     "envelope_govern::_govern",
     "envelope_govern::_log_govern_outcome",
     "envelope_govern::_receipt_cost",
