@@ -201,7 +201,7 @@ def _start_heartbeat(
     *,
     process_cell: "list | None" = None,
     model: str = "",
-) -> tuple["threading.Event | None", "threading.Thread | None", "threading.Thread | None"]:
+) -> tuple["threading.Event | None", "threading.Thread | None", "threading.Event | None", "threading.Thread | None"]:
     """Start background lease-renewal + silence-detection threads.
 
     When *process_cell* is provided, a second daemon thread monitors the
@@ -210,7 +210,7 @@ def _start_heartbeat(
     caller populates with the spawn result after spawn_claude() completes,
     giving the heartbeat thread access to the adapter for process kill.
 
-    Returns (lease_stop_event, lease_thread, silence_thread).
+    Returns (lease_stop_event, lease_thread, silence_stop_event, silence_thread).
     """
     # Lease renewal thread.
     lease_stop: "threading.Event | None" = None
@@ -242,7 +242,7 @@ def _start_heartbeat(
     )
     silence_thread.start()
 
-    return lease_stop, lease_thread, silence_thread
+    return lease_stop, lease_thread, silence_stop, silence_thread
 
 
 def _mark_handover_processed(pending_handover: "Path | None") -> None:
@@ -373,7 +373,7 @@ def deliver_via_subprocess(
     # Mutable cell so the silence heartbeat thread can access the adapter
     # reference after spawn_claude() has started the subprocess.
     process_cell: list = [None]
-    heartbeat_stop, heartbeat_thread, silence_thread = _start_heartbeat(
+    heartbeat_stop, heartbeat_thread, silence_stop, silence_thread = _start_heartbeat(
         terminal_id, dispatch_id, lease_generation, heartbeat_interval,
         process_cell=process_cell, model=model,
     )
@@ -474,6 +474,8 @@ def deliver_via_subprocess(
         if heartbeat_thread is not None:
             heartbeat_thread.join(timeout=5)
         # Stop the silence heartbeat thread.
+        if silence_stop is not None:
+            silence_stop.set()
         if silence_thread is not None:
             silence_thread.join(timeout=5)
         # Event archive + report-pipeline trigger using the same adapter instance

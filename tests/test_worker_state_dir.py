@@ -138,7 +138,7 @@ class TestDeliveryEnvInjection:
             ),
             patch(
                 "subprocess_dispatch_internals.delivery._start_heartbeat",
-                return_value=(None, None),
+                return_value=(None, None, None, None),
             ),
         ):
             from subprocess_dispatch_internals.delivery import deliver_via_subprocess
