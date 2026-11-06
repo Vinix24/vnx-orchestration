@@ -3653,6 +3653,24 @@ def _owner_update_attempt(
         )
 
 
+def _owner_row_closed_by_finalizer(dispatch_id: str, *, state_dir: Path) -> bool:
+    """True when the lifecycle finalizer already took the row to its end state.
+
+    The finalizer leaves a row on completed, failed_delivery or timed_out
+    (dispatch_lifecycle.END_STATE_TARGET values); from those the door's
+    accepted hop is illegal. Best-effort: a failed read answers False.
+    """
+    try:
+        from dispatch_lifecycle import END_STATE_TARGET
+        from coordination_db import get_dispatch
+        with _rc_get_connection(state_dir) as conn:
+            row = get_dispatch(conn, dispatch_id)
+        state = row["state"] if row else None
+        return state in _RC_TERMINAL_DISPATCH_STATES or state in END_STATE_TARGET.values()
+    except Exception:  # vnx-silent-except: state read is best-effort; the door walks the hops as before
+        return False
+
+
 def _owner_finish(
     dispatch_id: str, attempt_id: Optional[str], *, state_dir: Path,
     success: bool, failure_reason: Optional[str] = None,
@@ -3667,26 +3685,33 @@ def _owner_finish(
     'accepted' (delivery acknowledged) and 'running' (execution in progress)
     on individually, so both are stamped together with the outcome rather
     than left unreached. Never blocks the door.
+
+    A row the lifecycle finalizer already closed (OI-2592) is left alone: no
+    hops, no bookkeeping failure. The attempt is still closed.
     """
-    _owner_transition(
-        dispatch_id, "accepted", state_dir=state_dir,
-        reason="lane executor returned",
-    )
-    _owner_transition(
-        dispatch_id, "running", state_dir=state_dir,
-        reason="lane executor returned",
-    )
-    if success:
+    owned = _owner_row_closed_by_finalizer(dispatch_id, state_dir=state_dir)
+    if not owned:
         _owner_transition(
-            dispatch_id, "completed", state_dir=state_dir,
-            reason="lane execution succeeded",
+            dispatch_id, "accepted", state_dir=state_dir,
+            reason="lane executor returned",
         )
+        _owner_transition(
+            dispatch_id, "running", state_dir=state_dir,
+            reason="lane executor returned",
+        )
+    if success:
+        if not owned:
+            _owner_transition(
+                dispatch_id, "completed", state_dir=state_dir,
+                reason="lane execution succeeded",
+            )
         _owner_update_attempt(attempt_id, "succeeded", dispatch_id=dispatch_id, state_dir=state_dir)
     else:
-        _owner_transition(
-            dispatch_id, "failed_delivery", state_dir=state_dir,
-            reason=failure_reason or "lane execution failed",
-        )
+        if not owned:
+            _owner_transition(
+                dispatch_id, "failed_delivery", state_dir=state_dir,
+                reason=failure_reason or "lane execution failed",
+            )
         _owner_update_attempt(
             attempt_id, "failed", dispatch_id=dispatch_id, state_dir=state_dir,
             failure_reason=failure_reason,
