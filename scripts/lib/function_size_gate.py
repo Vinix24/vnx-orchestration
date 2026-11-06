@@ -352,3 +352,28 @@ def check_ratchet(repo: Path, base: str, head: str = "HEAD") -> List[RatchetViol
         base_fns = (_measure_at(repo, merge_base, old_path) or []) if old_path else []
         violations.extend(_compare_file(path, head_fns, base_fns))
     return violations
+
+
+# ---------------------------------------------------------------------------
+# Whole-tree callers: public entry points over the one counting rule
+# ---------------------------------------------------------------------------
+
+
+def in_scope(path: str) -> bool:
+    """Public name for `_in_scope`: the ratchet's scope rule, unchanged."""
+    return _in_scope(path)
+
+
+def measure_at(repo: Path, ref: str, path: str) -> Optional[List[MeasuredFunction]]:
+    """Public name for `_measure_at`: functions in `path` at `ref`; None when unparseable."""
+    return _measure_at(repo, ref, path)
+
+
+def paths_at(repo: Path, ref: str) -> List[str]:
+    """Every path in the tree of `ref`, from `git ls-tree -r --name-only`."""
+    return [line for line in _git(repo, "ls-tree", "-r", "--name-only", ref).splitlines() if line]
+
+
+def resolve_ref(repo: Path, ref: str) -> str:
+    """Full commit sha of `ref`. Raises GitError when the ref does not resolve."""
+    return _git(repo, "rev-parse", "--verify", f"{ref}^{{commit}}").strip()
