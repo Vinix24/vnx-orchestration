@@ -34,10 +34,14 @@ from __future__ import annotations
 import ast
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
+from typing import Iterable, List, Tuple
 
 import pytest
+
+from conftest import RepoPythonCensus, repo_python_census
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(VNX_ROOT / "scripts"))
@@ -531,6 +535,53 @@ def test_request_time_path_binary_gate_keeps_its_behaviour(monkeypatch):
 
 _REGISTRY_ONLY_METHODS = ("_mark_gate_unavailable", "_classify_unavailable")
 
+# The caller scan covers the runtime tree and the test tree; both are census
+# roots, so the two scanner tests share one parse per file per session.
+_CALLER_SCAN_ROOTS = ("scripts", "tests")
+
+
+def _census_trees(census: RepoPythonCensus) -> Iterable[Tuple[str, ast.Module]]:
+    """``(rel, tree)`` for every tracked module under the caller-scan roots.
+
+    An unparseable/non-UTF-8 file is skipped exactly as the pre-census loop
+    skipped a ``SyntaxError``/``UnicodeDecodeError``; any other read failure
+    still raises instead of silently narrowing the scan.
+    """
+    for rel, entry in sorted(census.entries().items()):
+        if not any(rel == root or rel.startswith(root + "/") for root in _CALLER_SCAN_ROOTS):
+            continue
+        error = entry.error
+        if error is not None:
+            if isinstance(error, (SyntaxError, UnicodeDecodeError, ValueError)):
+                continue
+            raise error
+        yield rel, entry.tree
+
+
+def _binary_name_offenders(census: RepoPythonCensus) -> List[str]:
+    """Every call site passing ``binary_name=`` to a method that reads the registry."""
+    offenders = []
+    for rel, tree in _census_trees(census):
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
+            if name not in _REGISTRY_ONLY_METHODS:
+                continue
+            for kw in node.keywords:
+                if kw.arg == "binary_name":
+                    offenders.append(f"{rel}:{node.lineno}: {name}(... binary_name=...)")
+    return offenders
+
+
+def _tracked_repo(tmp_path: Path, files: dict) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+    for name, text in files.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    subprocess.run(["git", "add", "--", *files], cwd=str(tmp_path), check=True)
+
 
 def test_neither_entry_point_accepts_a_provider_name():
     """The whole class of bug: a name handed in by the caller that nobody ever
@@ -551,7 +602,7 @@ def test_neither_entry_point_accepts_a_provider_name():
         )
 
 
-def test_no_caller_anywhere_passes_a_provider_name():
+def test_no_caller_anywhere_passes_a_provider_name(repo_python_census):
     """Every call site in the tree, not just the file the parameter lived in.
 
     The first version of this guard asserted the string was absent from
@@ -567,26 +618,25 @@ def test_no_caller_anywhere_passes_a_provider_name():
     AST of every module instead of one file's text: a keyword argument is a
     keyword argument no matter how the call is wrapped, and a mention in prose
     or a dict key is not a call at all.
+
+    test-suite-kosten TSK-4: the tree comes from the shared
+    ``repo_python_census()``; the provider-switch guard reads the same pass.
     """
-    offenders = []
-    for root in ("scripts", "tests"):
-        for path in sorted((VNX_ROOT / root).rglob("*.py")):
-            try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
-            except (SyntaxError, UnicodeDecodeError):
-                continue
-            for node in ast.walk(tree):
-                if not isinstance(node, ast.Call):
-                    continue
-                name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
-                if name not in _REGISTRY_ONLY_METHODS:
-                    continue
-                for kw in node.keywords:
-                    if kw.arg == "binary_name":
-                        rel = path.relative_to(VNX_ROOT)
-                        offenders.append(f"{rel}:{node.lineno}: {name}(... binary_name=...)")
+    offenders = _binary_name_offenders(repo_python_census)
 
     assert offenders == [], (
         "these call sites still hand a provider name to a method that reads the "
         "registry (OI-1490); drop the argument:\n  " + "\n  ".join(offenders)
     )
+
+
+def test_the_caller_scan_finds_a_planted_violation_in_a_tmp_tree(tmp_path):
+    """The scanner still finds a violation in a small tracked tree of its own (TSK-4)."""
+    _tracked_repo(tmp_path, {
+        "scripts/planted.py": "runner._classify_unavailable(binary_name='x')\n",
+        "scripts/clean.py": "runner._classify_unavailable()\n",
+    })
+
+    offenders = _binary_name_offenders(repo_python_census(tmp_path))
+
+    assert offenders == ["scripts/planted.py:1: _classify_unavailable(... binary_name=...)"]

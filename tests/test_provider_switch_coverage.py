@@ -22,11 +22,14 @@ import ast
 import inspect
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import pytest
+
+from conftest import CensusEntry, RepoPythonCensus
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -295,9 +298,8 @@ def _scan_unit(key: str, nodes: List[ast.AST], local: _Scope, module: _Scope,
     return scan
 
 
-def scan_python_source(source: str, relpath: str) -> Dict[str, FunctionScan]:
-    """Scan one module. Returns every function unit by key, flagged or not."""
-    tree = ast.parse(source)
+def scan_python_tree(tree: ast.Module, relpath: str) -> Dict[str, FunctionScan]:
+    """Scan one parsed module. Returns every function unit by key, flagged or not."""
     aliases = _alias_map(tree)
     docstrings = _docstring_nodes(tree)
     module_scope = _Scope(tree.body)
@@ -330,8 +332,29 @@ def scan_python_source(source: str, relpath: str) -> Dict[str, FunctionScan]:
     return results
 
 
+def scan_python_source(source: str, relpath: str) -> Dict[str, FunctionScan]:
+    """Scan one module's source text (the entry point of the synthetic tests)."""
+    return scan_python_tree(ast.parse(source), relpath)
+
+
 def _excluded(rel: str) -> bool:
     return any(rel == d or rel.startswith(d + "/") for d in EXCLUDED_DIRS)
+
+
+def iter_census_entries(census: RepoPythonCensus) -> Iterable[CensusEntry]:
+    """The census entries under the scan roots, minus the excluded directories."""
+    for rel, entry in sorted(census.entries().items()):
+        if any(rel == top or rel.startswith(top + "/") for top in SCAN_PY_ROOTS) \
+                and not _excluded(rel) and "__pycache__" not in rel:
+            yield entry
+
+
+def scan_census(census: RepoPythonCensus) -> Dict[str, FunctionScan]:
+    """Every function unit of every scanned module in ``census`` (one parse per file)."""
+    units: Dict[str, FunctionScan] = {}
+    for entry in iter_census_entries(census):
+        units.update(scan_python_tree(entry.tree, entry.rel))
+    return units
 
 
 def iter_python_files(root: Path) -> Iterable[Tuple[Path, str]]:
@@ -343,7 +366,11 @@ def iter_python_files(root: Path) -> Iterable[Tuple[Path, str]]:
 
 
 def scan_tree(root: Path) -> Dict[str, FunctionScan]:
-    """Every function unit of every scanned module under ``root``."""
+    """Every function unit under a small standalone tree (the planted-violation tests).
+
+    The real-repo assertions read the shared census (:func:`scan_census`); this
+    direct walk keeps their ``tmp_path`` tree from needing to be a git work tree.
+    """
     units: Dict[str, FunctionScan] = {}
     for path, rel in iter_python_files(root):
         units.update(scan_python_source(path.read_text(encoding="utf-8"), rel))
@@ -484,11 +511,13 @@ def coverage_violations(units: Dict[str, FunctionScan], *, launch: Iterable[str]
     return problems
 
 
-def floor_violations(units: Dict[str, FunctionScan], root: Path, *, launch: Iterable[str]) -> List[str]:
+def floor_violations(units: Dict[str, FunctionScan], census: RepoPythonCensus, *,
+                     launch: Iterable[str]) -> List[str]:
     launch_set = set(launch)
+    entries = census.entries()
     problems: List[str] = []
     for entry in MEASURED_FLOOR:
-        if not (root / entry.path).is_file():
+        if not (census.root / entry.path).is_file():
             problems.append(f"floor file {entry.path} does not exist")
             continue
         if entry.function:
@@ -499,7 +528,11 @@ def floor_violations(units: Dict[str, FunctionScan], root: Path, *, launch: Iter
                 problems.append(f"floor function {key} is not in the census")
         elif entry.reexport:
             module, name = entry.reexport
-            tree = ast.parse((root / entry.path).read_text(encoding="utf-8"))
+            shim = entries.get(entry.path)
+            if shim is None:
+                problems.append(f"floor shim {entry.path} is not a tracked .py file")
+                continue
+            tree = shim.tree
             imported = any(
                 isinstance(n, ast.ImportFrom) and n.module == module and any(a.name == name for a in n.names)
                 for n in ast.walk(tree)
@@ -536,9 +569,67 @@ def exempt_violations(units: Dict[str, FunctionScan], root: Path, exempt: Dict[s
 # The guard on the real tree
 # ---------------------------------------------------------------------------
 
+_PARSE_LOG: List[str] = []
+
+
+def _counting_parse(log: List[str], real_parse):
+    def counting_parse(source, *args, **kwargs):
+        log.append(str(kwargs.get("filename") or "<source>"))
+        return real_parse(source, *args, **kwargs)
+    return counting_parse
+
+
 @pytest.fixture(scope="module")
-def units() -> Dict[str, FunctionScan]:
-    return scan_tree(REPO_ROOT)
+def units(repo_python_census) -> Dict[str, FunctionScan]:
+    original = ast.parse
+    ast.parse = _counting_parse(_PARSE_LOG, original)
+    try:
+        return scan_census(repo_python_census)
+    finally:
+        ast.parse = original
+
+
+def test_the_two_repo_scanners_share_one_parse_per_file(units, repo_python_census, monkeypatch):
+    """test-suite-kosten TSK-4: both whole-tree scanners read ONE census pass.
+
+    The provider-switch scan (``units``, 895 modules under ``scripts/`` and
+    ``vnx_cli/``) and the OI-1490 caller scan (``scripts/`` + ``tests/``) used to
+    walk the tree each: 895 + 895 + 2481 = 4271 ``ast.parse`` calls here. They now
+    share ``repo_python_census()``, so the second scanner must re-parse no file
+    the first one read, and no file may be parsed twice.
+    """
+    import test_oi1490_gate_provider_registry as oi1490
+
+    provider_files = {str(repo_python_census.root / e.rel) for e in iter_census_entries(repo_python_census)}
+    assert provider_files, "the provider-switch scan must cover files the caller scan also reads"
+    parses: List[str] = []
+    monkeypatch.setattr(ast, "parse", _counting_parse(parses, ast.parse))
+    offender_scan = oi1490._binary_name_offenders(repo_python_census)
+
+    assert offender_scan == []
+    re_read = sorted(path for path in parses if path in provider_files)
+    assert re_read == [], f"the OI-1490 scan re-parsed files the provider-switch scan read: {re_read[:5]}"
+    combined = Counter(_PARSE_LOG + parses)
+    repeated = sorted(path for path, count in combined.items() if count > 1)
+    assert repeated == [], f"tracked files parsed more than once: {repeated[:5]}"
+    print(f"census parse counts: {len(_PARSE_LOG)} provider-switch + {len(parses)} OI-1490 "
+          f"= {len(combined)} parses, none repeated")
+
+
+def test_scan_tree_finds_a_planted_launch_in_a_tmp_tree(tmp_path):
+    """The scanner still finds a violation in a small tree of its own (TSK-4)."""
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "planted.py").write_text(
+        "import subprocess\n"
+        "def planted():\n"
+        f"    subprocess.run(['{_K}', '{_PRINT}', 'x'])\n",
+        encoding="utf-8",
+    )
+
+    found = scan_tree(tmp_path)
+
+    assert found["scripts/planted.py:planted"].flagged
+    assert [call.rule for call in found["scripts/planted.py:planted"].launches] == [RULE_PROCESS_LITERAL]
 
 
 def test_every_flagged_function_is_enforced_or_exempt(units):
@@ -548,8 +639,8 @@ def test_every_flagged_function_is_enforced_or_exempt(units):
     ) == []
 
 
-def test_measured_floor_exists_and_is_in_the_census(units):
-    assert floor_violations(units, REPO_ROOT, launch=provider_switch.LAUNCH_FUNCTIONS) == []
+def test_measured_floor_exists_and_is_in_the_census(units, repo_python_census):
+    assert floor_violations(units, repo_python_census, launch=provider_switch.LAUNCH_FUNCTIONS) == []
 
 
 def test_every_exempt_entry_still_matches_something(units):
@@ -608,18 +699,17 @@ def test_shell_calls_are_checked_or_exempt():
     assert problems == []
 
 
-def test_no_runtime_module_imports_from_spikes():
+def test_no_runtime_module_imports_from_spikes(repo_python_census):
     offenders = []
-    for path, rel in iter_python_files(REPO_ROOT):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
+    for entry in iter_census_entries(repo_python_census):
+        for node in ast.walk(entry.tree):
             names: List[str] = []
             if isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module]
             if any(n == "spikes" or n.startswith("spikes.") or ".spikes" in n for n in names):
-                offenders.append(f"{rel}:{node.lineno}")
+                offenders.append(f"{entry.rel}:{node.lineno}")
     assert offenders == []
 
 
