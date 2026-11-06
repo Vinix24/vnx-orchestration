@@ -410,6 +410,171 @@ def _run_phantom_guard(
             logger.error("envelope._govern: guard-error audit signal itself failed dispatch=%s", spec.dispatch_id)
 
 
+def _adopt_stray_report(spec: EnvelopeSpec) -> Optional[Path]:
+    """Adopt a stray worker report into the central store. Never fatal.
+
+    A-bis-2 (envelope lane): adopt a stray worker report BEFORE emitting the
+    wrapper — mirrors dispatch_govern._govern_impl's a/a2 steps and reuses its
+    shared resolver (never a second implementation, see
+    dispatch_govern._resolve_worker_report_with_adoption). Search order:
+    central store (nothing to do here — emit_unified_report's own idempotent
+    early-return already preserves it), then the ephemeral per-dispatch
+    worktree (derived the same way run_envelope_headless_plan creates it —
+    usually already torn down by GOVERN time, since run_envelope_headless_plan
+    calls remove_dispatch_worktree() in a `finally` BEFORE invoking _govern, so
+    this is best-effort), then the outer/consumer checkout root — the location
+    that actually caught the 2026-09-06 incident (A5/A1): a worker that could
+    not see VNX_DATA_DIR guessed the outer checkout's own .vnx-data instead of
+    the central store.
+
+    Returns the original stray path when a valid report was relocated, else
+    ``None`` (nothing found, a placeholder, an invalid body, or an adoption
+    error).
+    """
+    _report_relocated_from: Optional[Path] = None
+    try:
+        from dispatch_govern import _resolve_worker_report_with_adoption  # noqa: PLC0415
+        from dispatch_worktree_isolation import (  # noqa: PLC0415
+            _dispatch_worktree_dir,
+            resolve_consumer_project_root,
+        )
+        from report_body_contract import validate_body as _validate_stray_body  # noqa: PLC0415
+
+        _consumer_root = resolve_consumer_project_root()
+        _stray_candidate, _stray_path = _resolve_worker_report_with_adoption(
+            spec.dispatch_id, spec.data_dir,
+            worktree_path=_dispatch_worktree_dir(_consumer_root, spec.dispatch_id),
+            repo_root=_consumer_root,
+        )
+        if _stray_path is not None:
+            _stray_text = _stray_candidate.read_text(encoding="utf-8")
+            _stray_result = _validate_stray_body(_stray_text, pr_id=spec.pr_id)
+            if _stray_result.valid and not _stray_result.placeholder:
+                _central_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
+                _central_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(_stray_path, _central_path)
+                _report_relocated_from = _stray_path
+                logger.info(
+                    "envelope._govern: adopted stray worker report for dispatch=%s: %s -> %s",
+                    spec.dispatch_id, _stray_path, _central_path,
+                )
+    except Exception as exc:  # noqa: BLE001 — adoption is best-effort, never blocks GOVERN
+        logger.warning(
+            "envelope._govern: stray-report adoption failed dispatch=%s (non-fatal): %s",
+            spec.dispatch_id, exc,
+        )
+    return _report_relocated_from
+
+
+def _emit_govern_report(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    duration: float,
+    emit_unified_report: Any,
+) -> Optional[Path]:
+    """Emit the unified report for this dispatch. Never fatal.
+
+    REPORT first — idempotent: worker-written file is preserved, not
+    overwritten. OI-903: on failure/timeout, a killed worker's partial report
+    is preserved under a .partial.md sidecar so the canonical report stays
+    contract-compliant while the partial output remains retrievable.
+
+    ``emit_unified_report`` is passed in by ``_govern`` (imported lazily there)
+    so the tests that patch ``governance_emit.emit_unified_report`` keep
+    binding. An emit failure is one error log and a ``None`` report path.
+    """
+    report_path: Optional[Path] = None
+    try:
+        report_path = emit_unified_report(
+            dispatch_id=spec.dispatch_id,
+            terminal_id=spec.terminal_id,
+            provider=spec.provider,
+            model=spec.model or "",
+            instruction=spec.instruction,
+            response_text=adapter_result.completion_text,
+            # The generic wrapper reports the completion text, it never extracts
+            # structured findings — None marks "not captured", not a false "zero".
+            findings=None,
+            duration_seconds=duration,
+            data_dir=spec.data_dir,
+            # OI-1716: thread the spawn-layer diagnosis into the report so an
+            # empty response never falls back to "(no response captured)" when
+            # the spawn layer already knows why it produced nothing (proxy
+            # unreachable, harness refused to start). Same form as the provider
+            # lane (#1834, provider_dispatch._emit_governance).
+            spawn_error=getattr(adapter_result, "error", None),
+            preserve_partial=adapter_result.status != "success",
+        )
+    except Exception as exc:
+        logger.error(
+            "envelope._govern: report emit failed dispatch=%s: %s — proceeding to receipt",
+            spec.dispatch_id,
+            exc,
+        )
+    return report_path
+
+
+def _check_report_contract(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    report_path: Optional[Path],
+    report_relocated_from: Optional[Path],
+) -> tuple[List[Dict[str, Any]], str]:
+    """Validate the report body and return (warnings, effective status).
+
+    OI-1017/OI-1048: binding body-contract validation on envelope lanes. The
+    tmux lane already binds via dispatch_govern._govern_impl() (lines 533 +
+    562 — validate_body() before emit, status override on violation). This is
+    the shared envelope entry point for provider + headless lanes; one fix
+    covers both. When validate_body() rejects the report and the adapter
+    claimed success, the receipt status is overridden to the existing
+    "contract_invalid" value (404 records in the live ledger, the converter
+    already produces it) — no new status value, so no consumer breakage. The
+    violation is still logged + stamped as a warning for audit-trail
+    queryability.
+
+    OI-2519: the governed verdict is published on ``adapter_result.
+    governed_status`` (``status`` itself is never rewritten, OI-1179) so the
+    lane exit can publish the end line governance decided. An unreadable
+    report skips the check — it never breaks the receipt.
+    """
+    _contract_warnings: List[Dict[str, Any]] = []
+    _effective_status: str = adapter_result.status
+    if report_relocated_from is not None:
+        _contract_warnings.append({
+            "code": "report_relocated",
+            "severity": "info",
+            "message": f"report_relocated_from={report_relocated_from}",
+        })
+    if report_path is not None:
+        try:
+            from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
+            _report_text = report_path.read_text(encoding="utf-8", errors="replace")
+            _body_result = validate_body(_report_text)
+            if not _body_result.valid:
+                _violation_msg = (
+                    f"{_CONTRACT_ENFORCE_MARKER}: report body contract "
+                    f"violated — missing sections: {', '.join(_body_result.missing)}"
+                )
+                logger.warning(
+                    "envelope._govern: %s dispatch=%s",
+                    _violation_msg, spec.dispatch_id,
+                )
+                _contract_warnings.append({
+                    "code": "report_contract_violated",
+                    "severity": "warn",
+                    "message": _violation_msg,
+                })
+                if adapter_result.status == "success":
+                    # OI-2519: publish the governed verdict as its own field
+                    # (``status`` above is never rewritten, OI-1179) so the lane
+                    # exit can publish the end line governance decided.
+                    _effective_status = adapter_result.governed_status = CONTRACT_INVALID_STATUS
+        except OSError:
+            pass  # can't read report file — skip validation, don't break receipt
+    return _contract_warnings, _effective_status
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -451,128 +616,18 @@ def _govern(
     events_path, _events_archive_ok = _archive_dispatch_events(spec.terminal_id, spec.dispatch_id)
 
     # A-bis-2 (envelope lane): adopt a stray worker report BEFORE emitting the
-    # wrapper — mirrors dispatch_govern._govern_impl's a/a2 steps and reuses its
-    # shared resolver (never a second implementation, see
-    # dispatch_govern._resolve_worker_report_with_adoption). Search order:
-    # central store (nothing to do here — emit_unified_report's own idempotent
-    # early-return below already preserves it), then the ephemeral per-dispatch
-    # worktree (derived the same way run_envelope_headless_plan creates it —
-    # usually already torn down by GOVERN time, since run_envelope_headless_plan
-    # calls remove_dispatch_worktree() in a `finally` BEFORE invoking _govern, so
-    # this is best-effort), then the outer/consumer checkout root — the location
-    # that actually caught the 2026-09-06 incident (A5/A1): a worker that could
-    # not see VNX_DATA_DIR guessed the outer checkout's own .vnx-data instead of
-    # the central store.
-    _report_relocated_from: Optional[Path] = None
-    try:
-        from dispatch_govern import _resolve_worker_report_with_adoption  # noqa: PLC0415
-        from dispatch_worktree_isolation import (  # noqa: PLC0415
-            _dispatch_worktree_dir,
-            resolve_consumer_project_root,
-        )
-        from report_body_contract import validate_body as _validate_stray_body  # noqa: PLC0415
-
-        _consumer_root = resolve_consumer_project_root()
-        _stray_candidate, _stray_path = _resolve_worker_report_with_adoption(
-            spec.dispatch_id, spec.data_dir,
-            worktree_path=_dispatch_worktree_dir(_consumer_root, spec.dispatch_id),
-            repo_root=_consumer_root,
-        )
-        if _stray_path is not None:
-            _stray_text = _stray_candidate.read_text(encoding="utf-8")
-            _stray_result = _validate_stray_body(_stray_text, pr_id=spec.pr_id)
-            if _stray_result.valid and not _stray_result.placeholder:
-                _central_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
-                _central_path.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(_stray_path, _central_path)
-                _report_relocated_from = _stray_path
-                logger.info(
-                    "envelope._govern: adopted stray worker report for dispatch=%s: %s -> %s",
-                    spec.dispatch_id, _stray_path, _central_path,
-                )
-    except Exception as exc:  # noqa: BLE001 — adoption is best-effort, never blocks GOVERN
-        logger.warning(
-            "envelope._govern: stray-report adoption failed dispatch=%s (non-fatal): %s",
-            spec.dispatch_id, exc,
-        )
+    # wrapper. See _adopt_stray_report for the search order and the fail-open.
+    _report_relocated_from = _adopt_stray_report(spec)
 
     # REPORT first — idempotent: worker-written file is preserved, not overwritten.
-    # OI-903: on failure/timeout, a killed worker's partial report is preserved
-    # under a .partial.md sidecar so the canonical report stays contract-compliant
-    # while the partial output remains retrievable.
-    report_path: Optional[Path] = None
-    try:
-        report_path = emit_unified_report(
-            dispatch_id=spec.dispatch_id,
-            terminal_id=spec.terminal_id,
-            provider=spec.provider,
-            model=spec.model or "",
-            instruction=spec.instruction,
-            response_text=adapter_result.completion_text,
-            # The generic wrapper reports the completion text, it never extracts
-            # structured findings — None marks "not captured", not a false "zero".
-            findings=None,
-            duration_seconds=duration,
-            data_dir=spec.data_dir,
-            # OI-1716: thread the spawn-layer diagnosis into the report so an
-            # empty response never falls back to "(no response captured)" when
-            # the spawn layer already knows why it produced nothing (proxy
-            # unreachable, harness refused to start). Same form as the provider
-            # lane (#1834, provider_dispatch._emit_governance).
-            spawn_error=getattr(adapter_result, "error", None),
-            preserve_partial=adapter_result.status != "success",
-        )
-    except Exception as exc:
-        logger.error(
-            "envelope._govern: report emit failed dispatch=%s: %s — proceeding to receipt",
-            spec.dispatch_id,
-            exc,
-        )
+    report_path = _emit_govern_report(
+        spec, adapter_result, duration, emit_unified_report,
+    )
 
     # OI-1017/OI-1048: binding body-contract validation on envelope lanes.
-    # The tmux lane already binds via dispatch_govern._govern_impl() (lines
-    # 533 + 562 — validate_body() before emit, status override on violation).
-    # This is the shared envelope entry point for provider + headless lanes;
-    # one fix covers both.  When validate_body() rejects the report and the
-    # adapter claimed success, the receipt status is overridden to the
-    # existing "contract_invalid" value (404 records in the live ledger, the
-    # converter already produces it) — no new status value, so no consumer
-    # breakage.  The violation is still logged + stamped as a warning for
-    # audit-trail queryability.
-    _contract_warnings: List[Dict[str, Any]] = []
-    _effective_status: str = adapter_result.status
-    if _report_relocated_from is not None:
-        _contract_warnings.append({
-            "code": "report_relocated",
-            "severity": "info",
-            "message": f"report_relocated_from={_report_relocated_from}",
-        })
-    if report_path is not None:
-        try:
-            from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
-            _report_text = report_path.read_text(encoding="utf-8", errors="replace")
-            _body_result = validate_body(_report_text)
-            if not _body_result.valid:
-                _violation_msg = (
-                    f"{_CONTRACT_ENFORCE_MARKER}: report body contract "
-                    f"violated — missing sections: {', '.join(_body_result.missing)}"
-                )
-                logger.warning(
-                    "envelope._govern: %s dispatch=%s",
-                    _violation_msg, spec.dispatch_id,
-                )
-                _contract_warnings.append({
-                    "code": "report_contract_violated",
-                    "severity": "warn",
-                    "message": _violation_msg,
-                })
-                if adapter_result.status == "success":
-                    # OI-2519: publish the governed verdict as its own field
-                    # (``status`` above is never rewritten, OI-1179) so the lane
-                    # exit can publish the end line governance decided.
-                    _effective_status = adapter_result.governed_status = CONTRACT_INVALID_STATUS
-        except OSError:
-            pass  # can't read report file — skip validation, don't break receipt
+    _contract_warnings, _effective_status = _check_report_contract(
+        spec, adapter_result, report_path, _report_relocated_from,
+    )
 
     # RECEIPT second — with idempotent dedup. A failed emit records a
     # proof-chain gap (OI-1179) instead of raising: the end-of-dispatch event
