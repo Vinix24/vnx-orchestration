@@ -81,7 +81,7 @@
     executable name that also exists in ~/.local/bin shadow the system
     version of the same name for every OTHER tool this job invokes (e.g. a
     ~/.local/bin/python3 silently taking over from the system python3 that
-    the launcher's own "exec python3" actually depends on). codex itself
+    the launcher's own python3 call actually depends on). codex itself
     does not exist anywhere in the static PATH above, so appending finds it
     exactly as reliably as prepending would, with zero shadowing risk for
     every other binary on the declared static PATH.
