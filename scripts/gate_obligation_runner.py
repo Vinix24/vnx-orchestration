@@ -4225,6 +4225,73 @@ def _fulfill_escalate_stay_pending_unmeasured(
     return outcome
 
 
+def _fulfill_escalate_stay_pending(
+    path: Path,
+    outcome: Dict[str, Any],
+    *,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # OI-1532: the genuine-wait branch (branch exists or its existence
+    # undetermined) used to retry FOREVER — no bound, no escalation.
+    # Measured on mission-control 2026-08-30: 11 obligations on 776
+    # attempts (8+ days) with nothing alarming. After the stay-pending
+    # threshold a wait that never produced a PR escalates to the SAME loud
+    # terminal not_executable the other bounded branches use, reusing the
+    # SAME constant — never a second, drift-prone bound. (The two sibling
+    # branches are NOT escalated here: stay_pending_live is deliberately
+    # unbounded — kernel-enforced proof of a live process — and
+    # stay_pending_unmeasured escalates under its own reason just above,
+    # OI-1587.)
+    update_obligation(
+        path,
+        status=STATUS_NOT_EXECUTABLE,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=now,
+        reason="stay_pending_timeout",
+        reason_detail=(
+            f"obligation waited {attempts} attempts (≈ "
+            f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence) for "
+            f"a PR that never appeared, with the branch existing or "
+            f"undetermined. The unbounded wait is closed loudly: either "
+            f"the dispatch is stuck (its gate will never run) or it was "
+            f"never going to produce a PR. Reset to pending if the "
+            f"dispatch is known to be live (OI-1532)."
+        ),
+    )
+    outcome["action"] = "not_executable"
+    outcome["detail"] = (
+        f"obligation waited {attempts} attempts for a PR that never "
+        f"appeared — escalating the unbounded wait to a loud terminal "
+        f"outcome (OI-1532)"
+    )
+    return outcome
+
+
+def _fulfill_stay_pending(
+    path: Path,
+    outcome: Dict[str, Any],
+    *,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    # The repo resolves and gh works, but no PR exists yet for the head
+    # branch, and the branch is still there (or its existence could not be
+    # determined) — a genuine wait: stays pending for the freshness
+    # monitor, never closed on ambiguous evidence. OI-1532: now bounded
+    # — past _STAY_PENDING_ESCALATION_ATTEMPTS the decision above
+    # escalates loudly instead of retrying forever.
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        attempts=attempts,
+        last_attempt_at=now,
+    )
+    outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
+    return outcome
+
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
@@ -4313,57 +4380,10 @@ def fulfill_obligation(
             path, decision, outcome, state_dir=state_dir, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "escalate_stay_pending":
-        # OI-1532: the genuine-wait branch (branch exists or its existence
-        # undetermined) used to retry FOREVER — no bound, no escalation.
-        # Measured on mission-control 2026-08-30: 11 obligations on 776
-        # attempts (8+ days) with nothing alarming. After the stay-pending
-        # threshold a wait that never produced a PR escalates to the SAME loud
-        # terminal not_executable the other bounded branches use, reusing the
-        # SAME constant — never a second, drift-prone bound. (The two sibling
-        # branches are NOT escalated here: stay_pending_live is deliberately
-        # unbounded — kernel-enforced proof of a live process — and
-        # stay_pending_unmeasured escalates under its own reason just above,
-        # OI-1587.)
-        update_obligation(
-            path,
-            status=STATUS_NOT_EXECUTABLE,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            reason="stay_pending_timeout",
-            reason_detail=(
-                f"obligation waited {attempts} attempts (≈ "
-                f"{round(attempts * 900 / 3600, 1)}h at the 900s cadence) for "
-                f"a PR that never appeared, with the branch existing or "
-                f"undetermined. The unbounded wait is closed loudly: either "
-                f"the dispatch is stuck (its gate will never run) or it was "
-                f"never going to produce a PR. Reset to pending if the "
-                f"dispatch is known to be live (OI-1532)."
-            ),
-        )
-        outcome["action"] = "not_executable"
-        outcome["detail"] = (
-            f"obligation waited {attempts} attempts for a PR that never "
-            f"appeared — escalating the unbounded wait to a loud terminal "
-            f"outcome (OI-1532)"
-        )
-        return outcome
+        return _fulfill_escalate_stay_pending(path, outcome, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending":
-        # The repo resolves and gh works, but no PR exists yet for the head
-        # branch, and the branch is still there (or its existence could not be
-        # determined) — a genuine wait: stays pending for the freshness
-        # monitor, never closed on ambiguous evidence. OI-1532: now bounded
-        # — past _STAY_PENDING_ESCALATION_ATTEMPTS the decision above
-        # escalates loudly instead of retrying forever.
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            attempts=attempts,
-            last_attempt_at=now,
-        )
-        outcome["detail"] = "no PR resolvable yet — stays pending for the freshness monitor"
-        return outcome
+        return _fulfill_stay_pending(path, outcome, attempts=attempts, now=now)
 
     # decision["kind"] == "attempt_gate": a PR is resolved — actually run it.
     pr_number = resolution.pr_number
