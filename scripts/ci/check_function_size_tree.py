@@ -8,9 +8,11 @@ Usage: check_function_size_tree.py [--ref HEAD] [--prefix scripts/] [--max 200] 
 Text: `function size tree: <A> above <max>, <B> above 70, <F> functions in <N> files
 at <ref> (<sha8>)`, then `unparsed <path>` per file that does not parse, then
 `<lines> <path>::<qualname> (line <lineno>)` per function above --max, longest first.
-JSON: one object with the same numbers; `unparsed` there is the count of those paths.
+JSON: one object with the same numbers; `unparsed` there is the count of those paths
+and `unparsed_paths` the sorted list itself.
 Exit 0 clean, 1 something above --max or a file that does not parse (an unmeasured
-file is no proof that it is small), 2 usage or git error.
+file is no proof that it is small), 2 usage or git error, or a measurement of zero
+files (a prefix that matches nothing proves nothing, OI-2570).
 """
 
 from __future__ import annotations
@@ -68,7 +70,8 @@ def measure_tree(repo: Path, ref: str, prefix: str, max_lines: int) -> tuple[dic
     offenders.sort(key=lambda offender: (-offender["executable_lines"], offender["path"]))
     payload = {"ref": ref, "sha": sha, "prefix": prefix, "max": max_lines, "files": len(paths),
                "functions": functions, "above_max": len(offenders), "above_70": above_70,
-               "unparsed": len(unparsed), "offenders": offenders}
+               "unparsed": len(unparsed), "unparsed_paths": sorted(unparsed),
+               "offenders": offenders}
     return payload, sorted(unparsed)
 
 
@@ -83,6 +86,13 @@ def main(argv: list[str] | None = None) -> int:
         payload, unparsed_paths = measure_tree(Path.cwd(), args.ref, args.prefix, args.max)
     except GitError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if payload["files"] == 0:
+        print(
+            f"error: measured 0 files under prefix {args.prefix!r} at {args.ref}; "
+            "an empty measurement proves nothing",
+            file=sys.stderr,
+        )
         return 2
     print(json.dumps(payload, indent=2) if args.json else "\n".join(render(payload, unparsed_paths)))
     return 0 if not payload["offenders"] and payload["unparsed"] == 0 else 1

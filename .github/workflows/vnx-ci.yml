@@ -688,6 +688,17 @@ jobs:
           fi
           python3 "$VNX_HOME/scripts/ci/check_function_size_ratchet.py" --base "${base_ref}" --head HEAD
 
+      # The whole tree, not the change: the 200-line limit of the track
+      # functies-onder-200 is a state, so it is measured on every pull request
+      # and every push to main. Own step, so a red tree is a red job, and it
+      # needs git, so it runs from the outer checkout. Rules: ADR-052.
+      - name: Function size tree
+        env:
+          VNX_HOME: ${{ github.workspace }}/.claude/vnx-system
+        run: |
+          set -euo pipefail
+          python3 "$VNX_HOME/scripts/ci/check_function_size_tree.py" --ref HEAD --prefix scripts/ --max 200
+
       # Own step, so the early exit of the lint step never skips it. Pull
       # requests only: it needs the merge base and the PR number, which a push
       # to main or baseline/** does not have, and a skipped step leaves the

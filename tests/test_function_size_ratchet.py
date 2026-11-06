@@ -262,3 +262,21 @@ def test_g3_workflow_step_in_required_job():
     step = steps[names.index("Function size ratchet")]
     assert "check_function_size_ratchet.py" in step["run"]
     assert "$VNX_HOME" in step["run"]
+
+
+def test_g2_15_workflow_step_sizes_the_whole_tree():
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/vnx-ci.yml").read_text(encoding="utf-8"))
+    jobs = [j for j in workflow["jobs"].values() if j.get("name") == JOB_NAME]
+    assert len(jobs) == 1
+    steps = jobs[0]["steps"]
+    names = [s.get("name") for s in steps]
+    assert "Function size tree" in names
+    assert names.index("Function size tree") == names.index("Function size ratchet") + 1
+    step = steps[names.index("Function size tree")]
+    assert "check_function_size_tree.py" in step["run"]
+    assert "--ref HEAD" in step["run"]
+    assert "--prefix scripts/" in step["run"]
+    assert "--max 200" in step["run"]
+    assert "|| true" not in step["run"]
+    assert "continue-on-error" not in step
+    assert "if" not in step

@@ -184,6 +184,7 @@ def test_json_carries_every_field(repo):
     assert payload["above_max"] == 2
     assert payload["above_70"] == 2
     assert payload["unparsed"] == 0
+    assert payload["unparsed_paths"] == []
     assert payload["offenders"] == [
         {"path": "scripts/a.py", "qualname": "big", "lineno": 203, "executable_lines": 250},
         {"path": "scripts/a.py", "qualname": "small", "lineno": 1, "executable_lines": 201},
@@ -196,8 +197,32 @@ def test_json_reports_unparsed_count(repo):
     assert result.returncode == 1
     payload = json.loads(result.stdout)
     assert payload["unparsed"] == 1
+    assert payload["unparsed_paths"] == ["scripts/bad.py"]
     assert payload["files"] == 2
     assert payload["functions"] == 1
+
+
+def test_json_unparsed_paths_are_sorted(repo):
+    commit(repo, {"scripts/z_bad.py": "def f(:\n", "scripts/a_bad.py": "def g(:\n"})
+    result = run_tree(repo, "--json")
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["unparsed_paths"] == ["scripts/a_bad.py", "scripts/z_bad.py"]
+
+
+def test_clean_tree_is_exit_zero(repo):
+    commit(repo, {"scripts/a.py": fn("f", 3), "scripts/b.py": fn("g", 5)})
+    result = run_tree(repo)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 above 200" in result.stdout
+    assert "2 functions in 2 files" in result.stdout
+
+
+def test_prefix_matching_no_file_is_exit_two(repo):
+    commit(repo, {"scripts/a.py": fn("f", 3)})
+    result = run_tree(repo, "--prefix", "scrips/")
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert "0 files" in result.stderr
 
 
 def test_bad_ref_is_exit_two(repo):
