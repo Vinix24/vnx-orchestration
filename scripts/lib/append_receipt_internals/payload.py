@@ -775,6 +775,10 @@ def _update_confidence_from_receipt(
     store, ADR-026). It is never derived from this file's own git checkout:
     that landed in ``<checkout>/.vnx-data/state``, a store without the
     intelligence tables, so every update was a silent no-op.
+
+    A v3 dispatch writes its governance record as ``dispatch_governed`` (ADR-054),
+    the twin of ``task_complete``, and it is read here. ``dispatch_finished`` is
+    not: the end line carries no ``failure_class`` and no terminal.
     """
     try:
         sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
@@ -783,7 +787,9 @@ def _update_confidence_from_receipt(
         event_type = str(receipt.get("event_type") or receipt.get("event") or "").lower()
         status = str(receipt.get("status", "")).lower()
 
-        if event_type in ("task_complete", "task_completed"):
+        from receipt_schema import DISPATCH_GOVERNED_EVENT_TYPE
+
+        if event_type in ("task_complete", "task_completed", DISPATCH_GOVERNED_EVENT_TYPE):
             if status in FAILURE_STATUSES:
                 outcome = "failure"
             elif status in SUCCESS_STATUSES:
