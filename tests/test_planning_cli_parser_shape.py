@@ -44,6 +44,15 @@ COMMAND_LINES: List[List[str]] = [
     ["horizon", "show", "x"],
     ["plan-gate", "run", "t", "--doc", "d", "--panel-seats", "codex"],
     ["plan-gate", "status", "t"],
+    ["plan-gate", "missing-reasons"],
+    ["plan-gate", "backfill-reason", "t", "--reason", "why", "--approval-id", "AP-1"],
+    ["plan-gate", "reblock", "t", "--reason", "why", "--approval-id", "AP-2"],
+    [
+        "plan-gate", "batch", "--track", "a", "--track", "b", "--limit", "2",
+        "--restart", "--dry-run", "--panel-seats", "codex", "--seat-timeout", "120",
+        "--dispatch-paths", "scripts/x.py", "--task-class", "03_refactoring",
+        "--irreversible",
+    ],
 ]
 
 

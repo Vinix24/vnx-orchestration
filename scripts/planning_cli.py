@@ -6349,14 +6349,125 @@ def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> 
     p_attest.set_defaults(func=cmd_plan_gate_attest)
 
 
-def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> Any:
-    """The `plan-gate` parser with its action subparsers; returns them.
+def _add_plan_gate_missing_reasons_parser(
+    pg_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`plan-gate missing-reasons`: list resolved blockers without a reason."""
+    p_pmiss = pg_sub.add_parser(
+        "missing-reasons",
+        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
+    )
+    common(p_pmiss)
+    p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
+
+
+def _add_plan_gate_backfill_reason_parser(
+    pg_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`plan-gate backfill-reason`: record a missing reason on a resolved blocker."""
+    p_pbackfill = pg_sub.add_parser(
+        "backfill-reason",
+        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
+    )
+    common(p_pbackfill)
+    p_pbackfill.add_argument("track_id")
+    p_pbackfill.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_pbackfill.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_pbackfill.set_defaults(func=cmd_plan_gate_backfill_reason)
+
+
+def _add_plan_gate_reblock_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate reblock`: put a wrongly-lifted blocker back on the track."""
+    p_preblock = pg_sub.add_parser(
+        "reblock",
+        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
+    )
+    common(p_preblock)
+    p_preblock.add_argument("track_id")
+    p_preblock.add_argument("--reason", default="", help="operator reason (REQUIRED)")
+    p_preblock.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_preblock.set_defaults(func=cmd_plan_gate_reblock)
+
+
+def _add_plan_gate_batch_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate batch`: run the gate over a set of OI-PLAN-blocked tracks."""
+    p_pbatch = pg_sub.add_parser(
+        "batch",
+        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
+             "--dry-run first shows the class + seat count WITHOUT calling a model)",
+    )
+    common(p_pbatch)
+    p_pbatch.add_argument(
+        "--track", action="append", default=None, metavar="TRACK_ID",
+        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
+             "Default: every track with an open OI-PLAN blocker.",
+    )
+    p_pbatch.add_argument(
+        "--limit", type=int, default=None, metavar="N",
+        help="cap the number of tracks processed; composes with --track (not "
+             "mutually exclusive).",
+    )
+    p_pbatch.add_argument(
+        "--restart", action="store_true",
+        help="re-run all selected tracks, ignoring the resume store.",
+    )
+    p_pbatch.add_argument(
+        "--dry-run", action="store_true",
+        help="show each track's gate class + seat count without calling any "
+             "model. Standard first step before a real batch.",
+    )
+    p_pbatch.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
+    )
+    p_pbatch.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+    )
+    p_pbatch.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace, not the seat count.",
+    )
+    p_pbatch.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
+    )
+    p_pbatch.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict in the trace, not more seats.",
+    )
+    p_pbatch.set_defaults(func=cmd_plan_gate_batch)
+
+
+def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> None:
+    """The `plan-gate` parser, built one action builder at a time.
 
     Extracted from ``_build_parser`` (the functies-onder-200 track): that function
     is far past the 70-executable-line ratchet, so the domain moves out one
-    builder per action. The caller keeps building the remaining plan-gate
-    actions (``missing-reasons``, ``backfill-reason``, ``reblock``, ``batch``)
-    on the returned subparsers object.
+    builder per action, in the order the actions were originally added.
     """
     pg = sub.add_parser(
         "plan-gate",
@@ -6367,7 +6478,10 @@ def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> Any:
     _add_plan_gate_run_parser(pg_sub, common)
     _add_plan_gate_status_parser(pg_sub, common)
     _add_plan_gate_attest_parser(pg_sub, common)
-    return pg_sub
+    _add_plan_gate_missing_reasons_parser(pg_sub, common)
+    _add_plan_gate_backfill_reason_parser(pg_sub, common)
+    _add_plan_gate_reblock_parser(pg_sub, common)
+    _add_plan_gate_batch_parser(pg_sub, common)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -6644,104 +6758,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)
     # ------------------------------------------------------------------
-    pg_sub = _add_plan_gate_parsers(sub, _common)
-
-    p_pmiss = pg_sub.add_parser(
-        "missing-reasons",
-        help="list resolved plan-gate blockers with no resolution_reason (read-only)",
-    )
-    _common(p_pmiss)
-    p_pmiss.set_defaults(func=cmd_plan_gate_missing_reasons)
-
-    p_pbackfill = pg_sub.add_parser(
-        "backfill-reason",
-        help="record the missing resolution_reason on an already-resolved plan-gate blocker",
-    )
-    _common(p_pbackfill)
-    p_pbackfill.add_argument("track_id")
-    p_pbackfill.add_argument("--reason", default="", help="operator reason (REQUIRED)")
-    p_pbackfill.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_pbackfill.set_defaults(func=cmd_plan_gate_backfill_reason)
-
-    p_preblock = pg_sub.add_parser(
-        "reblock",
-        help="put back a wrongly-lifted plan-gate blocker (track is blocked again)",
-    )
-    _common(p_preblock)
-    p_preblock.add_argument("track_id")
-    p_preblock.add_argument("--reason", default="", help="operator reason (REQUIRED)")
-    p_preblock.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_preblock.set_defaults(func=cmd_plan_gate_reblock)
-
-    p_pbatch = pg_sub.add_parser(
-        "batch",
-        help="run the gate over a set of OI-PLAN-blocked tracks (resumeable; "
-             "--dry-run first shows the class + seat count WITHOUT calling a model)",
-    )
-    _common(p_pbatch)
-    p_pbatch.add_argument(
-        "--track", action="append", default=None, metavar="TRACK_ID",
-        help="explicit track id(s) to gate (repeatable); unknown ids fail loud. "
-             "Default: every track with an open OI-PLAN blocker.",
-    )
-    p_pbatch.add_argument(
-        "--limit", type=int, default=None, metavar="N",
-        help="cap the number of tracks processed; composes with --track (not "
-             "mutually exclusive).",
-    )
-    p_pbatch.add_argument(
-        "--restart", action="store_true",
-        help="re-run all selected tracks, ignoring the resume store.",
-    )
-    p_pbatch.add_argument(
-        "--dry-run", action="store_true",
-        help="show each track's gate class + seat count without calling any "
-             "model. Standard first step before a real batch.",
-    )
-    p_pbatch.add_argument(
-        "--panel-seats",
-        dest="panel_seats",
-        default="",
-        help="comma-separated seat labels to run instead of the default seat; "
-             "logged as an override, unknown labels fail loud. Default: default_seat.",
-    )
-    p_pbatch.add_argument(
-        "--seat-timeout",
-        dest="seat_timeout",
-        type=int,
-        default=None,
-        help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
-    )
-    p_pbatch.add_argument(
-        "--dispatch-paths",
-        dest="dispatch_paths",
-        default=None,
-        help="comma-separated repo paths the plan touches; they derive the governance "
-             "weight (variant) in the trace, not the seat count.",
-    )
-    p_pbatch.add_argument(
-        "--task-class",
-        dest="task_class",
-        default=None,
-        help="task class for the plan from the smart-router closed set; it feeds "
-             "the governance weight in the trace. A new feature no longer gets "
-             "more seats.",
-    )
-    p_pbatch.add_argument(
-        "--irreversible",
-        dest="irreversible",
-        action="store_true",
-        help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict in the trace, not more seats.",
-    )
-    p_pbatch.set_defaults(func=cmd_plan_gate_batch)
+    _add_plan_gate_parsers(sub, _common)
 
     return parser
 
