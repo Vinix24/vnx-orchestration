@@ -314,26 +314,34 @@ Resterend:
 
 @pytest.fixture
 def rig(tmp_path):
-    stub = tmp_path / "stub"
+    return _rig(tmp_path)
+
+
+def _rig(base: Path) -> Dict:
+    """The stub world: a project with its daily-log folder, a state dir and a stub ``tmux`` and
+    ``claude`` on PATH. ``base`` is the test's own ``tmp_path``, or a ``tmp_path_factory.mktemp()``
+    directory when one run is shared by several tests."""
+    base.mkdir(parents=True, exist_ok=True)
+    stub = base / "stub"
     stub.mkdir()
-    bindir = tmp_path / "bin"
+    bindir = base / "bin"
     bindir.mkdir()
     (bindir / "tmux").write_text(STUB_TMUX)
     (bindir / "claude").write_text(STUB_CLAUDE)
     for name in ("tmux", "claude"):
         (bindir / name).chmod(0o755)
-    project = tmp_path / "project"
+    project = base / "project"
     (project / "daily-log").mkdir(parents=True)
-    state = tmp_path / "state"
+    state = base / "state"
     env = {
         "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '/usr/bin:/bin')}",
-        "HOME": str(tmp_path / "home"),
+        "HOME": str(base / "home"),
         "STUB_DIR": str(stub),
         "TMUX": "/tmp/stub-tmux,1,0",
         "TMUX_PANE": PANE,
         "VNX_PYTHON": sys.executable,
         "VNX_T0_ROTATION_STATE_DIR": str(state),
-        "VNX_T0_ROTATION_RECEIPTS_FILE": str(tmp_path / "receipts" / "t0_receipts.ndjson"),
+        "VNX_T0_ROTATION_RECEIPTS_FILE": str(base / "receipts" / "t0_receipts.ndjson"),
         "VNX_T0_ROTATE_POLL_SECONDS": "0",
         "VNX_T0_ROTATE_SETTLE_SECONDS": "0",
         "VNX_T0_ROTATE_CHUNK_PAUSE": "0",
@@ -343,7 +351,7 @@ def rig(tmp_path):
         "VNX_T0_ROTATE_DELIVERY_TIMEOUT": "0",
         "VNX_T0_ROTATE_DELIVERY_POLL": "0",
     }
-    return {"tmp": tmp_path, "stub": stub, "project": project, "state": state, "env": env}
+    return {"tmp": base, "stub": stub, "project": project, "state": state, "env": env}
 
 
 DAILY_LOG = "daily-log/2026-10-16.md"
@@ -425,6 +433,46 @@ def _spawn(rig, *args: str, env_extra: Dict[str, str] = None,
     return subprocess.run(["bash", str(SPAWN), "--project-root", str(rig["project"]), *args],
                           env=env, cwd=cwd or rig["project"], capture_output=True, text=True,
                           timeout=120)
+
+
+def _spawn_to(rig, stdout_path: Path, *args: str,
+              env_extra: Dict[str, str] = None) -> subprocess.CompletedProcess:
+    """``_spawn`` with the spawner's stdout written to ``stdout_path``: the stub copies that file
+    when the tmux server job is handed over (STUB_STDOUT_FILE), so the one shared run can prove
+    both where the last line went and which fields it carried."""
+    env = {**rig["env"], **(env_extra or {}), "STUB_STDOUT_FILE": str(stdout_path)}
+    with stdout_path.open("w") as handle:
+        return subprocess.run(["bash", str(SPAWN), "--project-root", str(rig["project"]), *args],
+                              env=env, cwd=rig["project"], stdout=handle,
+                              stderr=subprocess.PIPE, text=True, timeout=120)
+
+
+class SharedRun:
+    """One real script run, shared by the tests that assert different facts about it. Each group
+    gets its own ``tmp_path_factory`` directory, so no group reads another group's files."""
+
+    def __init__(self, rig: Dict, proc: subprocess.CompletedProcess, stdout: Path):
+        self.rig, self.proc, self.stdout = rig, proc, stdout
+
+
+@pytest.fixture(scope="module")
+def plain_spawn(tmp_path_factory) -> SharedRun:
+    """One plain successful spawn: a fresh wrapped handoff, no T0 folder, no pending marker, no
+    stub switch and no transcript (so the delivery check times out and the old window stays)."""
+    rig = _rig(tmp_path_factory.mktemp("plain-spawn"))
+    _handoff(rig, HANDOFF_BASE)
+    stdout = rig["tmp"] / "spawner.stdout"
+    return SharedRun(rig, _spawn_to(rig, stdout), stdout)
+
+
+@pytest.fixture(scope="module")
+def goal_spawn(tmp_path_factory) -> SharedRun:
+    """One spawn of a handoff with an active /goal, delivered into the successor's transcript
+    (STUB_TRANSCRIPT=expanded): its kickoff turn ends in the transcript and the follow-up lands."""
+    rig = _rig(tmp_path_factory.mktemp("goal-spawn"))
+    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
+    stdout = rig["tmp"] / "spawner.stdout"
+    return SharedRun(rig, _spawn_to(rig, stdout, env_extra={"STUB_TRANSCRIPT": "expanded"}), stdout)
 
 
 def _calls(rig) -> List[list]:
@@ -639,9 +687,8 @@ def test_no_rc_overrides_the_bridge(rig):
     assert _launch(rig) == "claude --model opus"
 
 
-def test_active_goal_is_resumed_after_the_first_turn(rig):
-    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
-    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
+def test_active_goal_is_resumed_after_the_first_turn(goal_spawn):
+    rig, proc = goal_spawn.rig, goal_spawn.proc
     assert proc.returncode == 0, proc.stderr
 
     typed = _typed(rig)
@@ -682,7 +729,7 @@ def test_unconfirmed_goal_retries_once_then_speaks_up(rig):
     _assert_enter_always_separate(rig)
 
 
-def test_goal_enter_taken_by_autocomplete_is_retried_with_enter_only(rig):
+def test_goal_enter_taken_by_autocomplete_is_retried_with_enter_only(rig, monkeypatch, tmp_path):
     _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
     proc = _spawn(rig, env_extra={"STUB_EAT_FIRST_GOAL_ENTER": "1", "STUB_TRANSCRIPT": "expanded"})
     assert proc.returncode == 0, proc.stderr
@@ -693,6 +740,18 @@ def test_goal_enter_taken_by_autocomplete_is_retried_with_enter_only(rig):
     assert calls[goal_idx + 1:] == [["send-keys", "-t", NEW_WIN, "Enter"]] * 2
     outcome = [r for r in _receipts(rig) if r["trigger"] == "t0_context_rotation_goal_followup"]
     assert [r["outcome"] for r in outcome] == ["confirmed"]
+
+    # The enter-only fact is the stub branch's, not the goal run's: on a rig whose env is
+    # monkeypatched to switch the branch off, the first Enter lands, the /goal is active and the
+    # spawner sends one Enter — the assertion above is the one that fails there.
+    without = _rig(tmp_path / "without-the-branch")
+    monkeypatch.setitem(without["env"], "STUB_EAT_FIRST_GOAL_ENTER", "")
+    _handoff(without, HANDOFF_BASE + GOAL_SECTION)
+    assert _spawn(without, env_extra={"STUB_TRANSCRIPT": "expanded"}).returncode == 0
+    sends = [c for c in _calls(without) if c[:1] == ["send-keys"]]
+    plain_idx = next(i for i, c in enumerate(sends) if "-l" in c and c[-1].startswith("/goal "))
+    assert sends[plain_idx + 1:] == [["send-keys", "-t", NEW_WIN, "Enter"]], \
+        "without the autocomplete branch the first Enter lands: one Enter, not two"
 
 
 # ── handoff parsing ──────────────────────────────────────────────────────────
@@ -889,9 +948,8 @@ def test_b2_started_from_the_t0_folder_reads_the_root_handoff_and_logs_no_correc
     assert not (t0 / "daily-log").exists()
 
 
-def test_b3_no_t0_claude_md_starts_in_the_project_root(rig):
-    _handoff(rig, HANDOFF_BASE)
-    proc = _spawn(rig)
+def test_b3_no_t0_claude_md_starts_in_the_project_root(plain_spawn):
+    rig, proc = plain_spawn.rig, plain_spawn.proc
     _root_start_asserted(rig, proc)
     lines = [ln for ln in proc.stderr.splitlines() if "no T0 folder" in ln]
     assert len(lines) == 1
@@ -994,13 +1052,12 @@ def test_b8_a_successor_in_the_wrong_folder_is_closed_and_nothing_is_typed(rig):
     assert _receipts(rig) == []
 
 
-def test_b9_the_last_line_keeps_the_four_fields_the_rotate_skill_reads(rig):
-    """The skill's own expressions, as written, on a state dir without spaces."""
-    _t0_folder(rig)
-    _handoff(rig, HANDOFF_BASE)
-    proc = _spawn(rig)
+def test_b9_the_last_line_keeps_the_four_fields_the_rotate_skill_reads(plain_spawn):
+    """The skill's own expressions, as written, on a state dir without spaces. The start folder
+    (a T0 folder or the project root) is not what this reads: the fields are."""
+    rig, proc = plain_spawn.rig, plain_spawn.proc
     assert proc.returncode == 0, proc.stderr
-    last = proc.stdout.strip().splitlines()[-1]
+    last = plain_spawn.stdout.read_text(encoding="utf-8").strip().splitlines()[-1]
     pipeline = ("printf '%s\n' \"$LAST\" | grep -E '^new_window=@[0-9]+ old_window=@[0-9]+' "
                 "| sed -E 's/{expr}/\\1/'")
     got = {}
@@ -1369,11 +1426,10 @@ def _launch_parts(rig):
     return match.group(1), match.group(2)
 
 
-def test_the_first_message_is_a_start_argument_and_nothing_is_typed_after_the_footer(rig):
+def test_the_first_message_is_a_start_argument_and_nothing_is_typed_after_the_footer(plain_spawn):
     """Red run on origin/main: the prompt was typed with `send-keys -l` into the TUI input box
     after the footer, and the launch line carried neither --session-id nor the first message."""
-    _handoff(rig, HANDOFF_BASE)
-    proc = _spawn(rig)
+    rig, proc = plain_spawn.rig, plain_spawn.proc
     assert proc.returncode == 0, proc.stderr
 
     session_uuid, run_id = _launch_parts(rig)
@@ -1396,10 +1452,9 @@ def test_the_launch_line_keeps_config_dir_remote_control_and_cd_prefix(rig):
                             "claude --model opus --remote-control VNX\\ ORCH")
 
 
-def test_a_goal_run_types_only_the_goal_after_the_launch(rig):
-    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
-    assert _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"}).returncode == 0
-    typed = _typed(rig)
+def test_a_goal_run_types_only_the_goal_after_the_launch(goal_spawn):
+    assert goal_spawn.proc.returncode == 0
+    typed = _typed(goal_spawn.rig)
     assert len(typed) == 2 and typed[1].startswith("/goal ")
 
 
@@ -1414,9 +1469,9 @@ def test_prompt_txt_keeps_the_goal_sentence_and_the_catch_up_head_without_the_ki
     assert json.loads((_run_dir(rig) / "continuation.json").read_text())["goal"].startswith("/goal werk alle")
 
 
-def test_the_delivery_check_is_a_script_file_run_by_the_tmux_server(rig):
-    _handoff(rig, HANDOFF_BASE)
-    assert _spawn(rig).returncode == 0
+def test_the_delivery_check_is_a_script_file_run_by_the_tmux_server(plain_spawn):
+    rig = plain_spawn.rig
+    assert plain_spawn.proc.returncode == 0
     jobs = [c for c in _calls(rig) if c[0] == "run-shell"]
     [job] = jobs
     job_file = _run_dir(rig) / "delivery_job.sh"
@@ -1435,9 +1490,9 @@ def test_the_config_dir_of_the_transcript_search_follows_claude_config_dir(rig):
     assert "--config-dir /Users/x/.claude-salesminds" in body
 
 
-def test_without_a_transcript_in_time_the_old_window_stays_open_and_both_windows_say_so(rig):
-    _handoff(rig, HANDOFF_BASE)
-    assert _spawn(rig).returncode == 0
+def test_without_a_transcript_in_time_the_old_window_stays_open_and_both_windows_say_so(plain_spawn):
+    rig = plain_spawn.rig
+    assert plain_spawn.proc.returncode == 0
     calls = _calls(rig)
     assert not any(c[0] == "kill-window" for c in calls)
     notes = [c for c in calls if c[0] == "display-message" and "-p" not in c]
@@ -1633,9 +1688,9 @@ def test_a_goal_run_with_a_refused_receipt_types_no_goal_and_closes_nothing(rig)
     assert all("receipt" in c[-1] for c in _notes(rig)) and len(_notes(rig)) == 2
 
 
-def test_the_goal_followup_comes_after_a_confirmed_delivery_and_before_the_old_window_closes(rig):
-    _handoff(rig, HANDOFF_BASE + GOAL_SECTION)
-    assert _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"}).returncode == 0
+def test_the_goal_followup_comes_after_a_confirmed_delivery_and_before_the_old_window_closes(goal_spawn):
+    rig = goal_spawn.rig
+    assert goal_spawn.proc.returncode == 0
     calls = _calls(rig)
     goal_enter = max(i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and c[-1] == "Enter")
     kill_old = next(i for i, c in enumerate(calls) if c == ["kill-window", "-t", OLD_WIN])
@@ -1663,17 +1718,12 @@ def test_a_goal_run_without_a_confirmed_delivery_types_no_goal(rig, mode):
         not (_run_dir(rig) / "goal_followup.log").read_text()
 
 
-def test_the_last_stdout_line_is_printed_before_the_server_job_starts(rig):
-    _handoff(rig, HANDOFF_BASE)
-    out = rig["tmp"] / "spawner.stdout"
-    with out.open("w") as handle:
-        proc = subprocess.run(["bash", str(SPAWN), "--project-root", str(rig["project"])],
-                              env={**rig["env"], "STUB_STDOUT_FILE": str(out)}, cwd=rig["project"],
-                              stdout=handle, stderr=subprocess.PIPE, text=True, timeout=120)
+def test_the_last_stdout_line_is_printed_before_the_server_job_starts(plain_spawn):
+    rig, proc = plain_spawn.rig, plain_spawn.proc
     assert proc.returncode == 0, proc.stderr
     seen = (rig["stub"] / "stdout_at_run_shell").read_text(encoding="utf-8")
     assert seen.startswith("new_window=") and "close=on_delivery_confirmed" in seen
-    assert seen == out.read_text(encoding="utf-8")
+    assert seen == plain_spawn.stdout.read_text(encoding="utf-8")
 
 
 def test_the_wrong_folder_path_never_carries_the_first_message(rig):
@@ -1962,19 +2012,24 @@ def test_a_goal_of_582_bytes_is_still_one_burst_then_enter(rig):
     assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
 
 
-@pytest.mark.parametrize("section,typed_in_pieces", [
-    (GOAL_SECTION, "0"),
-    (_long_goal_section()[1], "1"),
-])
-def test_the_followup_event_carries_goal_bytes_and_typed_in_pieces(rig, section, typed_in_pieces):
-    _handoff(rig, HANDOFF_BASE + section)
+def test_the_followup_event_carries_goal_bytes_and_typed_in_pieces(goal_spawn):
+    """The follow-up of the shared /goal run: the line fit in one burst."""
+    goal = _goal_file(goal_spawn.rig)
+    [outcome] = _goal_outcomes(goal_spawn.rig)
+    assert outcome["outcome"] == "confirmed"
+    assert int(outcome["goal_bytes"]) == len(goal.encode("utf-8"))
+    assert outcome["typed_in_pieces"] == "0"
+
+
+def test_a_long_followup_event_carries_goal_bytes_and_typed_in_pieces(rig):
+    _handoff(rig, HANDOFF_BASE + _long_goal_section()[1])
     proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
     assert proc.returncode == 0, proc.stderr
     goal = _goal_file(rig)
     [outcome] = _goal_outcomes(rig)
     assert outcome["outcome"] == "confirmed"
     assert int(outcome["goal_bytes"]) == len(goal.encode("utf-8"))
-    assert outcome["typed_in_pieces"] == typed_in_pieces
+    assert outcome["typed_in_pieces"] == "1"
 
 
 def test_the_let_op_line_repeats_a_long_goal_in_pieces_too(rig):
