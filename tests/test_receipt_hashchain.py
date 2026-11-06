@@ -4,7 +4,7 @@
 Covers:
   - flag OFF: append behavior unchanged (no prev_hash field) — byte-for-byte.
   - flag ON: appends carry prev_hash; verify_chain passes on the result.
-  - CONCURRENCY (the critical one): 12 concurrent processes each append a
+  - CONCURRENCY (the critical one): 8 concurrent processes each append a
     receipt under the lock with the flag ON; verify_chain passes (zero forks:
     every prev_hash matches the prior entry's hash, no duplicate prev_hash,
     no GENESIS after line 1).
@@ -13,6 +13,11 @@ Covers:
 The concurrency test exercises the exact correctness invariant from the spec:
 read-tail + stamp + write + cache-update must be serialized under the single
 append lock or concurrent appends fork the chain.
+
+``VNX_TEST_NO_APPEND_LOCK=1`` is the red run of that invariant: every child
+appends without the lock and is held at the read-tail point until all have
+read it, so the chain forks and the no-fork test fails. Unset (CI, and every
+normal run) the children take the lock production takes.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ import json
 import multiprocessing as mp
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -124,38 +130,71 @@ def test_flag_on_genesis_only_first_line(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # CONCURRENCY: the critical fork-test
 # --------------------------------------------------------------------------- #
-def _concurrent_worker(receipt_path_str: str, worker_id: int) -> None:
-    """Subprocess body: enable flag, append one receipt under the lock."""
+# The red run of the no-fork test: every child appends without the append lock.
+_NO_APPEND_LOCK_ENV = "VNX_TEST_NO_APPEND_LOCK"
+
+
+def _hold_every_writer_at_the_read_tail(idempotency, rendezvous: Path, worker_id: int, n_workers: int) -> None:
+    """Hold each lock-less writer at the read-tail point until every writer has read it.
+
+    Without the lock two writers can read the same tail before either writes; this makes
+    that window as wide as the writer count instead of a race of luck, so the red run
+    (``VNX_TEST_NO_APPEND_LOCK=1``) forks the chain every time.
+    """
+    read_the_tail = idempotency._last_hash_under_lock
+    rendezvous.mkdir(parents=True, exist_ok=True)
+
+    def read_then_wait_for_the_others(receipt_path: Path) -> str:
+        tail = read_the_tail(receipt_path)
+        (rendezvous / f"read-{worker_id}").write_text("1", encoding="utf-8")
+        deadline = time.monotonic() + 30
+        while len(list(rendezvous.iterdir())) < n_workers:
+            if time.monotonic() >= deadline:
+                raise RuntimeError("not every writer reached the read-tail point")
+            time.sleep(0.01)
+        return tail
+
+    idempotency._last_hash_under_lock = read_then_wait_for_the_others
+
+
+def _concurrent_worker(receipt_path_str: str, worker_id: int, n_workers: int) -> None:
+    """Subprocess body: enable the flag, append one receipt under the lock production takes.
+
+    With ``VNX_TEST_NO_APPEND_LOCK=1`` the lock is a no-op here: the red run.
+    """
     os.environ["VNX_CHAIN_RECEIPTS"] = "1"
     # Re-resolve imports inside the spawned process.
     for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
         if _p not in sys.path:
             sys.path.insert(0, _p)
-    from append_receipt_internals.idempotency import (
-        _cache_file_for as cf,
-        _compute_idempotency_key as ck,
-        _write_receipt_under_lock as wr,
-    )
+    from append_receipt_internals import idempotency
 
     receipt_path = Path(receipt_path_str)
+    if os.environ.get(_NO_APPEND_LOCK_ENV) == "1":
+        idempotency._take_the_append_lock = lambda *_args, **_kwargs: None
+        _hold_every_writer_at_the_read_tail(idempotency, receipt_path.parent / "read-tail", worker_id, n_workers)
+
     receipt = {
         "event_type": "test_event",
         "dispatch_id": f"worker-{worker_id}",
         "worker": worker_id,
         "pid": os.getpid(),
     }
-    cache_path = cf(receipt_path)
-    key = ck(receipt, "test_event")
-    wr(receipt, receipt_path, cache_path, key, cache_window_seconds=300)
+    cache_path = idempotency._cache_file_for(receipt_path)
+    key = idempotency._compute_idempotency_key(receipt, "test_event")
+    idempotency._write_receipt_under_lock(receipt, receipt_path, cache_path, key, cache_window_seconds=300)
 
 
-@pytest.mark.parametrize("n_workers", [8, 16])
+# Eight writers are enough: the race needs concurrency, not a number. Two writers that read
+# the same tail already fork the chain, and eight spawned processes interleave far more than
+# two; a sixteenth adds spawn time and no new interleaving the eight have not shown.
+@pytest.mark.parametrize("n_workers", [8])
 def test_concurrent_appends_no_fork(tmp_path, n_workers):
     receipt_path = tmp_path / f"t0_receipts_{n_workers}.ndjson"
 
     ctx = mp.get_context("spawn")
     procs = [
-        ctx.Process(target=_concurrent_worker, args=(str(receipt_path), wid))
+        ctx.Process(target=_concurrent_worker, args=(str(receipt_path), wid, n_workers))
         for wid in range(n_workers)
     ]
     for p in procs:

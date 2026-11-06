@@ -67,9 +67,14 @@ RUN_A2 = f"{PROJECT}:dispatch:{REF}:2"
 RUN_B1 = f"{PROJECT}:gate:codex-gate-pr2150:1"
 RUN_C1 = f"{PROJECT}:gate:codex-gate-pr2151:1"
 _ZERO = {"input_uncached": 0, "cache_hit": 0, "cache_write_5m": 0, "cache_write_1h": 0, "output": 0}
-# How long a child holds the lock file, and how long the replay waits for it.
-HOLD_SECONDS = 3.0
-WAIT_SECONDS = 0.3
+# The poll interval of a bounded lock wait, from the module under test (never a copy): a wait
+# shorter than one poll is one try and no wait at all, so two polls is the smallest that still
+# separates "waited and gave up" from "did not wait".
+LOCK_POLL_SECONDS = cost_ledger._LOCK_POLL_SEC
+WAIT_SECONDS = 2 * LOCK_POLL_SECONDS
+# How long a child holds the lock file: above the wait it must outlast, and above the replay
+# call's own work, so "waited and gave up" is not confused with "the holder finished".
+HOLD_SECONDS = 1.0
 # What a bounded wait may take beyond its bound: the poll interval and the work around it.
 MARGIN_SECONDS = 0.7
 
@@ -277,15 +282,15 @@ def _wait_for(marker: Path, child: subprocess.Popen) -> None:
 
 @pytest.fixture
 def hold_the_lock(ledger, signals, spawn):
-    """``hold_the_lock()`` starts a child that holds the lock file exclusively for ``HOLD_SECONDS``.
+    """``hold_the_lock(seconds=HOLD_SECONDS)`` starts a child that holds the lock file exclusively.
 
     It returns once the child holds it; the child is checked at teardown.
     """
     holders: list = []
 
-    def start() -> subprocess.Popen:
+    def start(seconds: float = HOLD_SECONDS) -> subprocess.Popen:
         ledger.parent.mkdir(parents=True, exist_ok=True)
-        holder = spawn(_LOCK_FILE_HOLDER, ledger, signals, {"hold": HOLD_SECONDS})
+        holder = spawn(_LOCK_FILE_HOLDER, ledger, signals, {"hold": seconds})
         _wait_for(signals / "holder_has_the_lock", holder)
         holders.append(holder)
         return holder
@@ -1218,7 +1223,9 @@ class TestTheCli:
 
     def test_exit_3_when_the_lock_stays_taken(self, ledger, monkeypatch, hold_the_lock):
         _to_the_spool(ledger, monkeypatch, _run())
-        hold_the_lock()
+        # The child here starts a fresh interpreter before it takes the lock, so the hold must
+        # outlast that startup as well as the wait; in-process replays need only HOLD_SECONDS.
+        hold_the_lock(HOLD_SECONDS + 1.0)
 
         busy = _replay_cli(ledger, "--json", VNX_COST_LEDGER_LOCK_WAIT_SEC=str(WAIT_SECONDS))
 
