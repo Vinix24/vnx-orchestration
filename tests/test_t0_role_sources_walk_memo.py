@@ -98,12 +98,16 @@ def test_planning_cli_is_one_of_the_walked_scripts() -> None:
     assert "scripts/planning_cli.py" in WALKED
 
 
-def test_memo_cuts_the_stmts_work_of_the_audit_walk_at_least_tenfold() -> None:
-    """The whole walk set, the axis the cProfile counted (271,316 `_stmts`)."""
+def test_memo_cuts_the_stmts_work_of_the_audit_walk_at_least_fivefold() -> None:
+    """The whole walk set, the axis the cProfile counted (271,316 `_stmts`).
+
+    The floor is 5, not 10: the rule that never stores a root-creating or
+    guard-cut body measures 6.6 (41,185 against 270,461), so 5 keeps a margin.
+    """
     plain = sum(_count_stmts(rel, False) for rel in WALKED)
     memoized = sum(_count_stmts(rel, True) for rel in WALKED)
     assert plain > 0
-    assert memoized * 10 <= plain, f"memo={memoized} plain={plain}"
+    assert memoized * 5 <= plain, f"memo={memoized} plain={plain}"
 
 
 def test_planning_cli_interprets_each_call_site_once() -> None:
