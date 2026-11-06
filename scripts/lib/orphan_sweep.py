@@ -957,80 +957,17 @@ def sweep(
             logger.warning("orphan_sweep: kill failed for %s; leaving session", name)
 
     # ── kind 2: worktrees whose tmux session is gone ─────────────────────────
-    if worktrees_dir.is_dir():
-        from tmux_worktree import WorktreeHandle, classify_path, reap
-
-        for entry in sorted(worktrees_dir.iterdir()):
-            if not entry.is_dir():
-                continue
-            m = _WORKTREE_DIR_RE.match(entry.name)
-            if not m:
-                continue
-            wid = m.group("id")
-            result.worktrees_scanned.append(str(entry))
-            if listing_unmeasurable or wid in surviving_ids:
-                result.worktrees_skipped_live.append(str(entry))
-                continue
-            # OI-1427: no tmux session is not "dead" — a headless/provider
-            # dispatch never has one. True (known, not provably terminal) or
-            # None (register unmeasurable) both mean "never reap on doubt";
-            # only a hard False (unknown to the register, or provably
-            # terminal) falls through to the classify/reap path below.
-            inflight = _dispatch_known_inflight(
-                wid,
-                register_known_ids=register_known_ids,
-                register_completed_ids=register_completed_ids,
-                receipts_index=receipts_index,
-                ledger=ledger,
-            )
-            if inflight is not False:
-                result.worktrees_skipped_live.append(str(entry))
-                logger.info(
-                    "orphan_sweep: SKIP worktree %s — no tmux session but register %s",
-                    entry.name,
-                    "shows it in flight" if inflight else "was unmeasurable",
-                )
-                continue
-            branch = f"dispatch/{wid}"
-            try:
-                classification = classify_path(
-                    wt=entry, branch=branch, dispatch_id=wid, base_sha=None,
-                )
-            except Exception as exc:
-                result.errors.append(
-                    {"kind": "worktree", "path": str(entry), "error": f"classify: {exc}"}
-                )
-                continue
-            if dry_run:
-                bucket = (
-                    result.worktrees_preserved if classification == "dirty"
-                    else result.worktrees_removed
-                )
-                bucket.append(str(entry))
-                logger.info(
-                    "orphan_sweep: DRY-RUN worktree %s classified %s (no mutation)",
-                    entry.name, classification,
-                )
-                continue
-            try:
-                handle = WorktreeHandle(
-                    path=entry, branch=branch, base_sha="",
-                    base_ref="origin/main", dispatch_id=wid,
-                )
-                rr = reap(handle, classification)
-            except Exception as exc:
-                result.errors.append({"kind": "worktree", "path": str(entry), "error": str(exc)})
-                continue
-            if rr.removed:
-                result.worktrees_removed.append(str(entry))
-                logger.info("orphan_sweep: reaped orphan worktree %s", entry.name)
-            elif rr.preserved_path is not None:
-                result.worktrees_preserved.append(str(entry))
-                logger.info(
-                    "orphan_sweep: preserved (marked) dirty worktree %s", entry.name,
-                )
-            for e in rr.errors:
-                result.errors.append({"kind": "worktree", "path": str(entry), "error": e})
+    _sweep_orphan_worktrees(
+        worktrees_dir,
+        result=result,
+        listing_unmeasurable=listing_unmeasurable,
+        surviving_ids=surviving_ids,
+        register_known_ids=register_known_ids,
+        register_completed_ids=register_completed_ids,
+        receipts_index=receipts_index,
+        ledger=ledger,
+        dry_run=dry_run,
+    )
 
     # ── kind 3: active manifests (delegate to crash_recovery_sweep) ──────────
     active = crash_recovery_sweep.sweep(
@@ -1059,6 +996,130 @@ def sweep(
         result.active_v3, result.dry_run, len(result.errors),
     )
     return result
+
+
+def _sweep_orphan_worktrees(
+    worktrees_dir: Path,
+    *,
+    result: "OrphanSweepResult",
+    listing_unmeasurable: bool,
+    surviving_ids: "set[str]",
+    register_known_ids: "Optional[set[str]]",
+    register_completed_ids: "Optional[set[str]]",
+    receipts_index: "Optional[dict]",
+    ledger: "_LedgerView",
+    dry_run: bool,
+) -> None:
+    """Kind 2 — worktrees whose tmux session is gone (see the module docstring).
+
+    Walks ``<repo>/.vnx-data/worktrees/dispatch-<id>`` and hands every
+    well-formed entry to :func:`_sweep_worktree_entry`. An entry that is not a
+    directory or whose name is not a dispatch id is not a worktree of ours and
+    is skipped silently. ``tmux_worktree`` is imported only here and only when
+    the worktrees directory actually exists, so a run on a checkout without one
+    never pays for the import.
+    """
+    if not worktrees_dir.is_dir():
+        return
+    from tmux_worktree import WorktreeHandle, classify_path, reap
+
+    for entry in sorted(worktrees_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        m = _WORKTREE_DIR_RE.match(entry.name)
+        if not m:
+            continue
+        _sweep_worktree_entry(
+            entry, m.group("id"),
+            result=result,
+            handle_cls=WorktreeHandle,
+            classify=classify_path,
+            reap_fn=reap,
+            listing_unmeasurable=listing_unmeasurable,
+            surviving_ids=surviving_ids,
+            register_known_ids=register_known_ids,
+            register_completed_ids=register_completed_ids,
+            receipts_index=receipts_index,
+            ledger=ledger,
+            dry_run=dry_run,
+        )
+
+
+def _sweep_worktree_entry(
+    entry: Path,
+    wid: str,
+    *,
+    result: "OrphanSweepResult",
+    handle_cls,
+    classify,
+    reap_fn,
+    listing_unmeasurable: bool,
+    surviving_ids: "set[str]",
+    register_known_ids: "Optional[set[str]]",
+    register_completed_ids: "Optional[set[str]]",
+    receipts_index: "Optional[dict]",
+    ledger: "_LedgerView",
+    dry_run: bool,
+) -> None:
+    """Decide one kind-2 worktree: skip, classify, then reap or report (dry-run)."""
+    result.worktrees_scanned.append(str(entry))
+    if listing_unmeasurable or wid in surviving_ids:
+        result.worktrees_skipped_live.append(str(entry))
+        return
+    # OI-1427: no tmux session is not "dead" — a headless/provider dispatch
+    # never has one. True (known, not provably terminal) or None (register
+    # unmeasurable) both mean "never reap on doubt"; only a hard False
+    # (unknown to the register, or provably terminal) falls through to the
+    # classify/reap path below.
+    inflight = _dispatch_known_inflight(
+        wid,
+        register_known_ids=register_known_ids,
+        register_completed_ids=register_completed_ids,
+        receipts_index=receipts_index,
+        ledger=ledger,
+    )
+    if inflight is not False:
+        result.worktrees_skipped_live.append(str(entry))
+        logger.info(
+            "orphan_sweep: SKIP worktree %s — no tmux session but register %s",
+            entry.name, "shows it in flight" if inflight else "was unmeasurable",
+        )
+        return
+    branch = f"dispatch/{wid}"
+    try:
+        classification = classify(wt=entry, branch=branch, dispatch_id=wid, base_sha=None)
+    except Exception as exc:
+        result.errors.append(
+            {"kind": "worktree", "path": str(entry), "error": f"classify: {exc}"}
+        )
+        return
+    if dry_run:
+        bucket = (
+            result.worktrees_preserved if classification == "dirty"
+            else result.worktrees_removed
+        )
+        bucket.append(str(entry))
+        logger.info(
+            "orphan_sweep: DRY-RUN worktree %s classified %s (no mutation)",
+            entry.name, classification,
+        )
+        return
+    try:
+        handle = handle_cls(
+            path=entry, branch=branch, base_sha="", base_ref="origin/main", dispatch_id=wid,
+        )
+        rr = reap_fn(handle, classification)
+    except Exception as exc:
+        result.errors.append({"kind": "worktree", "path": str(entry), "error": str(exc)})
+        return
+    if rr.removed:
+        result.worktrees_removed.append(str(entry))
+        logger.info("orphan_sweep: reaped orphan worktree %s", entry.name)
+    elif rr.preserved_path is not None:
+        result.worktrees_preserved.append(str(entry))
+        logger.info("orphan_sweep: preserved (marked) dirty worktree %s", entry.name)
+    for e in rr.errors:
+        result.errors.append({"kind": "worktree", "path": str(entry), "error": e})
 
 
 def _absorb_active(result: "OrphanSweepResult", active) -> None:
