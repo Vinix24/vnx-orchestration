@@ -3659,6 +3659,201 @@ def _owner_finish(
         )
 
 
+def _route_provider_pre_validate(
+    spec: DispatchSpec,
+) -> "tuple[Optional[Reject], DispatchSpec, Optional[str]]":
+    """Door step A: resolve provider+model via the smart router BEFORE validate().
+
+    OI-962: the router fills in provider+model when the spec carries none (AUTO),
+    then validate() tests the resolved values against constraints.  This keeps
+    governance intact: a route that violates constraints is still rejected by the
+    full validation chain — only the order changed.
+
+    Returns ``(refusal, spec, door_route_reason)``. ``refusal`` is the Reject the
+    door emits (the emit and the exit code stay at the door); ``spec`` carries the
+    router's provider+model or the deterministic CLAUDE fallback.
+    """
+    door_route_reason: Optional[str] = None
+    if spec.provider != Provider.AUTO:
+        return None, spec, door_route_reason
+    try:
+        from providers.provider_registry import RegistryLookupError  # noqa: PLC0415
+
+        result = _resolve_router_pre_validate(spec)
+    except RegistryLookupError as exc:
+        # ADR-036 §2: an unknown provider/model is drift between the router and
+        # the registry — reject loudly, never silently fall back to the default
+        # lane. No dispatch, no receipt of a half-run.
+        return Reject("router-registry-drift", str(exc)), spec, door_route_reason
+    if result is not None and result.route is not None:
+        new_provider, new_model, route_reason = result.route
+        spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
+        return None, spec, route_reason
+    # Router declined or could not resolve (T0, VNX_SMART_ROUTER_DISABLE, or a
+    # classifier exception) — fall back to CLAUDE. OI-1050: this must set
+    # provider AND model TOGETHER, in the same replace() call as the success path
+    # above. Setting provider alone left spec.model=None, and the
+    # workers-kimi-pinned "default" pin semantics then filled effective_model
+    # from ITS OWN pin (kimi-k3) — producing provider=claude + model=kimi-k3,
+    # which kimi-via-cli-only correctly rejects.
+    #
+    # OI-1187: the fallback model is tier-aware. A tier-high dispatch whose
+    # routing failed must never silently land on sonnet (a quality class drop);
+    # it falls back to opus-5 (equal class) instead. Only when the classifier
+    # did not determine a tier (or the router returned None on an unexpected
+    # error) does the historical "sonnet" default apply.
+    tier = result.tier if result is not None else None
+    fallback_model = _tier_aware_fallback_model(tier, spec.model)
+    spec = dataclasses.replace(spec, provider=Provider.CLAUDE, model=fallback_model)
+    decline_reason = result.decline_reason if result is not None else None
+    if decline_reason:
+        door_route_reason = (
+            f"smart-router:no-route,reason={decline_reason},fallback={fallback_model}"
+        )
+    else:
+        door_route_reason = f"smart-router:no-route,fallback={fallback_model}"
+    return None, spec, door_route_reason
+
+
+def _fill_gate_and_check_required(
+    vspec: ValidatedSpec, door_route_reason: Optional[str],
+) -> "tuple[Optional[Reject], ValidatedSpec, Optional[str]]":
+    """Door step B: fill the review-gate from the router, then require one.
+
+    Punt 7 (gate-weight-by-variant): the gate reason is merged into
+    door_route_reason so the chosen variant + reason are visible in the dry-run
+    output and carried on the plan (route_reason), never a silent lighter gate.
+    An unreadable VNX_DEFAULT_REVIEW_STACK refuses the dispatch BY NAME rather
+    than falling back to a hardcoded gate (see _primary_review_gate). The
+    fallback is what made every obligation declare codex_gate for a project
+    whose operator had routed review to glm_gate (2026-09-19, mission-control).
+
+    Returns ``(refusal, vspec, door_route_reason)``; the door emits the refusal
+    and returns the exit code. A writing dispatch with an empty gate after
+    router derivation is a governance decision that was never made, not a valid
+    "no gate": the gate can only still be empty here when the router raised
+    (fail-open path in _resolve_gate_via_router) or the spec is read-only.
+    Refuse the writing case loudly; a read-only dispatch with no gate proceeds
+    (no write, no PR) and records a countable no-gate obligation via
+    _register_gate_obligation.
+    """
+    try:
+        vspec, gate_reason = _resolve_gate_via_router(vspec)
+    except ReviewGateConfigError as exc:
+        return Reject("gate-config-unreadable", str(exc)), vspec, door_route_reason
+    if gate_reason:
+        door_route_reason = (
+            f"{door_route_reason};{gate_reason}" if door_route_reason else gate_reason
+        )
+    if not (vspec.spec.gate or "").strip() and _spec_is_writing(vspec.spec):
+        return Reject(
+            "gate-required",
+            "writing dispatch has no review gate: the spec carries no gate and "
+            "smart-router derivation produced nothing (fail-open). Declare an "
+            "explicit gate on the spec or fix the router; refusing to run "
+            "unreviewed.",
+        ), vspec, door_route_reason
+    return None, vspec, door_route_reason
+
+
+def _resolve_door_authority(
+    spec_file: Path,
+) -> "Optional[tuple[str, Path, Path, Path]]":
+    """Resolve (project_id, repo_root, data_dir, state_dir) for this spec file.
+
+    Authority = where the bundle is PHYSICALLY staged, not ambient CWD/env. In a
+    central install the door's CWD is the shared engine tree (its stray
+    .vnx-project-id would mis-resolve every consumer to vnx-dev). Fall back to
+    ambient resolution only when the spec isn't under the staged-bundle layout
+    (ad-hoc/test specs).
+
+    ADR-007 independent-authority cross-check (codex gate PR #1093): when the
+    OPERATOR explicitly pins the tenant / data root (VNX_PROJECT_ID /
+    VNX_DATA_DIR_EXPLICIT), the staged-bundle authority MUST agree. This restores
+    the anti-redirect guard whenever an independent authority exists — a bundle
+    staged under a different project's store than the pinned one is a
+    cross-project redirect and is rejected. Without an explicit pin (the common
+    central-install case) the store's filesystem write-access is the trust
+    boundary (PR-4d: the data root is OPERATOR config; the threat model is our
+    own agents, not an external adversary).
+
+    Emits the rejection itself and returns None on a cross-project redirect; the
+    caller only returns the exit code.
+    """
+    derived_pid, derived_data_dir = _authority_from_spec_path(spec_file)
+    if derived_pid:
+        env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip()
+        if env_pid and env_pid != derived_pid:
+            _emit_reject(Reject(
+                "project-mismatch",
+                f"staged-bundle project_id={derived_pid!r} != pinned VNX_PROJECT_ID={env_pid!r}; "
+                "caller cannot redirect state to another project",
+            ))
+            return None
+        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
+            explicit = (os.environ.get("VNX_DATA_DIR") or "").strip()
+            if (
+                explicit
+                and derived_data_dir is not None
+                and Path(explicit).resolve() != derived_data_dir.resolve()
+            ):
+                _emit_reject(Reject(
+                    "project-mismatch",
+                    f"staged-bundle data_dir={derived_data_dir} != pinned VNX_DATA_DIR={explicit}; "
+                    "refusing to write state outside the operator-pinned data root",
+                ))
+                return None
+
+    project_id = derived_pid or _resolve_project_id()
+    repo_root = _resolve_repo_root()
+    data_dir = derived_data_dir or _resolve_data_dir(derived_pid)
+    return project_id, repo_root, data_dir, data_dir / "state"
+
+
+def _load_spec_with_track_override(
+    spec_file: Path, track_id_override: Optional[str],
+) -> "Optional[DispatchSpec]":
+    """Load the spec file and apply the --track override; None on a bad spec.
+
+    OI-1639: --track stamps spec.track_id BEFORE validate()/build_runtime_snapshot(),
+    so the TL-D1 machinery (_check_track_link_verdict, _persist_track_id) sees it
+    exactly as if the staged spec had carried the value, and an empty/whitespace
+    override is treated as "not given" (never overwrites a staged track_id).
+
+    Emits the spec-parse rejection itself and returns None; the caller only
+    returns the exit code.
+    """
+    try:
+        spec = load_spec(spec_file)
+    except Exception as exc:
+        _emit_reject(Reject("spec-parse-error", str(exc)))
+        return None
+    if track_id_override and track_id_override.strip():
+        spec = dataclasses.replace(spec, track_id=track_id_override.strip())
+    return spec
+
+
+def _refire_guard_reject(
+    spec: DispatchSpec, *, state_dir: Path, refire_reason: Optional[str],
+) -> "Optional[Reject]":
+    """Point 1 (golf 1A) — hervuur-wachter: refuse a dispatch_id that already
+    carries a terminal receipt, a route decision, or a runtime end-state, unless
+    the caller supplied an explicit --refire reason. Checked before any
+    router/validate work is spent on a dispatch_id that already ran; the
+    non-blocking refire warning is emitted on the allow path.
+    """
+    refire_block = _refire_guard_verdict(
+        spec.dispatch_id, state_dir=state_dir, refire_reason=refire_reason,
+    )
+    if refire_block:
+        return Reject(
+            "refire-blocked",
+            f"{refire_block}; pass --refire REASON to override",
+        )
+    _warn_refire(refire_reason, spec.dispatch_id)
+    return None
+
+
 def run_dispatch(
     spec_file: Path,
     *,
@@ -3672,172 +3867,36 @@ def run_dispatch(
     Returns 0 on success, 1 on any reject or execution failure.
     When dry_run=True, prints plan + permit fingerprint and spawns nothing.
     """
-    # Authority = where the bundle is PHYSICALLY staged, not ambient CWD/env. In a
-    # central install the door's CWD is the shared engine tree (its stray
-    # .vnx-project-id would mis-resolve every consumer to vnx-dev). Fall back to
-    # ambient resolution only when the spec isn't under the staged-bundle layout
-    # (ad-hoc/test specs).
-    derived_pid, derived_data_dir = _authority_from_spec_path(spec_file)
+    authority = _resolve_door_authority(spec_file)
+    if authority is None:
+        return 1
+    project_id, repo_root, data_dir, state_dir = authority
 
-    # ADR-007 independent-authority cross-check (codex gate PR #1093): when the OPERATOR
-    # explicitly pins the tenant / data root (VNX_PROJECT_ID / VNX_DATA_DIR_EXPLICIT), the
-    # staged-bundle authority MUST agree. This restores the anti-redirect guard whenever an
-    # independent authority exists — a bundle physically staged under a different project's
-    # store than the pinned one is a cross-project redirect and is rejected. Without an
-    # explicit pin (the common central-install case) the store's filesystem write-access is
-    # the trust boundary, per the PR-4d model ("resolved data root is OPERATOR config; the
-    # threat model is our own agents, not an external adversary").
-    if derived_pid:
-        env_pid = (os.environ.get("VNX_PROJECT_ID") or "").strip()
-        if env_pid and env_pid != derived_pid:
-            _emit_reject(Reject(
-                "project-mismatch",
-                f"staged-bundle project_id={derived_pid!r} != pinned VNX_PROJECT_ID={env_pid!r}; "
-                "caller cannot redirect state to another project",
-            ))
-            return 1
-        if os.environ.get("VNX_DATA_DIR_EXPLICIT") == "1":
-            explicit = (os.environ.get("VNX_DATA_DIR") or "").strip()
-            if (
-                explicit
-                and derived_data_dir is not None
-                and Path(explicit).resolve() != derived_data_dir.resolve()
-            ):
-                _emit_reject(Reject(
-                    "project-mismatch",
-                    f"staged-bundle data_dir={derived_data_dir} != pinned VNX_DATA_DIR={explicit}; "
-                    "refusing to write state outside the operator-pinned data root",
-                ))
-                return 1
-
-    project_id = derived_pid or _resolve_project_id()
-    repo_root = _resolve_repo_root()
-    data_dir = derived_data_dir or _resolve_data_dir(derived_pid)
-    state_dir = data_dir / "state"
-
-    try:
-        spec = load_spec(spec_file)
-    except Exception as exc:
-        print(f"[dispatch_cli] REJECT [spec-parse-error]: {exc}", file=sys.stderr)
+    spec = _load_spec_with_track_override(spec_file, track_id_override)
+    if spec is None:
         return 1
 
-    # OI-1639: --track stamps spec.track_id BEFORE validate()/build_runtime_snapshot(), so
-    # the existing TL-D1 machinery (_check_track_link_verdict's existence/format check,
-    # _persist_track_id's write on a real fire) sees it exactly as if the staged spec had
-    # carried the value itself — no second code path, no second column. An empty/whitespace
-    # override is treated as "not given" (never overwrites a staged track_id with blank).
-    if track_id_override and track_id_override.strip():
-        spec = dataclasses.replace(spec, track_id=track_id_override.strip())
-
-    # Point 1 (golf 1A) — hervuur-wachter: refuse a dispatch_id that already
-    # carries a terminal receipt, a route decision, or a runtime end-state,
-    # unless the caller supplied an explicit --refire reason. Checked before
-    # any router/validate work is spent on a dispatch_id that already ran.
-    refire_block = _refire_guard_verdict(
-        spec.dispatch_id, state_dir=state_dir, refire_reason=refire_reason,
-    )
-    if refire_block:
-        _emit_reject(Reject(
-            "refire-blocked",
-            f"{refire_block}; pass --refire REASON to override",
-        ))
+    reject = _refire_guard_reject(spec, state_dir=state_dir, refire_reason=refire_reason)
+    if reject is not None:
+        _emit_reject(reject)
         return 1
-    _warn_refire(refire_reason, spec.dispatch_id)
 
     # OI-962: resolve provider+model via smart router BEFORE validate().
-    # The router fills in provider+model when the spec carries none (AUTO),
-    # then validate() tests the resolved values against constraints.  This
-    # keeps governance intact: a route that violates constraints is still
-    # rejected by the full validation chain — only the order changed.
-    # Deterministic fallback: when the router declines (T0, disabled,
-    # classifier error), AUTO resolves to CLAUDE so compile_plan never sees an
-    # unresolved AUTO.  This is the same hard-default the old bridge alias
-    # provided, now applied AFTER the router had its chance to fill in a
-    # cheaper provider.
-    door_route_reason: Optional[str] = None
-    if spec.provider == Provider.AUTO:
-        try:
-            from providers.provider_registry import RegistryLookupError  # noqa: PLC0415
-
-            result = _resolve_router_pre_validate(spec)
-        except RegistryLookupError as exc:
-            # ADR-036 §2: an unknown provider/model is drift between the router
-            # and the registry — reject loudly, never silently fall back to the
-            # default lane. No dispatch, no receipt of a half-run.
-            _emit_reject(Reject(
-                "router-registry-drift",
-                str(exc),
-            ))
-            return 1
-        if result is not None and result.route is not None:
-            new_provider, new_model, route_reason = result.route
-            spec = dataclasses.replace(spec, provider=new_provider, model=new_model)
-            door_route_reason = route_reason
-        else:
-            # Router declined or could not resolve (T0, VNX_SMART_ROUTER_DISABLE,
-            # or a classifier exception) — fall back to CLAUDE. OI-1050:
-            # this must set provider AND model TOGETHER, in the same replace() call
-            # that resolves the router's own success path above. Setting provider
-            # alone previously left spec.model=None, and the workers-kimi-pinned
-            # "default" pin semantics then filled effective_model from ITS OWN pin
-            # (kimi-k3) whenever spec.model was empty — producing a spec with
-            # provider=claude and model=kimi-k3, which kimi-via-cli-only correctly
-            # rejects.
-            #
-            # OI-1187: the fallback model is tier-aware. A tier-high dispatch whose
-            # routing failed must never silently land on sonnet (a quality class
-            # drop); it falls back to opus-5 (equal class) instead. Only when the
-            # classifier did not determine a tier (or the router returned None on an
-            # unexpected error) does the historical "sonnet" default apply.
-            tier = result.tier if result is not None else None
-            fallback_model = _tier_aware_fallback_model(tier, spec.model)
-            spec = dataclasses.replace(spec, provider=Provider.CLAUDE, model=fallback_model)
-            decline_reason = result.decline_reason if result is not None else None
-            if decline_reason:
-                door_route_reason = (
-                    f"smart-router:no-route,reason={decline_reason},fallback={fallback_model}"
-                )
-            else:
-                door_route_reason = f"smart-router:no-route,fallback={fallback_model}"
+    reject, spec, door_route_reason = _route_provider_pre_validate(spec)
+    if reject is not None:
+        _emit_reject(reject)
+        return 1
 
     vspec = validate(spec, project_id=project_id, repo_root=repo_root)
     if isinstance(vspec, Reject):
         _emit_reject(vspec)
         return 1
 
-    # Punt 7 (gate-weight-by-variant): fill the review-gate from the router when
-    # the spec is silent. The gate reason is merged into door_route_reason so the
-    # chosen variant + reason are visible in the dry-run output and carried on
-    # the plan (route_reason), never a silent lighter gate.
-    # An unreadable VNX_DEFAULT_REVIEW_STACK refuses the dispatch BY NAME rather
-    # than falling back to a hardcoded gate (see _primary_review_gate). The
-    # fallback is what made every obligation declare codex_gate for a project
-    # whose operator had routed review to glm_gate (2026-09-19, mission-control).
-    try:
-        vspec, gate_reason = _resolve_gate_via_router(vspec)
-    except ReviewGateConfigError as exc:
-        _emit_reject(Reject("gate-config-unreadable", str(exc)))
-        return 1
-    if gate_reason:
-        door_route_reason = (
-            f"{door_route_reason};{gate_reason}" if door_route_reason else gate_reason
-        )
-
-    # dispatch-20260816-gate-never-skippable: a writing dispatch with an empty
-    # gate after router derivation is a governance decision that was never
-    # made, not a valid "no gate". The gate can only still be empty here when
-    # the router raised (fail-open path in _resolve_gate_via_router) or the
-    # spec is read-only. Refuse the writing case loudly; a read-only dispatch
-    # with no gate proceeds (no write, no PR) and records a countable no-gate
-    # obligation via _register_gate_obligation.
-    if not (vspec.spec.gate or "").strip() and _spec_is_writing(vspec.spec):
-        _emit_reject(Reject(
-            "gate-required",
-            "writing dispatch has no review gate: the spec carries no gate and "
-            "smart-router derivation produced nothing (fail-open). Declare an "
-            "explicit gate on the spec or fix the router; refusing to run "
-            "unreviewed.",
-        ))
+    # Punt 7 + dispatch-20260816-gate-never-skippable: fill the gate from the
+    # router when the spec is silent, then refuse a writing spec left gate-less.
+    reject, vspec, door_route_reason = _fill_gate_and_check_required(vspec, door_route_reason)
+    if reject is not None:
+        _emit_reject(reject)
         return 1
 
     # Point 3 (golf 1A): the door-owned dispatch_attempts row for this fire,
