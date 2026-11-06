@@ -104,6 +104,9 @@ def _hermetic_append(monkeypatch):
         return real(receipt, **kwargs)
 
     monkeypatch.setattr(payload_module, "append_receipt_payload", _append)
+    # The lifecycle writers (dispatch_start / dispatch_lifecycle) resolve the
+    # append through the registered facade, so the same wrapper goes there too.
+    monkeypatch.setattr("governance_receipts.append_receipt_payload", _append)
     monkeypatch.setattr(payload_module.facade, "_emit_dispatch_register", lambda receipt: False)
 
 
@@ -310,7 +313,7 @@ def test_concurrent_handovers_pick_exactly_one_attempt(state_dir, spec_file, v3)
 
 
 def test_append_duplicate_is_a_named_refusal(state_dir, spec_file, v3, monkeypatch):
-    monkeypatch.setattr(payload_module, "append_receipt_payload",
+    monkeypatch.setattr("governance_receipts.append_receipt_payload",
                         lambda receipt, **kwargs: types.SimpleNamespace(status="duplicate"))
     with pytest.raises(dispatch_start.StartRefused) as excinfo:
         _begin(state_dir, spec_file)
@@ -319,7 +322,7 @@ def test_append_duplicate_is_a_named_refusal(state_dir, spec_file, v3, monkeypat
 
 
 def test_unconfirmed_append_is_a_named_refusal(state_dir, spec_file, v3, monkeypatch):
-    monkeypatch.setattr(payload_module, "append_receipt_payload",
+    monkeypatch.setattr("governance_receipts.append_receipt_payload",
                         lambda receipt, **kwargs: types.SimpleNamespace(status="queued"))
     with pytest.raises(dispatch_start.StartRefused) as excinfo:
         _begin(state_dir, spec_file)

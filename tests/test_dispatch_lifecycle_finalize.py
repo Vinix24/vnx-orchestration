@@ -323,7 +323,7 @@ def test_the_intent_is_frozen_before_the_append_runs(state_dir, lifecycle_on, mo
         return real_append(line, **kwargs)
 
     real_append = append_receipt_payload
-    monkeypatch.setattr("append_receipt_internals.payload.append_receipt_payload", checked_append)
+    monkeypatch.setattr("governance_receipts.append_receipt_payload", checked_append)
 
     _finalize(state_dir)
 
@@ -892,8 +892,7 @@ def test_a_missing_end_line_after_the_append_is_a_named_refusal_and_recover_retr
                             idempotency_key="k3c-readback")
 
     with monkeypatch.context() as patch:
-        patch.setattr("append_receipt_internals.payload.append_receipt_payload",
-                      append_writes_nothing)
+        patch.setattr("governance_receipts.append_receipt_payload", append_writes_nothing)
         with pytest.raises(AppendReceiptError) as excinfo:
             _recover(state_dir)
 

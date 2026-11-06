@@ -450,6 +450,13 @@ def prepare_end_line(line: Mapping[str, Any], *, ledger_path: str | Path) -> Dic
             f"{DISPATCH_FINISHED_EVENT_TYPE!r} line, got {line.get('event_type')!r}")
     prepared = copy.deepcopy(dict(line))
     receipt_path = Path(ledger_path).expanduser().resolve()
+    # Register ``scripts/append_receipt.py`` before the first facade read
+    # below: ``_prepare_receipt`` resolves its helpers through the
+    # ``common.facade`` proxy, which is empty in a lib-only process (the door,
+    # a sweep) — the same trap the lifecycle writers had (K-act regression).
+    from governance_receipts import _load_append_receipt  # noqa: PLC0415
+
+    _load_append_receipt()
     # Imported here: payload imports this module at module scope for
     # stamp_lifecycle, so a top-level import would close the cycle.
     from .payload import _prepare_receipt
