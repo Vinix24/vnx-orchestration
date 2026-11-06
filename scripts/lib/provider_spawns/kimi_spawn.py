@@ -52,11 +52,13 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -386,6 +388,26 @@ def _is_quota_or_auth_error(text: str) -> bool:
     return any(pat in lower for pat in _QUOTA_OR_AUTH_PATTERNS)
 
 
+def _kimi_config_with_guard() -> str:
+    """User's kimi config + the OI-1447 git-stash deny hook, as --config JSON.
+
+    ``--config`` REPLACES ~/.kimi/config.toml (kimi_cli/config.py:354-378), so
+    its values ride along and only ``hooks`` is appended; ~/.kimi is read, never
+    written (OAuth tokens stay in the share dir: auth/oauth.py:848-863).
+    """
+    share = Path(os.environ.get("KIMI_SHARE_DIR") or Path.home() / ".kimi")
+    try:
+        data = tomllib.loads((share / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        logger.warning("kimi_spawn: no readable kimi config under %s; hook passed alone", share)
+        data = {}
+    script = Path(__file__).resolve().parents[2] / "kimi_deny_git_stash.py"
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+    data["hooks"] = [*(data.get("hooks") or []),
+                     {"event": "PreToolUse", "matcher": "^Shell$", "command": command}]
+    return json.dumps(data, default=str)
+
+
 def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
     """Build the kimi argv list.
 
@@ -408,6 +430,7 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
         cmd.extend(["-m", model])
     if work_dir:
         cmd.extend(["-w", str(work_dir)])
+    cmd.extend(["--config", _kimi_config_with_guard()])  # OI-2587: no --disallowedTools
     return cmd
 
 
@@ -1274,7 +1297,10 @@ def spawn_kimi(
     # char count) and, when an event sink is wired, record it as an "info" event
     # so it lands in the archived event stream the receipt points to via
     # events_path — the "always logged, never hidden" posture for YOLO mode.
-    _redacted_argv = [tok if tok != prompt else f"<prompt:{len(prompt)}chars>" for tok in cmd]
+    # The --config value is the user's whole kimi config (OI-2587) and always
+    # the last argv element: redacted to a char count, never into the receipt.
+    _redacted_argv = [f"<prompt:{len(prompt)}chars>" if tok == prompt else tok for tok in cmd]
+    _redacted_argv[-1] = f"<config:{len(cmd[-1])}chars>"
     logger.info(
         "kimi_spawn: launching kimi -p <%d chars> -m %s effective_argv=%s",
         len(prompt),
