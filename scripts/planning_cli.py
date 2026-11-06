@@ -4873,6 +4873,152 @@ def _panel_weight_lines(weight) -> list[str]:
     return lines
 
 
+def _resolve_gate_plan_source(
+    *, doc, track, state_dir, project_id, track_id, min_goal_chars,
+    stderr_lines, error,
+):
+    """Resolve the plan text one gate run reviews, and say where it came from.
+
+    ``--doc`` wins explicitly over the track's ``goal_state``; without ``--doc``
+    the plan is the ``goal_state`` PLUS the track's deliverables (the
+    deliverables are fetched here, not inside ``resolve_plan_source``, which
+    stays a plain DB-free function — same contract as ``goal_state`` arriving
+    already read from ``track``).
+
+    Returns the finished ``PlanGateRunResult`` when no plan source can be
+    resolved: a missing or unreadable doc goes through the caller's ``error``
+    (exit 1, outcome ERROR, an infra failure and never a weight decision), and a
+    ``PlanRefusal`` carries its own exit 2 with ``REFUSED_NO_DELIVERABLES`` or
+    ``REFUSED_THIN`` plus the measured length and the threshold. Otherwise it
+    returns ``(plan_text, source, ignored_goal, deliverables, plan_source_info)``.
+
+    ``stderr_lines`` is the caller's own list, so the refusal message and the
+    source note land on it in the order they always did.
+    """
+    source = "goal"
+    ignored_goal = False
+    doc_path: Optional[Path] = None
+    deliverables: list = []
+    if doc:
+        doc_path = Path(doc)
+        if not doc_path.is_file():
+            return error(f"plan doc not found: {doc_path}")
+        # An unreadable doc is an infra error, never a weight decision.
+        try:
+            plan_text = doc_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return error(f"plan doc unreadable: {doc_path}: {exc}")
+        source = "doc"
+        ignored_goal = bool((track.get("goal_state") or "").strip())
+    else:
+        deliverables = _fetch_deliverable_records(
+            state_dir, project_id, track_id, include_metadata=True,
+        )
+        try:
+            resolved = resolve_plan_source(
+                doc_text=None,
+                goal_state=track.get("goal_state"),
+                deliverables=deliverables,
+                min_goal_chars=min_goal_chars,
+                track_id=track_id,
+            )
+        except PlanRefusal as exc:
+            stderr_lines.append(str(exc))
+            outcome = "REFUSED_NO_DELIVERABLES" if exc.kind == "no_deliverables" else "REFUSED_THIN"
+            return PlanGateRunResult(
+                track_id=track_id, project_id=project_id, exit_code=2,
+                outcome=outcome, error=str(exc),
+                thin_length=exc.length, thin_threshold=exc.threshold,
+                stderr_lines=stderr_lines,
+            )
+        plan_text = resolved.plan_text
+
+    if source == "doc":
+        note = f"plan-gate source: doc {doc_path}"
+        if ignored_goal:
+            note += " (track goal_state ignored)"
+        stderr_lines.append(note)
+    else:
+        stderr_lines.append(
+            f"plan-gate source: track goal_state + {len(deliverables)} deliverable(s) "
+            f"({len(plan_text.strip())} chars total)"
+        )
+
+    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
+    if source == "doc":
+        plan_source_info["doc_path"] = str(doc_path)
+    else:
+        plan_source_info["goal_chars"] = len((track.get("goal_state") or "").strip())
+        plan_source_info["deliverable_count"] = len(deliverables)
+    return plan_text, source, ignored_goal, deliverables, plan_source_info
+
+
+def _append_verdict_text(stdout_text: list, result: dict) -> None:
+    """Append the human verdict text of one panel result to ``stdout_text``.
+
+    The decision with its tally, the truncation warning when the gate read only
+    part of the document (a verdict on an incomplete plan must say so), the
+    panel's rationale, then one line per seat — its verdict, or NO-VERDICT when
+    the lane never answered — with every blocking finding under it.
+    ``result["panelists"]`` is ``run_panel``'s own list.
+    """
+    s = result["summary"]
+    stdout_text.append(
+        f"Plan gate: {result['decision']}  "
+        f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
+    )
+    trunc = result.get("doc_truncation") or {}
+    if trunc.get("truncated"):
+        pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
+        stdout_text.append(
+            f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
+            f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
+            "on an incomplete plan **"
+        )
+    stdout_text.append(f"  {s['rationale']}")
+    for p in result["panelists"]:
+        mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
+        detail = p.get("rationale") or p.get("error") or ""
+        stdout_text.append(f"  - {p['label']:16} {mark}  {detail}")
+        for finding in p.get("blocking_findings", []):
+            stdout_text.append(f"      · {finding}")
+
+
+def _record_plan_gate_pass(
+    *, repo_root, track_id, project_id, resolved, seats, scope, weight, stderr_lines,
+) -> None:
+    """Write the durable ``plan_gate_pass`` record for a PASS that clears the gate.
+
+    A PASS that CLEARS is a real pass: the hash-chained record carries
+    resolver="run" and the seat count + derived weight (scope=governance
+    variant) that certified it. Before this, only ``plan-gate attest`` ever
+    wrote a record, so the ledger was all-attest and the effectiveness probe
+    read every gate as manually overridden even when the panel had actually
+    converged.
+
+    Nothing is written when the blocker did not resolve (``resolved`` false:
+    another blocker or a hard dependency still holds the track). A record the
+    ledger refused is reported on ``stderr_lines`` and never raised — the
+    blocker IS resolved either way, and the missing evidence is the merge
+    gate's problem, not the run's.
+    """
+    if not resolved:
+        return
+    wrote = _emit_plan_gate_pass_record(
+        repo_root=repo_root, track_id=track_id, project_id=project_id,
+        resolver="run", seats=seats, scope=scope,
+        reason=weight["gov_trace"],
+        governance_variant=scope, gov_trace=weight["gov_trace"],
+    )
+    if not wrote:
+        stderr_lines.append(
+            f"WARNING: plan_gate_pass evidence NOT written for track "
+            f"{track_id} (resolver=run, seats={seats}, scope={scope}). "
+            "The plan blocker IS resolved, but the durable pass record is "
+            "missing - the merge gate may not recognize this pass."
+        )
+
+
 def run_plan_gate_for_track(
     *,
     state_dir,
@@ -4926,65 +5072,18 @@ def run_plan_gate_for_track(
         data_dir = os.environ.get("VNX_DATA_DIR") or str(Path(state_dir).parent)
 
     # Resolve the plan source: --doc wins explicitly over the track's goal_state;
-    # without --doc the plan is the goal_state PLUS the track's deliverables (the
-    # deliverables are fetched here, not inside resolve_plan_source, which stays
-    # a plain DB-free function — same contract as goal_state coming in already
-    # read from `track`).
-    source = "goal"
-    ignored_goal = False
-    doc_path: Optional[Path] = None
-    deliverables: list = []
-    if doc:
-        doc_path = Path(doc)
-        if not doc_path.is_file():
-            return _error(f"plan doc not found: {doc_path}")
-        # An unreadable doc is an infra error, never a weight decision.
-        try:
-            plan_text = doc_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            return _error(f"plan doc unreadable: {doc_path}: {exc}")
-        source = "doc"
-        ignored_goal = bool((track.get("goal_state") or "").strip())
-    else:
-        deliverables = _fetch_deliverable_records(
-            state_dir, project_id, track_id, include_metadata=True,
-        )
-        try:
-            resolved = resolve_plan_source(
-                doc_text=None,
-                goal_state=track.get("goal_state"),
-                deliverables=deliverables,
-                min_goal_chars=min_goal_chars,
-                track_id=track_id,
-            )
-        except PlanRefusal as exc:
-            stderr_lines.append(str(exc))
-            outcome = "REFUSED_NO_DELIVERABLES" if exc.kind == "no_deliverables" else "REFUSED_THIN"
-            return PlanGateRunResult(
-                track_id=track_id, project_id=project_id, exit_code=2,
-                outcome=outcome, error=str(exc),
-                thin_length=exc.length, thin_threshold=exc.threshold,
-                stderr_lines=stderr_lines,
-            )
-        plan_text = resolved.plan_text
-
-    if source == "doc":
-        note = f"plan-gate source: doc {doc_path}"
-        if ignored_goal:
-            note += " (track goal_state ignored)"
-        stderr_lines.append(note)
-    else:
-        stderr_lines.append(
-            f"plan-gate source: track goal_state + {len(deliverables)} deliverable(s) "
-            f"({len(plan_text.strip())} chars total)"
-        )
-
-    plan_source_info = {"source": source, "ignored_goal": ignored_goal}
-    if source == "doc":
-        plan_source_info["doc_path"] = str(doc_path)
-    else:
-        plan_source_info["goal_chars"] = len((track.get("goal_state") or "").strip())
-        plan_source_info["deliverable_count"] = len(deliverables)
+    # without --doc the plan is the goal_state PLUS the track's deliverables.
+    resolved_source = _resolve_gate_plan_source(
+        doc=doc, track=track, state_dir=state_dir, project_id=project_id,
+        track_id=track_id, min_goal_chars=min_goal_chars,
+        stderr_lines=stderr_lines, error=_error,
+    )
+    if isinstance(resolved_source, PlanGateRunResult):
+        return resolved_source
+    plan_text, source, ignored_goal, deliverables, plan_source_info = resolved_source
+    # The panel and the tiebreaker take the doc path, not the doc text; the helper
+    # resolved what to READ from it, this is the same Path it built.
+    doc_path = Path(doc) if doc else None
 
     try:
         weight = _derive_panel_weight(
@@ -5103,26 +5202,7 @@ def run_plan_gate_for_track(
     out["plan_source"] = plan_source_info
     stdout_json = json.dumps(out, indent=2)
 
-    s = result["summary"]
-    stdout_text.append(
-        f"Plan gate: {result['decision']}  "
-        f"({s['pass_count']} pass / {s['revise_count']} revise / {s['block_count']} block)"
-    )
-    trunc = result.get("doc_truncation") or {}
-    if trunc.get("truncated"):
-        pct = 100.0 * trunc["kept_chars"] / trunc["original_chars"]
-        stdout_text.append(
-            f"  ** PLAN DOC TRUNCATED: gate read {trunc['kept_chars']} of "
-            f"{trunc['original_chars']} chars ({pct:.1f}%) — this verdict may be based "
-            "on an incomplete plan **"
-        )
-    stdout_text.append(f"  {s['rationale']}")
-    for p in result["panelists"]:
-        mark = p["verdict"].upper() if p["dispatched"] else "NO-VERDICT"
-        detail = p.get("rationale") or p.get("error") or ""
-        stdout_text.append(f"  - {p['label']:16} {mark}  {detail}")
-        for finding in p.get("blocking_findings", []):
-            stdout_text.append(f"      · {finding}")
+    _append_verdict_text(stdout_text, result)
 
     if result["decision"] == "PASS":
         # A PASS verdict only counts as "unblocked" if the track actually reconciled
@@ -5157,26 +5237,11 @@ def run_plan_gate_for_track(
                 exit_code=2, outcome="PASS", decision=result["decision"],
                 resolved=resolved, derived_status=derived, still_blocked=True, result=result,
             )
-        if resolved:
-            # A PASS that CLEARS the gate is a real pass: write the durable,
-            # hash-chained plan_gate_pass record with resolver="run" and the seat
-            # count + derived weight (scope=governance variant) that certified it.
-            # Before this, only `plan-gate attest` ever wrote a record, so the
-            # ledger was all-attest and the effectiveness probe read every gate as
-            # manually overridden even when the panel had actually converged.
-            wrote = _emit_plan_gate_pass_record(
-                repo_root=repo_root, track_id=track_id, project_id=project_id,
-                resolver="run", seats=len(panel), scope=variant,
-                reason=weight["gov_trace"],
-                governance_variant=variant, gov_trace=weight["gov_trace"],
-            )
-            if not wrote:
-                stderr_lines.append(
-                    f"WARNING: plan_gate_pass evidence NOT written for track "
-                    f"{track_id} (resolver=run, seats={len(panel)}, scope={variant}). "
-                    "The plan blocker IS resolved, but the durable pass record is "
-                    "missing - the merge gate may not recognize this pass."
-                )
+        _record_plan_gate_pass(
+            repo_root=repo_root, track_id=track_id, project_id=project_id,
+            resolved=resolved, seats=len(panel), scope=variant, weight=weight,
+            stderr_lines=stderr_lines,
+        )
         stdout_text.append(
             f"PASS — plan gate cleared. {_plan_blocker_oi(track_id)} "
             f"resolved={resolved}; track derived_status={derived}."
