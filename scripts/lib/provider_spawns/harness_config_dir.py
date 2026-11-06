@@ -306,7 +306,7 @@ def project_instructions_args(cwd: Optional[Any]) -> List[str]:
 
 
 def bare_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
-    """Flags every harness child starts with: the worker deny, ``--bare``, the worktree instructions.
+    """Flags every harness child starts with: ``--bare``, the worker deny, the worktree instructions.
 
     ``--disallowedTools`` is VARIADIC (``<tools...>``). It is placed directly
     after ``--bare`` and is terminated by the next option flag
