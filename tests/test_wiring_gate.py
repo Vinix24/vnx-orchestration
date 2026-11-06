@@ -20,6 +20,7 @@ from wiring_gate import (
     _extract_new_public_defs,
     _grep_callers,
     _load_skip_list,
+    analyse_diff,
     check_pr_wiring,
 )
 
@@ -73,9 +74,28 @@ DIFF_NO_DEFS = textwrap.dedent("""\
 """)
 
 
+def _added_file_diff(path: str, body: str) -> str:
+    """Build a unified diff that adds one whole new file."""
+    lines = body.splitlines()
+    added = "\n".join("+" + line for line in lines)
+    return (
+        f"diff --git a/{path} b/{path}\n"
+        "new file mode 100644\n"
+        "--- /dev/null\n"
+        f"+++ b/{path}\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n"
+        f"{added}\n"
+    )
+
+
+def _added_files_diff(*files: tuple) -> str:
+    """Build one diff adding several new files: ``_added_files_diff((path, body), ...)``."""
+    return "".join(_added_file_diff(path, body) for path, body in files)
+
+
 class TestExtractNewPublicDefs:
     def test_extracts_public_skips_private(self):
-        defs = _extract_new_public_defs(SAMPLE_DIFF)
+        defs = _extract_new_public_defs(SAMPLE_DIFF)[0]
         names = [d["name"] for d in defs]
         assert "public_helper" in names
         assert "PublicWidget" in names
@@ -83,17 +103,17 @@ class TestExtractNewPublicDefs:
         assert "_InternalWidget" not in names
 
     def test_assigns_correct_kind(self):
-        defs = _extract_new_public_defs(SAMPLE_DIFF)
+        defs = _extract_new_public_defs(SAMPLE_DIFF)[0]
         by_name = {d["name"]: d for d in defs}
         assert by_name["public_helper"]["kind"] == "function"
         assert by_name["PublicWidget"]["kind"] == "class"
 
     def test_no_defs_in_non_python(self):
-        defs = _extract_new_public_defs(DIFF_NO_DEFS)
+        defs = _extract_new_public_defs(DIFF_NO_DEFS)[0]
         assert defs == []
 
     def test_records_file_path(self):
-        defs = _extract_new_public_defs(SAMPLE_DIFF)
+        defs = _extract_new_public_defs(SAMPLE_DIFF)[0]
         for d in defs:
             assert d["file"] == "scripts/lib/new_module.py"
 
@@ -204,14 +224,14 @@ class TestCheckPrWiring:
 
 class TestAsyncDefExtraction:
     def test_extracts_async_def(self):
-        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)
+        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)[0]
         names = [d["name"] for d in defs]
         assert "fetch_data" in names
         assert "sync_helper" in names
         assert "_internal_fetch" not in names
 
     def test_async_def_kind_is_function(self):
-        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)
+        defs = _extract_new_public_defs(SAMPLE_DIFF_ASYNC)[0]
         by_name = {d["name"]: d for d in defs}
         assert by_name["fetch_data"]["kind"] == "function"
 
@@ -254,3 +274,84 @@ class TestGrepCallersReturnsNone:
         )
         result = _grep_callers("some_func", "some_file.py")
         assert result is None
+
+
+class TestTestFileDefinitionsAreNotUnwired:
+    """OI-1411: a definition in a test file is not an unwired symbol for this gate."""
+
+    @patch("wiring_gate._grep_callers", return_value=0)
+    def test_test_dir_defs_are_skipped_production_def_is_reported(self, mock_grep, tmp_path):
+        diff_text = _added_files_diff(
+            ("tests/test_x.py", "class TestFoo:\n    pass\n\ndef test_bar():\n    pass"),
+            ("scripts/lib/x_helper.py", "def helper():\n    pass"),
+        )
+        result = analyse_diff(diff_text, state_dir=tmp_path, required=True)
+
+        assert [s.name for s in result.unwired] == ["helper"]
+        assert getattr(result, "test_file_skipped", None) == 2
+
+    @patch("wiring_gate._grep_callers", return_value=0)
+    def test_conftest_fixture_is_skipped(self, mock_grep, tmp_path):
+        diff_text = _added_files_diff(
+            ("tests/conftest.py", "def tmp_store():\n    pass"),
+        )
+        result = analyse_diff(diff_text, state_dir=tmp_path, required=True)
+
+        assert [s.name for s in result.unwired] == []
+        assert getattr(result, "test_file_skipped", None) == 1
+
+    @patch("wiring_gate._grep_callers", return_value=0)
+    def test_test_suffix_basename_is_skipped(self, mock_grep, tmp_path):
+        diff_text = _added_files_diff(
+            ("scripts/lib/thing_test.py", "def test_thing():\n    pass"),
+        )
+        result = analyse_diff(diff_text, state_dir=tmp_path, required=True)
+
+        assert [s.name for s in result.unwired] == []
+        assert getattr(result, "test_file_skipped", None) == 1
+
+    @patch("wiring_gate._grep_callers", return_value=0)
+    def test_unparseable_test_file_uses_regex_and_is_skipped(self, mock_grep, tmp_path):
+        diff_text = _added_files_diff(
+            ("tests/test_broken.py", "def test_broken(:\n    pass"),
+        )
+        result = analyse_diff(diff_text, state_dir=tmp_path, required=True)
+
+        assert [s.name for s in result.unwired] == []
+        assert getattr(result, "test_file_skipped", None) == 1
+
+    @patch("wiring_gate._grep_callers", return_value=0)
+    def test_production_paths_that_merely_contain_test_are_not_skipped(self, mock_grep, tmp_path):
+        diff_text = _added_files_diff(
+            ("scripts/testing_tools/runner.py", "def runner():\n    pass"),
+            ("scripts/lib/attest.py", "def attest():\n    pass"),
+        )
+        result = analyse_diff(diff_text, state_dir=tmp_path, required=True)
+
+        assert [s.name for s in result.unwired] == ["runner", "attest"]
+        assert getattr(result, "test_file_skipped", None) == 0
+
+    def test_extract_new_public_defs_drops_test_file_defs(self):
+        diff_text = _added_files_diff(
+            ("tests/test_x.py", "class TestFoo:\n    pass"),
+            ("scripts/lib/x_helper.py", "def helper():\n    pass"),
+        )
+        assert [d["name"] for d in _extract_new_public_defs(diff_text)[0]] == ["helper"]
+
+    @pytest.mark.parametrize(
+        "path,expected",
+        [
+            ("tests/test_x.py", True),
+            ("tests/unit/test_x.py", True),
+            ("scripts/test/helpers.py", True),
+            ("scripts/lib/thing_test.py", True),
+            ("conftest.py", True),
+            ("scripts/lib/attest.py", False),
+            ("scripts/testing_tools/runner.py", False),
+            ("scripts/lib/testimonial.py", False),
+        ],
+    )
+    def test_test_file_predicate_matches_components_and_basenames(self, path, expected):
+        from wiring_gate import _is_test_file
+
+        assert _is_test_file(path) is expected

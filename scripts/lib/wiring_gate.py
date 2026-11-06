@@ -41,6 +41,7 @@ class WiringGateResult:
     unwired: List[UnwiredSymbol] = field(default_factory=list)
     skipped: List[str] = field(default_factory=list)
     total_checked: int = 0
+    test_file_skipped: int = 0  # definitions left out because they live in a test file
     summary: str = ""
 
     def to_dict(self) -> dict:
@@ -52,6 +53,7 @@ class WiringGateResult:
             ],
             "skipped": self.skipped,
             "total_checked": self.total_checked,
+            "test_file_skipped": self.test_file_skipped,
             "summary": self.summary,
         }
 
@@ -207,8 +209,25 @@ def _extract_defs_via_regex(diff_text: str) -> List[dict]:
     return defs
 
 
-def _extract_new_public_defs(diff_text: str) -> List[dict]:
-    """Extract new public definitions from diff. Uses AST as primary, regex as fallback."""
+def _is_test_file(filepath: str) -> bool:
+    """A pytest file: a ``tests``/``test`` path component, or a test basename.
+
+    Whole components and basenames only — ``testing_tools/`` and ``attest.py``
+    are production files, not tests.
+    """
+    parts = Path(filepath).parts
+    name = parts[-1] if parts else filepath
+    return ("tests" in parts or "test" in parts or name.startswith("test_")
+            or name.endswith("_test.py") or name == "conftest.py")
+
+
+def _extract_new_public_defs(diff_text: str) -> Tuple[List[dict], int]:
+    """Extract new public definitions from diff. Uses AST as primary, regex as fallback.
+
+    Returns ``(definitions, test_file_skipped)``. A definition inside a test file
+    has no caller by definition, so it is not an unwired candidate (OI-1411); the
+    predicate runs on the merged list, so AST and regex fallback filter alike.
+    """
     file_sources = _extract_added_source_per_file(diff_text)
 
     all_defs: List[dict] = []
@@ -227,7 +246,8 @@ def _extract_new_public_defs(diff_text: str) -> List[dict]:
             if d["file"] in ast_failed_files:
                 all_defs.append(d)
 
-    return all_defs
+    production_defs = [d for d in all_defs if not _is_test_file(d["file"])]
+    return production_defs, len(all_defs) - len(production_defs)
 
 
 def _grep_callers(symbol_name: str, def_file: str, *, root: Optional[str] = None) -> Optional[int]:
@@ -299,7 +319,7 @@ def _classify_symbols(
 
 def _grep_failure_result(
     unwired: List[UnwiredSymbol], skipped: List[str], total_checked: int,
-    grep_failures: List[str],
+    grep_failures: List[str], test_file_skipped: int,
 ) -> WiringGateResult:
     """The blocking result of a run whose caller analysis could not be done."""
     names = ", ".join(grep_failures[:5])
@@ -309,6 +329,7 @@ def _grep_failure_result(
         unwired=unwired,
         skipped=skipped,
         total_checked=total_checked,
+        test_file_skipped=test_file_skipped,
         summary=f"grep failed for {len(grep_failures)} symbol(s) (treated as blocking): {names}{tail}",
     )
 
@@ -344,18 +365,21 @@ def analyse_diff(
             summary="Empty PR diff (no changes)",
         )
 
-    new_defs = _extract_new_public_defs(diff_text)
+    new_defs, test_file_skipped = _extract_new_public_defs(diff_text)
     if not new_defs:
+        left_out = f" ({test_file_skipped} test-file definition(s) skipped)" if test_file_skipped else ""
         return WiringGateResult(
-            status="pass", total_checked=0,
-            summary="No new public definitions in PR diff",
+            status="pass", total_checked=0, test_file_skipped=test_file_skipped,
+            summary="No new public definitions in PR diff" + left_out,
         )
 
     unwired, skipped, grep_failures = _classify_symbols(new_defs, skip_list, root)
     total_checked = len(new_defs) - len(skipped)
 
     if grep_failures:
-        return _grep_failure_result(unwired, skipped, total_checked, grep_failures)
+        return _grep_failure_result(
+            unwired, skipped, total_checked, grep_failures, test_file_skipped,
+        )
 
     if not unwired:
         return WiringGateResult(
@@ -363,6 +387,7 @@ def analyse_diff(
             unwired=[],
             skipped=skipped,
             total_checked=total_checked,
+            test_file_skipped=test_file_skipped,
             summary=f"All {total_checked} new public definitions are wired",
         )
 
@@ -376,6 +401,7 @@ def analyse_diff(
         unwired=unwired,
         skipped=skipped,
         total_checked=total_checked,
+        test_file_skipped=test_file_skipped,
         summary=summary,
     )
 
