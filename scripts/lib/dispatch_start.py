@@ -68,6 +68,7 @@ class Handover:
     door_pid: int
     door_started_at: str
     started_at: str
+    role: str
     mode_write: str = MODE_WRITE_OK
 
     @property
@@ -375,7 +376,7 @@ def begin(
                                     dispatch_id=dispatch_id)
             handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
                                 lifecycle_mode=mode, door_pid=door_pid,
-                                door_started_at=door_started, started_at=_now())
+                                door_started_at=door_started, started_at=_now(), role=role)
             _append_start_line(handover, role=role, base_sha=base_sha, spec_file=spec_file,
                                target_slot=target_slot, state_dir=state_path)
     else:
@@ -389,7 +390,7 @@ def begin(
         # ``ps`` here would only delay the fire on a slow host.
         handover = Handover(project_id=project_id, dispatch_id=dispatch_id, attempt=attempt,
                             lifecycle_mode=mode, door_pid=door_pid,
-                            door_started_at="", started_at=_now())
+                            door_started_at="", started_at=_now(), role=role)
     projection = _record_lifecycle_mode(handover, state_dir=state_path,
                                         write_attempt=handover.attempt >= 1)
     if projection == MODE_WRITE_FAILED or handover.attempt < 1:

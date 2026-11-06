@@ -198,6 +198,7 @@ def _v3_handover(dispatch_id: str, *, attempt: int = 1) -> dispatch_start.Handov
         door_pid=os.getpid(),
         door_started_at=dispatch_start.process_started_at(os.getpid()) or "",
         started_at="2026-11-03T00:00:00Z",
+        role="backend-developer",
     )
 
 
@@ -210,6 +211,7 @@ def _legacy_handover(dispatch_id: str) -> dispatch_start.Handover:
         door_pid=os.getpid(),
         door_started_at="",
         started_at="2026-11-03T00:00:00Z",
+        role="backend-developer",
     )
 
 
