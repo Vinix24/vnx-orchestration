@@ -476,6 +476,9 @@ _STATUS_BEARING_EVENT_TYPES = frozenset({
     # status from end_state before this contract runs, so an absent status here
     # means the end_state was outside the closed set (already refused above).
     DISPATCH_FINISHED_EVENT_TYPE,
+    # ADR-054 deliberately does NOT add ``dispatch_governed``: it carries the
+    # envelope's evidence but claims no outcome (the end is dispatch_finished),
+    # so its status is not validated as an outcome claim. It is still accepted.
 })
 
 

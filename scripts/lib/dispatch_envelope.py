@@ -601,7 +601,9 @@ class _LaneExit:
         try:
             report_path, receipt_path = _govern(
                 spec, result, start, end, phantom_diff=phantom_diff,
-                integrity=integrity, base_ref=base_ref)
+                integrity=integrity, base_ref=base_ref,
+                # ADR-054: a v3 attempt's governance record is ``dispatch_governed``.
+                lifecycle_v3=bool(getattr(self.handover, "is_v3", False)))
         except BaseException as exc:
             self.status, self.reason = "failure", REASON_GOVERN_ERROR
             logger.exception("envelope: _govern raised dispatch=%s: %r", self.dispatch_id, exc)
@@ -778,7 +780,7 @@ def run_envelope_plan(
         _budget_fail_start = _budget_fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(
             enriched_spec, _budget_fail_result, _budget_fail_start, _budget_fail_end,
-            integrity=integrity,
+            integrity=integrity, lifecycle_v3=getattr(handover, "is_v3", False),
         )
         return _pre_spawn_failure(
             handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=str(_budget_exc),
@@ -824,8 +826,8 @@ def run_envelope_plan(
         )
         _fail_start = _fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(
-            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
-        )
+            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity,
+            lifecycle_v3=getattr(handover, "is_v3", False))
         return _pre_spawn_failure(
             handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
             report_path=report_path, receipt_path=receipt_path,
@@ -1112,8 +1114,8 @@ def run_envelope_headless_plan(
         )
         _fail_start = _fail_end = datetime.now(timezone.utc)
         report_path, receipt_path = _govern(
-            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity
-        )
+            enriched_spec, _fail_result, _fail_start, _fail_end, integrity=integrity,
+            lifecycle_v3=getattr(handover, "is_v3", False))
         return _pre_spawn_failure(
             handover, state_dir, reason=REASON_PRE_SPAWN_ERROR, error=_isolation_error,
             report_path=report_path, receipt_path=receipt_path,

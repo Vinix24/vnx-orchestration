@@ -120,6 +120,13 @@ COMPLETION_EVENT_TYPES = frozenset(
 # one into an outcome.
 _LIFECYCLE_NON_OUTCOME_EVENT_TYPES = frozenset({"dispatch_started", "report_ingested"})
 
+# ADR-054: the envelope's v3 governance record carries role/skill/cost evidence
+# but is neither an outcome nor an end -- that dispatch's end is its
+# ``dispatch_finished``. Named explicitly for the same reason as the two above.
+DISPATCH_GOVERNED_EVENT_TYPE = "dispatch_governed"
+_NON_OUTCOME_EVENT_TYPES = (
+    _LIFECYCLE_NON_OUTCOME_EVENT_TYPES | {DISPATCH_GOVERNED_EVENT_TYPE})
+
 # ADR-045 §4, "Eindtoestand naar projectie": the receipt status each closed
 # end_state projects to. ``timed_out`` and ``abandoned`` both project to
 # ``timeout`` — ``abandoned`` is a ledger fact and a timed-out projection, not a
@@ -164,7 +171,7 @@ def classify_event_outcome(event_type: Optional[str], status: Optional[str]) -> 
     et = (event_type or "").strip().lower()
     st = (status or "").strip().lower()
 
-    if et in _LIFECYCLE_NON_OUTCOME_EVENT_TYPES:
+    if et in _NON_OUTCOME_EVENT_TYPES:
         return None
 
     if et in _ALWAYS_FAILURE_EVENT_TYPES:
@@ -253,6 +260,7 @@ __all__ = [
     "SUCCESS_STATUSES",
     "IGNORABLE_STATUSES",
     "COMPLETION_EVENT_TYPES",
+    "DISPATCH_GOVERNED_EVENT_TYPE",
     "END_STATE_TO_STATUS",
     "STATUS_ONLY_EVENT_TYPE",
     "UnknownStatusError",

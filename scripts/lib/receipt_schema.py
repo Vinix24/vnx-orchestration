@@ -68,6 +68,12 @@ def _utc_now_iso() -> str:
 # (bump there, not here — see ledger_schema_version.py).
 RECEIPT_V2_SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 RECEIPT_V2_EVENT_TYPE = "task_complete"
+# ADR-054: the envelope's v3 governance record keeps the same fields but is NOT a
+# completion and NOT an end line -- the end is its ``dispatch_finished``. A legacy
+# dispatch keeps ``task_complete``.
+DISPATCH_GOVERNED_EVENT_TYPE = "dispatch_governed"
+# The closed set ReceiptV2 may carry; anything else raises at construction.
+RECEIPT_V2_EVENT_TYPES = frozenset({RECEIPT_V2_EVENT_TYPE, DISPATCH_GOVERNED_EVENT_TYPE})
 
 # ReceiptV2 fields stamped only when not None, in ledger insertion order (the
 # writer uses sort_keys=False, so this order is part of the byte shape).
@@ -224,11 +230,13 @@ class ReceiptV2:
         self.receipt_kind = validate_receipt_kind(self.receipt_kind)
         # Same normalization the pre-PR-B0 literal applied at build time.
         self.duration_seconds = round(float(self.duration_seconds), 3)
-        # OI-817: schema_version/event_type are contract identity — force the
-        # constants regardless of what a caller passed (a future emit site must
-        # not be able to bypass them).
+        # OI-817: schema_version is contract identity — force the constant.
         self.schema_version = RECEIPT_V2_SCHEMA_VERSION
-        self.event_type = RECEIPT_V2_EVENT_TYPE
+        # ADR-054: the event type is a closed two-value field (a forged type raises).
+        if self.event_type not in RECEIPT_V2_EVENT_TYPES:
+            raise ValueError(
+                f"Invalid event_type {self.event_type!r} for a v2 receipt: must be one "
+                f"of {sorted(RECEIPT_V2_EVENT_TYPES)}")
         if self.timestamp is None:
             self.timestamp = _utc_now_iso()
 

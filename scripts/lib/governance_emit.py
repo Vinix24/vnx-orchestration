@@ -49,7 +49,7 @@ from append_receipt_internals.receipt_finalize import (
     counter_path_beside,
 )
 from append_receipt_internals.validation import _validate_receipt
-from receipt_schema import ReceiptV2
+from receipt_schema import DISPATCH_GOVERNED_EVENT_TYPE, RECEIPT_V2_EVENT_TYPE, ReceiptV2
 from report_body_contract import validate_body
 from token_harvest import CLAUDE_HARNESS_PROVIDERS
 
@@ -117,10 +117,9 @@ def emit_dispatch_receipt(
     parent_dispatch: Optional[str] = None,
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
-    tier_to: Optional[str] = None,
-    permission_posture: Optional[str] = None,
+    tier_to: Optional[str] = None, permission_posture: Optional[str] = None,
     permission_profile: Optional[str] = None,
-    permission_allow_pattern_count: Optional[int] = None,
+    permission_allow_pattern_count: Optional[int] = None, lifecycle_v3: bool = False,
     model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
@@ -238,6 +237,10 @@ def emit_dispatch_receipt(
     the lane wrote for this dispatch before calling here; ``cost_usd`` and
     ``cost_source`` then come from those lines. Stamped only when provided.
 
+    ``lifecycle_v3``: ADR-054 — True when the lane holds a v3 ``Handover``, so the
+    same 17-field record is written as ``dispatch_governed`` instead of
+    ``task_complete``; a v3 dispatch then has no second end line.
+
     Raises:
         ValueError: provider field doesn't match required pattern, or
             receipt_kind missing / outside the closed set (PR-3 lint raise)
@@ -300,6 +303,8 @@ def emit_dispatch_receipt(
         terminal_id=terminal_id,
         provider=provider,
         model=model,
+        # ADR-054: a v3 dispatch's record is not an end line; legacy is unchanged.
+        event_type=DISPATCH_GOVERNED_EVENT_TYPE if lifecycle_v3 else RECEIPT_V2_EVENT_TYPE,
         status=status,
         completion_pct=completion_pct,
         risk=risk,
