@@ -197,6 +197,65 @@ def _mock_subprocess_factory(pid: int, returncode: Any = None):
     return factory
 
 
+# The rollback kill escalates SIGTERM -> wait -> SIGKILL -> wait, and each
+# wait is bounded by the manager's ``_sigkill_wait_timeout_seconds``. The
+# production default (5 s) therefore makes a rollback of an unreaped child
+# wait out both bounds (~10 s) — the wait is the assertion here, so the
+# tests set a short bound through that same attribute and prove the kill
+# finished inside it. Slack covers the two poll intervals (0,1 s each) plus
+# the DB and audit work around the kill; the deadline is still far below
+# what the 5 s default would take, so the assertion is what turns red when
+# the bound regresses.
+_KILL_WAIT_BOUND_S = 0.1
+_KILL_DEADLINE_SLACK_S = 1.0
+
+
+def _spawn_with_failing_audit(
+    mgr: T0LifecycleManager,
+    agg: StateAggregator,
+    project_id: str,
+    fail_event: str,
+) -> float:
+    """Drive a spawn whose audit submit fails at *fail_event*.
+
+    Returns the wall-clock seconds the spawn (including the rollback kill)
+    took. The submit is restored afterwards so the aggregator is reusable by
+    the surrounding test.
+    """
+    original_submit = agg.submit
+
+    def failing_submit(update):
+        if update.event_type == fail_event:
+            raise RuntimeError(f"simulated failure on {fail_event}")
+        return original_submit(update)
+
+    agg.submit = failing_submit  # type: ignore[assignment]
+    started = time.monotonic()
+    try:
+        with pytest.raises(T0AuditEmitError):
+            mgr.spawn(project_id)
+    finally:
+        agg.submit = original_submit  # type: ignore[assignment]
+        elapsed = time.monotonic() - started
+    return elapsed
+
+
+def _assert_kill_within_bound(elapsed: float, bound: float) -> None:
+    """The rollback kill must finish inside the bound production was given.
+
+    ``_force_kill_subprocess`` waits *bound* after SIGTERM and again after
+    SIGKILL, so the deadline is one bound plus slack for the two poll
+    intervals and the surrounding DB/audit work. ``bound`` is read from the
+    manager attribute, never copied: with the 5 s default the same assertion
+    fails (the kill takes ~10 s), which is the red-run proof.
+    """
+    deadline = bound + _KILL_DEADLINE_SLACK_S
+    assert elapsed < deadline, (
+        f"rollback kill took {elapsed:.2f}s; the SIGKILL wait bound is "
+        f"{bound}s (deadline {deadline:.1f}s: two escalation waits plus slack)"
+    )
+
+
 def _spawn_test_t0(
     mgr: T0LifecycleManager,
     project_id: str,
@@ -313,22 +372,18 @@ def test_spawn_rollback_kills_subprocess_on_insert_failure(tmp_path: Path) -> No
         start_new_session=True,
     )
     mgr._subprocess_factory = _mock_subprocess_factory(real_sleeper.pid)  # noqa: SLF001
+    mgr._sigkill_wait_timeout_seconds = _KILL_WAIT_BOUND_S  # noqa: SLF001
 
-    # Mock aggregator.submit to fail ONLY on t0.spawn.committed (after subprocess is alive).
-    original_submit = agg.submit
-    call_count = {"n": 0}
-
-    def failing_submit(update):
-        call_count["n"] += 1
-        if update.event_type == "t0.spawn.committed":
-            raise RuntimeError("simulated aggregator failure on commit")
-        return original_submit(update)
-
-    agg.submit = failing_submit  # type: ignore[assignment]
+    # Read the bound back from the attribute production reads; the assertion
+    # below proves the escalation finished inside it instead of assuming so.
+    kill_bound = mgr._sigkill_wait_timeout_seconds  # noqa: SLF001
 
     try:
-        with pytest.raises(T0AuditEmitError):
-            mgr.spawn("proj-rollback")
+        # Mock aggregator.submit to fail ONLY on t0.spawn.committed (after
+        # the subprocess is alive), so the rollback kill actually runs.
+        kill_elapsed = _spawn_with_failing_audit(
+            mgr, agg, "proj-rollback", "t0.spawn.committed"
+        )
 
         # Wait up to 5s for cleanup to take effect.
         for _ in range(50):
@@ -336,6 +391,7 @@ def test_spawn_rollback_kills_subprocess_on_insert_failure(tmp_path: Path) -> No
                 break
             time.sleep(0.1)
         assert real_sleeper.poll() is not None, "subprocess was not killed by rollback"
+        _assert_kill_within_bound(kill_elapsed, kill_bound)
 
         # No lease row in leased state.
         conn = sqlite3.connect(str(db))
@@ -373,26 +429,23 @@ def test_spawn_rollback_on_audit_emit_failure(tmp_path: Path) -> None:
         start_new_session=True,
     )
     mgr._subprocess_factory = _mock_subprocess_factory(real_sleeper.pid)  # noqa: SLF001
+    mgr._sigkill_wait_timeout_seconds = _KILL_WAIT_BOUND_S  # noqa: SLF001
 
-    original_submit = agg.submit
-
-    def failing_submit(update):
-        if update.event_type == "t0.spawn.committed":
-            raise RuntimeError("simulated emit failure")
-        return original_submit(update)
-
-    agg.submit = failing_submit  # type: ignore[assignment]
+    # Same bound read back from the production attribute as in the test above.
+    kill_bound = mgr._sigkill_wait_timeout_seconds  # noqa: SLF001
 
     try:
-        with pytest.raises(T0AuditEmitError):
-            mgr.spawn("proj-aud-fail")
+        kill_elapsed = _spawn_with_failing_audit(
+            mgr, agg, "proj-aud-fail", "t0.spawn.committed"
+        )
 
-        # Subprocess killed.
+        # Subprocess killed, and the escalation honoured the bound.
         for _ in range(50):
             if real_sleeper.poll() is not None:
                 break
             time.sleep(0.1)
         assert real_sleeper.poll() is not None
+        _assert_kill_within_bound(kill_elapsed, kill_bound)
 
         # Audit trail: requested emitted but not committed; aborted should be emitted.
         events = _read_audit_events(tmp_path)

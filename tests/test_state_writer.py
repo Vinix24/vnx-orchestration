@@ -12,11 +12,21 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import state_writer as SW  # noqa: E402
 
-# Workload of the concurrent test below: 100 threads each appending 100
-# records. append_locked serializes every write behind flock, so the real
-# work is THREADS * WRITES_PER_THREAD sequential flock+fsync cycles.
-_THREADS = 100
+# Workload of the concurrent test below: 25 threads each appending 100
+# records (2,500 serialized flock+fsync cycles). append_locked serializes
+# every write behind flock, so the real work is THREADS * WRITES_PER_THREAD
+# sequential cycles — the claim ("no lost, no torn write") needs enough
+# threads and lines to exercise serialization, not 10,000 cycles of it. The
+# guard test below pins the minimum (>= 25 threads, >= 2,500 writes).
+_THREADS = 25
 _WRITES_PER_THREAD = 100
+
+# OI-1005's premise is that the serialized per-write sleep alone exceeds the
+# old fixed 10 s join. Tied to the workload pair above so lowering the
+# workload cannot quietly retire the premise: 25 * 100 * 6ms = 15 s > 10 s.
+# The delay also stays far below _STALL_WINDOW_S, so the progress-based wait
+# still sees steady completions.
+_SLOW_RUNNER_DELAY_S = 0.006
 
 # Per-write completion budget in seconds, used ONLY as a reference value in
 # the OI-1598 proof below (and to size the OI-1598 slow-runner delay) — it
@@ -48,7 +58,7 @@ class _ProgressCounter:
     """Thread-safe monotonic counter of completed writes.
 
     A lock-guarded int is the cheapest counter that's actually reliable
-    across threads: the lock costs nanoseconds against the ~80us-1.5ms
+    across threads: the lock costs nanoseconds against the ~80us-6ms
     flock+fsync cycle it counts, so it can't skew the thing it measures.
     """
 
@@ -171,7 +181,12 @@ def test_append_locked_without_skip_if_returns_true(tmp_path: Path):
     assert SW.append_locked(path, {"dispatch_id": "d-3"}) is True
 
 
-def test_append_locked_concurrent_100_threads_100_writes(tmp_path: Path):
+def test_append_locked_concurrent_25_threads_100_writes(tmp_path: Path):
+    # The lost/torn-write claim needs real contention and real volume, so the
+    # workload floor is pinned here: lowering it further would weaken the
+    # claim even though it would make the test faster.
+    assert _THREADS >= 25
+    assert _THREADS * _WRITES_PER_THREAD >= 2500
     path = tmp_path / "state.ndjson"
     start = threading.Event()
     progress = _ProgressCounter()
@@ -220,19 +235,22 @@ def test_oi1005_slow_runner_fits_scaled_budget_but_not_fixed_join(
 ):
     """Regression for OI-1005.
 
-    A loaded shared runner makes the 10,000 serialized flock+fsync cycles
-    slower than the old fixed 10s join, so the concurrent test false-failed
-    on a run that was merely slow. Simulate that runner by inflating
-    append_locked's per-write cost to ~1.5ms (measured unloaded: ~0.08ms):
-    the pure-sleep component alone is ~15s serialized, past the old 10s cap,
-    before any contention overhead. The progress-based wait must let the
-    workload finish regardless of total elapsed time; if the wait logic
-    reverts to a fixed <=10s join, this test turns red.
+    A loaded shared runner makes the serialized flock+fsync cycles slower
+    than the old fixed 10s join, so the concurrent test false-failed on a
+    run that was merely slow. Simulate that runner by inflating
+    append_locked's per-write cost to ~6ms (measured unloaded: ~0.08ms):
+    the pure-sleep component alone is ~15s serialized over the current
+    _THREADS * _WRITES_PER_THREAD workload, past the old 10s cap, before any
+    contention overhead. The delay is scaled off that workload pair (see
+    _SLOW_RUNNER_DELAY_S) so lowering the workload keeps this premise alive.
+    The progress-based wait must let the workload finish regardless of total
+    elapsed time; if the wait logic reverts to a fixed <=10s join, this test
+    turns red.
     """
     path = tmp_path / "state.ndjson"
     start = threading.Event()
     progress = _ProgressCounter()
-    simulated_delay_s = 0.0015
+    simulated_delay_s = _SLOW_RUNNER_DELAY_S
 
     monkeypatch.setattr(SW, "append_locked", _slow_append_factory(simulated_delay_s))
 
