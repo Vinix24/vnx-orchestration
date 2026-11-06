@@ -3872,6 +3872,166 @@ def _deferred_outcome(
     return outcome
 
 
+def _fulfill_sha_unverifiable(
+    path: Path,
+    decision: Dict[str, Any],
+    outcome: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """OI-1571 tak 3: existing evidence found, its sha binding unverifiable.
+
+    A complete, decided result exists for this dispatch+gate, but whether it
+    belongs to the PR's CURRENT head could not be verified (head_sha or the
+    record's own commit_sha is missing). Neither the OI-1388 rescue (that
+    requires a confirmed MATCH) nor a retire/escalate (that would silently
+    discard evidence that might still be current) applies — a third outcome
+    that suspends judgement and stays pending, loud about why, so the next
+    run gets another chance to verify it.
+    """
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        attempts=attempts,
+        last_attempt_at=now,
+        reason="sha_binding_unverifiable",
+        reason_detail=(
+            f"{gate} has existing complete evidence for dispatch "
+            f"{dispatch_id} but its sha binding to the PR head could not "
+            f"be verified ({decision.get('detail')}) — suspending "
+            "judgement (OI-1571 tak 3) rather than silently accepting or "
+            "discarding it; will re-check on the next run"
+        ),
+    )
+    outcome["detail"] = "existing evidence found but its sha binding is unverifiable"
+    return outcome
+
+
+def _fulfill_unresolvable_or_escalate(
+    path: Path,
+    decision: Dict[str, Any],
+    resolution: PrResolution,
+    outcome: Dict[str, Any],
+    *,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """The environment is wrong: a fault, not a wait. Records it distinctly.
+
+    Recorded in a state distinct from ``pending`` so a misconfigured
+    obligation can never masquerade as "not yet". It stays retryable — the env
+    may be fixed — until it crosses the escalation threshold, where it becomes
+    the loud terminal not_executable.
+
+    OI-1508: ``decision["detail"]`` carries the RESOLVED branch's own "PR
+    state undeterminable" message when this kind originated there —
+    ``resolution.reason`` is unset for RESOLUTION_RESOLVED (only
+    RESOLUTION_UNRESOLVABLE/RESOLUTION_AWAITING populate it), so it is only
+    the fallback for this block's pre-existing origin.
+    """
+    reason_source = decision.get("detail") or resolution.reason
+    mismatch_note = _rejected_evidence_note(gate, decision)
+    update_obligation(
+        path,
+        status=STATUS_UNRESOLVABLE,
+        attempts=attempts,
+        last_attempt_at=now,
+        reason="unresolvable_repo",
+        reason_detail=f"{reason_source}{mismatch_note}",
+    )
+    outcome["action"] = "unresolvable"
+    outcome["detail"] = reason_source
+    if decision["kind"] == "escalate":
+        update_obligation(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            reason="unresolvable_timeout",
+            reason_detail=(
+                f"PR unresolved after {attempts} attempts because the "
+                f"environment is misconfigured: {reason_source}. Fix "
+                "the project attribution (VNX_PROJECT_ID / "
+                "~/.vnx/projects.json / the checkout's git origin remote) "
+                f"and reset this obligation to pending.{mismatch_note}"
+            ),
+        )
+        outcome["action"] = "not_executable"
+    return outcome
+
+
+def _fulfill_retire(
+    path: Path,
+    decision: Dict[str, Any],
+    resolution: PrResolution,
+    outcome: Dict[str, Any],
+    *,
+    dispatch_id: str,
+    gate: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """Retire an obligation nothing will ever gate: a merged/closed PR or a gone branch.
+
+    Two terminal shapes, both distinct from ``fulfilled`` — no gate ever
+    reviewed this obligation. ``decision["retire_reason"]`` picks between
+    them, and the merged/closed shape retires on the PR number while the
+    branch-gone shape retires on the dispatch branch.
+    """
+    mismatch_note = _rejected_evidence_note(gate, decision)
+    retire_reason = decision.get("retire_reason", REASON_NO_PR_BRANCH_GONE)
+    if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
+        # OI-1508: the RESOLVED branch's own retirement — gh confirmed
+        # the PR is no longer open, and the evidence lookup above this
+        # branch found no rescuing verdict. Never fires on an OPEN PR
+        # (that stays attempt_gate) and never without that lookup.
+        state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
+        update_obligation(
+            path,
+            status=STATUS_RETIRED,
+            pr_number=resolution.pr_number,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=now,
+            reason=retire_reason,
+            reason_detail=(
+                f"PR #{resolution.pr_number} for dispatch {dispatch_id} is "
+                f"{state_word} and no rescuing {gate} evidence was found — "
+                f"nothing left for {gate} to guard.{mismatch_note}"
+            ),
+        )
+        outcome["action"] = STATUS_RETIRED
+        outcome["detail"] = f"PR #{resolution.pr_number} is {state_word} — retired"
+        return outcome
+
+    # OI-1388: the dispatch never produced a PR AND its head branch is
+    # gone from origin — nothing will ever gate this obligation.
+    # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
+    branch_name = f"dispatch/{dispatch_id}"
+    update_obligation(
+        path,
+        status=STATUS_RETIRED,
+        branch=branch_name,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=now,
+        reason=REASON_NO_PR_BRANCH_GONE,
+        reason_detail=(
+            f"dispatch {dispatch_id} never produced a PR and its head "
+            f"branch {branch_name} no longer exists on "
+            f"{resolution.owner_repo or 'the resolved repo'} — nothing "
+            f"left for {gate} to guard.{mismatch_note}"
+        ),
+    )
+    outcome["action"] = STATUS_RETIRED
+    outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
+    return outcome
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
@@ -3935,123 +4095,13 @@ def fulfill_obligation(
         )
 
     if decision["kind"] == "sha_unverifiable":
-        # OI-1571 tak 3: a complete, decided result exists for this
-        # dispatch+gate, but whether it belongs to the PR's CURRENT head
-        # could not be verified (head_sha or the record's own commit_sha is
-        # missing). Neither the OI-1388 rescue (that requires a confirmed
-        # MATCH) nor a retire/escalate (that would silently discard evidence
-        # that might still be current) applies — a third outcome that
-        # suspends judgement and stays pending, loud about why, so the next
-        # run gets another chance to verify it.
-        update_obligation(
-            path,
-            status=STATUS_PENDING,
-            attempts=attempts,
-            last_attempt_at=now,
-            reason="sha_binding_unverifiable",
-            reason_detail=(
-                f"{gate} has existing complete evidence for dispatch "
-                f"{dispatch_id} but its sha binding to the PR head could not "
-                f"be verified ({decision.get('detail')}) — suspending "
-                "judgement (OI-1571 tak 3) rather than silently accepting or "
-                "discarding it; will re-check on the next run"
-            ),
-        )
-        outcome["detail"] = "existing evidence found but its sha binding is unverifiable"
-        return outcome
+        return _fulfill_sha_unverifiable(path, decision, outcome, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] in ("unresolvable", "escalate"):
-        # The environment is wrong (repo unattributable, gh unusable): a fault,
-        # not a wait. Record it in a state distinct from ``pending`` so a
-        # misconfigured obligation can never masquerade as "not yet". It stays
-        # retryable — the env may be fixed — until it crosses the escalation
-        # threshold, where it becomes the loud terminal not_executable.
-        #
-        # OI-1508: decision["detail"] carries the RESOLVED branch's own "PR
-        # state undeterminable" message when this kind originated there —
-        # resolution.reason is unset for RESOLUTION_RESOLVED (only
-        # RESOLUTION_UNRESOLVABLE/RESOLUTION_AWAITING populate it), so it is
-        # only the fallback for this block's pre-existing origin.
-        reason_source = decision.get("detail") or resolution.reason
-        mismatch_note = _rejected_evidence_note(gate, decision)
-        update_obligation(
-            path,
-            status=STATUS_UNRESOLVABLE,
-            attempts=attempts,
-            last_attempt_at=now,
-            reason="unresolvable_repo",
-            reason_detail=f"{reason_source}{mismatch_note}",
-        )
-        outcome["action"] = "unresolvable"
-        outcome["detail"] = reason_source
-        if decision["kind"] == "escalate":
-            update_obligation(
-                path,
-                status=STATUS_NOT_EXECUTABLE,
-                attempts=attempts,
-                last_attempt_at=now,
-                resolved_at=now,
-                reason="unresolvable_timeout",
-                reason_detail=(
-                    f"PR unresolved after {attempts} attempts because the "
-                    f"environment is misconfigured: {reason_source}. Fix "
-                    "the project attribution (VNX_PROJECT_ID / "
-                    "~/.vnx/projects.json / the checkout's git origin remote) "
-                    f"and reset this obligation to pending.{mismatch_note}"
-                ),
-            )
-            outcome["action"] = "not_executable"
-        return outcome
+        return _fulfill_unresolvable_or_escalate(path, decision, resolution, outcome, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "retire":
-        mismatch_note = _rejected_evidence_note(gate, decision)
-        retire_reason = decision.get("retire_reason", REASON_NO_PR_BRANCH_GONE)
-        if retire_reason in (REASON_PR_MERGED, REASON_PR_CLOSED):
-            # OI-1508: the RESOLVED branch's own retirement — gh confirmed
-            # the PR is no longer open, and the evidence lookup above this
-            # branch found no rescuing verdict. Never fires on an OPEN PR
-            # (that stays attempt_gate) and never without that lookup.
-            state_word = "merged" if retire_reason == REASON_PR_MERGED else "closed without merge"
-            update_obligation(
-                path,
-                status=STATUS_RETIRED,
-                pr_number=resolution.pr_number,
-                attempts=attempts,
-                last_attempt_at=now,
-                resolved_at=now,
-                reason=retire_reason,
-                reason_detail=(
-                    f"PR #{resolution.pr_number} for dispatch {dispatch_id} is "
-                    f"{state_word} and no rescuing {gate} evidence was found — "
-                    f"nothing left for {gate} to guard.{mismatch_note}"
-                ),
-            )
-            outcome["action"] = STATUS_RETIRED
-            outcome["detail"] = f"PR #{resolution.pr_number} is {state_word} — retired"
-            return outcome
-
-        # OI-1388: the dispatch never produced a PR AND its head branch is
-        # gone from origin — nothing will ever gate this obligation.
-        # Terminal, distinct from `fulfilled` (no gate ever reviewed it).
-        branch_name = f"dispatch/{dispatch_id}"
-        update_obligation(
-            path,
-            status=STATUS_RETIRED,
-            branch=branch_name,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=now,
-            reason=REASON_NO_PR_BRANCH_GONE,
-            reason_detail=(
-                f"dispatch {dispatch_id} never produced a PR and its head "
-                f"branch {branch_name} no longer exists on "
-                f"{resolution.owner_repo or 'the resolved repo'} — nothing "
-                f"left for {gate} to guard.{mismatch_note}"
-            ),
-        )
-        outcome["action"] = STATUS_RETIRED
-        outcome["detail"] = "dispatch died without ever producing a PR; branch gone — retired"
-        return outcome
+        return _fulfill_retire(path, decision, resolution, outcome, dispatch_id=dispatch_id, gate=gate, attempts=attempts, now=now)
 
     if decision["kind"] == "stay_pending_live":
         # OI-1532: the branch is gone on GitHub but the dispatch is still
