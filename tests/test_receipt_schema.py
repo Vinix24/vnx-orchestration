@@ -213,15 +213,23 @@ def test_receipt_v2_defaults_schema_version_event_type_and_timestamp():
     assert receipt["timestamp"]  # auto-stamped
 
 
-def test_receipt_v2_schema_version_event_type_not_overridable():
-    """OI-817: schema_version/event_type are contract identity — a caller
-    cannot stamp a non-v2 receipt or a different event_type by passing them."""
+def test_receipt_v2_schema_version_forced_and_event_type_closed_set():
+    """OI-817/ADR-054: schema_version is forced to 2; event_type is a closed
+    two-value field (``task_complete`` | ``dispatch_governed``) — a forged type
+    raises at construction, before any write."""
     kw = _v2_kwargs_minimal()
     kw["schema_version"] = 99
-    kw["event_type"] = "forged"
     receipt = ReceiptV2(**kw).to_dict()
     assert receipt["schema_version"] == 2
     assert receipt["event_type"] == "task_complete"
+
+    forged = _v2_kwargs_minimal()
+    forged["event_type"] = "forged"
+    with pytest.raises(ValueError, match="event_type"):
+        ReceiptV2(**forged)
+
+    forged["event_type"] = "dispatch_governed"
+    assert ReceiptV2(**forged).to_dict()["event_type"] == "dispatch_governed"
 
 
 def test_receipt_v2_duration_rounded_three_decimals():

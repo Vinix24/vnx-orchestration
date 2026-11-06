@@ -582,7 +582,7 @@ def _govern(
     end_time: datetime,
     phantom_diff: Optional[str] = None,
     integrity: Optional[Any] = None,
-    base_ref: str = "origin/main",
+    base_ref: str = "origin/main", lifecycle_v3: bool = False,
 ) -> tuple:
     """Emit unified_report then dispatch receipt. Returns (report_path, receipt_path).
 
@@ -598,6 +598,10 @@ def _govern(
     dispatch_id (written by deliver_with_recovery's internal close-out as a safety
     net), the GOVERN receipt write is skipped.  This avoids double-emit during the
     migration period where both legacy and envelope paths may run.
+
+    ``lifecycle_v3`` (ADR-054) marks a v3 attempt: the same governance record is
+    emitted as ``dispatch_governed``, never as a second end line. A caller
+    without a ``Handover`` leaves it False and nothing changes.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: PLC0415
 
@@ -831,7 +835,7 @@ def _govern(
                     # with a filterable warning code + severity=error when
                     # violated.  The receipt status field is overridden to
                     # "contract_invalid" above (binding, not observable).
-                    warnings=_contract_warnings or None,
+                    warnings=_contract_warnings or None, lifecycle_v3=lifecycle_v3,
                 )
             except Exception as exc:
                 # OI-1179: a receipt-emit failure is a PROOF problem, not a WORK

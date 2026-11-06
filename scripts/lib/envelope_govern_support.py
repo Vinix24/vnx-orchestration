@@ -43,7 +43,9 @@ def _is_lane_completion_receipt(entry: Any, dispatch_id: str) -> bool:
     (``receipt_kind: dispatch`` with ``source: subprocess``) and the ReceiptV2
     shape written by ``emit_dispatch_receipt`` (``receipt_kind: dispatch``, no
     ``source``, carrying ``completion_pct``, ``risk`` and ``findings``; ``deadline_seconds``
-    is optional and so not part of the test). Review-gate,
+    is optional and so not part of the test). ADR-054: the v3 ``dispatch_governed``
+    record is the same field shape, only the event type differs, so this test
+    finds it too and a re-run never writes a second record. Review-gate,
     report_parser, converter, restore and corrective (``pr_enforcement`` /
     ``phantom_guard``) records are not lane completion receipts.
 

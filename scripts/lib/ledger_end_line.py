@@ -8,8 +8,10 @@ ledger holds the new type, the legacy type, or both for the same attempt.
 
 ``end_line`` is that one answer. It never treats a start line or a report line
 as an end: ``dispatch_started`` happens before the work and ``report_ingested``
-only says the report arrived (ADR-045 §2, plan revisie 2 point 3). The outcome
-of an end line is read through
+only says the report arrived (ADR-045 §2, plan revisie 2 point 3). Nor does it
+treat the envelope's ``dispatch_governed`` record as an end (ADR-054): that type
+is outside ``COMPLETION_EVENT_TYPES``, so it can never be the witness. The
+outcome of an end line is read through
 ``event_outcome_semantics.classify_event_outcome``; for a ``dispatch_finished``
 the status is projected from its ``end_state`` with
 ``event_outcome_semantics.end_state_status``, never taken from a raw ``status``
