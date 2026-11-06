@@ -392,7 +392,7 @@ def _pool_env(root, captured):
         patch.object(subprocess_dispatch, "_resolve_agent_cwd", lambda role: None),
         patch.object(subprocess_dispatch, "_write_manifest", lambda **kw: root / "manifest.json"),
         patch.object(subprocess_dispatch, "_promote_manifest", lambda *a, **kw: None),
-        patch.object(_delivery, "_start_heartbeat", lambda *a, **kw: (None, None, None)),
+        patch.object(_delivery, "_start_heartbeat", lambda *a, **kw: (None, None, None, None)),
         patch.object(_recovery, "_init_recovery_state", lambda *a, **kw: ("ts", "", [], None)),
         patch.object(_recovery, "_book_attempt", lambda *a, **kw: None),
         patch.object(_recovery, "_handle_success", lambda *a, **kw: None),
