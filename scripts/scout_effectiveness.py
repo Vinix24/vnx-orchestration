@@ -20,8 +20,9 @@ from typing import List, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LIB_DIR = SCRIPT_DIR / "lib"
-if str(LIB_DIR) not in sys.path:
-    sys.path.insert(0, str(LIB_DIR))
+# scripts/lib must win over this script's own directory (same-name module), also when it is already on PYTHONPATH.
+sys.path[:] = [p for p in sys.path if os.path.realpath(p or '.') != os.path.realpath(LIB_DIR)]
+sys.path.insert(0, str(LIB_DIR))
 
 from scout_effectiveness import (  # noqa: E402
     compute_effectiveness,

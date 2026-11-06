@@ -204,6 +204,7 @@ def _run_door_and_ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> "li
         return append(receipt, **kwargs)
 
     with patch.object(payload_module, "append_receipt_payload", _hermetic_append), \
+         patch("governance_receipts.append_receipt_payload", _hermetic_append), \
          patch.object(payload_module.facade, "_emit_dispatch_register", lambda receipt: False), \
          patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
          patch("dispatch_cli.serialize_lane", _lane_slot), \

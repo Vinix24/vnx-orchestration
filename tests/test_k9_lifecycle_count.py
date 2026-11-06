@@ -427,7 +427,7 @@ def test_the_briefing_line_carries_the_five_numbers_and_the_sweep_age(
         {"lifecycle_count": build_t0_state._lifecycle_count_index_summary(state_dir)})
 
     assert index["lifecycle"]["line"] == (
-        "lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+        "lifecycle [cohort all_v3]: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
         "1 provenance-unknown; sweep 600s")
     assert count["sweep_heartbeat_age_seconds"] == 600
     assert count["sweep_heartbeat_reason"] is None
@@ -466,7 +466,7 @@ def test_the_sessionstart_hook_prints_the_lifecycle_line(tmp_path, state_dir, da
 
     assert run.returncode == 0, run.stderr
     context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert ("lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+    assert ("lifecycle [cohort all_v3]: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
             "1 provenance-unknown; sweep 600s") in context, context
 
 
@@ -637,3 +637,44 @@ def test_a_missing_database_path_still_counts_the_ledger(
 
     assert count["status"] == lifecycle_count.STATUS_MEASURED, count
     assert count["counts"]["total"] == 0, count
+
+
+# ---------------------------------------------------------------------------
+# 7. OI-2594: the briefing line names the cohort the count was taken over
+# ---------------------------------------------------------------------------
+
+def _measured(**extra) -> dict:
+    count = {"status": "measured", "counts": dict.fromkeys(lifecycle_count.DEFECTS, 0),
+             "sweep_heartbeat_age_seconds": 412}
+    count.update(extra)
+    return count
+
+
+def test_the_line_names_all_v3_for_a_count_without_activation_commit():
+    line = lifecycle_count.briefing_line(_measured(cohort="all_v3"))
+
+    assert line.startswith("lifecycle [cohort all_v3]: "), line
+
+
+def test_the_line_names_the_short_sha_for_a_count_with_an_activation_commit():
+    sha = "a7a2d7c4" + "0" * 32
+
+    line = lifecycle_count.briefing_line(_measured(cohort=sha))
+
+    assert line.startswith("lifecycle [cohort since a7a2d7c4]: "), line
+
+
+@pytest.mark.parametrize("cohort", [None, "", "  ", 7])
+def test_a_measured_count_without_a_usable_cohort_says_unknown(cohort):
+    line = lifecycle_count.briefing_line(_measured(cohort=cohort))
+    absent = lifecycle_count.briefing_line(_measured())
+
+    assert line.startswith("lifecycle [cohort unknown]: "), line
+    assert absent.startswith("lifecycle [cohort unknown]: "), absent
+
+
+def test_the_unmeasured_line_has_no_cohort():
+    line = lifecycle_count.briefing_line(
+        {"status": "unmeasured", "reason": "no project id", "cohort": None})
+
+    assert line == "lifecycle: unmeasured (no project id); sweep unknown"
