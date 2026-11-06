@@ -469,12 +469,16 @@ def test_record_child_writes_nothing_for_legacy(state_dir, spec_file, legacy):
     assert not dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1).exists()
 
 
-def test_record_child_without_a_child_start_time_writes_nothing(
+def test_record_child_without_a_child_start_time_records_an_unknown_start(
         state_dir, spec_file, v3, monkeypatch):
+    """K-act rule 5: an unreadable start still records the child; unknown never reads as dead."""
     handover = _begin(state_dir, spec_file)
     monkeypatch.setattr(dispatch_start, "process_started_at", lambda pid: None)
-    assert dispatch_start.record_child(handover, state_dir=state_dir, child_pid=os.getpid()) is None
-    assert not dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1).exists()
+    path = dispatch_start.record_child(handover, state_dir=state_dir, child_pid=os.getpid())
+    assert path == dispatch_start.spawn_file_path(state_dir, PROJECT, DISPATCH, 1)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert document["child_pid"] == os.getpid()
+    assert document["child_started_at"] is None
 
 
 # --- OI-2528 (K-8a r5): the door refuses only on its OWN broken evidence -------
