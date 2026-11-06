@@ -11,7 +11,10 @@ called from production code, inflating maintenance surface.
 ## How it works
 
 1. Fetches the PR diff via `gh pr diff <number>`
-2. AST-parses added lines for new public definitions (`def`/`class` without `_` prefix)
+2. AST-parses added lines for new public definitions (`def`/`class` without `_` prefix).
+   A definition that lives in a test file — a `tests`/`test` path component, or a
+   `test_*.py` / `*_test.py` / `conftest.py` basename — is not a candidate: it has no
+   caller by definition. The count left out is reported as `test_file_skipped`.
 3. Greps the codebase for callers (excludes `tests/` and the defining file itself)
 4. Flags symbols with zero callers as unwired
 
@@ -70,6 +73,7 @@ result: WiringGateResult = check_pr_wiring(pr_number=567)
 # result.unwired: List[UnwiredSymbol]
 # result.skipped: List[str]
 # result.total_checked: int
+# result.test_file_skipped: int
 # result.summary: str
 ```
 
@@ -83,6 +87,7 @@ result: WiringGateResult = check_pr_wiring(pr_number=567)
   ],
   "skipped": ["register_handler"],
   "total_checked": 8,
+  "test_file_skipped": 2,
   "summary": "1 unwired symbol(s): orphan_func"
 }
 ```
