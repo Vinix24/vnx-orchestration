@@ -26,8 +26,12 @@ TARGETS = {
 
 
 def _raw_length(path: str, qualname: str) -> int:
-    """The census's raw length; its own AST span when below census reporting."""
-    census = refactor_census.census(str(_ROOT), paths="scripts/lib")
+    """The census's raw length; its own AST span when below census reporting.
+
+    `paths` is the target file itself: `_selectors` matches a file path exactly,
+    so the census parses one file instead of all of `scripts/lib`.
+    """
+    census = refactor_census.census(str(_ROOT), paths=path)
     for item in census["long_functions"]["items"]:
         if (item["path"], item["qualname"]) == (path, qualname):
             return item["raw_lines"]

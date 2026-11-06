@@ -94,6 +94,7 @@ def _fabric_text(fabric: Path, rel: str) -> str:
     return _read(path) if path.is_file() and _inside(fabric, path) else ""
 
 
+@functools.lru_cache(maxsize=None)
 def _script_index(fabric: Path) -> Tuple[Dict[str, Path], Set[str]]:
     """Return ({basename: first path inside the fabric}, basenames that only
     exist as a link out of the fabric) for every script under SCRIPT_DIRS."""
@@ -308,6 +309,7 @@ def _shell_dispatch(func_body: str) -> Dict[str, str]:
     return words
 
 
+@functools.lru_cache(maxsize=None)
 def _bin_vnx_main(fabric: Path) -> Dict[str, str]:
     """{command: branch body} of the case in bin/vnx `main()` on its first argument."""
     body = _shell_function(_fabric_text(fabric, BIN_VNX_REL), "main")
@@ -315,6 +317,27 @@ def _bin_vnx_main(fabric: Path) -> Dict[str, str]:
 
 
 # --- argparse tree --------------------------------------------------------
+
+
+def _tree_index(tree: Optional["ast.Module"]) -> Tuple[Dict[str, "ast.FunctionDef"], Dict[str, Tuple[str, str]]]:
+    """(functions, `from x import y` map) of one module.
+
+    Computed once per tree and kept on it: every walk over a fabric re-registers
+    the same imported modules, and the import scan walks the whole module.
+    """
+    if tree is None:
+        return {}, {}
+    index = getattr(tree, "_vnx_index", None)
+    if index is None:
+        funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        imports: Dict[str, Tuple[str, str]] = {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.ImportFrom) and n.module and not n.level:
+                for a in n.names:
+                    imports[a.asname or a.name] = (n.module, a.name)
+        index = (funcs, imports)
+        tree._vnx_index = index
+    return index
 
 
 class _Parser:
@@ -339,27 +362,27 @@ class _ArgparseWalk:
     MAIN = "<main>"
     PARSE_CALLS = frozenset({"parse_args", "parse_known_args", "parse_intermixed_args"})
 
-    def __init__(self, tree: "ast.Module", resolve: Callable[[str], Optional["ast.Module"]]) -> None:
+    def __init__(
+        self,
+        tree: "ast.Module",
+        resolve: Callable[[str], Optional["ast.Module"]],
+        memo: bool = True,
+    ) -> None:
         self.roots: List[_Parser] = []
         self.argv_words: Set[str] = set()
         self._resolve = resolve
         self._mods: Dict[str, Tuple[Dict[str, "ast.FunctionDef"], Dict[str, Tuple[str, str]]]] = {}
         self._stack: List[Tuple[str, str]] = []
+        self._cut = 0  # calls the recursion guard returned None for
+        self._memo = memo
+        self._cache: Dict[tuple, Tuple[List[object], Dict[str, object], object]] = {}
         self._register(self.MAIN, tree)
         self._stmts(tree.body, {}, (self.MAIN, "<module>"))
         for name, fn in self._mods[self.MAIN][0].items():
             self._call((self.MAIN, name), fn, [], {})
 
     def _register(self, key: str, tree: Optional["ast.Module"]) -> None:
-        funcs: Dict[str, "ast.FunctionDef"] = {}
-        imports: Dict[str, Tuple[str, str]] = {}
-        if tree is not None:
-            funcs = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
-            for n in ast.walk(tree):
-                if isinstance(n, ast.ImportFrom) and n.module and not n.level:
-                    for a in n.names:
-                        imports[a.asname or a.name] = (n.module, a.name)
-        self._mods[key] = (funcs, imports)
+        self._mods[key] = _tree_index(tree)
 
     def _lookup(self, key: str, name: str) -> Optional[Tuple[str, "ast.FunctionDef"]]:
         funcs, imports = self._mods[key]
@@ -374,8 +397,15 @@ class _ArgparseWalk:
         return (mod, fn) if fn is not None else None
 
     def _call(self, where: Tuple[str, str], fn: "ast.FunctionDef", args: List[object], kwargs: Dict[str, object]) -> object:
+        # The guard runs before the cache: a call cut short by the stack is not
+        # a result of interpreting the body, so it is never stored.
         if where in self._stack or len(self._stack) >= self.MAX_DEPTH:
+            self._cut += 1
             return None
+        key = (where, tuple(id(a) for a in args), tuple(sorted((k, id(v)) for k, v in kwargs.items())))
+        hit = self._cache.get(key) if self._memo else None
+        if hit is not None:
+            return hit[2]
         params = [a.arg for a in fn.args.posonlyargs + fn.args.args]
         env: Dict[str, object] = {}
         for p, v in zip(params, args):
@@ -383,11 +413,19 @@ class _ArgparseWalk:
         for k, v in kwargs.items():
             if k in params:
                 env[k] = v
+        roots_before, cut_before = len(self.roots), self._cut
         self._stack.append(where)
         try:
-            return self._stmts(fn.body, env, where)
+            result = self._stmts(fn.body, env, where)
         finally:
             self._stack.pop()
+        # A factory creates a new root on every run, and a body cut short by the
+        # guard depends on the stack it ran under: neither result is reusable.
+        # The entry holds the id-keyed objects, so no id is reused while the
+        # cache lives and a second call with the same key is a hit.
+        if self._memo and len(self.roots) == roots_before and self._cut == cut_before:
+            self._cache[key] = (list(args), dict(kwargs), result)
+        return result
 
     def _stmts(self, stmts: List["ast.stmt"], env: Dict[str, object], where: Tuple[str, str]) -> object:
         returned: object = None
@@ -487,7 +525,9 @@ class _ArgparseWalk:
                 )
 
 
+@functools.lru_cache(maxsize=None)
 def _parse_py(path: Optional[Path]) -> Optional["ast.Module"]:
+    """The module's AST, parsed once per path for the life of the process."""
     if path is None:
         return None
     try:
@@ -535,6 +575,7 @@ _BRANCH_MOD = re.compile(r"-m[ \t]+([A-Za-z0-9_.]+)((?:[ \t]+[A-Za-z0-9][\w-]*)*
 _BRANCH_FUNC = re.compile(r"(?m)(?:^|[;&|][ \t]*|\bthen[ \t]+)[ \t]*(cmd_\w+)\b")
 
 
+@functools.lru_cache(maxsize=None)
 def _module_file(fabric: Path, mod: str) -> Optional[Path]:
     rel = mod.replace(".", "/")
     for cand in (f"{rel}.py", f"{rel}/__main__.py", f"scripts/lib/{rel}.py", f"scripts/{rel}.py"):
