@@ -388,7 +388,8 @@ def test_a_status_that_contradicts_end_state_is_refused(tmp_path, lifecycle_on):
 # ---------------------------------------------------------------------------
 
 def test_no_lifecycle_line_is_written_while_the_setting_is_off(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    # K-act flipped the default on; the brake must be named explicitly.
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
     ledger = _ledger(tmp_path)
     with pytest.raises(AppendReceiptError) as excinfo:
         _append(ledger, _receipt(START, START_FIELDS))
@@ -396,10 +397,12 @@ def test_no_lifecycle_line_is_written_while_the_setting_is_off(tmp_path, monkeyp
     assert _lines(ledger) == []
 
 
-def test_the_setting_is_registered_and_defaults_off():
+def test_the_setting_is_registered_and_defaults_on():
+    """K-act activation: the setting is on by default and 0 stays the brake."""
     entry = config_registry.CONFIG_REGISTRY["VNX_LEDGER_LIFECYCLE"]
-    assert entry.default == "0"
+    assert entry.default == "1"
     assert entry.type == "bool"
+    assert entry.status == "LIVE"
 
 
 def test_task_complete_keeps_its_v2_stamp(tmp_path, lifecycle_on):

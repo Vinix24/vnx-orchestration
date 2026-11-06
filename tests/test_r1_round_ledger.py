@@ -700,6 +700,9 @@ def _door_env(monkeypatch, tmp_path, data_dir) -> None:
     base it can resolve, and a non-repo or a repo without that ref is refused).
     """
     project_root = _consumer_repo(tmp_path / "consumer-repo")
+    # K-act flipped the default on; this door predates it and uses a fresh,
+    # un-migrated store, so it runs the legacy lifecycle it always exercised.
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
     monkeypatch.setenv("VNX_PROJECT_ROOT", str(project_root))
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
