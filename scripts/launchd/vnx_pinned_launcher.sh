@@ -54,8 +54,6 @@ DECLARED_HOME="${VNX_HOME:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 # Prints the engine root, or exits 78 having printed its one line (dead pin, unregistered
 # project, or a chosen tree without <relative-script>).
-# The resolver runs on the interpreter of THIS launcher's own tree, held to that tree's
-# requires-python; vnx_python.sh has already printed its one line when it refuses.
 if ! RESOLVER_PYTHON="$(bash "$SCRIPT_DIR/vnx_python.sh" "$(cd "$SCRIPT_DIR/../.." && pwd)")"; then
     exit 78
 fi
@@ -73,8 +71,6 @@ export VNX_HOME="$ENGINE_ROOT"
 export PATH="$PATH:${HOME:?HOME is not set}/.local/bin"
 
 if [ "$INTERPRETER" = resolve ]; then
-    # The job's interpreter comes from the resolved engine root, not from whatever
-    # python3 the PATH happens to hold (OI-2564).
     if ! INTERPRETER="$(bash "$SCRIPT_DIR/vnx_python.sh" "$ENGINE_ROOT")"; then
         exit 78
     fi
