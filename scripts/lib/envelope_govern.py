@@ -11,12 +11,13 @@ dispatch_envelope.py's module docstring for the split's seam order.
 
 Binding note (the rule this whole split obeys): a name-string coupling
 (``patch("dispatch_envelope.X")``) resolves against the globals of the
-module the CALLER lives in, not the new home of the symbol X. ``_govern`` IS
-the caller for ``_archive_dispatch_events`` / ``_clear_dispatch_events`` /
+module the CALLER lives in, not the new home of the symbol X. The callers
+for ``_archive_dispatch_events`` / ``_clear_dispatch_events`` /
 ``_receipt_exists_for_dispatch`` / ``_verify_role_application`` /
-``_verification_from_report`` / ``_resolve_fix_forward_diff`` — moving
-``_govern`` here re-targets every coupling to those six symbols onto
-``envelope_govern.<name>``. dispatch_envelope.py's own ``_govern(...)``
+``_verification_from_report`` / ``_resolve_fix_forward_diff`` are ``_govern``
+and the closing helpers it delegates to — all in this module, so every
+coupling to those six symbols resolves against ``envelope_govern.<name>``.
+dispatch_envelope.py's own ``_govern(...)``
 call sites stay in the facade, so ``patch("dispatch_envelope._govern")``
 keeps binding unchanged.
 """
@@ -264,6 +265,149 @@ def _receipt_cost(
 # ---------------------------------------------------------------------------
 # GOVERN
 # ---------------------------------------------------------------------------
+
+
+def _clear_archived_event_stream(spec: EnvelopeSpec, archive_ok: bool) -> None:
+    """Truncate this dispatch's live event stream once its receipt is written.
+
+    OI-878/OI-902: truncate the live event stream now that the archive
+    (top of _govern) and the receipt write are complete. Best-effort.
+    OI-918: only when the archive step actually succeeded (or had nothing
+    to archive) — clearing after a FAILED archive would destroy exactly
+    the events we wanted to preserve. On an archive failure the live file
+    is left in place for the next dispatch's write-side boundary guard
+    (#1276) to rotate, which is the second line of defence it exists for.
+    """
+    if archive_ok:
+        _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
+    else:
+        logger.warning(
+            "envelope: end-dispatch clear skipped terminal=%s dispatch=%s — "
+            "archive failed; live file left for the next dispatch's boundary guard",
+            spec.terminal_id, spec.dispatch_id,
+        )
+
+
+def _log_govern_outcome(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    effective_status: str,
+    report_path: Optional[Path],
+    receipt_path: Optional[Path],
+) -> None:
+    """Log the one closing status line of a GOVERN pass.
+
+    Three-way, exactly as ``_govern`` did inline: a failed/timeout/empty-
+    completion receipt logs an ERROR (dispatch_cli returns only an integer exit
+    code for the provider lane, so this line is often the only place the raw
+    error surfaces — printed in full), a contract override logs a WARNING, and
+    a clean success logs an INFO.
+    """
+    if adapter_result.status != "success":
+        # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
+        # dispatch_cli returns only an integer exit code for the provider lane, so this
+        # log line is often the only place the raw error surfaces — print it in full.
+        logger.error(
+            "envelope._govern: dispatch=%s provider=%s status=%s report=%s receipt=%s "
+            "completion_len=%d error=%s",
+            spec.dispatch_id,
+            spec.provider,
+            adapter_result.status,
+            report_path,
+            receipt_path,
+            len(adapter_result.completion_text or ""),
+            adapter_result.error or "(no error captured)",
+        )
+    elif effective_status != adapter_result.status:
+        logger.warning(
+            "envelope._govern: dispatch=%s adapter=%s effective=%s (contract override) "
+            "report=%s receipt=%s",
+            spec.dispatch_id,
+            adapter_result.status,
+            effective_status,
+            report_path,
+            receipt_path,
+        )
+    else:
+        logger.info(
+            "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
+            spec.dispatch_id,
+            adapter_result.status,
+            report_path,
+            receipt_path,
+        )
+
+
+def _run_phantom_guard(
+    spec: EnvelopeSpec,
+    adapter_result: _AdapterResult,
+    phantom_diff: Optional[str],
+    base_ref: str,
+) -> None:
+    """Run the inline phantom guard for this dispatch. Never fatal.
+
+    P0.2: inline phantom-guard (provider lanes — the kimi/glm/deepseek text-only fabrication
+    vector). A delivery worker that reports success with no worktree/branch diff is rejected via
+    a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
+    the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
+    """
+    try:
+        from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
+        _tok = adapter_result.token_usage or {}
+        # Fix-forward: an empty own-worktree/dispatch-branch diff is falsely read as phantom when
+        # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
+        # instead — resolve the pushed branch and use its diff when the own diff is empty.
+        _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
+        # OI-2519 (K-5b r2): the publish wraps the call — a guard that raises
+        # publishes nothing, a phantom verdict becomes the governed status.
+        _publish_phantom_verdict(record_phantom_if_any(
+            dispatch_id=spec.dispatch_id,
+            context=PhantomDecisionContext(
+                role=spec.role,
+                # OI-1614: EnvelopeSpec already carries task_class (threaded from the
+                # plan/DispatchSpec at PREPARE) — it was simply never forwarded to the
+                # guard, which is why a research/review dispatch on the provider lane
+                # was rejected despite the guard's own task_class exemption being
+                # correct all along.
+                task_class=spec.task_class,
+                # No provider-lane caller currently computes an explicit read_only
+                # signal — EnvelopeSpec carries no such field. Explicit None (not an
+                # omitted keyword) records that this lane looked and found nothing,
+                # not that it forgot to ask (see PhantomDecisionContext docstring).
+                read_only=None,
+                # OI-2519 (K-5b r2): the WORKER's own claim, never the downgraded
+                # ``_effective_status`` above — the guard asks whether a completion
+                # claim is backed by a deliverable, so a contract refusal must not
+                # make it abstain from an equally empty diff.
+                status=adapter_result.status,
+                worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
+            ),
+            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
+            worktree_path=None,
+            base_sha=None,
+            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+            state_dir=spec.state_dir,
+            # Attribution fix: the provider lane KNOWS the dispatch's provider
+            # and terminal (both on EnvelopeSpec) — pass them so the corrective
+            # rejection receipt names the fabricator instead of landing with the
+            # sentinel "unknown". Never overwritten by enrichment.
+            provider=spec.provider,
+            terminal=spec.terminal_id,
+        ), adapter_result)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "envelope._govern: phantom-guard check failed (non-fatal) dispatch=%s: %s",
+            spec.dispatch_id, exc,
+        )
+        try:
+            from phantom_guard import record_guard_error  # noqa: PLC0415
+            record_guard_error(
+                dispatch_id=spec.dispatch_id,
+                receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
+                error=exc,
+            )
+        except Exception:  # noqa: BLE001 — the guard-error audit signal must never make _govern fatal
+            logger.error("envelope._govern: guard-error audit signal itself failed dispatch=%s", spec.dispatch_id)
 
 
 def _govern(
@@ -664,114 +808,8 @@ def _govern(
                     )
                     receipt_path = None
     finally:
-        # OI-878/OI-902: truncate the live event stream now that the archive
-        # (top of _govern) and the receipt write are complete. Best-effort.
-        # OI-918: only when the archive step actually succeeded (or had nothing
-        # to archive) — clearing after a FAILED archive would destroy exactly
-        # the events we wanted to preserve. On an archive failure the live file
-        # is left in place for the next dispatch's write-side boundary guard
-        # (#1276) to rotate, which is the second line of defence it exists for.
-        if _events_archive_ok:
-            _clear_dispatch_events(spec.terminal_id, spec.dispatch_id)
-        else:
-            logger.warning(
-                "envelope: end-dispatch clear skipped terminal=%s dispatch=%s — "
-                "archive failed; live file left for the next dispatch's boundary guard",
-                spec.terminal_id, spec.dispatch_id,
-            )
+        _clear_archived_event_stream(spec, _events_archive_ok)
 
-    if adapter_result.status != "success":
-        # Fail-loud: a failure/timeout/empty-completion receipt must never be silent.
-        # dispatch_cli returns only an integer exit code for the provider lane, so this
-        # log line is often the only place the raw error surfaces — print it in full.
-        logger.error(
-            "envelope._govern: dispatch=%s provider=%s status=%s report=%s receipt=%s "
-            "completion_len=%d error=%s",
-            spec.dispatch_id,
-            spec.provider,
-            adapter_result.status,
-            report_path,
-            receipt_path,
-            len(adapter_result.completion_text or ""),
-            adapter_result.error or "(no error captured)",
-        )
-    elif _effective_status != adapter_result.status:
-        logger.warning(
-            "envelope._govern: dispatch=%s adapter=%s effective=%s (contract override) "
-            "report=%s receipt=%s",
-            spec.dispatch_id,
-            adapter_result.status,
-            _effective_status,
-            report_path,
-            receipt_path,
-        )
-    else:
-        logger.info(
-            "envelope._govern: dispatch=%s status=%s report=%s receipt=%s",
-            spec.dispatch_id,
-            adapter_result.status,
-            report_path,
-            receipt_path,
-        )
-    # P0.2: inline phantom-guard (provider lanes — the kimi/glm/deepseek text-only fabrication
-    # vector). A delivery worker that reports success with no worktree/branch diff is rejected via
-    # a corrective failed receipt. worktree_path is unavailable on EnvelopeSpec, so the guard derives
-    # the dispatch/<id> branch (isolated dispatches) or abstains (never false-rejects). Non-fatal.
-    try:
-        from phantom_guard import PhantomDecisionContext, record_phantom_if_any  # noqa: PLC0415
-        _tok = adapter_result.token_usage or {}
-        # Fix-forward: an empty own-worktree/dispatch-branch diff is falsely read as phantom when
-        # the dispatch targets an existing PR (spec.pr_id) and pushed its commit onto THAT branch
-        # instead — resolve the pushed branch and use its diff when the own diff is empty.
-        _effective_diff = _resolve_fix_forward_diff(spec, phantom_diff, base_ref=base_ref)
-        # OI-2519 (K-5b r2): the publish wraps the call — a guard that raises
-        # publishes nothing, a phantom verdict becomes the governed status.
-        _publish_phantom_verdict(record_phantom_if_any(
-            dispatch_id=spec.dispatch_id,
-            context=PhantomDecisionContext(
-                role=spec.role,
-                # OI-1614: EnvelopeSpec already carries task_class (threaded from the
-                # plan/DispatchSpec at PREPARE) — it was simply never forwarded to the
-                # guard, which is why a research/review dispatch on the provider lane
-                # was rejected despite the guard's own task_class exemption being
-                # correct all along.
-                task_class=spec.task_class,
-                # No provider-lane caller currently computes an explicit read_only
-                # signal — EnvelopeSpec carries no such field. Explicit None (not an
-                # omitted keyword) records that this lane looked and found nothing,
-                # not that it forgot to ask (see PhantomDecisionContext docstring).
-                read_only=None,
-                # OI-2519 (K-5b r2): the WORKER's own claim, never the downgraded
-                # ``_effective_status`` above — the guard asks whether a completion
-                # claim is backed by a deliverable, so a contract refusal must not
-                # make it abstain from an equally empty diff.
-                status=adapter_result.status,
-                worktree_diff=_effective_diff,  # F1: pre-captured before the worktree teardown
-            ),
-            token_usage=(int(_tok.get("input", 0) or 0) + int(_tok.get("output", 0) or 0)) or None,
-            worktree_path=None,
-            base_sha=None,
-            receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
-            state_dir=spec.state_dir,
-            # Attribution fix: the provider lane KNOWS the dispatch's provider
-            # and terminal (both on EnvelopeSpec) — pass them so the corrective
-            # rejection receipt names the fabricator instead of landing with the
-            # sentinel "unknown". Never overwritten by enrichment.
-            provider=spec.provider,
-            terminal=spec.terminal_id,
-        ), adapter_result)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "envelope._govern: phantom-guard check failed (non-fatal) dispatch=%s: %s",
-            spec.dispatch_id, exc,
-        )
-        try:
-            from phantom_guard import record_guard_error  # noqa: PLC0415
-            record_guard_error(
-                dispatch_id=spec.dispatch_id,
-                receipts_file=str(spec.state_dir / "t0_receipts.ndjson"),
-                error=exc,
-            )
-        except Exception:  # noqa: BLE001 — the guard-error audit signal must never make _govern fatal
-            logger.error("envelope._govern: guard-error audit signal itself failed dispatch=%s", spec.dispatch_id)
+    _log_govern_outcome(spec, adapter_result, _effective_status, report_path, receipt_path)
+    _run_phantom_guard(spec, adapter_result, phantom_diff, base_ref)
     return report_path, receipt_path

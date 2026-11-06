@@ -1,0 +1,4181 @@
+{
+  "env": {
+    "VNX_PROJECT_ID": "<unset>"
+  },
+  "namespaces": {
+    "horizon show x": {
+      "action": "show",
+      "domain": "horizon",
+      "func": "cmd_objective_show",
+      "json": false,
+      "project_id": "vnx-dev",
+      "state_dir": "",
+      "track_id": "x"
+    },
+    "objective list": {
+      "action": "list",
+      "all": false,
+      "count_blocked": false,
+      "domain": "objective",
+      "func": "cmd_objective_list",
+      "horizon": null,
+      "json": false,
+      "phase": null,
+      "project_id": "vnx-dev",
+      "state_dir": ""
+    },
+    "objective show x": {
+      "action": "show",
+      "domain": "objective",
+      "func": "cmd_objective_show",
+      "json": false,
+      "project_id": "vnx-dev",
+      "state_dir": "",
+      "track_id": "x"
+    },
+    "plan-gate run t --doc d --panel-seats codex": {
+      "action": "run",
+      "dispatch_paths": null,
+      "doc": "d",
+      "domain": "plan-gate",
+      "func": "cmd_plan_gate_run",
+      "irreversible": false,
+      "json": false,
+      "panel_seats": "codex",
+      "project_id": "vnx-dev",
+      "seat_timeout": null,
+      "state_dir": "",
+      "task_class": null,
+      "track_id": "t"
+    },
+    "plan-gate status t": {
+      "action": "status",
+      "domain": "plan-gate",
+      "func": "cmd_plan_gate_status",
+      "json": false,
+      "project_id": "vnx-dev",
+      "state_dir": "",
+      "track_id": "t"
+    }
+  },
+  "parser": {
+    "actions": [
+      {
+        "choices": null,
+        "class": "_HelpAction",
+        "const": null,
+        "default": "==SUPPRESS==",
+        "dest": "help",
+        "help": "show this help message and exit",
+        "metavar": null,
+        "nargs": 0,
+        "option_strings": [
+          "-h",
+          "--help"
+        ],
+        "required": false,
+        "type": null
+      },
+      {
+        "class": "_SubParsersAction",
+        "dest": "domain",
+        "help": null,
+        "metavar": null,
+        "required": true
+      }
+    ],
+    "aliases": [],
+    "description": "VNX planning read surface",
+    "handler": null,
+    "path": [],
+    "prog": "vnx",
+    "subcommands": {
+      "deliverable": {
+        "actions": [
+          {
+            "choices": null,
+            "class": "_HelpAction",
+            "const": null,
+            "default": "==SUPPRESS==",
+            "dest": "help",
+            "help": "show this help message and exit",
+            "metavar": null,
+            "nargs": 0,
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "required": false,
+            "type": null
+          },
+          {
+            "class": "_SubParsersAction",
+            "dest": "action",
+            "help": null,
+            "metavar": null,
+            "required": true
+          }
+        ],
+        "aliases": [],
+        "description": null,
+        "handler": null,
+        "path": [
+          "deliverable"
+        ],
+        "prog": "vnx deliverable",
+        "subcommands": {
+          "add": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "objective",
+                "help": "track/objective this deliverable belongs to",
+                "metavar": "TRACK_ID",
+                "nargs": null,
+                "option_strings": [
+                  "--objective"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "pr",
+                  "post",
+                  "deal",
+                  "doc"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "output_kind",
+                "help": null,
+                "metavar": "KIND",
+                "nargs": null,
+                "option_strings": [
+                  "--output-kind"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "title",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--title"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "task_class",
+                "help": "optional task class from the smart-router closed set (01_code_generation .. 07_translation) \u2014 the same rubric axis the plan-gate reads. Unknown values are refused.",
+                "metavar": "CLASS",
+                "nargs": null,
+                "option_strings": [
+                  "--task-class"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "routing_floor",
+                "help": "optional model-routing quality floor for this deliverable (free text, e.g. a model name) \u2014 the plan-gate's rubric axis 5.",
+                "metavar": "FLOOR",
+                "nargs": null,
+                "option_strings": [
+                  "--routing-floor"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_paths",
+                "help": "optional comma-separated repo paths this deliverable will touch. A plan-gate run without --dispatch-paths reads them: a schema or security path brings the second seat in from the start.",
+                "metavar": "P1,P2",
+                "nargs": null,
+                "option_strings": [
+                  "--dispatch-paths"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_add",
+            "path": [
+              "deliverable",
+              "add"
+            ],
+            "prog": "vnx deliverable add",
+            "subcommands": {}
+          },
+          "close": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "evidence",
+                "help": "delivering PR as #NNN or NNN (REQUIRED). Records an operator attestation of what delivered the work; VNX does not verify the merge state at close time.",
+                "metavar": "PR",
+                "nargs": null,
+                "option_strings": [
+                  "--evidence"
+                ],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_close",
+            "path": [
+              "deliverable",
+              "close"
+            ],
+            "prog": "vnx deliverable close",
+            "subcommands": {}
+          },
+          "list": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "objective",
+                "help": null,
+                "metavar": "TRACK_ID",
+                "nargs": null,
+                "option_strings": [
+                  "--objective"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "all",
+                "help": "also show withdrawn deliverables (hidden by default)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--all"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_list",
+            "path": [
+              "deliverable",
+              "list"
+            ],
+            "prog": "vnx deliverable list",
+            "subcommands": {}
+          },
+          "promote": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_promote",
+            "path": [
+              "deliverable",
+              "promote"
+            ],
+            "prog": "vnx deliverable promote",
+            "subcommands": {}
+          },
+          "retarget": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "objective",
+                "help": "the track to move it to",
+                "metavar": "TRACK_ID",
+                "nargs": null,
+                "option_strings": [
+                  "--objective"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "reason",
+                "help": "why it moves (REQUIRED, in the audit event)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "include_parked",
+                "help": "allow a parked target",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--include-parked"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_retarget",
+            "path": [
+              "deliverable",
+              "retarget"
+            ],
+            "prog": "vnx deliverable retarget",
+            "subcommands": {}
+          },
+          "set": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "task_class",
+                "help": "task class from the smart-router closed set (01_code_generation .. 07_translation). Unknown values are refused. At least one of --task-class/--routing-floor/--dispatch-paths is required.",
+                "metavar": "CLASS",
+                "nargs": null,
+                "option_strings": [
+                  "--task-class"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "routing_floor",
+                "help": "model-routing quality floor for this deliverable (free text, e.g. a model name). At least one of --task-class/--routing-floor/--dispatch-paths is required.",
+                "metavar": "FLOOR",
+                "nargs": null,
+                "option_strings": [
+                  "--routing-floor"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_paths",
+                "help": "comma-separated repo paths this deliverable will touch (replaces the stored list). Read by a plan-gate run that names no paths.",
+                "metavar": "P1,P2",
+                "nargs": null,
+                "option_strings": [
+                  "--dispatch-paths"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_set",
+            "path": [
+              "deliverable",
+              "set"
+            ],
+            "prog": "vnx deliverable set",
+            "subcommands": {}
+          },
+          "withdraw": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "reason",
+                "help": "why it is not built (REQUIRED, in the audit event)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_deliverable_withdraw",
+            "path": [
+              "deliverable",
+              "withdraw"
+            ],
+            "prog": "vnx deliverable withdraw",
+            "subcommands": {}
+          }
+        }
+      },
+      "objective": {
+        "actions": [
+          {
+            "choices": null,
+            "class": "_HelpAction",
+            "const": null,
+            "default": "==SUPPRESS==",
+            "dest": "help",
+            "help": "show this help message and exit",
+            "metavar": null,
+            "nargs": 0,
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "required": false,
+            "type": null
+          },
+          {
+            "class": "_SubParsersAction",
+            "dest": "action",
+            "help": null,
+            "metavar": null,
+            "required": true
+          }
+        ],
+        "aliases": [
+          "horizon"
+        ],
+        "description": null,
+        "handler": null,
+        "path": [
+          "objective"
+        ],
+        "prog": "vnx objective",
+        "subcommands": {
+          "add": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "title",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "goal_state",
+                "help": "what 'done' looks like for this track",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "now",
+                  "next",
+                  "later"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "horizon",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--horizon"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "priority",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--priority"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": [
+                  "direct",
+                  "governed",
+                  "unset"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "lane_hint",
+                "help": "descriptive dispatch-routing hint (governed|direct|unset); default unset",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--lane-hint"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": [
+                  "architecture",
+                  "light"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "plan_scope",
+                "help": "REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the plan-gate runs) or light (no plan-gate)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--plan-scope"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_add",
+            "path": [
+              "objective",
+              "add"
+            ],
+            "prog": "vnx objective add",
+            "subcommands": {}
+          },
+          "close": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "apply",
+                "help": "write the transition (default: dry-run check)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--apply"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "approval_id",
+                "help": "operator approval token (REQUIRED with --apply)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--approval-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "include_parked",
+                "help": "allow closing a PARKED track (un-parks it; off by default)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--include-parked"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "repo_root",
+                "help": "git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+                "metavar": "PATH",
+                "nargs": null,
+                "option_strings": [
+                  "--repo-root"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "attest",
+                "help": "operator attestation for ops-tracks with no PR evidence (requires --apply --approval-id). Appends the real PR via --pr when given, else fails open by appending ops-attest:<date>; refs already on the track are kept",
+                "metavar": "REASON",
+                "nargs": null,
+                "option_strings": [
+                  "--attest"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_AppendAction",
+                "const": null,
+                "default": null,
+                "dest": "pr",
+                "help": "delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, order kept, nothing replaced) instead of ops-attest:<date>. Without --attest, use `vnx objective link-pr` instead.",
+                "metavar": "NNN",
+                "nargs": null,
+                "option_strings": [
+                  "--pr"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": 50,
+                "dest": "max_gh_calls",
+                "help": "cap live gh pr view calls for the track's pr_ref (default 50; a single close handles one track so the cap is rarely reached). Bounds the evidence gather so it is explicit rather than unbounded.",
+                "metavar": "N",
+                "nargs": null,
+                "option_strings": [
+                  "--max-gh-calls"
+                ],
+                "required": false,
+                "type": "int"
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_close",
+            "path": [
+              "objective",
+              "close"
+            ],
+            "prog": "vnx objective close",
+            "subcommands": {}
+          },
+          "drift": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "repo_root",
+                "help": "git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+                "metavar": "PATH",
+                "nargs": null,
+                "option_strings": [
+                  "--repo-root"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_drift",
+            "path": [
+              "objective",
+              "drift"
+            ],
+            "prog": "vnx objective drift",
+            "subcommands": {}
+          },
+          "link-pr": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "pr",
+                "help": "PR reference(s) as #NNN or NNN; comma-separated or repeated",
+                "metavar": null,
+                "nargs": "+",
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "partial",
+                  "complete"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": "partial",
+                "dest": "delivery",
+                "help": "delivery_kind for the linked PR(s): 'partial' ships a slice of the plan, 'complete' ships the whole thing (default: partial). A track closes only when EVERY linked PR is 'complete' (_delivery_hold in track_reconciler.py): one explicit 'partial' holds it, so when the last slice merges, re-link every PR of the track with --delivery complete. Fail-closed ONLY once migration 0032 (track_pr_delivery) is applied to this DB; if it is missing, pr_ref is still linked but the delivery marking is NOT recorded (a loud stderr error and --json 'error' field say so; apply 0032 and re-run to record it)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--delivery"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_link_pr",
+            "path": [
+              "objective",
+              "link-pr"
+            ],
+            "prog": "vnx objective link-pr",
+            "subcommands": {}
+          },
+          "list": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": [
+                  "now",
+                  "next",
+                  "later"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "horizon",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--horizon"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": [
+                  "active",
+                  "done",
+                  "parked",
+                  "queued"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "phase",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--phase"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "all",
+                "help": "include done tracks (hidden by default)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--all"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "count_blocked",
+                "help": "print one repeatable count of blocked tracks: every track whose stored derived_status is 'blocked', over ALL tracks \u2014 the same definition as the 14-08 baseline of 76 \u2014 split plan-gate (open OI-PLAN-* blocker) > dependency (unmet hard dependency) > other, each track counted once; --json lists every reason per track",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--count-blocked"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_list",
+            "path": [
+              "objective",
+              "list"
+            ],
+            "prog": "vnx objective list",
+            "subcommands": {}
+          },
+          "queue": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "objective",
+                "help": "only show the deliverables of this track",
+                "metavar": "TRACK_ID",
+                "nargs": null,
+                "option_strings": [
+                  "--objective"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "all",
+                "help": "also show closed/done/cancelled/withdrawn deliverables (hidden by default)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--all"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_queue",
+            "path": [
+              "objective",
+              "queue"
+            ],
+            "prog": "vnx objective queue",
+            "subcommands": {}
+          },
+          "reconcile": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "apply",
+                "help": "close CONFIRMED tracks (default: check only \u2014 no phase writes)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--apply"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "allow_closed_siblings",
+                "help": "CONFIRMED if \u22651 PR merged even when siblings are CLOSED-unmerged",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--allow-closed-siblings"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": 50,
+                "dest": "max_gh_calls",
+                "help": "cap live gh pr view calls per run (default 50; excess \u2192 deferred). Bounds ONLY gh pr view calls \u2014 other git calls (the single batched ls-remote dispatch-branch probe, OI-1078) are not counted",
+                "metavar": "N",
+                "nargs": null,
+                "option_strings": [
+                  "--max-gh-calls"
+                ],
+                "required": false,
+                "type": "int"
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "repo_root",
+                "help": "git repo root for gh calls (default: auto-resolved from project root)",
+                "metavar": "PATH",
+                "nargs": null,
+                "option_strings": [
+                  "--repo-root"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_reconcile",
+            "path": [
+              "objective",
+              "reconcile"
+            ],
+            "prog": "vnx objective reconcile",
+            "subcommands": {}
+          },
+          "reconcile-review": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "run_id",
+                "help": "run_id from reconcile_history.ndjson",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "reviewer",
+                "help": "reviewer name or id",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reviewer"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "ok",
+                  "false-candidate"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "verdict",
+                "help": "ok = candidate is correct; false-candidate = reconcile over-nominated this track",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--verdict"
+                ],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "note",
+                "help": "optional review note",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--note"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_reconcile_review",
+            "path": [
+              "objective",
+              "reconcile-review"
+            ],
+            "prog": "vnx objective reconcile-review",
+            "subcommands": {}
+          },
+          "reconcile-streak": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_reconcile_streak",
+            "path": [
+              "objective",
+              "reconcile-streak"
+            ],
+            "prog": "vnx objective reconcile-streak",
+            "subcommands": {}
+          },
+          "remove-dependency": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": "the dependent (from) track",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "to_track_id",
+                "help": "the track it depends on",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "to_project_id",
+                "help": "project of the to-track (default: --project-id)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--to-project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "REQUIRED, non-empty: why this edge is being removed (audited; no silent bypass -- an empty reason is refused)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_remove_dependency",
+            "path": [
+              "objective",
+              "remove-dependency"
+            ],
+            "prog": "vnx objective remove-dependency",
+            "subcommands": {}
+          },
+          "reopen": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "approval_id",
+                "help": "operator approval token (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--approval-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_reopen",
+            "path": [
+              "objective",
+              "reopen"
+            ],
+            "prog": "vnx objective reopen",
+            "subcommands": {}
+          },
+          "set-goal": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "goal",
+                "help": "what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_set_goal",
+            "path": [
+              "objective",
+              "set-goal"
+            ],
+            "prog": "vnx objective set-goal",
+            "subcommands": {}
+          },
+          "set-lane-hint": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "direct",
+                  "governed",
+                  "unset"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "lane_hint",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_set_lane_hint",
+            "path": [
+              "objective",
+              "set-lane-hint"
+            ],
+            "prog": "vnx objective set-lane-hint",
+            "subcommands": {}
+          },
+          "set-plan-scope": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "architecture",
+                  "light"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "plan_scope",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "REQUIRED: why the scope changes",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_set_plan_scope",
+            "path": [
+              "objective",
+              "set-plan-scope"
+            ],
+            "prog": "vnx objective set-plan-scope",
+            "subcommands": {}
+          },
+          "show": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_show",
+            "path": [
+              "objective",
+              "show"
+            ],
+            "prog": "vnx objective show",
+            "subcommands": {}
+          },
+          "sync": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "apply",
+                "help": "apply the idempotent projection (default: dry-run check)",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--apply"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "roadmap",
+                "help": "REQUIRED: the ROADMAP-shaped file to import. Nothing is derived for you (ADR-047: the tracks DB is the plan source)",
+                "metavar": "FILE",
+                "nargs": null,
+                "option_strings": [
+                  "--roadmap"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_sync",
+            "path": [
+              "objective",
+              "sync"
+            ],
+            "prog": "vnx objective sync",
+            "subcommands": {}
+          },
+          "unlink-pr": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "pr",
+                "help": "PR reference(s) as #NNN or NNN; comma-separated or repeated",
+                "metavar": null,
+                "nargs": "+",
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "REQUIRED, non-empty: why this PR reference is being removed (audited; no silent bypass -- an empty reason is refused)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_unlink_pr",
+            "path": [
+              "objective",
+              "unlink-pr"
+            ],
+            "prog": "vnx objective unlink-pr",
+            "subcommands": {}
+          },
+          "unmark-delivery": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "pr",
+                "help": "PR reference(s) as #NNN or NNN; comma-separated or repeated",
+                "metavar": null,
+                "nargs": "+",
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "REQUIRED, non-empty: why this delivery marker is being removed (audited; no silent bypass -- an empty reason is refused)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_unmark_delivery",
+            "path": [
+              "objective",
+              "unmark-delivery"
+            ],
+            "prog": "vnx objective unmark-delivery",
+            "subcommands": {}
+          }
+        }
+      },
+      "plan-gate": {
+        "actions": [
+          {
+            "choices": null,
+            "class": "_HelpAction",
+            "const": null,
+            "default": "==SUPPRESS==",
+            "dest": "help",
+            "help": "show this help message and exit",
+            "metavar": null,
+            "nargs": 0,
+            "option_strings": [
+              "-h",
+              "--help"
+            ],
+            "required": false,
+            "type": null
+          },
+          {
+            "class": "_SubParsersAction",
+            "dest": "action",
+            "help": null,
+            "metavar": null,
+            "required": true
+          }
+        ],
+        "aliases": [],
+        "description": null,
+        "handler": null,
+        "path": [
+          "plan-gate"
+        ],
+        "prog": "vnx plan-gate",
+        "subcommands": {
+          "attest": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "operator attestation reason (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "approval_id",
+                "help": "operator approval token (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--approval-id"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_attest",
+            "path": [
+              "plan-gate",
+              "attest"
+            ],
+            "prog": "vnx plan-gate attest",
+            "subcommands": {}
+          },
+          "backfill-reason": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "operator reason (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "approval_id",
+                "help": "operator approval token (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--approval-id"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_backfill_reason",
+            "path": [
+              "plan-gate",
+              "backfill-reason"
+            ],
+            "prog": "vnx plan-gate backfill-reason",
+            "subcommands": {}
+          },
+          "batch": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_AppendAction",
+                "const": null,
+                "default": null,
+                "dest": "track",
+                "help": "explicit track id(s) to gate (repeatable); unknown ids fail loud. Default: every track with an open OI-PLAN blocker.",
+                "metavar": "TRACK_ID",
+                "nargs": null,
+                "option_strings": [
+                  "--track"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "limit",
+                "help": "cap the number of tracks processed; composes with --track (not mutually exclusive).",
+                "metavar": "N",
+                "nargs": null,
+                "option_strings": [
+                  "--limit"
+                ],
+                "required": false,
+                "type": "int"
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "restart",
+                "help": "re-run all selected tracks, ignoring the resume store.",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--restart"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "dry_run",
+                "help": "show each track's gate class + seat count without calling any model. Standard first step before a real batch.",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--dry-run"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "panel_seats",
+                "help": "comma-separated seat labels to run instead of the default seat; logged as an override, unknown labels fail loud. Default: default_seat.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--panel-seats"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "seat_timeout",
+                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--seat-timeout"
+                ],
+                "required": false,
+                "type": "int"
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_paths",
+                "help": "comma-separated repo paths the plan touches; they derive the governance weight (variant) in the trace, not the seat count.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--dispatch-paths"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "task_class",
+                "help": "task class for the plan from the smart-router closed set; it feeds the governance weight in the trace. A new feature no longer gets more seats.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--task-class"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "irreversible",
+                "help": "declare the change irreversible (deletion/rename/big architecture refactor); forces coding-strict in the trace, not more seats.",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--irreversible"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_batch",
+            "path": [
+              "plan-gate",
+              "batch"
+            ],
+            "prog": "vnx plan-gate batch",
+            "subcommands": {}
+          },
+          "missing-reasons": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_missing_reasons",
+            "path": [
+              "plan-gate",
+              "missing-reasons"
+            ],
+            "prog": "vnx plan-gate missing-reasons",
+            "subcommands": {}
+          },
+          "reblock": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "reason",
+                "help": "operator reason (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--reason"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "approval_id",
+                "help": "operator approval token (REQUIRED)",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--approval-id"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_reblock",
+            "path": [
+              "plan-gate",
+              "reblock"
+            ],
+            "prog": "vnx plan-gate reblock",
+            "subcommands": {}
+          },
+          "run": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "doc",
+                "help": "path to the plan doc under review. Optional: when omitted, the track's goal_state is the plan (it must carry at least goal_min_chars meaningful characters from configs/plan_gate_panel.yaml).",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--doc"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "panel_seats",
+                "help": "comma-separated seat labels to run instead of the default seat; logged as an override, unknown labels fail loud. Default: default_seat.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--panel-seats"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "seat_timeout",
+                "help": "per-seat deadline in seconds before a panelist times out and books a fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT (default 900) \u2014 the same env-var-knob style as VNX_PANEL_RETRY.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--seat-timeout"
+                ],
+                "required": false,
+                "type": "int"
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "dispatch_paths",
+                "help": "comma-separated repo paths the plan touches; they derive the governance weight (variant) in the trace. The seat count does not follow it: one default seat, a second on BLOCK.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--dispatch-paths"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "task_class",
+                "help": "task class for the plan from the smart-router closed set; it feeds the governance weight in the trace. A new feature no longer gets more seats.",
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--task-class"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "irreversible",
+                "help": "declare the change irreversible (deletion/rename/big architecture refactor); forces coding-strict in the trace, not more seats.",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--irreversible"
+                ],
+                "required": false,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_run",
+            "path": [
+              "plan-gate",
+              "run"
+            ],
+            "prog": "vnx plan-gate run",
+            "subcommands": {}
+          },
+          "seed": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_seed",
+            "path": [
+              "plan-gate",
+              "seed"
+            ],
+            "prog": "vnx plan-gate seed",
+            "subcommands": {}
+          },
+          "status": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_plan_gate_status",
+            "path": [
+              "plan-gate",
+              "status"
+            ],
+            "prog": "vnx plan-gate status",
+            "subcommands": {}
+          }
+        }
+      }
+    }
+  }
+}

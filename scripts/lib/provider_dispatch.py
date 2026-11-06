@@ -1592,6 +1592,108 @@ def _book_dispatch_cost(
     return harness_run_cost.receipt_cost(records)
 
 
+def _resolve_receipt_role(args: argparse.Namespace, state_dir: Path) -> str:
+    """Resolve the role stamped on the receipt, fail-open (step A of ``_emit_governance``).
+
+    The shared resolver prefers the genuinely-set --role (never the fake
+    sentinel "" default, OI-981), falls back to dispatch_metadata, then stamps
+    identity_unresolved. A resolver error must never break receipt emission, so
+    it logs at debug (with ``exc_info``) and returns ``_IDENTITY_UNRESOLVED``.
+    The identity imports stay lazy: this runs once per receipt, not per import.
+    """
+    try:
+        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
+        _project_id = vars(args).get("project_id")
+        if not _project_id:
+            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
+            _project_id = _resolve_project_id()
+        return resolve_effective_role(
+            getattr(args, "role", None), args.dispatch_id, _project_id, state_dir=state_dir,
+        )
+    except Exception:  # noqa: BLE001 — identity join is fail-open
+        logger.debug(
+            "_emit_governance: role resolution failed open dispatch=%s",
+            getattr(args, "dispatch_id", "?"),
+            exc_info=True,
+        )
+        return _IDENTITY_UNRESOLVED
+
+
+def _resolve_toolcall_signals(args: argparse.Namespace) -> Dict[str, int]:
+    """Aggregate this dispatch's PreToolUse-hook tool-call signals (step B).
+
+    ``VNX_TMUX_SIGNAL_DIR``'s ``toolcalls.ndjson`` is folded by
+    ``toolcall_signals.aggregate_toolcall_signals`` into the three additive
+    receipt fields. FAIL-OPEN — an aggregation error or absent signal log must
+    never break receipt emission; the dict stays empty and ReceiptV2 omits the
+    fields. The import stays lazy: only signal-carrying lanes pay for it.
+    """
+    try:
+        _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+        if _signal_dir:
+            from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+            return aggregate_toolcall_signals(_signal_dir) or {}
+    except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+        logger.debug(
+            "_emit_governance: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+            getattr(args, "dispatch_id", "?"),
+            exc_info=True,
+        )
+    return {}
+
+
+def _record_dispatch_outcome(
+    *,
+    provider: str,
+    status: str,
+    failure_class: Optional[str],
+    failure_reason: Optional[str],
+    result: Any,
+    state_dir: Path,
+    event_store: "Optional[Any]",
+    args: argparse.Namespace,
+) -> None:
+    """The post-receipt tail of ``_emit_governance`` (step C), all fail-open.
+
+    Runs only after the receipt is durably emitted:
+
+    - OI-1263: on a non-success status, the router-lane cooldown write, using
+      the failure class/reason the retry loop already computed from the event
+      payload — never a second 403/429 detector.
+    - OI-1454: the same observation as a reachability record every consumer
+      reads (adapters, classifiers, the review-gate seat walk).
+    - OI-2115: the live event stream is cleared once the archive and receipt
+      are done, named by this run's dispatch id so a per-run terminal never
+      reaches the shared stream.
+
+    Nothing here can raise into the dispatch: each callee is best-effort and
+    the clear is wrapped in its own warning-only guard.
+    """
+    if status != "success":
+        _maybe_record_provider_lane_cooldown(
+            lane=provider,
+            failure_class=failure_class,
+            reason=failure_reason or (getattr(result, "error", None) or ""),
+            state_dir=state_dir,
+        )
+    _maybe_record_provider_reachability(
+        provider=provider,
+        status=status,
+        failure_class=failure_class,
+        reason=failure_reason or (getattr(result, "error", None) or ""),
+        state_dir=state_dir,
+    )
+    if event_store is not None:
+        try:
+            event_store.clear(args.terminal_id, dispatch_id=args.dispatch_id)
+        except Exception as _clr_exc:
+            logger.warning(
+                "_emit_governance: event_store.clear failed for dispatch=%s (non-fatal): %s",
+                getattr(args, "dispatch_id", "?"),
+                _clr_exc,
+            )
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -1691,26 +1793,8 @@ def _emit_governance(
     _enriched_instruction = vars(args).get("_enriched_instruction")
 
     # receipt-quality PR-1 + W7 fix: resolve dispatch identity (role) just
-    # before the emit. The shared resolver prefers the genuinely-set --role
-    # (never the fake sentinel "" default, OI-981), falls back to
-    # dispatch_metadata, then stamps identity_unresolved. FAIL-OPEN — a
-    # resolver error must never break receipt emission.
-    try:
-        from dispatch_identity import resolve_effective_role  # noqa: PLC0415
-        _project_id = vars(args).get("project_id")
-        if not _project_id:
-            from dispatch_cli import _resolve_project_id  # noqa: PLC0415
-            _project_id = _resolve_project_id()
-        _role = resolve_effective_role(
-            getattr(args, "role", None), args.dispatch_id, _project_id, state_dir=state_dir,
-        )
-    except Exception:  # noqa: BLE001 — identity join is fail-open
-        logger.debug(
-            "_emit_governance: role resolution failed open dispatch=%s",
-            getattr(args, "dispatch_id", "?"),
-            exc_info=True,
-        )
-        _role = _IDENTITY_UNRESOLVED
+    # before the emit; fail-open, see _resolve_receipt_role.
+    _role = _resolve_receipt_role(args, state_dir)
 
     # OI-983 + RS-3: re-verify role_applied AND skill_applied with the resolved
     # _role when it differs from the raw one, so both fields were checked
@@ -1718,22 +1802,8 @@ def _emit_governance(
     _role_app, _skill_app = _application_verdicts(args, _enriched_instruction, _role, _role_app)
 
     # receipt-quality PR-B2: aggregate PreToolUse-hook tool-call signals for
-    # this dispatch (scripts/lib/toolcall_signals.py). FAIL-OPEN — an
-    # aggregation error or absent signal log must never break receipt
-    # emission; each field simply stays None (omitted by ReceiptV2).
-    _toolcall_signals: Dict[str, int] = {}
-    try:
-        _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-        if _signal_dir:
-            from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-            _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-    except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-        logger.debug(
-            "_emit_governance: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-            getattr(args, "dispatch_id", "?"),
-            exc_info=True,
-        )
-        _toolcall_signals = {}
+    # this dispatch; fail-open, see _resolve_toolcall_signals.
+    _toolcall_signals = _resolve_toolcall_signals(args)
 
     # Delivery-state (dispatch 20260816-p10b-provider-observability): derive
     # the four-way delivery/reporting state from status + spawn returncode so
@@ -1892,43 +1962,18 @@ def _emit_governance(
             )
             raise
 
-    # OI-1263: the router-lane cooldown write, at the point a provider failure
-    # is actually observed. Uses the failure_class/failure_reason the retry
-    # loop above already computed from the event payload — never a second
-    # 403/429 detector. Written after the receipt is durably emitted so a
-    # cooldown-write issue can never affect receipt delivery; best-effort
-    # internally, so it can never raise back into this function.
-    if status != "success":
-        _maybe_record_provider_lane_cooldown(
-            lane=provider,
-            failure_class=_fail_class,
-            reason=_fail_reason or (getattr(result, "error", None) or ""),
-            state_dir=state_dir,
-        )
-    # OI-1454: the same observation, kept as a reachability record every
-    # consumer reads (adapters, classifiers, the review-gate seat walk), not
-    # only the smart router's lane_available.
-    _maybe_record_provider_reachability(
+    # OI-1263 + OI-1454 + OI-2115: cooldown, reachability and the live-stream
+    # clear, all fail-open; see _record_dispatch_outcome.
+    _record_dispatch_outcome(
         provider=provider,
         status=status,
         failure_class=_fail_class,
-        reason=_fail_reason or (getattr(result, "error", None) or ""),
+        failure_reason=_fail_reason,
+        result=result,
         state_dir=state_dir,
+        event_store=event_store,
+        args=args,
     )
-
-    # Clear (truncate) the live event file now that the archive + receipt are done.
-    # Only when event_store is wired in — otherwise the caller's finally block handles it.
-    # The dispatch id names this run's own stream on a per-run terminal (plan-gate,
-    # OI-2115); a bare clear there would reach the shared stream, not this run's.
-    if event_store is not None:
-        try:
-            event_store.clear(args.terminal_id, dispatch_id=args.dispatch_id)
-        except Exception as _clr_exc:
-            logger.warning(
-                "_emit_governance: event_store.clear failed for dispatch=%s (non-fatal): %s",
-                getattr(args, "dispatch_id", "?"),
-                _clr_exc,
-            )
 
     frontmatter = _build_frontmatter(
         args, provider, model_used, result, duration, token_usage, cost_usd, cost_source,

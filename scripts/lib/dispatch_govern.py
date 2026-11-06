@@ -668,6 +668,89 @@ def _resolve_worker_report_with_adoption(
     return candidate_path, candidate_path
 
 
+def _govern_frontmatter(
+    spec: GovernSpec,
+    raw: GovernRaw,
+    *,
+    dispatch_id: str,
+    lane: str,
+    contract_status: str,
+    permission_enforcement: str,
+) -> dict:
+    """The schema-complete frontmatter the govern step stamps on its report.
+
+    ``unified_report_v1.json`` requires 14 fields; partial frontmatter raises
+    SchemaViolation under ``VNX_SCHEMA_STRICT=1`` and blocks the atomic write,
+    leaving a stale placeholder on disk.
+
+    Key ORDER is part of the contract: ``governance_emit.emit_unified_report``
+    serialises this dict with ``yaml.dump(..., sort_keys=False)``, so the
+    insertion order below is the order written to disk. Keep new keys last.
+    """
+    receipt_data = raw.receipt or {}
+    # Same source order as the synthesized-receipt path above (line ~205):
+    # worker-authored receipt first, then spec.model (the real dispatch value,
+    # e.g. "sonnet"/"opus"). OI-1184: no "unknown" fallback — an undeterminable
+    # model is left empty for the fail-closed validator to refuse. Before
+    # OI-1001, a worker receipt with no "model" key fell straight to "unknown"
+    # even though spec.model carried the real value.
+    _model = receipt_data.get("model") or spec.model or ""
+    _exit_code = int(receipt_data.get("exit_code", 0) or 0)
+    _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
+    _token_usage = {
+        "input": int(_raw_token.get("input") or 0),
+        "output": int(_raw_token.get("output") or 0),
+        "cache_read": int(
+            _raw_token.get("cache_read") or _raw_token.get("cache_hit") or 0
+        ),
+    }
+    _cost_fields = _govern_cost_fields(receipt_data)
+    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): resolve from the
+    # spec first, then the door's env vars (the tmux pane inherits them).
+    _parent_dispatch = spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
+    _task_class = spec.task_class or os.environ.get("VNX_TASK_CLASS") or None
+    _tier_from = spec.tier_from or os.environ.get("VNX_TIER_FROM") or None
+    _tier_to = spec.tier_to or os.environ.get("VNX_TIER_TO") or None
+    frontmatter = {
+        "schema_version": 1,
+        "dispatch_id": dispatch_id,
+        "provider": "claude",
+        "sub_provider": "anthropic",
+        "model": _model,
+        "terminal_id": spec.terminal_id,
+        "pool_id": "interactive",
+        # receipt-quality PR-2: resolved dispatch identity, not the hardcoded
+        # fake default the converter would otherwise drop/misread.
+        "role": _resolve_govern_role(spec),
+        # dispatch-20260802-model-ssot-en-ketenlink: real task class instead of
+        # the old unconditional "implementation"; chain-link stamped when known.
+        "task_class": _task_class or "implementation",
+        "pr_id": spec.pr_id or "none",
+        "duration_seconds": float(raw.duration_seconds),
+        "exit_code": _exit_code,
+        "token_usage": _token_usage,
+        **_cost_fields,
+        "route_decision": {
+            "strategy": "synthesized",
+            "selected_provider": "claude",
+            "selected_model": _model,
+            "reason": (
+                f"tmux interactive lane — govern synthesis (terminal={spec.terminal_id})"
+            ),
+        },
+        "lane": lane,
+        "contract_status": contract_status,
+        "permission_enforcement": permission_enforcement,
+    }
+    if _parent_dispatch is not None:
+        frontmatter["parent_dispatch"] = _parent_dispatch
+    if _tier_from is not None:
+        frontmatter["tier_from"] = _tier_from
+    if _tier_to is not None:
+        frontmatter["tier_to"] = _tier_to
+    return frontmatter
+
+
 def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome:
     """Core govern logic. Called by govern(); any exception is caught there."""
     from report_body_contract import CONTRACT_INVALID_STATUS, validate_body  # noqa: PLC0415
@@ -843,70 +926,13 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     # synthesized/violated: overwrite=True so a stale placeholder is replaced.
     is_authored = contract_status == "authored"
 
-    # Build schema-complete frontmatter (unified_report_v1.json requires 14 fields).
-    # Partial frontmatter raises SchemaViolation under VNX_SCHEMA_STRICT=1 and
-    # blocks the atomic write, leaving a stale placeholder on disk.
-    receipt_data = raw.receipt or {}
-    # Same source order as the synthesized-receipt path above (line ~205):
-    # worker-authored receipt first, then spec.model (the real dispatch value,
-    # e.g. "sonnet"/"opus"). OI-1184: no "unknown" fallback — an undeterminable
-    # model is left empty for the fail-closed validator to refuse. Before
-    # OI-1001, a worker receipt with no "model" key fell straight to "unknown"
-    # even though spec.model carried the real value.
-    _model = receipt_data.get("model") or spec.model or ""
-    _exit_code = int(receipt_data.get("exit_code", 0) or 0)
-    _raw_token = receipt_data.get("token_usage") or raw.token_usage or {}
-    _token_usage = {
-        "input": int(_raw_token.get("input") or 0),
-        "output": int(_raw_token.get("output") or 0),
-        "cache_read": int(
-            _raw_token.get("cache_read") or _raw_token.get("cache_hit") or 0
-        ),
-    }
-    _cost_fields = _govern_cost_fields(receipt_data)
-    # Chain-link (dispatch-20260802-model-ssot-en-ketenlink): resolve from the
-    # spec first, then the door's env vars (the tmux pane inherits them).
-    _parent_dispatch = spec.parent_dispatch or os.environ.get("VNX_PARENT_DISPATCH") or None
-    _task_class = spec.task_class or os.environ.get("VNX_TASK_CLASS") or None
-    _tier_from = spec.tier_from or os.environ.get("VNX_TIER_FROM") or None
-    _tier_to = spec.tier_to or os.environ.get("VNX_TIER_TO") or None
-    frontmatter = {
-        "schema_version": 1,
-        "dispatch_id": dispatch_id,
-        "provider": "claude",
-        "sub_provider": "anthropic",
-        "model": _model,
-        "terminal_id": spec.terminal_id,
-        "pool_id": "interactive",
-        # receipt-quality PR-2: resolved dispatch identity, not the hardcoded
-        # fake default the converter would otherwise drop/misread.
-        "role": _resolve_govern_role(spec),
-        # dispatch-20260802-model-ssot-en-ketenlink: real task class instead of
-        # the old unconditional "implementation"; chain-link stamped when known.
-        "task_class": _task_class or "implementation",
-        "pr_id": spec.pr_id or "none",
-        "duration_seconds": float(raw.duration_seconds),
-        "exit_code": _exit_code,
-        "token_usage": _token_usage,
-        **_cost_fields,
-        "route_decision": {
-            "strategy": "synthesized",
-            "selected_provider": "claude",
-            "selected_model": _model,
-            "reason": (
-                f"tmux interactive lane — govern synthesis (terminal={spec.terminal_id})"
-            ),
-        },
-        "lane": lane,
-        "contract_status": contract_status,
-        "permission_enforcement": permission_enforcement,
-    }
-    if _parent_dispatch is not None:
-        frontmatter["parent_dispatch"] = _parent_dispatch
-    if _tier_from is not None:
-        frontmatter["tier_from"] = _tier_from
-    if _tier_to is not None:
-        frontmatter["tier_to"] = _tier_to
+    frontmatter = _govern_frontmatter(
+        spec, raw,
+        dispatch_id=dispatch_id,
+        lane=lane,
+        contract_status=contract_status,
+        permission_enforcement=permission_enforcement,
+    )
 
     status = (raw.receipt or {}).get("status", "unknown") if raw.receipt else "timeout"
 

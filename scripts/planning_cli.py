@@ -6258,6 +6258,118 @@ def _add_objective_list_parser(obj_sub: Any, common: Callable[[Any], None]) -> N
     p_list.set_defaults(func=cmd_objective_list)
 
 
+def _add_plan_gate_seed_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate seed`: plant the OI-PLAN blocker on one track."""
+    p_seed = pg_sub.add_parser(
+        "seed", help="seed the OI-PLAN blocker (track stays blocked until the gate passes)",
+    )
+    common(p_seed)
+    p_seed.add_argument("track_id")
+    p_seed.set_defaults(func=cmd_plan_gate_seed)
+
+
+def _add_plan_gate_run_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate run`: run the panel over a plan doc and resolve on PASS."""
+    p_run = pg_sub.add_parser(
+        "run", help="run the panel over a plan doc; on PASS, resolve the blocker",
+    )
+    common(p_run)
+    p_run.add_argument("track_id")
+    p_run.add_argument(
+        "--doc", default=None,
+        help="path to the plan doc under review. Optional: when omitted, the "
+             "track's goal_state is the plan (it must carry at least "
+             "goal_min_chars meaningful characters from configs/plan_gate_panel.yaml).",
+    )
+    p_run.add_argument(
+        "--panel-seats",
+        dest="panel_seats",
+        default="",
+        help="comma-separated seat labels to run instead of the default seat; "
+             "logged as an override, unknown labels fail loud. Default: default_seat.",
+    )
+    p_run.add_argument(
+        "--seat-timeout",
+        dest="seat_timeout",
+        type=int,
+        default=None,
+        help="per-seat deadline in seconds before a panelist times out and books a "
+             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
+             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
+    )
+    p_run.add_argument(
+        "--dispatch-paths",
+        dest="dispatch_paths",
+        default=None,
+        help="comma-separated repo paths the plan touches; they derive the governance "
+             "weight (variant) in the trace. The seat count does not follow it: one "
+             "default seat, a second on BLOCK.",
+    )
+    p_run.add_argument(
+        "--task-class",
+        dest="task_class",
+        default=None,
+        help="task class for the plan from the smart-router closed set; it feeds "
+             "the governance weight in the trace. A new feature no longer gets "
+             "more seats.",
+    )
+    p_run.add_argument(
+        "--irreversible",
+        dest="irreversible",
+        action="store_true",
+        help="declare the change irreversible (deletion/rename/big architecture "
+             "refactor); forces coding-strict in the trace, not more seats.",
+    )
+    p_run.set_defaults(func=cmd_plan_gate_run)
+
+
+def _add_plan_gate_status_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate status`: show a track's plan-gate state and derived status."""
+    p_status = pg_sub.add_parser(
+        "status", help="show a track's plan-gate state + derived_status",
+    )
+    common(p_status)
+    p_status.add_argument("track_id")
+    p_status.set_defaults(func=cmd_plan_gate_status)
+
+
+def _add_plan_gate_attest_parser(pg_sub: Any, common: Callable[[Any], None]) -> None:
+    """`plan-gate attest`: the operator escape-hatch that passes the gate by hand."""
+    p_attest = pg_sub.add_parser(
+        "attest",
+        help="operator escape-hatch: attest the plan gate as passed without re-running the panel",
+    )
+    common(p_attest)
+    p_attest.add_argument("track_id")
+    p_attest.add_argument("--reason", default="", help="operator attestation reason (REQUIRED)")
+    p_attest.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_attest.set_defaults(func=cmd_plan_gate_attest)
+
+
+def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> Any:
+    """The `plan-gate` parser with its action subparsers; returns them.
+
+    Extracted from ``_build_parser`` (the functies-onder-200 track): that function
+    is far past the 70-executable-line ratchet, so the domain moves out one
+    builder per action. The caller keeps building the remaining plan-gate
+    actions (``missing-reasons``, ``backfill-reason``, ``reblock``, ``batch``)
+    on the returned subparsers object.
+    """
+    pg = sub.add_parser(
+        "plan-gate",
+        help="plan-first gate: a multi-model panel reviews a plan before any build",
+    )
+    pg_sub = pg.add_subparsers(dest="action", required=True)
+    _add_plan_gate_seed_parser(pg_sub, common)
+    _add_plan_gate_run_parser(pg_sub, common)
+    _add_plan_gate_status_parser(pg_sub, common)
+    _add_plan_gate_attest_parser(pg_sub, common)
+    return pg_sub
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -6532,90 +6644,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------
     # plan-gate subcommand (PM plan-first gate)
     # ------------------------------------------------------------------
-    pg = sub.add_parser(
-        "plan-gate",
-        help="plan-first gate: a multi-model panel reviews a plan before any build",
-    )
-    pg_sub = pg.add_subparsers(dest="action", required=True)
-
-    p_pseed = pg_sub.add_parser(
-        "seed", help="seed the OI-PLAN blocker (track stays blocked until the gate passes)",
-    )
-    _common(p_pseed)
-    p_pseed.add_argument("track_id")
-    p_pseed.set_defaults(func=cmd_plan_gate_seed)
-
-    p_prun = pg_sub.add_parser(
-        "run", help="run the panel over a plan doc; on PASS, resolve the blocker",
-    )
-    _common(p_prun)
-    p_prun.add_argument("track_id")
-    p_prun.add_argument(
-        "--doc", default=None,
-        help="path to the plan doc under review. Optional: when omitted, the "
-             "track's goal_state is the plan (it must carry at least "
-             "goal_min_chars meaningful characters from configs/plan_gate_panel.yaml).",
-    )
-    p_prun.add_argument(
-        "--panel-seats",
-        dest="panel_seats",
-        default="",
-        help="comma-separated seat labels to run instead of the default seat; "
-             "logged as an override, unknown labels fail loud. Default: default_seat.",
-    )
-    p_prun.add_argument(
-        "--seat-timeout",
-        dest="seat_timeout",
-        type=int,
-        default=None,
-        help="per-seat deadline in seconds before a panelist times out and books a "
-             "fabricated abstention (OI-1068). Defaults to VNX_PLAN_GATE_SEAT_TIMEOUT "
-             "(default 900) — the same env-var-knob style as VNX_PANEL_RETRY.",
-    )
-    p_prun.add_argument(
-        "--dispatch-paths",
-        dest="dispatch_paths",
-        default=None,
-        help="comma-separated repo paths the plan touches; they derive the governance "
-             "weight (variant) in the trace. The seat count does not follow it: one "
-             "default seat, a second on BLOCK.",
-    )
-    p_prun.add_argument(
-        "--task-class",
-        dest="task_class",
-        default=None,
-        help="task class for the plan from the smart-router closed set; it feeds "
-             "the governance weight in the trace. A new feature no longer gets "
-             "more seats.",
-    )
-    p_prun.add_argument(
-        "--irreversible",
-        dest="irreversible",
-        action="store_true",
-        help="declare the change irreversible (deletion/rename/big architecture "
-             "refactor); forces coding-strict in the trace, not more seats.",
-    )
-    p_prun.set_defaults(func=cmd_plan_gate_run)
-
-    p_pstat = pg_sub.add_parser(
-        "status", help="show a track's plan-gate state + derived_status",
-    )
-    _common(p_pstat)
-    p_pstat.add_argument("track_id")
-    p_pstat.set_defaults(func=cmd_plan_gate_status)
-
-    p_pattest = pg_sub.add_parser(
-        "attest",
-        help="operator escape-hatch: attest the plan gate as passed without re-running the panel",
-    )
-    _common(p_pattest)
-    p_pattest.add_argument("track_id")
-    p_pattest.add_argument("--reason", default="", help="operator attestation reason (REQUIRED)")
-    p_pattest.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_pattest.set_defaults(func=cmd_plan_gate_attest)
+    pg_sub = _add_plan_gate_parsers(sub, _common)
 
     p_pmiss = pg_sub.add_parser(
         "missing-reasons",

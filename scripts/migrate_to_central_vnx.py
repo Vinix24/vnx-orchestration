@@ -56,7 +56,7 @@ import sys
 import tarfile
 import time
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_LIB = REPO_ROOT / "scripts" / "lib"
@@ -1751,18 +1751,14 @@ def _parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
-def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
-    """Execute the apply / verify / backup flow.
+def _warn_on_env_leak(args: argparse.Namespace) -> None:
+    """Warn when ``VNX_DATA_DIR`` contradicts ``--central-state``.
 
-    Receives a fully-parsed ``args`` namespace (from :func:`_parse_args`) and
-    a filtered ``projects`` list (from :func:`main`).  Handles the
-    ``--verify-only``, dry-run, ``--test-apply``, and ``--apply`` code paths.
+    Env isolation pre-flight: this detects cross-repo env contamination (e.g.
+    ``VNX_DATA_DIR`` inherited from a different tmux pane).  WARN only — not
+    abort — because the flag value always takes precedence over env vars in
+    the migrator's own code paths.
     """
-    # Env isolation pre-flight: warn if VNX_DATA_DIR is set and does not
-    # match the --central-state argument.  This detects cross-repo env
-    # contamination (e.g. VNX_DATA_DIR inherited from a different tmux pane).
-    # WARN only — not abort — because the flag value always takes precedence
-    # over env vars in the migrator's own code paths.
     _env_vnx_data_dir = os.environ.get("VNX_DATA_DIR", "")
     if _env_vnx_data_dir:
         _central_arg = str(args.central_state.expanduser().resolve())
@@ -1775,52 +1771,57 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
                 args.central_state,
             )
 
-    # --test-apply: redirect central_state to a temp dir and run the full
-    # bootstrap + migration chain without touching the live central DB.
-    # Source DBs remain read-only (unchanged from normal apply flow).
-    # The temp dir is auto-cleaned after completion regardless of exit code.
-    if args.test_apply:
-        import shutil
-        import tempfile
 
-        real_central = args.central_state.expanduser()
-        tmp_dir = tempfile.mkdtemp(prefix="vnx-test-apply-")
-        try:
-            print(
-                f"TEST MODE -- no writes to live central DB at {real_central}",
-                flush=True,
-            )
-            LOG.info(
-                "test-apply: redirecting central_state from %s to temp dir %s",
-                real_central,
-                tmp_dir,
-            )
-            # Override central_state and implicit flags for the test run.
-            args.central_state = Path(tmp_dir)
-            args.fresh_central = True
-            args.no_prompt = True
-            # --test-apply implies --apply so the real apply path runs.
-            args.apply = True
-            # Confirmation phrase is set implicitly for test-apply.
-            args.confirm = CONFIRMATION_PHRASE
-            # Run the apply through the normal code path.  We CANNOT call
-            # main() recursively here because that re-parses argv and would
-            # infinite-loop on args.test_apply.  Instead, fall through to the
-            # existing apply logic below with the modified args namespace.
-        except Exception as exc:
-            LOG.error("test-apply setup failed: %s", exc)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-            return 2
+def _redirect_for_test_apply(args: argparse.Namespace) -> tuple[str | None, int | None]:
+    """Redirect ``--test-apply`` onto a temp central dir.
 
-        # Register cleanup to run after the apply block regardless of outcome.
-        _test_apply_tmp_dir: str | None = tmp_dir
-    else:
-        _test_apply_tmp_dir = None
+    Returns ``(tmp_dir, exit_code)``: ``tmp_dir`` is what the caller must clean
+    up on every exit path (None when ``--test-apply`` is off), and ``exit_code``
+    is set only when the redirect itself failed.  ``args`` is then rewritten for
+    the real apply path — ``main()`` cannot be called recursively (it re-parses
+    argv and would infinite-loop on ``args.test_apply``).  Source DBs stay
+    read-only.
+    """
+    if not args.test_apply:
+        return None, None
 
-    central_state: Path = args.central_state.expanduser()
-    central_qi = central_state / "quality_intelligence.db"
-    central_rc = central_state / "runtime_coordination.db"
+    import shutil
+    import tempfile
 
+    real_central = args.central_state.expanduser()
+    tmp_dir = tempfile.mkdtemp(prefix="vnx-test-apply-")
+    try:
+        print(
+            f"TEST MODE -- no writes to live central DB at {real_central}",
+            flush=True,
+        )
+        LOG.info(
+            "test-apply: redirecting central_state from %s to temp dir %s",
+            real_central,
+            tmp_dir,
+        )
+        # Override central_state and implicit flags for the test run.
+        args.central_state = Path(tmp_dir)
+        args.fresh_central = True
+        args.no_prompt = True
+        # --test-apply implies --apply so the real apply path runs.
+        args.apply = True
+        # Confirmation phrase is set implicitly for test-apply.
+        args.confirm = CONFIRMATION_PHRASE
+    except Exception as exc:
+        LOG.error("test-apply setup failed: %s", exc)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None, 2
+    return tmp_dir, None
+
+
+def _run_non_apply_mode(
+    args: argparse.Namespace,
+    projects: list[ProjectEntry],
+    central_qi: Path,
+    central_rc: Path,
+) -> int | None:
+    """Run ``--verify-only`` or the plan-only mode; None means keep applying."""
     if args.verify_only:
         report = verify_import(central_qi, central_rc, projects)
         print(json.dumps(report, indent=2, default=str))
@@ -1840,6 +1841,140 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
             cmd.append("--json")
         LOG.info("default mode: invoking dry-run preflight (no writes)")
         return subprocess.call(cmd)
+
+    return None
+
+
+def _backup_before_apply(
+    args: argparse.Namespace,
+    projects: list[ProjectEntry],
+    test_apply_tmp_dir: str | None,
+) -> tuple[Path | None, int | None]:
+    """Back up every source project before any write to the central DB.
+
+    In test-apply mode no backup is taken: the source DBs are read-only and
+    there is nothing to roll back — the write target is a temp dir that is
+    cleaned at the end of the run.  Returns ``(backup_dir, exit_code)``, where
+    ``exit_code`` is 3 when access or the backup itself failed.
+    """
+    if test_apply_tmp_dir is not None:
+        LOG.info("test-apply: skipping backup phase (writes target temp dir only)")
+        return None, None
+
+    inaccessible = _check_backup_access(projects)
+    if inaccessible:
+        for pid, path, err in inaccessible:
+            LOG.error(
+                "Cannot access source directory for project_id=%s: %s. "
+                "macOS TCC blocking: enable Full Disk Access for %s in "
+                "System Settings → Privacy & Security → Full Disk Access, "
+                "then re-run.",
+                pid,
+                err,
+                sys.executable,
+            )
+        return None, 3
+
+    try:
+        return backup_projects(projects, args.backup_base), None
+    except (BackupFailure, AbortRequested) as exc:
+        LOG.error("backup phase failed: %s", exc)
+        return None, 3
+
+
+def _cleanup_unpopulated_stubs(created_stubs: list[tuple[bool, Path]]) -> None:
+    """Remove stub file(s) THIS run just created if bootstrap never populated them.
+
+    ``created_stubs`` holds ``(created_this_run, path)`` pairs.  Without this,
+    any failure between the lazy stub creation and a successful bootstrap — not
+    just the three exception types the apply block explicitly catches, but also
+    Ctrl-C, an uncaught exception, or --central-state pointed at a directory
+    that was never a real state dir to begin with — leaves a permanent 0-table
+    decoy on disk. That decoy later reads as "no data yet" to any reader that
+    only checks ``.exists()``, instead of "wrong path" (OI: absence-is-loud D5).
+    Only stubs created by THIS invocation are touched; a pre-existing DB (even
+    a still-partial one from a prior run) is never deleted here.
+    """
+    for created, path in created_stubs:
+        if created and _qi_count_tables(path) == 0:
+            path.unlink()
+            LOG.warning("removed unpopulated stub created this run: %s", path)
+
+
+def _apply_pre_import_gates(
+    args: argparse.Namespace,
+    central_state: Path,
+    central_qi: Path,
+    central_rc: Path,
+    cleanup_test_apply: Callable[[], None],
+) -> tuple[bool, bool, list[tuple[bool, Path]], int | None]:
+    """Create the central dir/stubs and run the pre-import freshness gates.
+
+    Returns ``(central_was_fresh, central_qi_partial, created_stubs, exit_code)``
+    where ``exit_code`` is set only when the run must stop (fresh central without
+    ``--fresh-central``); ``created_stubs`` belongs in the bootstrap's ``finally``
+    (see :func:`_cleanup_unpopulated_stubs`).
+    """
+    central_state.mkdir(parents=True, exist_ok=True)
+
+    # OI-011 fix: detect partial-init QI DB BEFORE the --fresh-central gate.
+    # A partial DB (e.g. dispatch_experiments only from retroactive_backfill)
+    # has tables but user_version=0 — it is NOT fresh and must NOT require
+    # --fresh-central, since existing data would be incorrectly abandoned.
+    # _init_central_if_missing is safe to call on a partial DB (idempotent).
+    central_qi_partial = _qi_is_partial(central_qi)
+
+    # Round-3 fix-forward: detect a fresh central BEFORE creating empty
+    # DB files. Without this gate, an operator who has just blown away
+    # ~/.vnx-data/state/ would see "import complete" against empty DBs.
+    # OI-011: partial-init QI (data present, not truly empty) bypasses this
+    # gate — _init_central_if_missing handles the bootstrap idempotently.
+    central_was_fresh = _central_is_empty(central_qi, central_rc)
+    if central_was_fresh and not args.fresh_central and not central_qi_partial:
+        LOG.error(
+            "central appears fresh (missing canonical schema at %s); "
+            "pass --fresh-central to acknowledge first-deploy bootstrap",
+            central_state,
+        )
+        cleanup_test_apply()
+        return central_was_fresh, central_qi_partial, [], 1
+
+    stub_created_qi = not central_qi.exists()
+    if stub_created_qi:
+        LOG.warning("central QI db missing; creating empty: %s", central_qi)
+        sqlite3.connect(str(central_qi)).close()
+    stub_created_rc = not central_rc.exists()
+    if stub_created_rc:
+        LOG.warning("central RC db missing; creating empty: %s", central_rc)
+        sqlite3.connect(str(central_rc)).close()
+
+    created_stubs = [(stub_created_qi, central_qi), (stub_created_rc, central_rc)]
+    return central_was_fresh, central_qi_partial, created_stubs, None
+
+
+def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
+    """Execute the apply / verify / backup flow.
+
+    Receives a fully-parsed ``args`` namespace (from :func:`_parse_args`) and
+    a filtered ``projects`` list (from :func:`main`).  Handles the
+    ``--verify-only``, dry-run, ``--test-apply``, and ``--apply`` code paths.
+    """
+    _warn_on_env_leak(args)
+
+    # --test-apply: redirect central_state to a temp dir and run the full
+    # bootstrap + migration chain without touching the live central DB.
+    # The temp dir is auto-cleaned after completion regardless of exit code.
+    _test_apply_tmp_dir, _test_apply_exit = _redirect_for_test_apply(args)
+    if _test_apply_exit is not None:
+        return _test_apply_exit
+
+    central_state: Path = args.central_state.expanduser()
+    central_qi = central_state / "quality_intelligence.db"
+    central_rc = central_state / "runtime_coordination.db"
+
+    _early_exit = _run_non_apply_mode(args, projects, central_qi, central_rc)
+    if _early_exit is not None:
+        return _early_exit
 
     if not confirm_apply(args.confirm, central_state, no_prompt=args.no_prompt):
         return 1
@@ -1862,33 +1997,9 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         LOG.error("aborting: %s", exc)
         return 1
 
-    # In test-apply mode, source DBs are opened read-only (unchanged from
-    # normal flow) but no backup of source data is taken — there is nothing
-    # to roll back because the central write target is a temp dir that is
-    # auto-cleaned at the end of the run.
-    if _test_apply_tmp_dir is not None:
-        LOG.info("test-apply: skipping backup phase (writes target temp dir only)")
-        backup_dir: Path | None = None
-    else:
-        inaccessible = _check_backup_access(projects)
-        if inaccessible:
-            for pid, path, err in inaccessible:
-                LOG.error(
-                    "Cannot access source directory for project_id=%s: %s. "
-                    "macOS TCC blocking: enable Full Disk Access for %s in "
-                    "System Settings → Privacy & Security → Full Disk Access, "
-                    "then re-run.",
-                    pid,
-                    err,
-                    sys.executable,
-                )
-            return 3
-
-        try:
-            backup_dir = backup_projects(projects, args.backup_base)
-        except (BackupFailure, AbortRequested) as exc:
-            LOG.error("backup phase failed: %s", exc)
-            return 3
+    backup_dir, _backup_exit = _backup_before_apply(args, projects, _test_apply_tmp_dir)
+    if _backup_exit is not None:
+        return _backup_exit
 
     # All paths below may return early (exit codes 1/3/4).  When in
     # test-apply mode the temp dir must be cleaned up on every exit path.
@@ -1900,56 +2011,11 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
             LOG.info("test-apply: cleaning up temp central dir %s", _test_apply_tmp_dir)
             _shutil.rmtree(_test_apply_tmp_dir, ignore_errors=True)
 
-    central_state.mkdir(parents=True, exist_ok=True)
-
-    # OI-011 fix: detect partial-init QI DB BEFORE the --fresh-central gate.
-    # A partial DB (e.g. dispatch_experiments only from retroactive_backfill)
-    # has tables but user_version=0 — it is NOT fresh and must NOT require
-    # --fresh-central, since existing data would be incorrectly abandoned.
-    # _init_central_if_missing is safe to call on a partial DB (idempotent).
-    central_qi_partial = _qi_is_partial(central_qi)
-
-    # Round-3 fix-forward: detect a fresh central BEFORE creating empty
-    # DB files. Without this gate, an operator who has just blown away
-    # ~/.vnx-data/state/ would see "import complete" against empty DBs.
-    # OI-011: partial-init QI (data present, not truly empty) bypasses this
-    # gate — _init_central_if_missing handles the bootstrap idempotently.
-    central_was_fresh = _central_is_empty(central_qi, central_rc)
-    if central_was_fresh and not args.fresh_central and not central_qi_partial:
-        LOG.error(
-            "central appears fresh (missing canonical schema at %s); "
-            "pass --fresh-central to acknowledge first-deploy bootstrap",
-            central_state,
-        )
-        _test_apply_cleanup()
-        return 1
-
-    _stub_created_qi = not central_qi.exists()
-    if _stub_created_qi:
-        LOG.warning("central QI db missing; creating empty: %s", central_qi)
-        sqlite3.connect(str(central_qi)).close()
-    _stub_created_rc = not central_rc.exists()
-    if _stub_created_rc:
-        LOG.warning("central RC db missing; creating empty: %s", central_rc)
-        sqlite3.connect(str(central_rc)).close()
-
-    def _cleanup_unpopulated_stubs() -> None:
-        """Remove stub file(s) THIS run just created if bootstrap never populated them.
-
-        Without this, any failure between the lazy-create above and a
-        successful bootstrap — not just the three exception types this
-        block explicitly catches, but also Ctrl-C, an uncaught exception, or
-        --central-state pointed at a directory that was never a real state
-        dir to begin with — leaves a permanent 0-table decoy on disk. That
-        decoy later reads as "no data yet" to any reader that only checks
-        `.exists()`, instead of "wrong path" (OI: absence-is-loud D5). Only
-        stubs created by THIS invocation are touched; a pre-existing DB
-        (even a still-partial one from a prior run) is never deleted here.
-        """
-        for created, path in ((_stub_created_qi, central_qi), (_stub_created_rc, central_rc)):
-            if created and _qi_count_tables(path) == 0:
-                path.unlink()
-                LOG.warning("removed unpopulated stub created this run: %s", path)
+    central_was_fresh, central_qi_partial, _created_stubs, _gate_exit = _apply_pre_import_gates(
+        args, central_state, central_qi, central_rc, _test_apply_cleanup
+    )
+    if _gate_exit is not None:
+        return _gate_exit
 
     pre_snapshot = _snapshot_central(central_qi, central_rc)
     try:
@@ -2018,7 +2084,7 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
         # explicitly-handled exception types, AND anything else (Ctrl-C,
         # an unanticipated exception) that this dispatch's exception list
         # doesn't happen to name. See _cleanup_unpopulated_stubs docstring.
-        _cleanup_unpopulated_stubs()
+        _cleanup_unpopulated_stubs(_created_stubs)
 
     if args.reset_idempotency:
         cleared = reset_idempotency_state(central_qi, central_rc)
