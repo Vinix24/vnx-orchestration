@@ -469,7 +469,8 @@ class TestLifecycleRefusalIsVisible:
 
     def test_two_refusals_are_logged_counted_and_left_in_place(
             self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock,
-            hermetic_append, caplog, capsys, tmp_path):
+            hermetic_append, caplog, capsys, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")  # a legacy row is undecidable here
         dispatch_ids = ("20260906-refused-a", "20260906-refused-b")
         for dispatch_id in dispatch_ids:
             _insert_dispatch_row(state_dir, dispatch_id)
@@ -654,9 +655,10 @@ class TestApplyBooksTheRoutedLine:
 
     def test_legacy_report_without_project_id_and_a_db_row_books_task_complete(
             self, data_dir, state_dir, reports_dir, lifecycle_db, spec_file, clock,
-            hermetic_append, capsys):
+            hermetic_append, capsys, monkeypatch):
         """Codex's warning (OI-2520): a legacy report with no tenant and a live DB
         must stay a candidate, and ``--apply`` books the same ``task_complete``."""
+        monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")  # legacy on purpose
         dispatch_id = "20260906-legacy-db"
         clock["now"] = T0
         _insert_dispatch_row(state_dir, dispatch_id)

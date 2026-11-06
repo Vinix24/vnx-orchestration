@@ -64,7 +64,8 @@ def _write(path: Path, chunks: list) -> None:
 
 def test_the_sweep_reads_a_big_ledger_without_keeping_it(tmp_path, monkeypatch):
     """The red-run test: on the pre-change code the peak fails, not the import."""
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    # K-act flipped the default on; the brake must be named explicitly.
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
     state = _state_dir(tmp_path)
     ledger = state / "t0_receipts.ndjson"
 

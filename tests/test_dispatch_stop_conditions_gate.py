@@ -40,10 +40,21 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 from dispatch_cli import run_dispatch  # noqa: E402
 from stop_conditions import CheckStatus, StopConditionResult  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _legacy_ledger_lifecycle(monkeypatch):
+    """These door tests predate the K-act activation and use a fresh, un-migrated
+    store (``init_schema`` only, no project_id on ``dispatches``), so they run the
+    door in the legacy lifecycle mode they always exercised. The on-by-default
+    setting is proven end to end in ``tests/test_k_act_activation.py``."""
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
 
 # ---------------------------------------------------------------------------

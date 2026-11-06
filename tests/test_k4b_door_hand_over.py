@@ -247,7 +247,7 @@ def _door_env(monkeypatch, data_dir: Path, *, lifecycle: bool) -> Path:
     if lifecycle:
         monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
     else:
-        monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+        monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
     return state_dir
 
 
@@ -488,7 +488,7 @@ def test_legacy_writes_no_line_and_keeps_main_s_decision(tmp_path, monkeypatch):
     _make_coordination_db(state_dir)
     monkeypatch.setenv("VNX_DATA_DIR", str(data_dir))
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
-    monkeypatch.delenv("VNX_LEDGER_LIFECYCLE", raising=False)
+    monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "0")
 
     with _patched_fetch() as fetch_spy, \
          patch("dispatch_cli.build_runtime_snapshot", return_value=_clean_snapshot()), \
