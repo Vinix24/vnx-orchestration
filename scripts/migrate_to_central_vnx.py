@@ -1775,15 +1775,12 @@ def _warn_on_env_leak(args: argparse.Namespace) -> None:
 def _redirect_for_test_apply(args: argparse.Namespace) -> tuple[str | None, int | None]:
     """Redirect ``--test-apply`` onto a temp central dir.
 
-    Returns ``(tmp_dir, exit_code)``.  ``tmp_dir`` is the directory the caller
-    must clean up on every exit path (None when ``--test-apply`` is off);
-    ``exit_code`` is set only when the redirect itself failed.
-
-    On success ``args`` is rewritten for the real apply path — we CANNOT call
-    ``main()`` recursively here because that re-parses argv and would
-    infinite-loop on ``args.test_apply``.  The caller falls through to the
-    existing apply logic with the modified ``args`` namespace.  Source DBs
-    remain read-only (unchanged from the normal apply flow).
+    Returns ``(tmp_dir, exit_code)``: ``tmp_dir`` is what the caller must clean
+    up on every exit path (None when ``--test-apply`` is off), and ``exit_code``
+    is set only when the redirect itself failed.  ``args`` is then rewritten for
+    the real apply path — ``main()`` cannot be called recursively (it re-parses
+    argv and would infinite-loop on ``args.test_apply``).  Source DBs stay
+    read-only.
     """
     if not args.test_apply:
         return None, None
@@ -1824,11 +1821,7 @@ def _run_non_apply_mode(
     central_qi: Path,
     central_rc: Path,
 ) -> int | None:
-    """Run ``--verify-only`` or the plan-only default mode.
-
-    Returns the exit code for those modes, or None when neither applies and
-    the caller must continue with the real apply.
-    """
+    """Run ``--verify-only`` or the plan-only mode; None means keep applying."""
     if args.verify_only:
         report = verify_import(central_qi, central_rc, projects)
         print(json.dumps(report, indent=2, default=str))
@@ -1859,13 +1852,10 @@ def _backup_before_apply(
 ) -> tuple[Path | None, int | None]:
     """Back up every source project before any write to the central DB.
 
-    In test-apply mode the source DBs are opened read-only (unchanged from the
-    normal flow) but no backup of source data is taken — there is nothing to
-    roll back because the central write target is a temp dir that is
-    auto-cleaned at the end of the run.
-
-    Returns ``(backup_dir, exit_code)``; ``exit_code`` is 3 when access or the
-    backup itself failed, and the caller returns it unchanged.
+    In test-apply mode no backup is taken: the source DBs are read-only and
+    there is nothing to roll back — the write target is a temp dir that is
+    cleaned at the end of the run.  Returns ``(backup_dir, exit_code)``, where
+    ``exit_code`` is 3 when access or the backup itself failed.
     """
     if test_apply_tmp_dir is not None:
         LOG.info("test-apply: skipping backup phase (writes target temp dir only)")
@@ -1918,13 +1908,12 @@ def _apply_pre_import_gates(
     central_rc: Path,
     cleanup_test_apply: Callable[[], None],
 ) -> tuple[bool, bool, list[tuple[bool, Path]], int | None]:
-    """Create the central dir/stubs and run the two pre-import freshness gates.
+    """Create the central dir/stubs and run the pre-import freshness gates.
 
-    Returns ``(central_was_fresh, central_qi_partial, created_stubs,
-    exit_code)``; ``exit_code`` is set only when the run must stop (fresh
-    central without the ``--fresh-central`` acknowledgement), in which case the
-    caller returns it unchanged.  ``created_stubs`` belongs in the bootstrap's
-    ``finally`` — see :func:`_cleanup_unpopulated_stubs`.
+    Returns ``(central_was_fresh, central_qi_partial, created_stubs, exit_code)``
+    where ``exit_code`` is set only when the run must stop (fresh central without
+    ``--fresh-central``); ``created_stubs`` belongs in the bootstrap's ``finally``
+    (see :func:`_cleanup_unpopulated_stubs`).
     """
     central_state.mkdir(parents=True, exist_ok=True)
 
@@ -2022,12 +2011,7 @@ def _run_apply(args: argparse.Namespace, projects: list[ProjectEntry]) -> int:
             LOG.info("test-apply: cleaning up temp central dir %s", _test_apply_tmp_dir)
             _shutil.rmtree(_test_apply_tmp_dir, ignore_errors=True)
 
-    (
-        central_was_fresh,
-        central_qi_partial,
-        _created_stubs,
-        _gate_exit,
-    ) = _apply_pre_import_gates(
+    central_was_fresh, central_qi_partial, _created_stubs, _gate_exit = _apply_pre_import_gates(
         args, central_state, central_qi, central_rc, _test_apply_cleanup
     )
     if _gate_exit is not None:
