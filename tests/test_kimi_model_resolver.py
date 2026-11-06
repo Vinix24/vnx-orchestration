@@ -22,6 +22,8 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from provider_worktree_support import provider_worktree_stub
+
 
 # ---------------------------------------------------------------------------
 # WS1 — registry: default_model flag + verified entries
@@ -469,3 +471,29 @@ class TestProviderAdapterKimiSeam:
 
         assert result.status == "success"
         assert spawn_mock.call_args.kwargs["model"] == "kimi-code/k3"
+
+
+def test_dispatch_kimi_does_not_create_a_real_worktree(monkeypatch, provider_worktree_stub):
+    """The model-resolution assertions here never read the checkout, so this
+    module runs on the stubbed isolation seam
+    (tests/provider_worktree_support.py). The real create/remove path is pinned
+    by tests/test_provider_dispatch_worktree_isolation.py.
+    """
+    import provider_dispatch as pd
+    from provider_spawns.kimi_spawn import KimiSpawnResult
+
+    monkeypatch.delenv("VNX_KIMI_MODEL", raising=False)
+    result = KimiSpawnResult(
+        returncode=0, completion_text="hi", events_written=1, session_id=None,
+        timed_out=False, token_usage={"input_tokens": 1, "output_tokens": 1},
+    )
+
+    with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+         patch("event_store.EventStore", return_value=MagicMock()), \
+         patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/r.ndjson")), \
+         patch("governance_emit.emit_unified_report", return_value=Path("/tmp/r.md")):
+        exit_code = pd._dispatch_kimi(_build_args())
+
+    assert exit_code == 0, f"expected exit 0, got {exit_code}"
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()

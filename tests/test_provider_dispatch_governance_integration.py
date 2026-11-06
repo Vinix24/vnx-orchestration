@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 import provider_dispatch
+from provider_worktree_support import provider_worktree_stub
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +129,14 @@ def test_claude_dispatch_failure_produces_receipt(tmp_path):
 # Codex dispatch tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.real_provider_worktree
 def test_codex_dispatch_produces_receipt(tmp_path):
+    """The integration case: the ONE test in this file that keeps the real
+    isolation path (a real git worktree built and removed around the dispatch).
+    Every other test here runs on the stub in tests/provider_worktree_support.py,
+    so this is where a break in the create/teardown wiring still shows up next
+    to the receipt it is supposed to produce.
+    """
     args = _make_args("codex", dispatch_id="codex-integ-001")
     result = _SpawnResult(completion_text="codex output")
     with patch("provider_spawns.codex_spawn.spawn_codex", return_value=result), \
@@ -150,6 +158,24 @@ def test_codex_dispatch_failure_emits_receipt_with_status_failure(tmp_path):
     receipt = _last_receipt(tmp_path)
     assert receipt["provider"] == "codex"
     assert receipt["status"] == "failure"
+
+
+def test_codex_dispatch_does_not_create_a_real_worktree(tmp_path, provider_worktree_stub):
+    """The receipt assertions above never read the checkout, so only
+    test_codex_dispatch_produces_receipt keeps the real path. Here the dispatch
+    still lands its receipt, and the isolation seam stays stubbed.
+    """
+    args = _make_args("codex", dispatch_id="codex-no-real-worktree-001")
+    with patch("provider_spawns.codex_spawn.spawn_codex", return_value=_SpawnResult()), \
+         patch("event_store.EventStore", MagicMock()):
+        rc = provider_dispatch._dispatch_codex(args)
+
+    assert rc == 0
+    receipt = _last_receipt(tmp_path)
+    assert receipt is not None
+    assert receipt["dispatch_id"] == "codex-no-real-worktree-001"
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 # ---------------------------------------------------------------------------

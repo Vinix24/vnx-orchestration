@@ -119,6 +119,7 @@ vnx_orchestration = [
 [tool.pytest.ini_options]
 markers = [
     "live: runs real claude -p inference (F39 replay suite). Opt in with -m live.",
+    "real_provider_worktree: keeps the real provider-lane git worktree (tests/provider_worktree_support.py)",
 ]
 
 # Exclude build artifacts, caches, and non-runtime content from the wheel.

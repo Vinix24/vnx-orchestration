@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
 from provider_spawns.litellm_spawn import LiteLLMSpawnResult
+from provider_worktree_support import provider_worktree_stub
 
 
 def _assert_price_schema(model) -> None:
@@ -99,6 +100,40 @@ class TestProviderDispatchRoutesZaiViaOpenRouter:
         assert "openrouter" in model, (
             f"expected model containing 'openrouter', got {model!r}"
         )
+
+
+def test_zai_dispatch_does_not_create_a_real_worktree(provider_worktree_stub):
+    """The routing assertion above reads no checkout, so this module runs on the
+    stubbed isolation seam (tests/provider_worktree_support.py). The real
+    create/remove path is pinned by
+    tests/test_provider_dispatch_worktree_isolation.py::test_isolated_worktree_creates_and_removes.
+    """
+    mock_result = LiteLLMSpawnResult(
+        returncode=0,
+        completion_text="ok",
+        events_written=2,
+        session_id=None,
+        timed_out=False,
+        stopped_early=False,
+        token_usage=None,
+        error=None,
+        event_writer_failures=0,
+    )
+
+    with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=mock_result):
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test-key",
+                                     "VNX_OVERRIDE_GLM_VIA_HARNESS_ONLY": "1"}):
+            from provider_dispatch import main
+            rc = main([
+                "--provider", "litellm:zai",
+                "--terminal-id", "T1",
+                "--dispatch-id", "test-dispatch-zai-no-worktree",
+                "--instruction", "Reply with one word.",
+            ])
+
+    assert rc == 0, f"expected exit 0, got {rc}"
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 # ---------------------------------------------------------------------------

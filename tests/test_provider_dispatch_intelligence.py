@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
 
 import provider_dispatch
 import intelligence_injection
+from provider_worktree_support import provider_worktree_stub
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +160,22 @@ class TestEnrichInstructionHelper:
         call_kwargs = instance.select.call_args[1]
         assert "scripts/lib/foo.py" in call_kwargs.get("dispatch_paths", [])
         assert "tests/test_foo.py" in call_kwargs.get("dispatch_paths", [])
+
+
+def test_provider_dispatch_does_not_create_a_real_worktree(tmp_path, provider_worktree_stub):
+    """The wiring assertions here read the prompt, never the checkout, so this
+    module runs on the stubbed isolation seam
+    (tests/provider_worktree_support.py). The real create/remove path is pinned
+    by tests/test_provider_dispatch_worktree_isolation.py.
+    """
+    args = _make_args("kimi")
+    with patch.object(provider_dispatch, "_resolve_state_dir", return_value=tmp_path), \
+            patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=_SpawnResult()), \
+            patch("event_store.EventStore"), _patch_governance():
+        provider_dispatch._dispatch_kimi(args)
+
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 # ---------------------------------------------------------------------------
