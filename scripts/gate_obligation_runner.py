@@ -4292,6 +4292,201 @@ def _fulfill_stay_pending(
     return outcome
 
 
+def _fulfill_by_takeover(
+    path: Path,
+    outcome: Dict[str, Any],
+    takeover_hit: Tuple[str, Path, Dict[str, Any], List[str]],
+    *,
+    manager: Any,
+    gate: str,
+    pr_number: int,
+    branch: str,
+    attempts: int, now: str,
+) -> Dict[str, Any]:
+    """D2e: book the successor gate's decided verdict against the declared gate's obligation."""
+    successor_gate, successor_path, successor_record, hops = takeover_hit
+    passed, verdict_reason = _gate_is_pass(successor_record)
+    terminal = STATUS_FULFILLED if passed else STATUS_FAILED
+    hop_chain = " -> ".join(hops)
+    reason = REASON_FULFILLED_BY_TAKEOVER if passed else REASON_FAILED_BY_TAKEOVER
+    reason_detail = (
+        f"{gate} never produced a decided verdict of its own for PR "
+        f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
+        f"already substituted {successor_gate} as the reader, and "
+        f"{successor_gate} produced a complete-evidence verdict "
+        f"({verdict_reason}). Booked against {gate}'s obligation with "
+        f"resolved_by_gate={successor_gate!r} (D2e)."
+    )
+    updated = _book_obligation_outcome(
+        path,
+        status=terminal,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(successor_path),
+        resolved_by_gate=successor_gate,
+        takeover_hops=hops,
+        fulfilled_by=successor_gate,
+        takeover_gate=successor_gate,
+        evidence_result_path=str(successor_path),
+        reason=reason,
+        reason_detail=reason_detail,
+    )
+    outcome["action"] = updated.get("status", terminal)
+    outcome["request_path"] = updated.get("request_path")
+    outcome["result_path"] = updated.get("result_path")
+    outcome["resolved_by_gate"] = successor_gate
+    outcome["has_required_failure"] = not passed
+    return outcome
+
+
+def _drop_provider_not_installed_result(
+    result_file: Path,
+    result_status: str,
+    result_reason: str,
+    *,
+    gate: str, pr_number: int,
+) -> None:
+    """OI-1469: drop the provider_not_installed record this run wrote — an environment fact, not PR evidence."""
+    # OI-1469: "provider_not_installed" means the required CLI binary was
+    # missing from THIS RUNNER's own process environment (e.g. a
+    # launchd/cron PATH that never sourced it) at the moment the shared
+    # gate engine checked ``shutil.which`` — a fact about the runner, not
+    # about the PR. Booking it in results/ would let a merge-blocking
+    # evidence trail be polluted by whichever process happened to run
+    # last without the binary on PATH (measured live: PR #1694). Remove
+    # the record this fulfilment attempt just caused the engine to write
+    # for exactly that reason — the obligation still stays pending below
+    # with a named reason, so a later run from a properly configured
+    # environment can still fulfil it and write a real result.
+    if result_status == STATUS_NOT_EXECUTABLE and result_reason == "provider_not_installed":
+        try:
+            if result_file.exists():
+                result_file.unlink()
+                _LOG.warning(
+                    "gate_obligation_runner: removed provider_not_installed "
+                    "result for pr=%s gate=%s — provider availability is an "
+                    "environment fact, not PR evidence (OI-1469)",
+                    pr_number, gate,
+                )
+        except OSError as exc:
+            _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
+
+
+def _fulfill_temporary_refusal(
+    path: Path,
+    outcome: Dict[str, Any],
+    temp_reason: str,
+    temp_detail: str,
+    *,
+    manager: Any, gate: str, pr_number: int,
+    branch: str, attempts: int, now: str,
+    result_file: Path, result_status: str, result_reason: str,
+    result_data: Optional[Dict[str, Any]],
+    head_sha_before_run: str, dispatch_id: str,
+) -> Dict[str, Any]:
+    """A temporary refusal stays pending under a bounded retry term, then escalates loudly."""
+    # Same shape as the `unresolvable` PR-resolution path: stays
+    # pending under a bounded retry term, then escalates loudly
+    # (OI-1384) — never burns the obligation on the first temporary
+    # refusal.
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason=temp_reason,
+        reason_detail=temp_detail,
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = temp_detail
+    if attempts >= _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS:
+        escalation_detail = (
+            f"{gate} stayed temporarily unavailable ({temp_reason}) for "
+            f"{attempts} attempts (last status={result_status!r}, "
+            f"reason={result_reason!r}) — escalating to a loud terminal failure"
+        )
+        # OI-1721: the parked case must read the shared composed
+        # constant so the reopen script and this writer can never
+        # drift on the literal string; the other temporary refusals
+        # keep the generic "<temp_reason>_timeout" composition.
+        escalation_reason = (
+            REASON_GATE_PARKED_TIMEOUT
+            if temp_reason == REASON_GATE_PARKED
+            else f"{temp_reason}_timeout"
+        )
+        _book_obligation_outcome(
+            path,
+            status=STATUS_NOT_EXECUTABLE,
+            pr_number=pr_number,
+            branch=branch,
+            attempts=attempts,
+            last_attempt_at=now,
+            resolved_at=utc_now_iso(),
+            request_path=str(manager._request_path(gate, pr_number)),
+            result_path=str(result_file),
+            reason=escalation_reason,
+            reason_detail=escalation_detail,
+        )
+        outcome["action"] = "not_executable"
+        outcome["detail"] = escalation_detail
+    # R10: a reviewer that ran without a bookable verdict counts toward
+    # the retry cap of this head; the run that reaches it parks the obligation.
+    _book_reviewer_run(
+        path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
+        dispatch_id=dispatch_id,
+    )
+    return outcome
+
+
+def _fulfill_runner_error(
+    state_dir: Path,
+    path: Path,
+    outcome: Dict[str, Any],
+    exc: BaseException,
+    *,
+    gate: str,
+    pr_number: int,
+    dispatch_id: str,
+    branch: str,
+    attempts: int,
+    now: str,
+) -> Dict[str, Any]:
+    """A gate that cannot run is a loud registered outcome, never an exception."""
+    result_payload = _record_loud_not_executable(
+        state_dir,
+        gate=gate,
+        pr_number=pr_number,
+        dispatch_id=dispatch_id,
+        reason="runner_error",
+        reason_detail=f"{type(exc).__name__}: {exc}",
+    )
+    _book_obligation_outcome(
+        path,
+        status=STATUS_NOT_EXECUTABLE,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        result_path=str(
+            Path(state_dir) / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
+        ),
+        reason="runner_error",
+        reason_detail=result_payload.get("reason_detail"),
+    )
+    outcome["action"] = "not_executable"
+    outcome["detail"] = result_payload.get("reason_detail")
+    return outcome
+
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
@@ -4505,125 +4700,22 @@ def fulfill_obligation(
             takeover_hit = _find_takeover_successor_evidence(manager, gate, pr_number, head_sha)
 
         if takeover_hit is not None:
-            successor_gate, successor_path, successor_record, hops = takeover_hit
-            passed, verdict_reason = _gate_is_pass(successor_record)
-            terminal = STATUS_FULFILLED if passed else STATUS_FAILED
-            hop_chain = " -> ".join(hops)
-            reason = REASON_FULFILLED_BY_TAKEOVER if passed else REASON_FAILED_BY_TAKEOVER
-            reason_detail = (
-                f"{gate} never produced a decided verdict of its own for PR "
-                f"#{pr_number} -- the review-gate takeover chain ({hop_chain}) "
-                f"already substituted {successor_gate} as the reader, and "
-                f"{successor_gate} produced a complete-evidence verdict "
-                f"({verdict_reason}). Booked against {gate}'s obligation with "
-                f"resolved_by_gate={successor_gate!r} (D2e)."
+            return _fulfill_by_takeover(
+                path, outcome, takeover_hit, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now,
             )
-            updated = _book_obligation_outcome(
-                path,
-                status=terminal,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                resolved_at=utc_now_iso(),
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(successor_path),
-                resolved_by_gate=successor_gate,
-                takeover_hops=hops,
-                fulfilled_by=successor_gate,
-                takeover_gate=successor_gate,
-                evidence_result_path=str(successor_path),
-                reason=reason,
-                reason_detail=reason_detail,
-            )
-            outcome["action"] = updated.get("status", terminal)
-            outcome["request_path"] = updated.get("request_path")
-            outcome["result_path"] = updated.get("result_path")
-            outcome["resolved_by_gate"] = successor_gate
-            outcome["has_required_failure"] = not passed
-            return outcome
 
-        # OI-1469: "provider_not_installed" means the required CLI binary was
-        # missing from THIS RUNNER's own process environment (e.g. a
-        # launchd/cron PATH that never sourced it) at the moment the shared
-        # gate engine checked ``shutil.which`` — a fact about the runner, not
-        # about the PR. Booking it in results/ would let a merge-blocking
-        # evidence trail be polluted by whichever process happened to run
-        # last without the binary on PATH (measured live: PR #1694). Remove
-        # the record this fulfilment attempt just caused the engine to write
-        # for exactly that reason — the obligation still stays pending below
-        # with a named reason, so a later run from a properly configured
-        # environment can still fulfil it and write a real result.
-        if result_status == STATUS_NOT_EXECUTABLE and result_reason == "provider_not_installed":
-            try:
-                if result_file.exists():
-                    result_file.unlink()
-                    _LOG.warning(
-                        "gate_obligation_runner: removed provider_not_installed "
-                        "result for pr=%s gate=%s — provider availability is an "
-                        "environment fact, not PR evidence (OI-1469)",
-                        pr_number, gate,
-                    )
-            except OSError as exc:
-                _LOG.debug("could not remove provider_not_installed result for pr-%s-%s: %s", pr_number, gate, exc)
+        _drop_provider_not_installed_result(
+            result_file, result_status, result_reason, gate=gate, pr_number=pr_number)
 
         temp_reason, temp_detail = _temporary_refusal(gate, pr_number, result_status, result_reason)
         if temp_reason is not None:
-            # Same shape as the `unresolvable` PR-resolution path: stays
-            # pending under a bounded retry term, then escalates loudly
-            # (OI-1384) — never burns the obligation on the first temporary
-            # refusal.
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason=temp_reason,
-                reason_detail=temp_detail,
+            return _fulfill_temporary_refusal(
+                path, outcome, temp_reason, temp_detail, manager=manager, gate=gate,
+                pr_number=pr_number, branch=branch, attempts=attempts, now=now,
+                result_file=result_file, result_status=result_status, result_reason=result_reason,
+                result_data=result_data, head_sha_before_run=head_sha_before_run, dispatch_id=dispatch_id,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = temp_detail
-            if attempts >= _TEMPORARY_REFUSAL_ESCALATION_ATTEMPTS:
-                escalation_detail = (
-                    f"{gate} stayed temporarily unavailable ({temp_reason}) for "
-                    f"{attempts} attempts (last status={result_status!r}, "
-                    f"reason={result_reason!r}) — escalating to a loud terminal failure"
-                )
-                # OI-1721: the parked case must read the shared composed
-                # constant so the reopen script and this writer can never
-                # drift on the literal string; the other temporary refusals
-                # keep the generic "<temp_reason>_timeout" composition.
-                escalation_reason = (
-                    REASON_GATE_PARKED_TIMEOUT
-                    if temp_reason == REASON_GATE_PARKED
-                    else f"{temp_reason}_timeout"
-                )
-                _book_obligation_outcome(
-                    path,
-                    status=STATUS_NOT_EXECUTABLE,
-                    pr_number=pr_number,
-                    branch=branch,
-                    attempts=attempts,
-                    last_attempt_at=now,
-                    resolved_at=utc_now_iso(),
-                    request_path=str(manager._request_path(gate, pr_number)),
-                    result_path=str(result_file),
-                    reason=escalation_reason,
-                    reason_detail=escalation_detail,
-                )
-                outcome["action"] = "not_executable"
-                outcome["detail"] = escalation_detail
-            # R10: a reviewer that ran without a bookable verdict counts toward
-            # the retry cap of this head; the run that reaches it parks the obligation.
-            _book_reviewer_run(
-                path, head_sha_before_run, result_data, outcome, gate=gate, pr_number=pr_number,
-                dispatch_id=dispatch_id,
-            )
-            return outcome
 
         # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
         # record looks decided enough to fall straight through to the
@@ -4778,31 +4870,10 @@ def fulfill_obligation(
             outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
         return outcome
     except Exception as exc:  # noqa: BLE001 — a gate that cannot run is a loud registered outcome
-        result_payload = _record_loud_not_executable(
-            state_dir,
-            gate=gate,
-            pr_number=pr_number,
-            dispatch_id=dispatch_id,
-            reason="runner_error",
-            reason_detail=f"{type(exc).__name__}: {exc}",
+        return _fulfill_runner_error(
+            state_dir, path, outcome, exc, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id,
+            branch=branch, attempts=attempts, now=now,
         )
-        _book_obligation_outcome(
-            path,
-            status=STATUS_NOT_EXECUTABLE,
-            pr_number=pr_number,
-            branch=branch,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=utc_now_iso(),
-            result_path=str(
-                Path(state_dir) / "review_gates" / "results" / f"pr-{pr_number}-{gate}.json"
-            ),
-            reason="runner_error",
-            reason_detail=result_payload.get("reason_detail"),
-        )
-        outcome["action"] = "not_executable"
-        outcome["detail"] = result_payload.get("reason_detail")
-        return outcome
     finally:
         launch.lock.release()
 
