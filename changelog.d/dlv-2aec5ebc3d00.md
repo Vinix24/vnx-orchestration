@@ -1,0 +1,1 @@
+- Event archives (track `audit-spoor-kern`, OI-2096, OI-2098): an archive is extended without repeating lines. A retry after a move that died between the archive write and the truncate no longer doubles the events, and the copy into a terminal-pinned archive takes the live file's lock and extends the archive instead of replacing it.
