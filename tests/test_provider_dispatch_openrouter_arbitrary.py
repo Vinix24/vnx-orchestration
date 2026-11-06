@@ -37,6 +37,7 @@ import provider_dispatch as pd  # noqa: E402
 from provider_dispatch import _build_lane_key, _resolve_openrouter_model  # noqa: E402
 from providers.behavior_contracts import get_contract  # noqa: E402
 from provider_spawns.litellm_spawn import LiteLLMSpawnResult  # noqa: E402
+from provider_worktree_support import provider_worktree_stub  # noqa: E402
 
 _FAKE_KEY = "sk-or-test-key-1234567890abcd"
 
@@ -254,6 +255,28 @@ class TestDispatchLitellmRouting:
 
         assert rc == 0
         assert captured_kwargs["model"] == "openrouter/google/gemini-2.5-flash"
+
+
+def test_openrouter_dispatch_does_not_create_a_real_worktree(provider_worktree_stub):
+    """The routing assertions above read argv/model/lane, never the checkout, so
+    this module runs on the stubbed isolation seam
+    (tests/provider_worktree_support.py). The real create/remove path is pinned
+    by tests/test_provider_dispatch_worktree_isolation.py.
+    """
+    with patch("provider_spawns.litellm_spawn.spawn_litellm", return_value=LiteLLMSpawnResult(
+            returncode=0, completion_text="ok", events_written=1,
+            session_id=None, timed_out=False)), \
+            patch.dict("os.environ", {"OPENROUTER_API_KEY": _FAKE_KEY}):
+        rc = pd.main([
+            "--provider", "litellm:openrouter",
+            "--terminal-id", "T1",
+            "--dispatch-id", "test-openrouter-no-worktree",
+            "--instruction", "echo hello",
+        ])
+
+    assert rc == 0
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,8 @@ _LIB_DIR = str(Path(__file__).resolve().parents[1] / "scripts" / "lib")
 if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
+from provider_worktree_support import provider_worktree_stub
+
 
 def _build_args(**overrides):
     """Build a minimal argparse.Namespace for dispatch tests."""
@@ -515,6 +517,38 @@ class TestComputeKimiCostRefusesToGuess(unittest.TestCase):
         with self.assertLogs("provider_dispatch", level=logging.WARNING) as captured:
             pd._compute_kimi_cost("kimi-code/not-a-real-arg", self.ONE_MTOK)
         self.assertIn("kimi-code/not-a-real-arg", "\n".join(captured.output))
+
+
+def test_dispatch_kimi_does_not_create_a_real_worktree(provider_worktree_stub):
+    """The receipt/prompt assertions here never read the checkout, so this module
+    runs on the stubbed isolation seam (tests/provider_worktree_support.py). The
+    real create/remove path is pinned by
+    tests/test_provider_dispatch_worktree_isolation.py::test_isolated_worktree_creates_and_removes.
+    """
+    import provider_dispatch as pd
+    from provider_spawns.kimi_spawn import KimiSpawnResult
+
+    result = KimiSpawnResult(
+        returncode=0,
+        completion_text="Hello from Kimi!",
+        events_written=3,
+        session_id=None,
+        timed_out=False,
+        stopped_early=False,
+        token_usage={"input_tokens": 50, "output_tokens": 20, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+        error=None,
+        event_writer_failures=0,
+    )
+
+    with patch("provider_spawns.kimi_spawn.spawn_kimi", return_value=result), \
+         patch("event_store.EventStore", return_value=MagicMock()), \
+         patch("governance_emit.emit_dispatch_receipt", return_value=Path("/tmp/receipts.ndjson")), \
+         patch("governance_emit.emit_unified_report", return_value=Path("/tmp/report.md")):
+        exit_code = pd._dispatch_kimi(_build_args())
+
+    assert exit_code == 0, f"expected exit 0, got {exit_code}"
+    provider_worktree_stub.create_worktree.assert_not_called()
+    provider_worktree_stub.finish.assert_called()
 
 
 if __name__ == "__main__":
