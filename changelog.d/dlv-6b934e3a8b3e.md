@@ -1,0 +1,1 @@
+- Dispatch door (golf 2, G2-8): `run_dispatch` drops from 264 to 195 executable lines. The pre-validate routing, the gate fill plus gate-required refusal, and the opening authority/spec-load/refire prologue move into private helpers that keep every reject code, printed line, exit code and spec mutation identical.
