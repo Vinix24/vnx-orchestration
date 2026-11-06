@@ -6549,6 +6549,211 @@ def _add_plan_gate_parsers(sub: Any, common: Callable[[Any], None]) -> None:
     _add_plan_gate_batch_parser(pg_sub, common)
 
 
+def _add_objective_close_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective close`: advance a track's declared phase to a terminal status."""
+    p_close = obj_sub.add_parser(
+        "close",
+        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
+    )
+    common(p_close)
+    p_close.add_argument("track_id")
+    p_close.add_argument("--apply", action="store_true",
+                         help="write the transition (default: dry-run check)")
+    p_close.add_argument("--approval-id", default="",
+                         help="operator approval token (REQUIRED with --apply)")
+    p_close.add_argument("--include-parked", action="store_true",
+                         help="allow closing a PARKED track (un-parks it; off by default)")
+    p_close.add_argument(
+        "--repo-root", default="", dest="repo_root",
+        metavar="PATH",
+        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
+    )
+    p_close.add_argument(
+        "--attest", default=None, metavar="REASON",
+        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
+             "--approval-id). Appends the real PR via --pr when given, else fails open by "
+             "appending ops-attest:<date>; refs already on the track are kept",
+    )
+    p_close.add_argument(
+        "--pr", action="append", default=None, metavar="NNN",
+        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
+             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
+             "order kept, nothing replaced) instead of ops-attest:<date>. "
+             "Without --attest, use `vnx objective link-pr` instead.",
+    )
+    p_close.add_argument(
+        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
+        metavar="N",
+        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
+             "close handles one track so the cap is rarely reached). Bounds the "
+             "evidence gather so it is explicit rather than unbounded.",
+    )
+    p_close.set_defaults(func=cmd_objective_close)
+
+
+def _add_objective_link_pr_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective link-pr`: attach PR ref(s) to a track, retroactively."""
+    p_link_pr = obj_sub.add_parser(
+        "link-pr",
+        help="manually link PR ref(s) to a track (retroactive/override; audited)",
+    )
+    common(p_link_pr)
+    p_link_pr.add_argument("track_id")
+    p_link_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_link_pr.add_argument(
+        "--delivery", choices=("partial", "complete"), default="partial",
+        help=_LINK_PR_DELIVERY_HELP,
+    )
+    p_link_pr.set_defaults(func=cmd_objective_link_pr)
+
+
+def _add_objective_unlink_pr_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective unlink-pr`: remove PR ref(s) and their delivery markers."""
+    p_unlink_pr = obj_sub.add_parser(
+        "unlink-pr",
+        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; "
+             "audited); also removes their delivery markers",
+    )
+    common(p_unlink_pr)
+    p_unlink_pr.add_argument("track_id")
+    p_unlink_pr.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unlink_pr.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this PR reference is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
+
+
+def _add_objective_remove_dependency_parser(
+    obj_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`objective remove-dependency`: drop one dependency edge from a track."""
+    p_remove_dep = obj_sub.add_parser(
+        "remove-dependency",
+        help="remove one dependency edge from a track, by its full key "
+             "(operator-gated; audited)",
+    )
+    common(p_remove_dep)
+    p_remove_dep.add_argument("track_id", help="the dependent (from) track")
+    p_remove_dep.add_argument("to_track_id", help="the track it depends on")
+    p_remove_dep.add_argument(
+        "--to-project-id", default="", dest="to_project_id",
+        help="project of the to-track (default: --project-id)",
+    )
+    p_remove_dep.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this edge is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_remove_dep.set_defaults(func=cmd_objective_remove_dependency)
+
+
+def _add_objective_unmark_delivery_parser(
+    obj_sub: Any, common: Callable[[Any], None],
+) -> None:
+    """`objective unmark-delivery`: strip the delivery marker of PR(s) on a track."""
+    p_unmark_delivery = obj_sub.add_parser(
+        "unmark-delivery",
+        help="remove the delivery marker (partial|complete) of PR(s) on a track, returning "
+             "them to unmarked; pr_ref is left alone (operator-gated; audited)",
+    )
+    common(p_unmark_delivery)
+    p_unmark_delivery.add_argument("track_id")
+    p_unmark_delivery.add_argument(
+        "pr", nargs="+",
+        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
+    )
+    p_unmark_delivery.add_argument(
+        "--reason", default="",
+        help="REQUIRED, non-empty: why this delivery marker is being removed (audited; "
+             "no silent bypass -- an empty reason is refused)",
+    )
+    p_unmark_delivery.set_defaults(func=cmd_objective_unmark_delivery)
+
+
+def _add_objective_reopen_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective reopen`: move a done track back to active."""
+    p_reopen = obj_sub.add_parser(
+        "reopen",
+        help="reopen a done track: done -> active (operator-gated, audited)",
+    )
+    common(p_reopen)
+    p_reopen.add_argument("track_id")
+    p_reopen.add_argument(
+        "--approval-id", default="", dest="approval_id",
+        help="operator approval token (REQUIRED)",
+    )
+    p_reopen.add_argument(
+        "--reason", default="",
+        help="reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
+    )
+    p_reopen.set_defaults(func=cmd_objective_reopen)
+
+
+def _add_objective_add_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective add`: create one ad-hoc track."""
+    p_add = obj_sub.add_parser(
+        "add",
+        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
+    )
+    common(p_add)
+    p_add.add_argument("track_id")
+    p_add.add_argument("title")
+    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
+    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
+    p_add.add_argument("--priority", default=None)
+    p_add.add_argument(
+        "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
+        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
+    )
+    p_add.add_argument(
+        "--plan-scope", choices=plan_scope.PLAN_SCOPES, default=None, dest="plan_scope",
+        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
+             "plan-gate runs) or light (no plan-gate)",
+    )
+    p_add.set_defaults(func=cmd_objective_add)
+
+
+def _add_objective_set_goal_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """`objective set-goal`: repair a too-thin goal on an existing track."""
+    p_set_goal = obj_sub.add_parser(
+        "set-goal",
+        help="repair a too-thin track goal: set goal_state on an existing track "
+             "(validated against the plan-gate's goal_min_chars threshold)",
+    )
+    common(p_set_goal)
+    p_set_goal.add_argument("track_id")
+    p_set_goal.add_argument(
+        "goal",
+        help="what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
+    )
+    p_set_goal.set_defaults(func=cmd_objective_set_goal)
+
+
+def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    """The eight `objective` write actions, one builder each.
+
+    Extracted from ``_build_parser`` (the functies-onder-200 track): that function
+    is far past the 70-executable-line ratchet, so the domain moves out in the
+    order the actions were originally added.
+    """
+    _add_objective_close_parser(obj_sub, common)
+    _add_objective_link_pr_parser(obj_sub, common)
+    _add_objective_unlink_pr_parser(obj_sub, common)
+    _add_objective_remove_dependency_parser(obj_sub, common)
+    _add_objective_unmark_delivery_parser(obj_sub, common)
+    _add_objective_reopen_parser(obj_sub, common)
+    _add_objective_add_parser(obj_sub, common)
+    _add_objective_set_goal_parser(obj_sub, common)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vnx", description="VNX planning read surface")
     sub = parser.add_subparsers(dest="domain", required=True)
@@ -6617,165 +6822,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_reconcile.set_defaults(func=cmd_objective_reconcile)
 
-    p_close = obj_sub.add_parser(
-        "close",
-        help="close-the-loop: advance declared phase to a terminal derived_status (human-gated)",
-    )
-    _common(p_close)
-    p_close.add_argument("track_id")
-    p_close.add_argument("--apply", action="store_true",
-                         help="write the transition (default: dry-run check)")
-    p_close.add_argument("--approval-id", default="",
-                         help="operator approval token (REQUIRED with --apply)")
-    p_close.add_argument("--include-parked", action="store_true",
-                         help="allow closing a PARKED track (un-parks it; off by default)")
-    p_close.add_argument(
-        "--repo-root", default="", dest="repo_root",
-        metavar="PATH",
-        help="git repo root for ROADMAP lookups (default: auto-resolved from project root)",
-    )
-    p_close.add_argument(
-        "--attest", default=None, metavar="REASON",
-        help="operator attestation for ops-tracks with no PR evidence (requires --apply "
-             "--approval-id). Appends the real PR via --pr when given, else fails open by "
-             "appending ops-attest:<date>; refs already on the track are kept",
-    )
-    p_close.add_argument(
-        "--pr", action="append", default=None, metavar="NNN",
-        help="delivering PR ref(s) as #NNN or NNN, comma-separated or repeated. Only valid "
-             "with --attest: APPENDS the real PR to the track's existing pr_ref (deduplicated, "
-             "order kept, nothing replaced) instead of ops-attest:<date>. "
-             "Without --attest, use `vnx objective link-pr` instead.",
-    )
-    p_close.add_argument(
-        "--max-gh-calls", type=int, default=50, dest="max_gh_calls",
-        metavar="N",
-        help="cap live gh pr view calls for the track's pr_ref (default 50; a single "
-             "close handles one track so the cap is rarely reached). Bounds the "
-             "evidence gather so it is explicit rather than unbounded.",
-    )
-    p_close.set_defaults(func=cmd_objective_close)
-
-    p_link_pr = obj_sub.add_parser(
-        "link-pr",
-        help="manually link PR ref(s) to a track (retroactive/override; audited)",
-    )
-    _common(p_link_pr)
-    p_link_pr.add_argument("track_id")
-    p_link_pr.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_link_pr.add_argument(
-        "--delivery", choices=("partial", "complete"), default="partial",
-        help=_LINK_PR_DELIVERY_HELP,
-    )
-    p_link_pr.set_defaults(func=cmd_objective_link_pr)
-
-    p_unlink_pr = obj_sub.add_parser(
-        "unlink-pr",
-        help="manually unlink PR ref(s) from a track (inverse of link-pr; operator-gated; "
-             "audited); also removes their delivery markers",
-    )
-    _common(p_unlink_pr)
-    p_unlink_pr.add_argument("track_id")
-    p_unlink_pr.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_unlink_pr.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this PR reference is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_unlink_pr.set_defaults(func=cmd_objective_unlink_pr)
-
-    p_remove_dep = obj_sub.add_parser(
-        "remove-dependency",
-        help="remove one dependency edge from a track, by its full key "
-             "(operator-gated; audited)",
-    )
-    _common(p_remove_dep)
-    p_remove_dep.add_argument("track_id", help="the dependent (from) track")
-    p_remove_dep.add_argument("to_track_id", help="the track it depends on")
-    p_remove_dep.add_argument(
-        "--to-project-id", default="", dest="to_project_id",
-        help="project of the to-track (default: --project-id)",
-    )
-    p_remove_dep.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this edge is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_remove_dep.set_defaults(func=cmd_objective_remove_dependency)
-
-    p_unmark_delivery = obj_sub.add_parser(
-        "unmark-delivery",
-        help="remove the delivery marker (partial|complete) of PR(s) on a track, returning "
-             "them to unmarked; pr_ref is left alone (operator-gated; audited)",
-    )
-    _common(p_unmark_delivery)
-    p_unmark_delivery.add_argument("track_id")
-    p_unmark_delivery.add_argument(
-        "pr", nargs="+",
-        help="PR reference(s) as #NNN or NNN; comma-separated or repeated",
-    )
-    p_unmark_delivery.add_argument(
-        "--reason", default="",
-        help="REQUIRED, non-empty: why this delivery marker is being removed (audited; "
-             "no silent bypass -- an empty reason is refused)",
-    )
-    p_unmark_delivery.set_defaults(func=cmd_objective_unmark_delivery)
-
-    p_reopen = obj_sub.add_parser(
-        "reopen",
-        help="reopen a done track: done -> active (operator-gated, audited)",
-    )
-    _common(p_reopen)
-    p_reopen.add_argument("track_id")
-    p_reopen.add_argument(
-        "--approval-id", default="", dest="approval_id",
-        help="operator approval token (REQUIRED)",
-    )
-    p_reopen.add_argument(
-        "--reason", default="",
-        help="reason for reopening (REQUIRED); stored with a pr_ref stamp for the re-close guard",
-    )
-    p_reopen.set_defaults(func=cmd_objective_reopen)
-
-    p_add = obj_sub.add_parser(
-        "add",
-        help="add an ad-hoc objective/track (thin wrapper over the single-writer)",
-    )
-    _common(p_add)
-    p_add.add_argument("track_id")
-    p_add.add_argument("title")
-    p_add.add_argument("goal_state", help="what 'done' looks like for this track")
-    p_add.add_argument("--horizon", choices=_HORIZON_ORDER, default=None)
-    p_add.add_argument("--priority", default=None)
-    p_add.add_argument(
-        "--lane-hint", choices=sorted(_VALID_LANE_HINTS), default=None, dest="lane_hint",
-        help="descriptive dispatch-routing hint (governed|direct|unset); default unset",
-    )
-    p_add.add_argument(
-        "--plan-scope", choices=plan_scope.PLAN_SCOPES, default=None, dest="plan_scope",
-        help="REQUIRED for a new track: architecture (OI-PLAN-<track> is seeded, the "
-             "plan-gate runs) or light (no plan-gate)",
-    )
-    p_add.set_defaults(func=cmd_objective_add)
-
-    p_set_goal = obj_sub.add_parser(
-        "set-goal",
-        help="repair a too-thin track goal: set goal_state on an existing track "
-             "(validated against the plan-gate's goal_min_chars threshold)",
-    )
-    _common(p_set_goal)
-    p_set_goal.add_argument("track_id")
-    p_set_goal.add_argument(
-        "goal",
-        help="what 'done' looks like for this track (>= goal_min_chars meaningful chars)",
-    )
-    p_set_goal.set_defaults(func=cmd_objective_set_goal)
+    _add_objective_write_parsers(obj_sub, _common)
 
     p_lane_hint = obj_sub.add_parser(
         "set-lane-hint",
