@@ -1,0 +1,1 @@
+- Confidence loop (OI-2597): `_update_confidence_from_receipt` reads the outcome of a v3 dispatch from its `dispatch_governed` record, so v3 dispatches feed pattern confidence again (K-fix-3 had made the hook skip them).
