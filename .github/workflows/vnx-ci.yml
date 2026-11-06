@@ -185,6 +185,12 @@ jobs:
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF_NAME"
 
+      # OI-1420: state how much of the tree the sweep skips, non-fatally.
+      - name: Test exclusions coverage summary
+        if: ${{ always() }}
+        continue-on-error: true
+        run: python3 "$GITHUB_WORKSPACE/scripts/ci/check_test_exclusions.py" "$GITHUB_WORKSPACE" --summary | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+
       # Evidence, also when the suite is red. Non-fatal: an artifact-service
       # hiccup must not turn this required job red.
       - name: Upload Profile A evidence (JUnit XML + manifest + completeness verdict)
