@@ -373,6 +373,7 @@ class _ArgparseWalk:
         self._resolve = resolve
         self._mods: Dict[str, Tuple[Dict[str, "ast.FunctionDef"], Dict[str, Tuple[str, str]]]] = {}
         self._stack: List[Tuple[str, str]] = []
+        self._cut = 0  # calls the recursion guard returned None for
         self._memo = memo
         self._cache: Dict[tuple, Tuple[List[object], Dict[str, object], object]] = {}
         self._register(self.MAIN, tree)
@@ -399,6 +400,7 @@ class _ArgparseWalk:
         # The guard runs before the cache: a call cut short by the stack is not
         # a result of interpreting the body, so it is never stored.
         if where in self._stack or len(self._stack) >= self.MAX_DEPTH:
+            self._cut += 1
             return None
         key = (where, tuple(id(a) for a in args), tuple(sorted((k, id(v)) for k, v in kwargs.items())))
         hit = self._cache.get(key) if self._memo else None
@@ -411,14 +413,17 @@ class _ArgparseWalk:
         for k, v in kwargs.items():
             if k in params:
                 env[k] = v
+        roots_before, cut_before = len(self.roots), self._cut
         self._stack.append(where)
         try:
             result = self._stmts(fn.body, env, where)
         finally:
             self._stack.pop()
+        # A factory creates a new root on every run, and a body cut short by the
+        # guard depends on the stack it ran under: neither result is reusable.
         # The entry holds the id-keyed objects, so no id is reused while the
         # cache lives and a second call with the same key is a hit.
-        if self._memo:
+        if self._memo and len(self.roots) == roots_before and self._cut == cut_before:
             self._cache[key] = (list(args), dict(kwargs), result)
         return result
 
