@@ -50,6 +50,7 @@ if _LIB_DIR not in sys.path:
     sys.path.insert(0, _LIB_DIR)
 
 from atomic_io import atomic_write_text
+from worker_permissions import WORKER_CLI_DENIED_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ HARNESS_CONFIG_SUBDIR = "harness-config"
 # claude 2.1.287). Every harness child that talks to a redirected endpoint carries it.
 BARE_FLAG = "--bare"
 APPEND_SYSTEM_PROMPT_FILE_FLAG = "--append-system-prompt-file"
+DISALLOWED_TOOLS_FLAG = "--disallowedTools"
 PROJECT_INSTRUCTIONS_FILE = "CLAUDE.md"
 
 # Fabric constant, never copied from ~/.claude/settings.json at runtime.
@@ -304,8 +306,17 @@ def project_instructions_args(cwd: Optional[Any]) -> List[str]:
 
 
 def bare_harness_cli_args(cwd: Optional[Any] = None) -> List[str]:
-    """Flags every harness child starts with: ``--bare`` plus the worktree instructions."""
-    return [BARE_FLAG, *project_instructions_args(cwd)]
+    """Flags every harness child starts with: ``--bare``, the worker deny, the worktree instructions.
+
+    ``--disallowedTools`` is VARIADIC (``<tools...>``). It is placed directly
+    after ``--bare`` and is terminated by the next option flag
+    (``--append-system-prompt-file`` or the caller's next flag), so no
+    positional (the prompt) or another flag's value is ever swallowed.
+    """
+    deny = [
+        DISALLOWED_TOOLS_FLAG, ",".join(WORKER_CLI_DENIED_TOOLS),
+    ]
+    return [BARE_FLAG, *deny, *project_instructions_args(cwd)]
 
 
 def require_harness_credential(env: Dict[str, str]) -> None:

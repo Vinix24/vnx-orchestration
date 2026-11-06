@@ -77,10 +77,16 @@ class TestHarnessHelpers:
 
     def test_mcp_fully_off_cli_args(self):
         # --mcp-config is variadic; JSON value first, boolean terminator last so
-        # the positional prompt is not slurped into the config list.
+        # the positional prompt is not slurped into the config list. The worker
+        # deny (OI-1447: refs/stash is shared by every worktree) rides the same
+        # tail; its variadic value ends at the --mcp-config flag that follows.
         args = build_harness_cli_args()
-        assert args == ["--bare", "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config"]
+        assert args == [
+            "--bare", "--disallowedTools", "Bash(git stash:*)",
+            "--mcp-config", '{"mcpServers":{}}', "--strict-mcp-config",
+        ]
         assert args[-1] == "--strict-mcp-config", "boolean must terminate the variadic"
+        assert args[args.index("--disallowedTools") + 2] == "--mcp-config"
 
     def test_default_model_is_v4_pro(self):
         assert DEFAULT_DEEPSEEK_HARNESS_MODEL == "deepseek-v4-pro"

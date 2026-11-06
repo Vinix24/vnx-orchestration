@@ -105,6 +105,17 @@ EMPTY_MCP_CONFIG = json.dumps({"mcpServers": {}}, separators=(",", ":"))
 # scripts/analysis/mcp_namespace_probe.py).
 MCP_NAMESPACE_DENY = "mcp__*"
 
+# OI-1447: tools every claude-CLI worker lane is ALWAYS denied, whatever the
+# role profile says. ``refs/stash`` belongs to the repository, not to a
+# worktree, so every dispatch worktree shares ONE stash: ``git stash drop`` /
+# ``clear`` or a ``pop`` of the wrong entry is irreversible on state outside
+# the worker's isolation boundary (2026-08-23 a build worker's batched
+# ``git stash drop`` removed an entry of another branch's dispatch). A worker
+# has its own worktree and branch and never needs the stash — work in progress
+# is committed. ``:*`` covers every subcommand (push, pop, drop, clear, apply,
+# store) and every argument of each.
+WORKER_CLI_DENIED_TOOLS = ("Bash(git stash:*)",)
+
 
 def _resolve_permissions_yaml() -> Path:
     """Resolve worker_permissions.yaml with project-override-first priority.
@@ -667,6 +678,12 @@ def build_claude_scope_args(
     if allowed:
         args += ["--allowedTools", ",".join(allowed)]
     disallowed = list(profile.denied_tools)
+    # OI-1447: the shared stash is outside every worker's isolation boundary;
+    # the deny is unconditional (also under requires_mcp) and merged into this
+    # one --disallowedTools value, never a second flag.
+    for tool in WORKER_CLI_DENIED_TOOLS:
+        if tool not in disallowed:
+            disallowed.append(tool)
     if not requires_mcp:
         # The empty --mcp-config above only kills the mcpServers group; it does
         # not reach extension bridges (claude-in-chrome) that surface mcp__ tools
