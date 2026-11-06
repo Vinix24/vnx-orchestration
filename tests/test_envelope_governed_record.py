@@ -84,7 +84,7 @@ def _spec(data_dir: Path) -> EnvelopeSpec:
 
 def _handover(mode: str) -> dispatch_start.Handover:
     ts = "2026-11-06T00:00:00Z"
-    return dispatch_start.Handover(PROJECT, DISPATCH_ID, 1, mode, 1, ts, ts)
+    return dispatch_start.Handover(PROJECT, DISPATCH_ID, 1, mode, 1, ts, ts, role="backend-developer")
 
 
 def _run_govern(data_dir: Path, *, lifecycle_v3: bool):
