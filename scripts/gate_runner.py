@@ -21,6 +21,7 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -156,6 +157,54 @@ def resolve_codex_review_effort(risk_class: Optional[str]) -> str:
             )
         return configured
     return "high" if (risk_class or "").strip().lower() in _HIGH_EFFORT_RISK_CLASSES else "medium"
+
+# OI-2591: a codex review runs the tests with the ``python3`` its PATH offers, which on
+# this host is 3.15 without the project packages; the seat is handed one that imports
+# pytest. Import-time capture below: the gate tests' ``subprocess.Popen`` patch must not
+# be able to mock this probe into answering "has pytest".
+_ProbePopen = subprocess.Popen
+
+
+@lru_cache(maxsize=1)
+def resolve_review_interpreter() -> Optional[str]:
+    """The first of VNX_REVIEW_PYTHON, VNX_PYTHON, sys.executable, python3.12, python3
+    that is a file and imports pytest within 10 s; None when none of them has it."""
+    for candidate in (
+        os.environ.get("VNX_REVIEW_PYTHON"),
+        os.environ.get("VNX_PYTHON"),
+        sys.executable,
+        shutil.which("python3.12"),
+        shutil.which("python3"),
+    ):
+        if not (candidate and os.path.isfile(candidate)):
+            continue
+        try:
+            proc = _ProbePopen(
+                [candidate, "-c", "import pytest"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            proc.communicate(timeout=10)
+            if proc.returncode == 0:
+                return candidate
+        except OSError:  # vnx-silent-except: an interpreter that cannot start is no candidate
+            continue
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+    return None
+
+
+def _review_tests_block(interpreter: Optional[str]) -> str:
+    """The codex prompt block naming the interpreter that runs the PR's tests (OI-2591)."""
+    if not interpreter:
+        body = ("No interpreter with pytest was found on this host, so this PR's tests "
+                "cannot be run. `residual_risk` must say that the tests did not run.\n")
+    else:
+        body = (f"Run the PR's tests with `{interpreter} -m pytest <files> -q -p "
+                "no:cacheprovider` before the verdict, and report what came out.\n")
+    return "\n\n## Running the PR's tests\n\n" + body
+
 
 # The dispatcher (plan_gate_panel._make_default_dispatcher) reports a provider_dispatch
 # run that left no report as ``no report for <id> (rc=<exit code>)``. For that RuntimeError the
@@ -1454,7 +1503,10 @@ class GateRunner:
             dispatch_metadata={"role": "reviewer"},
             instruction=l3,
         )
-        return format_for_provider(assembled, "codex")["pipe_input"]
+        return (
+            format_for_provider(assembled, "codex")["pipe_input"]
+            + _review_tests_block(resolve_review_interpreter())
+        )
 
     @staticmethod
     def _build_gemini_prompt(request_payload: Dict[str, Any]) -> str:
@@ -1674,6 +1726,10 @@ class GateRunner:
         if not _rec.gate_never_switched(gate):
             provider_switch.require(gate, consumer=_SWITCH_CONSUMER, project_id=_rec.switch_project_id(self._state_dir))
         cmd = self._build_gate_cmd(gate, binary, request_payload)
+        # OI-2591: only the codex seat gets one, and only to name the interpreter
+        # that runs the PR's tests; every other gate inherits as before (env=None).
+        interpreter = resolve_review_interpreter() if gate == "codex_gate" else None
+        spawn_env = None if not interpreter else {**os.environ, "VNX_REVIEW_PYTHON": interpreter}
         start = time.monotonic()
         try:
             proc = subprocess.Popen(
@@ -1681,6 +1737,7 @@ class GateRunner:
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 start_new_session=True,
                 cwd=str(cwd) if cwd else None,
+                env=spawn_env,
             )
         except OSError as exc:
             # The binary never started: the cost line books this as a refused
