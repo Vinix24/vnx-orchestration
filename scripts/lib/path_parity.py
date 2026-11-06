@@ -69,7 +69,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from xml.parsers.expat import ExpatError, ParserCreate
 
 _LOG = logging.getLogger(__name__)
@@ -446,6 +446,7 @@ def _extract_pinned_python_path(text: str) -> Optional[str]:
 
 _HOMEBREW_PYTHON = "/opt/homebrew/opt/python@3.12/bin/python3.12"
 _PINNED_LAUNCHER = "vnx_pinned_launcher.sh"
+_VERSIONED_PYTHONS = ("python3.13", "python3.12", "python3.11")
 _VNX_PYTHON_CALL = re.compile(r"scripts/launchd/vnx_python\.sh\s+[\"']?([^\s\"';&|)]+)")
 
 
@@ -453,14 +454,19 @@ def launchd_engine_interpreter(root: Path, search_path: str = BACKGROUND_PATH) -
     """The interpreter ``scripts/launchd/vnx_python.sh <root>`` picks, without running it.
 
     Twin of that script's precedence (a test pins that both agree): the root's
-    ``.venv/bin/python`` when executable, else Homebrew 3.12, else a bare ``python3``
-    looked up on ``search_path`` (None when there is none).
+    ``.venv/bin/python`` when executable, else Homebrew 3.12, else the first of
+    ``python3.13``/``python3.12``/``python3.11`` found on ``search_path``, else a bare
+    ``python3`` there (None when there is none).
     """
     venv = Path(root) / ".venv" / "bin" / "python"
     if os.access(venv, os.X_OK):
         return str(venv)
     if os.access(_HOMEBREW_PYTHON, os.X_OK):
         return _HOMEBREW_PYTHON
+    for name in _VERSIONED_PYTHONS:
+        found = shutil.which(name, path=search_path)
+        if found:
+            return found
     return shutil.which("python3", path=search_path)
 
 
@@ -478,6 +484,43 @@ def _inline_resolver_root(text: str, repo_root: Path) -> Optional[Path]:
     match = _VNX_PYTHON_CALL.search(text)
     root = match.group(1).replace(_VNX_HOME_PLACEHOLDER, str(repo_root)) if match else ""
     return Path(root) if os.path.isabs(root) else None
+
+
+def _outside_repo(script_desc: str, repo_root: Path) -> Dict[str, Any]:
+    return {
+        "interpreter": None,
+        "relevant": False,
+        "reason": f"{script_desc}: outside {repo_root.name} — not this project's requires-python to judge",
+    }
+
+
+def _read_shell_script(argv: List[str], repo_root: Path) -> Tuple[Optional[Dict[str, Any]], str, str, bool]:
+    """Look up the script a ``bash <script>`` consumer runs: ``(early_result, desc, text, is_launcher)``.
+
+    ``early_result`` is the final verdict when the script is missing, outside the repo or
+    unreadable; otherwise None and ``text`` holds the script body.
+    """
+    script_path = next((Path(a) for a in argv[1:] if a.endswith((".sh", ".py"))), None)
+    if script_path is None:
+        return {"interpreter": None, "relevant": False, "reason": "shell wrapper, no script argument"}, "", "", False
+    if not script_path.is_absolute():
+        script_path = (repo_root / script_path).resolve()
+    script_desc = script_path.name
+    try:
+        in_repo = script_path.resolve().is_relative_to(repo_root)
+    except AttributeError:  # pragma: no cover - Python <3.9 fallback, unreachable on this fleet
+        try:
+            script_path.resolve().relative_to(repo_root)
+            in_repo = True
+        except ValueError:
+            in_repo = False
+    if not in_repo:
+        return _outside_repo(script_desc, repo_root), script_desc, "", False
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"interpreter": None, "relevant": False, "reason": f"{script_desc}: unreadable"}, script_desc, "", False
+    return None, script_desc, text, script_path.name == _PINNED_LAUNCHER
 
 
 def resolve_consumer_interpreter(
@@ -515,43 +558,13 @@ def resolve_consumer_interpreter(
 
     # Shell wrapper: either `bash -c "<inline text>"` or `bash /path/to/script`.
     if len(argv) >= 3 and argv[1] == "-c":
-        text = argv[2]
-        script_desc = "inline -c script"
-        in_repo = str(repo_root) in text
-        launcher = False
+        text, script_desc, launcher = argv[2], "inline -c script", False
+        if str(repo_root) not in text:
+            return _outside_repo(script_desc, repo_root)
     else:
-        script_path = next((Path(a) for a in argv[1:] if a.endswith((".sh", ".py"))), None)
-        if script_path is None:
-            return {"interpreter": None, "relevant": False, "reason": "shell wrapper, no script argument"}
-        if not script_path.is_absolute():
-            script_path = (repo_root / script_path).resolve()
-        script_desc = script_path.name
-        launcher = script_path.name == _PINNED_LAUNCHER
-        try:
-            in_repo = script_path.resolve().is_relative_to(repo_root)
-        except AttributeError:  # pragma: no cover - Python <3.9 fallback, unreachable on this fleet
-            try:
-                script_path.resolve().relative_to(repo_root)
-                in_repo = True
-            except ValueError:
-                in_repo = False
-        if not in_repo:
-            return {
-                "interpreter": None,
-                "relevant": False,
-                "reason": f"{script_desc}: outside {repo_root.name} — not this project's requires-python to judge",
-            }
-        try:
-            text = script_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return {"interpreter": None, "relevant": False, "reason": f"{script_desc}: unreadable"}
-
-    if not in_repo:
-        return {
-            "interpreter": None,
-            "relevant": False,
-            "reason": f"{script_desc}: outside {repo_root.name} — not this project's requires-python to judge",
-        }
+        early, script_desc, text, launcher = _read_shell_script(argv, repo_root)
+        if early is not None:
+            return early
 
     if launcher:
         return _resolver_pick(repo_root, search_path, script_desc)

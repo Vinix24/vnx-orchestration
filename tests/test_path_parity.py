@@ -5,8 +5,11 @@ RED against origin/main (module does not exist), GREEN on this branch.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
@@ -452,6 +455,47 @@ def test_engine_interpreter_twin_matches_vnx_python_sh(tmp_path) -> None:
         if picked == "python3":
             expected = "python3" if expected is None else Path(expected).name
         assert expected == picked, (venv, expected, picked)
+
+
+def _versioned_path(tmp_path) -> str:
+    """A search PATH holding a python3.12 symlink to a real interpreter plus a 3.15 python3 shim."""
+    import sys
+
+    bindir = tmp_path / "search-bin"
+    bindir.mkdir()
+    (bindir / "python3.12").symlink_to(sys.executable)
+    shim = bindir / "python3"
+    shim.write_text('#!/bin/sh\necho "Python 3.15.0"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    return str(bindir)
+
+
+_HOMEBREW_PRESENT = os.access("/opt/homebrew/opt/python@3.12/bin/python3.12", os.X_OK)
+_HOMEBREW_SKIP = "Homebrew 3.12 exists on this host and wins before the versioned-name step; CI is the measurement"
+
+
+@pytest.mark.skipif(_HOMEBREW_PRESENT, reason=_HOMEBREW_SKIP)
+def test_resolver_takes_versioned_python_over_bare_python3_without_homebrew(tmp_path) -> None:
+    """No venv, no Homebrew 3.12: bash and Python both pick the python3.12 shim, not the 3.15 python3."""
+    import subprocess
+
+    root = _fake_engine(tmp_path, venv=False)
+    search = _versioned_path(tmp_path)
+    env = {**os.environ, "PATH": search + ":/usr/bin:/bin"}
+    picked = subprocess.run(
+        ["bash", str(_RESOLVER_SH), str(root)], capture_output=True, text=True, check=True, env=env
+    ).stdout.strip()
+    assert picked == f"{search}/python3.12"
+    assert path_parity.launchd_engine_interpreter(root, search) == picked
+
+
+def test_python_twin_prefers_versioned_name_when_no_venv_or_homebrew(tmp_path) -> None:
+    """The twin's versioned-name step, independent of the host (Homebrew case is bypassed by the venv-less branch order)."""
+    if _HOMEBREW_PRESENT:
+        pytest.skip(_HOMEBREW_SKIP)
+    root = _fake_engine(tmp_path, venv=False)
+    search = _versioned_path(tmp_path)
+    assert path_parity.launchd_engine_interpreter(root, search) == f"{search}/python3.12"
 
 
 def test_inline_resolver_call_resolves_to_the_pick_for_that_root(tmp_path) -> None:
