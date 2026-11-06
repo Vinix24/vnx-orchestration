@@ -4487,6 +4487,186 @@ def _fulfill_runner_error(
     return outcome
 
 
+def _fulfill_declared_sha_mismatch(
+    path: Path, outcome: Dict[str, Any], declared_detail: str, *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path,
+) -> Dict[str, Any]:
+    """A declared verdict about another commit, with no current successor, stays pending."""
+    # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
+    # record looks decided enough to fall straight through to the
+    # unconditional booking below (its status is a pass/known-terminal
+    # shape) -- but "looks decided" is not "is current". A MISMATCH or
+    # UNKNOWN_SHA declared_kind here means the takeover walk above ALSO
+    # found nothing usable (a match would have short-circuited via
+    # takeover_hit, or declared_kind itself would already be USABLE and
+    # skip this branch entirely) -- so this is the dead end: neither the
+    # declared gate's own evidence nor any successor's is provably about
+    # the current head. Never fall through to the unconditional
+    # STATUS_FULFILLED default on that basis (measured live, PR #1736: a
+    # stale codex_gate PASS from an earlier dispatch against the same PR
+    # booked fulfilled with zero takeover, zero rescue markers).
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="stale_evidence_sha_mismatch",
+        reason_detail=(
+            f"{gate}'s own result for PR #{pr_number} is decided but "
+            f"about a DIFFERENT commit than the PR head "
+            f"({declared_detail}) and no takeover successor produced "
+            "current evidence either — staying pending, never booking "
+            "a verdict about other code (OI-1571 tak 3)"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = declared_detail
+    return outcome
+
+
+def _fulfill_declared_unknown_sha(
+    path: Path, outcome: Dict[str, Any], declared_detail: str, *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path,
+) -> Dict[str, Any]:
+    """A declared verdict whose sha binding cannot be verified, with no successor, stays pending."""
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="sha_binding_unverifiable",
+        reason_detail=(
+            f"{gate}'s own result for PR #{pr_number} is decided but "
+            f"its sha binding to the PR head could not be verified "
+            f"({declared_detail}) and no takeover successor produced "
+            "verifiable evidence either — suspending judgement "
+            "(OI-1571 tak 3) rather than silently accepting or "
+            "refusing it"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = declared_detail
+    return outcome
+
+
+def _fulfill_result_head_moved(
+    path: Path, outcome: Dict[str, Any], *,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path, result_commit_sha: str, head_sha: str,
+    head_sha_before_run: str,
+) -> Dict[str, Any]:
+    """A result about a commit the re-resolved head no longer is stays pending."""
+    # Fix-forward defect (2026-09-30): the result is judged against the
+    # head re-resolved AFTER the run. A result whose recorded commit is
+    # provably not that head is about superseded code — it must never be
+    # booked, even when its evidence is too incomplete for
+    # _has_decided_evidence to classify it as a decided MISMATCH above
+    # (the two branches above cover complete-evidence records; this one
+    # covers the rest without ever weakening them). An UNKNOWN binding
+    # (empty sha on either side) is deliberately NOT a mismatch: it keeps
+    # the existing "binding unverifiable" handling, exactly as a complete
+    # record with a missing sha does above.
+    head_moved_detail = (
+        f"{gate} result for PR #{pr_number} records commit "
+        f"{result_commit_sha[:8] or '?'} but the PR head was "
+        f"re-resolved as {head_sha[:8] or '?'} after the gate ran (it "
+        f"was {head_sha_before_run[:8] or '?'} before) — the head "
+        "moved while the gate ran, so this verdict is about "
+        "superseded code and is never booked"
+    )
+    update_obligation(
+        path,
+        status=STATUS_PENDING,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason="stale_evidence_sha_mismatch",
+        reason_detail=(
+            f"{head_moved_detail} and no takeover successor produced "
+            "current evidence either — staying pending, never booking "
+            "a verdict about other code (defect fixed 2026-09-30)"
+        ),
+    )
+    outcome["action"] = "pending"
+    outcome["detail"] = head_moved_detail
+    return outcome
+
+
+def _fulfill_book_declared_result(
+    path: Path, outcome: Dict[str, Any], *,
+    result: Dict[str, Any], result_data: Optional[Dict[str, Any]], result_status: str,
+    manager: Any, gate: str, pr_number: int, branch: str, attempts: int,
+    now: str, result_file: Path, dispatch_id: str,
+) -> Dict[str, Any]:
+    """Book the declared gate's own run result, mirroring the status actually persisted."""
+    # OI-1943: a review rejection is written as status ``completed`` plus
+    # blocking findings, so the status string alone would book it fulfilled.
+    # The shared predicate decides; the reason is never null for it.
+    rejected = (
+        result_data is not None
+        and result_status not in TERMINAL_STATUSES
+        and _gate_decided_verdict(result_data) == "fail"
+    )
+    if rejected:
+        terminal = STATUS_FAILED
+        booking_reason = (
+            "required_failure" if result.get("has_required_failure")
+            else REASON_FAILED_BY_GATE_VERDICT
+        )
+        booking_detail = _gate_is_pass(result_data)[1]
+    else:
+        terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
+        booking_reason = None if not result.get("has_required_failure") else "required_failure"
+        booking_detail = None if terminal == STATUS_FULFILLED else f"result status: {result_status}"
+    fast_fulfillment_warning = None
+    if terminal in (STATUS_FULFILLED, STATUS_FAILED):
+        fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
+            result_file, gate, pr_number, dispatch_id,
+        )
+    updated = _book_obligation_outcome(
+        path,
+        status=terminal,
+        pr_number=pr_number,
+        branch=branch,
+        attempts=attempts,
+        last_attempt_at=now,
+        resolved_at=utc_now_iso(),
+        request_path=str(manager._request_path(gate, pr_number)),
+        result_path=str(result_file),
+        reason=booking_reason,
+        reason_detail=booking_detail,
+        fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
+        takeover_gate=None,
+        evidence_result_path=(
+            str(result_file) if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None
+        ),
+    )
+    # Mirror the status actually persisted to disk — never a hardcoded
+    # "fulfilled" label, which would lie about a not_executable/failed
+    # record and let a caller reading only the label count a burned
+    # obligation as vervuld (OI-1400 residu, defect 2).
+    outcome["action"] = updated.get("status", terminal)
+    outcome["request_path"] = updated.get("request_path")
+    outcome["result_path"] = updated.get("result_path")
+    outcome["has_required_failure"] = bool(result.get("has_required_failure"))
+    if fast_fulfillment_warning:
+        outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
+    return outcome
+
+
 def fulfill_obligation(
     state_dir: Path,
     path: Path,
@@ -4717,158 +4897,31 @@ def fulfill_obligation(
                 result_data=result_data, head_sha_before_run=head_sha_before_run, dispatch_id=dispatch_id,
             )
 
-        # OI-1571 tak 3: reached only when the declared gate's OWN on-disk
-        # record looks decided enough to fall straight through to the
-        # unconditional booking below (its status is a pass/known-terminal
-        # shape) -- but "looks decided" is not "is current". A MISMATCH or
-        # UNKNOWN_SHA declared_kind here means the takeover walk above ALSO
-        # found nothing usable (a match would have short-circuited via
-        # takeover_hit, or declared_kind itself would already be USABLE and
-        # skip this branch entirely) -- so this is the dead end: neither the
-        # declared gate's own evidence nor any successor's is provably about
-        # the current head. Never fall through to the unconditional
-        # STATUS_FULFILLED default on that basis (measured live, PR #1736: a
-        # stale codex_gate PASS from an earlier dispatch against the same PR
-        # booked fulfilled with zero takeover, zero rescue markers).
         if declared_kind == _EVIDENCE_MISMATCH:
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="stale_evidence_sha_mismatch",
-                reason_detail=(
-                    f"{gate}'s own result for PR #{pr_number} is decided but "
-                    f"about a DIFFERENT commit than the PR head "
-                    f"({declared_detail}) and no takeover successor produced "
-                    "current evidence either — staying pending, never booking "
-                    "a verdict about other code (OI-1571 tak 3)"
-                ),
+            return _fulfill_declared_sha_mismatch(
+                path, outcome, declared_detail, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now, result_file=result_file,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = declared_detail
-            return outcome
 
         if declared_kind == _EVIDENCE_UNKNOWN_SHA:
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="sha_binding_unverifiable",
-                reason_detail=(
-                    f"{gate}'s own result for PR #{pr_number} is decided but "
-                    f"its sha binding to the PR head could not be verified "
-                    f"({declared_detail}) and no takeover successor produced "
-                    "verifiable evidence either — suspending judgement "
-                    "(OI-1571 tak 3) rather than silently accepting or "
-                    "refusing it"
-                ),
+            return _fulfill_declared_unknown_sha(
+                path, outcome, declared_detail, manager=manager, gate=gate, pr_number=pr_number,
+                branch=branch, attempts=attempts, now=now, result_file=result_file,
             )
-            outcome["action"] = "pending"
-            outcome["detail"] = declared_detail
-            return outcome
 
-        # Fix-forward defect (2026-09-30): the result is judged against the
-        # head re-resolved AFTER the run. A result whose recorded commit is
-        # provably not that head is about superseded code — it must never be
-        # booked, even when its evidence is too incomplete for
-        # _has_decided_evidence to classify it as a decided MISMATCH above
-        # (the two branches above cover complete-evidence records; this one
-        # covers the rest without ever weakening them). An UNKNOWN binding
-        # (empty sha on either side) is deliberately NOT a mismatch: it keeps
-        # the existing "binding unverifiable" handling, exactly as a complete
-        # record with a missing sha does above.
         if result_sha_binding == "mismatch":
-            head_moved_detail = (
-                f"{gate} result for PR #{pr_number} records commit "
-                f"{result_commit_sha[:8] or '?'} but the PR head was "
-                f"re-resolved as {head_sha[:8] or '?'} after the gate ran (it "
-                f"was {head_sha_before_run[:8] or '?'} before) — the head "
-                "moved while the gate ran, so this verdict is about "
-                "superseded code and is never booked"
+            return _fulfill_result_head_moved(
+                path, outcome, manager=manager, gate=gate, pr_number=pr_number, branch=branch,
+                attempts=attempts, now=now, result_file=result_file,
+                result_commit_sha=result_commit_sha, head_sha=head_sha,
+                head_sha_before_run=head_sha_before_run,
             )
-            update_obligation(
-                path,
-                status=STATUS_PENDING,
-                pr_number=pr_number,
-                branch=branch,
-                attempts=attempts,
-                last_attempt_at=now,
-                request_path=str(manager._request_path(gate, pr_number)),
-                result_path=str(result_file),
-                reason="stale_evidence_sha_mismatch",
-                reason_detail=(
-                    f"{head_moved_detail} and no takeover successor produced "
-                    "current evidence either — staying pending, never booking "
-                    "a verdict about other code (defect fixed 2026-09-30)"
-                ),
-            )
-            outcome["action"] = "pending"
-            outcome["detail"] = head_moved_detail
-            return outcome
 
-        # OI-1943: a review rejection is written as status ``completed`` plus
-        # blocking findings, so the status string alone would book it fulfilled.
-        # The shared predicate decides; the reason is never null for it.
-        rejected = (
-            result_data is not None
-            and result_status not in TERMINAL_STATUSES
-            and _gate_decided_verdict(result_data) == "fail"
+        return _fulfill_book_declared_result(
+            path, outcome, result=result, result_data=result_data, result_status=result_status,
+            manager=manager, gate=gate, pr_number=pr_number, branch=branch, attempts=attempts,
+            now=now, result_file=result_file, dispatch_id=dispatch_id,
         )
-        if rejected:
-            terminal = STATUS_FAILED
-            booking_reason = (
-                "required_failure" if result.get("has_required_failure")
-                else REASON_FAILED_BY_GATE_VERDICT
-            )
-            booking_detail = _gate_is_pass(result_data)[1]
-        else:
-            terminal = result_status if result_status in TERMINAL_STATUSES else STATUS_FULFILLED
-            booking_reason = None if not result.get("has_required_failure") else "required_failure"
-            booking_detail = None if terminal == STATUS_FULFILLED else f"result status: {result_status}"
-        fast_fulfillment_warning = None
-        if terminal in (STATUS_FULFILLED, STATUS_FAILED):
-            fast_fulfillment_warning = _flag_fast_fulfillment_if_evidence_predates_attempt(
-                result_file, gate, pr_number, dispatch_id,
-            )
-        updated = _book_obligation_outcome(
-            path,
-            status=terminal,
-            pr_number=pr_number,
-            branch=branch,
-            attempts=attempts,
-            last_attempt_at=now,
-            resolved_at=utc_now_iso(),
-            request_path=str(manager._request_path(gate, pr_number)),
-            result_path=str(result_file),
-            reason=booking_reason,
-            reason_detail=booking_detail,
-            fulfilled_by=gate if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None,
-            takeover_gate=None,
-            evidence_result_path=(
-                str(result_file) if terminal in (STATUS_FULFILLED, STATUS_FAILED) else None
-            ),
-        )
-        # Mirror the status actually persisted to disk — never a hardcoded
-        # "fulfilled" label, which would lie about a not_executable/failed
-        # record and let a caller reading only the label count a burned
-        # obligation as vervuld (OI-1400 residu, defect 2).
-        outcome["action"] = updated.get("status", terminal)
-        outcome["request_path"] = updated.get("request_path")
-        outcome["result_path"] = updated.get("result_path")
-        outcome["has_required_failure"] = bool(result.get("has_required_failure"))
-        if fast_fulfillment_warning:
-            outcome["fast_fulfillment_warning"] = fast_fulfillment_warning
-        return outcome
     except Exception as exc:  # noqa: BLE001 — a gate that cannot run is a loud registered outcome
         return _fulfill_runner_error(
             state_dir, path, outcome, exc, gate=gate, pr_number=pr_number, dispatch_id=dispatch_id,
