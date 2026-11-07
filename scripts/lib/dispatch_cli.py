@@ -1529,6 +1529,69 @@ def _spec_is_writing(spec: DispatchSpec) -> bool:
     return role_grants_write(spec.role)
 
 
+# OI-2588 (follow-up of OI-1447): provider lanes that CAN build through the door
+# but have no per-run mechanism to refuse the shared `git stash`.
+#
+# gemini is the only such lane. `codex exec` (0.164.0) has no command denylist
+# and no per-run rules-file flag; its execpolicy `.rules` are loaded from
+# $CODEX_HOME or the project only (`codex exec --help` -> `--ignore-rules`), and
+# the workspace-write sandbox that would block a write to the shared .git common
+# dir equally blocks the commit/push a build worker must deliver. Codex is
+# nevertheless left un-refused: it is the live availability fallback
+# (wave7_models.yaml routing.tier_map tier-zero/tier-low -> openai/gpt-5.5 lane
+# provider), so refusing it would break a routing default — recorded for T0 in
+# docs/operations/WORKER_LANE_STASH_POSTURE.md.
+#
+# A build on gemini is refused here, before the permit and the spawn, unless the
+# operator names the lane deliberately with the override env. The gate run
+# (gemini_review) does not pass through the door, so it is unaffected.
+STASH_UNGUARDED_BUILD_LANES = frozenset({"gemini"})
+STASH_BUILD_OVERRIDE_ENV = "VNX_OVERRIDE_STASH_BUILD_LANE"
+STASH_BUILD_REFUSAL_CODE = "stash-unrefused-build-lane"
+
+
+def _stash_build_reject(
+    spec: DispatchSpec,
+    provider_value: str,
+    *,
+    override: Optional[bool] = None,
+) -> Optional[Reject]:
+    """Refuse a BUILD on a lane with no per-run deny for `git stash` (OI-2588).
+
+    ``refs/stash`` belongs to the repository, not to a worktree, so every dispatch
+    worktree shares ONE stash and a drop/clear/pop of the wrong entry is
+    irreversible outside the worker's isolation boundary (OI-1447). The claude
+    lanes carry ``--disallowedTools`` and the kimi lane a PreToolUse hook; the
+    gemini CLI has neither a command denylist nor a per-run rules file, so a build
+    worker on that lane could clear the shared stash.
+
+    Only a writing dispatch (``_spec_is_writing``) is affected: a read-only review
+    dispatch on gemini never mutates the stash and stays allowed. ``override``
+    is the operator's explicit escape hatch; when None it is read from
+    ``STASH_BUILD_OVERRIDE_ENV``. Returns None when the lane is fine, the
+    dispatch does not write, or the override is set.
+    """
+    if provider_value not in STASH_UNGUARDED_BUILD_LANES:
+        return None
+    if not _spec_is_writing(spec):
+        return None
+    if override is None:
+        override = os.environ.get(STASH_BUILD_OVERRIDE_ENV, "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+    if override:
+        return None
+    return Reject(
+        STASH_BUILD_REFUSAL_CODE,
+        f"provider {provider_value!r} can build but has no per-run way to refuse "
+        "`git stash` (OI-1447): refs/stash is shared by every worktree of the "
+        "repository, so a drop/clear/pop escapes the worker's isolation boundary. "
+        "The gemini CLI exposes no command denylist or per-run rules file. "
+        "Dispatch this build on a lane with a deny (claude/kimi), or set "
+        f"{STASH_BUILD_OVERRIDE_ENV}=1 to accept the risk deliberately.",
+    )
+
+
 def _register_gate_obligation(
     spec: DispatchSpec, *, state_dir: Path,
 ) -> Optional[ConstraintVerdict]:
@@ -3977,6 +4040,16 @@ def run_dispatch(
         plan = compile_plan(vspec, snapshot)
         if isinstance(plan, Reject):
             _emit_reject(plan)
+            return 1
+
+        # OI-2588: a BUILD on a provider lane that cannot refuse `git stash` is
+        # refused here, on the dry-run and the fire path alike, before the permit
+        # and the spawn. Read-only dispatches on the same lane stay allowed.
+        stash_reject = _stash_build_reject(
+            vspec.spec, getattr(plan.provider, "value", plan.provider),
+        )
+        if stash_reject is not None:
+            _emit_reject(stash_reject)
             return 1
 
         # Merge the door route reason into the plan so it's visible in dry-run
