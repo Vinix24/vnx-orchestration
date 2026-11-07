@@ -1,0 +1,1 @@
+- Gates (OI-2623): kimi's weekly-limit 429 counts as an exhausted lane at the third wrap width too, so the takeover walk passes the seat to the next gate in the chain.

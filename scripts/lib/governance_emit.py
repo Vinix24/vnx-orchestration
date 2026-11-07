@@ -509,6 +509,11 @@ _LANE_EXHAUSTED_MARKERS = (
     # widths. It contains no "usage limit" at all, so prose about usage limits
     # does not match it; only kimi's own sentence, or a verbatim quote of it.
     "your quota will reset when the current 7-day window ends",  # GEMETEN: kimi 403 weekly prose, pr-2074-kimi_gate.json 16-10 — "You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends"
+    # Third wrap width (OI-2623): the 429 body breaks the reset sentence before
+    # "ends", the error type in three, and the first sentence reads "weekly
+    # (7-day) usage limit". Both markers below stay whole at this width.
+    "reached your weekly (7-day) usage limit",  # GEMETEN: kimi 429 weekly prose, pr-2477-kimi_gate.json 07-11 — "You've reached your weekly (7-day) usage limit."
+    "your quota will reset when the current 7-day window",  # GEMETEN: kimi 429 weekly prose, pr-2477-kimi_gate.json 07-11 — the OI-2114 sentence cut before " ends" ("...current 7-day window'" | "raw='ends."); a prefix of the old marker, so it also matches the 80- and 145-column records
     "insufficient_quota",                  # AANGENOMEN: codex/openai 429 quota (error `type`/`code`), OpenAI API JSON-vorm — geen live codex-record bestond op 26-08 ochtend (61ebb567)
     "exceeded your current quota",          # AANGENOMEN: codex/openai quota prose, idem
     "hit your usage limit",                 # GEMETEN: codex CLI-prose, pr-1696-codex_gate.json (ook pr-1691/1692-codex_gate.json, identieke tekst) 26-08 — "Subprocess exited with code 1: You've hit your usage limit..."
