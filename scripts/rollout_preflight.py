@@ -15,8 +15,11 @@ state name kept literally), ``hooks`` (hook commands a ``regen_settings.sh
 --dry-run`` render would change, old and new named; a failed dry-run is a
 finding) and ``main_drift`` (the doctor's check; outside a git checkout its
 skip is printed, never a finding). An unmeasured class is never a pass: a
-project without a pin reports ``pin`` and ``launchd`` as ``unmeasured`` (it
-does not itself block). Shim-routed project hooks are one ``info`` line.
+project without a pin reports ``pin``, ``launchd`` and ``hooks`` as
+``unmeasured`` (it does not itself block): there is no pin to render from, and a
+render from the running tree is not what a rollout writes. Only an unreadable
+settings file stays a ``hooks`` finding. Shim-routed project hooks are one
+``info`` line.
 
 Exit: 0 no finding, 1 at least one, 2 a measurement itself failed.
 """
@@ -64,7 +67,7 @@ _ENGINE_ROOT = engine_root()
 
 BLOCKING_CLASSES = ("pin", "launchd", "hooks", "main_drift")
 REPORT_CLASSES = BLOCKING_CLASSES + ("unmeasured", "info")
-UNMEASURED_WITHOUT_PIN = ("launchd", "pin")
+UNMEASURED_WITHOUT_PIN = ("hooks", "launchd", "pin")
 DEFAULT_REGISTRY = Path.home() / ".vnx" / "projects.json"
 DEFAULT_STORE_ROOT = Path.home() / ".vnx-system"
 DEFAULT_PLIST_DIR = Path.home() / "Library" / "LaunchAgents"
@@ -225,6 +228,15 @@ def hooks_findings(root: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
                  "detail": "regen_settings.sh --dry-run printed no settings JSON"}], _shim_markers(settings)
     return hook_findings(settings, rendered), _shim_markers(settings)
 
+def unpinned_hooks(root: Path) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """A project without a pin: no dry-run, only the settings read and the shim routes."""
+    try:
+        settings = read_settings(root)
+    except (OSError, ValueError) as exc:
+        return [{"state": "unreadable",
+                 "detail": f".claude/settings.json cannot be read: {exc}"}], []
+    return [], _shim_markers(settings)
+
 # ── pin, launchd, main drift ───────────────────────────────────────────────
 def verify_release(store_root: Path, version: str) -> Optional[str]:
     """Run ``vnx release verify <version>`` on this store; the failure text or None.
@@ -299,7 +311,8 @@ def main_drift_findings(root: Path) -> Tuple[List[Dict[str, Any]], Optional[str]
 def _project_entry(project_id: str, root: Path, store_root: Path, versions_dir: Path,
                    alignment: Mapping[str, Any], current: Optional[str]) -> Dict[str, Any]:
     row = fleet_pin_audit.classify_project(root, store_root, current)
-    hooks, markers = hooks_findings(root)
+    hooks, markers = (hooks_findings(root) if row.get("pin") is not None
+                      else unpinned_hooks(root))
     drift, skipped = main_drift_findings(root)
     return {
         "root": str(root),

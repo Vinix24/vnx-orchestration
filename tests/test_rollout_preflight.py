@@ -366,8 +366,8 @@ def test_main_drift_outside_a_git_checkout_is_skipped(fleet, capsys, monkeypatch
     assert report["projects"]["alpha"]["main_drift"] == []
 
 
-# ── 6. a project without a pin: pin and launchd unmeasured, not blocking ───
-def test_project_without_a_pin_reports_pin_and_launchd_unmeasured(fleet, capsys):
+# ── 6. a project without a pin: pin, launchd and hooks unmeasured, not blocking
+def test_project_without_a_pin_reports_pin_launchd_and_hooks_unmeasured(fleet, capsys):
     root = _project(fleet["tmp"], "nopin", None)
     fleet["roots"]["nopin"] = root
 
@@ -375,9 +375,73 @@ def test_project_without_a_pin_reports_pin_and_launchd_unmeasured(fleet, capsys)
 
     assert code == 0
     entry = report["projects"]["nopin"]
-    assert entry["unmeasured"] == ["launchd", "pin"]
-    assert entry["pin"] == [] and entry["launchd"] == []
+    assert entry["unmeasured"] == ["hooks", "launchd", "pin"]
+    assert entry["pin"] == [] and entry["launchd"] == [] and entry["hooks"] == []
     assert report["exit_code"] == 0
+
+
+def test_project_without_a_pin_never_runs_the_hooks_dry_run(fleet, capsys, monkeypatch):
+    root = _project(fleet["tmp"], "nopin", None)
+    fleet["roots"]["nopin"] = root
+    calls: list[Path] = []
+    changed = dict(RENDER, _vnx_hook_report={"Stop": {
+        "kept": [],
+        "replaced": [{"matcher": "", "old_command": "bash -c 'old'",
+                      "new_command": CLEAN_COMMAND}],
+        "added": []}})
+
+    def runner(project, engine_root=None):
+        calls.append(project)
+        return _completed(0, json.dumps(changed), "")
+
+    monkeypatch.setattr(rp, "run_regen_settings_dry_run", runner)
+
+    code, report = _json(fleet, capsys, "--project", "nopin")
+
+    assert code == 0
+    assert report["projects"]["nopin"]["hooks"] == []
+    assert root not in calls
+
+
+def test_project_without_a_pin_keeps_the_shim_info_line(fleet, capsys):
+    shim = {"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{
+        "type": "command",
+        "command": "sh \"$HOME/.vnx-system/current/scripts/hooks/vnx_hook_shim.sh\" "
+                   "t0_context_guard.py"}]}]}}
+    fleet["roots"]["nopin"] = _project(fleet["tmp"], "nopin", None, settings=shim)
+
+    code, report = _json(fleet, capsys, "--project", "nopin")
+
+    assert code == 0
+    entry = report["projects"]["nopin"]
+    assert entry["hooks"] == []
+    assert len(entry["info"]) == 1 and ".vnx-system/current" in entry["info"][0]
+
+
+def test_project_without_a_pin_and_unreadable_settings_is_still_a_hooks_finding(fleet, capsys):
+    root = _project(fleet["tmp"], "nopin", None)
+    (root / ".claude" / "settings.json").write_text("{not json", encoding="utf-8")
+    fleet["roots"]["nopin"] = root
+
+    code, report = _json(fleet, capsys, "--project", "nopin")
+
+    assert code == 1
+    findings = report["projects"]["nopin"]["hooks"]
+    assert len(findings) == 1 and findings[0]["state"] == "unreadable"
+
+
+def test_pinned_project_still_gets_its_hooks_dry_run(fleet, capsys, monkeypatch):
+    calls: list[Path] = []
+
+    def runner(project, engine_root=None):
+        calls.append(project)
+        return _completed(0, json.dumps(RENDER), "")
+
+    monkeypatch.setattr(rp, "run_regen_settings_dry_run", runner)
+
+    _json(fleet, capsys)
+
+    assert set(calls) == set(fleet["roots"].values())
 
 
 # ── 7. a module that raises is exit 2, never 0 ────────────────────────────
