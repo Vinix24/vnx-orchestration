@@ -72,6 +72,14 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# VNX_PROJECT_ID is the operator's own project (every operator shell and worker here
+# exports vnx-dev). Left in the environment it outranks the project a test's fixture
+# derives: init/migrate backfills refuse with an ADR-007 project_id conflict, and
+# dashboard/api_planning.py queries the operator's project instead of the seeded one
+# (58 failures in eleven files, OI-2589 D2). Removed once at import time, before any
+# test module loads; a test that needs a project id sets it with monkeypatch.setenv
+# and keeps winning.
+os.environ.pop("VNX_PROJECT_ID", None)
 # Provider switch (provider-schakelaar A): the operator's ~/.vnx/providers.json is a
 # fleet-level operator file, like ~/.vnx/projects.json. VNX_PROVIDER_SWITCH_FILE moves the
 # switch file and, with it, the audit log, the lock and every quarantined copy (they live in
