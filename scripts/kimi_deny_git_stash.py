@@ -5,9 +5,8 @@ stdin: the hook payload from kimi_cli/hooks/runner.py:33; the shell tool is
 hookSpecificOutput ``permissionDecision: "deny"`` with exit 0
 (kimi_cli/hooks/runner.py:70-82). Exit 1 = malformed payload, not a deny.
 The command is tokenized on shell boundaries and every simple command checked on
-its own, so a ``;`` cannot walk the guard past refs/stash; ``sh -c``/``-lc``,
-``eval`` and substitutions are checked one level in, and text shlex cannot parse
-is denied when it mentions stash.
+its own (a ``;`` cannot walk the guard past refs/stash); a shell ``-c`` body,
+``eval``/substitutions and unparseable text mentioning stash are all checked.
 Patterns: worker_permissions.WORKER_SHELL_DENIED_PATTERNS (OI-1447).
 """
 import json
@@ -54,12 +53,15 @@ def _simple_commands(tokens):
 
 def _nested(command, depth):
     """The command a nested shell would run, or None (a ``-c`` argument, ``eval``)."""
-    executable = command[0].rsplit("/", 1)[-1]
-    if executable == "eval":
-        return _check(" ".join(command[1:]), depth)
-    for index, token in enumerate(command[1:], start=1):
-        if executable in _SHELLS and token[:1] == "-" and token[:2] != "--" and "c" in token[1:]:
-            return _check(command[index + 1], depth) if index + 1 < len(command) else None
+    for index, token in enumerate(command):
+        executable, arguments = token.rsplit("/", 1)[-1], command[index + 1:]
+        if executable == "eval":
+            return _check(" ".join(arguments), depth)
+        if executable not in _SHELLS:
+            continue
+        for at, argument in enumerate(arguments):
+            if argument[:1] == "-" and argument[:2] != "--" and "c" in argument[1:]:
+                return _check(arguments[at + 1], depth) if at + 1 < len(arguments) else None
     return None
 
 

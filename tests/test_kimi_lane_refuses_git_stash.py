@@ -286,6 +286,8 @@ _HIDDEN_STASH = [
     "eval git stash",
     'eval "git stash pop"',
     "env FOO=1 git stash",
+    "env FOO=1 bash -c 'git stash clear'",
+    "sudo bash -c 'git stash list'",
     "/usr/bin/git stash",
     "git stash 'x",
 ]
