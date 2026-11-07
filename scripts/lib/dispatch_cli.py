@@ -721,13 +721,22 @@ def _lane_verdict(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, project_id: Optional[str], state_dir: Path,
     dry_run: bool,
 ) -> Optional[Reject]:
-    """The door's lane refusal, or None: the provider switch first, then reachability.
+    """The door's lane refusal, or None: the stash posture, the provider switch, then reachability.
 
-    A lane the operator switched off is refused ``provider-disabled`` and never reaches
-    ``_check_reachability``, so it is never probed and never becomes a reachability fact; on a
-    fire that refusal is booked as a receipt (``_record_switch_refusal``), the dry-run writes
-    nothing. A known-rejected lane is refused ``lane-known-rejected``.
+    OI-2588 first: a BUILD on a lane with no per-run way to refuse ``git stash`` is refused
+    before anything else (``_stash_build_reject``), so the stash shared by every worktree of
+    the repository is never at stake. It rides on this seam — the one the door already calls
+    after ``compile_plan`` and before the permit, on the dry-run and the fire path alike —
+    instead of inside ``run_dispatch``, because that function may not grow (its origin/main
+    count is 195 and it must stay there). A lane the operator switched off is refused
+    ``provider-disabled`` and never reaches ``_check_reachability``, so it is never probed and
+    never becomes a reachability fact; on a fire that refusal is booked as a receipt
+    (``_record_switch_refusal``), the dry-run writes nothing. A known-rejected lane is refused
+    ``lane-known-rejected``.
     """
+    stash_reject = _stash_build_reject(spec, plan.provider.value)
+    if stash_reject is not None:
+        return stash_reject
     switch_reject = _provider_switch_verdict(plan, project_id=project_id)
     if switch_reject is not None:
         if not dry_run:
@@ -1527,6 +1536,69 @@ def _spec_is_writing(spec: DispatchSpec) -> bool:
     if write_paths(spec.dispatch_paths):
         return True
     return role_grants_write(spec.role)
+
+
+# OI-2588 (follow-up of OI-1447): provider lanes that CAN build through the door
+# but have no per-run mechanism to refuse the shared `git stash`.
+#
+# gemini is the only such lane. `codex exec` (0.164.0) has no command denylist
+# and no per-run rules-file flag; its execpolicy `.rules` are loaded from
+# $CODEX_HOME or the project only (`codex exec --help` -> `--ignore-rules`), and
+# the workspace-write sandbox that would block a write to the shared .git common
+# dir equally blocks the commit/push a build worker must deliver. Codex is
+# nevertheless left un-refused: it is the live availability fallback
+# (wave7_models.yaml routing.tier_map tier-zero/tier-low -> openai/gpt-5.5 lane
+# provider), so refusing it would break a routing default — recorded for T0 in
+# docs/operations/WORKER_LANE_STASH_POSTURE.md.
+#
+# A build on gemini is refused here, before the permit and the spawn, unless the
+# operator names the lane deliberately with the override env. The gate run
+# (gemini_review) does not pass through the door, so it is unaffected.
+STASH_UNGUARDED_BUILD_LANES = frozenset({"gemini"})
+STASH_BUILD_OVERRIDE_ENV = "VNX_OVERRIDE_STASH_BUILD_LANE"
+STASH_BUILD_REFUSAL_CODE = "stash-unrefused-build-lane"
+
+
+def _stash_build_reject(
+    spec: DispatchSpec,
+    provider_value: str,
+    *,
+    override: Optional[bool] = None,
+) -> Optional[Reject]:
+    """Refuse a BUILD on a lane with no per-run deny for `git stash` (OI-2588).
+
+    ``refs/stash`` belongs to the repository, not to a worktree, so every dispatch
+    worktree shares ONE stash and a drop/clear/pop of the wrong entry is
+    irreversible outside the worker's isolation boundary (OI-1447). The claude
+    lanes carry ``--disallowedTools`` and the kimi lane a PreToolUse hook; the
+    gemini CLI has neither a command denylist nor a per-run rules file, so a build
+    worker on that lane could clear the shared stash.
+
+    Only a writing dispatch (``_spec_is_writing``) is affected: a read-only review
+    dispatch on gemini never mutates the stash and stays allowed. ``override``
+    is the operator's explicit escape hatch; when None it is read from
+    ``STASH_BUILD_OVERRIDE_ENV``. Returns None when the lane is fine, the
+    dispatch does not write, or the override is set.
+    """
+    if provider_value not in STASH_UNGUARDED_BUILD_LANES:
+        return None
+    if not _spec_is_writing(spec):
+        return None
+    if override is None:
+        override = os.environ.get(STASH_BUILD_OVERRIDE_ENV, "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+    if override:
+        return None
+    return Reject(
+        STASH_BUILD_REFUSAL_CODE,
+        f"provider {provider_value!r} can build but has no per-run way to refuse "
+        "`git stash` (OI-1447): refs/stash is shared by every worktree of the "
+        "repository, so a drop/clear/pop escapes the worker's isolation boundary. "
+        "The gemini CLI exposes no command denylist or per-run rules file. "
+        "Dispatch this build on a lane with a deny (claude/kimi), or set "
+        f"{STASH_BUILD_OVERRIDE_ENV}=1 to accept the risk deliberately.",
+    )
 
 
 def _register_gate_obligation(
