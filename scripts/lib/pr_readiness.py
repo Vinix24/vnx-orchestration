@@ -200,6 +200,9 @@ class Readiness:
     gates_error: Optional[str] = None
     declared_gates: List[str] = field(default_factory=list)
     observed_gates: List[str] = field(default_factory=list)
+    #: Gates with a request record the door wrote for this PR (``origin: "door"``, ADR-046 A6).
+    #: They are not obligations, but they are not off the door either.
+    door_requested_gates: List[str] = field(default_factory=list)
 
     @property
     def head_sha(self) -> str:
@@ -323,6 +326,7 @@ class Readiness:
             "contexts_summary": ci_contexts.summarise(self.contexts) if self.contexts else None,
             "declared_gates": self.declared_gates,
             "observed_gates": self.observed_gates,
+            "door_requested_gates": self.door_requested_gates,
             "gates": [g.to_dict() for g in self.gates],
             "gates_error": self.gates_error,
             "blockers": self.blockers,
@@ -405,6 +409,47 @@ def observed_gates_for_pr(results_dir: Path, pr_number: int) -> List[str]:
     return gates
 
 
+def _request_names_pr(record: Dict[str, Any], pr_number: int) -> bool:
+    """True when the request names this PR by ``pr_number`` or by a ``pr_id`` that normalises to it."""
+    from gate_obligations import normalise_pr_id
+
+    number = record.get("pr_number")
+    if isinstance(number, int) and not isinstance(number, bool) and number == pr_number:
+        return True
+    pr_id = record.get("pr_id")
+    return isinstance(pr_id, str) and bool(pr_id.strip()) and normalise_pr_id(pr_id) == str(pr_number)
+
+
+def door_requested_gates_for_pr(requests_dir: Path, pr_number: int) -> List[str]:
+    """Gates the door itself asked for on this PR: request records with ``origin == "door"``.
+
+    The obligation store holds one obligation per dispatch, the primary seat. A second seat of
+    the same stack is requested and run by the door too, and leaves only a request record. That
+    record counts as the door's on positive evidence only (``request_is_from_the_door``): a
+    record with no ``origin``, another value, unreadable JSON or no gate name is skipped, so the
+    gate keeps its ``[off the door`` label. Offline ``test_run`` records never count.
+    """
+    from gate_status import is_test_run_record, request_is_from_the_door
+
+    gates: List[str] = []
+    if not requests_dir.is_dir():
+        return gates
+    for path in sorted(requests_dir.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not request_is_from_the_door(record) or is_test_run_record(record):
+            continue
+        # A record that does not name this PR exactly is another PR's (or nobody's).
+        if not _request_names_pr(record, pr_number):
+            continue
+        gate = record.get("gate")
+        if isinstance(gate, str) and gate.strip() and gate.strip() not in gates:
+            gates.append(gate.strip())
+    return gates
+
+
 def collect_gate_evidence(
     pr_number: int,
     declared_gates: Sequence[str],
@@ -425,8 +470,8 @@ def collect_gate_evidence(
     rejecting reviewer gets a NO-GO entry of its own, also when its gate name
     is a seat that another reviewer filled; only a seat line that already names
     the same reviewer as NO-GO is not repeated. ``declared_gates`` (the
-    obligations plus gates run off the door) decides no seat; it marks which
-    seat an obligation declared. The required seats follow the risk class of
+    obligations plus gates run off the door) decides no seat; ``declared`` marks which
+    seat the door declared: an obligation, or a request record it wrote (``origin: "door"``). The required seats follow the risk class of
     the head as the door reads it (R3b), in ``checkout`` (``None``: the store's
     own checkout) against ``base_branch``, the PR's ``baseRefName`` (``None``:
     not known, so the class is high).
@@ -537,13 +582,16 @@ def assess(
     results_dir = Path(state_dir) / "review_gates" / "results"
     observed = observed_gates_for_pr(results_dir, pr_number)
     report.observed_gates = [g for g in observed if g not in report.declared_gates]
+    report.door_requested_gates = door_requested_gates_for_pr(
+        Path(state_dir) / "review_gates" / "requests", pr_number,
+    )
     report.gates = collect_gate_evidence(
         pr_number,
         report.declared_gates + report.observed_gates,
         state_dir,
         branch=branch,
         head_sha=head_sha,
-        declared=report.declared_gates,
+        declared=report.declared_gates + report.door_requested_gates,
         checkout=project_root,
         base_branch=facts.get("baseRefName"),
     )
