@@ -1,0 +1,1 @@
+- Agent layout (track `agents-als-map-fase-1`, PR-0): ADR-050 records the `VNX_AGENT_LAYOUT` flag (`off` default, `shadow`; `on` reads as `off` until phase 2), the shadow skill copy contract and the context-manifest receipt contract.
