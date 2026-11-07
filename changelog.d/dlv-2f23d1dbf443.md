@@ -1,1 +1,0 @@
-- Hooks (G3): the T0 context guard leaves this repo's `.claude/settings.json` (it runs at user level via `vnx guard install`), and every remaining hook timeout is now in seconds instead of 5000 (83 minutes).
