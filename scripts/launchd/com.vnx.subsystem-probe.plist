@@ -71,7 +71,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 -m vnx_cli.main subsystems --probe</string>
+    <string>cd ${VNX_HOME} &amp;&amp; PY=$(bash ${VNX_HOME}/scripts/launchd/vnx_python.sh ${VNX_HOME}) || exit 78; exec "$PY" -m vnx_cli.main subsystems --probe</string>
   </array>
   <key>StartInterval</key>
   <integer>21600</integer>

@@ -9,7 +9,8 @@
 # must only carry <relative-script>. A run in progress is never switched: it finishes on
 # the tree it started from, and only the NEXT launchd start picks up a changed pin.
 #
-# The interpreter comes from the script's own extension: *.py runs python3, *.sh runs
+# The interpreter comes from the script's own extension: *.py runs the interpreter
+# vnx_python.sh picks for the engine root (inside requires-python), *.sh runs
 # bash, anything else exits 78 with one line naming the script.
 #
 # No pin or a resolvable pin -> that tree. A dead pin, an unreadable/malformed/escaping
@@ -34,7 +35,7 @@ shift 2
 # receipt-processor supervisor) cannot be started by python3, and a `*.py` job must not
 # be handed to bash. Anything else is refused before a tree is resolved at all.
 case "$RELATIVE_SCRIPT" in
-    *.py) INTERPRETER=python3 ;;
+    *.py) INTERPRETER=resolve ;;
     *.sh) INTERPRETER=bash ;;
     *)
         echo "ERROR: cannot start $RELATIVE_SCRIPT: only *.py and *.sh scripts are supported" >&2
@@ -53,7 +54,10 @@ DECLARED_HOME="${VNX_HOME:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 
 # Prints the engine root, or exits 78 having printed its one line (dead pin, unregistered
 # project, or a chosen tree without <relative-script>).
-if ! ENGINE_ROOT="$(python3 "$RESOLVER" "$PROJECT_ID" "$DECLARED_HOME" "$RELATIVE_SCRIPT")"; then
+if ! RESOLVER_PYTHON="$(bash "$SCRIPT_DIR/vnx_python.sh" "$(cd "$SCRIPT_DIR/../.." && pwd)")"; then
+    exit 78
+fi
+if ! ENGINE_ROOT="$("$RESOLVER_PYTHON" "$RESOLVER" "$PROJECT_ID" "$DECLARED_HOME" "$RELATIVE_SCRIPT")"; then
     exit 78
 fi
 
@@ -65,5 +69,11 @@ export VNX_HOME="$ENGINE_ROOT"
 # Appended, never prepended (OI-1663): a ~/.local/bin/python3 must not shadow the system
 # python3 this job depends on.
 export PATH="$PATH:${HOME:?HOME is not set}/.local/bin"
+
+if [ "$INTERPRETER" = resolve ]; then
+    if ! INTERPRETER="$(bash "$SCRIPT_DIR/vnx_python.sh" "$ENGINE_ROOT")"; then
+        exit 78
+    fi
+fi
 
 exec "$INTERPRETER" "$RELATIVE_SCRIPT" "$@"
