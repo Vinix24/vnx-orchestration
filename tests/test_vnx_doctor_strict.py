@@ -130,6 +130,9 @@ def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
     (project / _engine.PROJECT_FILE_NAME).write_text("vnx-dev\n", encoding="utf-8")
     _inject_launchd(monkeypatch, "vnx-dev")
     monkeypatch.setattr(doctor_module.shutil, "which", lambda name: f"/usr/bin/{name}")
+    # The clean tree is about the project, not the host: the installed claude CLI and its
+    # measurement record (check `claude-cli`) must not decide the strict exit code.
+    monkeypatch.setattr(doctor_module, "_claude_cli_version", lambda: None)
     monkeypatch.setattr(sys, "platform", "darwin")
     return project
 
