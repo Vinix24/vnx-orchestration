@@ -270,5 +270,62 @@ class TestDenyHookScript(unittest.TestCase):
                 self.assertIn("malformed", result.stderr)
 
 
+_HIDDEN_STASH = [
+    "git stash; true",
+    "true;git stash pop",
+    "true; git stash pop",
+    "bash -c 'git stash clear'",
+    'bash -lc "cd x && git stash"',
+    "sh -c 'git -C /tmp stash list'",
+    "git stash&&true",
+    "(git stash)",
+    "{ git stash; }",
+    "echo a\ngit stash",
+    "$(git stash)",
+    "`git stash`",
+    "eval git stash",
+    'eval "git stash pop"',
+    "env FOO=1 git stash",
+    "/usr/bin/git stash",
+    "git stash 'x",
+]
+
+_STASH_FREE = [
+    "git status",
+    "git log --grep stash",
+    'git commit -m "do not use git stash"',
+    "echo stash",
+    "git checkout stash-fix",
+]
+
+
+def _hook(command: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_DENY_SCRIPT)],
+        input=_payload(command),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+@pytest.mark.parametrize("command", _HIDDEN_STASH)
+def test_the_hook_sees_a_stash_behind_a_shell_boundary_or_a_nested_shell(command):
+    """A `;`, a `&&`, a subshell, a nested `sh -c`/`eval` or a substitution around
+    `git stash` is still the stash subcommand: the guard is not bypassable."""
+    result = _hook(command)
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout)["hookSpecificOutput"]
+    assert decision["permissionDecision"] == "deny"
+    assert "OI-1447" in decision["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("command", _STASH_FREE)
+def test_the_hook_allows_a_compound_command_without_the_stash_subcommand(command):
+    result = _hook(command)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == ""
+
+
 if __name__ == "__main__":
     unittest.main()
