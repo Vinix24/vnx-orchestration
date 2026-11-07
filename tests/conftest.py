@@ -819,6 +819,33 @@ def _fail_on_refused_launchctl():
         )
 
 
+@pytest.fixture(autouse=True)
+def _refuse_signal_to_own_process_group(monkeypatch):
+    """OI-2599: raise instead of sending a signal aimed at the test's own group.
+
+    A fake pid (99) resolved by getpgid to 0 on a Linux runner turned killpg(0, ...)
+    into a signal for pytest, the step shell and the runner; this refuses that call.
+    """
+    real_killpg, real_kill = os.killpg, os.kill
+    own = os.getpgrp()
+
+    def _group_is_own_or_wider(pgid: int) -> bool:
+        return pgid <= 1 or pgid == own
+
+    def _killpg(pgid, sig):
+        if _group_is_own_or_wider(pgid):
+            raise AssertionError(f"[TEST ISOLATION GUARD] os.killpg({pgid}, {sig}) targets the test's own group or wider")
+        return real_killpg(pgid, sig)
+
+    def _kill(pid, sig):
+        if pid in (0, -1) or (pid < -1 and _group_is_own_or_wider(-pid)):
+            raise AssertionError(f"[TEST ISOLATION GUARD] os.kill({pid}, {sig}) targets the test's own group or wider")
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(os, "killpg", _killpg)
+    monkeypatch.setattr(os, "kill", _kill)
+
+
 # ---------------------------------------------------------------------------
 # DB / registry fixtures  (shared with test_burnin_certification)
 # ---------------------------------------------------------------------------
