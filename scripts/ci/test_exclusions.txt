@@ -181,6 +181,7 @@ tests/test_receipt_classifier.py  # OI-1227: red solo — classifier_providers.o
 tests/test_receipt_instruction_hash.py  # OI-1227: red solo — manifest sha256 read failed (2 failed, 7 passed)
 tests/test_receipt_t0_view_filter.py  # OI-946: DB/migration precondition chain (init/migrate/track bootstrap) red on main too
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
+tests/test_repo_map.py  # OI-1420 + D1 (OI-2589) gemeten run 42318233090 op ff7ef8d8 (Profile A parallel, 13 failed): 11x NameError '_TSParser' (TestExtractPythonSymbols, TestBuildDependencyGraph) en 2x ModuleNotFoundError 'networkx' (TestPersonalizedBoost); de runner heeft geen tree-sitter en geen networkx (bewust niet geïnstalleerd, zie profile-a-prelude/action.yml), lokaal groen: omgeving, geen codefout (CI image-klasse)
 tests/test_review_adapters.py  # OI-1227: red solo — ValueError not raised for unknown adapter (7 failed, 28 passed)
 tests/test_runtime_facade_registry_integration.py  # OI-1227: red solo — Invalid terminal_id 'A0' must match ^T[0-9]+$ (1 failed, 19 passed)
 tests/test_safe_autonomy_cutover.py  # OI-1227: red solo — ModuleNotFoundError: fpd_certification (3 failed, 35 passed)
@@ -195,6 +196,8 @@ tests/test_subprocess_cheap_lane.py  # OI-1227: red solo — cheap-lane routes t
 tests/test_subprocess_dispatch_identity.py  # OI-1227: red solo — delivered env leaks ANTHROPIC_AUTH_TOKEN (1 failed, 5 passed)
 tests/test_subprocess_health.py  # OI-1227: red solo — deliver-with-recovery file not found (3 failed, 13 passed)
 tests/test_subprocess_w3e_robustness.py  # OI-1227: red solo — cannot import _classify_completion from delivery (3 failed, 14 passed)
+tests/test_t0_decision_log.py  # OI-1420 + D1 (OI-2589) gemeten run 42318233090 op ff7ef8d8 (Profile A parallel, 2 failed): TestProcessEventsFileCursorStaleness::test_cursor_resets_when_source_replaced_same_length (assert 0 == 3) en ::test_legacy_cursor_upgrade_enables_same_length_replacement_detection (assert 0 == 1); slaagt solo, valt onder de xdist-sweep (inode-hergebruik, OI-658-klasse)
+tests/test_t0_escalations_log.py  # OI-1420 + D1 (OI-2589) gemeten run 42318233090 op ff7ef8d8 (Profile A parallel, 1 failed): TestProcessEventsFileCursorStaleness::test_cursor_resets_when_source_replaced_same_length (assert 0 == 3); slaagt solo, valt onder de xdist-sweep (zelfde inode-hergebruik-klasse als test_t0_decision_log.py, OI-658-klasse)
 tests/test_t0_skill_consistency.py  # OI-1227: red solo — no bash blocks found in CLAUDE.md (2 failed, 6 passed)
 tests/test_tenant_stamp_fail_closed.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (1 failed) op de letterlijke bron-quote: "ADR-007 fail-closed: project_id conflict for init backfill — db-path='mission-control', env:VNX_PROJECT_ID='vnx-dev'. All sources must agree."
 tests/test_terminal_state_reconciler.py  # OI-1227: red solo — reconciler 'idle' != 'blocked' (2 failed, 10 passed)
