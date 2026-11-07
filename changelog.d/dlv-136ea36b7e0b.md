@@ -1,0 +1,1 @@
+- Agents (track `agents-als-map-fase-1`, PR-2a): `backend-developer`, `quality-engineer` and `research-analyst` declare their `skills:` in `config.yaml`, and `scripts/lib/agent_skill_materialize.py` copies them to `<worktree>/.vnx-agent-skills/<role>/` under `VNX_AGENT_LAYOUT=shadow` (git-ignored, fail-open, manifest with sha256 per file); nothing calls it yet.
