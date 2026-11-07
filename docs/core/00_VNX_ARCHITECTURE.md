@@ -251,9 +251,10 @@ not this doc).
 
 **Purpose**: Context-rotation automation for long-running T0 sessions.
 
-**Hooks actually wired** (see the generated *Hooks Wired* table further down,
-which is the checkable source): `t0_context_guard.py` (PreToolUse/Stop/UserPromptSubmit),
-`session_stop_rotation.py` (Stop). T0's own rotation flow, the mechanism
+**Hooks actually wired in this repo's `.claude/settings.json`** (see the
+generated *Hooks Wired* table further down, which is the checkable source):
+`session_stop_rotation.py` (Stop). `t0_context_guard.py` runs at user level via
+`vnx guard install`, not in this file (G3, dispatch dlv-2f23d1dbf443). T0's own rotation flow, the mechanism
 that actually ships, is `docs/operations/T0_CONTEXT_ROTATION.md`
 (`scripts/hooks/t0_context_guard.py`, `scripts/t0_rotate_spawn.sh`). `vnx guard install|check`
 registers the guard at user level and reports where it runs (`vnx_cli/commands/guard.py`);
@@ -616,11 +617,10 @@ liveness with `bash scripts/vnx_supervisor_simple.sh status` or
 ### Hooks Wired in `.claude/settings.json` (generated — do not hand-edit; regenerate with `python3 scripts/generate_architecture_doc.py --write`)
 
 <!-- BEGIN GENERATED: hooks -->
-- **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_block_subagent.sh`, `t0_context_guard.py`
+- **PreToolUse**: `pretooluse_block_raw_claude_spawn.sh`, `pretooluse_block_subagent.sh`
 - **SessionEnd**: `session_reconcile_cleanup.sh`, `build_current_state.py`, `build_doc_indexes.py`
 - **SessionStart**: `session_reconcile_autoclose.sh`, `build_t0_state_hook.sh`, `path_parity_check.sh`, `monitor_tripwire.sh`, `sessionstart.sh`, `hookpin_check.sh`
-- **Stop**: `stop_report_hook.sh`, `session_stop_rotation.py`, `t0_context_guard.py`
-- **UserPromptSubmit**: `t0_context_guard.py`
+- **Stop**: `stop_report_hook.sh`, `session_stop_rotation.py`
 <!-- END GENERATED: hooks -->
 
 `scripts/userpromptsubmit_worker_intelligence_inject.sh` is intentionally

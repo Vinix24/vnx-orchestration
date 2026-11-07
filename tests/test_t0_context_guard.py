@@ -646,9 +646,14 @@ def _guard_events(settings: dict) -> set:
     return events
 
 
-def test_guard_registered_in_fabric_settings():
+def test_guard_not_registered_in_fabric_settings():
+    """G3 (dispatch dlv-2f23d1dbf443): the guard runs at USER level now
+    (`vnx guard install`, `vnx guard check --require-user` OK). The fabric
+    repo's own .claude/settings.json must carry no project-level entry, or
+    `vnx guard check --require-user` reports vnx-dev as "project (direct)".
+    """
     settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text())
-    assert _guard_events(settings) == {"UserPromptSubmit", "PreToolUse", "Stop"}
+    assert _guard_events(settings) == set()
 
 
 def test_guard_not_registered_in_consumer_template(tmp_path):
