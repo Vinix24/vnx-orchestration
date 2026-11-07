@@ -100,7 +100,7 @@ if str(LIB_DIR) not in sys.path:
 from ndjson_hash_chain import verify_chain  # noqa: E402
 from open_outcomes import build_open_outcomes
 from lifecycle_count import briefing_line, compute_lifecycle_count
-from receipt_outcome import is_foreign_project
+from receipt_outcome import noise_reason
 from vnx_paths import project_id_from_state_dir
 from vnx_ids import PROJECT_ID_RE
 from migrations.auto_apply import _RUNNERS_DIR as _AUTO_APPLY_RUNNERS_DIR, highest_auto_applicable_migration  # noqa: E402
@@ -175,9 +175,11 @@ def _read_unique_dispatch_ids(
     the shape of the id — and a line with no ``event``, or one nobody
     classified, is NOT skipped: an unknown line stays visible.
 
-    When ``project_id`` is given, a line stamped with another project is skipped
-    through ``receipt_outcome.is_foreign_project`` (the one project test of every
-    ledger reader, ADR-007); a line without a stamp stays visible.
+    When ``project_id`` is given, a line that ``receipt_outcome.noise_reason``
+    names as noise is skipped: a pytest row, a line stamped with another project
+    (the one project test of every ledger reader, ADR-007), a temp report path, a
+    MagicMock row or a stale contract-invalid line. A real line without a stamp
+    stays visible. Without ``project_id`` nothing is filtered (the registry side).
 
     Returns ``(ids, total_lines, parse_errors)``. Raises ``OSError`` if the
     file cannot be opened/read (caller maps that to ``SKIPPED_UNVERIFIED`` —
@@ -203,7 +205,7 @@ def _read_unique_dispatch_ids(
             event = rec.get("event")
             if isinstance(event, str) and event in exclude_events:
                 continue
-            if project_id is not None and is_foreign_project(rec, project_id):
+            if project_id is not None and noise_reason(rec, project_id) is not None:
                 continue
             did = rec.get("dispatch_id")
             if not did and include_cmd_id:
