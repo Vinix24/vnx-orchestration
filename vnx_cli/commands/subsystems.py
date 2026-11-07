@@ -127,6 +127,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Dispatch lifecycle in the receipt ledger (ADR-045): one start line, "
         "one end line per attempt, and a report that is never a second outcome."
     ),
+    "agent-layout": (
+        "Agent-as-folder skill layout (track agents-als-map-fase-1): off or "
+        "shadow; `on` is phase 2 and reads as off."
+    ),
 }
 
 # Ledger row order (framework-status-audit-and-cockpit PR-3). Grouped by
@@ -188,6 +192,7 @@ _ROW_ORDER: List[str] = [
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",
+    "agent-layout",
     # COCKPIT
     "subsystem-cockpit",
     "effectiveness-probe-framework",

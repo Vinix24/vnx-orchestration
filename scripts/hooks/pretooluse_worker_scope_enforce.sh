@@ -10,13 +10,21 @@
 #
 # Claude Code hook contract (2.1+):
 #   stdin  : JSON {tool_name, tool_input, session_id, cwd, transcript_path}
-#   stdout : {"decision":"block","reason":"..."} to block, empty to allow
-#   exit   : 0 always — block/allow is communicated via JSON stdout, never
+#   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
+#            "permissionDecision":"deny","permissionDecisionReason":"..."}}
+#            to deny, empty to allow (the flat {"decision":"block"} form is
+#            not the PreToolUse contract; OI-1644)
+#   exit   : 0 always — deny/allow is communicated via JSON stdout, never
 #            the exit code. A crashing core must never surface as a hook
 #            error, so the python invocation is hardened with `|| true`.
 #
+# Registration: .claude/settings.json, PreToolUse, matcher
+#       Write|Edit|MultiEdit|Bash, timeout 5 (seconds).
+#
 # Gate: VNX_ENFORCE_WORKER_PERMISSIONS (default OFF). Unset/0 → no-op, every
-#       tool call is allowed exactly as if this hook were not registered.
+#       tool call is allowed exactly as if this hook were not registered, in
+#       every session of this repo including a T0 session with no dispatch
+#       environment. evaluate() returns allow before any file is read.
 #
 # Token budget: ~60 tokens/call — fast-path exits for non-matching tools
 # happen inside the Python core (pretooluse_worker_scope_enforce.py).

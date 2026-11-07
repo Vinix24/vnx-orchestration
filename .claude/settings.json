@@ -23,6 +23,16 @@
         ]
       },
       {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'exec bash \"$(git rev-parse --show-toplevel 2>/dev/null || echo .)/scripts/hooks/pretooluse_worker_scope_enforce.sh\"'",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "matcher": "Task",
         "hooks": [
           {

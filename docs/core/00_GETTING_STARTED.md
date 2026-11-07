@@ -1,7 +1,7 @@
 # Getting Started (VNX)
 
 **Status**: Active
-**Last Updated**: 2026-10-18
+**Last Updated**: 2026-11-07
 **Owner**: T-MANAGER
 **Purpose**: Quick orientation and links to the current VNX "source of truth" docs.
 
@@ -59,15 +59,19 @@ vnx providers list
 # Token cost report
 ./bin/vnx cost-report
 
+# Cost ledger report, grouped by model, role, day or provider (v1.8.0)
+./bin/vnx costs report --by provider
+
 # Operator recovery
 ./bin/vnx recover
 ```
 
 `./bin/vnx start` opens a tmux session with a single T0 orchestrator pane, not
 a fixed T1-T3 grid. T1/T2/T3 workers run as ephemeral per-dispatch processes
-through the single-entry door (`./bin/vnx dispatch`) unless a terminal opts
-into a terminal-pinned worker with `VNX_ADAPTER_T{n}=subprocess`; see
-`DISPATCH_RULES.md` §8.
+through the single-entry door (`./bin/vnx dispatch`). Since T-G1 the worker
+terminals T1-T3 always take the headless subprocess lane and no
+`VNX_ADAPTER_T{n}` value moves them; only T0 still opts in, with
+`VNX_ADAPTER_T0=subprocess`. See `DISPATCH_RULES.md` §5.
 
 The full pip-vs-bash command list and the two-binary split live in one place:
 [Onboarding Guide, Appendix A](../onboarding/ONBOARDING_GUIDE.md#appendix-a-two-binaries-and-the-full-pip-cli-surface).
@@ -76,7 +80,7 @@ The full pip-vs-bash command list and the two-binary split live in one place:
 
 A T0 session that crosses 500K tokens of context must rotate to a fresh session. Two parts
 make that work: a guard hook that blocks new work, and a spawner that opens the successor.
-Both shipped in a release (#1923). Two later changes are on main and not yet released: `vnx guard install|check` (#2078) and the wrap-proof check in the spawner (#2076). The full contract, with the bands and every exit code, is
+Both shipped in release v1.6.6 (#1923). `vnx guard install|check` (#2078) and the wrap-proof check in the spawner (#2076) followed in v1.7.2. The full contract, with the bands and every exit code, is
 [`../operations/T0_CONTEXT_ROTATION.md`](../operations/T0_CONTEXT_ROTATION.md).
 
 The guard is `scripts/hooks/t0_context_guard.py`. Under the warn band it does nothing, and in the warn
@@ -93,8 +97,9 @@ vnx guard check               # read-only: where the guard runs, per account and
 ```
 
 `vnx guard check` exits 0 only when all of its checks hold, among them that each account carries
-the three hook entries in the exact form and that the shim and the guard exist in the installed
-VNX.
+the three hook entries (`UserPromptSubmit`, `PreToolUse` and `Stop`) in the exact form and that
+the shim and the guard exist in the installed VNX. With `--require-user` (#2245, v1.8.0) only the
+user-level registration counts: an event that a project's own settings answer is a failure.
 
 The spawner is `scripts/t0_rotate_spawn.sh`. It is called by the `rotate` skill after
 `/build-log wrap` has written `daily-log/handoff.md`. It refuses to run outside tmux, on a

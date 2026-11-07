@@ -31,6 +31,7 @@ _SCRIPT_RE = re.compile(r"[\w.-]+\.(?:sh|py)")
 EXPECTED_SCRIPTS = {
     "PreToolUse": [
         "pretooluse_block_raw_claude_spawn.sh",
+        "pretooluse_worker_scope_enforce.sh",
         "pretooluse_block_subagent.sh",
     ],
     "SessionEnd": [

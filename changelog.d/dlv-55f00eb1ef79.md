@@ -1,0 +1,1 @@
+- Documentation (track `ledger-is-falsifiable`, PR 0): `docs/governance/decisions/ADR-055-processor-liveness-heartbeat.md` fixes the receipt processor heartbeat contract, its five states, the `fail` > `unknown` > `ok` aggregation, the 90 s window as an assumption and the writer-before-reader rollout order.
