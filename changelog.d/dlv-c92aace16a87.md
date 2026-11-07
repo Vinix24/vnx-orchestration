@@ -1,0 +1,1 @@
+refactor(gates): GateRunner picks its dispatcher from one dispatch table (gate_dispatch_table.py) and holds no provider name; a harness-lane row without a dispatcher books not_executable/gate_runner_missing instead of falling back (review-lane P1)

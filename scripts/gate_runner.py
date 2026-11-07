@@ -39,7 +39,7 @@ import gate_artifacts as _art
 import provider_costs
 import provider_switch
 import vertex_ai_runner as _vtx
-from claude_gate_lane import CLAUDE_LANE_PROVIDER
+import gate_dispatch_table
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -398,31 +398,20 @@ def _build_harness_lane_dispatcher(
     success writer (``gate_artifacts.materialize_artifacts``) and the failure
     writer (``gate_recorder.record_failure``) both carry it onto the result.
 
-    A gate registered on the ``claude`` lane (``claude_gate``, R7) gets
-    ``claude_gate_lane``'s dispatcher, on the subscription, in a worktree
-    allocated in ``project_root`` (``None``: the consumer project root).
+    The dispatcher comes from ``gate_dispatch_table`` (ADR-046 Amendment 1, A2):
+    the lane is the one the gate's registry row names, the table maps it to
+    a dispatcher key and builds it. This engine holds no lane or provider name.
+    ``project_root`` (``None``: the consumer project root) is handed to the
+    factory for lanes that allocate a worktree.
     """
     timeouts = _harness_lane_dispatcher_timeouts(
         gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
     )
     request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
-    if _rec.resolve_gate_provider(gate) == (_rec.GATE_PROVIDER_HARNESS_LANE, CLAUDE_LANE_PROVIDER):
-        # R7: the claude seat never goes through provider_dispatch, which refuses
-        # claude. Same call shape, the lane's own deadline; no outer process.
-        # Looked up on the module at call time, like plan_gate_panel's below.
-        import claude_gate_lane
-
-        return claude_gate_lane.make_claude_gate_dispatcher(
-            data_dir, base_ref=base_ref,
-            total_deadline_seconds=timeouts["total_deadline_seconds"], project_root=project_root,
-        )
-    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-    # graph, and only the harness-lane path needs it.
-    from plan_gate_panel import _make_default_dispatcher
-
-    return _make_default_dispatcher(
-        str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
-        total_deadline_seconds=timeouts["total_deadline_seconds"],
+    registered = _rec.resolve_gate_provider(gate)
+    lane = registered[1] if registered is not None else None
+    return gate_dispatch_table.build_dispatcher(
+        gate, lane, data_dir, base_ref, timeouts, project_root,
     )
 
 
@@ -941,6 +930,12 @@ class GateRunner:
             ),
         )
 
+    @staticmethod
+    def _is_harness_lane_gate(gate: str) -> bool:
+        """Whether the registry row of ``gate`` is a harness lane (the kind, not a name)."""
+        registered = _rec.resolve_gate_provider(gate)
+        return registered is not None and registered[0] == _rec.GATE_PROVIDER_HARNESS_LANE
+
     def _not_executable(
         self, *, gate: str, pr_number: Optional[int], pr_id: str,
         request_payload: Dict[str, Any], reason: str, reason_detail: str,
@@ -1010,7 +1005,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate", "claude_gate"):
+        elif not prompt and self._is_harness_lane_gate(gate):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
@@ -1233,6 +1228,15 @@ class GateRunner:
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
             )
         base_ref = f"origin/{branch}"
+
+        # ADR-046 A2: a lane the dispatch table cannot build is not executable;
+        # there is no default dispatcher to fall back on.
+        unresolved = gate_dispatch_table.unresolved_detail(gate, provider)
+        if unresolved is not None:
+            return self._not_executable(
+                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+                reason="gate_runner_missing", reason_detail=unresolved,
+            )
 
         # reports_dir is <data_dir>/unified_reports, so its parent is the data
         # dir the dispatcher resolves and the lane writes its report into.
