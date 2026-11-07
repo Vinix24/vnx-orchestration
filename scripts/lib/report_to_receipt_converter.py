@@ -50,6 +50,7 @@ logger = logging.getLogger(__name__)
 # ADR-045 (K-8b): one decision, in report_lifecycle_mode. Imported as a MODULE so
 # `report_line` is not rebound here for other writers to reuse.
 import report_lifecycle_mode
+from atomic_io import atomic_write_text
 from receipt_schema import REPORT_INGESTED_EVENT_TYPE
 from dispatch_identity import _IDENTITY_UNRESOLVED  # single canonical sentinel (dispatch-20260804-190000)
 # Canonical receipt status vocabulary (single generated source). The converter
@@ -1826,11 +1827,7 @@ def _convert_one_detailed(
     except report_lifecycle_mode.ReportPathRefused as exc:
         # Named refusal (K-8b rule 4): book nothing — or dead-letter when permanent
         # and aged (OI-2542). Caught BEFORE the generic handler: never a crash.
-        outcome = _lifecycle_refusal_outcome(
-            exc, report_path, state_dir_for_route, dry_run, rejected_detail_sink)
-        if outcome == "error":
-            return _error_outcome(error_reason_sink, f"lifecycle refusal: {exc.code}")
-        return None, outcome
+        return _lifecycle_refusal_result(exc, report_path, state_dir_for_route, dry_run, rejected_detail_sink, error_reason_sink)
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -2104,6 +2101,17 @@ _HEALTH_ERRORS_LIST_MAX = 100
 _HEALTH_ERRORS_FILENAME = "report_to_receipt_converter.errors.ndjson"
 
 
+def _lifecycle_refusal_result(exc: "report_lifecycle_mode.ReportPathRefused",
+                              report_path: Path, state_dir: Optional[Path], dry_run: bool,
+                              rejected_detail_sink: Optional[List[Dict[str, Any]]],
+                              error_reason_sink: Optional[List[str]]) -> Tuple[None, str]:
+    """The ``(None, outcome)`` of a lifecycle refusal; an ``error`` outcome names its reason in *error_reason_sink*."""
+    outcome = _lifecycle_refusal_outcome(exc, report_path, state_dir, dry_run, rejected_detail_sink)
+    if outcome == "error":
+        return _error_outcome(error_reason_sink, f"lifecycle refusal: {exc.code}")
+    return None, outcome
+
+
 def _error_outcome(sink: Optional[List[str]], reason: str) -> Tuple[None, str]:
     """The ``error`` outcome, with its reason named in *sink* (a path and a reason, never report content)."""
     if sink is not None:
@@ -2125,11 +2133,8 @@ def _write_errors_sidefile(data_root: Path, errors: Tuple[Dict[str, str], ...]) 
     """Rewrite ``health/<component>.errors.ndjson`` with this scan's full error list, atomically."""
     health_dir = data_root / "health"
     target = health_dir / _HEALTH_ERRORS_FILENAME
-    tmp = health_dir / (_HEALTH_ERRORS_FILENAME + ".tmp")
     try:
-        health_dir.mkdir(parents=True, exist_ok=True)
-        tmp.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in errors), encoding="utf-8")
-        os.replace(tmp, target)
+        atomic_write_text(target, "".join(json.dumps(e, sort_keys=True) + "\n" for e in errors))
     except OSError as exc:
         logger.warning("report_to_receipt_converter: cannot write %s: %s", _HEALTH_ERRORS_FILENAME, exc)
 
