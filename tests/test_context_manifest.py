@@ -1,0 +1,212 @@
+"""context_manifest.capture and the transcript locator (agents-als-map PR-4a1).
+
+The fixture is a synthetic 2.1.287 transcript: ``{HOME}`` and ``{REPO}`` are
+replaced per test with temp dirs, so no path of this machine is baked in.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts" / "lib"))
+
+FIXTURE = Path(__file__).parent / "fixtures" / "context_manifest" / "transcript_2_1_287.jsonl"
+SESSION = "sess-fixture-1"
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    projects = tmp_path / "projects"
+    for d in (home, repo, projects / "-enc"):
+        d.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("VNX_CLAUDE_PROJECTS_DIR", raising=False)
+    text = FIXTURE.read_text(encoding="utf-8").replace("{HOME}", str(home)).replace("{REPO}", str(repo))
+    transcript = projects / "-enc" / f"{SESSION}.jsonl"
+    transcript.write_text(text, encoding="utf-8")
+    return {"home": home, "repo": repo, "projects": projects, "transcript": transcript}
+
+
+def _capture(env, **kw):
+    import context_manifest
+    return context_manifest.capture(
+        SESSION, claude_projects_dir=env["projects"], repo_root=env["repo"], **kw
+    )
+
+
+# --- locator -------------------------------------------------------------
+
+def test_harvest_reads_the_transcript_through_the_locator(env, monkeypatch):
+    import token_harvest
+
+    calls = []
+
+    def spy(session_id, *, claude_projects_dir=None):
+        calls.append((session_id, claude_projects_dir))
+        return env["transcript"]
+
+    monkeypatch.setattr(token_harvest, "locate_session_transcript", spy, raising=False)
+    # A projects dir that holds nothing: only the locator can find the file now.
+    empty = env["projects"].parent / "empty"
+    empty.mkdir()
+    result = token_harvest.harvest_session_tokens(SESSION, claude_projects_dir=empty)
+    assert calls == [(SESSION, empty)]
+    assert result == {"input": 100, "output": 20, "cache_creation_5m": 10,
+                      "cache_creation_1h": 5, "cache_read": 2}
+
+
+def test_locator_finds_the_same_file_harvest_reads(env):
+    import token_harvest
+
+    found = token_harvest.locate_session_transcript(SESSION, claude_projects_dir=env["projects"])
+    assert found == env["transcript"]
+    assert token_harvest.harvest_session_tokens(SESSION, claude_projects_dir=env["projects"])["input"] == 100
+
+
+@pytest.mark.parametrize("session_id", [None, "", "   ", "nope"])
+def test_locator_returns_none_without_a_match(env, session_id):
+    import token_harvest
+
+    assert token_harvest.locate_session_transcript(session_id, claude_projects_dir=env["projects"]) is None
+
+
+# --- capture: happy path ---------------------------------------------------
+
+def test_capture_instructions_are_paths_types_lengths_hashes(env):
+    result = _capture(env)
+    assert result["status"] == "ok"
+    inst = result["instructions"]
+    files = {f["path"]: f for f in inst["files"]}
+    assert set(files) == {
+        "~/.claude-alt/CLAUDE.md", "~/.claude/rules/style.md",
+        str(env["repo"] / "CLAUDE.md"), "~/.claude-alt/projects/enc/memory/MEMORY.md",
+        str(env["repo"] / "sub" / "CLAUDE.md"),
+    }
+    user = files["~/.claude-alt/CLAUDE.md"]
+    assert user == {"path": "~/.claude-alt/CLAUDE.md", "type": "User",
+                    "chars": len("SENTINEL-CONTENT user instructions"),
+                    "sha256": _digest("SENTINEL-CONTENT user instructions"),
+                    "in_config_home": True, "seen": "initial"}
+    assert files[str(env["repo"] / "CLAUDE.md")]["in_config_home"] is False
+    assert files[str(env["repo"] / "CLAUDE.md")]["seen"] == "initial"
+    assert files[str(env["repo"] / "sub" / "CLAUDE.md")]["seen"] == "later"
+    assert inst["by_type"] == {"User": 1, "Project": 3, "AutoMem": 1}
+    assert inst["attachments"] == 2
+    assert inst["total_chars"] == sum(f["chars"] for f in inst["files"])
+    assert result["cli_version"] == "2.1.287"
+
+
+def test_capture_auto_memory(env):
+    mem = _capture(env)["auto_memory"]
+    assert mem == {"loaded": True, "path": "~/.claude-alt/projects/enc/memory/MEMORY.md",
+                   "chars": len("SENTINEL-CONTENT memory index")}
+
+
+def test_capture_skills_split_by_origin(env):
+    (env["repo"] / ".claude" / "skills" / "repo-skill").mkdir(parents=True)
+    (env["repo"] / ".claude" / "skills" / "repo-skill" / "SKILL.md").write_text("x")
+    (env["home"] / ".claude-alt" / "skills" / "user-skill").mkdir(parents=True)
+    (env["home"] / ".claude-alt" / "skills" / "user-skill" / "SKILL.md").write_text("x")
+    skills = _capture(env)["skills"]
+    assert skills["initial_count"] == 6
+    assert skills["initial_chars"] > 0
+    assert skills["initial"] == {
+        "synced": ["anthropic-skills:docx"], "namespaced": ["plugin:thing"],
+        "repo": ["repo-skill"], "user": ["user-skill"], "other": ["builtin", "dup"],
+    }
+    assert skills["later"] == ["later-skill"]
+
+
+def test_capture_output_has_no_content_and_no_address(env):
+    blob = json.dumps(_capture(env))
+    assert "SENTINEL-CONTENT" not in blob
+    assert "@" not in blob
+    assert "example.invalid" not in blob
+
+
+# --- capture: failure and edge paths ---------------------------------------
+
+def test_capture_without_session_id_is_unavailable(env):
+    import context_manifest
+
+    result = context_manifest.capture("  ", claude_projects_dir=env["projects"])
+    assert result["status"] == "unavailable" and result["reason"] == "no_session_id"
+
+
+def test_capture_unknown_session_is_unavailable(env):
+    import context_manifest
+
+    result = context_manifest.capture("other", claude_projects_dir=env["projects"])
+    assert result["status"] == "unavailable" and result["reason"] == "transcript_not_found"
+
+
+def test_transcript_without_context_records_is_partial(env):
+    env["transcript"].write_text(json.dumps({"type": "user", "version": "2.1.287"}) + "\n", encoding="utf-8")
+    result = _capture(env)
+    assert result["status"] == "partial"
+    assert result["instructions"]["files"] == []
+    assert result["auto_memory"]["loaded"] is False
+    assert result["skills"]["initial_count"] is None
+
+
+@pytest.mark.parametrize("bad_entry", [
+    {"path": "/x/CLAUDE.md", "type": "User", "content": None},
+    {"path": "/x/CLAUDE.md", "type": None, "content": "c"},
+    {"path": "", "type": "User", "content": "c"},
+    {"type": "User", "content": "c"},
+    "not-a-dict",
+])
+def test_malformed_instruction_entry_is_skipped_and_marks_partial(env, bad_entry):
+    line = {"type": "attachment", "version": "2.1.287",
+            "attachment": {"type": "instructions", "files": [bad_entry]}}
+    env["transcript"].write_text(json.dumps(line) + "\n", encoding="utf-8")
+    result = _capture(env)
+    assert result["status"] == "partial"
+    assert result["instructions"]["files"] == []
+    assert result["instructions"]["skipped"] == 1
+
+
+def test_unparseable_lines_are_ignored(env):
+    text = env["transcript"].read_text(encoding="utf-8")
+    env["transcript"].write_text('{"attachment": broken\n' + text, encoding="utf-8")
+    assert _capture(env)["status"] == "ok"
+
+
+def test_byte_budget_gives_partial(env, monkeypatch):
+    import context_manifest
+
+    monkeypatch.setattr(context_manifest, "MAX_SCAN_BYTES", 10)
+    result = _capture(env)
+    assert result["status"] == "partial"
+    assert result["transcript"]["budget_hit"] is True
+
+
+def test_time_budget_gives_partial(env, monkeypatch):
+    import context_manifest
+
+    monkeypatch.setattr(context_manifest, "MAX_SCAN_SECONDS", -1.0)
+    result = _capture(env)
+    assert result["status"] == "partial"
+    assert result["transcript"]["budget_hit"] is True
+
+
+def test_capture_never_raises(env, monkeypatch):
+    import context_manifest
+
+    def boom(*a, **k):
+        raise RuntimeError("scan broke")
+
+    monkeypatch.setattr(context_manifest, "_scan_transcript", boom)
+    result = _capture(env)
+    assert result["status"] == "error" and result["reason"] == "extract_failed:RuntimeError"
