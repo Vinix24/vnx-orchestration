@@ -51,7 +51,7 @@
   <array>
     <string>/bin/bash</string>
     <string>-c</string>
-    <string>cd ${VNX_HOME} &amp;&amp; exec python3 scripts/fleet_pin_audit.py --write-state --scan-root $HOME/Development --json</string>
+    <string>cd ${VNX_HOME} &amp;&amp; PY=$(bash ${VNX_HOME}/scripts/launchd/vnx_python.sh ${VNX_HOME}) || exit 78; exec "$PY" scripts/fleet_pin_audit.py --write-state --scan-root $HOME/Development --json</string>
   </array>
   <key>StartInterval</key>
   <integer>21600</integer>

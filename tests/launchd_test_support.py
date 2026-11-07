@@ -13,15 +13,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
 
+PYPROJECT_BODY = '[project]\nrequires-python = ">=3.11,<3.14"\n'
+
+
+def write_pyproject(root: Path) -> None:
+    """Give a fake engine tree the ``requires-python`` the interpreter resolver reads."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "pyproject.toml").write_text(PYPROJECT_BODY, encoding="utf-8")
+
+
 def register_engine(home: Path, engine: Path, project_id: str) -> Path:
     """Make ``engine`` a registered primary checkout of ``project_id`` under ``home``."""
-    engine.mkdir(parents=True, exist_ok=True)
+    write_pyproject(engine)
     (engine / ".vnx-project-id").write_text(project_id + "\n", encoding="utf-8")
     registry_path = home / ".vnx" / "projects.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -37,7 +48,7 @@ def register_engine(home: Path, engine: Path, project_id: str) -> Path:
 
 def make_central_engine(engine: Path, real_scripts: Optional[Path] = None) -> Path:
     """A fake engine that passes the guard as a central install."""
-    engine.mkdir(parents=True, exist_ok=True)
+    write_pyproject(engine)
     (engine / ".vnx-install-mode").write_text("central\n", encoding="utf-8")
     if real_scripts is not None and not (engine / "scripts").exists():
         os.symlink(real_scripts, engine / "scripts", target_is_directory=True)
@@ -96,7 +107,7 @@ def pinned_store(
         contents["scripts/gate_obligation_runner.py"] = script
     for name in releases:
         release = versions / name
-        release.mkdir(parents=True, exist_ok=True)
+        write_pyproject(release)
         for relative, body in contents.items():
             stub = release / relative
             stub.parent.mkdir(parents=True, exist_ok=True)
@@ -104,3 +115,17 @@ def pinned_store(
     if current is not None:
         os.symlink(versions / current, home / ".vnx-system" / "current")
     return versions
+
+
+def interpreter_version(interpreter: str) -> Optional[str]:
+    """``major.minor`` the interpreter reports for ``--version``, None when it does not say.
+
+    Reads the interpreter itself, the way ``vnx_python.sh`` does, so a test can compute
+    what the range check must conclude on this host instead of assuming one.
+    """
+    try:
+        proc = subprocess.run([interpreter, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"(\d+)\.(\d+)", proc.stdout + proc.stderr)
+    return f"{match.group(1)}.{match.group(2)}" if match else None

@@ -5,10 +5,12 @@
 # 2026-10-30, artifact `profile-a-evidence` of its serial Profile A
 # (junit-full.xml + manifest-full.json, phase `full`, run attempt 1). That run
 # recorded 50 skips and no collection-time skip; every one is listed below with
-# the reason it carried. One key was added after that run by the D4 round of
+# the reason it carried. Two keys were added after that run. The D4 round of
 # OI-2518 (2026-11-03): the positive control of the branch-on-origin check now
 # skips when its precondition listing cannot answer under xdist, so that skip
-# is accepted here with the reason it carries.
+# is accepted here with the reason it carries. OI-2564 (track
+# launchd-interpreter-pin, PR #2449, 2026-11-07): a host-conditional skip on a
+# runner without Homebrew 3.12, measured in VNX CI run 42317512164.
 #
 # ENTRY RULE. One key per line: a test nodeid
 # (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
@@ -70,6 +72,7 @@ tests/test_intelligence_recency.py::TestPatternUsageRecent::test_pattern_usage_u
 tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed::test_plutil_lint_passes[com.vnx.dashboard-generator.plist]  # plutil is macOS only
 tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed::test_plutil_lint_passes[com.vnx.fleet-role-drift.plist]  # plutil is macOS only
 tests/test_launchd_subsystem_probe_driver.py::TestTemplateIsWellFormed::test_plutil_lint_passes  # plutil is macOS only
+tests/test_launchd_interpreter_pin.py::test_without_a_venv_the_pinned_312_is_taken  # the pinned Homebrew 3.12 is not installed on this runner
 tests/test_learning_d3_proposal.py::test_real_history_produces_at_least_one_proposal  # real receipt trail not found at /tmp/vnx_conftest_q47sxiqe/state/t0_receipts.ndjson
 tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_lane_log_stamp_failure_reason_on_copy  # real PR #1677 kimi_gate report/lane-log not present under /home/runner/.vnx-data/vnx-dev — this verification only runs on the operator's own local central store
 tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass

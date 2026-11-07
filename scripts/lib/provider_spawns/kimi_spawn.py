@@ -52,11 +52,13 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -386,7 +388,114 @@ def _is_quota_or_auth_error(text: str) -> bool:
     return any(pat in lower for pat in _QUOTA_OR_AUTH_PATTERNS)
 
 
-def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) -> list:
+def _kimi_config_with_guard() -> str:
+    """User's kimi config + the OI-1447 git-stash deny hook, as config JSON.
+
+    ``--config-file`` REPLACES ~/.kimi/config.toml exactly like ``--config``:
+    the CLI hands the path to ``load_config`` (kimi_cli/cli/__init__.py:162-171
+    and :512-513, then kimi_cli/app.py:196 ``load_config(config)``), and
+    ``load_config`` reads only that file (kimi_cli/config.py:291-340). Both JSON
+    and TOML are accepted; the suffix picks the parser (config.py:326-329), so
+    this writes ``.json``. Only ``hooks`` is appended; ~/.kimi is read, never
+    written (OAuth tokens stay in the share dir: auth/oauth.py:848-863).
+    """
+    share = Path(os.environ.get("KIMI_SHARE_DIR") or Path.home() / ".kimi")
+    try:
+        data = tomllib.loads((share / "config.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        logger.warning("kimi_spawn: no readable kimi config under %s; hook passed alone", share)
+        data = {}
+    script = Path(__file__).resolve().parents[2] / "kimi_deny_git_stash.py"
+    command = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}"
+    data["hooks"] = [*(data.get("hooks") or []),
+                     {"event": "PreToolUse", "matcher": "^Shell$", "command": command}]
+    return json.dumps(data, default=str)
+
+
+_KIMI_CONFIG_DIR_PREFIX = "vnx-kimi-config-"
+
+
+def _sweep_stale_kimi_config_dirs() -> None:
+    """Reap config dirs a supervisor-killed predecessor could not remove.
+
+    A process killed with SIGTERM/SIGKILL never runs its ``finally``, so the
+    directory name carries its owner's pid. Remove only directories whose pid
+    is no longer alive (``os.kill(pid, 0)`` raising ``ProcessLookupError``); a
+    live pid's directory is never touched. A name whose pid cannot be parsed is
+    left alone and logged once.
+    """
+    prefix_len = len(_KIMI_CONFIG_DIR_PREFIX)
+    for directory in Path(tempfile.gettempdir()).glob(f"{_KIMI_CONFIG_DIR_PREFIX}*"):
+        if not directory.is_dir():
+            continue
+        try:
+            pid = int(directory.name[prefix_len:].split("-", 1)[0])
+        except (ValueError, IndexError):
+            logger.warning("kimi_spawn: unrecognized kimi config dir left alone: %s", directory)
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                shutil.rmtree(directory)
+            except OSError as exc:
+                logger.warning("kimi_spawn: could not reap %s: %s", directory, exc)
+        except PermissionError:
+            continue
+
+
+def _write_kimi_config_file() -> Path:
+    """Create this run's kimi config in a private dir; return the file path.
+
+    The file is mode 0o600 inside a fresh ``mkdtemp`` directory (mode 0o700)
+    outside the dispatch worktree, so a worker can neither read it from its own
+    tree nor commit it. It carries the user's config, API keys included, so it
+    must never ride on argv (``ps``/``/proc`` expose argv to every local
+    process) and must never be world-readable.
+
+    Owner of the file's lifetime, one line per termination path:
+      * launch failure (``Popen`` raises) and every exit of the wait — normal
+        end, timeout, kill of the kimi child, exception: the process owner in
+        ``spawn_kimi`` removes it via ``_remove_kimi_config_file`` (the
+        ``_start_kimi_subprocess`` failure branch and the wait ``finally``).
+      * supervisor kill of the process running ``spawn_kimi`` (SIGTERM/SIGKILL,
+        so no ``finally`` runs): the directory name carries this pid
+        (``vnx-kimi-config-<pid>-``) and the next ``spawn_kimi`` start sweeps
+        every such directory whose pid is dead, before creating its own.
+    """
+    _sweep_stale_kimi_config_dirs()
+    directory = Path(tempfile.mkdtemp(prefix=f"{_KIMI_CONFIG_DIR_PREFIX}{os.getpid()}-"))
+    config_path = directory / "config.json"
+    fd = os.open(config_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(_kimi_config_with_guard())
+    return config_path
+
+
+def _remove_kimi_config_file(config_path: Path) -> None:
+    """Remove the config file and its private directory; never raises.
+
+    Refuses any path whose parent does not carry the per-run prefix, so a wrong
+    argument can never turn into a ``shutil.rmtree`` of an unrelated directory.
+    """
+    directory = Path(config_path).parent
+    if not directory.name.startswith(_KIMI_CONFIG_DIR_PREFIX):
+        logger.warning("kimi_spawn: refusing to remove unexpected path %s", directory)
+        return
+    if not directory.exists():
+        return
+    try:
+        shutil.rmtree(directory)
+    except OSError as exc:
+        logger.warning("kimi_spawn: could not remove %s: %s", directory, exc)
+
+
+def _build_kimi_cmd(
+    prompt: str,
+    model: Optional[str],
+    work_dir: Optional[Any],
+    config_path: Path,
+) -> list:
     """Build the kimi argv list.
 
     ``--yolo`` is always passed (confirmed against kimi-cli 1.46.0 ``--help``):
@@ -401,6 +510,9 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
     argv (and, when an event sink is wired, records it in the event stream so
     it lands in the receipt), and ``_finalize_kimi_result`` fails loud if the
     stream shows tool_calls with no corresponding worktree diff.
+
+    ``config_path`` is created and owned by the caller (``spawn_kimi``) so the
+    per-run config never rides on argv; this builder only names the file.
     """
     cmd = ["kimi", "--print", "--output-format", "stream-json", "--yolo"]
     cmd.extend(["-p", prompt])
@@ -408,6 +520,9 @@ def _build_kimi_cmd(prompt: str, model: Optional[str], work_dir: Optional[Any]) 
         cmd.extend(["-m", model])
     if work_dir:
         cmd.extend(["-w", str(work_dir)])
+    # OI-2587: kimi-cli has no tool deny flag; the git-stash guard is a hook in
+    # the private config file (see _write_kimi_config_file).
+    cmd.extend(["--config-file", str(config_path)])
     return cmd
 
 
@@ -891,18 +1006,21 @@ def _start_kimi_subprocess(
     cmd: list,
     env: Dict[str, str],
     cwd_str: Optional[str],
+    config_path: Path,
 ) -> "tuple[subprocess.Popen | None, KimiSpawnResult | None]":
     """Start the kimi subprocess (no stdin — prompt passed via -p flag).
 
     Returns (proc, None) on success, or (None, KimiSpawnResult) on spawn failure.
+    Every launch-failure path removes the per-run config file before returning
+    (or re-raising), so a failed start never leaves the private config behind.
     All subprocess-boundary errors convert to structured results; none are re-raised.
     A provider-switch refusal is not a subprocess error: it raises
     ``provider_switch.ProviderDisabledError`` before the launch, decided for the project the
     child env carries (``VNX_PROJECT_ID``), so the launch and the door decide alike.
     """
-    provider_switch.require("kimi", consumer="kimi_spawn",
-                            project_id=(env or {}).get(provider_switch.PROJECT_ENV))
     try:
+        provider_switch.require("kimi", consumer="kimi_spawn",
+                                project_id=(env or {}).get(provider_switch.PROJECT_ENV))
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -912,6 +1030,7 @@ def _start_kimi_subprocess(
             cwd=cwd_str,
         )
     except FileNotFoundError as exc:
+        _remove_kimi_config_file(config_path)
         return None, KimiSpawnResult(
             returncode=127,
             completion_text="",
@@ -923,6 +1042,7 @@ def _start_kimi_subprocess(
             error=f"kimi CLI not found: {exc}. Install: `uv tool install kimi-cli` and run `kimi login`.",
         )
     except OSError as exc:
+        _remove_kimi_config_file(config_path)
         return None, KimiSpawnResult(
             returncode=126,
             completion_text="",
@@ -933,7 +1053,28 @@ def _start_kimi_subprocess(
             token_usage=None,
             error=f"failed to spawn kimi: {exc}",
         )
+    except BaseException:
+        _remove_kimi_config_file(config_path)
+        raise
     return proc, None
+
+
+def _teardown_kimi_run(
+    stop_event: threading.Event,
+    heartbeat_thread: Optional[threading.Thread],
+    config_path: Path,
+) -> None:
+    """Stop the heartbeat monitor and remove the per-run config file.
+
+    Runs in the ``finally`` around the wait in ``spawn_kimi``: normal end,
+    timeout, kill of the kimi child and any exception all reach it. The
+    supervisor-kill path is covered by ``_sweep_stale_kimi_config_dirs`` on the
+    next start instead (see ``_write_kimi_config_file``).
+    """
+    stop_event.set()
+    if heartbeat_thread is not None:
+        heartbeat_thread.join(timeout=5.0)
+    _remove_kimi_config_file(config_path)
 
 
 def _consume_kimi_stream(
@@ -1268,13 +1409,17 @@ def spawn_kimi(
     )
     cwd_str = str(cwd) if cwd is not None else None
 
-    cmd = _build_kimi_cmd(prompt, model, cwd)
+    # The per-run config (guard hook + user config) lives in a private temp file,
+    # never on argv; this caller owns its lifetime (see _write_kimi_config_file).
+    config_path = _write_kimi_config_file()
+    cmd = _build_kimi_cmd(prompt, model, cwd, config_path)
 
     # Never launch --yolo silently: log the effective argv (prompt redacted to a
     # char count) and, when an event sink is wired, record it as an "info" event
     # so it lands in the archived event stream the receipt points to via
     # events_path — the "always logged, never hidden" posture for YOLO mode.
-    _redacted_argv = [tok if tok != prompt else f"<prompt:{len(prompt)}chars>" for tok in cmd]
+    # The --config-file path may be logged; the config values never are.
+    _redacted_argv = [f"<prompt:{len(prompt)}chars>" if tok == prompt else tok for tok in cmd]
     logger.info(
         "kimi_spawn: launching kimi -p <%d chars> -m %s effective_argv=%s",
         len(prompt),
@@ -1303,8 +1448,9 @@ def spawn_kimi(
                 "kimi_spawn: effective-argv event emission failed (non-fatal): %s", _flags_exc,
             )
 
-    proc, err_result = _start_kimi_subprocess(cmd, env, cwd_str)
+    proc, err_result = _start_kimi_subprocess(cmd, env, cwd_str, config_path)
     if err_result is not None:
+        _remove_kimi_config_file(config_path)
         return err_result
 
     # OI-1044: external worker heartbeat — the provider lane had no liveness
@@ -1343,9 +1489,7 @@ def spawn_kimi(
             total_deadline=total_deadline, heartbeat_log_path=heartbeat_log_path,
         )
     finally:
-        _hb_stop.set()
-        if _hb_thread is not None:
-            _hb_thread.join(timeout=5.0)
+        _teardown_kimi_run(_hb_stop, _hb_thread, config_path)
 
     result = _finalize_kimi_result(
         proc=proc, completion_text=completion_text,

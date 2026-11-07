@@ -262,9 +262,21 @@ def _glm_harness(tmp_path, monkeypatch):
     return lambda: spawn_glm_harness("x", None, "d-1", "T1", cwd=tmp_path)
 
 
+def _kimi_config_path(tmp_path: Path) -> Path:
+    """A config file shaped like the one ``_write_kimi_config_file`` creates: inside a
+    per-run ``vnx-kimi-config-`` directory, the only path its owner removes."""
+    directory = tmp_path / f"vnx-kimi-config-{os.getpid()}-test"
+    directory.mkdir()
+    path = directory / "config.json"
+    path.write_text("{}", encoding="utf-8")
+    return path
+
+
 def _kimi_start(tmp_path, monkeypatch):
     from provider_spawns.kimi_spawn import _start_kimi_subprocess
-    return lambda: _start_kimi_subprocess([_K, "x"], {provider_switch.PROJECT_ENV: PROJECT}, None)
+    config_path = _kimi_config_path(tmp_path)
+    return lambda: _start_kimi_subprocess(
+        [_K, "x"], {provider_switch.PROJECT_ENV: PROJECT}, None, config_path)
 
 
 def _gemini_start(tmp_path, monkeypatch):
@@ -368,6 +380,19 @@ def test_with_the_family_on_the_same_invocation_reaches_its_primitive(key, switc
     except Exception as exc:  # the primitive raised Launched; a caller may wrap or re-raise it
         assert not isinstance(exc, provider_switch.ProviderDisabledError), exc
     assert primitives, f"{key} never reached a launch primitive with {family} on"
+
+
+def test_kimi_start_removes_the_private_config_file_when_the_family_is_off(switch_file, tmp_path):
+    """The refusal is a launch that never happened, so the hook config the run created must
+    not survive it: the failed-launch owner removes it on that path too."""
+    from provider_spawns.kimi_spawn import _start_kimi_subprocess
+    config_path = _kimi_config_path(tmp_path)
+    switch_off(switch_file, "kimi")
+
+    with pytest.raises(provider_switch.ProviderDisabledError):
+        _start_kimi_subprocess([_K, "x"], {provider_switch.PROJECT_ENV: PROJECT}, None, config_path)
+
+    assert not config_path.exists()
 
 
 def test_spawn_claude_lets_an_anthropic_or_absent_base_url_through(switch_file, primitives, tmp_path):

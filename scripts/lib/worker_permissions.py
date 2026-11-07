@@ -116,6 +116,11 @@ MCP_NAMESPACE_DENY = "mcp__*"
 # store) and every argument of each.
 WORKER_CLI_DENIED_TOOLS = ("Bash(git stash:*)",)
 
+# OI-2587: the same deny in shell form, for lanes that have no --disallowedTools
+# (kimi). The first token is the executable, the second the git subcommand it
+# must not run; scripts/kimi_deny_git_stash.py reads this tuple, never a copy.
+WORKER_SHELL_DENIED_PATTERNS = ("git stash",)
+
 
 def _resolve_permissions_yaml() -> Path:
     """Resolve worker_permissions.yaml with project-override-first priority.
