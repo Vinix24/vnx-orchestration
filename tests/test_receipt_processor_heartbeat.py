@@ -147,6 +147,8 @@ def test_last_progress_at_moves_only_when_a_report_is_ingested(tmp_path: Path) -
     (dirs["unified"] / "report-a.md").write_text("x", encoding="utf-8")
     body = f"""
 SCRIPTS_DIR="{stub}"
+UNIFIED_REPORTS="{dirs['unified']}"
+HEADLESS_REPORTS="{dirs['headless']}"
 should_process_report() {{ return 0; }}
 process_single_report() {{ return 1; }}
 _poll_new_reports_cycle 1 100
