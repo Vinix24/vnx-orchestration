@@ -1,0 +1,1 @@
+- Documentation (track `documentatie-volgt-de-code`): `docs/operations/FORGE_GATE.md` carries the live branch protection measured on 2026-11-07, the seat rule by risk class (R3b), the default takeover chain with `claude_gate`, `VNX_REVIEW_SEAT_RULE`, `refresh_review_summary` (RG-2), and points to `docs/core/ENFORCEMENT_CHAIN.md` for the other 14 required checks.

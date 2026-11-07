@@ -2,17 +2,45 @@
 
 Operator-runbook voor golf B (`gate-enforcement-to-forge`). Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md` (deliverables B4, OP-B3, B5). Privé planningsdocument: `claudedocs/` is gitignored en staat niet in de repo. Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
 
-## 0. Wat bestaat er vandaag, wat nog niet (gemeten 2026-09-08)
+## 0. Wat bestaat er vandaag, wat nog niet (gemeten 2026-11-07 op `d8b58c359`)
 
-Dit runbook beschrijft twee lagen.
+Dit runbook beschrijft twee lagen. De statustabel is op 2026-11-07 opnieuw gemeten tegen `origin/main` (`d8b58c359`, tag `v1.8.0` staat op een eerdere stand) en tegen de live bescherming. De meetcorrecties onder de tabel zijn gemeten op 2026-09-07 en blijven staan als geschiedenis.
 
-| Laag | Status op 2026-09-08 | Commando's in dit runbook |
+### Live branch-protection op `main`, gemeten 2026-11-07
+
+Bron: `gh api repos/Vinix24/vnx-orchestration/branches/main/protection` (GET), plus `.../required_pull_request_reviews`.
+
+| Veld | Waarde |
+|---|---|
+| `required_status_checks.checks` | 15 contexten. `vnx-gate/review` is gebonden aan `app_id` 4869217 (de App `vnx-gate`), de andere 14 aan `app_id` 15368 (GitHub Actions) |
+| `required_status_checks.strict` | `false`. Een PR hoeft niet bij te zijn met `main` om te mogen mergen |
+| `required_pull_request_reviews.required_approving_review_count` | 0. GitHub vraagt geen menselijke approval. Het review-akkoord komt uit `vnx-gate/review` |
+| `enforce_admins.enabled` | `true`. De regels gelden ook voor de eigenaar |
+| `required_signatures.enabled` | `false` |
+| `allow_force_pushes` / `allow_deletions` | `false` / `false` |
+
+De 15 contexten, letterlijk uit de API:
+
+```
+"Profile A (doctor + core tests)", "Profile B (snapshot integration)",
+"Profile C (adoption smoke tests)", "Profile D (pip install smoke)",
+"ADR-003: No Anthropic SDK Imports", "Anchor Immutability Check",
+"Dashboard TS Lint (fixture-gate + typecheck)", "Dispatch-ID Slug-Match Gate",
+"docs/core/SUBSYSTEMS.md matches the live registry",
+"Lint Patterns (silent-except + atomic-write)",
+"Repo-local state-pin gate (#1043 footgun)", "Trace Token Validation",
+"secret scan (gitleaks)", "vnx doctor smoke", "vnx-gate/review"
+```
+
+Dit komt overeen met `scripts/forge/branch_protection.yaml` (15 checks, blok `app:` met `app_id: 4869217`), dus er is op deze meetdatum geen drift. De workflownaam `VNX CI` is zelf geen vereiste context: de vereiste contexten zijn de jobnamen hierboven. Dit runbook gaat over `vnx-gate/review` (§5 en §6). De andere 14 staan in §6 onder "De andere veertien vereiste checks".
+
+| Laag | Status op 2026-11-07 | Commando's in dit runbook |
 |---|---|---|
 | **1. Branch-protection als YAML** (B1, #1807, **gemerged**) — `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, de preflight in `scripts/pr_merge.py`, de doctor-check in `scripts/vnx_doctor.py` | **Op `main`.** | Geverifieerd tegen elk script zijn eigen `--help`, en tegen een echte `gh api`-meting op de repo (zie §4). |
 | **2a. Forge-client** (`scripts/lib/forge_check_run.py`) | **Op `main`** (B2a, #1808, plus de keychain-fix #1813). Bracht ook het `app:`-blok uit §3 en de schema-aanpassing in `forge_protection_drift.py` mee. Het App ID staat inmiddels ingevuld: `4869217`, slug `vnx-gate`. | De client heeft **geen CLI**, alleen library-functies — de toets in §2 is dus een directe library-aanroep. |
 | **2b. Publicatie + de samenvattende check** (B2b #1812, B3 #1814) — `scripts/lib/forge_gate_publisher.py`, aangeroepen door de gate-recorder na elk schijf-record | **Op `main`.** De afbeelding van poortstatus naar `conclusion`, de `--pr`-CLI (`publish`, `review`, `pending-preview`) en `vnx-gate/review` als samenvattend oordeel bestaan en zijn getest. | Geverifieerd tegen de broncode op `main` en tegen `pending-preview`, dat niets schrijft en niets opvraagt. |
-| **3. `vnx-gate/review` als VEREISTE check** (OP-B3) | **Gedaan.** De entry staat sinds OP-B3 in `required_status_checks.checks` van `branch_protection.yaml` op `main` (15 checks), gebonden aan app_id `4869217`. De apply is gedraaid: gemeten 2026-09-27 via `gh api repos/Vinix24/vnx-orchestration/branches/main/protection/required_status_checks` vereist de live bescherming ook 15 checks, met `vnx-gate/review` erbij. | §5 (historisch, de migratie-window is voorbij). |
-| **4. Terugweg één keer live bewijzen** (B5) | **Niet gedaan.** | §7 beschrijft de stappen; B5 voert ze één keer uit en quoteert de API-feiten. |
+| **3. `vnx-gate/review` als VEREISTE check** (OP-B3) | **Gedaan.** De entry staat sinds OP-B3 in `required_status_checks.checks` van `branch_protection.yaml` op `main` (15 checks), gebonden aan app_id `4869217`. De apply is gedraaid: gemeten 2026-11-07 (zie de tabel hierboven) vereist de live bescherming 15 checks, met `vnx-gate/review` erbij. | §5 (historisch, de migratie-window is voorbij). |
+| **4. Terugweg één keer live bewijzen** (B5) | **Niet gedaan, nagezocht op 2026-11-07.** In de git-historie van `origin/main`, in `CHANGELOG.md` en in `docs/` staat geen B5 van deze golf die de terugweg uitvoert (de B5 in `CHANGELOG.md` en ADR-047 is een ander werkpakket, de plan-scaffolds). Het enige `branch_protection_applied`-record in de receipts van dit project is de eerste apply van 2026-09-08, zonder `weak_fields`: een terugweg, die altijd `weak_fields` met de teruggedraaide check draagt (§7.1 stap 5), is er dus nooit uitgevoerd. De open-item-administratie van de golf staat buiten de repo en is hier niet gelezen. | §7 beschrijft de stappen; B5 voert ze één keer uit en quoteert de API-feiten. |
 
 **Meetcorrectie op de aanname achter §4:** de dispatch-instructie voor dit runbook noemt de eerste apply als het moment waarop de bescherming ontstaat. Gemeten op 2026-09-07 via `gh api repos/Vinix24/vnx-orchestration/branches/main/protection` (+ `.../required_signatures`, `repos/{owner}/{repo}`, `.../rulesets`) staat de bescherming al live en komt hij op elk veld overeen met `branch_protection.yaml` (14/14 checks, `enforce_admins: true`, `allow_auto_merge: false`, `required_signatures: false`, 0 rulesets) — precies zoals de YAML's eigen kopregel zegt ("Measured live ... on 2026-09-07"). Een `--dry-run` bevestigt dit: `verdict: DRY-RUN, changed: False, diffs: []`. De eerste apply-run is dus vandaag een **no-op**: hij schrijft de eerste receipt en bewijst idempotentie, hij legt de bescherming niet voor het eerst vast — die staat er al.
 
@@ -188,14 +216,14 @@ Herken dus `vnx-gate/review` in een `SKIPPED_UNVERIFIED`-regel als "publiceer he
 
 ## 6. Werkgevolg voor iedereen, na OP-B3
 
-Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait — ook een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaard review-stack `codex_gate,kimi_gate` (of de opvolger in de overnameketen: codex → kimi → glm → deepseek) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
+Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait. Dat geldt ook voor een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaard review-stack `codex_gate,kimi_gate` (een uitgevallen stoel gaat via de overnameketen codex → kimi → claude → deepseek, zie "Welke stoelen vereist zijn" hieronder) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
 
 ### Wie publiceert wat, en wanneer
 
 "Publicatie" in die volgorde is geen handmatige stap. De **gate-recorder** publiceert na elk schijf-record twee check-runs, in deze volgorde, op de kop die in dat record staat (`scripts/lib/gate_recorder.py::publish_forge_check_run` en `::publish_forge_review_summary`):
 
 1. `vnx-gate/<poort>` — wat déze poort zei. Vereist door niets.
-2. `vnx-gate/review` — of er op deze kop een geldig review-akkoord ligt, volgens dezelfde regel als de merge-deur. **Dit is de check die `main` vereist.**
+2. `vnx-gate/review`: of er op deze kop een geldig review-akkoord ligt, volgens dezelfde regel als de merge-deur (`forge_gate_publisher.review_verdict`, dat `review_seat_evaluation.evaluate_review_seats` aanroept). Welke stoelen die regel vereist, hangt af van de risicoklasse van de kop: zie hieronder. **Dit is de check die `main` vereist.**
 
 De twee zijn onafhankelijk. De per-poort-publicatie gaat eerst en slaagt of faalt op eigen merites; de samenvatting is een aparte aanroep met een aparte foutafhandeling, dus een fout daar kan de eerste niet ongedaan maken en kan een geslaagde poortrun niet rood maken. Beide falen luid in de log, met het herstelcommando erin, en geen van beide raakt het record op schijf.
 
@@ -210,6 +238,34 @@ python3 scripts/lib/forge_gate_publisher.py review --pr <n>
 Gebruik het voor een kop die nooit een poortrun heeft gehad (de migratie in §5 stap 5), en na een uitval waarbij de recorder de publicatie moest inslikken — een gesloten keychain, een GitHub-500, een launchd-runner zonder `gh` op zijn PATH (§8). De log-regel van die uitval draagt dit commando al.
 
 Wat de recorder **niet** doorgeeft, omdat hij het niet weet: `project_id` en `project_root`. De samenvatting valt daarvoor terug op de eigen resolutie van de publisher (`origin` van de checkout waarin hij draait). `results_dir` en `branch` komen wél mee, uit het record dat zojuist geschreven is, zodat de check dezelfde records leest als de deur straks toetst.
+
+### Welke stoelen vereist zijn (R3b, sinds v1.8.0)
+
+Tot 1.8.0 eiste `vnx-gate/review` elke stoel van de review-stack. Sinds R3b (#2193, eerste tag `v1.8.0`) hangt het aantal vereiste stoelen af van de risicoklasse van de kop. `review_seat_evaluation.seats_for_risk` geeft bij `low` en `medium` alleen de eerste stoel van de stack, bij `high` en `critical` elke stoel. Een onbekende of lege klasse eist elke stoel. De klasse komt uit `scripts/lib/review_risk_class.py` en wordt afgeleid uit de diff tegen de `baseRefName` van de PR. Is die base niet bekend, dan is de klasse `high`, zoals bij de merge-deur (`review_verdict` krijgt `base_branch` mee).
+
+Gevolg voor wie `vnx-gate/review` leest: bij een `low`- of `medium`-kop is een PASS van `codex_gate` genoeg en staat `kimi_gate` niet in de lijst `seats:` van de melding. De melding van de seat-evaluatie noemt de klasse, de reden en de vereiste seats (`risicoklasse <klasse> (<reden>): vereiste seats ...`). Mist een stoel die je verwachtte, lees dan eerst de klasse.
+
+Een afwijzing blijft bij elke klasse blokkeren. Een FAIL of blokkerende bevinding van een reviewer op deze kop maakt `vnx-gate/review` `failure`, ook als die reviewer geen vereiste stoel vult.
+
+### De overnameketen
+
+Een stoel die zijn eigen reviewer niet kan draaien, wordt gevuld door de volgende gate in de overnameketen. De standaard is `codex_gate,kimi_gate,claude_gate,deepseek_gate` (`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, `scripts/lib/gate_request_handler.py:106`). `claude_gate` staat sinds R7 (operatorbesluit 2026-10-22, #2172, eerste tag `v1.7.6`) tussen `kimi_gate` en `deepseek_gate`: eerst de reviewers op het abonnement, dan de eindschakel op API-krediet. Een stoel krijgt nooit een reviewer van de vendor van de bouwer (`review_vendor`). Zo'n reviewer wordt overgeslagen alsof hij uitgevallen was.
+
+`glm_gate` staat sinds 2026-10-17 niet meer in de standaardketen (commentaar op regel 85-87 van hetzelfde bestand). Het blijft een geregistreerde gate: wie `VNX_REVIEW_GATE_TAKEOVER_CHAIN` zelf zet, bereikt hem nog. De standaard review-stack zelf, `VNX_DEFAULT_REVIEW_STACK`, is `codex_gate,kimi_gate` (`scripts/lib/config_registry.py:117`).
+
+### Het signaalregime (`VNX_REVIEW_SEAT_RULE`)
+
+`VNX_REVIEW_SEAT_RULE` kiest de stoelregel (`review_seat_evaluation.SEAT_RULE_KEY`, `active_seat_rule`, #2365, eerste tag `v1.8.0`). Standaard is de sleutel leeg en geldt `first_seat_or_every_seat_by_risk`, de regel van R3b hierboven. Met de waarde `first_seat_or_every_seat_on_signal` vraagt de regel na een zuivere PASS van stoel 1 alleen dan een tweede stoel als een signaal afgaat (`seats_for_signals`). Een onbekende waarde valt terug op de risicoregel en logt een waarschuwing.
+
+`review_verdict` leest de sleutel via dezelfde `active_seat_rule` als de merge-deur. De gepubliceerde check en de deur beslissen dus met dezelfde regel op dezelfde invoer. Staat de sleutel uit, dan krijgt `evaluate_review_seats` geen regelargument en is de aanroep dezelfde als zonder de sleutel.
+
+### Override en verversen (RG-2)
+
+De deur kan een kop met `--override-b3` of met een staand `mergen-met-OI`-oordeel laten mergen (#2306, eerste tag `v1.8.0`). Die weg schrijft geen poortrecord, dus `vnx-gate/review` zou rood blijven op een kop die de deur doorlaat. `forge_gate_publisher.refresh_review_summary` publiceert de samenvatting daarom opnieuw uit de records op schijf, met de override-reden (`b3_override`) en een label dat zegt wat het bewijs is. De reden is verplicht: zonder reden gooit de functie een `ForgeCheckRunError`. De check wordt alleen gepubliceerd voor de kop die de PR nu heeft. Is die verschoven of niet op te vragen, dan gaat er niets uit en logt de functie de reden. De deur beschouwt de merge pas als toegestaan als de gepubliceerde check `success` is. Een gepubliceerde `failure` of `action_required` laat de deur NO-GO.
+
+### De andere veertien vereiste checks
+
+Dit runbook beschrijft alleen `vnx-gate/review`. Wat elk van de andere 14 contexten uit de tabel in §0 afdwingt, welk script of welke workflow ze produceert en welk document erover gaat, staat in `docs/core/ENFORCEMENT_CHAIN.md`.
 
 ## 7. Terugweg **[operator]**
 
@@ -385,6 +441,8 @@ De lezer van `enforcement` en `ci_workflow` staat sinds OI-1849 op `main`. Het v
 
 - Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`
 - Merge-deur en zijn gates: `docs/core/DISPATCH_RULES.md` §2
+- De andere veertien vereiste checks en de keten van deur tot branch protection: `docs/core/ENFORCEMENT_CHAIN.md`
+- Stoelen, overnameketen en signaalregime: `scripts/lib/review_seat_evaluation.py` (`seats_for_risk`, `active_seat_rule`), `scripts/lib/gate_request_handler.py` (`_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`), `scripts/lib/forge_gate_publisher.py` (`review_verdict`, `refresh_review_summary`)
 - Code op `main`: `scripts/forge/branch_protection.yaml`, `scripts/forge/apply_branch_protection.py`, `scripts/lib/forge_protection_drift.py`, `scripts/pr_merge.py::_run_branch_protection_gate`, `scripts/vnx_doctor.py::check_branch_protection_drift`
 - Publicatielaag op `main`: `scripts/lib/forge_check_run.py` (client), `scripts/lib/forge_gate_publisher.py` (afbeelding, samenvattende check, CLI), `tests/test_forge_check_run_client.py`, `tests/test_forge_review_summary.py`
 - Lezer-voor-veld-contract (OI-1672): §10 hierboven, bewaakt door `tests/test_branch_protection_gate_reader_for_field_doc.py`
