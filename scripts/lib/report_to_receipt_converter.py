@@ -1770,6 +1770,7 @@ def _convert_one_detailed(
     cache_window_seconds: int = 300,
     dry_run: bool = False,
     rejected_detail_sink: Optional[List[Dict[str, Any]]] = None,
+    error_reason_sink: Optional[List[str]] = None,
 ) -> Tuple[Optional[Any], str]:  # (Optional[AppendResult], outcome_tag)
     """Convert one report file to a governed receipt; classify the outcome.
 
@@ -1808,7 +1809,7 @@ def _convert_one_detailed(
         AppendResult = append_receipt.AppendResult
     except Exception as exc:
         logger.warning("report_to_receipt_converter: cannot import append_receipt: %s", exc)
-        return None, "error"
+        return _error_outcome(error_reason_sink, f"append_receipt import failed: {type(exc).__name__}")
 
     try:
         text = report_path.read_text(encoding="utf-8")
@@ -1825,8 +1826,11 @@ def _convert_one_detailed(
     except report_lifecycle_mode.ReportPathRefused as exc:
         # Named refusal (K-8b rule 4): book nothing — or dead-letter when permanent
         # and aged (OI-2542). Caught BEFORE the generic handler: never a crash.
-        return None, _lifecycle_refusal_outcome(
+        outcome = _lifecycle_refusal_outcome(
             exc, report_path, state_dir_for_route, dry_run, rejected_detail_sink)
+        if outcome == "error":
+            return _error_outcome(error_reason_sink, f"lifecycle refusal: {exc.code}")
+        return None, outcome
     except Exception as exc:
         # build_receipt_from_report() is documented "never raises" but a
         # single poisoned report must never be trusted to honor that on its
@@ -1835,7 +1839,7 @@ def _convert_one_detailed(
             "report_to_receipt_converter: build_receipt_from_report crashed for %s: %s: %s",
             report_path.name, type(exc).__name__, exc,
         )
-        return None, "error"
+        return _error_outcome(error_reason_sink, f"build_receipt_from_report crashed: {type(exc).__name__}")
     if receipt is None:
         return None, "malformed"
 
@@ -1956,14 +1960,14 @@ def _convert_one_detailed(
                 "for %s: %s",
                 report_path.name, exc,
             )
-            return None, "error"
+            return _error_outcome(error_reason_sink, f"dry-run append validation failed: {exc.code}")
         except Exception as exc:
             logger.warning(
                 "report_to_receipt_converter: [dry-run] append validation crashed "
                 "for %s: %s: %s",
                 report_path.name, type(exc).__name__, exc,
             )
-            return None, "error"
+            return _error_outcome(error_reason_sink, f"dry-run append validation crashed: {type(exc).__name__}")
         logger.info(
             "report_to_receipt_converter: [dry-run] would book dispatch=%s "
             "event_type=%s status=%s file=%s",
@@ -2024,13 +2028,13 @@ def _convert_one_detailed(
             "report_to_receipt_converter: append failed for %s: %s",
             report_path.name, exc,
         )
-        return None, "error"
+        return _error_outcome(error_reason_sink, f"append failed: {exc.code}")
     except Exception as exc:
         logger.warning(
             "report_to_receipt_converter: append failed for %s: %s",
             report_path.name, exc,
         )
-        return None, "error"
+        return _error_outcome(error_reason_sink, f"append failed: {type(exc).__name__}")
 
     # append_receipt_payload's documented contract (payload.py's own OI-948
     # guard, and its mirror in scripts/append_receipt.py main()) is: return an
@@ -2051,7 +2055,7 @@ def _convert_one_detailed(
             "result (contract violation — expected AppendResult) dispatch=%s file=%s",
             receipt.get("dispatch_id"), report_path.name,
         )
-        return None, "error"
+        return _error_outcome(error_reason_sink, "append_receipt_payload returned no result")
 
     if result.status in ("appended", "duplicate"):
         _sync_report_open_items(receipt, text)
@@ -2096,6 +2100,40 @@ _REJECTION_CONTINUITY_GAP_SECONDS = 2 * _HEALTH_EXPECTED_INTERVAL_SECONDS
 _HEALTH_REJECTED_HISTORY_MAX = 200
 
 
+_HEALTH_ERRORS_LIST_MAX = 100
+_HEALTH_ERRORS_FILENAME = "report_to_receipt_converter.errors.ndjson"
+
+
+def _error_outcome(sink: Optional[List[str]], reason: str) -> Tuple[None, str]:
+    """The ``error`` outcome, with its reason named in *sink* (a path and a reason, never report content)."""
+    if sink is not None:
+        sink.append(reason)
+    return None, "error"
+
+
+def _note_error(details: List[Dict[str, str]], report_path: Path, base: Optional[Path],
+                reasons: List[str], fallback: str) -> None:
+    """Name one errored report: its path relative to *base* (else its name) and the reason."""
+    try:
+        name = str(report_path.relative_to(base)) if base is not None else report_path.name
+    except ValueError:
+        name = report_path.name
+    details.append({"file": name, "reason": reasons[0] if reasons else fallback})
+
+
+def _write_errors_sidefile(data_root: Path, errors: Tuple[Dict[str, str], ...]) -> None:
+    """Rewrite ``health/<component>.errors.ndjson`` with this scan's full error list, atomically."""
+    health_dir = data_root / "health"
+    target = health_dir / _HEALTH_ERRORS_FILENAME
+    tmp = health_dir / (_HEALTH_ERRORS_FILENAME + ".tmp")
+    try:
+        health_dir.mkdir(parents=True, exist_ok=True)
+        tmp.write_text("".join(json.dumps(e, sort_keys=True) + "\n" for e in errors), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError as exc:
+        logger.warning("report_to_receipt_converter: cannot write %s: %s", _HEALTH_ERRORS_FILENAME, exc)
+
+
 @dataclass(frozen=True)
 class ScanStats:
     """Per-scan outcome counts, returned by scan_and_convert() (OI-998).
@@ -2132,6 +2170,9 @@ class ScanStats:
     # history. A tuple (not a list) so the frozen dataclass never exposes a
     # mutable default shared across instances.
     rejected: Tuple[Dict[str, Any], ...] = ()
+    # One {"file", "reason"} per errored report of THIS scan (path relative to
+    # the reports dir, no report content); see _write_scan_heartbeat.
+    errors: Tuple[Dict[str, str], ...] = ()
 
     @property
     def attempted_count(self) -> int:
@@ -2252,6 +2293,7 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
     if recent_rejected:
         status = "fail"
 
+    _write_errors_sidefile(state_dir.parent, stats.errors)
     beacon = HealthBeacon(
         state_dir.parent, _HEALTH_COMPONENT, expected_interval_seconds=_HEALTH_EXPECTED_INTERVAL_SECONDS,
     )
@@ -2263,6 +2305,8 @@ def _write_scan_heartbeat(state_dir: Path, stats: ScanStats) -> None:
             "rejected_count": stats.rejected_count,
             "malformed_count": stats.malformed_count,
             "error_count": stats.error_count,
+            "errors": list(stats.errors[:_HEALTH_ERRORS_LIST_MAX]),
+            "errors_omitted": max(0, len(stats.errors) - _HEALTH_ERRORS_LIST_MAX),
             "skipped_non_dispatch_count": stats.skipped_non_dispatch_count,
             "recent_rejected_count": len(recent_rejected),
             "rejection_alarm_window_seconds": REJECTION_ALARM_WINDOW_SECONDS,
@@ -2338,6 +2382,7 @@ def scan_and_convert(
     skipped_non_dispatch_count = 0
     would_append_count = 0
     rejected_details: List[Dict[str, Any]] = []
+    error_details: List[Dict[str, str]] = []
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -2356,6 +2401,7 @@ def scan_and_convert(
             if file_hash in watermark or file_hash in bash_watermark:
                 continue
 
+            error_reasons: List[str] = []
             try:
                 result, outcome = _convert_one_detailed(
                     report_path,
@@ -2363,6 +2409,7 @@ def scan_and_convert(
                     cache_window_seconds=cache_window_seconds,
                     dry_run=dry_run,
                     rejected_detail_sink=rejected_details,
+                    error_reason_sink=error_reasons,
                 )
             except Exception as exc:
                 # Belt-and-suspenders: _convert_one_detailed() already catches
@@ -2376,6 +2423,8 @@ def scan_and_convert(
                     report_path.name, type(exc).__name__, exc,
                 )
                 error_count += 1
+                _note_error(error_details, report_path, reports_dir,
+                            [f"unhandled exception: {type(exc).__name__}"], "")
                 continue
 
             if dry_run:
@@ -2402,6 +2451,7 @@ def scan_and_convert(
                     malformed_count += 1
                 else:  # "error" or any future/unrecognized tag
                     error_count += 1
+                    _note_error(error_details, report_path, reports_dir, error_reasons, f"outcome: {outcome}")
                 continue
 
             if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -2430,6 +2480,7 @@ def scan_and_convert(
                 malformed_count += 1
             else:  # "error"
                 error_count += 1
+                _note_error(error_details, report_path, reports_dir, error_reasons, f"outcome: {outcome}")
             # malformed / error reports are NOT marked processed: retried on
             # the next scan once the cause is fixed. A rejected report is not
             # marked here either, but it is already out of reports_dir:
@@ -2444,6 +2495,7 @@ def scan_and_convert(
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
         rejected=tuple(rejected_details),
+        errors=tuple(error_details),
     )
     # dry_run: no write happened, so no heartbeat about a scan cycle either —
     # a dry-run must leave zero observable state behind.
@@ -2513,6 +2565,7 @@ def convert_dispatch_ids(
     skipped_non_dispatch_count = 0
     would_append_count = 0
     rejected_details: List[Dict[str, Any]] = []
+    error_details: List[Dict[str, str]] = []
 
     for dispatch_id in ids:
         # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
@@ -2559,6 +2612,7 @@ def convert_dispatch_ids(
         if file_hash in watermark or file_hash in bash_watermark:
             continue
 
+        error_reasons: List[str] = []
         try:
             result, outcome = _convert_one_detailed(
                 report_path,
@@ -2566,6 +2620,7 @@ def convert_dispatch_ids(
                 cache_window_seconds=cache_window_seconds,
                 dry_run=dry_run,
                 rejected_detail_sink=rejected_details,
+                error_reason_sink=error_reasons,
             )
         except Exception as exc:
             logger.error(
@@ -2574,6 +2629,8 @@ def convert_dispatch_ids(
                 dispatch_id, report_path.name, type(exc).__name__, exc,
             )
             error_count += 1
+            _note_error(error_details, report_path, None,
+                        [f"unhandled exception: {type(exc).__name__}"], "")
             continue
 
         if dry_run:
@@ -2596,6 +2653,7 @@ def convert_dispatch_ids(
                 malformed_count += 1
             else:  # "error" or any future/unrecognized tag
                 error_count += 1
+                _note_error(error_details, report_path, None, error_reasons, f"outcome: {outcome}")
             continue
 
         if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -2620,6 +2678,7 @@ def convert_dispatch_ids(
             malformed_count += 1
         else:  # "error"
             error_count += 1
+            _note_error(error_details, report_path, None, error_reasons, f"outcome: {outcome}")
 
     stats = ScanStats(
         new_count=new_count,
@@ -2630,6 +2689,7 @@ def convert_dispatch_ids(
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
         rejected=tuple(rejected_details),
+        errors=tuple(error_details),
     )
     if not dry_run:
         _write_scan_heartbeat(state_dir, stats)
