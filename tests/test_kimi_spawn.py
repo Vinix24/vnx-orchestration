@@ -52,7 +52,7 @@ def _mock_proc(stdout_events: list, returncode: int = 0) -> MagicMock:
 
 class TestBuildKimiCmd(unittest.TestCase):
     def test_constructs_correct_argv_no_model(self):
-        cmd = _build_kimi_cmd("hello world", None, None)
+        cmd = _build_kimi_cmd("hello world", None, None, Path("/tmp/cfg.json"))
         self.assertEqual(
             cmd[:6], ["kimi", "--print", "--output-format", "stream-json", "--yolo", "-p"],
         )
@@ -61,7 +61,7 @@ class TestBuildKimiCmd(unittest.TestCase):
     def test_yolo_always_added(self):
         """--yolo is unconditional: without it kimi auto-dismisses tool calls
         instead of executing them (the fabrication bug this dispatch fixes)."""
-        cmd = _build_kimi_cmd("prompt", None, None)
+        cmd = _build_kimi_cmd("prompt", None, None, Path("/tmp/cfg.json"))
         self.assertIn("--yolo", cmd)
 
     def test_yolo_added_regardless_of_stray_env_var(self):
@@ -69,7 +69,7 @@ class TestBuildKimiCmd(unittest.TestCase):
         be able to turn it off (there is no override mechanism by design)."""
         os.environ["VNX_KIMI_YOLO"] = "0"
         try:
-            cmd = _build_kimi_cmd("prompt", None, None)
+            cmd = _build_kimi_cmd("prompt", None, None, Path("/tmp/cfg.json"))
             self.assertIn("--yolo", cmd)
         finally:
             del os.environ["VNX_KIMI_YOLO"]
@@ -77,27 +77,27 @@ class TestBuildKimiCmd(unittest.TestCase):
     def test_yolo_and_work_dir_together_for_governed_build_dispatch(self):
         """The governed build lane passes both flags together: --yolo makes
         kimi execute tools, -w scopes the blast radius to the dispatch worktree."""
-        cmd = _build_kimi_cmd("prompt", None, Path("/tmp/worktree"))
+        cmd = _build_kimi_cmd("prompt", None, Path("/tmp/worktree"), Path("/tmp/cfg.json"))
         self.assertIn("--yolo", cmd)
         self.assertIn("-w", cmd)
         self.assertEqual(cmd[cmd.index("-w") + 1], "/tmp/worktree")
 
     def test_passes_model_when_specified(self):
-        cmd = _build_kimi_cmd("prompt", "kimi-k2-6", None)
+        cmd = _build_kimi_cmd("prompt", "kimi-k2-6", None, Path("/tmp/cfg.json"))
         self.assertIn("-m", cmd)
         self.assertEqual(cmd[cmd.index("-m") + 1], "kimi-k2-6")
 
     def test_skips_model_when_none(self):
-        cmd = _build_kimi_cmd("prompt", None, None)
+        cmd = _build_kimi_cmd("prompt", None, None, Path("/tmp/cfg.json"))
         self.assertNotIn("-m", cmd)
 
     def test_passes_work_dir_when_specified(self):
-        cmd = _build_kimi_cmd("prompt", None, Path("/tmp/work"))
+        cmd = _build_kimi_cmd("prompt", None, Path("/tmp/work"), Path("/tmp/cfg.json"))
         self.assertIn("-w", cmd)
         self.assertEqual(cmd[cmd.index("-w") + 1], "/tmp/work")
 
     def test_skips_work_dir_when_none(self):
-        cmd = _build_kimi_cmd("prompt", None, None)
+        cmd = _build_kimi_cmd("prompt", None, None, Path("/tmp/cfg.json"))
         self.assertNotIn("-w", cmd)
 
 
@@ -973,7 +973,7 @@ class TestKimiEnvIsolation(unittest.TestCase):
         }
         captured: dict = {}
 
-        def _fake_start(cmd, env, cwd_str):
+        def _fake_start(cmd, env, cwd_str, config_path):
             captured["env"] = env
             return None, KimiSpawnResult(
                 returncode=127, completion_text="", events_written=0,

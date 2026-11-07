@@ -219,8 +219,10 @@ def _dispatch(lane_env, fn, args) -> int:
 
 def _kimi_start(script: str, report_path: Path):
     """kimi_spawn's subprocess start, with the kimi argv swapped for *script*; it
-    returns once the stand-in's report is on disk."""
-    def fake_start(cmd, env, cwd_str):
+    returns once the stand-in's report is on disk. These tests are about the
+    deadline mark on the report, not the provider-switch guard config, so the
+    fourth argument (the private config path) is accepted and ignored."""
+    def fake_start(cmd, env, cwd_str, config_path):
         proc = _REAL_POPEN(
             [sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env=env, cwd=cwd_str,
