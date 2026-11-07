@@ -428,6 +428,20 @@ def restore_project_scope():
 
 
 @pytest.fixture(autouse=True)
+def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test starts with a VNX_PROJECT_ID in the environment, whoever set it before.
+
+    The import-time pop above clears the operator's shell once. A test module that writes
+    os.environ["VNX_PROJECT_ID"] at import (every pytest-xdist worker imports every module
+    at collection) or a test that writes it without restoring puts it back for every later
+    test in that worker (OI-2589 D2: ADR-007 project_id conflict, 58 failures on #2456).
+    delenv here, per test, closes that: monkeypatch restores whatever it found at teardown,
+    and a test or fixture that calls monkeypatch.setenv itself runs after this one and wins.
+    """
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _vnx_data_dir_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect VNX_DATA_DIR (+ subsystem dirs) so EventStore() without an
     explicit events_dir cannot write to ~/.vnx-data during any test run.

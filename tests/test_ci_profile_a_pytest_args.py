@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -190,7 +191,15 @@ def test_full_vector_matches_the_inline_block_on_the_real_tree(tmp_path):
     vector = _read_vector(tmp_path / "out" / "full.args")
     assert vector == _run_inline(REPO_ROOT)
     ignores = [a for a in vector if a.startswith("--ignore=")]
-    assert len(ignores) > 100, "the real exclusion list was not read"
+    # The list shrinks as files rejoin Profile A, so a numeric floor goes stale: compare with
+    # the entries of the file itself, parsed the way the script does (strip "\s*#.*", drop blanks).
+    listed = [
+        re.sub(r"[ \t]*#.*", "", line).strip()
+        for line in (REPO_ROOT / "scripts" / "ci" / "test_exclusions.txt").read_text(encoding="utf-8").splitlines()
+    ]
+    listed = [entry for entry in listed if entry]
+    assert listed, "the real exclusion list was not read"
+    assert ignores == [f"--ignore={REPO_ROOT}/{entry}" for entry in listed], "the real exclusion list was not read"
     assert vector[:7] == ["-q", f"{REPO_ROOT}/tests", "-p", "no:cacheprovider", "--timeout=180", "-k", QUARANTINE_K]
 
 

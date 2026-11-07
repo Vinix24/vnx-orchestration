@@ -230,8 +230,13 @@ def test_stub_modules_cleaned_up_after_load_daemon_module(tmp_path, monkeypatch)
     monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
 
     # Pop any cached real modules so we can verify the stub → real transition.
+    # monkeypatch.delitem puts the ORIGINAL module objects back at teardown: a bare pop
+    # left the fresh import below in sys.modules as a second learning_loop, so a class
+    # imported at collection (test_learning_feature.LearningLoop) and patch("learning_loop.
+    # ensure_env") then pointed at two different module objects and five
+    # TestConfidenceLogging tests wrote to the real state dir instead of the patched one.
     for name in _STUB_NAMES:
-        sys.modules.pop(name, None)
+        monkeypatch.delitem(sys.modules, name, raising=False)
 
     # Install stubs + import daemon → stubs must be gone afterwards.
     _load_daemon_module()

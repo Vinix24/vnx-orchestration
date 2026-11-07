@@ -5,7 +5,6 @@ and receipt token_usage backfill in link_sessions_dispatches.py.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -16,8 +15,16 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
-# Ensure vnx_paths module can resolve; link_sessions_dispatches uses it at import.
-os.environ.setdefault("VNX_PROJECT_ID", "vnx-dev")
+
+
+@pytest.fixture(autouse=True)
+def _project_id(monkeypatch):
+    """link_sessions_dispatches resolves its project through vnx_paths when it is imported.
+
+    Set per test with monkeypatch (restored afterwards): a module-level os.environ write
+    leaked into every pytest-xdist worker at collection time and outlived this file.
+    """
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
 
 
 def _init_db_schema(conn: sqlite3.Connection) -> None:
