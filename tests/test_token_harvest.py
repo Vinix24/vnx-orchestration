@@ -468,11 +468,11 @@ def test_deepseek_harness_missing_transcript_fails_open(tmp_path, monkeypatch):
     assert len(calls) == 1  # the guard fired for a harness provider
 
 
-def test_emit_and_backfill_share_one_harness_provider_set():
+def test_emit_and_backfill_share_one_harness_provider_set(monkeypatch):
     """OI-884: both consumers gate on the exact same single source of truth,
     so the nightly backfill can never cover a different set than the emit
     path. A third harness provider only needs adding in token_harvest."""
-    os.environ.setdefault("VNX_PROJECT_ID", "vnx-dev")
+    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     import governance_emit
     import link_sessions_dispatches
     import token_harvest

@@ -72,6 +72,14 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# VNX_PROJECT_ID is the operator's own project (every operator shell and worker here
+# exports vnx-dev). Left in the environment it outranks the project a test's fixture
+# derives: init/migrate backfills refuse with an ADR-007 project_id conflict, and
+# dashboard/api_planning.py queries the operator's project instead of the seeded one
+# (58 failures in eleven files, OI-2589 D2). Removed once at import time, before any
+# test module loads; a test that needs a project id sets it with monkeypatch.setenv
+# and keeps winning.
+os.environ.pop("VNX_PROJECT_ID", None)
 # Provider switch (provider-schakelaar A): the operator's ~/.vnx/providers.json is a
 # fleet-level operator file, like ~/.vnx/projects.json. VNX_PROVIDER_SWITCH_FILE moves the
 # switch file and, with it, the audit log, the lock and every quarantined copy (they live in
@@ -417,6 +425,20 @@ def restore_project_scope():
     if module is not None and saved is not None:
         vars(module).clear()
         vars(module).update(saved)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_vnx_project_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test starts with a VNX_PROJECT_ID in the environment, whoever set it before.
+
+    The import-time pop above clears the operator's shell once. A test module that writes
+    os.environ["VNX_PROJECT_ID"] at import (every pytest-xdist worker imports every module
+    at collection) or a test that writes it without restoring puts it back for every later
+    test in that worker (OI-2589 D2: ADR-007 project_id conflict, 58 failures on #2456).
+    delenv here, per test, closes that: monkeypatch restores whatever it found at teardown,
+    and a test or fixture that calls monkeypatch.setenv itself runs after this one and wins.
+    """
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
 
 
 @pytest.fixture(autouse=True)
