@@ -51,7 +51,7 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
 import gate_request_handler
-from dispatch_spec import Gate
+from dispatch_spec import RETIRED_GATE_NAMES, Gate
 from review_contract import ReviewContract
 
 
@@ -246,13 +246,17 @@ class TestGateEnumMembership:
 class TestKnownGatesHandlersSynchronised:
     def test_kimi_and_glm_are_known_and_have_handlers(self):
         assert {"kimi_gate", "glm_gate"} <= cv._KNOWN_GATES
-        assert {"kimi_gate", "glm_gate"} <= set(cv._GATE_HANDLERS.keys())
+        for gate in ("kimi_gate", "glm_gate"):
+            assert cv._generic_handler_for_kind(gate) is not None
 
     def test_known_gates_and_handlers_are_symmetric(self):
         """Both directions of the diff must be empty — a known gate with no
         handler would KeyError at runtime; a handler for a gate not in
         _KNOWN_GATES is dead/stray code the enum does not authorise."""
-        known_without_handler = cv._KNOWN_GATES - set(cv._GATE_HANDLERS.keys())
+        known_without_handler = {
+            g for g in cv._KNOWN_GATES - RETIRED_GATE_NAMES
+            if g not in cv._GATE_HANDLERS and cv._generic_handler_for_kind(g) is None
+        }
         handler_without_known = set(cv._GATE_HANDLERS.keys()) - cv._KNOWN_GATES
         assert known_without_handler == set(), f"known gates missing handlers: {known_without_handler}"
         assert handler_without_known == set(), f"handlers for gates outside _KNOWN_GATES: {handler_without_known}"
