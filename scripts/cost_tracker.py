@@ -23,7 +23,7 @@ try:
 except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
-from completion_reading import dedupe_completions  # noqa: E402
+from completion_reading import completion_attempt_key, dedupe_completions, event_type_of, is_refusal  # noqa: E402
 from event_outcome_semantics import COMPLETION_EVENT_TYPES  # noqa: E402
 
 # ADR-045 K-2c: a cost line is a completion of either shape. The excluded
@@ -131,6 +131,7 @@ def _extract_tokens(receipt: Dict[str, Any]) -> Tuple[Optional[int], Optional[in
         ("usage", "prompt_tokens"),
         ("token_usage", "input_tokens"),
         ("token_usage", "prompt_tokens"),
+        ("token_usage", "input"),
     )
     output_candidates = (
         ("output_tokens",),
@@ -140,6 +141,7 @@ def _extract_tokens(receipt: Dict[str, Any]) -> Tuple[Optional[int], Optional[in
         ("usage", "completion_tokens"),
         ("token_usage", "output_tokens"),
         ("token_usage", "completion_tokens"),
+        ("token_usage", "output"),
     )
     total_candidates = (
         ("total_tokens",),
@@ -438,11 +440,55 @@ def _cost_lines(receipts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     this reader has never booked. Booking those 50 now would move every legacy
     ``events_analyzed`` count for a line synthesized from the report contract,
     not from a usage record.
+
+    OI-2595: a v3 ``dispatch_finished`` witness carries no usage, so its tokens
+    (and a missing ``model``) come from the governance record of the same attempt
+    (``task_complete``/``task_completed``/``dispatch_governed``); everything else
+    stays the witness's own. No such record books unknown tokens, never zero.
+    Cache tokens are not booked.
     """
+    governance = _governance_token_index(receipts)
     return [
-        receipt for receipt in dedupe_completions(receipts)
+        _with_governance_tokens(receipt, governance)
+        for receipt in dedupe_completions(receipts)
         if _raw_event_type(receipt) in COST_LINE_EVENT_TYPES
     ]
+
+
+_GOVERNANCE_TOKEN_EVENT_TYPES = frozenset({"task_complete", "task_completed", "dispatch_governed"})
+
+
+def _has_tokens(receipt: Dict[str, Any]) -> bool:
+    input_tokens, output_tokens, _ = _extract_tokens(receipt)
+    return input_tokens is not None and output_tokens is not None
+
+
+def _governance_token_index(receipts: List[Dict[str, Any]]) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    """The first governance record with tokens per ``(dispatch_id, attempt)``, built once."""
+    index: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for receipt in receipts:
+        if event_type_of(receipt) not in _GOVERNANCE_TOKEN_EVENT_TYPES or is_refusal(receipt):
+            continue
+        key = completion_attempt_key(receipt)
+        if key is not None and key not in index and _has_tokens(receipt):
+            index[key] = receipt
+    return index
+
+
+def _with_governance_tokens(
+    witness: Dict[str, Any], governance: Dict[Tuple[str, str], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """``witness`` as booked: tokens (and a missing model) from its attempt's governance record."""
+    key = completion_attempt_key(witness)
+    record = governance.get(key) if key is not None else None
+    if record is None or _has_tokens(witness):
+        return witness
+    input_tokens, output_tokens, total_tokens = _extract_tokens(record)
+    booked = dict(witness)
+    booked.update(input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens)
+    if _infer_model(witness, "", {}) == "unknown" and record.get("model"):
+        booked["model"] = record["model"]
+    return booked
 
 
 def build_metrics(receipts: List[Dict[str, Any]], invalid_lines: int, state_dir: Path, source_path: Path) -> Dict[str, Any]:

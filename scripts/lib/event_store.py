@@ -235,6 +235,27 @@ def _replace_from_scratch(dest: Path, mode: int, *chunks: bytes) -> None:
         raise
 
 
+def _extend_archive(dest: Path, mode: int, content: bytes) -> bool:
+    """Write ``head + the lines of *content* the plain archive *dest* lacks`` (OI-2096).
+
+    Lines compare raw, newline stripped: a retry after an interrupted move adds
+    nothing twice, a line repeated inside *content* stays as often as it
+    occurs, and a head without a final newline is not glued to the tail. When
+    nothing is new *dest* is untouched. Returns whether *dest* was written.
+    """
+    head = dest.read_bytes() if dest.is_file() else b""
+    held = {line.rstrip(b"\r\n") for line in head.splitlines(keepends=True)}
+    tail = b"".join(
+        line for line in content.splitlines(keepends=True) if line.rstrip(b"\r\n") not in held
+    )
+    if not tail:
+        return False
+    if head and not head.endswith(b"\n"):
+        head += b"\n"
+    _replace_from_scratch(dest, mode, head, tail)
+    return True
+
+
 def _own_event_lines(content: bytes, dispatch_id: str) -> bytes:
     """The lines of *content* whose event names *dispatch_id*, NDJSON re-terminated.
 
@@ -262,13 +283,10 @@ def _append_to_archive_file(dest: Path, mode: int, payload: bytes) -> None:
     ``gzip``/``open_archive_text`` read back in order after the members already
     there.
     """
-    head = dest.read_bytes()
     if dest.name.endswith(".gz"):
-        _replace_from_scratch(dest, mode, head, gzip.compress(payload))
+        _replace_from_scratch(dest, mode, dest.read_bytes(), gzip.compress(payload))
         return
-    if head and not head.endswith(b"\n"):
-        head += b"\n"
-    _replace_from_scratch(dest, mode, head, payload)
+    _extend_archive(dest, mode, payload)
 
 
 def _events_dir() -> Path:
@@ -799,14 +817,27 @@ class EventStore:
         return self._copy_to_archive(self._terminal_path(terminal), terminal, dispatch_id)
 
     def _copy_to_archive(self, event_file: Path, terminal: str, archive_id: str) -> Optional[Path]:
-        """Copy *event_file* to ``<archive_dir(terminal)>/<archive_id>.ndjson``, replacing it."""
-        if not event_file.exists() or event_file.stat().st_size == 0:
-            return None
+        """Extend ``<archive_dir(terminal)>/<archive_id>.ndjson`` with *event_file*, never replacing it.
 
-        archive_path = self.archive_dir(terminal)
-        archive_path.mkdir(parents=True, exist_ok=True)
-        dest = archive_path / f"{archive_id}.ndjson"
-        shutil.copy2(str(event_file), str(dest))
+        Read and write run under LOCK_EX on the live file (OI-2098). The live
+        file is not truncated: the callers reset the stream themselves.
+        """
+        try:
+            f = open(event_file, "rb")
+        except FileNotFoundError:
+            return None
+        with f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                content = f.read()
+                if not content:
+                    return None
+                archive_path = self.archive_dir(terminal)
+                archive_path.mkdir(parents=True, exist_ok=True)
+                dest = archive_path / f"{archive_id}.ndjson"
+                _extend_archive(dest, stat.S_IMODE(os.fstat(f.fileno()).st_mode), content)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         logger.info("event_store: archived %s -> %s", event_file, dest)
         return dest
 
@@ -1036,11 +1067,8 @@ class EventStore:
                     return None
                 if content:
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    head = dest.read_bytes() if dest.is_file() else b""
-                    if head and not head.endswith(b"\n"):
-                        head += b"\n"
                     live_mode = stat.S_IMODE(os.fstat(f.fileno()).st_mode)
-                    _replace_from_scratch(dest, live_mode, head, content)
+                    _extend_archive(dest, live_mode, content)
                     f.seek(0)
                     f.truncate(0)
                     f.flush()
