@@ -4628,3 +4628,99 @@ class TestObligationPrLinkFourConditions:
         assert receipt["pr_link"] == "refused"
         assert receipt["pr_link_reason"] == "no_obligation"
         assert not obligation_path(state_dir, dispatch_id).exists()
+
+
+class TestErrorsNameTheirFile:
+    """Track ledger-is-falsifiable PR 4 (OI-2611): an error_count of N names N files."""
+
+    @staticmethod
+    def _refuse_every_append(monkeypatch):
+        facade = _append_receipt_facade()
+        from append_receipt_internals.common import EXIT_VALIDATION_ERROR
+
+        def _refuse(*args, **kwargs):
+            raise facade.AppendReceiptError(
+                "missing_status", EXIT_VALIDATION_ERROR, "receipt carries no status at all",
+            )
+
+        monkeypatch.setattr(facade, "append_receipt_payload", _refuse)
+
+    @staticmethod
+    def _errors_file(state_dir):
+        return state_dir.parent / "health" / "report_to_receipt_converter.errors.ndjson"
+
+    def test_150_failing_reports_list_is_bounded_and_side_file_is_complete(
+        self, reports_dir, state_dir, monkeypatch
+    ):
+        self._refuse_every_append(monkeypatch)
+        for i in range(150):
+            name = f"20260601-fail-{i:03d}"
+            _write_frontmatter_report(reports_dir / f"{name}.md", name)
+
+        stats = scan_and_convert([reports_dir], state_dir)
+
+        details = _converter_beacon(state_dir)["details"]
+        assert stats.error_count == details["error_count"] == 150
+        assert len(details["errors"]) == 100
+        assert details["errors_omitted"] == 50
+        assert len(details["errors"]) + details["errors_omitted"] == details["error_count"]
+        assert all(set(e) == {"file", "reason"} for e in details["errors"])
+        assert details["errors"][0] == {
+            "file": "20260601-fail-000.md", "reason": "append failed: missing_status",
+        }
+        lines = self._errors_file(state_dir).read_text(encoding="utf-8").splitlines()
+        assert len(lines) == 150
+        assert {json.loads(line)["file"] for line in lines} == {
+            f"20260601-fail-{i:03d}.md" for i in range(150)
+        }
+
+    def test_side_file_is_rewritten_per_scan_and_holds_no_report_content(
+        self, reports_dir, state_dir, monkeypatch
+    ):
+        self._refuse_every_append(monkeypatch)
+        sub = reports_dir / "nested"
+        sub.mkdir()
+        # scan globs only the top level of each dir, so scan the sub dir as its own root
+        _write_frontmatter_report(sub / "20260601-one.md", "20260601-one")
+        scan_and_convert([sub], state_dir)
+        first = self._errors_file(state_dir).read_text(encoding="utf-8")
+        assert json.loads(first)["file"] == "20260601-one.md"
+        assert "20260601-one" in first and "Summary" not in first
+
+        (sub / "20260601-one.md").unlink()
+        scan_and_convert([sub], state_dir)
+        assert self._errors_file(state_dir).read_text(encoding="utf-8") == ""
+        assert not self._errors_file(state_dir).with_name(
+            self._errors_file(state_dir).name + ".tmp").exists()
+
+    def test_unhandled_exception_is_named_by_type_only(self, reports_dir, state_dir, monkeypatch):
+        import report_to_receipt_converter as rtc
+
+        _write_frontmatter_report(reports_dir / "20260601-boom.md", "20260601-boom")
+
+        def _boom(report_path, **kwargs):
+            raise RuntimeError("secret report content")
+
+        monkeypatch.setattr(rtc, "_convert_one_detailed", _boom)
+        scan_and_convert([reports_dir], state_dir)
+
+        details = _converter_beacon(state_dir)["details"]
+        assert details["errors"] == [
+            {"file": "20260601-boom.md", "reason": "unhandled exception: RuntimeError"}]
+        assert details["errors_omitted"] == 0
+        assert "secret report content" not in self._errors_file(state_dir).read_text(encoding="utf-8")
+
+    def test_dispatch_id_conversion_names_its_error_file(self, reports_dir, state_dir, monkeypatch):
+        self._refuse_every_append(monkeypatch)
+        _write_frontmatter_report(reports_dir / "20260601-byid.md", "20260601-byid")
+        stats = convert_dispatch_ids(["20260601-byid"], state_dir)
+
+        assert stats.errors == ({"file": "20260601-byid.md", "reason": "append failed: missing_status"},)
+
+    def test_clean_scan_has_empty_error_list(self, reports_dir, state_dir):
+        _write_frontmatter_report(reports_dir / "20260601-clean.md", "20260601-clean")
+        scan_and_convert([reports_dir], state_dir)
+
+        details = _converter_beacon(state_dir)["details"]
+        assert details["errors"] == [] and details["errors_omitted"] == 0
+        assert self._errors_file(state_dir).read_text(encoding="utf-8") == ""
