@@ -38,6 +38,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | ledger-lifecycle | Dispatch lifecycle in the receipt ledger (ADR-045): one start line, one end line per attempt, and a report that is never a second outcome. | `VNX_LEDGER_LIFECYCLE` | LIVE | works — K-act acceptance: one door run with no override books one start, one end and one report_ingested |
 | plan-gate-panel | 5-model deliberation panel for plan-first enforcement. | `VNX_PLAN_GATE_ENFORCE` | SCOPE | works — panel runs, verdicts recorded |
 | plan-gate-task-class-scope | Flag with no effect since P1: VNX_PLAN_GATE_COMPLEX_ONLY is read by complex_only_active() but changes no plan-gate run; kept until P4 reworks the effectiveness probe. | `VNX_PLAN_GATE_COMPLEX_ONLY` | SCOPE | no effect — flag read but changes no plan-gate run (P1) |
+| agent-layout | Agent-as-folder skill layout (track agents-als-map-fase-1): off or shadow; `on` is phase 2 and reads as off. | `VNX_AGENT_LAYOUT` | SCOPE | unknown — no probe yet |
 | subsystem-cockpit | SUBSYSTEMS.md + config_registry + vnx subsystems + dashboard tile. | — | COCKPIT | degraded — SSOT exists, probes partial |
 | effectiveness-probe-framework | Generic "does it produce crap?" probes per subsystem. | — | COCKPIT | unknown — framework not built yet |
 
