@@ -1,1 +1,1 @@
-pr-ready: declared_set takes the request records the door wrote (origin: door) next to the obligations, so a second seat the door asked for is no longer marked off the door; a loose request record still is.
+- pr-ready: a second seat the door requested (request record with origin: door) is no longer marked off the door; a loose request record still is.
