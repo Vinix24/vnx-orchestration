@@ -99,6 +99,19 @@ ALL_KNOWN_STATES = (
 # re-run. A retry after any of these is a NEW request, never a re-run.
 REQUEST_TERMINAL_STATUSES = frozenset({"completed", "failed", "not_executable", "unavailable"})
 
+#: The ``origin`` the door stamps on every gate request it writes (ADR-046 A6).
+REQUEST_ORIGIN_DOOR = "door"
+
+
+def request_is_from_the_door(record: object) -> bool:
+    """True only on positive evidence: a request object whose ``origin`` is exactly ``"door"``.
+
+    A record without the field (written before P4, or by a shim run by hand), with another
+    value, with a value that is not text, or that is not an object at all, is off the door.
+    No case-folding and no stripping: the door writes the constant, so a near-miss is not it.
+    """
+    return isinstance(record, dict) and record.get("origin") == REQUEST_ORIGIN_DOOR
+
 
 def review_coverage_gap(result: Dict[str, Any]) -> str:
     """:func:`gate_depth.coverage_gap` on the record's own ``execution_depth``

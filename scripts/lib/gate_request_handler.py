@@ -34,7 +34,7 @@ from gate_recorder import (
 )
 from gate_executor import _classify_sha_binding
 from gate_result_parser import evidence_error
-from gate_status import decided_verdict, has_complete_evidence
+from gate_status import REQUEST_ORIGIN_DOOR, decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
 from provider_switch import SwitchDecision
 from review_vendor import (
@@ -1056,9 +1056,18 @@ class GateRequestHandlerMixin:
         module writes it, and an executor reads the request it just wrote to
         decide whether to run. ``path`` is the caller's, because this module
         names a request two ways (``_request_path``, ``_contract_request_path``).
+
+        Every request written here carries ``origin: "door"`` (ADR-046 A6, P4):
+        it is what lets ``vnx pr-ready`` tell a request the door asked for from
+        a record a shim wrote by hand. One place, set on the caller's payload so
+        the stamp goes on the record at ``path`` only. The caller's dict is left alone, because
+        the same dict is booked as the ``review_gate_request`` receipt and mirrored to the result
+        slot, and neither of those is a request. A later rewrite reads the record back from disk
+        (executor, ``commit_gate_outcome``) and so keeps the field.
         """
+        stamped = {**payload, "origin": REQUEST_ORIGIN_DOOR}
         with slot_lock(path):
-            atomic_write_json(path, payload)
+            atomic_write_json(path, stamped)
 
     def _stamp_takeover_annotations(
         self,
