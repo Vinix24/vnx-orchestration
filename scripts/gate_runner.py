@@ -1238,14 +1238,11 @@ class GateRunner:
             fetch_branch(branch, gate=gate, identifier=identifier, project_root=self._project_root)
         except GateWorktreeError as exc:
             return _rec.record_failure_simple(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                reason="harness_lane_branch_unavailable",
-                reason_detail=str(exc),
-                request_payload=request_payload,
+                gate=gate, pr_number=pr_number, pr_id=pr_id, reason="harness_lane_branch_unavailable",
+                reason_detail=str(exc), request_payload=request_payload,
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
             )
         base_ref = f"origin/{branch}"
-
         refused = self._refuse_unresolved_lane(gate, provider, pr_number, pr_id, request_payload)
         if refused is not None:
             return refused
