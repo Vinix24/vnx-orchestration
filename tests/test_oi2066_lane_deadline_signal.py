@@ -315,8 +315,13 @@ def _claude_popen(script: str):
 
 
 def _kimi_start(script: str):
-    """kimi_spawn's subprocess start, with the kimi argv swapped for *script*."""
-    def fake_start(cmd, env, cwd_str):
+    """kimi_spawn's subprocess start, with the kimi argv swapped for *script*.
+
+    The fourth argument is the private provider-switch config file the lane
+    writes for the real launch. These tests are about the drainer deadline, not
+    the guard config, so the fake accepts the path and ignores it.
+    """
+    def fake_start(cmd, env, cwd_str, config_path):
         proc = _REAL_POPEN(
             [sys.executable, "-c", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True, env=env, cwd=cwd_str,
