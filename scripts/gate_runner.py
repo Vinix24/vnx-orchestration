@@ -89,8 +89,8 @@ _REVIEWER_VERDICT_TEMPLATE = (
 # Derived from the single registry in gate_recorder (OI-1490) so this can no
 # longer drift from it: this copy carried 3 gates while gate_recorder's carried
 # 5, and neither carried kimi_gate or glm_gate. Only PATH-binary gates appear
-# here — a script-runner gate has no binary and must not be looked up as if it
-# did. Kept as a module-level name because tests and readers expect it.
+# here — a harness-lane or deterministic gate has no binary and must not be
+# looked up as if it did. Kept as a module-level name because tests and readers expect it.
 GATE_BINARIES: Dict[str, str] = dict(_rec._GATE_BINARIES)
 
 # Gate type → CLI args for review execution
@@ -805,7 +805,7 @@ class GateRunner:
 
         if not using_vertex:
             # OI-1490: three outcomes, not one. Before this, an unregistered
-            # gate and a script-runner gate both collapsed into "binary not
+            # gate and a lane-routed gate both collapsed into "binary not
             # found in PATH" — a name this runner had just invented from the
             # gate's own name. Each now says what is actually true, and the
             # two new reasons are PERMANENT: neither is in
@@ -830,33 +830,6 @@ class GateRunner:
                 # a binary named after the kind.
                 return self._refuse_deterministic(
                     gate, pr_number, pr_id, request_payload, kind, provider_name,
-                )
-            elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
-                pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
-                # Not-shipped and not-routable are different answers and the
-                # reader acts differently on each. Availability is kind-based
-                # (gate_recorder.gate_is_available): a script-runner gate is
-                # available only while its runner file is on disk. Reuse
-                # `gate_runner_missing` here rather than mint a second name
-                # for the fact gate_request_handler already books.
-                if not _rec.gate_is_available(gate):
-                    return self._not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                        reason="gate_runner_missing",
-                        reason_detail=(
-                            f"{provider_name} is not on disk — {gate} is registered "
-                            f"as a script runner and its runner is unavailable"
-                        ),
-                    )
-                return self._not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                    reason="gate_not_subprocess_routable",
-                    reason_detail=(
-                        f"{gate} is a script runner ({provider_name}) with its own "
-                        f"contract, dispatch and result-writing lifecycle; it is not a "
-                        f"CLI this runner can drive with a prompt. Run it directly: "
-                        f"python3 {provider_name} --pr {pr_ref}"
-                    ),
                 )
             else:
                 binary = provider_name
@@ -902,7 +875,7 @@ class GateRunner:
             reason="unsupported_gate_type",
             reason_detail=(
                 f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
-                f"PATH binary, a script runner, or a harness lane; this runner "
+                f"PATH binary, a harness lane, or a deterministic row; this runner "
                 f"will not guess a binary name from the gate name"
             ),
         )

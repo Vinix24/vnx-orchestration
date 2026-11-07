@@ -49,15 +49,11 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
-# How each gate's provider is actually reached. Four KINDS, kept apart because
+# How each gate's provider is actually reached. Three KINDS, kept apart because
 # their failure modes are different and collapsing them is OI-1490.
 #
 # PATH_BINARY   the gate drives a CLI that must be on PATH, with a prompt on
 #               stdin (gate_runner._build_gate_cmd builds `[binary] + args`).
-# SCRIPT_RUNNER the gate IS a repo script with its own lifecycle — it builds
-#               its own contract, dispatches, parses the verdict and writes
-#               its own result record. There is no PATH binary to look for,
-#               and there never will be.
 # HARNESS_LANE  the gate routes through the governed dispatcher
 #               (plan_gate_panel._make_default_dispatcher ->
 #               provider_dispatch), the SAME lane glm_gate.py/kimi_gate.py
@@ -90,7 +86,6 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 # obligation burns bounded retries waiting for an environment change that
 # cannot happen.
 GATE_PROVIDER_PATH_BINARY = "path_binary"
-GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
 GATE_PROVIDER_HARNESS_LANE = "harness_lane"
 GATE_PROVIDER_DETERMINISTIC = "deterministic"
 
@@ -250,9 +245,7 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
     )
 
 
-def gate_is_available(
-    gate: str, *, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None,
-) -> bool:
+def gate_is_available(gate: str, *, state_dir: Optional[Path] = None) -> bool:
     """Availability by REGISTRATION plus lane executability, never path existence.
 
     dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
@@ -272,8 +265,6 @@ def gate_is_available(
       PATH (``shutil.which``). Note this answers "route present", NOT "enabled
       by its env flag" — the env-flag question is a separate concern owned by
       the gate's own availability helper.
-    - ``script_runner`` the gate IS a repo script: available when the script
-      file is on disk. A gate that still needs a file keeps that check.
     - ``harness_lane``  the gate is config-based: available by registration
       and the operator's provider switch. There is no file to look for, and
       none is expected. A harness-lane gate whose family is switched off is
@@ -301,8 +292,6 @@ def gate_is_available(
     kind, name = provider
     if kind == GATE_PROVIDER_PATH_BINARY:
         return shutil.which(name) is not None
-    if kind == GATE_PROVIDER_SCRIPT_RUNNER:
-        return ((repo_root or _repo_root()) / name).exists()
     if kind == GATE_PROVIDER_HARNESS_LANE:
         return gate_switch_refusal(
             gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
@@ -323,8 +312,8 @@ def gate_provider_reachability(
     now: Optional[float] = None,
 ) -> Optional[provider_reachability.Reachability]:
     """Measured reachability of the provider behind ``gate``, or ``None`` when
-    the gate has no provider key to measure (unregistered, or a script runner
-    whose registered name is a path, not a provider).
+    the gate has no provider key to measure (unregistered, or a registered name that
+    is not a provider key).
 
     Reads recorded outcomes only, so an unasked provider is ``unmeasured`` and
     never ``reachable``. ``state_dir`` is explicit: the caller says whose
@@ -644,11 +633,6 @@ def persist_request(
     return None
 
 
-def _repo_root() -> Path:
-    """Repo root for resolving a script-runner path (scripts/lib -> repo)."""
-    return Path(__file__).resolve().parent.parent.parent
-
-
 def write_skip_rationale(
     state_dir: Path,
     gate: str,
@@ -660,11 +644,10 @@ def write_skip_rationale(
     """Append skip-rationale record to NDJSON audit trail (GATE-9).
 
     ``provider_check`` reports what was actually checked, per gate KIND
-    (OI-1490). A script-runner gate gets an existence check on its runner
-    file and never a PATH lookup: ``shutil.which("kimi_gate")`` answers a
-    question nobody asked and its ``False`` was read for two days as "the
-    provider is missing" while scripts/kimi_gate.py sat on disk. A
-    harness-lane gate has nothing to find either — it is config-based, its
+    (OI-1490). A lane-routed gate never gets a PATH lookup:
+    ``shutil.which("kimi_gate")`` answers a question nobody asked and its
+    ``False`` was read for two days as "the provider is missing" while
+    scripts/kimi_gate.py sat on disk. A harness-lane gate has nothing to find: it is config-based, its
     route is wired by construction, so ``binary_found`` is True without
     touching the filesystem and ``binary_name`` carries the provider string
     the dispatcher routes on. An unregistered gate says so in
@@ -688,9 +671,6 @@ def write_skip_rationale(
     provider = resolve_gate_provider(gate)
     if provider is None:
         kind, name, found = "unregistered", "", False
-    elif provider[0] == GATE_PROVIDER_SCRIPT_RUNNER:
-        kind, name = provider
-        found = (_repo_root() / name).exists()
     elif provider[0] == GATE_PROVIDER_HARNESS_LANE:
         kind, name = provider
         found = True
@@ -1102,8 +1082,8 @@ def is_routing_announcement(result: Dict[str, Any]) -> bool:
 # ``provider_disabled``, ``provider_not_configured``, a quota/auth refusal),
 # which is the reader being asked and unable to answer, i.e. a statement about
 # the head. The runner reasons are the executor describing itself: the gate is
-# not registered (``unsupported_gate_type``), the script runner has not shipped
-# (``gate_runner_missing``), or it ships but is not a CLI this runner can drive
+# not registered (``unsupported_gate_type``), the runner file is not on disk
+# (``gate_runner_missing``), or the gate is not a CLI this runner can drive
 # with a prompt (``gate_not_subprocess_routable``).
 #
 # WIDER than :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS` on purpose, because the
