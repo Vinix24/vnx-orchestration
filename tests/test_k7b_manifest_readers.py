@@ -93,6 +93,18 @@ def data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
     monkeypatch.setenv("VNX_STATE_DIR", str(data / "state"))
     monkeypatch.setenv("VNX_REPORTS_DIR", str(data / "unified_reports"))
+    # Every other variable the path resolver reads is pinned inside this store too, so
+    # nothing an earlier test on the same worker left behind can name another store
+    # (OI-2590). The ones that change behaviour rather than a path are removed.
+    for name in ("VNX_DISPATCH_DIR", "VNX_DB_DIR", "VNX_LOCKS_DIR", "VNX_LOGS_DIR",
+                 "VNX_PIDS_DIR", "VNX_HEADLESS_REPORTS_DIR", "VNX_INTELLIGENCE_DIR",
+                 "VNX_SOCKETS_DIR", "VNX_TMUX_SIGNAL_DIR"):
+        monkeypatch.setenv(name, str(data / name.removeprefix("VNX_").removesuffix("_DIR").lower()))
+    monkeypatch.setenv("VNX_DATA_HOME", str(data / "account-home"))
+    for name in ("VNX_PROJECT_ROOT", "VNX_PROJECT_FILTER", "VNX_CHAIN_RECEIPTS",
+                 "VNX_REQUESTED_BY", "VNX_PARENT_DISPATCH", "VNX_TASK_CLASS",
+                 "VNX_CANONICAL_ROOT", "VNX_HOME"):
+        monkeypatch.delenv(name, raising=False)
     return data
 
 
@@ -444,3 +456,71 @@ def test_kind_1b_legacy_sessions_are_unchanged(
     else:
         assert killed_sessions == []
         assert result.tmux_completed_orphans_preserved[0]["reason"] == "not_completed"
+
+
+# ---------------------------------------------------------------------------
+# 6. Hermetic store: a foreign environment never reaches the v3 lifecycle (OI-2590)
+# ---------------------------------------------------------------------------
+
+FOREIGN_ENV = ("VNX_DATA_DIR", "VNX_STATE_DIR", "VNX_REPORTS_DIR", "VNX_DISPATCH_DIR",
+               "VNX_DB_DIR", "VNX_LOCKS_DIR", "VNX_LOGS_DIR", "VNX_PIDS_DIR",
+               "VNX_HEADLESS_REPORTS_DIR", "VNX_INTELLIGENCE_DIR", "VNX_SOCKETS_DIR",
+               "VNX_TMUX_SIGNAL_DIR", "VNX_DATA_HOME")
+
+
+@pytest.fixture()
+def foreign_env(tmp_path_factory: pytest.TempPathFactory,
+                monkeypatch: pytest.MonkeyPatch) -> Path:
+    """What an earlier test on the same xdist worker can leave in ``os.environ``.
+
+    Requested BEFORE ``data_dir`` in the test signature, so the store fixture has to
+    win over every variable set here. The foreign store holds a real, empty
+    ``runtime_coordination.db``: if the lifecycle resolved it, the finalizer would
+    project into a store ``dispatch_start.begin`` never created.
+    """
+    foreign = tmp_path_factory.mktemp("foreign-store")
+    for name in FOREIGN_ENV:
+        monkeypatch.setenv(name, str(foreign / name.lower()))
+    monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "0")
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(foreign))
+    monkeypatch.setenv("VNX_PROJECT_FILTER", "0")
+    monkeypatch.setenv("VNX_CHAIN_RECEIPTS", "1")
+    monkeypatch.setenv("VNX_REQUESTED_BY", "a-foreign-test")
+    monkeypatch.setenv("VNX_PARENT_DISPATCH", "d-foreign-parent")
+    monkeypatch.setenv("VNX_TASK_CLASS", "foreign-class")
+    monkeypatch.setenv("VNX_CURRENT_DISPATCH_ID", "d-foreign-current")
+    (foreign / "state").mkdir()
+    (foreign / "state" / "runtime_coordination.db").write_bytes(b"")
+    monkeypatch.chdir(foreign)
+    return foreign
+
+
+def test_a_foreign_environment_does_not_move_the_v3_lifecycle_out_of_its_own_store(
+        foreign_env: Path, data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    before = sorted(str(p.relative_to(foreign_env)) for p in foreign_env.rglob("*"))
+
+    _v3(state_dir, spec_file, "d-v3-hermetic", end_state="completed")
+
+    assert attempt_verdict(state_dir, PROJECT, "d-v3-hermetic").kind == "ended"
+    assert (state_dir / "t0_receipts.ndjson").is_file()
+    assert not (state_dir / "runtime_coordination.db").exists()
+    assert (foreign_env / "state" / "runtime_coordination.db").read_bytes() == b""
+    assert sorted(str(p.relative_to(foreign_env)) for p in foreign_env.rglob("*")) == before
+
+
+def test_a_present_but_schemaless_store_stays_blocking_for_the_finalizer(
+        data_dir: Path, state_dir: Path, spec_file: Path) -> None:
+    """Fail closed: a database file without ``dispatches`` is never read as "no store"."""
+    handover = _begin(state_dir, spec_file, "d-v3-schemaless")
+    (state_dir / "runtime_coordination.db").write_bytes(b"")
+
+    with pytest.raises(Exception, match="no such table: dispatches"):
+        _end(state_dir, handover, "completed")
+
+    # The end line is already in the ledger (step 3); the projection (step 4) failed, so
+    # the intent stays unpublished and the same finalize call completes it once the
+    # store is sound again.
+    assert list((state_dir / "dispatch_end").rglob("*.json"))
+    (state_dir / "runtime_coordination.db").unlink()
+    _end(state_dir, handover, "completed")
+    assert attempt_verdict(state_dir, PROJECT, "d-v3-schemaless").kind == "ended"

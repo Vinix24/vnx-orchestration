@@ -209,25 +209,60 @@ def _sweep_age(state_dir: Path, evaluated: datetime):
         (None, f"sweep heartbeat {path} carries no finished_at")
 
 
-def _unmeasured(reason: str) -> dict:
+def _unmeasured(reason: str, problems=None) -> dict:
     """Fail-closed: every count is ``None`` — there is no zero here to mistake for clean."""
     return {"status": STATUS_UNMEASURED, "reason": reason, "cohort": None,
             "counts": dict.fromkeys(DEFECTS), "findings": {name: [] for name in DEFECTS},
             "sweep_heartbeat_age_seconds": None, "sweep_heartbeat_reason": reason,
-            "problems": [reason]}
+            "problems": list(problems) if problems else [reason]}
 
 
-def briefing_line(count: dict) -> str:
-    """The one SessionStart line: the five numbers and the heartbeat's age."""
+REASON_CAP = 160
+
+
+def _capped_reason(reason: str, problems) -> str:
+    """The reason, cut at ``REASON_CAP`` with an ellipsis and how many problems it hides."""
+    if len(reason) <= REASON_CAP:
+        return reason
+    cut = reason[:REASON_CAP - 1] + "\u2026"
+    if not isinstance(problems, list) or "; ".join(map(str, problems)) != reason:
+        return cut
+    starts, at = [], 0
+    for problem in problems:
+        starts.append(at)
+        at += len(str(problem)) + 2
+    hidden = sum(1 for start in starts if start >= REASON_CAP - 1)
+    return f"{cut} (+{hidden} more)" if hidden else cut
+
+
+def _count_age(count: dict, now) -> str:
+    """``count 14h old`` from ``counted_at`` / ``evaluated_at``; anything unusable is unknown."""
+    try:
+        stamped = _as_utc(count.get("counted_at") or count.get("evaluated_at"))
+        minutes = int(((_as_utc(now) or datetime.now(timezone.utc)) - stamped).total_seconds() // 60)
+    except (ValueError, TypeError, AttributeError):  # fail-closed: an unreadable stamp is no age
+        return "count age unknown"
+    if minutes < 0:  # a stamp in the future is not a measurement of age
+        return "count age unknown"
+    return f"count {minutes}m old" if minutes < 60 else f"count {minutes // 60}h old"
+
+
+def briefing_line(count: dict, now=None) -> str:
+    """The one SessionStart line: the cohort, the five numbers, the heartbeat's age and the count's."""
     if count.get("status") != STATUS_MEASURED:
-        return f"lifecycle: unmeasured ({count.get('reason') or 'not measured'}); sweep unknown"
+        reason = _capped_reason(str(count.get("reason") or "not measured"), count.get("problems"))
+        return f"lifecycle: unmeasured ({reason}); sweep unknown"
     counts, age = count.get("counts") or {}, count.get("sweep_heartbeat_age_seconds")
     sweep = (f"{int(age)}s" if isinstance(age, (int, float)) and not isinstance(age, bool)
              else f"unknown ({count.get('sweep_heartbeat_reason') or 'no reason'})")
-    return (f"lifecycle: {counts.get('start_without_end')} start-without-end, "
+    cohort = count.get("cohort")  # an absent or blank cohort is named unknown, never guessed
+    label = ("unknown" if not isinstance(cohort, str) or not cohort.strip()
+             else cohort if cohort == COHORT_ALL else f"since {cohort.strip()[:8]}")
+    return (f"lifecycle [cohort {label}]: {counts.get('start_without_end')} start-without-end, "
             f"{counts.get('end_without_start')} end-without-start, "
             f"{counts.get('double_end')} double, {counts.get('projection_conflict')} conflict, "
-            f"{counts.get('provenance_unknown')} provenance-unknown; sweep {sweep}")
+            f"{counts.get('provenance_unknown')} provenance-unknown; sweep {sweep}; "
+            f"{_count_age(count, now)}")
 
 
 def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=None, repo=None,
@@ -256,7 +291,7 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
             state_path, repo, activation, project)
         found = _defects(state_path, starts, ends, records, evaluated, problems)
         if problems:  # a problem is not a measurement: no zero may stand for it
-            raise Unmeasured("; ".join(problems))
+            return _unmeasured("; ".join(problems), problems)
     except Unmeasured as exc:
         return _unmeasured(str(exc))
     found["provenance_unknown"] = unknown

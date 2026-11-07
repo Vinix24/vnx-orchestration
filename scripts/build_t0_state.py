@@ -2594,7 +2594,11 @@ def _lifecycle_count_index_summary(state_dir: Path) -> Dict[str, Any]:
         return {"line": "lifecycle: unmeasured (no lifecycle_count beacon); sweep unknown"}
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return {"line": f"lifecycle: unmeasured (unreadable {path}: {exc}); sweep unknown"}
-    return {"line": briefing_line(details), "counts": details.get("counts"),
+    try:
+        line = briefing_line(details)
+    except (TypeError, AttributeError, ValueError) as exc:  # a malformed beacon is unmeasured, not a crash
+        return {"line": f"lifecycle: unmeasured (malformed beacon {path}: {exc}); sweep unknown"}
+    return {"line": line, "counts": details.get("counts"),
             "sweep_heartbeat_age_seconds": details.get("sweep_heartbeat_age_seconds"),
             "counted_at": details.get("counted_at")}
 

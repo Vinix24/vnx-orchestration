@@ -426,9 +426,9 @@ def test_the_briefing_line_carries_the_five_numbers_and_the_sweep_age(
     index = build_t0_state._build_t0_index(
         {"lifecycle_count": build_t0_state._lifecycle_count_index_summary(state_dir)})
 
-    assert index["lifecycle"]["line"] == (
-        "lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
-        "1 provenance-unknown; sweep 600s")
+    assert index["lifecycle"]["line"].startswith(
+        "lifecycle [cohort all_v3]: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+        "1 provenance-unknown; sweep 600s; count ")
     assert count["sweep_heartbeat_age_seconds"] == 600
     assert count["sweep_heartbeat_reason"] is None
 
@@ -466,8 +466,8 @@ def test_the_sessionstart_hook_prints_the_lifecycle_line(tmp_path, state_dir, da
 
     assert run.returncode == 0, run.stderr
     context = json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
-    assert ("lifecycle: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
-            "1 provenance-unknown; sweep 600s") in context, context
+    assert ("lifecycle [cohort all_v3]: 1 start-without-end, 1 end-without-start, 1 double, 1 conflict, "
+            "1 provenance-unknown; sweep 600s; count ") in context, context
 
 
 # ---------------------------------------------------------------------------
@@ -637,3 +637,129 @@ def test_a_missing_database_path_still_counts_the_ledger(
 
     assert count["status"] == lifecycle_count.STATUS_MEASURED, count
     assert count["counts"]["total"] == 0, count
+
+
+# ---------------------------------------------------------------------------
+# 7. OI-2594: the briefing line names the cohort the count was taken over
+# ---------------------------------------------------------------------------
+
+def _measured(**extra) -> dict:
+    count = {"status": "measured", "counts": dict.fromkeys(lifecycle_count.DEFECTS, 0),
+             "sweep_heartbeat_age_seconds": 412}
+    count.update(extra)
+    return count
+
+
+def test_the_line_names_all_v3_for_a_count_without_activation_commit():
+    line = lifecycle_count.briefing_line(_measured(cohort="all_v3"))
+
+    assert line.startswith("lifecycle [cohort all_v3]: "), line
+
+
+def test_the_line_names_the_short_sha_for_a_count_with_an_activation_commit():
+    sha = "a7a2d7c4" + "0" * 32
+
+    line = lifecycle_count.briefing_line(_measured(cohort=sha))
+
+    assert line.startswith("lifecycle [cohort since a7a2d7c4]: "), line
+
+
+@pytest.mark.parametrize("cohort", [None, "", "  ", 7])
+def test_a_measured_count_without_a_usable_cohort_says_unknown(cohort):
+    line = lifecycle_count.briefing_line(_measured(cohort=cohort))
+    absent = lifecycle_count.briefing_line(_measured())
+
+    assert line.startswith("lifecycle [cohort unknown]: "), line
+    assert absent.startswith("lifecycle [cohort unknown]: "), absent
+
+
+def test_the_unmeasured_line_has_no_cohort():
+    line = lifecycle_count.briefing_line(
+        {"status": "unmeasured", "reason": "no project id", "cohort": None})
+
+    assert line == "lifecycle: unmeasured (no project id); sweep unknown"
+
+
+# ---------------------------------------------------------------------------
+# 8. OI-2557: the age of the count, a capped reason and a guarded summary
+# ---------------------------------------------------------------------------
+
+NOW = datetime(2026, 11, 7, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("stamp, expected", [
+    ("2026-11-07T11:15:00Z", "count 45m old"),
+    ("2026-11-07T11:59:30Z", "count 0m old"),
+    ("2026-11-06T22:00:00Z", "count 14h old"),
+    ("2026-11-07T11:00:00Z", "count 1h old"),
+])
+def test_the_line_carries_the_age_of_the_count(stamp, expected):
+    for field in ("counted_at", "evaluated_at"):
+        line = lifecycle_count.briefing_line(_measured(cohort="all_v3", **{field: stamp}), now=NOW)
+
+        assert line.endswith(f"; {expected}"), line
+
+
+@pytest.mark.parametrize("extra", [{}, {"counted_at": None}, {"counted_at": "yesterday"},
+                                   {"counted_at": 7}, {"counted_at": "2026-11-08T12:00:00Z"}])
+def test_a_count_without_a_usable_timestamp_says_the_age_is_unknown(extra):
+    line = lifecycle_count.briefing_line(_measured(cohort="all_v3", **extra), now=NOW)
+
+    assert line.endswith("; count age unknown"), line
+
+
+def test_the_age_does_not_change_the_cohort_or_the_five_numbers():
+    line = lifecycle_count.briefing_line(
+        _measured(cohort="all_v3", counted_at="2026-11-07T11:00:00Z"), now=NOW)
+
+    assert line == ("lifecycle [cohort all_v3]: 0 start-without-end, 0 end-without-start, 0 double, "
+                    "0 conflict, 0 provenance-unknown; sweep 412s; count 1h old")
+
+
+def test_a_long_unmeasured_reason_is_capped_with_the_number_of_hidden_problems():
+    problems = [f"problem {n}: " + "x" * 50 for n in range(4)]
+    reason = "; ".join(problems)
+
+    line = lifecycle_count.briefing_line(
+        {"status": "unmeasured", "reason": reason, "problems": problems})
+
+    assert line.startswith("lifecycle: unmeasured (problem 0: ")
+    assert line.endswith("\u2026 (+1 more)); sweep unknown")
+    assert "problem 3" not in line
+    assert len(line) < len(reason)
+
+
+def test_a_short_unmeasured_reason_is_left_alone():
+    line = lifecycle_count.briefing_line(
+        {"status": "unmeasured", "reason": "a; b", "problems": ["a", "b"]})
+
+    assert line == "lifecycle: unmeasured (a; b); sweep unknown"
+
+
+def test_the_full_problem_list_stays_in_the_count(state_dir, git_repo, writer_sha, lifecycle_on,
+                                                  monkeypatch):
+    monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
+    for n in range(3):
+        _append_raw(state_dir, {"timestamp": "not-a-date", "event_type": "dispatch_started",
+                                "schema_version": 3, "project_id": PROJECT,
+                                "dispatch_id": f"d-k9-date-{n}", "attempt": 1, "base_sha": "a" * 40,
+                                "deadline_seconds": DEADLINE, "writer_sha": writer_sha["value"]})
+
+    count = _count(state_dir, git_repo)
+
+    assert count["status"] == "unmeasured"
+    assert len(count["problems"]) == 3, count["problems"]
+    assert count["reason"] == "; ".join(count["problems"])
+
+
+@pytest.mark.parametrize("counts", [["not", "a", "dict"], 7, "text"])
+def test_a_beacon_with_malformed_counts_is_unmeasured_not_an_exception(data_dir, state_dir, counts):
+    beacon = data_dir / "health" / "lifecycle_count.json"
+    beacon.parent.mkdir(parents=True, exist_ok=True)
+    beacon.write_text(json.dumps({"details": {"status": "measured", "counts": counts}}),
+                      encoding="utf-8")
+
+    line = build_t0_state._lifecycle_count_index_summary(state_dir)["line"]
+
+    assert line.startswith("lifecycle: unmeasured (malformed beacon "), line
+    assert line.endswith("); sweep unknown")
