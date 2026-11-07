@@ -1,0 +1,1 @@
+- Health (track `ledger-is-falsifiable`): `scripts/lib/processor_liveness.py` reads the receipt-processor heartbeat in five states (absent, unknown, dead, stalled, fresh) and `t0_state` `system_health` carries it as `processor_liveness`, so a stalled processor no longer reads running.

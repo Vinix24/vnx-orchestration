@@ -1678,7 +1678,7 @@ def _last_job_exit_by_label(state_dir: Path, labels: Sequence[str]) -> Dict[str,
     return result
 
 
-def _combine_liveness_overall(*values: Optional[str]) -> str:
+def _combine_liveness_overall(*values: Optional[str], strict: Optional[str] = None) -> str:
     """Fold sub-signal ``overall`` values (the ``"ok"``/``"fail"``/``"unknown"``
     vocabulary daemon_liveness already established) into one, mirroring the
     stop_conditions.py ``CheckStatus``/``_combine`` combination rule (PR
@@ -1686,12 +1686,24 @@ def _combine_liveness_overall(*values: Optional[str]) -> str:
     idiom rather than imported, since 'unmeasurable' must stay a distinct
     branch, never collapsed into either of the other two): ANY ``"fail"`` ->
     ``"fail"``; else ANY ``"ok"`` -> ``"ok"``; else ``"unknown"`` (every
-    sub-signal was itself unmeasured, or there were none at all)."""
+    sub-signal was itself unmeasured, or there were none at all).
+
+    ``strict`` is one extra component folded as the worst of ``fail`` >
+    ``unknown`` > ``ok`` (the processor heartbeat, ADR-055): where the values
+    above let an ``ok`` outvote an ``unknown``, this component cannot be
+    outvoted. ``None`` means the component was not supplied; any value other
+    than ``"ok"`` or ``"fail"`` counts as ``unknown``."""
     present = [v for v in values if v is not None]
     if any(v == "fail" for v in present):
+        base = "fail"
+    elif any(v == "ok" for v in present):
+        base = "ok"
+    else:
+        base = "unknown"
+    if strict is None or strict == "ok":
+        return base
+    if strict == "fail" or base == "fail":
         return "fail"
-    if any(v == "ok" for v in present):
-        return "ok"
     return "unknown"
 
 
@@ -1861,6 +1873,7 @@ def _migrations_skipped_fields(migration_skip: Optional[Dict[str, str]]) -> Dict
 def _producer_liveness_summary(
     daemon_liveness: Optional[Dict[str, Any]],
     launchd_liveness: Optional[Dict[str, Any]],
+    processor_overall: Optional[str] = None,
 ) -> Dict[str, Any]:
     """The combined producer verdict plus each class's own overall, nothing more.
 
@@ -1870,11 +1883,14 @@ def _producer_liveness_summary(
     """
     daemon_overall = daemon_liveness.get("overall") if daemon_liveness else None
     launchd_overall = launchd_liveness.get("overall") if launchd_liveness else None
-    return {
-        "overall": _combine_liveness_overall(daemon_overall, launchd_overall),
+    summary = {
+        "overall": _combine_liveness_overall(daemon_overall, launchd_overall, strict=processor_overall),
         "daemon_overall": daemon_overall,
         "launchd_overall": launchd_overall,
     }
+    if processor_overall is not None:
+        summary["processor_overall"] = processor_overall
+    return summary
 
 
 def _build_system_health(
@@ -1885,6 +1901,7 @@ def _build_system_health(
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
     launchd_liveness: Optional[Dict[str, Any]] = None,
+    processor_liveness: Optional[Dict[str, Any]] = None,
     degraded_reasons: Optional[Sequence[str]] = None,
     db_reason: Optional[str] = None,
     migration_skip: Optional[Dict[str, str]] = None,
@@ -1975,6 +1992,20 @@ def _build_system_health(
             log.debug("measure_launchd_liveness failed (non-critical): %s", exc)
             launchd_liveness = {"overall": "unknown", "jobs": {}, "reason": f"measurement raised: {exc}"}
 
+    # Ledger PR 1: the receipt processor's heartbeat is its own component. A
+    # read that raises is "unknown", never a skipped signal.
+    if processor_liveness is None:
+        try:
+            from processor_liveness import read_processor_liveness
+            processor_liveness = read_processor_liveness(state_dir)
+        except Exception as exc:  # vnx-silent-except: logged and surfaced as an explicit unknown state, never dropped
+            log.debug("read_processor_liveness failed (non-critical): %s", exc)
+            processor_liveness = {"state": "unknown", "overall": "unknown", "reason": f"measurement raised: {exc}"}
+    processor_overall = processor_liveness.get("overall")
+    if processor_overall not in ("ok", "fail", "unknown"):
+        # Missing or unrecognised evidence is unknown, never "not supplied".
+        processor_overall = "unknown"
+
     # R6.4 (D2): a summary can never report healthier than the worst thing it
     # summarizes. Before this, `status` was computed once above (from
     # db_health/artifact-presence) and never revisited, so
@@ -1992,6 +2023,8 @@ def _build_system_health(
         daemon_liveness.get("overall") if daemon_liveness else None,
         launchd_liveness.get("overall") if launchd_liveness else None,
         "degraded" if reasons else None,
+        # Fail-closed: only a measured "ok" keeps status healthy; absent/unknown/fail degrade.
+        None if processor_overall == "ok" else "degraded",
     )
 
     result: Dict[str, Any] = {
@@ -2010,6 +2043,8 @@ def _build_system_health(
     # launchd_liveness is unconditional -- see the "never silently omitted"
     # note above; it is always a dict by this point, never None.
     result["launchd_liveness"] = launchd_liveness
+    # Derived copy (dict literal), folded into status above via processor_overall.
+    result["processor_liveness"] = dict(processor_liveness)
     # producer_liveness: the single first-class liveness field a caller can
     # check without knowing daemon_liveness and launchd_liveness are two
     # separate producer classes that need combining by hand. Folds both via
@@ -2023,7 +2058,7 @@ def _build_system_health(
     # pushed a real t0_index.json from 3559 to 8024 bytes). Per-daemon and
     # per-job detail is one field away (daemon_liveness/launchd_liveness
     # above) for a caller that wants it.
-    result["producer_liveness"] = _producer_liveness_summary(daemon_liveness, launchd_liveness)
+    result["producer_liveness"] = _producer_liveness_summary(daemon_liveness, launchd_liveness, processor_overall)
     return result
 
 
@@ -2742,6 +2777,7 @@ def _state_to_brief(state: Dict[str, Any]) -> Dict[str, Any]:
             "daemon_liveness": sh.get("daemon_liveness"),
             "launchd_liveness": sh.get("launchd_liveness"),
             "producer_liveness": sh.get("producer_liveness"),
+            "processor_liveness": sh.get("processor_liveness"),
         },
     }
 
@@ -2793,7 +2829,7 @@ def _slim_health_for_index(system_health: Dict[str, Any]) -> Dict[str, Any]:
         slim["db_reason"] = system_health["db_reason"]
     if system_health.get("migrations_skipped"):
         slim["migrations_skipped"] = system_health["migrations_skipped"]
-    for key in ("beacon_health", "daemon_liveness", "launchd_liveness"):
+    for key in ("beacon_health", "daemon_liveness", "launchd_liveness", "processor_liveness"):
         nested = system_health.get(key)
         if nested is not None:
             slim[key] = {"overall": nested.get("overall")}
