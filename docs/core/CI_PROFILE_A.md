@@ -34,7 +34,7 @@ pytest arguments (`.github/workflows/vnx-ci.yml:126`).
 - Both phases write a JUnit XML and a collection manifest **from the same
   pytest process** (`scripts/ci/profile_a_run_phase.sh:111-115`). The XML and
   manifest are uploaded as `profile-a-evidence`, also when the suite is red
-  (`.github/workflows/vnx-ci.yml:190-199`).
+  (`.github/workflows/vnx-ci.yml:196-205`).
 
 ### The required completeness step
 
@@ -76,6 +76,31 @@ in-window runs, all exit 0, and the longest shadow suite wall time was 1134 s
 (run 41827919472 on 65b7aa65, 2026-11-04); 2 x 1134 s = 2268 s = 37.8 minutes,
 rounded up to 38 (`.github/workflows/vnx-ci.yml:20-33`). The serial branch keeps
 80 because that shape measured 52, 52 and 54.8 minutes on `main` (same comment).
+
+### What the job runs after the pytest phases
+
+After the evidence upload the job runs seven guards
+(`.github/workflows/vnx-ci.yml:207-316`): the side-door exhaustiveness audit,
+the central-mode path gate, the out-of-repo symlink guard, the docs file:line
+reference guard, the retired paths guard, the architecture doc drift guard and
+the status vocabulary drift guard. The symlink, docs file:line, retired paths,
+architecture doc drift and status vocabulary guards each have a second step
+that runs the guard's own unit tests.
+
+The function-size ratchet and the function-size tree check are not part of this
+job. They run in `lint-patterns` (`.github/workflows/vnx-ci.yml:625`,
+`.github/workflows/vnx-ci.yml:689` and `.github/workflows/vnx-ci.yml:700`).
+
+### `Red on base` is a separate workflow
+
+`Red on base` (`.github/workflows/red-on-base.yml:16-17`, release v1.8.0) is a
+workflow of its own, not a job of `vnx-ci.yml`. It also runs when a PR
+description is edited (`.github/workflows/red-on-base.yml:11-13`, `types` includes `edited`), and a
+body edit must not re-enter `VNX CI`. It runs the test files a PR adds or
+changes against the merge base and against the head and rules per claimed test
+(`docs/core/11_RECEIPT_FORMAT.md`, section on CI red-on-base). It is not a
+required check on `main`. The verdict is uploaded as the artifact
+`red-on-base-verdict`.
 
 ## The serial list and its entry rule
 
@@ -120,7 +145,8 @@ accepts. It was written from the last measurable run of the cutover window:
 VNX CI run 41119890499, head 75011469, 2026-10-30, artifact
 `profile-a-evidence` of its serial Profile A
 (`scripts/ci/xdist_expected_skips.txt:3-11`). That run recorded 50 skips and no
-collection-time skip; one key was added afterwards by the D4 round of OI-2518
+collection-time skip; two keys were added afterwards, one by the D4 round of
+OI-2518 and one by OI-2564 (PR #2449), which brings the file to 52 keys
 (same header). The entry rule is one key per line — a test nodeid or a
 collection-skipped file — with the reason after `#`
 (`scripts/ci/xdist_expected_skips.txt:13-18`).
