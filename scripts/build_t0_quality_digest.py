@@ -13,6 +13,7 @@ Lookback: 24h for receipt-based evidence
 """
 
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -31,6 +32,8 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 from digest_text import smart_truncate
+from receipt_outcome import noise_reason
+from vnx_paths import project_id_from_state_dir
 
 PATHS = ensure_env()
 STATE_DIR = Path(PATHS["VNX_STATE_DIR"])
@@ -45,8 +48,21 @@ SCHEMA_VERSION = "2.0"
 
 # ── Evidence helpers ──────────────────────────────────────────────────────────
 
+def _is_noise_receipt(receipt: Dict, project_id: str) -> bool:
+    """True when ``receipt_outcome.noise_reason`` names the receipt as noise.
+
+    Without a project id the project test cannot run, so the receipt is compared
+    with its own stamp (never foreign); the pytest, temp-path, MagicMock and
+    stale-contract tests still apply."""
+    return noise_reason(receipt, project_id or str(receipt.get("project_id") or "")) is not None
+
+
 def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[Dict]:
-    """Load receipts from the last N hours from t0_receipts.ndjson."""
+    """Load receipts from the last N hours from t0_receipts.ndjson.
+
+    Pytest rows and the other noise ``receipt_outcome.noise_reason`` names are
+    dropped, so a test run never reads as a real dispatch outcome."""
+    project_id = project_id_from_state_dir(state_dir) or os.environ.get("VNX_PROJECT_ID", "").strip()
     receipts_path = state_dir / "t0_receipts.ndjson"
     if not receipts_path.exists():
         return []
@@ -62,6 +78,8 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
                     continue
                 try:
                     r = json.loads(line)
+                    if _is_noise_receipt(r, project_id):
+                        continue
                     ts_raw = r.get("timestamp", "")
                     if ts_raw:
                         if isinstance(ts_raw, (int, float)):
