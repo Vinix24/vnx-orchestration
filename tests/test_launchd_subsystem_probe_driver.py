@@ -274,12 +274,57 @@ class TestCommand:
         assert entry["relevant"] is True, entry
         requires = path_parity.parse_requires_python(REPO / "pyproject.toml")
         version = interpreter_version(entry["interpreter"])
-        expected = path_parity.version_in_range(version, requires) if version else False
-        # an interpreter outside the range (or one that cannot say its version) must be
-        # reported out of range, never skipped and never passed
+        # the guard's own rule: None when the version is unreadable, else the range check
+        expected = path_parity.version_in_range(version, requires) if version else None
         assert entry["in_range"] is expected, (entry, version, requires)
         assert not report["xml_errors"], report["xml_errors"]
-        assert [m for m in report["mismatches"] if m["file"] == TEMPLATE.name] == []
+        mismatches = [m for m in report["mismatches"] if m["file"] == TEMPLATE.name]
+        if expected is False:
+            # an interpreter outside the range is reported, once, naming the interpreter
+            assert [(m["kind"], m["interpreter"]) for m in mismatches] == [
+                ("template_interpreter_out_of_range", entry["interpreter"])
+            ], (mismatches, entry)
+        else:
+            assert mismatches == [], (mismatches, entry)
+
+    @pytest.mark.parametrize(
+        ("reported", "in_range", "mismatch_count"),
+        [("3.14.0", False, 1), ("3.12.4", True, 0), (None, None, 0)],
+    )
+    def test_the_guard_reports_an_interpreter_the_runner_says_is_out_of_range(
+        self, tmp_path: Path, reported: Any, in_range: Any, mismatch_count: int
+    ) -> None:
+        """Documents the rule the test above follows: the host-independent case.
+        ``/usr/bin/python3`` encodes no version in its path, so the guard asks the
+        injected ``runner`` (``resolve_interpreter_version(..., runner=...)``, which
+        ``check_repo_launchd_templates`` forwards). 3.14 is out of range and must be
+        in ``mismatches``; an unreadable version is ``in_range is None``."""
+        path_parity = _lib("path_parity")
+        templates = tmp_path / "launchd"
+        templates.mkdir()
+        (templates / "com.vnx.fake.plist").write_bytes(
+            plistlib.dumps(
+                {
+                    "Label": "com.vnx.fake",
+                    "ProgramArguments": ["/usr/bin/python3", "-m", "vnx_cli.main"],
+                }
+            )
+        )
+
+        def runner(cmd: Any, **_kw: Any) -> Any:
+            if reported is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=reported + "\n", stderr="")
+
+        requires = path_parity.parse_requires_python(REPO / "pyproject.toml")
+        report = path_parity.check_repo_launchd_templates(templates, REPO, requires, runner=runner)
+        entry = next(c for c in report["consumers"] if c["file"] == "com.vnx.fake.plist")
+        assert entry["relevant"] is True, entry
+        assert entry["in_range"] is in_range, entry
+        assert len(report["mismatches"]) == mismatch_count, report["mismatches"]
+        assert report["ok"] is (mismatch_count == 0), report
+        if mismatch_count:
+            assert report["mismatches"][0]["interpreter"] == "/usr/bin/python3"
 
 
 class TestInstallableByReloadPlist:
