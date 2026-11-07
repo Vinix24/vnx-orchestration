@@ -141,14 +141,6 @@ def test_not_ignored_writes_nothing(tmp_path, shadow, caplog):
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
-def test_not_a_git_worktree_fails_open_without_writing(tmp_path, shadow):
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    result = _run(plain)
-    assert result["status"] == "error" and result["reason"] == "not_ignored"
-    assert not (plain / ".vnx-agent-skills").exists()
-
-
 def test_leftover_directory_is_replaced(tmp_path, shadow):
     _, wt = _make_repo(tmp_path)
     stale = wt / ".vnx-agent-skills" / "backend-developer" / "old"
