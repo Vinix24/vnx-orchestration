@@ -31,6 +31,12 @@ sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
 
 import closure_verifier as cv
 from dispatch_spec import RETIRED_GATE_NAMES, Gate
+from gate_recorder import GATE_PROVIDER_HARNESS_LANE, resolve_gate_provider
+
+
+def _kind_of(gate: str):
+    provider = resolve_gate_provider(gate)
+    return provider[0] if provider else None
 
 
 class TestKnownGatesDerivedFromEnum:
@@ -86,17 +92,28 @@ class TestKnownGatesDerivedFromEnum:
         assert "wiring_gate" in cv._GATES_NOT_IMPLEMENTED_BY_CLOSURE
         assert "wiring_gate" not in cv._KNOWN_GATES
 
-    def test_every_implemented_gate_has_a_handler(self):
-        """Every gate in _KNOWN_GATES must have a handler in the dispatch table.
+    def test_every_implemented_gate_has_an_own_handler_or_a_harness_lane_row(self):
+        """Every gate in _KNOWN_GATES has an own handler in the dispatch table
+        or a ``harness_lane`` registry row (ADR-046 Amendment 1 A4).
 
-        A gate marked implemented but with no handler would raise KeyError at
-        runtime instead of producing a CheckResult — the table-driven design
-        must stay complete.
+        A gate with neither would end in UNVERIFIED forever: marked implemented
+        but structurally unable to close. Retired names stay readable for
+        history and are not gates the verifier runs.
         """
-        missing_handlers = cv._KNOWN_GATES - set(cv._GATE_HANDLERS.keys())
-        assert not missing_handlers, (
-            f"_KNOWN_GATES without a _GATE_HANDLERS entry: {sorted(missing_handlers)}"
+        live = cv._KNOWN_GATES - RETIRED_GATE_NAMES
+        uncovered = sorted(
+            g for g in live
+            if g not in cv._GATE_HANDLERS and _kind_of(g) != GATE_PROVIDER_HARNESS_LANE
         )
+        assert not uncovered, (
+            f"_KNOWN_GATES with neither an own _GATE_HANDLERS entry nor a harness_lane "
+            f"row: {uncovered}"
+        )
+
+    def test_every_registered_gate_has_a_kind(self):
+        """Every Gate enum member resolves to a registry kind (no ``None``)."""
+        kindless = sorted(g.value for g in Gate if resolve_gate_provider(g.value) is None)
+        assert not kindless, f"Gate enum members with no registry kind: {kindless}"
 
     def test_no_handler_for_a_gate_outside_known_gates(self):
         """No handler may exist for a gate the verifier does not claim to implement."""
@@ -119,7 +136,10 @@ class TestKnownGatesDerivedFromEnum:
             f"{gate_name} must not be parked on _GATES_NOT_IMPLEMENTED_BY_CLOSURE — "
             "that would make closure for it structurally unreachable"
         )
-        assert gate_name in cv._GATE_HANDLERS, f"{gate_name} must have a _GATE_HANDLERS entry"
+        assert (
+            gate_name in cv._GATE_HANDLERS
+            or _kind_of(gate_name) == GATE_PROVIDER_HARNESS_LANE
+        ), f"{gate_name} must have an own handler or a harness_lane row"
 
 
 class TestGateSignerClassificationConsistency:

@@ -41,6 +41,7 @@ from gate_status import (
     is_test_run_record as _is_test_run_record,
 )
 from dispatch_spec import RETIRED_GATE_NAMES, Gate
+from gate_recorder import GATE_PROVIDER_HARNESS_LANE, resolve_gate_provider
 from gate_obligations import (
     REASON_FULFILLED_BY_TAKEOVER,
     STATUS_FULFILLED,
@@ -1837,56 +1838,42 @@ def _gate_full_evidence_pass(gate: str, result: Optional[Dict[str, Any]]) -> Che
     return CheckResult(f"gate_{gate}", "FAIL", f"{gate} not passing — {reason}")
 
 
-def _gate_kimi_gate(
-    contract: ReviewContract,
-    result: Optional[Dict[str, Any]],
-    results_dir: Path,
-    branch: Optional[str],
-) -> CheckResult:
-    return _gate_full_evidence_pass("kimi_gate", result)
-
-
-def _gate_glm_gate(
-    contract: ReviewContract,
-    result: Optional[Dict[str, Any]],
-    results_dir: Path,
-    branch: Optional[str],
-) -> CheckResult:
-    return _gate_full_evidence_pass("glm_gate", result)
-
-
-def _gate_deepseek_gate(
-    contract: ReviewContract,
-    result: Optional[Dict[str, Any]],
-    results_dir: Path,
-    branch: Optional[str],
-) -> CheckResult:
-    return _gate_full_evidence_pass("deepseek_gate", result)
-
-
-def _gate_claude_gate(
-    contract: ReviewContract,
-    result: Optional[Dict[str, Any]],
-    results_dir: Path,
-    branch: Optional[str],
-) -> CheckResult:
-    return _gate_full_evidence_pass("claude_gate", result)
-
-
-# Table-driven dispatch: one entry per gate the closure verifier implements.
-# Adding a gate means adding one handler here plus (if excluded) an entry in
-# _GATES_NOT_IMPLEMENTED_BY_CLOSURE — not a new branch in _check_single_gate,
-# which is what made the function grow past its line budget (OI-1094).
+# Table-driven dispatch: one entry per gate with its OWN handler. A gate whose
+# registry row is a ``harness_lane`` needs no entry: it gets the generic handler
+# for its kind (``_generic_handler_for_kind``, ADR-046 Amendment 1 A4). An
+# exclusion goes in _GATES_NOT_IMPLEMENTED_BY_CLOSURE, not in a new branch of
+# _check_single_gate (OI-1094).
 _GATE_HANDLERS: Dict[str, Any] = {
     "claude_github_optional": _gate_claude_github_optional,
     "codex_gate": _gate_codex_gate,
     "gemini_review": _gate_gemini_review,
     "ci_gate": _gate_ci_gate,
-    "kimi_gate": _gate_kimi_gate,
-    "glm_gate": _gate_glm_gate,
-    "deepseek_gate": _gate_deepseek_gate,
-    "claude_gate": _gate_claude_gate,
 }
+
+
+def _gate_harness_lane_generic(
+    gate: str,
+    contract: ReviewContract,
+    result: Optional[Dict[str, Any]],
+    results_dir: Path,
+    branch: Optional[str],
+) -> CheckResult:
+    """Generic handler of the ``harness_lane`` kind: the one function the four
+    former per-gate wrappers called, so there is no second copy of the seven
+    evidence invariants that could drift."""
+    return _gate_full_evidence_pass(gate, result)
+
+
+def _generic_handler_for_kind(gate: str) -> Optional[Any]:
+    """The generic handler for a gate's registry kind, or None when its kind
+    has none. Only ``harness_lane`` has one: ``path_binary`` and
+    ``deterministic`` gates (codex_gate, ci_gate, ...) carry policy a shared
+    handler cannot express. An unregistered gate (kind None) has none either,
+    which is the fail-closed answer."""
+    provider = resolve_gate_provider(gate)
+    if provider is not None and provider[0] == GATE_PROVIDER_HARNESS_LANE:
+        return _gate_harness_lane_generic
+    return None
 
 
 def _check_single_gate(
@@ -1917,8 +1904,20 @@ def _check_single_gate(
             f"gate {gate} is not implemented by the closure verifier — not decided, cannot pass",
         )
 
-    handler = _GATE_HANDLERS[gate]
-    return handler(contract, result, results_dir, branch)
+    handler = _GATE_HANDLERS.get(gate)
+    if handler is not None:
+        return handler(contract, result, results_dir, branch)
+    generic = _generic_handler_for_kind(gate)
+    if generic is not None:
+        return generic(gate, contract, result, results_dir, branch)
+    # Known gate, no own handler, no generic handler for its kind: not decided,
+    # never a KeyError and never a PASS (ADR-046 Amendment 1 A4, step 4).
+    return CheckResult(
+        f"gate_{gate}",
+        "UNVERIFIED",
+        f"gate {gate} has no own handler and no generic handler exists for its kind "
+        f"— not decided, cannot pass",
+    )
 
 
 def _check_contract_hashes(
