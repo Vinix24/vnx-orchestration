@@ -1,1 +1,1 @@
-- Gates (OI-2623): kimi's weekly-limit 429 counts as an exhausted lane at the third wrap width too, so the takeover walk passes the seat to the next gate in the chain.
+- Gates (OI-2623): kimi's weekly-limit 429 counts as an exhausted lane at the third wrap width too, so the takeover walk passes the seat to the next gate in the chain. The OI-1748 spawn-failure test now pins `lane_exhausted` for the weekly-limit text and keeps `harness_lane_no_model_response` for a spawn failure without quota wording.
