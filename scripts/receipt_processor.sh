@@ -457,6 +457,106 @@ process_pending_reports() {
     _ppr_process_rate_limited "${_PPR_PENDING_REPORTS[@]}"
 }
 
+# --- Processor liveness heartbeat (track ledger-is-falsifiable, PR 2) ---------
+# $STATE_DIR/receipt_processor_heartbeat.json, schema 1. Written twice per poll
+# cycle: at the top of _poll_new_reports_cycle and right after the converter
+# scan block. updated_at moves on every write; last_progress_at moves only when
+# a report was ingested; last_cycle_seconds is the duration of the previous full
+# cycle (0.0 until one has finished). A write failure is logged and the cycle
+# continues: a missing or stale heartbeat is what the reader reports.
+_RP_HB_STARTED_AT=""
+_RP_HB_LAST_PROGRESS=""
+_RP_HB_CYCLE_START=""
+_RP_HB_PREV_SECONDS="0.0"
+
+_rp_hb_now() {
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+        printf '%s' "${EPOCHREALTIME/,/.}"
+    else
+        python3 -c 'import time; print(repr(time.time()))'
+    fi
+}
+
+_rp_hb_iso() {
+    python3 -c 'import sys, datetime; print(datetime.datetime.fromtimestamp(float(sys.argv[1]), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+
+_write_processor_heartbeat() {
+    local _cycle="${1:-0}"
+    local _now
+    _now="$(_rp_hb_now)"
+    if [ -z "$_RP_HB_STARTED_AT" ]; then
+        _RP_HB_STARTED_AT="$(_rp_hb_iso "$_now")"
+        _RP_HB_LAST_PROGRESS="$_RP_HB_STARTED_AT"
+    fi
+    python3 - "$STATE_DIR" "$$" "$_cycle" "$_RP_HB_STARTED_AT" "$_now" \
+        "$_RP_HB_LAST_PROGRESS" "$_RP_HB_PREV_SECONDS" "$WATERMARK_FILE" <<'PYEOF' \
+        || log "WARN" "Failed to write receipt processor heartbeat (non-fatal)"
+import datetime, hashlib, json, os, sys, tempfile
+
+state_dir, pid, cycle, started, now, progress, prev, watermark = sys.argv[1:9]
+
+
+def iso(ts):
+    return datetime.datetime.fromtimestamp(float(ts), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def count(details, key):
+    # Display only: an absent or unreadable converter beacon reports 0 here;
+    # liveness is decided by updated_at and pid, never by these counters.
+    value = details.get(key) if isinstance(details, dict) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+try:
+    # The converter beacon lives under <state_dir parent>/health (HealthBeacon(state_dir.parent, ...)).
+    beacon = os.path.join(os.path.dirname(os.path.normpath(state_dir)), "health", "report_to_receipt_converter.json")
+    with open(beacon, encoding="utf-8") as fh:
+        details = json.load(fh).get("details")
+except (OSError, ValueError, AttributeError):
+    details = None
+try:
+    with open(watermark, "rb") as fh:
+        wm_hash = hashlib.sha256(fh.read()).hexdigest()
+except OSError:
+    wm_hash = ""
+doc = {
+    "schema": 1, "pid": int(pid), "cycle": int(cycle), "started_at": started,
+    "updated_at": iso(now), "last_progress_at": progress,
+    "last_cycle_seconds": float(prev), "watermark_hash": wm_hash,
+    "converter": {
+        "rejected": count(details, "rejected_count"),
+        "malformed": count(details, "malformed_count"),
+        "errors": count(details, "error_count"),
+    },
+}
+target = os.path.join(state_dir, "receipt_processor_heartbeat.json")
+fd, tmp = tempfile.mkstemp(dir=state_dir, prefix=".receipt_processor_heartbeat.", suffix=".tmp")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, target)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+PYEOF
+}
+
+# Mark that a report was ingested this cycle (moves last_progress_at only).
+_rp_hb_mark_progress() {
+    _RP_HB_LAST_PROGRESS="$(_rp_hb_iso "$(_rp_hb_now)")"
+}
+
+# Close the cycle: its duration becomes last_cycle_seconds of the next write.
+_rp_hb_end_cycle() {
+    [ -n "$_RP_HB_CYCLE_START" ] || return 0
+    _RP_HB_PREV_SECONDS="$(python3 -c 'import sys; print(round(max(0.0, float(sys.argv[1]) - float(sys.argv[2])), 3))' "$(_rp_hb_now)" "$_RP_HB_CYCLE_START")" \
+        || _RP_HB_PREV_SECONDS="0.0"
+}
+
 # Monitor mode - watch for new reports only
 # Polls the unified_reports directory at POLL_INTERVAL (default 5s).
 # Previously used fswatch for sub-second detection, but the external process
@@ -471,9 +571,12 @@ _poll_new_reports_cycle() {
     local _cycle="$1"
     local _retry_cycles="$2"
     local _poll_max_mtime=0
+    _RP_HB_CYCLE_START="$(_rp_hb_now)"
+    _write_processor_heartbeat "$_cycle"
     for report in "$UNIFIED_REPORTS"/*.md "$HEADLESS_REPORTS"/*.md; do
         [ -f "$report" ] || continue
         if should_process_report "$report" && process_single_report "$report"; then
+            _rp_hb_mark_progress
             local _mtime
             _mtime=$(stat -c %Y "$report" 2>/dev/null || stat -f %m "$report" 2>/dev/null)
             if [ -n "$_mtime" ] && [ "$_mtime" -gt "$_poll_max_mtime" ]; then
@@ -496,9 +599,11 @@ _poll_new_reports_cycle() {
     if [ $(( _cycle % 6 )) -eq 0 ]; then
         _run_receipt_converter_scan
     fi
+    _write_processor_heartbeat "$_cycle"
     if [ $(( _cycle % _retry_cycles )) -eq 0 ]; then
         _retry_pending_receipts
     fi
+    _rp_hb_end_cycle
 }
 
 _poll_new_reports() {
