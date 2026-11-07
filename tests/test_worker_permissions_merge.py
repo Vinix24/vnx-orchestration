@@ -440,3 +440,103 @@ class TestDiffSummary:
         second = merge_permissions(merged, VNX_TEMPLATE)
         summary = diff_summary(merged, second)
         assert summary == [], f"Expected no diff, got: {summary}"
+
+
+# ---------------------------------------------------------------------------
+# CLI: no project override, dry-run naming, real wrapper (OI-2614)
+# ---------------------------------------------------------------------------
+
+import subprocess
+
+_REPO = Path(__file__).resolve().parents[1]
+_SCRIPT = _REPO / "scripts" / "vnx_worker_permissions_merge.py"
+_NO_OVERRIDE = "no project override at"
+
+
+def _cli(project: Path, *flags: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT), *flags,
+         "--project-root", str(project), "--vnx-home", str(_REPO)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+
+
+def _override(project: Path) -> Path:
+    return project / ".vnx" / "worker_permissions.yaml"
+
+
+class TestNoProjectOverride:
+    def test_merge_writes_nothing_without_a_project_file(self, tmp_path: Path) -> None:
+        proc = _cli(tmp_path, "--merge")
+        assert proc.returncode == 0, proc.stderr
+        assert not _override(tmp_path).exists()
+        assert _NO_OVERRIDE in proc.stdout
+
+    def test_merge_dry_run_says_so_and_writes_nothing(self, tmp_path: Path) -> None:
+        proc = _cli(tmp_path, "--merge", "--dry-run")
+        assert proc.returncode == 0, proc.stderr
+        assert not _override(tmp_path).exists()
+        assert _NO_OVERRIDE in proc.stdout
+        assert "(no changes)" not in proc.stdout
+
+    def test_full_still_creates_the_file(self, tmp_path: Path) -> None:
+        proc = _cli(tmp_path, "--full")
+        assert proc.returncode == 0, proc.stderr
+        assert _override(tmp_path).is_file()
+
+    def test_full_dry_run_names_the_create(self, tmp_path: Path) -> None:
+        proc = _cli(tmp_path, "--full", "--dry-run")
+        assert proc.returncode == 0, proc.stderr
+        assert f"would create {_override(tmp_path)}" in proc.stdout
+        assert not _override(tmp_path).exists()
+
+    def test_merge_with_existing_file_still_merges(self, tmp_path: Path) -> None:
+        target = _override(tmp_path)
+        target.parent.mkdir(parents=True)
+        target.write_text(yaml.dump(PROJECT_WITH_SRC_SCOPE))
+        proc = _cli(tmp_path, "--merge", "--no-backup")
+        assert proc.returncode == 0, proc.stderr
+        assert "(merge)" in proc.stdout
+        merged = yaml.safe_load(target.read_text())
+        assert "src/**" in merged["profiles"]["backend-developer"]["file_write_scope"]
+
+    @pytest.mark.parametrize("flag", ["--merge", "--full"])
+    def test_dry_run_names_the_update_of_an_existing_file(
+            self, tmp_path: Path, flag: str) -> None:
+        target = _override(tmp_path)
+        target.parent.mkdir(parents=True)
+        target.write_text(yaml.dump(PROJECT_WITH_SRC_SCOPE))
+        before = target.read_text()
+        proc = _cli(tmp_path, flag, "--dry-run")
+        assert proc.returncode == 0, proc.stderr
+        assert f"would update {target}" in proc.stdout
+        assert target.read_text() == before
+
+    def test_merge_dry_run_on_an_up_to_date_file_reports_no_changes(
+            self, tmp_path: Path) -> None:
+        assert _cli(tmp_path, "--full").returncode == 0
+        assert _cli(tmp_path, "--merge", "--no-backup").returncode == 0
+        proc = _cli(tmp_path, "--merge", "--dry-run")
+        assert "(no changes)" in proc.stdout
+        assert "would" not in proc.stdout
+
+
+def test_regen_settings_merge_through_the_wrapper_creates_no_override(
+        tmp_path: Path) -> None:
+    """The real wrapper (as rollout_preflight sources it) co-runs this engine."""
+    project = tmp_path / "proj"
+    (project / ".claude").mkdir(parents=True)
+    (project / ".claude" / "settings.json").write_text("{}\n")
+    wrapper = _REPO / "scripts" / "commands" / "regen_settings.sh"
+    program = (
+        "set -euo pipefail\n"
+        f'source "{wrapper}"\n'
+        "err() { printf '%s\\n' \"$*\" >&2; }\n"
+        "log() { printf '%s\\n' \"$*\" >&2; }\n"
+        'PROJECT_ROOT="$1"\n'
+        f'VNX_HOME="{_REPO}"\n'
+        "cmd_regen_settings --merge --no-backup\n"
+    )
+    subprocess.run(["bash", "-c", program, "wrapper", str(project)],
+                   capture_output=True, text=True, timeout=180, check=False)
+    assert not _override(project).exists()

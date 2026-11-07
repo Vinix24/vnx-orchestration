@@ -1,0 +1,1 @@
+Fix OI-2614: `vnx regen-settings --merge` no longer creates a `.vnx/worker_permissions.yaml` override in a project without one, and the worker_permissions dry-run names every create/update.
