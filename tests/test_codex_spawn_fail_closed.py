@@ -13,6 +13,7 @@ Verifies fail-closed behaviour in spawn_codex():
 from __future__ import annotations
 
 import logging
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -369,10 +370,20 @@ class TestCodexSpawnErrorRanking:
 # Test 4: on_event=False stops stream early
 # ---------------------------------------------------------------------------
 
+@pytest.fixture
+def fake_group():
+    """Patch getpgid/killpg as codex_spawn sees them; no real signal leaves the test."""
+    from provider_spawns import codex_spawn
+
+    with patch.object(codex_spawn.os, "getpgid", return_value=424242) as getpgid, \
+         patch.object(codex_spawn.os, "killpg") as killpg:
+        yield getpgid, killpg
+
+
 class TestCodexSpawnOnEventStop:
     """spawn_codex sets stopped_early=True when on_event returns False."""
 
-    def test_on_event_false_stops_stream_early(self):
+    def test_on_event_false_stops_stream_early(self, fake_group):
         call_count = 0
 
         def _stop_after_first(event: CanonicalEvent):
@@ -423,6 +434,9 @@ class TestCodexSpawnOnEventStop:
         assert result.stopped_early is True
         assert call_count == 1
         assert result.events_written == 1
+        getpgid, killpg = fake_group
+        getpgid.assert_called_with(99)
+        killpg.assert_any_call(424242, signal.SIGTERM)
 
 
 # ---------------------------------------------------------------------------
@@ -827,7 +841,7 @@ class TestCodexSpawnRefusalEvidence:
         assert result.returncode == 1 and result.token_usage is None
         assert (result.spawn_refused or "").startswith("codex_model_unresolved:")
 
-    def test_a_stream_failure_after_the_process_started_is_not_a_launch_refusal(self):
+    def test_a_stream_failure_after_the_process_started_is_not_a_launch_refusal(self, fake_group):
         proc = MagicMock()
         proc.pid = 99
         proc.returncode = -9
@@ -850,6 +864,8 @@ class TestCodexSpawnRefusalEvidence:
         assert result.spawn_refused is None, (
             "the process started, so this run is unknown usage, never a refused spawn"
         )
+        _getpgid, killpg = fake_group
+        killpg.assert_any_call(424242, signal.SIGTERM)
 
     def test_a_broken_stdin_pipe_is_not_a_launch_refusal(self):
         proc = MagicMock()
