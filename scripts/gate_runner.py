@@ -1165,6 +1165,23 @@ class GateRunner:
             reports_dir=self._reports_dir,
         )
 
+    def _refuse_unresolved_lane(
+        self, gate: str, provider: str, pr_number: Optional[int], pr_id: str,
+        request_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """ADR-046 A2: a lane the dispatch table cannot build is not executable.
+
+        There is no default dispatcher to fall back on. Returns the booked
+        ``not_executable`` record, or None when the table can build the lane.
+        """
+        unresolved = gate_dispatch_table.unresolved_detail(gate, provider)
+        if unresolved is None:
+            return None
+        return self._not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+            reason="gate_runner_missing", reason_detail=unresolved,
+        )
+
     def _run_harness_lane_path(
         self,
         *,
@@ -1229,14 +1246,9 @@ class GateRunner:
             )
         base_ref = f"origin/{branch}"
 
-        # ADR-046 A2: a lane the dispatch table cannot build is not executable;
-        # there is no default dispatcher to fall back on.
-        unresolved = gate_dispatch_table.unresolved_detail(gate, provider)
-        if unresolved is not None:
-            return self._not_executable(
-                gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                reason="gate_runner_missing", reason_detail=unresolved,
-            )
+        refused = self._refuse_unresolved_lane(gate, provider, pr_number, pr_id, request_payload)
+        if refused is not None:
+            return refused
 
         # reports_dir is <data_dir>/unified_reports, so its parent is the data
         # dir the dispatcher resolves and the lane writes its report into.
