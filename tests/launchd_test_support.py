@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
@@ -113,3 +115,17 @@ def pinned_store(
     if current is not None:
         os.symlink(versions / current, home / ".vnx-system" / "current")
     return versions
+
+
+def interpreter_version(interpreter: str) -> Optional[str]:
+    """``major.minor`` the interpreter reports for ``--version``, None when it does not say.
+
+    Reads the interpreter itself, the way ``vnx_python.sh`` does, so a test can compute
+    what the range check must conclude on this host instead of assuming one.
+    """
+    try:
+        proc = subprocess.run([interpreter, "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    match = re.search(r"(\d+)\.(\d+)", proc.stdout + proc.stderr)
+    return f"{match.group(1)}.{match.group(2)}" if match else None

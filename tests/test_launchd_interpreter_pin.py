@@ -7,14 +7,16 @@ first that reports 3.15 and cannot import yaml, the interpreter Homebrew relinke
 """
 from __future__ import annotations
 
+import importlib
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from launchd_test_support import pinned_store, register_engine, write_pyproject
+from launchd_test_support import interpreter_version, pinned_store, register_engine, write_pyproject
 
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHD_DIR = REPO / "scripts" / "launchd"
@@ -175,7 +177,7 @@ def test_launcher_runs_its_resolver_on_the_launchers_own_tree_interpreter(tmp_pa
     assert "3.15" in proc.stderr
 
 
-def test_pinned_store_release_without_a_venv_uses_the_pinned_312_or_refuses(tmp_path: Path) -> None:
+def test_pinned_store_release_without_a_venv_uses_the_resolver_pick_or_refuses(tmp_path: Path) -> None:
     home = tmp_path / "home"
     home.mkdir()
     pinned_store(home, ["v1.7.5"], script="print('pinned job')\n", current="v1.7.5")
@@ -189,11 +191,20 @@ def test_pinned_store_release_without_a_venv_uses_the_pinned_312_or_refuses(tmp_
 
     proc = subprocess.run(["bash", str(LAUNCHER), PROJECT, SCRIPT], capture_output=True, text=True, env=env, timeout=60)
 
-    if PINNED_312.exists():
-        assert proc.returncode == 0, proc.stdout + proc.stderr
+    sys.path.insert(0, str(REPO / "scripts" / "lib"))
+    path_parity = importlib.import_module("path_parity")
+    # the launcher resolves again on the pinned release with its PATH plus ~/.local/bin
+    search = f"{env['PATH']}{os.pathsep}{home}/.local/bin"
+    pick = path_parity.launchd_engine_interpreter(home / ".vnx-system" / "versions" / "v1.7.5", search_path=search)
+    version = interpreter_version(pick) if pick else None
+    requires = path_parity.parse_requires_python(home / ".vnx-system" / "versions" / "v1.7.5" / "pyproject.toml")
+    if version and path_parity.version_in_range(version, requires) is True:
+        assert proc.returncode == 0, (pick, proc.stdout + proc.stderr)
         assert proc.stdout.strip() == "pinned job"
     else:
-        assert proc.returncode == 78, proc.stdout + proc.stderr
+        assert proc.returncode == 78, (pick, proc.stdout + proc.stderr)
+        assert len(proc.stderr.strip().splitlines()) == 1, proc.stderr
+        assert (Path(pick).name if pick else "python3") in proc.stderr, (pick, proc.stderr)
 
 
 def test_no_template_starts_a_bare_python3() -> None:

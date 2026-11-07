@@ -38,7 +38,7 @@ from typing import Any, Dict, List
 
 import pytest
 
-from launchd_test_support import register_engine
+from launchd_test_support import interpreter_version, register_engine
 
 REPO = Path(__file__).resolve().parent.parent
 LAUNCHD_DIR = REPO / "scripts" / "launchd"
@@ -271,7 +271,13 @@ class TestCommand:
         )
         entry = next(c for c in report["consumers"] if c["file"] == TEMPLATE.name)
         assert entry["interpreter"] == path_parity.launchd_engine_interpreter(REPO), entry
-        assert entry["relevant"] is True and entry["in_range"] is True, entry
+        assert entry["relevant"] is True, entry
+        requires = path_parity.parse_requires_python(REPO / "pyproject.toml")
+        version = interpreter_version(entry["interpreter"])
+        expected = path_parity.version_in_range(version, requires) if version else False
+        # an interpreter outside the range (or one that cannot say its version) must be
+        # reported out of range, never skipped and never passed
+        assert entry["in_range"] is expected, (entry, version, requires)
         assert not report["xml_errors"], report["xml_errors"]
         assert [m for m in report["mismatches"] if m["file"] == TEMPLATE.name] == []
 

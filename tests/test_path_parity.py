@@ -443,18 +443,29 @@ def _fake_engine(tmp_path, venv: bool) -> Path:
 
 
 def test_engine_interpreter_twin_matches_vnx_python_sh(tmp_path) -> None:
-    """The Python function and the bash resolver pick the same interpreter on the same root."""
+    """The Python function and the bash resolver pick the same interpreter on the same root.
+
+    Both sides get the same search path: the bash resolver's PATH is exactly the path
+    handed to the twin, never the test process's own PATH (on a host whose ``python3`` is
+    newer than the hostedtoolcache one, two different paths give two different picks).
+    """
     import subprocess
 
-    for venv in (True, False):
-        root = _fake_engine(tmp_path, venv)
-        picked = subprocess.run(
-            ["bash", str(_RESOLVER_SH), str(root)], capture_output=True, text=True, check=True
-        ).stdout.strip()
-        expected = path_parity.launchd_engine_interpreter(root)
-        if picked == "python3":
-            expected = "python3" if expected is None else Path(expected).name
-        assert expected == picked, (venv, expected, picked)
+    paths = (path_parity.BACKGROUND_PATH, f"{_versioned_path(tmp_path)}:{path_parity.BACKGROUND_PATH}")
+    for index, search in enumerate(paths):
+        base = tmp_path / f"search-{index}"
+        base.mkdir()
+        for venv in (True, False):
+            root = _fake_engine(base, venv)
+            picked = subprocess.run(
+                ["bash", str(_RESOLVER_SH), str(root)],
+                capture_output=True, text=True, check=True,
+                env={"PATH": search, "HOME": str(tmp_path)},
+            ).stdout.strip()
+            expected = path_parity.launchd_engine_interpreter(root, search_path=search)
+            if picked == "python3":
+                expected = "python3" if expected is None else Path(expected).name
+            assert expected == picked, (search, venv, expected, picked)
 
 
 def _versioned_path(tmp_path) -> str:
