@@ -5,10 +5,12 @@
 # 2026-10-30, artifact `profile-a-evidence` of its serial Profile A
 # (junit-full.xml + manifest-full.json, phase `full`, run attempt 1). That run
 # recorded 50 skips and no collection-time skip; every one is listed below with
-# the reason it carried. One key was added after that run by the D4 round of
+# the reason it carried. Two keys were added after that run. The D4 round of
 # OI-2518 (2026-11-03): the positive control of the branch-on-origin check now
 # skips when its precondition listing cannot answer under xdist, so that skip
-# is accepted here with the reason it carries.
+# is accepted here with the reason it carries. OI-2564 (track
+# launchd-interpreter-pin, PR #2449, 2026-11-07): a host-conditional skip on a
+# runner without Homebrew 3.12, measured in VNX CI run 42317512164.
 #
 # ENTRY RULE. One key per line: a test nodeid
 # (`tests/<path>.py::<Class>::<test>[<param>]`) or a file (`tests/<path>.py`)
