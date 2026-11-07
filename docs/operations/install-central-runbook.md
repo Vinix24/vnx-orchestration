@@ -237,7 +237,7 @@ It measures four blocking classes per project:
 | `main_drift` | The doctor check `release:main-drift` fails: the running release lacks commits the local main ref already has. |
 
 A blocking finding in any class exits `1`. A class reported as `unmeasured` was never
-measured — a project without a pin reports `pin` and `launchd` as unmeasured — so it is
+measured — a project without a pin reports `pin`, `launchd` and `hooks` as unmeasured (no pin to render from) — so it is
 never a pass. Treat it as a stop and measure the class before rolling out. The exit code
 alone stays `0` for that case, so read the report, not only the exit code.
 
