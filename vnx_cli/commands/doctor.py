@@ -72,6 +72,77 @@ def _check_tools() -> list[Check]:
     return results
 
 
+CLAUDE_CLI_PROBE = "scripts/probe_claude_cli.sh"
+CLAUDE_CLI_MEASUREMENTS_DOC = "docs/operations/CLAUDE_CLI_MEASUREMENTS.md"
+_VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _claude_cli_version() -> "str | None":
+    """The installed ``claude --version`` as x.y.z, or None when it cannot be read."""
+    if not shutil.which("claude"):
+        return None
+    try:
+        proc = subprocess.run(
+            ["claude", "--version"], capture_output=True, text=True, timeout=15, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = _VERSION_RE.search(proc.stdout or "")
+    return match.group(0) if match else None
+
+
+def _read_claude_cli_rows(doc: Path) -> "list[tuple[str, str, str]]":
+    """(version, outcome, sha256-cell) of every dated table row, in file order."""
+    rows: list[tuple[str, str, str]] = []
+    for line in doc.read_text(encoding="utf-8").splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) == 4 and _DATE_RE.fullmatch(cells[0]):
+            rows.append((cells[1], cells[2], cells[3]))
+    return rows
+
+
+def _claude_cli_row_problem(row: "tuple[str, str, str]") -> "str | None":
+    """Why the newest row is not a measurement, or None when it is one."""
+    _version, outcome, sha = row
+    if outcome not in ("ja", "nee"):
+        return f"outcome '{outcome}' is not ja or nee"
+    if not _SHA256_RE.fullmatch(sha):
+        return "no probe sha256"
+    return None
+
+
+def _check_claude_cli(engine_root: "Path | None" = None, installed: "str | None" = None) -> Check:
+    """WARN when the newest measured CLI behaviour is not for the installed version.
+
+    A WARNING on a version change is a reminder, not a behaviour measurement:
+    only a row with outcome ja/nee and the probe's sha256 counts. Everything
+    else (no doc, no row, bad row, other version) stays a WARN that names the
+    script that re-measures. Without ``claude`` on PATH there is nothing to
+    compare (``tool:worker-cli`` covers that), so the check passes with the reason.
+    """
+    name = "claude-cli"
+    hint = f"run {CLAUDE_CLI_PROBE} --append (T0/operator only)"
+    version = installed if installed is not None else _claude_cli_version()
+    if version is None:
+        return Check(name, PASS, "claude not on PATH or version unreadable: nothing to compare")
+    doc = (engine_root or _engine.engine_root()) / CLAUDE_CLI_MEASUREMENTS_DOC
+    try:
+        rows = _read_claude_cli_rows(doc)
+    except (OSError, UnicodeDecodeError):
+        return Check(name, WARN, f"claude {version}: {CLAUDE_CLI_MEASUREMENTS_DOC} unreadable; {hint}")
+    if not rows:
+        return Check(name, WARN, f"claude {version} has no measurement row; {hint}")
+    measured = rows[-1][0]
+    if measured != version:
+        return Check(name, WARN, f"installed claude {version}, last measured {measured}; {hint}")
+    problem = _claude_cli_row_problem(rows[-1])
+    if problem:
+        return Check(name, WARN, f"claude {version} row is not a measurement ({problem}); {hint}")
+    return Check(name, PASS, f"claude {version} measured: cell B {rows[-1][1]}")
+
+
 def _check_directories(project_dir: Path, data_root: Path) -> list[Check]:
     results = []
 
@@ -1416,6 +1487,7 @@ def vnx_doctor(args) -> int:
 
     checks: list[Check] = []
     checks.extend(_check_tools())
+    checks.append(_check_claude_cli())
     checks.extend(_check_directories(project_dir, data_root))
     checks.append(_check_install_mode(project_dir))
     # Blocking: a release that is behind main is the fleet-release goal's defect.
