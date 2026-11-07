@@ -168,12 +168,14 @@ def _sum_transcript_usage(transcript_path: Path) -> Optional[Dict[str, int]]:
     return totals
 
 
-def find_session_transcript(
+def locate_session_transcript(
     session_id: Optional[str],
     *,
     claude_projects_dir: Optional[Path] = None,
 ) -> Optional[Path]:
     """The transcript ``<projects dir>/*/<session_id>.jsonl``, or None. Never raises.
+
+    The one locator: token harvesting and the context manifest read the same file.
 
     Without ``claude_projects_dir`` it searches ``~/.claude/projects`` first,
     then every harness lane's ``<VNX_DATA_DIR>/harness-config/*/projects``.
@@ -225,7 +227,7 @@ def harvest_session_tokens(
     UUID unique across all projects.
     """
     del project_id  # not needed to locate the transcript; kept for call-site symmetry
-    transcript_path = find_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
+    transcript_path = locate_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
     if transcript_path is None:
         return dict(_UNAVAILABLE)
 
@@ -346,7 +348,7 @@ def harvest_session_messages(
     ``None`` covers no session id, no transcript and a transcript without
     assistant usage: the caller books that as ``unknown``, never as zero.
     """
-    transcript_path = find_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
+    transcript_path = locate_session_transcript(session_id, claude_projects_dir=claude_projects_dir)
     if transcript_path is None:
         return None
     return read_transcript_messages(transcript_path)
@@ -354,6 +356,6 @@ def harvest_session_messages(
 
 __all__ = [
     "CLAUDE_HARNESS_PROVIDERS", "LEDGER_TOKEN_FIELDS", "MessageUsage",
-    "find_session_transcript", "harvest_session_messages", "harvest_session_tokens",
+    "harvest_session_messages", "harvest_session_tokens", "locate_session_transcript",
     "read_transcript_messages",
 ]
