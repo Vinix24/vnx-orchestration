@@ -2139,6 +2139,29 @@ def _write_errors_sidefile(data_root: Path, errors: Tuple[Dict[str, str], ...]) 
         logger.warning("report_to_receipt_converter: cannot write %s: %s", _HEALTH_ERRORS_FILENAME, exc)
 
 
+def _convert_noting_errors(report_path: Path, base: Optional[Path], error_details: List[Dict[str, str]],
+                           **kwargs: Any) -> Tuple[Optional[Any], str]:
+    """``_convert_one_detailed`` that names every errored report in *error_details*.
+
+    An unhandled exception is named and re-raised for the caller's own handler. An
+    outcome tag the callers do not book as appended/duplicate/skipped/rejected/malformed
+    (``would_append`` only counts as booked under ``dry_run``) is an error: named with
+    the reason ``_convert_one_detailed`` gave, else ``outcome: <tag>``.
+    """
+    reasons: List[str] = []
+    try:
+        result, outcome = _convert_one_detailed(report_path, error_reason_sink=reasons, **kwargs)
+    except Exception as exc:
+        _note_error(error_details, report_path, base, [f"unhandled exception: {type(exc).__name__}"], "")
+        raise
+    booked = {"appended", "duplicate", "skipped_non_dispatch", "rejected", "malformed"}
+    if kwargs.get("dry_run"):
+        booked.add("would_append")
+    if outcome not in booked:
+        _note_error(error_details, report_path, base, reasons, f"outcome: {outcome}")
+    return result, outcome
+
+
 @dataclass(frozen=True)
 class ScanStats:
     """Per-scan outcome counts, returned by scan_and_convert() (OI-998).
@@ -2386,8 +2409,7 @@ def scan_and_convert(
     error_count = 0
     skipped_non_dispatch_count = 0
     would_append_count = 0
-    rejected_details: List[Dict[str, Any]] = []
-    error_details: List[Dict[str, str]] = []
+    rejected_details, error_details = [], []
 
     for reports_dir in reports_dirs:
         if not isinstance(reports_dir, Path):
@@ -2406,15 +2428,13 @@ def scan_and_convert(
             if file_hash in watermark or file_hash in bash_watermark:
                 continue
 
-            error_reasons: List[str] = []
             try:
-                result, outcome = _convert_one_detailed(
-                    report_path,
+                result, outcome = _convert_noting_errors(
+                    report_path, reports_dir, error_details,
                     receipts_file=receipts_file,
                     cache_window_seconds=cache_window_seconds,
                     dry_run=dry_run,
                     rejected_detail_sink=rejected_details,
-                    error_reason_sink=error_reasons,
                 )
             except Exception as exc:
                 # Belt-and-suspenders: _convert_one_detailed() already catches
@@ -2428,8 +2448,6 @@ def scan_and_convert(
                     report_path.name, type(exc).__name__, exc,
                 )
                 error_count += 1
-                _note_error(error_details, report_path, reports_dir,
-                            [f"unhandled exception: {type(exc).__name__}"], "")
                 continue
 
             if dry_run:
@@ -2456,7 +2474,6 @@ def scan_and_convert(
                     malformed_count += 1
                 else:  # "error" or any future/unrecognized tag
                     error_count += 1
-                    _note_error(error_details, report_path, reports_dir, error_reasons, f"outcome: {outcome}")
                 continue
 
             if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -2485,7 +2502,6 @@ def scan_and_convert(
                 malformed_count += 1
             else:  # "error"
                 error_count += 1
-                _note_error(error_details, report_path, reports_dir, error_reasons, f"outcome: {outcome}")
             # malformed / error reports are NOT marked processed: retried on
             # the next scan once the cause is fixed. A rejected report is not
             # marked here either, but it is already out of reports_dir:
@@ -2499,8 +2515,7 @@ def scan_and_convert(
         error_count=error_count,
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
-        rejected=tuple(rejected_details),
-        errors=tuple(error_details),
+        rejected=tuple(rejected_details), errors=tuple(error_details),
     )
     # dry_run: no write happened, so no heartbeat about a scan cycle either —
     # a dry-run must leave zero observable state behind.
@@ -2569,8 +2584,7 @@ def convert_dispatch_ids(
     error_count = 0
     skipped_non_dispatch_count = 0
     would_append_count = 0
-    rejected_details: List[Dict[str, Any]] = []
-    error_details: List[Dict[str, str]] = []
+    rejected_details, error_details = [], []
 
     for dispatch_id in ids:
         # Codex finding (PR #1635): dispatch_id is caller-supplied CLI input
@@ -2617,15 +2631,13 @@ def convert_dispatch_ids(
         if file_hash in watermark or file_hash in bash_watermark:
             continue
 
-        error_reasons: List[str] = []
         try:
-            result, outcome = _convert_one_detailed(
-                report_path,
+            result, outcome = _convert_noting_errors(
+                report_path, None, error_details,
                 receipts_file=receipts_file,
                 cache_window_seconds=cache_window_seconds,
                 dry_run=dry_run,
                 rejected_detail_sink=rejected_details,
-                error_reason_sink=error_reasons,
             )
         except Exception as exc:
             logger.error(
@@ -2634,8 +2646,6 @@ def convert_dispatch_ids(
                 dispatch_id, report_path.name, type(exc).__name__, exc,
             )
             error_count += 1
-            _note_error(error_details, report_path, None,
-                        [f"unhandled exception: {type(exc).__name__}"], "")
             continue
 
         if dry_run:
@@ -2658,7 +2668,6 @@ def convert_dispatch_ids(
                 malformed_count += 1
             else:  # "error" or any future/unrecognized tag
                 error_count += 1
-                _note_error(error_details, report_path, None, error_reasons, f"outcome: {outcome}")
             continue
 
         if outcome in ("appended", "duplicate", "skipped_non_dispatch"):
@@ -2683,7 +2692,6 @@ def convert_dispatch_ids(
             malformed_count += 1
         else:  # "error"
             error_count += 1
-            _note_error(error_details, report_path, None, error_reasons, f"outcome: {outcome}")
 
     stats = ScanStats(
         new_count=new_count,
@@ -2693,8 +2701,7 @@ def convert_dispatch_ids(
         error_count=error_count,
         skipped_non_dispatch_count=skipped_non_dispatch_count,
         would_append_count=would_append_count,
-        rejected=tuple(rejected_details),
-        errors=tuple(error_details),
+        rejected=tuple(rejected_details), errors=tuple(error_details),
     )
     if not dry_run:
         _write_scan_heartbeat(state_dir, stats)
