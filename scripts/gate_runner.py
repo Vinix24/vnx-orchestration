@@ -1255,9 +1255,7 @@ class GateRunner:
         dispatch_id = _harness_lane_dispatch_id(gate, pr_number, pr_id)
         model_env, default_model = _HARNESS_LANE_MODEL.get(gate, ("", ""))
         model = os.environ.get(model_env, default_model) if model_env else default_model
-        request_payload["dispatch_id"] = dispatch_id
-        request_payload["provider"] = provider
-        request_payload["model"] = model
+        request_payload.update(dispatch_id=dispatch_id, provider=provider, model=model)
 
         main_checkout_before = _capture_main_checkout_state(self._project_root)
 
