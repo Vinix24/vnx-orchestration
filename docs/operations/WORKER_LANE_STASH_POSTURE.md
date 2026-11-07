@@ -59,6 +59,13 @@ Read-only dispatches on gemini (a role that denies `Edit`, no write paths, no
 does not pass through the door and is unaffected (it is retired as a gate, per
 `dispatch_spec.RETIRED_GATE_NAMES`).
 
+The rule itself is `dispatch_cli._stash_build_reject`, and it is evaluated as the
+first step of `dispatch_cli._lane_verdict` — the seam `run_dispatch` already
+calls after `compile_plan` and before the permit, on the dry-run and the fire
+path alike. It sits there, not inline in `run_dispatch`, because that function
+may not grow past its `main` size (OI-2588, round 2); the order of checks is
+unchanged.
+
 ## Open item for T0
 
 Codex is a build lane with no per-run stash deny. It is not refused because it

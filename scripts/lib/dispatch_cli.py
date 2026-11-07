@@ -721,13 +721,22 @@ def _lane_verdict(
     plan: "ExecutionPlan", spec: "DispatchSpec", *, project_id: Optional[str], state_dir: Path,
     dry_run: bool,
 ) -> Optional[Reject]:
-    """The door's lane refusal, or None: the provider switch first, then reachability.
+    """The door's lane refusal, or None: the stash posture, the provider switch, then reachability.
 
-    A lane the operator switched off is refused ``provider-disabled`` and never reaches
-    ``_check_reachability``, so it is never probed and never becomes a reachability fact; on a
-    fire that refusal is booked as a receipt (``_record_switch_refusal``), the dry-run writes
-    nothing. A known-rejected lane is refused ``lane-known-rejected``.
+    OI-2588 first: a BUILD on a lane with no per-run way to refuse ``git stash`` is refused
+    before anything else (``_stash_build_reject``), so the stash shared by every worktree of
+    the repository is never at stake. It rides on this seam — the one the door already calls
+    after ``compile_plan`` and before the permit, on the dry-run and the fire path alike —
+    instead of inside ``run_dispatch``, because that function may not grow (its origin/main
+    count is 195 and it must stay there). A lane the operator switched off is refused
+    ``provider-disabled`` and never reaches ``_check_reachability``, so it is never probed and
+    never becomes a reachability fact; on a fire that refusal is booked as a receipt
+    (``_record_switch_refusal``), the dry-run writes nothing. A known-rejected lane is refused
+    ``lane-known-rejected``.
     """
+    stash_reject = _stash_build_reject(spec, plan.provider.value)
+    if stash_reject is not None:
+        return stash_reject
     switch_reject = _provider_switch_verdict(plan, project_id=project_id)
     if switch_reject is not None:
         if not dry_run:
@@ -4040,16 +4049,6 @@ def run_dispatch(
         plan = compile_plan(vspec, snapshot)
         if isinstance(plan, Reject):
             _emit_reject(plan)
-            return 1
-
-        # OI-2588: a BUILD on a provider lane that cannot refuse `git stash` is
-        # refused here, on the dry-run and the fire path alike, before the permit
-        # and the spawn. Read-only dispatches on the same lane stay allowed.
-        stash_reject = _stash_build_reject(
-            vspec.spec, getattr(plan.provider, "value", plan.provider),
-        )
-        if stash_reject is not None:
-            _emit_reject(stash_reject)
             return 1
 
         # Merge the door route reason into the plan so it's visible in dry-run

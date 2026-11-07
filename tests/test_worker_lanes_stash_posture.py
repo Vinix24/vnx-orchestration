@@ -29,6 +29,7 @@ if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
 import dispatch_cli  # noqa: E402
+from dispatch_plan import ExecutionPlan, Isolation  # noqa: E402
 from dispatch_spec import (  # noqa: E402
     DispatchPath,
     DispatchSpec,
@@ -59,6 +60,32 @@ def _spec(
         dispatch_paths=tuple(paths),
         provider=provider,
         pr_id=pr_id,
+    )
+
+
+def _plan(provider: Provider) -> ExecutionPlan:
+    """A provider-lane ExecutionPlan: the real input type of the seam under test."""
+    return ExecutionPlan(
+        dispatch_id="dlv-stash-posture",
+        project_id="proj-stash-posture",
+        provider=provider,
+        model="gemini-2.5-pro",
+        lane="provider",
+        adapter="provider",
+        target_id="T1",
+        billing="provider_metered",
+        serialization_class=None,
+        isolation=Isolation.WORKTREE,
+        require_worktree=True,
+        seed_materialize=True,
+        instruction_delivery="file_ref",
+        report_contract="required",
+        warmup="n/a",
+        deadline_seconds=3600,
+        base_ref="origin/main",
+        dispatch_paths=(),
+        instruction_file=Path("/tmp/instruction.md"),
+        route_reason="D11,D3,D1,D2,D4,D5,D6,D7,D8,D9,D10,D12",
     )
 
 
@@ -114,9 +141,81 @@ class TestGeminiBuildIsRefused:
         assert dispatch_cli._stash_build_reject(_spec(provider=Provider.CLAUDE), "claude") is None
 
     def test_the_door_calls_the_rule_before_the_permit(self):
-        source = inspect.getsource(dispatch_cli.run_dispatch)
-        assert "_stash_build_reject(" in source
-        assert source.index("_stash_build_reject(") < source.index("issue_permit(plan)")
+        # The rule rides on _lane_verdict, the seam run_dispatch already calls
+        # after compile_plan and before the permit: run_dispatch itself may not
+        # grow (its origin/main executable-line count is the ceiling), so the
+        # check lives in that helper and the door keeps calling the helper.
+        seam = inspect.getsource(dispatch_cli._lane_verdict)
+        assert "_stash_build_reject(" in seam
+        door = inspect.getsource(dispatch_cli.run_dispatch)
+        assert "_lane_verdict(" in door
+        assert door.index("_lane_verdict(") < door.index("issue_permit(plan)")
+        assert "_stash_build_reject(" not in door
+
+
+class TestTheSeamRefusesBeforeTheSwitchAndTheProbe:
+    """The rule's place in the ORDER of checks, exercised through the seam itself."""
+
+    def test_a_gemini_build_is_refused_by_the_seam_before_switch_or_probe(self, monkeypatch):
+        def refuse_first(*args, **kwargs):
+            raise AssertionError(
+                "the stash refusal must come before the provider switch and reachability"
+            )
+
+        monkeypatch.setattr(dispatch_cli, "_provider_switch_verdict", refuse_first)
+        monkeypatch.setattr(dispatch_cli, "_check_reachability", refuse_first)
+        reject = dispatch_cli._lane_verdict(
+            _plan(Provider.GEMINI),
+            _spec(),
+            project_id="proj-stash-posture",
+            state_dir=Path("/nonexistent"),
+            dry_run=True,
+        )
+        assert reject is not None
+        assert reject.code == dispatch_cli.STASH_BUILD_REFUSAL_CODE
+
+    def test_a_read_only_gemini_dispatch_reaches_the_switch(self, monkeypatch):
+        # Not a build, so the stash rule passes it on: proving the seam does not
+        # over-refuse what round 1 deliberately left allowed.
+        asked: list[str] = []
+        monkeypatch.setattr(
+            dispatch_cli, "_provider_switch_verdict",
+            lambda *a, **k: asked.append("switch") or None,
+        )
+        monkeypatch.setattr(
+            dispatch_cli, "_check_reachability",
+            lambda *a, **k: dispatch_cli.ReachabilityVerdict(block=False),
+        )
+        reject = dispatch_cli._lane_verdict(
+            _plan(Provider.GEMINI),
+            _spec(role="code-reviewer"),
+            project_id="proj-stash-posture",
+            state_dir=Path("/nonexistent"),
+            dry_run=True,
+        )
+        assert reject is None
+        assert asked == ["switch"]
+
+    def test_a_codex_build_still_reaches_the_switch(self, monkeypatch):
+        # Deliberately not refused: codex is the live availability fallback.
+        asked: list[str] = []
+        monkeypatch.setattr(
+            dispatch_cli, "_provider_switch_verdict",
+            lambda *a, **k: asked.append("switch") or None,
+        )
+        monkeypatch.setattr(
+            dispatch_cli, "_check_reachability",
+            lambda *a, **k: dispatch_cli.ReachabilityVerdict(block=False),
+        )
+        reject = dispatch_cli._lane_verdict(
+            _plan(Provider.CODEX),
+            _spec(provider=Provider.CODEX),
+            project_id="proj-stash-posture",
+            state_dir=Path("/nonexistent"),
+            dry_run=True,
+        )
+        assert reject is None
+        assert asked == ["switch"]
 
 
 # ---------------------------------------------------------------------------
