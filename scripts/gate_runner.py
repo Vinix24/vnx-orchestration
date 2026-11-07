@@ -1246,8 +1246,7 @@ class GateRunner:
         refused = self._refuse_unresolved_lane(gate, provider, pr_number, pr_id, request_payload)
         if refused is not None:
             return refused
-        # reports_dir is <data_dir>/unified_reports, so its parent is the data
-        # dir the dispatcher resolves and the lane writes its report into.
+        # reports_dir is <data_dir>/unified_reports: its parent is the data dir the lane writes into.
         data_dir = self._reports_dir.parent
         # OI-1725: mint the gate's OWN identity up front, BEFORE the dispatcher
         # runs — so both the success and the failure path carry it, and the
