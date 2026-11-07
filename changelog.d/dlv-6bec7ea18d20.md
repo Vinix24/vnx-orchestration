@@ -1,1 +1,0 @@
-- Cost ledger (OI-2595): `cost_tracker` now books the tokens of a v3 attempt from its governance record (`task_complete` or `dispatch_governed`, receipt-v2 `token_usage.input`/`output`) instead of from the token-less `dispatch_finished`; an attempt without such a record still books unknown tokens.
