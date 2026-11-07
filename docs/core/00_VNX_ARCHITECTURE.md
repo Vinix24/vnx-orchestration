@@ -1,7 +1,7 @@
 # VNX Orchestration System - Complete Architecture
 
 **Status**: Active
-**Last Updated**: 2026-10-18
+**Last Updated**: 2026-11-07
 **Owner**: T-MANAGER
 **Purpose**: Single source of truth for VNX system architecture, components, and data flow.
 
@@ -43,7 +43,7 @@ VNX is a file-based orchestration system enabling parallel development across mu
 - **Quality Advisory Pipeline**: Automatic file size/complexity warnings on every completion
 - **Track-Agnostic Workers**: T1-T3 are role labels on ephemeral, headless build-worker dispatches, not persistent terminals; T0 dispatches the next role to the lane the door selects
 - **Multi-Model Coordination**: T0 runs Opus 5.5 (`t0-opus-only`, a floor); T1-T3 build-workers default to Sonnet (`workers-kimi-pinned`, advisory — a dispatch spec's own model wins)
-- **Review Seats**: every seat of the project's review stack is filled by its own reviewer, and a rejection by any review peer blocks the merge (see *Review Seats*)
+- **Review Seats**: the risk class of the PR head decides how many seats of the project's review stack are required (the first seat at `low` and `medium`, every seat at `high` and `critical`), each required seat is filled by its own reviewer, and a rejection by any review peer blocks the merge (see *Review Seats*)
 - **Git Worktree Isolation**: every headless dispatch runs in its own worktree under `.vnx-data/worktrees/`, provenance in every receipt
 
 ### Worktree Model
@@ -109,8 +109,8 @@ tracks DB is the plan source (ADR-047) (`scripts/commands/new_worktree.sh`).
 T1-T3 are role labels, not persistent panes: each build-worker dispatch is an
 ephemeral `claude -p` run in its own isolated worktree (see *Terminal
 Architecture* below), routed through the single-entry dispatch door. The
-legacy Dispatcher/Smart Tap process pair still exists for the older PR-queue
-path (Core Components §1) but is not the primary route.
+legacy Dispatcher/Smart Tap process pair still exists for markdown dispatches
+placed by hand (Core Components §1) but is not the primary route.
 
 ---
 
@@ -182,14 +182,16 @@ The dashboard "Jump" action calls `POST /api/jump/{terminal}`. It does not run `
 
 ## Core Components
 
-### 1. Dispatcher (`dispatcher_minimal.sh`) — the PR-queue path only
+### 1. Dispatcher (`dispatcher_minimal.sh`): the legacy markdown path only
 
-**Purpose**: Native skill activation and instruction routing for the older
-PR-queue path (`FEATURE_PLAN.md` → `staging/` → `queue/` → `pending/*.md`,
-see *Staging Workflow* below). The single-entry dispatch door
-(`scripts/lib/dispatch_cli.py`) is the primary, canonical path for every other
-dispatch; this daemon only scans the markdown files the PR-queue path
-produces. Check current liveness before relying on it — it is a supervised
+**Purpose**: Native skill activation and instruction routing for markdown
+dispatches in `dispatches/pending/*.md`. Nothing in the plan flow writes those
+files any more: the plan-to-markdown step of the older PR-queue path was removed
+(ADR-047, release v1.8.0) and so was the `.md` promote flow (T-A10). The
+single-entry dispatch door (`scripts/lib/dispatch_cli.py`) is the primary,
+canonical path for every dispatch, see *Staging Workflow* below. The daemon only
+scans markdown files placed there by hand, the raw-file form that ADR-025
+deprecates. Check current liveness before relying on it. It is a supervised
 daemon (`scripts/vnx_supervisor_simple.sh`) but is commonly absent between
 runs (`docs/core/DAEMON_LIVENESS.md` is the generated, re-checkable source,
 not this doc).
@@ -367,8 +369,7 @@ Each format has one owner document. This section names where it lives.
 - **Dispatch.** A staged bundle in the central pending dir:
   `<data_dir>/dispatches/pending/<dispatch-id>/instruction.md` plus
   `dispatch-spec.json`. The fields and the staging flow are in
-  `docs/core/DISPATCH_RULES.md` section 12. The older PR-queue path writes markdown
-  dispatches (see *Staging Workflow* below).
+  `docs/core/DISPATCH_RULES.md` section 12 (see *Staging Workflow* below).
 - **Receipt.** One NDJSON line per record in `state/t0_receipts.ndjson`. The shape is in
   `docs/core/11_RECEIPT_FORMAT.md`; the receipt v2 decision is ADR-035.
 - **Report.** Markdown at `$VNX_DATA_DIR/unified_reports/<dispatch-id>.md` with the
@@ -501,13 +502,13 @@ project-root/                        # this repo's own layout — no .claude/vnx
 ├── bin/vnx                          # operator + automation CLI entry point
 ├── scripts/                         # Active orchestration scripts
 │   ├── lib/dispatch_cli.py          # the single-entry dispatch door
-│   ├── dispatcher_minimal.sh        # legacy PR-queue-path dispatcher (see Core Components §1)
+│   ├── dispatcher_minimal.sh        # legacy markdown-dispatch scanner (see Core Components §1)
 │   ├── receipt_processor.sh         # Receipt processing, evidence-only
 │   ├── report_parser.py
 │   ├── append_receipt.py            # Receipt + quality sidecar writer
 │   ├── generate_t0_recommendations.py
 │   ├── vnx_supervisor_simple.sh
-│   ├── pr_queue_manager.py          # PR queue + staging workflow
+│   ├── pr_queue_manager.py          # PR queue state + staging listing (promote is retired)
 │   ├── gather_intelligence.py       # Intelligence aggregation
 │   ├── learning_loop.py             # Adoption signals, pending_rules queue
 │   ├── tag_intelligence.py          # Pairwise/triple tag subsets
@@ -547,7 +548,7 @@ project-root/                        # this repo's own layout — no .claude/vnx
 │   │   ├── t0_receipts.ndjson       # Production receipts
 │   │   ├── t0_brief.json            # T0 decision snapshot
 │   │   ├── terminal_state.json      # Terminal status + attention model
-│   │   ├── pr_queue_state.yaml      # PR queue tracking
+│   │   ├── pr_queue_state.yaml      # PR queue tracking (legacy state; dependencies come from the tracks DB)
 │   │   ├── quality_intelligence.db  # Quality patterns DB
 │   │   ├── intelligence_usage.ndjson # Append-only pattern offer/adoption audit (G-L7)
 │   │   ├── t0_quality_digest.ndjson # 3-section quality digest, append-only (G-L6)
@@ -559,8 +560,8 @@ project-root/                        # this repo's own layout — no .claude/vnx
 │   │
 │   ├── dispatches/                  # Task dispatches
 │   │   ├── pending/                 # Door bundles (<id>/dispatch-spec.json) and promoted *.md dispatches
-│   │   ├── staging/                 # PR-queue proposals, written by pr_queue_manager.py init-feature
-│   │   ├── queue/                   # Promoted PR-queue dispatches awaiting the popup watcher
+│   │   ├── staging/                 # markdown staging proposals (nothing in the plan flow writes here any more)
+│   │   ├── queue/                   # legacy: markdown dispatches awaiting the popup watcher
 │   │   ├── active/                  # In progress
 │   │   └── completed/              # Finished
 │   │
@@ -831,9 +832,24 @@ ADR-007 and `docs/MIGRATION_GUIDE.md` for the operator runbook.
 
 ## Staging Workflow
 
-Two staging paths exist in the tree. The single-entry door is the canonical
-one. The PR-queue path is older and still live: the roadmap autopilot drives
-it and the daemon dispatcher still consumes what it produces.
+Planning lives in the tracks DB and staging lives in the door. Each has one path.
+
+### Planning: the tracks DB
+
+The tracks DB is the only plan source (ADR-047, release v1.8.0). Tracks,
+deliverables, dispatches and the dependencies between tracks are rows in it.
+`FEATURE_PLAN.md`, `PR_QUEUE.md` and `ROADMAP.md` are no longer read, and the
+`init-feature`, `dispatch` and `test*` verbs of `scripts/pr_queue_manager.py`
+are gone (`CHANGELOG.md`, 1.8.0, track `retire-feature-plan`, A6). A deliverable
+is planned and managed with `vnx deliverable` (`add`, `list`, `promote`,
+`close`, `set`, `retarget`, `withdraw`; the same verbs sit under `vnx horizon
+deliverable`). `retarget` and `withdraw` came with ADR-049 in v1.8.0. The
+dependency check of `pr_queue_manager.py` (`check_pr_dependencies`) answers from
+`track_dependencies`, and missing evidence counts as not ready. The roadmap
+autopilot (`RoadmapManager.run_feature_step` in `scripts/roadmap_manager.py`,
+ticked under `VNX_ROADMAP_AUTOPILOT=1`) no longer stages anything: when a queued
+PR exists it ends with status `failed` and the reason that plan-based dispatch
+creation is retired.
 
 ### The door: a staged bundle in the central pending dir
 
@@ -859,85 +875,16 @@ repeat them. Decision records:
 `docs/governance/decisions/ADR-024-single-entry-door-default-dispatch-lane.md`
 (the door as default lane) and
 `docs/governance/decisions/ADR-025-raw-file-dispatch-deprecation.md` (the
-markdown path below).
+raw markdown path).
 
-### The PR-queue path: FEATURE_PLAN.md to markdown dispatches
+### What is left of the PR-queue code
 
-`scripts/pr_queue_manager.py` turns a `FEATURE_PLAN.md` into markdown
-dispatches under `dispatches/`. Its verbs are `init-feature`, `staging-list`,
-`show`, `patch`, `promote` and `reject`.
-
-```
-FEATURE_PLAN.md → init-feature → staging/ → promote → queue/ → pending/ → dispatcher_minimal.sh
-                  (all PRs)      (proposals) (1 PR)    (popup)  (*.md)
-```
-
-- `init-feature` writes one file per PR into `staging/`. Nothing in `staging/`
-  is delivered.
-- `promote <dispatch-id>` refuses while the PR's dependencies are incomplete.
-  `--force` skips that check.
-- A promoted file lands in `queue/` for the popup watcher, where accepting it
-  moves it to `pending/`. With `VNX_QUEUE_POPUP_ENABLED=0` it goes straight to
-  `pending/`, and `queue_auto_accept.sh` does the same for files already in
-  `queue/`.
-- `dispatcher_minimal.sh` scans `pending/*.md`. That markdown path does not go
-  through the door. ADR-025 deprecates its raw-file form and names the daemon
-  path as a structural-consolidation follow-up.
-- The roadmap autopilot (`RoadmapManager.run_feature_step` in
-  `scripts/roadmap_manager.py`, ticked under `VNX_ROADMAP_AUTOPILOT=1`) calls
-  `create_dispatch_from_pr` for the next dependency-ready PR. It no longer
-  promotes it: the staging `.md` promote flow is retired (T-A10,
-  `terminal-binding-afbouwen`) and a staged spec bundle fired through the door is
-  the only queue. This path is not T0-only.
-
-**CLI Commands**:
-```bash
-# Generate all PR dispatches to staging/
-python scripts/pr_queue_manager.py init-feature FEATURE_PLAN.md
-
-# Review staging with dependency status
-python scripts/pr_queue_manager.py staging-list
-
-# Promote one PR (to queue/, or to pending/ when the popup is disabled)
-python scripts/pr_queue_manager.py promote <dispatch-id>
-```
-
-**State Management**: `pr_queue_state.yaml` under the project's resolved
-`VNX_STATE_DIR` (`PRQueueManager.vnx_state_dir` in `scripts/pr_queue_manager.py`)
--- the per-project central store (ADR-026), not a fixed repo-relative path.
-- Tracks completed PRs, in-progress PR, execution order
-- Dependency validation during promotion
-- Evidence attachment via receipt processor (T0 reviews and completes PRs)
-
-### Staging Notification
-
-The recommendations engine (`scripts/generate_t0_recommendations.py`,
-`check_staging_dispatches`) emits a `STAGING_READY` recommendation for each new
-file in `staging/`, with the `show`, `patch`, `promote` and `reject` commands
-attached. `state/staging_seen.json` records which file versions it already
-announced, so an unchanged file raises one recommendation.
-
-### T0 Decision Tree
-```
-STAGING_READY recommendation (new file in staging/)
-    ↓
-[Review dispatch?]
-    ├─ YES → `pr_queue_manager.py show <id>`
-    │    ↓
-    │ [Needs changes?]
-    │    ├─ YES → `pr_queue_manager.py patch <id> --set key=value`
-    │    └─ NO → Continue
-    │    ↓
-    │ [Check dependencies?]
-    │    ↓
-    │ `pr_queue_manager.py staging-list` (shows ready vs waiting)
-    │    ↓
-    │ [Approve?]
-    │    ├─ YES → `pr_queue_manager.py promote <id>` → queue/ (popup) or pending/ (popup disabled)
-    │    └─ NO → `pr_queue_manager.py reject <id> --reason "X"`
-    │
-    └─ NO → Ignore (stays in staging)
-```
+`scripts/pr_queue_manager.py` still runs on demand and serves `status`, `list`,
+`start`, `complete`, `staging-list`, `show`, `patch` and `reject`. `promote`
+refuses and names the door (T-A10): a staged spec bundle fired with
+`vnx dispatch <id>` is the only queue. Its state is `pr_queue_state.yaml` under
+the project's resolved `VNX_STATE_DIR` (`PRQueueManager.vnx_state_dir`), the
+per-project central store (ADR-026), not a fixed repo-relative path.
 
 **Reference**: `docs/core/DISPATCH_RULES.md` is the enforced dispatch ruleset.
 
@@ -951,12 +898,23 @@ default `codex_gate,kimi_gate`) that names a review peer and is not optional
 peer and `claude_github_optional` is optional by name, so none of the three is a seat.
 An unknown or retired gate name in a stack is refused by name, never dropped quietly.
 
-Each seat gets its own reviewer: one reviewer gate fills at most one seat of a request.
+Which seats a head needs depends on its risk class (release v1.8.0, R3a and R3b).
+`scripts/lib/review_risk_class.py` derives the class from the PR diff against the
+PR's own base branch, and `seats_for_risk` in `scripts/lib/review_seat_evaluation.py`
+turns it into the required seats: the first seat of the stack at `low` and
+`medium`, every seat at `high` and `critical`. An unknown or empty class requires
+every seat, so a class that cannot be read never narrows the review. The merge
+door, the `vnx-gate/review` summary check and `vnx pr-ready` read the same rule.
+
+Each required seat gets its own reviewer: one reviewer gate fills at most one seat of a request.
 When a seat's reviewer is out, the next gate in the takeover chain reads it
 (`docs/core/PROVIDER_LANES.md`, "Takeover chain"; the seat rule itself is
-`docs/core/DISPATCH_RULES.md` section 2). With the default chain and both
-subscription reviewers out, deepseek reads one seat and the other seat ends as
-`chain_exhausted`.
+`docs/core/DISPATCH_RULES.md` section 2). The default chain is
+`codex_gate,kimi_gate,claude_gate,deepseek_gate`
+(`scripts/lib/gate_request_handler.py:106`). `claude_gate` stands before the
+API-credit end-link `deepseek_gate`, and a seat never gets a reviewer of the
+builder's vendor (R7): such a reviewer is passed over like an unavailable one.
+A chain that runs out ends as `chain_exhausted`.
 
 The merge side asks one module which record fills which seat on a PR head:
 `review_seat_evaluation.evaluate_review_seats`. The merge door (`scripts/pr_merge.py`),
@@ -974,7 +932,7 @@ Reviewer prompts carry no repo map or intelligence and skip the base worker laye
 skips L1 for `role == "reviewer"` (line 147). The merge-door checks are in
 `DISPATCH_RULES.md` sections 2.1 and 2.2, the evidence rules in
 `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`, the reviewer split in ADR-008. The
-seat rule and the per-seat reviewer are on main, not yet released.
+seat rule and the per-seat reviewer shipped in v1.7.2, the risk class in v1.8.0.
 
 ---
 

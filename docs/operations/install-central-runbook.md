@@ -66,13 +66,13 @@ bash install-central.sh --dry-run
 bash install-central.sh
 
 # Pin a specific version
-bash install-central.sh --version v1.0.0-rc5
+bash install-central.sh --version v1.8.0
 
 # Custom install root
-bash install-central.sh --target /opt/vnx-system --version v1.0.0-rc5
+bash install-central.sh --target /opt/vnx-system --version v1.8.0
 
 # Internal mirror
-bash install-central.sh --source https://internal.git/vnx-orchestration --version v1.0.0-rc5
+bash install-central.sh --source https://internal.git/vnx-orchestration --version v1.8.0
 ```
 
 After install, add the shim to PATH:
@@ -88,7 +88,7 @@ Add to `~/.zshrc` or `~/.bashrc` to persist.
 Each project can pin a specific installed version:
 
 ```bash
-echo 'v1.0.0-rc5' > /path/to/project/.vnx-version
+echo 'v1.8.0' > /path/to/project/.vnx-version
 ```
 
 The shim reads `.vnx-version` by traversing up from `cwd`. When no pin is found, it falls back to `~/.vnx-system/current` (the last installed version).
@@ -263,7 +263,24 @@ the commits it is missing and fails closed when it cannot measure. Only a releas
 cannot be compared at all — no release, not a git checkout, no local main ref — reports
 `skipped: <reason>` and leaves doctor green.
 
-Three steps stay operator actions. VNX does not do them for you:
+Then the pin audit for the whole fleet:
+
+```bash
+python3 scripts/fleet_pin_audit.py
+python3 scripts/fleet_pin_audit.py --project-dir <path> --json
+```
+
+It is read-only and gives one verdict per registered project over the `.vnx-version`
+pin and the `.claude/vnx-system` link. `dead` (the pinned release is absent or the link
+dangles) exits `1`. `lagging`, `pin-without-link` and `link-without-pin` are warnings
+and keep exit `0`, except a pin more than `VNX_FLEET_PIN_MAX_LAG_RELEASES` releases
+behind (default 3), which is a finding. `--scan-root <path>` (repeatable) also lists pin
+directories the registry does not cover as `unregistered`. The report's `store` section
+flags a release dir whose `VERSION` names another release (`mislabeled`) or whose write
+bit is still set (`writable`) as findings (exit `1`). The audit first ships in release v1.8.0;
+an install on v1.7.6 does not have it.
+
+Four steps stay operator actions. VNX does not do them for you:
 
 1. **The release itself.** `vnx release publish --tag <tag>` materializes the tag into
    `~/.vnx-system/versions/<tag>/`. Publishing is refused for a tag outside the default
@@ -274,9 +291,38 @@ Three steps stay operator actions. VNX does not do them for you:
 3. **Reloading the launchd jobs.** `bash scripts/launchd/reload_plist.sh <template>
    [project_id]` per family and per project. A running job keeps the tree it started
    from; only the next start resolves the pin again, through
-   `scripts/launchd/vnx_pinned_launcher.sh`.
+   `scripts/launchd/vnx_pinned_launcher.sh`. Since release 1.8.0 (#2449, OI-2564)
+   the launcher starts the job with an interpreter picked by
+   `scripts/launchd/vnx_python.sh` (the engine venv, else Homebrew 3.12, else the first
+   of `python3.13`, `python3.12` and `python3.11` on `PATH`, else `python3`). It exits
+   `78` when that interpreter is outside the `requires-python` of the pinned release
+   (`>=3.11,<3.14`), so a relinked system `python3` cannot fail a job in the background.
+4. **The T0 context guard at user level.** `vnx guard install --dry-run` lists the
+   Claude accounts and prints the diff per settings file; `vnx guard install` registers
+   the guard in every account. `vnx guard check --require-user` (#2245) then counts only the
+   user-level registration: an event that a project's own settings answer is a failure. The registration and the hook entries are described in
+   `docs/operations/T0_CONTEXT_ROTATION.md`.
 
 ## Rollback procedure
+
+### Migrations 0036 and 0037 (release v1.8.0)
+
+Release 1.8.0 ships two migrations on the `deliverables` view of
+`runtime_coordination.db`, neither with a data change on the way up. `0036`
+(`scripts/lib/migrations/apply_0036.py`) makes `withdrawn` a terminal derived status and
+stamps `user_version` 36. `0037` (`apply_0037.py`) makes a base whose own row ended
+`expired` derive `done` when the round named in `metadata_json.superseded_by` is
+`completed`, and stamps `user_version` 37.
+
+Moving a project's pin back from 1.8.0 to 1.7.6 is not established as safe on a store
+that already sits at 36 or 37. Release 1.7.6 knows no `withdrawn` state, and its
+`schema_manifest` holds one deliverables view for every version up to 35. Revert with the
+1.8.0 tree before the pin goes back: `apply_0037.revert_migration(db_path)` (v37 to v36,
+no row changes), then `apply_0036.revert_migration(db_path)` (v36 to v35; each
+`withdrawn` dispatch becomes `expired` with a `deliverable_withdrawn_reverted` event,
+after a `state_mutation` receipt in the `t0_receipts.ndjson` beside the database). Expect
+a `superseded` base to read `failed` again after the 0037 revert. What 1.7.6 does with a store at 36 or
+37 is read from its code, not run.
 
 ### System-level rollback (all projects)
 
