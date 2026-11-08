@@ -4,13 +4,11 @@ One owner for the rule that decides whether a skill can be ported to a provider
 other than Claude Code. ``validate_skill.py --inventory`` and ``vnx skills sync``
 read these functions, so no second copy of the rule exists.
 
-The rules are derived from the five skills that were measured as unsafe on
-origin/main (architect, database-engineer, debugger, intelligence-engineer,
-security-engineer). The only construct that singles out exactly those five is a
-path into the Claude Code user directory (``~/.claude/...``): it points at a
-directory that exists only for a Claude Code login, so a port copies a dead path.
-The project-relative ``.claude/skills`` and ``.claude/vnx-system`` references are
-not a rule: far more skills carry them, and they resolve inside the project.
+Derived from the five skills measured as unsafe on origin/main (architect,
+database-engineer, debugger, intelligence-engineer, security-engineer). Only a path
+into the Claude Code user directory (``~/.claude/...``) singles out exactly those
+five: a port copies a dead path. Project-relative ``.claude/skills`` and
+``.claude/vnx-system`` references are no rule: many more skills carry them.
 """
 
 from __future__ import annotations
@@ -22,29 +20,22 @@ from typing import Iterable
 
 from vnx_skills import iter_skill_dirs
 
-# rule name -> pattern. A rule that matches nothing in the real tree is not added.
 RULES: dict[str, re.Pattern[str]] = {
     "claude_home_path": re.compile(r"(?:~|\$HOME|\$\{HOME\})/\.claude(?![A-Za-z0-9_-])"),
 }
 
-# Files inside a skill directory that are read as text by the detector.
 _TEXT_SUFFIXES = {".md", ".sh", ".py", ".yaml", ".yml", ".txt", ".json", ".toml"}
 
-# "<emoji> Skill actief: name" and "Skill actief: name" are the same announcement.
 _ANNOUNCEMENT = re.compile(r"^\W*(Skill actief:.*)$")
 
 
 @dataclass(frozen=True)
 class Finding:
-    """One non-portable construct: the rule that matched, its file and line."""
-
+    """One non-portable construct: rule, file, line."""
     rule: str
     file: str
     line: int
     text: str
-
-    def as_dict(self) -> dict:
-        return {"rule": self.rule, "file": self.file, "line": self.line, "text": self.text}
 
 
 def dead_claude_paths(text: str, file: str = "SKILL.md") -> list[Finding]:

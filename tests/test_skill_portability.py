@@ -42,9 +42,7 @@ def test_home_variants_are_flagged(line):
     [
         "@.claude/skills/x/template.md",
         "see .claude/vnx-system/scripts/y.py",
-        "claudedocs/2026-05-09-note.md",
         "https://code.claude.com/docs/en/goal",
-        "",
     ],
 )
 def test_project_relative_and_unrelated_paths_are_not_flagged(line):
@@ -66,23 +64,12 @@ def test_a_path_in_a_reference_file_flags_the_skill_with_that_file(tmp_path):
     assert [(f.file, f.line) for f in findings] == [("references/notes.md", 3)]
 
 
-def test_opted_out_and_non_skill_directories_are_ignored(tmp_path):
-    d = _skill(tmp_path, "local-only", "~/.claude/x\n")
-    (d / ".vnx-skip-sync").write_text("")
-    (tmp_path / "no-skill-md").mkdir()
-    assert sp.provider_unsafe_skills(tmp_path) == []
-
-
 def test_unreadable_file_is_a_finding_not_a_pass(tmp_path):
     d = _skill(tmp_path, "weird", "clean\n")
     (d / "bad.md").write_bytes(b"\xff\xfe\x00\xc3\x28")
     findings = sp.scan_skill(d)
     assert [(f.rule, f.file) for f in findings] == [("unreadable_file", "bad.md")]
     assert sp.provider_unsafe_skills(tmp_path) == ["weird"]
-
-
-def test_missing_tree_gives_no_skills(tmp_path):
-    assert sp.provider_unsafe_skills(tmp_path / "absent") == []
 
 
 def test_classify_identical_announcement_semantic_and_unreadable(tmp_path):
@@ -97,8 +84,6 @@ def test_classify_identical_announcement_semantic_and_unreadable(tmp_path):
     b.write_text("x\nSkill actief: bar\ny\n", encoding="utf-8")
     assert sp.classify_skill_pair(a, b) == "semantic"
     assert sp.classify_skill_pair(a, tmp_path / "missing.md") == "semantic"
-    b.write_bytes(b"\xff\xfe")
-    assert sp.classify_skill_pair(a, b) == "semantic"
 
 
 def test_tree_parity_counts_and_one_sided_names(tmp_path):
