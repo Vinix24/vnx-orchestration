@@ -128,8 +128,9 @@ class ReviewSeats:
     def to_record(self) -> Dict[str, Any]:
         """The shape a request record carries, so an evaluator can use what was requested.
 
-        The gate profile fields stay off the record: the trail carries them from P6
-        (``gate-profiel-per-project``), which also moves the golden request line.
+        ``stack_source`` is on the record (P5): a one-seat stack the profile supplied must be told
+        from an operator's. The other gate profile fields stay off it: the trail carries them from P6
+        (``gate-profiel-per-project``), which moves the golden request line again.
         """
         return {
             "seats": list(self.seats),
