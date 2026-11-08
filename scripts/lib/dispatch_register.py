@@ -878,6 +878,15 @@ def _query_recent_dispatches(
     return legacy
 
 
+def _proposed_identity(state_dir: "str | Path", dispatch_id: str, project_id: Optional[str]) -> dict:
+    """The delivery identity of a proposed track dispatch: the passed project, else the store's."""
+    from delivery_identity import delivery_identity_fields
+
+    if not (isinstance(project_id, str) and project_id.strip()):
+        project_id = _project_id_from_state_dir(Path(state_dir))
+    return delivery_identity_fields(dispatch_id, project_id)
+
+
 def register_proposed_track_dispatch(
     state_dir: "str | Path",
     dispatch_id: str,
@@ -885,23 +894,28 @@ def register_proposed_track_dispatch(
     track_id: str,
     pr_ref: str,
     *,
-    project_id: str = "vnx-dev",
+    project_id: Optional[str] = None,
 ) -> None:
     """Insert a proposed dispatch row + emit NDJSON audit event (ADR-005 compliant).
 
     NDJSON write precedes the SQLite commit. If the audit write fails it raises
     and no DB row is created. Raises sqlite3.Error on DB failure.
 
-    ``project_id`` is written into the dispatches row (defaults to ``vnx-dev``
-    for backwards compatibility with callers that do not supply it).
+    ``project_id`` is written into the dispatches row as given. Without one it is
+    resolved from the store the row goes to, and ``unknown`` when that store names
+    no project (ADR-056): never a silent ``vnx-dev``.
     """
     import sqlite3 as _sqlite3
+
+    identity = _proposed_identity(state_dir, dispatch_id, project_id)
+    project_id = identity["project_id"]
 
     # Build audit record before any I/O
     record = _build_event_record(
         "dispatch_created", dispatch_id, None,
         pr_ref or "", terminal_id or "", "", None,
     )
+    record.update(identity)
 
     # Write NDJSON first — ADR-005 requires ledger before DB; events/ not state/
     _write_event_locked(Path(state_dir).parent / "events" / "dispatch_register.ndjson", record)
