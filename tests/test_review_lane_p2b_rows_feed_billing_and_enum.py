@@ -31,7 +31,7 @@ import gate_lane_rows
 row = gate_lane_rows.GateLaneRow(
     gate="synthetic_gate", lane="synthetic", request_provider="synthetic",
     dispatcher="provider_dispatch", billing="provider_metered",
-    model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=True,
+    model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=True, family="codex",
 )
 gate_lane_rows.GATE_LANE_ROWS = gate_lane_rows.GATE_LANE_ROWS + (row,)
 import gate_billing_table, dispatch_spec
@@ -113,13 +113,13 @@ def test_billing_from_rows_adds_a_synthetic_row_and_refuses_a_double_registratio
     row = gate_lane_rows.GateLaneRow(
         gate="synthetic_gate", lane="synthetic", request_provider="synthetic",
         dispatcher="provider_dispatch", billing="provider_metered",
-        model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=False,
+        model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=False, family="codex",
     )
     table = gate_billing_table.billing_from_rows(ROWS + (row,))
     assert table["synthetic_gate"] == "provider_metered"
     clash = gate_lane_rows.GateLaneRow(
         gate="codex_gate", lane="x", request_provider="x", dispatcher="provider_dispatch",
-        billing="none", model_env="E", model_default="m", single_shot=False,
+        billing="none", model_env="E", model_default="m", single_shot=False, family="codex",
     )
     with pytest.raises(ValueError, match="codex_gate"):
         gate_billing_table.billing_from_rows((clash,))
@@ -129,12 +129,12 @@ def test_gate_members_adds_a_synthetic_row_and_refuses_a_collision():
     row = gate_lane_rows.GateLaneRow(
         gate="synthetic_gate", lane="synthetic", request_provider="synthetic",
         dispatcher="provider_dispatch", billing="none",
-        model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=False,
+        model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="m", single_shot=False, family="codex",
     )
     assert dispatch_spec.gate_members(ROWS + (row,))["SYNTHETIC_GATE"] == "synthetic_gate"
     clash = gate_lane_rows.GateLaneRow(
         gate="ci_gate", lane="x", request_provider="x", dispatcher="provider_dispatch",
-        billing="none", model_env="E", model_default="m", single_shot=False,
+        billing="none", model_env="E", model_default="m", single_shot=False, family="codex",
     )
     with pytest.raises(ValueError, match="CI_GATE"):
         dispatch_spec.gate_members((clash,))

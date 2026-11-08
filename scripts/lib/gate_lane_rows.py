@@ -60,6 +60,8 @@ class GateLaneRow:
     on it byte for byte, and the registry lane is named differently
     (``glm-harness``), so it is a column of its own and never derived from
     ``lane``. ``dispatcher`` is the dispatcher key; it is data in this PR.
+    ``family`` is the provider family the switch decides on (``provider_switch``);
+    it has no default, so a row that does not name one is refused when built.
     """
 
     gate: str
@@ -72,6 +74,7 @@ class GateLaneRow:
     single_shot: bool
     timeout: int = DEFAULT_TIMEOUT_SECONDS
     diff_chars: int = DEFAULT_MAX_DIFF_CHARS
+    family: str = ""
 
     def __post_init__(self) -> None:
         _validate_row(self)
@@ -86,6 +89,7 @@ def _fail(row: "GateLaneRow", column: str, why: str) -> GateLaneRowError:
 def _validate_text_columns(row: "GateLaneRow") -> None:
     for column in (
         "gate", "lane", "request_provider", "dispatcher", "model_env", "model_default",
+        "family",
     ):
         value = getattr(row, column)
         if not isinstance(value, str) or not value.strip():
@@ -143,24 +147,28 @@ GATE_LANE_ROWS: Tuple[GateLaneRow, ...] = validate_rows((
         dispatcher="provider_dispatch", billing=BILLING_SUBSCRIPTION,
         model_env="VNX_KIMI_GATE_MODEL", model_default="kimi-k3",
         single_shot=True,
+        family="kimi",
     ),
     GateLaneRow(
         gate="glm_gate", lane="glm-harness", request_provider="glm",
         dispatcher="provider_dispatch", billing=BILLING_METERED,
         model_env="VNX_GLM_GATE_MODEL", model_default="glm-5.2",
         single_shot=True,
+        family="glm",
     ),
     GateLaneRow(
         gate="deepseek_gate", lane="deepseek-harness", request_provider="deepseek",
         dispatcher="provider_dispatch", billing=BILLING_METERED,
         model_env="VNX_DEEPSEEK_GATE_MODEL", model_default="deepseek-flash",
         single_shot=False,
+        family="deepseek",
     ),
     GateLaneRow(
         gate="claude_gate", lane="claude", request_provider="claude",
         dispatcher="claude_gate_lane", billing=BILLING_SUBSCRIPTION,
         model_env="VNX_CLAUDE_GATE_MODEL", model_default="sonnet",
         single_shot=False,
+        family="claude",
     ),
 ))
 
@@ -193,3 +201,11 @@ def timeout_config(rows: Iterable[GateLaneRow]) -> Dict[str, tuple]:
 def diff_char_config(rows: Iterable[GateLaneRow]) -> Dict[str, tuple]:
     """gate -> (config key, default chars)."""
     return {r.gate: (diff_chars_config_key(r.gate), r.diff_chars) for r in rows}
+
+
+def family_of_gate(gate: str, rows: Iterable[GateLaneRow]) -> "str | None":
+    """The family column of the row registered for *gate*, or ``None`` when no row is."""
+    for row in rows:
+        if row.gate == gate:
+            return row.family
+    return None
