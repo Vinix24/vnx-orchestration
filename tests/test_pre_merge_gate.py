@@ -55,6 +55,12 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 # Fixtures
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _resolvable_local_head(monkeypatch):
+    """These tests use a tmp_path that is no git repo; the permission check needs a resolvable HEAD."""
+    monkeypatch.setattr(pre_merge_gate, "_resolve_local_head_sha", lambda project_root: "c" * 40)
+
+
 @pytest.fixture
 def state_dir(tmp_path):
     """Create a state directory with standard structure."""
