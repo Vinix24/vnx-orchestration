@@ -170,7 +170,10 @@ def load_isolation(role: str, agents_dir: Optional[Path]) -> Optional[dict]:
     if not config.is_file():
         return None
     data = _read_yaml(config, f"agents/{role}/config.yaml")
-    if not isinstance(data, dict) or "isolation" not in data:
+    if not isinstance(data, dict):
+        # An empty, scalar or list document is malformed, not "no isolation".
+        raise _malformed(f"agents/{role}/config.yaml is not a mapping")
+    if "isolation" not in data:
         return None
     where = f"isolation of role {role!r}"
     block = data["isolation"]

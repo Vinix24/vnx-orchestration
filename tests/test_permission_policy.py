@@ -145,3 +145,14 @@ def test_every_repo_profile_composes_with_a_digest():
         assert profile.policy_digest and not profile.is_fallback
         digests[role] = profile.policy_digest
     assert len(digests) == len(profiles)
+
+
+@pytest.mark.parametrize("config", ["", "[]\n", "5\n", "just a string\n", "- a\n- b\n"])
+def test_load_isolation_refuses_a_non_mapping_document(tmp_path, config):
+    with pytest.raises(PermissionPolicyRefused) as info:
+        load_isolation("r", _agents(tmp_path, "r", config))
+    assert info.value.reason == "source-malformed"
+
+
+def test_load_isolation_a_mapping_without_isolation_is_absent(tmp_path):
+    assert load_isolation("r", _agents(tmp_path, "r", "{}\n")) is None

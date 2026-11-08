@@ -162,6 +162,11 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
         return _fallback_scope_args(requires_mcp)
 
 
+def _refusal_slug(exc: "PermissionPolicyRefused") -> str:
+    """The slug a refused delivery names: the legacy ``unknown_role`` or the refusal's own reason."""
+    return "unknown_role" if isinstance(exc, UnknownRoleError) else exc.reason
+
+
 def _resolve_scope_args(
     role: Optional[str], requires_mcp: bool, scope_args: Optional[List[str]],
 ) -> List[str]:
@@ -509,11 +514,8 @@ class SubprocessAdapter:
         try:
             cmd.extend(_resolve_scope_args(effective_role, requires_mcp, scope_args))
         except PermissionPolicyRefused as exc:
-            # Refuse before any subprocess spawns (OI-1069 pt.5) — no cmd has
-            # been Popen'd yet, so this is a clean pre-flight rejection. The
-            # named reason is the refusal's own slug.
-            slug = "unknown_role" if isinstance(exc, UnknownRoleError) else exc.reason
-            return _refused_delivery(terminal_id, dispatch_id, f"{slug}: {exc}")
+            # Refuse before any subprocess spawns (OI-1069 pt.5): a clean pre-flight rejection.
+            return _refused_delivery(terminal_id, dispatch_id, f"{_refusal_slug(exc)}: {exc}")
 
         # Resolve stderr logfile path.  Writing stderr to an append-mode file
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the
