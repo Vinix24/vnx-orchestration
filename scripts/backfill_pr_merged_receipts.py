@@ -815,6 +815,16 @@ def publish_reconcile(rec: Dict[str, Any]) -> None:
             rec["write_errors"].append(f"open item for PR #{finding['pr_number']}: {exc}")
 
 
+def _fold_publication(doc: Dict[str, Any], errors: List[str]) -> None:
+    """A failed open-item write makes the doc unclean (exit 2), before its beacon is written. Each error goes to stderr."""
+    if not errors:
+        return
+    for err in errors:
+        print(f"WRITE ERROR: {err}", file=sys.stderr)
+    doc.update(outcome="unknown", exit_code=EXIT_UNKNOWN, publication_errors=len(errors),
+               reason=f"publication failed: {len(errors)} write error(s): " + "; ".join(errors))
+
+
 def _merge_reconcile(report: Dict[str, Any], rec: Dict[str, Any]) -> None:
     """Fold the reconcile result into the audit report: exit = maximum, outcome follows the worse side."""
     report["reconcile"] = rec
@@ -831,14 +841,13 @@ def _print_reconcile(rec: Dict[str, Any]) -> None:
           + (" [dry-run]" if rec["dry_run"] else ""))
     for f in rec["findings"]:
         print(f"  {f['kind'].upper()} PR #{f['pr_number']} run {f['check_run_id']} revoked={f.get('revoked', False)}")
-    for err in rec.get("write_errors", []):
-        print(f"  WRITE ERROR: {err}", file=sys.stderr)
 
 
 def _main_reconcile(args: argparse.Namespace) -> int:
     rec = run_reconcile(args.permit_ttl, dry_run=args.dry_run)
     if not args.no_write:
         publish_reconcile(rec)
+        _fold_publication(rec, rec["write_errors"])
         _heartbeat_audit(_audit_ledger_paths()[0].parent, "ok" if rec["outcome"] == "clean" else "fail",
                          {"outcome": rec["outcome"], "reconcile": rec["counts"], "reason": rec["reason"]})
     if args.json:
@@ -855,6 +864,7 @@ def _main_report_only(args: argparse.Namespace) -> int:
     if not args.no_write:
         if args.reconcile_open_permits:
             publish_reconcile(report["reconcile"])
+            _fold_publication(report, report["reconcile"]["write_errors"])
         publish_report(report)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
@@ -972,6 +982,8 @@ def _read_child_report(proc: Any) -> Tuple[str, int, int, str]:
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         tail = (proc.stderr or "").strip()[-200:]
         return "unmeasurable", EXIT_UNKNOWN, 0, f"child output unusable: {exc} {tail}".strip()
+    if rc == EXIT_UNKNOWN and report.get("publication_errors"):
+        return "publication_failed", rc, gaps, str(report.get("reason") or "")
     if rc == EXIT_UNKNOWN:
         return "unmeasurable", EXIT_UNKNOWN, 0, str(report.get("reason") or "child reported unknown")
     return wanted[rc], rc, gaps, str(report.get("reason") or "")

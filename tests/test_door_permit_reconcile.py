@@ -311,3 +311,62 @@ def test_fleet_child_runs_both_modes(tmp_path, monkeypatch):
     cmd = seen[0]
     assert "--report-only" in cmd and "--reconcile-open-permits" in cmd and "--dry-run" in cmd
     assert cmd[cmd.index("--permit-ttl") + 1] == "12"
+
+
+def _broken_writer(monkeypatch) -> None:
+    import open_items_manager
+
+    def broken(**kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(open_items_manager, "add_item_programmatic", broken)
+
+
+def test_open_item_write_failure_is_unclean(env, monkeypatch):
+    beacons: List[Tuple[str, Dict[str, Any]]] = []
+    monkeypatch.setattr(bf, "_heartbeat_audit", lambda state_dir, status, details: beacons.append((status, details)))
+    _setup(env, [_run(11, minutes=45)])
+    _broken_writer(monkeypatch)
+    assert _main() == 2
+    assert [s for s, _ in beacons] == ["fail"]
+
+
+def test_open_item_write_failure_names_each_error_on_stderr(env, monkeypatch, capsys):
+    _setup(env, [_run(11, minutes=45)])
+    _broken_writer(monkeypatch)
+    assert _main() == 2
+    captured = capsys.readouterr()
+    assert "WRITE ERROR: open item for PR #7: disk full" in captured.err
+    doc = json.loads(captured.out)
+    assert doc["outcome"] == "unknown" and doc["publication_errors"] == 1
+
+
+def test_open_item_write_failure_in_combined_report_is_exit_2(env, monkeypatch, capsys):
+    _setup(env, [_run(11, minutes=45)])
+    _broken_writer(monkeypatch)
+    monkeypatch.setattr(bf, "list_merged_in_window", lambda since: [])
+    assert bf.main(["--report-only", "--reconcile-open-permits", "--json", "--since", "2026-11-01"]) == 2
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["outcome"] == "unknown" and doc["exit_code"] == 2 and doc["publication_errors"] == 1
+
+
+def test_no_write_with_a_broken_writer_stays_clean(env, monkeypatch):
+    _setup(env, [_run(11, minutes=45)])
+    _broken_writer(monkeypatch)
+    assert _main("--no-write") == 0
+
+
+def test_fleet_row_carries_publication_errors(tmp_path, monkeypatch):
+    root = tmp_path / "proj"
+    (root / ".git").mkdir(parents=True)
+    report = {"outcome": "unknown", "exit_code": 2, "missing": [], "publication_errors": 2,
+              "reason": "publication failed: 2 write error(s): a; b"}
+    monkeypatch.setattr(bf.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, json.dumps(report), ""))
+    monkeypatch.setattr(bf, "_project_data_dir", lambda pid, r: tmp_path / "d")
+    monkeypatch.setattr(bf, "enumerate_projects", lambda reg: [
+        {"project_id": "p", "path": str(root), "finding": "", "registry_ok": True}])
+    result = bf.run_fleet([], tmp_path / "reg.json", None)
+    row = result["rows"][0]
+    assert result["exit_code"] == 2
+    assert row["project_id"] == "p" and row["outcome"] == "publication_failed"
+    assert "2 write error(s)" in row["reason"]
