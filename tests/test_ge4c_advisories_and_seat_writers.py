@@ -335,7 +335,7 @@ def test_the_kimi_and_glm_request_writes_take_the_slot_lock(env, monkeypatch, wr
 def test_the_harness_seat_request_write_takes_the_slot_lock(env):
     def write():
         return _Requests(env)._request_harness_seat(
-            "deepseek_gate", "deepseek", True, pr_number=PR, branch=BRANCH, risk_class=RISK,
+            "deepseek_gate", True, pr_number=PR, branch=BRANCH, risk_class=RISK,
             changed_files=["scripts/a.py"], mode=MODE, dispatch_id="",
         )
 

@@ -33,6 +33,7 @@ from gate_recorder import (
     write_result_guarded,
 )
 from gate_executor import _classify_sha_binding
+from gate_lane_rows import GATE_LANE_ROWS
 from gate_result_parser import evidence_error
 from gate_status import REQUEST_ORIGIN_DOOR, decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
@@ -55,6 +56,20 @@ from claude_github_receipt import (
 
 logger = logging.getLogger(__name__)
 
+
+
+def request_provider(gate: str) -> str:
+    """The ``provider`` label on a request payload of harness-lane ``gate``.
+
+    Read from the gate's row (``GateLaneRow.request_provider``), never from a
+    literal per gate: ``stop_conditions`` and ``provider_costs`` match on the
+    label byte for byte. A gate without a row has no label to give, so it
+    refuses by name instead of guessing one.
+    """
+    for row in GATE_LANE_ROWS:
+        if row.gate == gate:
+            return row.request_provider
+    raise ValueError(f"no gate lane row for gate {gate!r}: no request provider label")
 
 
 class ReviewGateTakeoverConfigError(ValueError):
@@ -2626,7 +2641,7 @@ class GateRequestHandlerMixin:
         payload = {
             "gate": "kimi_gate",
             "status": "requested" if available else "not_executable",
-            "provider": "kimi",
+            "provider": request_provider("kimi_gate"),
             "branch": branch,
             "pr_number": pr_number,
             "review_mode": mode,
@@ -2675,7 +2690,7 @@ class GateRequestHandlerMixin:
         payload: Dict[str, Any] = {
             "gate": "glm_gate",
             "status": "requested" if available else "not_executable",
-            "provider": "glm",
+            "provider": request_provider("glm_gate"),
             "branch": branch,
             "pr_number": pr_number,
             "review_mode": mode,
@@ -2743,7 +2758,7 @@ class GateRequestHandlerMixin:
         legal ``VNX_DEFAULT_REVIEW_STACK`` entry.
         """
         return self._request_harness_seat(
-            "deepseek_gate", "deepseek", self._deepseek_gate_available(),
+            "deepseek_gate", self._deepseek_gate_available(),
             pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
         )
@@ -2759,13 +2774,13 @@ class GateRequestHandlerMixin:
         provider switch never refuses it (claude is not switchable, ADR-044 v1).
         """
         return self._request_harness_seat(
-            "claude_gate", "claude", self._claude_gate_available(),
+            "claude_gate", self._claude_gate_available(),
             pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
         )
 
     def _request_harness_seat(
-        self, gate: str, provider: str, available: bool, *, pr_number: int, branch: str,
+        self, gate: str, available: bool, *, pr_number: int, branch: str,
         risk_class: str, changed_files: List[str], mode: str, dispatch_id: str,
     ) -> Dict[str, Any]:
         """Request a harness-lane review ``gate`` whose availability the caller decided.
@@ -2780,7 +2795,7 @@ class GateRequestHandlerMixin:
         payload: Dict[str, Any] = {
             "gate": gate,
             "status": "requested" if available else "not_executable",
-            "provider": provider,
+            "provider": request_provider(gate),
             "branch": branch,
             "pr_number": pr_number,
             "review_mode": mode,
