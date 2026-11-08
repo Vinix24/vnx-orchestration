@@ -69,6 +69,19 @@ def _checkout(tmp_path: Path, home: Path, pin=None) -> Path:
     return checkout
 
 
+PINNED_312_BIN = Path("/opt/homebrew/opt/python@3.12/libexec/bin")
+
+
+def _reload_path() -> str:
+    """PATH for a ``reload_plist.sh`` run: the pinned 3.12 ``python3`` (it has yaml) first.
+
+    ``reload_plist.sh`` calls a bare ``python3``. With a caller PATH that lacks one, that
+    resolves to the system interpreter, which cannot import yaml once HOME is a tmp dir.
+    """
+    inherited = os.environ.get("PATH", "")
+    return f"{PINNED_312_BIN}{os.pathsep}{inherited}" if PINNED_312_BIN.is_dir() else inherited
+
+
 def _run_launcher(
     home: Path, *extra: str, script: str = RELATIVE_SCRIPT
 ) -> subprocess.CompletedProcess:
@@ -92,7 +105,7 @@ def test_program_arguments_call_the_pinned_launcher(tmp_path, monkeypatch) -> No
     recording_launchctl(tmp_path / "bin", monkeypatch)
     env = {
         "HOME": str(home),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": _reload_path(),
         "VNX_HOME": str(engine),
         "VNX_PROJECT_ID": PROJECT,
         "VNX_TEST_LAUNCHCTL_SHIM": os.environ.get("VNX_TEST_LAUNCHCTL_SHIM", ""),
@@ -270,7 +283,7 @@ def test_reload_plist_starts_each_family_through_the_launcher(
     recording_launchctl(tmp_path / "bin", monkeypatch)
     env = {
         "HOME": str(home),
-        "PATH": os.environ.get("PATH", ""),
+        "PATH": _reload_path(),
         "VNX_HOME": str(engine),
         "VNX_PROJECT_ID": PROJECT,
         "VNX_TEST_LAUNCHCTL_SHIM": os.environ.get("VNX_TEST_LAUNCHCTL_SHIM", ""),

@@ -207,3 +207,53 @@ def test_an_unregistered_project_still_exits_78(world: World) -> None:
 
     assert result.returncode == 78, result.stdout + result.stderr
     assert len(result.stderr.splitlines()) == 1
+
+
+def _launcher_with_resolver_stub(tmp_path: Path, stub_output: str) -> Path:
+    """A copy of the launcher tree whose resolver prints ``stub_output`` instead of resolving."""
+    tree = tmp_path / "launcher-tree"
+    (tree / "scripts" / "launchd").mkdir(parents=True)
+    (tree / "scripts" / "lib").mkdir()
+    for name in ("vnx_pinned_launcher.sh", "vnx_python.sh"):
+        (tree / "scripts" / "launchd" / name).write_text(
+            (REPO / "scripts" / "launchd" / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    (tree / "pyproject.toml").write_text('requires-python = ">=3.9"\n', encoding="utf-8")
+    (tree / "scripts" / "lib" / "pinned_engine.py").write_text(
+        f"import sys\nsys.stdout.write({stub_output!r})\n", encoding="utf-8"
+    )
+    return tree
+
+
+@pytest.mark.parametrize("checkout_kind", ["file", "missing", "empty_value", "no_checkout_line"])
+def test_launcher_guard_refuses_a_checkout_that_is_not_a_directory(tmp_path: Path, checkout_kind: str) -> None:
+    engine = tmp_path / "engine"
+    engine.mkdir()
+    (engine / "scripts").mkdir()
+    marker = tmp_path / "started"
+    (engine / "scripts" / "probe.sh").write_text(f'#!/usr/bin/env bash\ntouch "{marker}"\n', encoding="utf-8")
+    not_a_dir = tmp_path / "a-file"
+    not_a_dir.write_text("x\n", encoding="utf-8")
+    checkout_line = {
+        "file": f"checkout={not_a_dir}\n",
+        "missing": f"checkout={tmp_path / 'gone'}\n",
+        "empty_value": "checkout=\n",
+        "no_checkout_line": "",
+    }[checkout_kind]
+    tree = _launcher_with_resolver_stub(tmp_path, f"{engine}\n{checkout_line}")
+    home = tmp_path / "home"
+    home.mkdir()
+
+    result = subprocess.run(
+        ["bash", str(tree / "scripts" / "launchd" / "vnx_pinned_launcher.sh"), PROJECT, "scripts/probe.sh"],
+        capture_output=True, text=True, timeout=60, cwd=str(home),
+        env={"HOME": str(home), "PATH": os.environ.get("PATH", ""), "VNX_HOME": str(tree)},
+    )
+
+    assert result.returncode == 78, result.stdout + result.stderr
+    lines = result.stderr.splitlines()
+    assert len(lines) == 1, lines
+    assert "is not a directory; refusing to start scripts/probe.sh" in lines[0]
+    assert PROJECT in lines[0]
+    assert result.stdout == ""
+    assert not marker.exists()
