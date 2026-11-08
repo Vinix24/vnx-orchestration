@@ -607,3 +607,221 @@ def test_native_skill_md_that_is_not_a_file_refuses_without_blocking(tmp_path, w
         signal.signal(signal.SIGALRM, previous)
     assert (result["status"], result["reason"], result["skills"]) == ("skipped", "symlink_in_destination", [])
     assert not (worktree / ".claude" / "skills" / "beta").exists()
+
+
+# --- r6: a skill file appears at its final name only when it is complete ---
+
+PARTIAL_RE = r"^\.(SKILL\.md|data\.txt)\.vnx-partial-[0-9a-f]{32}$"
+
+
+def _partials(wt):
+    """Every private copy name left anywhere under ``.claude``; links are listed, never followed."""
+    found = []
+    for dirpath, dirs, names in os.walk(wt / ".claude"):
+        found += [Path(dirpath) / n for n in dirs + names if ".vnx-partial-" in n]
+    return sorted(found)
+
+
+def _break_write(target: bytes, kind: str):
+    """Patch the ``wb`` handle so the write of *target* stops after two bytes.
+
+    ``raises``: two bytes reach the file, then ENOSPC (disk full halfway). ``short``: two
+    bytes reach the file and the write returns as if it was done. Returns the patch and
+    the list that records each injection, so a test proves the fault really fired.
+    """
+    import errno
+
+    real_fdopen = os.fdopen
+    fired: list[int] = []
+
+    class Handle:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._inner.close()
+            return False
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def write(self, data):
+            if bytes(data) != target:
+                return self._inner.write(data)
+            fired.append(len(data))
+            self._inner.write(data[:2])
+            self._inner.flush()
+            if kind == "raises":
+                raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+            return 2
+
+    def fdopen(fd, mode="r", *args, **kwargs):
+        inner = real_fdopen(fd, mode, *args, **kwargs)
+        return Handle(inner) if mode == "wb" else inner
+
+    return mock.patch.object(asm.os, "fdopen", fdopen), fired
+
+
+@pytest.mark.parametrize("kind,reason", [("raises", "copy_failed:OSError"),
+                                         ("short", "copy_failed:IncompleteWrite")])
+def test_failed_skill_md_write_leaves_nothing_and_the_next_run_copies(tmp_path, worktree, kind, reason):
+    patch, fired = _break_write(b"alpha\n", kind)
+    with patch:
+        first = _call(worktree, tmp_path)
+    assert fired == [len(b"alpha\n")]
+    assert not os.path.lexists(_dest(worktree))
+    assert _partials(worktree) == []
+    _assert_alpha_refused(first, reason)
+    second = _call(worktree, tmp_path, dispatch_id="dlv-r3b")
+    assert (second["status"], second["reason"]) == ("ok", None)
+    assert [e["ownership"] for e in second["skills"]] == ["materialized", "native"]
+    assert second["skills"][0]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
+    assert _dest(worktree).read_bytes() == b"alpha\n"
+
+
+def test_failed_asset_write_leaves_nothing_and_the_next_run_copies(tmp_path):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    patch, fired = _break_write(b"shipped\n", "raises")
+    with patch:
+        first = _call(wt, tmp_path)
+    assert fired == [len(b"shipped\n")]
+    assert list(_asset(wt).parent.iterdir()) == []
+    assert not os.path.lexists(_dest(wt))
+    assert _partials(wt) == []
+    _assert_alpha_refused(first, "copy_failed:OSError")
+    second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
+    assert (second["status"], second["reason"]) == ("ok", None)
+    assert _asset(wt).read_bytes() == b"shipped\n"
+    assert _dest(wt).read_bytes() == b"alpha\n"
+
+
+def _plant_before_link(target: bytes, plant):
+    """Let *plant* create an entry at the final name after the private copy is written, just before the link."""
+    real_link = os.link
+    sources: list[str] = []
+
+    def link(src, dst, *, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True):
+        fd = os.open(src, os.O_RDONLY, dir_fd=src_dir_fd)
+        try:
+            content = os.read(fd, 4096)
+        finally:
+            os.close(fd)
+        if content == target:
+            sources.append(src)
+            plant(dst, dst_dir_fd)
+        return real_link(src, dst, src_dir_fd=src_dir_fd, dst_dir_fd=dst_dir_fd, follow_symlinks=follow_symlinks)
+
+    return mock.patch.object(asm.os, "link", link), sources
+
+
+def _plant_file(name, dir_fd):
+    fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644, dir_fd=dir_fd)
+    try:
+        os.write(fd, b"planted\n")
+    finally:
+        os.close(fd)
+
+
+@pytest.mark.parametrize("target", [b"alpha\n", b"shipped\n"], ids=["skill-md", "asset"])
+def test_file_that_appears_before_the_link_is_never_replaced(tmp_path, target):
+    import re
+
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    patch, sources = _plant_before_link(target, _plant_file)
+    with patch:
+        result = _call(wt, tmp_path)
+    assert len(sources) == 1 and re.match(PARTIAL_RE, sources[0])
+    final = _dest(wt) if target == b"alpha\n" else _asset(wt)
+    assert final.read_bytes() == b"planted\n"
+    assert _partials(wt) == []
+    _assert_alpha_refused(result, "not_owned:alpha")
+    if target == b"shipped\n":
+        assert not os.path.lexists(_dest(wt))
+
+
+def test_link_that_appears_before_the_link_is_never_followed(tmp_path, worktree):
+    outside = _outside(tmp_path)
+
+    def plant_link(name, dir_fd):
+        os.symlink(str(outside / "data.txt"), name, dir_fd=dir_fd)
+
+    patch, sources = _plant_before_link(b"alpha\n", plant_link)
+    with patch:
+        result = _call(worktree, tmp_path)
+    assert len(sources) == 1
+    _assert_refused(result, outside)
+    assert os.path.islink(_dest(worktree))
+    assert _partials(worktree) == []
+    assert not (worktree / ".claude" / "skills" / "beta").exists()
+
+
+@pytest.mark.parametrize("err,reason", [
+    ("EPERM", "copy_failed:LinkUnsupported"),
+    ("ENOTSUP", "copy_failed:LinkUnsupported"),
+    ("EOPNOTSUPP", "copy_failed:LinkUnsupported"),
+    ("EIO", "copy_failed:OSError"),
+])
+def test_filesystem_without_hard_links_never_writes_the_final_name(tmp_path, worktree, err, reason):
+    import errno
+
+    code = getattr(errno, err)
+
+    def link(*args, **kwargs):
+        raise OSError(code, os.strerror(code))
+
+    with mock.patch.object(asm.os, "link", link):
+        result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"], result["skills"]) == ("error", reason, [])
+    assert reason.split(":")[0] + ":<Class>" in asm.REASONS
+    for slug in ("alpha", "beta"):
+        assert not os.path.lexists(_dest(worktree, slug))
+    assert _partials(worktree) == []
+
+
+def _leftover(wt, content=None, link_to=None):
+    folder = _dest(wt).parent
+    folder.mkdir(parents=True)
+    leftover = folder / (".SKILL.md.vnx-partial-" + "0" * 32)
+    if link_to is not None:
+        leftover.symlink_to(link_to)
+    else:
+        leftover.write_bytes(content)
+    return leftover
+
+
+@pytest.mark.parametrize("published", [False, True], ids=["killed-before-link", "killed-after-link"])
+def test_leftover_partial_of_a_killed_run_is_not_read_counted_or_removed(tmp_path, worktree, published):
+    leftover = _leftover(worktree, b"alpha\n" if published else b"al")
+    if published:
+        os.link(leftover, _dest(worktree))
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("ok", None)
+    assert [e["ownership"] for e in result["skills"]] == ["native" if published else "materialized", "materialized"]
+    assert result["skills"][0]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
+    assert _dest(worktree).read_bytes() == b"alpha\n"
+    assert leftover.read_bytes() == (b"alpha\n" if published else b"al")
+    assert _partials(worktree) == [leftover]
+
+
+def test_leftover_partial_that_is_a_link_is_never_followed(tmp_path, worktree):
+    outside = _outside(tmp_path)
+    leftover = _leftover(worktree, link_to=outside / "data.txt")
+    result = _call(worktree, tmp_path)
+    _assert_refused(result, outside)
+    assert leftover.is_symlink()
+    assert not os.path.lexists(_dest(worktree))
+    assert not (worktree / ".claude" / "skills" / "beta").exists()
+
+
+def test_repo_gitignore_ignores_a_leftover_partial():
+    names = [".claude/skills/zzz-probe/.SKILL.md.vnx-partial-" + "0" * 32,
+             ".claude/skills/zzz-probe/assets/.data.txt.vnx-partial-" + "0" * 32]
+    proc = subprocess.run(["git", "-C", str(REPO), "check-ignore", "--no-index", *names],
+                          capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.splitlines() == names

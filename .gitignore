@@ -141,6 +141,9 @@ scripts/benchmark/field-tests/tasks.local.yaml
 .claude/skills/*/template.md
 .claude/skills/*/@*.md
 .claude/skills/skills.yaml
+# De materialiser schrijft elk skillbestand eerst naar `.<naam>.vnx-partial-<hex>` en
+# linkt het pas daarna naar zijn eindnaam. Een gekilde run kan die privénaam laten staan.
+.claude/skills/**/.*.vnx-partial-*
 .claude/hooks/
 .claude/terminals/*/.claude
 .claude/terminals/*/.mcp.json

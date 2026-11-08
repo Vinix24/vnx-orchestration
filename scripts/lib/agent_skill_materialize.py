@@ -13,12 +13,14 @@ raises to the caller. Under ``off`` nothing happens and no directory is made.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
 import os
 import stat
 import subprocess
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +50,12 @@ REASONS = frozenset({
 
 DEST_REFUSALS = frozenset({"symlink_in_destination", "path_outside_worktree"})
 
+# A skill file is written to ``.<name>.vnx-partial-<uuid4 hex>`` first and only then
+# linked to its final name. A killed run can leave such a name behind; nothing reads
+# it, counts it or removes it (ADR-059 decision 6), and ``.gitignore`` ignores it.
+PARTIAL_MARK = ".vnx-partial-"
+NO_LINK_ERRNOS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP})
+
 
 class ShadowError(Exception):
     """A refusal with a stable reason string; caught inside the module."""
@@ -55,6 +63,14 @@ class ShadowError(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class LinkUnsupported(OSError):
+    """The filesystem refuses the hard link that publishes a skill file; the slug is ``copy_failed:LinkUnsupported``."""
+
+
+class IncompleteWrite(OSError):
+    """The private copy holds another length than the source after the write; it is never published."""
 
 
 @dataclass(frozen=True)
@@ -332,30 +348,67 @@ def _lexists(name: str, dir_fd: int) -> bool:
 
 
 def _create_nofollow(root_fd: int, rel: Path, data: bytes, mode: int) -> None:
-    """Create *rel* below *root_fd* with ``O_CREAT|O_EXCL|O_NOFOLLOW``: an existing name is never replaced.
+    """Publish *data* at *rel* below *root_fd* only once it is complete; an existing name is never replaced.
 
-    A link at the name refuses the run (``symlink_in_destination``); any other entry that
-    exists by now raises FileExistsError for the caller to name. No temp file, no rename.
+    The bytes go to a private name in the same directory (:func:`_write_partial`), and a
+    hard link publishes it (:func:`_publish`): ``link`` fails on any existing entry, so the
+    final name is either absent or holds every byte. The private name is unlinked by
+    ``dir_fd`` on every path out, so a failure leaves neither name. No replace, no rename.
     """
     dir_fd = _descend(root_fd, rel.parts[:-1])
     try:
+        tmp = _write_partial(dir_fd, rel.name, data, mode)
         try:
-            fd = os.open(rel.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
-        except FileExistsError:
-            if stat.S_ISLNK(os.stat(rel.name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
-                raise ShadowError("symlink_in_destination") from None
-            raise
-        with os.fdopen(fd, "wb") as handle:  # vnx-atomic-write: O_EXCL create of a new name; nothing to replace
-            handle.write(data)
-            os.fchmod(handle.fileno(), mode)
+            _publish(dir_fd, tmp, rel.name)
+        finally:
+            os.unlink(tmp, dir_fd=dir_fd)
     finally:
         os.close(dir_fd)
+
+
+def _write_partial(dir_fd: int, name: str, data: bytes, mode: int) -> str:
+    """Write *data* to a new private name next to *name*, synced and length-checked; a failure removes it again."""
+    tmp = f".{name}{PARTIAL_MARK}{uuid.uuid4().hex}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "wb") as handle:  # vnx-atomic-write: private O_EXCL name, published by os.link
+            handle.write(data)
+            handle.flush()
+            os.fchmod(handle.fileno(), mode)
+            os.fsync(handle.fileno())
+            if os.fstat(handle.fileno()).st_size != len(data):
+                raise IncompleteWrite(errno.EIO, f"{name}: the private copy is not {len(data)} bytes")
+    except BaseException:
+        os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    return tmp
+
+
+def _publish(dir_fd: int, tmp: str, name: str) -> None:
+    """Hard-link the complete *tmp* to *name* below *dir_fd*; never a fallback write to *name* itself.
+
+    A link at *name* refuses the run (``symlink_in_destination``); any other entry raises
+    FileExistsError for the caller to name ``not_owned:<slug>``. A filesystem without hard
+    links (``EPERM``/``ENOTSUP``) raises :class:`LinkUnsupported`.
+    """
+    try:
+        os.link(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd, follow_symlinks=False)
+    except FileExistsError:
+        if stat.S_ISLNK(os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+            raise ShadowError("symlink_in_destination") from None
+        raise
+    except OSError as exc:
+        if exc.errno in NO_LINK_ERRNOS:
+            raise LinkUnsupported(exc.errno, f"{name}: {exc.strerror}") from exc
+        raise
 
 
 def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source) -> dict[str, Any]:
     """Create ``<slug>/`` and every file of *src* below *parent_fd*; nothing is opened by a multi-component path.
 
-    SKILL.md is created last, so its presence means the copy completed: a copy that fails
+    Every file appears at its final name only with all its bytes (:func:`_create_nofollow`),
+    and SKILL.md is published last. So a SKILL.md at the final name is complete, and its
+    presence means every other file of the copy is published too: a copy that fails
     halfway leaves no SKILL.md, and the next attempt never reads it as ``already_native``.
     """
     root_fd = _descend(parent_fd, (slug,))
