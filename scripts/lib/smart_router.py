@@ -1042,6 +1042,12 @@ _PLAN_SCOPE_PREFIXES: tuple[tuple[str, str], ...] = (
     ("scripts/lib/receipt_verdict.py", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/receipt_processor/", PLAN_SCOPE_GATE_MERGE),
     ("scripts/receipt_processor.sh", PLAN_SCOPE_GATE_MERGE),
+    # The files that set the review weight (the plan-gate panel, the governance
+    # profiles and enforcement) live under these two roots. A one-line edit there
+    # lowers the weight of every later review, so they are gate code themselves
+    # (track gate-profiel-per-project, P2).
+    ("configs/", PLAN_SCOPE_GATE_MERGE),
+    (".vnx/", PLAN_SCOPE_GATE_MERGE),
     ("scripts/lib/vnx_paths", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/project_root.py", PLAN_SCOPE_STORE_RESOLUTION),
     ("scripts/lib/launchd_project_root.py", PLAN_SCOPE_STORE_RESOLUTION),

@@ -135,7 +135,7 @@
           "note": "",
           "reason": "fail-closed: the PR's base branch is not known ('' given); no base is assumed; the caller's --risk-class medium does not lower it",
           "risk_class": "high",
-          "rule_version": "67591075cb2c59b7",
+          "rule_version": "0e24a4e6629bc962",
           "source": "derived"
         },
         "review_seats": {
