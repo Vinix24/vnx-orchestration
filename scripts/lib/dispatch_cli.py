@@ -2316,10 +2316,72 @@ def _capped_prs_on_branch(state_dir: Path, branch: str, dispatch_id: str = "") -
     ]
 
 
+def _base_delivery_id(dispatch_id: str) -> str:
+    """``dlv-abc`` for ``dlv-abc-r3``: the id without its round suffix; "" when unknown."""
+    import schema_manifest
+
+    text = (dispatch_id or "").strip()
+    base, sep, _ = text.rpartition(schema_manifest.ROUND_SEPARATOR)
+    if sep and base and schema_manifest.is_round_of(base, text):
+        return base
+    return text
+
+
+def _capped_delivery_id(cap) -> str:
+    """The base delivery id of the capped PR's latest counted round; "" when it names none."""
+    for line in reversed(tuple(cap.rounds)):
+        base = _base_delivery_id(line.dispatch_id)
+        if base:
+            return base
+    return ""
+
+
+def _record_b3_override_row(
+    conn, cap, *, reason: str, project_id: str,
+) -> None:
+    """Record the governance override for one capped PR (ADR-056 identity in its metadata)."""
+    import governance_escalation
+
+    delivery_id = _capped_delivery_id(cap)
+    named = bool(delivery_id)
+    governance_escalation.record_override(
+        conn,
+        entity_type="delivery" if named else "pr",
+        entity_id=delivery_id if named else str(cap.pr_number),
+        actor="operator",
+        override_type="b3_cap_override",
+        justification=reason,
+        override_scope=B3_OVERRIDE_REASON_ENV,
+        project_id=project_id,
+        delivery_id=delivery_id,
+    )
+
+
+def _book_b3_override_rows(capped: list, *, reason: str, state_dir: Path, project_id: str) -> None:
+    """One ``governance_overrides`` row per capped PR, in one transaction."""
+    import coordination_db
+
+    with coordination_db.get_connection(state_dir) as conn:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'governance_overrides'",
+        ).fetchone()
+    if not has_table:
+        coordination_db.init_schema(state_dir)
+    with coordination_db.get_connection(state_dir) as conn:
+        for cap in capped:
+            _record_b3_override_row(conn, cap, reason=reason, project_id=project_id)
+        conn.commit()
+
+
 def _book_b3_override_records(
     capped: list, *, reason: str, state_dir: Path,
 ) -> None:
-    """Book one ``override`` line per capped PR; a write failure propagates (fail-closed)."""
+    """Book one ``override`` line and one governance override row per capped PR.
+
+    A write failure propagates (fail-closed): a ledger failure as it is, a failure
+    of the override row as a :class:`RoundLedgerError`, so the fire is refused with
+    ``b3-override-ledger-error`` either way.
+    """
     import review_rounds
 
     review_gates = state_dir / "review_gates"
@@ -2329,6 +2391,12 @@ def _book_b3_override_records(
         review_rounds.book_b3_override(
             ledger, project_id=project_id, cap=cap, reason=reason, set_by=B3_OVERRIDE_REASON_ENV,
         )
+    try:
+        _book_b3_override_rows(capped, reason=reason, state_dir=state_dir, project_id=project_id)
+    except Exception as exc:
+        raise review_rounds.RoundLedgerError(
+            f"the governance override record could not be written: {exc}",
+        ) from exc
 
 
 def _book_b3_override_at_fire(snapshot: RuntimeSnapshot, *, state_dir: Path) -> Optional[ConstraintVerdict]:
