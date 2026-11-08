@@ -129,8 +129,10 @@ class ReviewSeats:
         """The shape a request record carries, so an evaluator can use what was requested.
 
         ``stack_source`` is on the record (P5): a one-seat stack the profile supplied must be told
-        from an operator's. The other gate profile fields stay off it: the trail carries them from P6
-        (``gate-profiel-per-project``), which moves the golden request line again.
+        from an operator's. ``profile``, ``profile_source`` and ``profile_error`` are on it since P6
+        (``gate-profiel-per-project``), so the seat record and the ``review_gate_result`` receipt can
+        say under which gate profile the stack was decided. They are not ``profile_stack``, which is
+        the glob governance profile's stack. ``None`` is unknown, never ``standard``.
         """
         return {
             "seats": list(self.seats),
@@ -140,6 +142,9 @@ class ReviewSeats:
             "value": self.value,
             "profile_stack": list(self.profile_stack) if self.profile_stack is not None else None,
             "stack_source": self.stack_source,
+            "profile": self.profile,
+            "profile_source": self.profile_source,
+            "profile_error": self.profile_error,
         }
 
 

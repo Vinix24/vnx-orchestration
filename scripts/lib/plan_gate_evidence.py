@@ -35,6 +35,23 @@ def _ledger_path(repo_root: "str | Path") -> Path:
     return Path(repo_root) / _LEDGER
 
 
+_TRACE_PROFILE_PREFIX = "profile="
+
+
+def profile_label_from_trace(gov_trace: str) -> str:
+    """The ``<profile> (<source>)`` label ``planning_cli._panel_gov_trace`` put in ``gov_trace``, else ``""``.
+
+    The gate profile (``VNX_GOVERNANCE_PROFILE``) and its source sit next to the seats on the
+    evidence record in the same words as in the trace (gate-profiel P6). A trace without the
+    part (a project whose profile key is not set) gives ``""`` and the record carries no
+    ``gate_profile``: unknown, never ``standard``. Parts are separated by ``"; "``.
+    """
+    for part in str(gov_trace or "").split("; "):
+        if part.startswith(_TRACE_PROFILE_PREFIX):
+            return part[len(_TRACE_PROFILE_PREFIX):].strip()
+    return ""
+
+
 def emit_plan_gate_pass(
     *,
     repo_root: "str | Path",
@@ -92,6 +109,9 @@ def emit_plan_gate_pass(
             record["governance_variant"] = governance_variant
         if gov_trace is not None:
             record["gov_trace"] = gov_trace
+            label = profile_label_from_trace(gov_trace)
+            if label:
+                record["gate_profile"] = label
         if key_path and signer_identity:
             from attestation import sign_manifest  # noqa: PLC0415
             record["signer_identity"] = signer_identity

@@ -329,6 +329,14 @@ class RequiredSeats:
     #: ``stack_source`` of the recorded request (``""`` for a record written before it existed
     #: and for any stack that is not a recorded one).
     stack_source: str = ""
+    #: The gate profile (``gate_profile``, not the glob governance profile) the stack was decided
+    #: under: from the recorded request for a recorded stack, from the fresh resolution otherwise.
+    #: ``None`` is "unknown" (a named list, a record from before P6), never ``standard``. On a
+    #: refused profile value ``profile`` stays ``None`` and ``profile_raw``/``profile_error`` say why (B13).
+    profile: Optional[str] = None
+    profile_source: Optional[str] = None
+    profile_error: Optional[str] = None
+    profile_raw: Optional[str] = None
 
     def risk_text(self) -> str:
         """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
@@ -663,16 +671,47 @@ def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str
     return best
 
 
-def fresh_config_seats() -> Tuple[Optional[Tuple[str, ...]], str, str]:
-    """``(seats, value, refusal)`` from a fresh ``resolve_review_seats()`` for this process's project."""
+def _fresh_resolution() -> Tuple[Any, Optional[Exception]]:
+    """``(ReviewSeats, None)`` from a fresh ``resolve_review_seats()``, or ``(None, the refusal)``."""
     from dispatch_spec import ReviewGateConfigError
     from review_seats import resolve_review_seats
 
     try:
-        resolved = resolve_review_seats()
+        return resolve_review_seats(), None
     except ReviewGateConfigError as exc:  # the shared base: a bad stack and a bad governance profile both refuse by name
-        return None, "", str(exc)
+        return None, exc
+
+
+def fresh_config_seats() -> Tuple[Optional[Tuple[str, ...]], str, str]:
+    """``(seats, value, refusal)`` from a fresh ``resolve_review_seats()`` for this process's project."""
+    resolved, refusal = _fresh_resolution()
+    if resolved is None:
+        return None, "", str(refusal)
     return resolved.seats, resolved.value, ""
+
+
+def _fresh_profile_fields(resolved: Any, refusal: Optional[Exception]) -> Dict[str, Any]:
+    """The gate profile fields of a fresh resolution; a refused profile value never reads as ``standard`` (B13)."""
+    from gate_profile import GateProfileConfigError
+
+    if resolved is not None:
+        return {"profile": resolved.profile, "profile_source": resolved.profile_source, "profile_error": resolved.profile_error}
+    if isinstance(refusal, GateProfileConfigError):
+        return {
+            "profile": None, "profile_source": refusal.source, "profile_error": str(refusal),
+            "profile_raw": refusal.raw if isinstance(refusal.raw, str) else repr(refusal.raw),
+        }
+    return {}  # a refusal about the stack, not the profile: the profile of this moment is not known
+
+
+def _recorded_profile_fields(recorded: Dict[str, Any]) -> Dict[str, Any]:
+    """The gate profile fields the recorded request carries; absent keys stay unknown (``None``)."""
+    fields: Dict[str, Any] = {}
+    for key in ("profile", "profile_source", "profile_error", "profile_raw"):
+        value = recorded.get(key)
+        if isinstance(value, str) and value:
+            fields[key] = value
+    return fields
 
 
 def required_seats(
@@ -697,17 +736,21 @@ def required_seats(
             return RequiredSeats((), seats_source, error=f"de opgegeven seat-lijst ({seats_source}) is leeg")
         return RequiredSeats(named, seats_source, value=",".join(named), stack=named)
     recorded = recorded_config_seats(Path(requests_dir), pr_id, head_sha)
-    fresh, value, refusal = fresh_config_seats()
+    fresh_rs, fresh_error = _fresh_resolution()
+    fresh = fresh_rs.seats if fresh_rs is not None else None
+    value = fresh_rs.value if fresh_rs is not None else ""
+    refusal = "" if fresh_error is None else str(fresh_error)
     if recorded is None:
+        fields = _fresh_profile_fields(fresh_rs, fresh_error)
         if fresh is None:
-            return RequiredSeats((), SOURCE_FRESH, error=refusal)
-        resolved = RequiredSeats(fresh, SOURCE_FRESH, value=value, stack=fresh)
+            return RequiredSeats((), SOURCE_FRESH, error=refusal, **fields)
+        resolved = RequiredSeats(fresh, SOURCE_FRESH, value=value, stack=fresh, stack_source=fresh_rs.stack_source, **fields)
     else:
         kept = tuple(recorded["seats"])
         resolved = RequiredSeats(
             kept, SOURCE_RECORDED, value=str(recorded.get("value") or ""), fresh=fresh,
             note=_recorded_note(kept, fresh, refusal), stack=kept,
-            stack_source=str(recorded.get("stack_source") or ""),
+            stack_source=str(recorded.get("stack_source") or ""), **_recorded_profile_fields(recorded),
         )
     if not by_risk:
         return resolved
@@ -1638,6 +1681,26 @@ class SeatEvaluation:
                 f"operator en een geboekte nasleep; alleen de codex-seat wordt hierdoor geheven")
         return "; ".join(parts)
 
+    def _profile_trail(self) -> Dict[str, Any]:
+        """The gate profile the seats were decided under (gate-profiel P6, B8/B13/B14).
+
+        Not ``profile_stack`` (the glob governance profile's stack) and not the governance
+        profile: this is ``VNX_GOVERNANCE_PROFILE``. ``None`` is "unknown", never ``standard``.
+        ``profile_raw`` is written only for a refused value. ``required_error`` is the text of
+        ``RequiredSeats.error`` (a ``light`` refusal on a signal path, an unreadable stack).
+        """
+        required = self.required
+        trail: Dict[str, Any] = {
+            "profile": required.profile,
+            "profile_source": required.profile_source,
+            "profile_error": required.profile_error,
+            "stack_source": required.stack_source or None,
+            "required_error": required.error or None,
+        }
+        if required.profile_raw is not None:
+            trail["profile_raw"] = required.profile_raw
+        return trail
+
     def to_record(self) -> Dict[str, Any]:
         """The shape the merge record carries (``review_seats`` on the ``pr_merged`` receipt)."""
         record = {
@@ -1657,6 +1720,7 @@ class SeatEvaluation:
         }
         if self.required.rule_value:
             record["rule_value"] = self.required.rule_value
+        record.update(self._profile_trail())
         if self.required.rule == RISK_SEAT_RULE:
             risk = self.required.risk or {}
             record.update({

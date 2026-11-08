@@ -141,6 +141,9 @@
         "review_seats": {
           "extra_gates": [],
           "key": "",
+          "profile": "standard",
+          "profile_error": null,
+          "profile_source": "default",
           "profile_stack": null,
           "seats": [
             "codex_gate"
