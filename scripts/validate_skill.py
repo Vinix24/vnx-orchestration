@@ -7,6 +7,7 @@ Usage:
     python3 validate_skill.py frontend-developer
     python3 validate_skill.py --list                # List all valid skills
     python3 validate_skill.py --check-disk          # Verify SKILL.md files exist
+    python3 validate_skill.py --inventory           # One JSON object: layers, provider_unsafe, parity
 
 Exit codes:
     0 - Valid skill
@@ -14,6 +15,7 @@ Exit codes:
     2 - No skill provided
 """
 
+import json
 import sys
 import yaml
 from pathlib import Path
@@ -21,6 +23,10 @@ from typing import List, Dict, Optional, Set
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from vnx_skills import iter_skill_dirs  # noqa: E402
+from skill_portability import provider_unsafe_skills, tree_parity  # noqa: E402
+
+# Registry types that T0 itself runs; every other skill belongs to the worker layer.
+T0_LAYER_TYPES = frozenset({"planning", "orchestration", "reference"})
 
 
 class SkillValidator:
@@ -137,6 +143,21 @@ class SkillValidator:
                     'responsibilities': skill_data.get('responsibilities', [])
                 }
         return None
+
+    def inventory(self, shipped_tree: Path) -> Dict:
+        """Layers (this tree), portability and parity (shipped tree against this tree)."""
+        t0_names = {
+            data['name'].lstrip('@') for data in self.skills.values()
+            if data.get('type') in T0_LAYER_TYPES
+        }
+        names = self.get_valid_skills()
+        return {
+            't0_layer': sorted(n for n in names if n in t0_names),
+            'worker_layer': sorted(n for n in names if n not in t0_names),
+            'provider_unsafe': provider_unsafe_skills(shipped_tree),
+            'parity': tree_parity(shipped_tree, self.skills_dir),
+            'trees': {'shipped': str(shipped_tree), 'project': str(self.skills_dir)},
+        }
 
     def list_skills_by_category(self):
         """List all skills grouped by type"""
@@ -259,5 +280,21 @@ def main():
             sys.exit(1)
 
 
+def run_inventory(extra_args: List[str]) -> int:
+    """Print the inventory as one JSON object; any extra argument is a usage error."""
+    if extra_args:
+        print("Usage: python3 validate_skill.py --inventory", file=sys.stderr)
+        return 2
+    from vnx_paths import ensure_env
+    shipped_tree = Path(ensure_env()["VNX_HOME"]) / "skills"
+    if not shipped_tree.is_dir():
+        print(f"Shipped skills tree not found: {shipped_tree}", file=sys.stderr)
+        return 1
+    print(json.dumps(SkillValidator().inventory(shipped_tree), indent=2, sort_keys=True))
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ['--inventory']:
+        sys.exit(run_inventory(sys.argv[2:]))
     main()
