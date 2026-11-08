@@ -1,0 +1,1 @@
+- DISPATCH_RULES no longer names a `vnx config` subcommand, so the T0 role audit (`tests/test_t0_role_audit_static.py`) is clean again after #2547 (OI-2678).

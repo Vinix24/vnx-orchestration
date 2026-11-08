@@ -125,7 +125,7 @@ cap, the takeover chain and the plan-gate seats.
   audited operator surface (`scripts/lib/config_store_db.py:133`: the value plus a mandatory
   `project_config_audit` row in one transaction); that surface needs an `approval_id` for this key
   because its registry entry is marked `approval=True` (`scripts/lib/config_registry.py:205-215`).
-  There is no `vnx config` subcommand.
+  The `vnx` CLI has no config subcommand: write the row through that surface.
 - **Precedence, per value.** `VNX_OVERRIDE_<BARE>` > the `project_config` row > the enforcement layer
   (the two stacks only) > the profile > `VNX_<BARE>` > the registry default
   (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py:664`). The profile
