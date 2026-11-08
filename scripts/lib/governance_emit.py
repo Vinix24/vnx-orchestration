@@ -100,15 +100,34 @@ def _manifest_line(dispatch_id: str, session_id: str, project_id: str, manifest:
     )
 
 
+def _read_whole_ledger(fd: int, size: int) -> bytes:
+    """Exactly ``size`` bytes from offset 0, or ``OSError``. A short read is legal, so loop.
+
+    An early EOF (0 bytes before ``size``) raises: the caller must not decide
+    to truncate from content it only partly saw.
+    """
+    chunks: list = []
+    got = 0
+    while got < size:
+        chunk = os.pread(fd, size - got, got)
+        if not chunk:
+            raise OSError(f"context manifest ledger read ended at {got} of {size} bytes")
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
+
+
 def _recover_ledger_tail(fd: int) -> bytes:
     """The ledger content with any unterminated tail cut off under the held lock.
 
     A tail after the last newline is a fragment no caller ever got a hash for:
     truncate to the last complete line and fsync, so neither the duplicate scan
-    can match it nor the next append join it. Logs the byte count, never content.
+    can match it nor the next append join it. The cut point comes only from the
+    complete content: a read that cannot finish raises before any truncate.
+    Logs the byte count, never content.
     """
     size = os.fstat(fd).st_size
-    content = os.pread(fd, size, 0) if size else b""
+    content = _read_whole_ledger(fd, size)
     if not content or content.endswith(b"\n"):
         return content
     keep = content.rfind(b"\n") + 1

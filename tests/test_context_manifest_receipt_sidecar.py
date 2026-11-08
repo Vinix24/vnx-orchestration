@@ -313,3 +313,58 @@ def test_a_duplicate_with_a_failing_fsync_gives_no_hash_and_a_working_one_the_sa
     assert governance_emit._write_manifest_sidecar(*args) == {
         "schema": 1, "status": "error", "reason": "ledger_write_failed:OSError"}
     assert len(_sidecar(env)) == 1
+
+
+def _short_pread_once(monkeypatch):
+    real, calls = governance_emit.os.pread, []
+
+    def short(fd, n, offset):
+        calls.append((n, offset))
+        data = real(fd, n, offset)
+        return data[: len(data) // 2] if len(calls) == 1 else data
+    monkeypatch.setattr(governance_emit.os, "pread", short)
+    return calls
+
+
+def test_a_short_read_that_completes_in_the_loop_keeps_every_complete_line(env, monkeypatch):
+    _shadow(monkeypatch)
+    ledger = env["state"] / LEDGER
+    ledger.write_bytes(b'{"a":1}\n{"bbbbbbbbbbbb":2}\n')
+    calls = _short_pread_once(monkeypatch)
+    ref = _emit_stamp(env)
+    assert len(calls) >= 2 and calls[1][1] > 0  # the second read resumes at the running offset
+    rows = _sidecar(env)
+    assert rows[:2] == ['{"a":1}', '{"bbbbbbbbbbbb":2}'] and len(rows) == 3
+    assert ref["status"] == "ok" and ref["sha256"] == hashlib.sha256(rows[2].encode()).hexdigest()
+
+
+def test_a_short_read_drops_only_the_real_fragment(env, monkeypatch):
+    _shadow(monkeypatch)
+    ledger = env["state"] / LEDGER
+    ledger.write_bytes(b'{"a":1}\n{"bbbbbbbbbbbb":2}\n{"dispatch_id":"x","sess')
+    _short_pread_once(monkeypatch)
+    _emit_stamp(env)
+    rows = _sidecar(env)
+    assert rows[:2] == ['{"a":1}', '{"bbbbbbbbbbbb":2}'] and len(rows) == 3
+
+
+def test_an_incomplete_read_leaves_the_ledger_byte_equal_and_no_hash(env, monkeypatch):
+    _shadow(monkeypatch)
+    ledger = env["state"] / LEDGER
+    ledger.write_bytes(b'{"a":1}\n{"bbbbbbbbbbbb":2}\n{"dispatch_id":"x","sess')
+    before = ledger.read_bytes()
+    monkeypatch.setattr(governance_emit.os, "pread", lambda fd, n, offset: b"")
+    ref = _emit_stamp(env)
+    assert ledger.read_bytes() == before
+    assert ref == {"schema": 1, "status": "error", "reason": "ledger_write_failed:OSError"}
+
+
+def test_a_read_that_raises_leaves_the_ledger_byte_equal_and_no_hash(env, monkeypatch):
+    _shadow(monkeypatch)
+    ledger = env["state"] / LEDGER
+    ledger.write_bytes(b'{"a":1}\n{"bbbbbbbbbbbb":2}\n{"frag')
+    before = ledger.read_bytes()
+    monkeypatch.setattr(governance_emit.os, "pread", lambda fd, n, offset: (_ for _ in ()).throw(OSError("io")))
+    ref = _emit_stamp(env)
+    assert ledger.read_bytes() == before
+    assert ref == {"schema": 1, "status": "error", "reason": "ledger_write_failed:OSError"}
