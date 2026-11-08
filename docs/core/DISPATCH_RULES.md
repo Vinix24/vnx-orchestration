@@ -112,6 +112,96 @@ So a green CI does **not** prove:
 
 A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a required context that cannot fail while `VNX_SLUG_ENFORCEMENT` is `0` in the workflow. Do not quote a test count from a green run. Every CI lock, its release and its test: `docs/core/LOCKS_AND_RELEASES.md` stage 5.
 
+### 2.4 The gate profile (`VNX_GOVERNANCE_PROFILE`)
+
+One key sets a project's gate weight in one move: the review stack the door asks, the review round
+cap, the takeover chain and the plan-gate seats.
+
+- **Where the reasons live.** The durable contract, the full table and every decision behind it are
+  **ADR-060** (`docs/governance/decisions/ADR-060-poortprofiel-per-project.md`). The safety floor and
+  the `gate-merge` exception are **ADR-008, amendment 4 (2026-11-08)**. This section is the operator
+  half; it repeats neither document.
+- **Setting it.** One `project_config` row, `VNX_GOVERNANCE_PROFILE`, per project. Write it through the
+  audited operator surface (`scripts/lib/config_store_db.py:133`: the value plus a mandatory
+  `project_config_audit` row in one transaction); that surface needs an `approval_id` for this key
+  because its registry entry is marked `approval=True` (`scripts/lib/config_registry.py:205-215`).
+  There is no `vnx config` subcommand.
+- **Precedence, per value.** `VNX_OVERRIDE_<BARE>` > the `project_config` row > the enforcement layer
+  (the two stacks only) > the profile > `VNX_<BARE>` > the registry default
+  (`config_registry.resolve_with_source`, `scripts/lib/config_registry.py:664`). The profile
+  deliberately outranks a bare env var; an operator value on a field's own key, `override` or row,
+  outranks the profile (`scripts/lib/gate_profile.py:173`).
+- **What each profile does.** `standard` contributes nothing: every reader keeps its own chain, so an
+  unset key and `standard` are today's behaviour (`gate_profile.PROFILE_TABLE`,
+  `scripts/lib/gate_profile.py:66`). `ci_gate` joins a stack when `VNX_CI_GATE_REQUIRED` is true, never
+  because of the profile. `heavy` keeps four takeover names; a fifth seat on API credit is not
+  "heavy".
+
+| Profile | Review stack (door asks) | Round cap | Takeover chain | Plan-gate seats |
+|---|---|---|---|---|
+| `light` | `codex_gate` (+`ci_gate`) | 2 | codex, kimi, claude | 1 |
+| `standard` (default) | `codex_gate,kimi_gate` (+`ci_gate`) | 3 | codex, kimi, claude, deepseek | 1 |
+| `heavy` | `codex_gate,kimi_gate,claude_gate` (+`ci_gate`) | 5 | codex, kimi, claude, deepseek | 2 |
+
+**Reading the effect.**
+
+- `vnx gate-profile show` prints the profile with its source, both stacks with the source of every
+  name, and the four values with their own source (`scripts/gate_profile_cli.py:53`).
+- `--json` gives the same as a record; `--value <field> [--csv]` prints one value for a script.
+- Two views, one function: `review_stack` is what the door asks (`scripts/lib/gate_profile.py:292`),
+  `required_stack` is what `vnx gate` verifies (`:317`) — the `checks.*_required` dials from
+  `.vnx/governance_enforcement.yaml` applied on top. Level >= 2 makes those gates the stack; level 0
+  removes a seat; level 1 requires nothing. When the two views differ, the command prints the
+  two-sources warning (`:77`).
+- In this project the dials are codex 2, kimi 2, ci 3 (`.vnx/governance_enforcement.yaml:15-28`), so
+  `required_stack` is `codex_gate,kimi_gate,ci_gate`, equal to today's request stack.
+
+**The trail in receipts and records.**
+
+- The review request record, the `review_gate_result` receipt and the `pr_merged` record carry
+  `profile`, `profile_source` and `profile_error` (`scripts/lib/review_seats.py:128`,
+  `scripts/lib/gate_recorder.py:1943`, `scripts/lib/review_seat_evaluation.py:1704`). A refused value
+  adds `profile_raw` and leaves `profile` null.
+- A record without the keys is **unknown**, never `standard`. The fields are additive and carry no
+  schema bump.
+- The plan-gate's `gov_trace` and its evidence record say `profile=<name> (<source>)`
+  (`scripts/planning_cli.py:4868`, `scripts/lib/plan_gate_evidence.py:114`).
+
+**`light` on a signal path is refused.**
+
+- A security, schema, irreversible, outside-repo or store-resolution head keeps two review seats under
+  every profile. `light` has one, so on such a head the door refuses and names the profile and the
+  path in `RequiredSeats.error` (`scripts/lib/review_seat_evaluation.py:791`). It never quietly raises
+  the stack to two: raising would make the profile lie.
+- The one exemption is a head whose deciding category is **only** `gate-merge`
+  (`scripts/lib/review_seat_evaluation.py:770`), the operator decision of 2026-10-30.
+- The escape is explicit and stays in the request: name a two-seat stack
+  (`--review-stack codex_gate,kimi_gate`) and the stack wins over the profile.
+- On the plan-gate side the floor is `second_seat_from_start`
+  (`scripts/lib/plan_gate_panel.py:2381`), which `compose_panel` takes as
+  `max(profile_seats, floor)` (`:647`).
+
+**A malformed value fails closed.**
+
+- An unset, empty or whitespace value is `standard`. After one `strip()` only `light`, `standard` or
+  `heavy` is legal, case-sensitive. Anything else (`zwaar`, `Heavy`, `high`) raises
+  `GateProfileConfigError` naming the raw value and its source (`scripts/lib/gate_profile.py:99`).
+- Nothing falls back to `standard`: the door requests nothing and blocks, `vnx gate` stops with the
+  reason instead of picking a literal (`scripts/commands/gate.sh:33`), the plan-gate refuses
+  (`scripts/planning_cli.py:4851`), and `vnx gate-profile show` prints the error and exits 2
+  (`scripts/gate_profile_cli.py:35`).
+- A typo therefore stops merges in that project until the row is corrected. That is the design, not a
+  bug.
+
+**Rollback.**
+
+- Remove the key or set the row to `standard`; that is the whole rollback, no code and no migration.
+  It restores the old chain for **future** requests; open obligations keep the requirement they were
+  booked under.
+- ADR-060 §7 states per clause what of the change contract holds today and what is a limit: a
+  not-yet-started obligation is **not** retired by a lighter profile (no code path ties `retired` to
+  the profile), and an explicitly named stack is not re-judged against a profile that became stricter.
+
 ## 3. PR size + iteration caps
 
 - Target **150–200 LOC** delta; **hard cap 300** (override `--allow-large-pr` or split via track_dependencies). Exceptions (no cap): auto-generated migration SQL, single-bug-class test surface, mechanical renames. Put the LOC budget in the dispatch instruction.
