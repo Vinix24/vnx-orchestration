@@ -7,8 +7,9 @@ read these functions, so no second copy of the rule exists.
 Derived from the five skills measured as unsafe on origin/main (architect,
 database-engineer, debugger, intelligence-engineer, security-engineer). Only a path
 into the Claude Code user directory (``~/.claude/...``) singles out exactly those
-five: a port copies a dead path. Project-relative ``.claude/skills`` and
-``.claude/vnx-system`` references are no rule: many more skills carry them.
+five: a port copies a dead path. Project-relative paths under the project's own
+``.claude`` directory (the skills and the installed system copy) are no rule: many
+more skills carry them.
 """
 
 from __future__ import annotations
