@@ -2634,37 +2634,11 @@ class GateRequestHandlerMixin:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
         dispatch_id: str = "",
     ) -> Dict[str, Any]:
-        from review_gate_manager import _utc_now
-
-        available = self._kimi_gate_available()
-        requested_at = _utc_now()
-        payload = {
-            "gate": "kimi_gate",
-            "status": "requested" if available else "not_executable",
-            "provider": request_provider("kimi_gate"),
-            "branch": branch,
-            "pr_number": pr_number,
-            "review_mode": mode,
-            "risk_class": risk_class,
-            "changed_files": changed_files,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "report_path": self._build_report_path(
-                gate="kimi_gate",
-                requested_at=requested_at,
-                pr_number=pr_number,
-            ),
-        }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        if not available:
-            self._mark_gate_unavailable(
-                payload, gate="kimi_gate",
-                pr_number=pr_number, pr_id="",
-                dispatch_id=dispatch_id,
-            )
-        self._write_request_record(self._request_path("kimi_gate", pr_number), payload)
-        return payload
+        return self._request_harness_seat(
+            "kimi_gate", self._kimi_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
 
     def _request_glm(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
@@ -2683,65 +2657,11 @@ class GateRequestHandlerMixin:
         reaches here) so an operator can tell "not a real gate" apart from
         "real gate, route missing".
         """
-        from review_gate_manager import _utc_now
-
-        available = self._glm_gate_available()
-        requested_at = _utc_now()
-        payload: Dict[str, Any] = {
-            "gate": "glm_gate",
-            "status": "requested" if available else "not_executable",
-            "provider": request_provider("glm_gate"),
-            "branch": branch,
-            "pr_number": pr_number,
-            "review_mode": mode,
-            "risk_class": risk_class,
-            "changed_files": changed_files,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "report_path": self._build_report_path(
-                gate="glm_gate",
-                requested_at=requested_at,
-                pr_number=pr_number,
-            ) if available else "",
-        }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        if not available:
-            # Classified by name (gate_result_parser._classify_unavailable): a
-            # switched-off glm is provider_switched_off, never gate_runner_missing.
-            reason, reason_detail = self._classify_unavailable("glm_gate")
-            payload["reason"] = reason
-            payload["reason_detail"] = reason_detail
-            payload["resolved_at"] = payload["requested_at"]
-            # audit_refusal=False (OI-1750 second finding): this branch
-            # already calls _write_skip_rationale below unconditionally, so
-            # the default audit-on-refusal would double-log the same
-            # refused write -- same reasoning as _mark_gate_unavailable and
-            # gate_recorder.record_not_executable (OI-1707). The head moves
-            # to the skip-rationale call's commit_sha= instead.
-            _result_payload, written = self._write_not_executable_result(
-                gate="glm_gate", pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=reason_detail,
-                dispatch_id=dispatch_id,
-                branch=branch,
-                commit_sha=payload.get("commit_sha") or "",
-                audit_refusal=False,
-            )
-            if not written:
-                logger.warning(
-                    "gate_request_handler: not_executable write REFUSED for "
-                    "gate=glm_gate pr=%s -- an existing terminal, evidenced "
-                    "result stands; this refusal (reason=%s) was request-time "
-                    "only and never reached results/",
-                    pr_number, reason,
-                )
-            self._write_skip_rationale(
-                gate="glm_gate", pr_id=str(pr_number),
-                reason=reason, reason_detail=reason_detail,
-                commit_sha=payload.get("commit_sha") or "",
-            )
-        self._write_request_record(self._request_path("glm_gate", pr_number), payload)
-        return payload
+        return self._request_harness_seat(
+            "glm_gate", self._glm_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
 
     def _request_deepseek(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
@@ -2785,9 +2705,20 @@ class GateRequestHandlerMixin:
     ) -> Dict[str, Any]:
         """Request a harness-lane review ``gate`` whose availability the caller decided.
 
-        An unavailable gate is classified by name (gate_result_parser
-        ``_classify_unavailable``, same as ``_request_glm``) and booked
-        ``not_executable`` in the result record and the skip rationale.
+        The one request path of kimi_gate, glm_gate, deepseek_gate and
+        claude_gate (review-lane P3b): one payload shape, the ``provider`` label
+        from the gate's row (``request_provider``), nothing per provider.
+
+        ``report_path`` rule, the same for every seat: the path of the report
+        the seat will write when it is ``requested``, and ``""`` when the seat
+        is ``not_executable``. A seat that never runs has no report, and
+        ``gate_status.has_evidence_fields`` reads a populated ``report_path`` as
+        evidence that a review happened.
+
+        An unavailable gate is booked ``not_executable`` through
+        ``_mark_gate_unavailable``: classified by name (``_classify_unavailable``),
+        stamped ``reason``/``reason_detail``/``failure_reason``/``resolved_at`` on
+        the request, written to the result record and the skip rationale.
         """
         from review_gate_manager import _utc_now
 
@@ -2812,27 +2743,9 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if not available:
-            reason, reason_detail = self._classify_unavailable(gate)
-            payload["reason"] = reason
-            payload["reason_detail"] = reason_detail
-            payload["resolved_at"] = payload["requested_at"]
-            # audit_refusal=False (OI-1750 second finding): same shape as
-            # _mark_gate_unavailable/_request_glm above -- _write_skip_rationale
-            # below already writes an unconditional line, so the default
-            # audit-on-refusal would double-log the same refused write. The
-            # head moves to the skip-rationale call's commit_sha= instead.
-            self._write_not_executable_result(
-                gate=gate, pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=reason_detail,
+            self._mark_gate_unavailable(
+                payload, gate=gate, pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
-                branch=branch,
-                commit_sha=payload.get("commit_sha") or "",
-                audit_refusal=False,
-            )
-            self._write_skip_rationale(
-                gate=gate, pr_id=str(pr_number),
-                reason=reason, reason_detail=reason_detail,
-                commit_sha=payload.get("commit_sha") or "",
             )
         self._write_request_record(self._request_path(gate, pr_number), payload)
         return payload
