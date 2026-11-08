@@ -45,6 +45,8 @@ if _LIB_DIR not in sys.path:
 
 from atomic_io import atomic_write_json, atomic_write_text  # noqa: E402
 from dispatch_flags import single_entry_enabled  # noqa: E402
+from permission_policy import PermissionPolicyRefused  # noqa: E402
+from worker_permissions import resolve_worker_profile  # noqa: E402
 from dispatch_spec import (  # noqa: E402
     _ID_RE,
     _validate_skill_slug,
@@ -282,6 +284,29 @@ def _require_known_skill(raw: Optional[str]) -> Optional[str]:
     return slug
 
 
+def policy_digest_for_role(role: str) -> Optional[str]:
+    """The ``policy_digest`` of the permission policy composed for *role* (permissions P5).
+
+    One composition for every spec creation site: ``resolve_worker_profile`` composes the
+    policy through ``permission_policy.compose_policy``; this never computes a second digest.
+    Evidence is fail-closed: an unreadable source, broken YAML, an unknown source key or a
+    role in no register raises :class:`PermissionPolicyRefused` naming the reason. A fallback
+    role, ``isolation: {}`` and an absent governance profile are degradations, not refusals.
+    An empty role has no policy to prove: the door's validate() Rule 7 rejects it loud.
+    """
+    role = (role or "").strip()
+    if not role:
+        return None
+    try:
+        return resolve_worker_profile(role).policy_digest
+    except PermissionPolicyRefused as exc:
+        raise PermissionPolicyRefused(
+            f"permission policy for role {role!r} cannot be proven [{exc.reason}]: {exc}; "
+            "no spec staged",
+            exc.reason,
+        ) from exc
+
+
 def stage_spec_bundle(
     *,
     instruction_text: str,
@@ -357,11 +382,10 @@ def stage_spec_bundle(
     # conflicting explicit value loud here rather than staging two lineages.
     parent_dispatch = resolve_parent_dispatch(dispatch_id, work_ref, parent_dispatch)
 
-    # 1a-ter. a named skill must exist in one of the two skill trees BEFORE the
-    # bundle is written — the same trust boundary rule as the deadline above, and
-    # the point where an unknown name is refused with both searched paths instead
-    # of being staged and silently injecting nothing downstream.
+    # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
+    # 1a-quater. permissions P5: the policy is proven BEFORE any write, or nothing is staged.
+    permission_policy_digest = policy_digest_for_role(role)
 
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
@@ -450,6 +474,7 @@ def stage_spec_bundle(
         "headless_reason": norm_reason,
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
+        "permission_policy_digest": permission_policy_digest,
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)

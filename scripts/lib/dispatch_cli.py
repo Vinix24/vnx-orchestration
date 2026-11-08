@@ -59,7 +59,12 @@ from dispatch_envelope import run_envelope_plan, run_envelope_headless_plan  # n
 from dispatch_serialization import LockWaitTimeout, force_release, serialize_lane  # noqa: E402
 import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
-from worker_permissions import role_grants_write  # noqa: E402
+from worker_permissions import (  # noqa: E402
+    resolve_worker_profile,
+    role_grants_write,
+    worker_permission_enforcement_enabled,
+)
+from permission_policy import PermissionPolicyRefused  # noqa: E402
 from receipt_verdict import (  # noqa: E402
     HARD_FAILURE_STATUSES as _RV_HARD_FAILURE_STATUSES,
     SUCCESS_STATUSES as _RV_SUCCESS_STATUSES,
@@ -260,7 +265,53 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         headless_reason=_sanitize_headless_reason(raw.get("headless_reason")),
         post_merge_verification=raw.get("post_merge_verification") is True,
         irreversible=raw.get("irreversible") is True,
+        # None stays None; a present-but-malformed value reaches validate() Rule 18 unchanged.
+        permission_policy_digest=raw.get("permission_policy_digest"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Permissions P5: the spec's policy digest against a fresh composition at fire time
+# ---------------------------------------------------------------------------
+
+_PRE_POLICY_LINE = "permission policy: pre-policy spec"
+
+
+def _fresh_policy_digest(role: str) -> "tuple[Optional[str], Optional[str]]":
+    """``(digest, None)`` for the role as composed now, or ``(None, why)`` when it cannot be proven."""
+    try:
+        return resolve_worker_profile(role).policy_digest, None
+    except PermissionPolicyRefused as exc:
+        return None, f"cannot be re-composed [{exc.reason}]: {exc}"
+
+
+def _policy_fire_check(plan: ExecutionPlan, spec: DispatchSpec) -> "ExecutionPlan | Reject":
+    """Compare the staged digest with a fresh composition for the same role.
+
+    A spec staged before P5 (digest ``None``) fires as before with one plan line. A digest
+    that differs or a policy that can no longer be proven is a plan warning naming both
+    digests, and a refusal only when worker-permission enforcement is ON: enforcement stays
+    OFF by default, so under OFF the evidence is shown but the dispatch runs as today.
+    """
+    staged = spec.permission_policy_digest
+    if staged is None:
+        return dataclasses.replace(plan, warnings=plan.warnings + (_PRE_POLICY_LINE,))
+    fresh, why = _fresh_policy_digest(spec.role)
+    if fresh == staged:
+        return plan
+    detail = why or f"changed between stage and fire: staged {staged}, now {fresh}"
+    message = f"permission policy: staged digest {staged}; fresh composition {detail}"
+    if worker_permission_enforcement_enabled():
+        return Reject("permission-policy-mismatch", message)
+    return dataclasses.replace(plan, warnings=plan.warnings + (message,))
+
+
+def _compile_plan_checked(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> "ExecutionPlan | Reject":
+    """``compile_plan`` followed by the permission policy fire check."""
+    plan = compile_plan(vspec, snapshot)
+    if isinstance(plan, Reject):
+        return plan
+    return _policy_fire_check(plan, vspec.spec)
 
 
 # ---------------------------------------------------------------------------
@@ -4114,7 +4165,7 @@ def run_dispatch(
             dry_run=dry_run,
         )
 
-        plan = compile_plan(vspec, snapshot)
+        plan = _compile_plan_checked(vspec, snapshot)
         if isinstance(plan, Reject):
             _emit_reject(plan)
             return 1
