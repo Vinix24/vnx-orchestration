@@ -1,11 +1,7 @@
-"""ADR-056 zelfst PR-6b: per-project coverage is measured from the stores.
+"""ADR-056 zelfst PR-6b (Dispatch-ID: dlv-533b6e2e55f4): per-project coverage per counted source.
 
-Dispatch-ID: dlv-533b6e2e55f4
-
-Per counted source (promote, close, decide, merge, override, prompt) a project is ``covered``
-(rows carrying ``(project_id, delivery_id)``), ``uncovered`` (rows without it, or with
-``project_id=unknown``) or ``no_data`` (no rows of that project). The stores are real files
-under ``tmp_path``; the real central store is never read.
+``covered`` = rows carrying ``(project_id, delivery_id)``, ``uncovered`` = rows without it or with
+``project_id=unknown``, ``no_data`` = no rows of that project. Stores are real files under ``tmp_path``.
 """
 
 from __future__ import annotations
@@ -170,17 +166,19 @@ def test_malformed_identity_fields_stay_uncovered(state_dir):
         "uncovered", "uncovered", "uncovered")
 
 
-def test_corrupt_store_is_unmeasured_not_no_data(state_dir):
-    (state_dir / "t0_decision_log.jsonl").write_text('{"a": 1}\nnot json\n{"b": 2}\n', encoding="utf-8")
-
-    with pytest.raises(lifecycle_count.Unmeasured):
-        lifecycle_count.measure_coverage(state_dir, project_id=PROJECT)
+def _corrupt_log(sd):
+    (sd / "t0_decision_log.jsonl").write_text('{"a": 1}\nnot json\n{"b": 2}\n', encoding="utf-8")
 
 
-def test_unreadable_database_is_unmeasured(state_dir):
-    db = coordination_db.db_path_from_state_dir(state_dir)
+def _db_is_a_directory(sd):
+    db = coordination_db.db_path_from_state_dir(sd)
     db.unlink()
     db.mkdir()
+
+
+@pytest.mark.parametrize("break_store", [_corrupt_log, _db_is_a_directory])
+def test_unreadable_store_is_unmeasured_not_no_data(state_dir, break_store):
+    break_store(state_dir)
 
     with pytest.raises(lifecycle_count.Unmeasured):
         lifecycle_count.measure_coverage(state_dir, project_id=PROJECT)
