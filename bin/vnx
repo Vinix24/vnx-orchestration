@@ -378,6 +378,8 @@ Gate commands (pre-merge verification):
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
+  context-manifest    Read the context-manifest sidecar per provider (read-only)
+                        Options: --json, --by provider, --state-dir <dir>
 
 Planning commands (strategic-layer read surface):
   horizon <verb>     Planning layer: objectives, deliverables, plan-gate
@@ -2706,6 +2708,9 @@ main() {
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
+      ;;
+    context-manifest)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/context_manifest_report.py" "$@"
       ;;
     help|-h|--help)
       usage
