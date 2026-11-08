@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
@@ -34,6 +34,7 @@ from gate_billing_table import (
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
+import gate_lane_rows
 import gate_status
 import provider_reachability
 import provider_switch
@@ -89,29 +90,36 @@ GATE_PROVIDER_PATH_BINARY = "path_binary"
 GATE_PROVIDER_HARNESS_LANE = "harness_lane"
 GATE_PROVIDER_DETERMINISTIC = "deterministic"
 
-GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
+# The gates that are not harness lanes: PATH binaries and the deterministic
+# adapter. They have no model, billing or lane columns, so they are no rows in
+# gate_lane_rows.GATE_LANE_ROWS. The harness-lane gates are not listed here.
+#
+# GE-6: the local half of ci_gate and wiring_gate is the deterministic adapter
+# kind. The gate's `gh` READ stays (gate_executor._execute_ci_gate /
+# wiring_gate._get_pr_diff); what these rows say is that the checks themselves
+# need no subprocess on the network.
+_NON_ROW_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
     "codex_gate": (GATE_PROVIDER_PATH_BINARY, "codex"),
     "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
-    # GE-6: the local half of both gates is the deterministic adapter kind. The
-    # gate's `gh` READ stays (gate_executor._execute_ci_gate / wiring_gate.
-    # _get_pr_diff); what these rows say is that the checks themselves need no
-    # subprocess on the network.
     "ci_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
     "wiring_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
-    "kimi_gate": (GATE_PROVIDER_HARNESS_LANE, "kimi"),
-    "glm_gate": (GATE_PROVIDER_HARNESS_LANE, "glm-harness"),
-    # OI-1714: deepseek_gate was registered as a script runner pointing at
-    # scripts/deepseek_gate.py, which has never existed. Every deepseek request
-    # therefore booked `gate_runner_missing` — a dead link for the ONE provider
-    # that was actually working. It is a config-based harness lane
-    # ("deepseek-harness"), not a repo script, so it needs no file at all.
-    "deepseek_gate": (GATE_PROVIDER_HARNESS_LANE, "deepseek-harness"),
-    # R7 (operator decision 2026-10-22): the claude review seat, `claude -p` on
-    # the operator's subscription. Same harness-lane path in gate_runner as
-    # deepseek_gate; its dispatcher is claude_gate_lane, never provider_dispatch,
-    # which refuses claude.
-    "claude_gate": (GATE_PROVIDER_HARNESS_LANE, "claude"),
+}
+
+
+def harness_providers(rows: Iterable[gate_lane_rows.GateLaneRow]) -> Dict[str, Tuple[str, str]]:
+    """gate -> (harness_lane, lane), one entry per row.
+
+    OI-1714: a harness lane is a config-based lane, not a repo script, so it needs
+    no file. R7: claude_gate is a harness lane too; its dispatcher column is
+    claude_gate_lane, never provider_dispatch, which refuses claude.
+    """
+    return {row.gate: (GATE_PROVIDER_HARNESS_LANE, row.lane) for row in rows}
+
+
+GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
+    **_NON_ROW_PROVIDERS,
+    **harness_providers(gate_lane_rows.GATE_LANE_ROWS),
 }
 
 # Backward-compatible view: only the gates that really do resolve to a PATH

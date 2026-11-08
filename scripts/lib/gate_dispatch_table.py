@@ -13,9 +13,9 @@ Two maps, one resolver:
   returns (``timeout_seconds`` and ``total_deadline_seconds``). A factory that
   needs fewer arguments ignores the rest.
 * ``LANE_DISPATCHER_KEYS`` maps the lane a ``harness_lane`` row registers
-  (``GATE_PROVIDERS[gate][1]``) to its dispatcher key. Once the gate row carries
-  a ``dispatcher`` column (A3, P2) this map is replaced by that column; the
-  factories and the resolver stay as they are.
+  (``GATE_PROVIDERS[gate][1]``) to its dispatcher key. It is derived from the
+  ``lane`` and ``dispatcher`` columns of ``gate_lane_rows.GATE_LANE_ROWS``
+  (review-lane P9b): a new row is a new entry, no table is edited by hand.
 
 It fails closed. A lane without a key and a key without a factory give
 :class:`UnknownDispatcher`; there is no default dispatcher. A typo in a new row
@@ -34,10 +34,13 @@ module at call time, so a test that patches the module attribute is honoured.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional
 
-DISPATCHER_GOVERNED = "governed"
-DISPATCHER_CLAUDE_LANE = "claude_lane"
+import gate_lane_rows  # stdlib-only; the lane -> dispatcher pairs are read from its rows
+
+# The values the ``dispatcher`` column of a gate row holds.
+DISPATCHER_GOVERNED = "provider_dispatch"
+DISPATCHER_CLAUDE_LANE = "claude_gate_lane"
 
 DispatcherFn = Callable[[str, str, str, str], str]
 DispatcherFactory = Callable[[Path, str, Mapping[str, int], Optional[Path]], DispatcherFn]
@@ -77,12 +80,12 @@ DISPATCHER_FACTORIES: Dict[str, DispatcherFactory] = {
     DISPATCHER_CLAUDE_LANE: _claude_lane_factory,
 }
 
-LANE_DISPATCHER_KEYS: Dict[str, str] = {
-    "kimi": DISPATCHER_GOVERNED,
-    "glm-harness": DISPATCHER_GOVERNED,
-    "deepseek-harness": DISPATCHER_GOVERNED,
-    "claude": DISPATCHER_CLAUDE_LANE,
-}
+def lane_dispatcher_keys(rows: Iterable[gate_lane_rows.GateLaneRow]) -> Dict[str, str]:
+    """lane -> dispatcher key, one pair per row."""
+    return {row.lane: row.dispatcher for row in rows}
+
+
+LANE_DISPATCHER_KEYS: Dict[str, str] = lane_dispatcher_keys(gate_lane_rows.GATE_LANE_ROWS)
 
 
 def unresolved_detail(gate: str, lane: Any) -> Optional[str]:
