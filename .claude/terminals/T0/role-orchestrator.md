@@ -93,7 +93,7 @@ OBJECTIVE -- a ROADMAP feature, one track row, horizon now|next|later. Each obje
 
 DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective X --output-kind ... --title "..."`. ISSUE/OI is separate (open-items plane, not a deliverable).
 
-**Human gate:** deliverables stay `proposed` until `vnx deliverable promote <id>` (proposed -> ready). Un-promoted deliverables are NOT dispatchable. T0 proposes deliverables; the human promotes.
+**Human gate:** deliverables stay `proposed` until `vnx deliverable promote <id>` (proposed -> ready). Un-promoted deliverables are NOT dispatchable. T0 proposes deliverables; the human promotes. The T0 promotes only on a track with `autonomous_promotion_eligible` and a VERIFIED plan-gate grant (ADR-056).
 
 **Rollup (advisory):** `scripts/lib/track_reconciler.py` computes `tracks.derived_status` from merged PRs and receipts. It NEVER auto-writes ROADMAP.yaml or the authoritative phase. T0 surfaces declared-vs-derived divergence as a planning signal -- the reconciler reports drift, it does not resolve it.
 

@@ -153,18 +153,29 @@ def test_promote_writes_class_operator_on_a_tty(tmp_path, monkeypatch):
 def test_promote_writes_class_t0_from_marker(tmp_path, monkeypatch):
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: False)
     monkeypatch.setenv("CLAUDE_ROLE", "orchestrator")
+    monkeypatch.setattr(
+        planning_cli, "_promotion_grant",
+        lambda project_id, track_id: planning_cli.plan_gate_enforcement.PromotionGrant.VERIFIED,
+    )
     state_dir = _store(tmp_path)
     _seed(state_dir, "dlv-1", "proposed")
+    monkeypatch.setattr(planning_cli.tracks_lib, "track_autonomous_promotion_eligible", lambda *a, **k: True)
+    monkeypatch.setattr(planning_cli, "_track_blocks_promotion", lambda *a, **k: False)
+    conn = sqlite3.connect(str(state_dir / "runtime_coordination.db"))
+    conn.execute("ALTER TABLE dispatches ADD COLUMN track TEXT")
+    conn.execute("UPDATE dispatches SET track = 'trk'")
+    conn.commit()
+    conn.close()
     assert _promote(state_dir, "dlv-1") == 0
     assert _event(state_dir, "deliverable_promoted")["metadata"]["actor_class"] == "t0"
 
 
-def test_promote_without_any_signal_writes_unknown(tmp_path, monkeypatch):
+def test_promote_without_any_signal_is_refused_as_unknown(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: False)
     state_dir = _store(tmp_path)
     _seed(state_dir, "dlv-1", "proposed")
-    assert _promote(state_dir, "dlv-1") == 0
-    assert _event(state_dir, "deliverable_promoted")["metadata"]["actor_class"] == "unknown"
+    assert _promote(state_dir, "dlv-1") == 1
+    assert "'unknown'" in capsys.readouterr().err
 
 
 def test_close_writes_class_operator_and_keeps_existing_metadata(tmp_path, monkeypatch, capsys):

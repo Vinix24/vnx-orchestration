@@ -41,7 +41,17 @@ VALID_LANE_HINTS = frozenset({"governed", "direct", "unset"})
 # The keys the planning layer keeps in tracks.metadata_json. Only set_plan_scope
 # and set_lane_hint write them; update_authored_fields, the writer for a source
 # that rebuilds metadata_json wholesale (the ROADMAP seeder), keeps them as stored.
-PLANNING_METADATA_KEYS = ("lane_hint", "plan_scope", "plan_scope_rule")
+PLANNING_METADATA_KEYS = (
+    "lane_hint", "plan_scope", "plan_scope_rule", "autonomous_promotion_eligible",
+)
+
+# The deliberate, recorded opt-in that lets the T0 promote deliverables of a track
+# (ADR-056, "Wie mag promoveren"). Default false; only an explicit setter writes it.
+AUTONOMOUS_PROMOTION_KEY = "autonomous_promotion_eligible"
+
+# Deliverable kinds an agent never promotes, whatever the track opt-in says: learning
+# and dreaming outcomes stay proposals the operator approves (ADR-056).
+OPERATOR_ONLY_OUTPUT_KINDS = frozenset({"learning", "dreaming"})
 
 # The plan_scope_rule a track carries when its scope was decided at creation
 # (horizon add --plan-scope) rather than by an automatic rule or by hand.
@@ -828,6 +838,69 @@ def set_decision_ref(
         return dict(updated)
     finally:
         conn.close()
+
+
+def autonomous_promotion_eligible(metadata_json: Optional[str]) -> bool:
+    """True only when the metadata holds the JSON boolean ``true`` for the opt-in.
+
+    Fail-closed: a missing key, ``None``, a string such as ``"true"``, any other
+    non-bool and an unreadable blob all read as False.
+    """
+    return _metadata_dict(metadata_json).get(AUTONOMOUS_PROMOTION_KEY) is True
+
+
+def track_autonomous_promotion_eligible(
+    state_dir: str | Path, track_id: str, project_id: str,
+) -> bool:
+    """The opt-in of one track; a missing track or an unreadable store reads as False."""
+    try:
+        track = get_track(state_dir, track_id, project_id)
+    except (sqlite3.Error, OSError):
+        return False
+    if not isinstance(track, dict):
+        return False
+    return autonomous_promotion_eligible(track.get("metadata_json"))
+
+
+def set_autonomous_promotion_eligible(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    eligible: bool,
+    *,
+    actor: str,
+    actor_class: str,
+) -> dict[str, Any]:
+    """Write the opt-in (a real bool) and emit one audit event carrying the actor class.
+
+    Raises ValueError when ``eligible`` is not a bool and TrackNotFoundError when
+    the track does not exist. Every other metadata key stays as stored.
+    """
+    if not isinstance(eligible, bool):
+        raise ValueError(f"eligible must be a bool, got {eligible!r}")
+    conn = _get_conn(state_dir)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT metadata_json FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+        conn.execute(
+            "UPDATE tracks SET metadata_json = ? WHERE track_id = ? AND project_id = ?",
+            (metadata_json_with(row["metadata_json"], {AUTONOMOUS_PROMOTION_KEY: eligible}),
+             track_id, project_id),
+        )
+        _emit_track_event(
+            state_dir, "track_autonomous_promotion_set", track_id, project_id, actor,
+            {"old": autonomous_promotion_eligible(row["metadata_json"]),
+             "new": eligible, "actor_class": actor_class},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return get_track(state_dir, track_id, project_id) or {}
 
 
 def get_track(
