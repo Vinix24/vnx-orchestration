@@ -80,11 +80,7 @@ def check_required_contexts(
         }
 
     summary = ci_contexts.summarise(states)
-    payload: Dict[str, Any] = {
-        "check": CHECK_NAME,
-        "contexts": [s.to_dict() for s in states],
-        "summary": summary,
-    }
+    payload = _classified_payload(states, summary)
 
     if not states:
         payload["status"] = SKIPPED_UNVERIFIED
@@ -106,12 +102,46 @@ def check_required_contexts(
     blocking = [s for s in states if s.blocking]
     if not blocking:
         payload["status"] = "GO"
-        payload["detail"] = f"all {summary['total']} required contexts passed on {head_sha[:12]}"
+        payload["detail"] = _describe_go(states, summary["total"], head_sha)
         return payload
 
     payload["status"] = "HOLD"
     payload["detail"] = _describe_blocking(blocking, summary["total"], head_sha)
     return payload
+
+
+def _classified_payload(states, summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Every classified answer, whatever its verdict, with the door fields of ADR-061 §6.
+
+    ``published_at_merge`` is its own field, never counted as ``unverified``;
+    ``recovery`` maps a context to what lifts its block, also while it HOLDs.
+    """
+    return {
+        "check": CHECK_NAME,
+        "contexts": [s.to_dict() for s in states],
+        "summary": summary,
+        "published_at_merge": [
+            s.to_dict() for s in states if s.state == ci_contexts.STATE_PUBLISHED_AT_MERGE
+        ],
+        "recovery": {s.context: s.recovery_for() for s in states if s.recovery is not None},
+    }
+
+
+def _describe_go(states, total: int, head_sha: str) -> str:
+    """The GO line; a door context still to be published is named, not counted as passed."""
+    at_merge = [s for s in states if s.state == ci_contexts.STATE_PUBLISHED_AT_MERGE]
+    if not at_merge:
+        return f"all {total} required contexts passed on {head_sha[:12]}"
+    return (
+        f"{total - len(at_merge)} of {total} required contexts passed on {head_sha[:12]}; "
+        + "; ".join(f"{s.context}: {s.detail}" for s in at_merge)
+    )
+
+
+def _blocking_line(state) -> str:
+    line = f"{state.context} [{state.state}] {state.detail}"
+    recovery = state.recovery_for()
+    return f"{line}; herstel: {recovery}" if recovery else line
 
 
 def _describe_blocking(blocking, total: int, head_sha: str) -> str:
@@ -120,9 +150,7 @@ def _describe_blocking(blocking, total: int, head_sha: str) -> str:
     in_flight = [s for s in blocking if s.transient]
     parts = []
     if settled:
-        parts.append(
-            "not satisfied: " + "; ".join(f"{s.context} [{s.state}] {s.detail}" for s in settled)
-        )
+        parts.append("not satisfied: " + "; ".join(_blocking_line(s) for s in settled))
     if in_flight:
         parts.append("still in flight: " + ", ".join(f"{s.context} [{s.state}]" for s in in_flight))
     return (

@@ -282,6 +282,11 @@ class Readiness:
         failed = [c for c in self.contexts if c.state == ci_contexts.STATE_FAILED]
         for c in failed:
             out.append(f"fix and re-push — {c.context} {c.detail}")
+        # The door states (ADR-061 §6) carry their own way back: a re-permit, or a new commit.
+        out += [
+            f"{c.context} [{c.state}] herstel: {c.recovery_for(self.pr_number)}"
+            for c in self.contexts if c.recovery is not None
+        ]
         if not self.declared_gates and not self.gates_error and not self.observed_gates:
             # An undeclared obligation has a cost too, and leaving it off the
             # list was the one place this report said "nothing outstanding"
