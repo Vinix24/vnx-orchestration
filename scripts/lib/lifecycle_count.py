@@ -26,6 +26,7 @@ from coordination_db import DISPATCH_TRANSITIONS, TERMINAL_DISPATCH_STATES  # ne
 from ledger_end_line import end_line
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
+from actor_class import ACTOR_CLASSES
 from vnx_paths import project_id_from_state_dir
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -247,7 +248,8 @@ def _member(row: dict, project: str, period_start, records: dict) -> Member:
     did, state = str(row["dispatch_id"]), str(row.get("state") or "").strip()
 
     def make(status: str, reason: str) -> Member:
-        return Member(project_id=project, dispatch_id=did, state=state, status=status, reason=reason)
+        return Member(project_id=project, dispatch_id=did, state=state, status=status, reason=reason,
+                      created_at=row.get("created_at"), pr_ref=row.get("pr_ref"))
 
     if period_start is not None:
         try:
@@ -315,11 +317,10 @@ def _meta(raw) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
-def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
-    """``(scope, project_id, delivery_id)`` per row of a coordination-store table, read-only.
+def _sql_rows(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """The rows of a coordination-store table as dicts, read-only.
 
-    Scope is the column when the table has one, else the metadata; the identity reads the
-    metadata first. An absent store or table holds no rows; an unreadable one is a refusal.
+    An absent store or table holds no rows; an unreadable one is a refusal.
     """
     db_path = db_path_from_state_dir(state_dir)
     store = store_state(db_path)
@@ -332,11 +333,19 @@ def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = (
             if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                             (table,)).fetchone() is None:
                 return []
-            rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table} {where}", params)]
+            return [dict(r) for r in conn.execute(f"SELECT * FROM {table} {where}", params)]
     except Exception as exc:  # vnx-silent-except: an unreadable store is a refusal, never "no rows"
         raise Unmeasured(f"cannot read {db_path}: {exc}") from exc
+
+
+def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """``(scope, project_id, delivery_id)`` per row of a coordination-store table, read-only.
+
+    Scope is the column when the table has one, else the metadata; the identity reads the
+    metadata first. An absent store or table holds no rows; an unreadable one is a refusal.
+    """
     entries = []
-    for row in rows:
+    for row in _sql_rows(state_dir, table, where, params):
         meta = _meta(row.get("metadata_json"))
         entries.append((row.get("project_id") or meta.get("project_id"),
                         meta.get("project_id") or row.get("project_id"),
@@ -344,17 +353,63 @@ def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = (
     return entries
 
 
-def _ndjson_entries(path: Path, event_type=None) -> list:
-    """``(scope, project_id, delivery_id)`` per line of an NDJSON store; an absent file has none."""
+def _ndjson_lines(path: Path, event_type=None) -> list:
+    """The object lines of an NDJSON store (optionally of one event type); an absent file has none."""
     if not path.exists():
         return []
     try:
         lines = read_ndjson_strict(path)
     except (NdjsonCorruptionError, OSError) as exc:
         raise Unmeasured(f"cannot read {path}: {exc}; coverage is not measurable") from exc
-    return [(ln.get("project_id"), ln.get("project_id"), ln.get("delivery_id"))
-            for ln in lines if isinstance(ln, dict)
+    return [ln for ln in lines if isinstance(ln, dict)
             and (event_type is None or ln.get("event_type") == event_type)]
+
+
+def _ndjson_entries(path: Path, event_type=None) -> list:
+    """``(scope, project_id, delivery_id)`` per line of an NDJSON store; an absent file has none."""
+    return [(ln.get("project_id"), ln.get("project_id"), ln.get("delivery_id"))
+            for ln in _ndjson_lines(path, event_type)]
+
+
+def _row_class(value) -> str:
+    """A recorded actor class, or ``unknown`` for a missing, malformed or foreign value."""
+    text = _text(value)
+    return text if text in ACTOR_CLASSES else PROJECT_UNKNOWN
+
+
+def _sql_source_rows(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """``(project_id, delivery_id, actor_class)`` per row; the class is read from the metadata."""
+    out = []
+    for row in _sql_rows(state_dir, table, where, params):
+        meta = _meta(row.get("metadata_json"))
+        out.append((_text(meta.get("project_id") or row.get("project_id")),
+                    _text(meta.get("delivery_id") or row.get("delivery_id")),
+                    _row_class(meta.get("actor_class"))))
+    return out
+
+
+def _ndjson_source_rows(path: Path, event_type=None) -> list:
+    """``(project_id, delivery_id, actor_class)`` per line; the class is the top-level field."""
+    return [(_text(ln.get("project_id")), _text(ln.get("delivery_id")), _row_class(ln.get("actor_class")))
+            for ln in _ndjson_lines(path, event_type)]
+
+
+def source_rows(state_dir) -> dict:
+    """Per counted source the rows as ``(project_id, delivery_id, actor_class)``, read-only.
+
+    The same stores as ``_coverage_entries``. A row without a readable class reads as
+    ``unknown``; the project is the row's own identity, never inferred. A store that cannot
+    be read raises ``Unmeasured``.
+    """
+    state_path, events = Path(state_dir), "WHERE event_type = ?"
+    return {
+        "promote": _sql_source_rows(state_path, "coordination_events", events, (PROMOTE_EVENT,)),
+        "close": _sql_source_rows(state_path, "coordination_events", events, (CLOSE_EVENT,)),
+        "decide": _ndjson_source_rows(state_path / DECISION_LOG_FILENAME),
+        "merge": _ndjson_source_rows(state_path / LEDGER_FILENAME, MERGE_EVENT_TYPE),
+        "override": _sql_source_rows(state_path, "governance_overrides"),
+        "prompt": _ndjson_source_rows(state_path / PROMPT_LOG_FILENAME),
+    }
 
 
 def _classify(entries: list, project: str) -> dict:

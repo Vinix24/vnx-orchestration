@@ -101,12 +101,16 @@ from open_outcomes import (
     record_outcome_decision,
 )
 from open_outcomes_recount import add_recount
-from vnx_paths import project_id_from_state_dir
+from vnx_paths import project_id_from_state_dir, resolve_project_data_root
+import lifecycle_count
 
 LEDGER_NAME = "t0_receipts.ndjson"
 RUNTIME_COORDINATION_DB_NAME = "runtime_coordination.db"
 DEFAULT_DIGEST_WINDOW = "24h"
 DEFAULT_RECONCILE_MAX_AGE_DAYS = 7.0
+# ADR-056 section Periode en noemer: fixed before any measurement; the end is exclusive.
+COHORT_SINCE, COHORT_UNTIL = "2026-10-30T00:00:00Z", "2026-11-09T00:00:00Z"
+COHORT_PROJECTS = ("vnx-dev", "seocrawler", "mission-control", "sales-copilot", "pacompany")
 
 _open_items_manager_cache: Optional[Any] = None
 
@@ -855,6 +859,142 @@ def _cmd_reconcile_oi_pending(args: argparse.Namespace) -> int:
     return 0
 
 
+def _delivery_classes(rows: Dict[str, list], project_id: str) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """``{delivery_id: {source: {class: count}}}``, joined on ``(project_id, delivery_id)`` only (ADR-056)."""
+    joined: Dict[str, Dict[str, Dict[str, int]]] = {}
+    for source, entries in rows.items():
+        for pid, did, klass in entries:
+            if pid != project_id or not did:
+                continue  # another project, or ``unknown``, is never this project's row
+            per_class = joined.setdefault(did, {}).setdefault(source, {})
+            per_class[klass] = per_class.get(klass, 0) + 1
+    return joined
+
+
+def _delivery_verdict(member: Dict[str, Any], by_source: Dict[str, Dict[str, int]]) -> Dict[str, Any]:
+    """``zero``, ``operator`` or ``unknown`` (with reasons) for one delivered or receipt-missing delivery."""
+    reasons = [f"class_unknown:{src}" for src, counts in sorted(by_source.items()) if counts.get("unknown")]
+    if member["status"] == lifecycle_count.MEMBER_UNKNOWN:
+        reasons.append(member["reason"])
+    required = ["promote"] + (["merge"] if isinstance(member.get("pr_ref"), str) and member["pr_ref"].strip() else [])
+    reasons += [f"source_missing:{src}" for src in required if not by_source.get(src)]
+    operator = sum(counts.get("operator", 0) for counts in by_source.values())
+    verdict = "unknown" if reasons else "operator" if operator else "zero"
+    return {"delivery_id": member["dispatch_id"], "verdict": verdict, "reason": reasons[0] if reasons else None,
+            "reasons": reasons, "operator_actions": operator, "sources": by_source}
+
+
+def _cohort_members(count: Dict[str, Any], until: datetime) -> List[Dict[str, Any]]:
+    """N: delivered members plus ``receipt_missing`` ones, created before ``until`` (end exclusive)."""
+    kept = []
+    for member in count["membership"]:
+        counted = member["status"] == lifecycle_count.MEMBER_DELIVERED or (
+            member["status"] == lifecycle_count.MEMBER_UNKNOWN and member["reason"] == "receipt_missing")
+        if counted and lifecycle_count._parse_period_start(member["created_at"]) < until:
+            kept.append(member)
+    return kept
+
+
+def measure_operator_cohort(state_dir: Path, project_id: str, since: str, until: str) -> Dict[str, Any]:
+    """The per-delivery verdicts and the rates of one project; ``Unmeasured`` when a store cannot be read."""
+    until_at = lifecycle_count._parse_period_start(until)
+    count = lifecycle_count.compute_lifecycle_count(state_dir, project_id=project_id, period_start=since)
+    if count["status"] != lifecycle_count.STATUS_MEASURED:
+        raise lifecycle_count.Unmeasured(count["reason"])
+    joined = _delivery_classes(lifecycle_count.source_rows(state_dir), project_id)
+    deliveries = [_delivery_verdict(m, joined.get(m["dispatch_id"], {}))
+                  for m in _cohort_members(count, until_at)]
+    tally = {v: sum(1 for d in deliveries if d["verdict"] == v) for v in ("zero", "operator", "unknown")}
+    n = len(deliveries)
+    coverage = lifecycle_count.measure_coverage(state_dir, project_id=project_id)
+    return {"project_id": project_id, "period": {"since": since, "until": until}, "N": n, **tally,
+            "zero_rate": tally["zero"] / n if n else None, "unknown_rate": tally["unknown"] / n if n else None,
+            "membership_summary": count["membership_summary"], "coverage": dict(coverage),
+            "deliveries": deliveries}
+
+
+def _cohort_state_dir(args: argparse.Namespace, project_id: str) -> Path:
+    """An explicit ``--state-dir`` for one project, else the project's own central store."""
+    if args.state_dir and not args.all_projects:
+        return Path(args.state_dir)
+    return resolve_project_data_root(project_id) / "state"
+
+
+def _measure_one(args: argparse.Namespace, project_id: str) -> Dict[str, Any]:
+    """The measurement, or ``{"status": "unmeasured", "reason": ...}``: never a silent zero."""
+    try:
+        return measure_operator_cohort(_cohort_state_dir(args, project_id), project_id, args.since, args.until)
+    except (lifecycle_count.Unmeasured, ValueError, OSError) as exc:
+        return {"project_id": project_id, "status": "unmeasured", "reason": str(exc)}
+
+
+def _cohort_targets(args: argparse.Namespace) -> Optional[Tuple[str, ...]]:
+    if bool(args.project) == bool(getattr(args, "all_projects", False)):
+        print("error: pass exactly one of --project or --all-projects", file=sys.stderr)
+        return None
+    return COHORT_PROJECTS if args.all_projects else (args.project,)
+
+
+def _delivery_line(d: Dict[str, Any]) -> str:
+    per_source = " ".join(
+        f"{src}[{','.join(f'{k}={v}' for k, v in sorted(c.items()))}]" for src, c in sorted(d["sources"].items()))
+    verdict = d["verdict"] + (f":{d['reason']}" if d["reason"] else "")
+    return f"  {d['delivery_id']} {verdict} {per_source}".rstrip()
+
+
+def _print_cohort_result(result: Dict[str, Any], lines: bool) -> None:
+    if result.get("status") == "unmeasured":
+        print(f"{result['project_id']}: unmeasured: {result['reason']}")
+        return
+    print(f"{result['project_id']}: N={result['N']} zero={result['zero']} operator={result['operator']} "
+          f"unknown={result['unknown']} zero_rate={result['zero_rate']} unknown_rate={result['unknown_rate']} "
+          f"coverage={result['coverage']['state']}")
+    if lines:
+        for d in result["deliveries"]:
+            print(_delivery_line(d))
+
+
+def _run_cohort(args: argparse.Namespace, lines: bool) -> int:
+    targets = _cohort_targets(args)
+    if targets is None:
+        return 2
+    results = [_measure_one(args, pid) for pid in targets]
+    if args.json:
+        print(json.dumps(results[0] if len(results) == 1 and not args.all_projects
+                         else {"projects": {r["project_id"]: r for r in results}}, indent=2))
+    else:
+        for result in results:
+            _print_cohort_result(result, lines)
+    return 1 if any(r.get("status") == "unmeasured" for r in results) else 0
+
+
+def _cmd_operator_actions(args: argparse.Namespace) -> int:
+    args.all_projects = False
+    return _run_cohort(args, lines=True)
+
+
+def _cmd_operator_cohort(args: argparse.Namespace) -> int:
+    return _run_cohort(args, lines=False)
+
+
+def _add_cohort_parsers(sub: Any) -> None:
+    """The ADR-056 counters: operator actions per delivery and the cohort rates."""
+    for name, func, doc in (
+        ("operator-actions", _cmd_operator_actions, "Operator actions per delivery over the six sources"),
+        ("operator-cohort", _cmd_operator_cohort, "N, zero_rate and unknown_rate over the ADR-056 period"),
+    ):
+        p = sub.add_parser(name, help=doc, description=doc)
+        p.add_argument("--project", help="project id (read from its own central store)")
+        if name == "operator-cohort":
+            p.add_argument("--all-projects", action="store_true",
+                           help="the five ADR-056 projects, each on its own, never aggregated")
+        p.add_argument("--state-dir", help="read this state dir instead of the central store (one project)")
+        p.add_argument("--since", default=COHORT_SINCE)
+        p.add_argument("--until", default=COHORT_UNTIL, help="end exclusive")
+        p.add_argument("--json", action="store_true")
+        p.set_defaults(func=func)
+
+
 def _add_outcome_parsers(sub: Any) -> None:
     """``open-outcomes`` and ``decide``: the T0's open points (fabric-state-herstel D4b)."""
     p_open = sub.add_parser(
@@ -999,6 +1139,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_outcome_parsers(sub)
     _add_lookup_parsers(sub)
     _add_digest_parsers(sub)
+    _add_cohort_parsers(sub)
     return parser
 
 
