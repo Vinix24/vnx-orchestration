@@ -1594,6 +1594,10 @@ class TestHarnessLaneDelegation:
         test reproduces that exact report shape. On main (before the
         OI-1748 fix in gate_runner._run_harness_lane_path) this fails with
         the measured value: result["status"] == "completed".
+
+        OI-2623: the weekly-limit text in this fixture is kimi's exhausted
+        lane, so the reason is `lane_exhausted`; the spawn failure without
+        quota wording is pinned by the sibling test below.
         """
         report_text = (
             "---\n"
@@ -1629,7 +1633,7 @@ class TestHarnessLaneDelegation:
         assert result["status"] != "completed", result
         assert "completed successfully" not in result.get("summary", "")
         assert result["status"] == "unavailable"
-        assert result["reason"] == "harness_lane_no_model_response"
+        assert result["reason"] == "lane_exhausted"
         assert "quota_or_auth" in result["reason_detail"]
 
         result_file = gate_env["results_dir"] / "pr-1852-kimi_gate.json"
@@ -1637,6 +1641,54 @@ class TestHarnessLaneDelegation:
         saved = json.loads(result_file.read_text(encoding="utf-8"))
         assert saved["status"] == "unavailable"
 
+        assert len(calls) == 1
+
+    def test_harness_lane_spawn_failure_without_quota_wording_keeps_no_model_response(
+        self, gate_env, monkeypatch,
+    ):
+        """Sibling of the OI-1748 test above: a spawn failure whose
+        failure_reason carries no quota wording is not an exhausted lane. It
+        stays `unavailable` with the reason `harness_lane_no_model_response`
+        (OI-2623 widened only the weekly-limit markers)."""
+        report_text = (
+            "---\n"
+            "dispatch_id: kimi-gate-pr1853-1789378666\n"
+            "failure_reason: '[spawn_error] provider=kimi reason=spawn_error "
+            "msg=subprocess exited with code 1'\n"
+            "---\n"
+            "\n"
+            "_No response text was captured from the model. The spawn layer failed "
+            "before the model could run — the text below is the spawn error, NOT a "
+            "model reply._\n"
+            "\n"
+            "subprocess exited with code 1 before complete event\n"
+        )
+        factory, calls = self._fake_dispatcher(report_text)
+
+        monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
+        monkeypatch.delenv("VNX_KIMI_GATE_MODEL", raising=False)
+
+        report_path = str(gate_env["reports_dir"] / "kimi-gate-pr1853.md")
+        payload = _make_request_payload(
+            gate="kimi_gate",
+            prompt="Review this diff for correctness and security",
+            report_path=report_path,
+        )
+
+        runner = GateRunner(
+            state_dir=gate_env["state_dir"],
+            reports_dir=gate_env["reports_dir"],
+        )
+        result = runner.run(gate="kimi_gate", request_payload=payload, pr_number=1853)
+
+        assert result["status"] == "unavailable", result
+        assert result["reason"] == "harness_lane_no_model_response"
+        assert "spawn_error" in result["reason_detail"]
+
+        saved = json.loads(
+            (gate_env["results_dir"] / "pr-1853-kimi_gate.json").read_text(encoding="utf-8")
+        )
+        assert saved["status"] == "unavailable"
         assert len(calls) == 1
 
     def test_harness_lane_normal_verdict_report_still_books_completed(
