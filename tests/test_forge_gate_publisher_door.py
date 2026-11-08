@@ -524,3 +524,107 @@ def test_revoke_needs_a_head(gh: FakeGitHub) -> None:
     with pytest.raises(fcr.ForgeCheckRunError):
         fgp.revoke_door(55, "x", sha=" ", pr=7, project_root=gh.root, receipts_file=gh.ledger)
     assert _receipts(gh.ledger) == []
+
+
+# --- r3: every permit transition has its own receipt identity ---------------
+
+SHA_B = "b" * 40
+
+
+@pytest.fixture
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every receipt lands in the same second."""
+    import governance_receipts
+
+    monkeypatch.setattr(governance_receipts, "utc_now_iso", lambda: "2026-11-08T10:00:00Z")
+
+
+def _publish_head(gh: FakeGitHub, sha: str) -> int:
+    return fgp.publish_door_permit(
+        _evidence(head_sha=sha), sha=sha, pr=7, project_root=gh.root, receipts_file=gh.ledger
+    )
+
+
+def test_two_heads_of_one_pr_in_one_second_keep_both_intent_lines(gh: FakeGitHub, frozen_clock: None) -> None:
+    """Red run on 5cf353d3: one intent line, the second was dropped as a duplicate."""
+    _publish_head(gh, SHA)
+    _publish_head(gh, SHA_B)
+    intents = [r for r in _receipts(gh.ledger) if r["phase"] == "intent"]
+    assert [r["head_sha"] for r in intents] == [SHA, SHA_B]
+    assert len({r["trigger"] for r in intents}) == 2
+
+
+def test_create_and_re_permit_on_one_head_in_one_second_have_distinct_identity(
+    gh: FakeGitHub, frozen_clock: None
+) -> None:
+    _publish_head(gh, SHA)  # create
+    _publish_head(gh, SHA)  # re_permit
+    outcomes = [r for r in _receipts(gh.ledger) if r["phase"] == "outcome"]
+    assert [r["action"] for r in outcomes] == ["create", "re_permit"]
+    assert len(outcomes) == 2 and outcomes[0]["trigger"] != outcomes[1]["trigger"]
+
+
+def test_intent_and_outcome_of_one_operation_share_the_operation_id(gh: FakeGitHub, frozen_clock: None) -> None:
+    _publish_head(gh, SHA)
+    _publish_head(gh, SHA)
+    first_intent, first_outcome, second_intent, second_outcome = _receipts(gh.ledger)
+    assert first_intent["operation_id"] == first_outcome["operation_id"]
+    assert second_intent["operation_id"] == second_outcome["operation_id"]
+    assert first_intent["operation_id"] != second_intent["operation_id"]
+    assert first_intent["trigger"] != first_outcome["trigger"]
+    assert SHA in first_intent["trigger"] and "pr7" in first_intent["trigger"]
+
+
+def test_revoke_intent_and_outcome_share_an_operation_id(gh: FakeGitHub, frozen_clock: None) -> None:
+    gh.runs = [_door(55)]
+    _revoke(gh, "a")
+    _revoke(gh, "a")
+    lines = _receipts(gh.ledger)
+    assert len(lines) == 4
+    assert lines[0]["operation_id"] == lines[1]["operation_id"] != lines[2]["operation_id"]
+
+
+def test_a_duplicate_intent_receipt_stops_the_github_call(gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Red run on 5cf353d3: the GitHub call went out although the intent was a duplicate."""
+    monkeypatch.setattr(
+        fgp, "emit_governance_receipt", lambda *a, **k: {"append_status": "duplicate", "idempotency_key": "k"}
+    )
+    with pytest.raises(fgp.ForgeLedgerError):
+        _publish(gh)
+    assert gh.calls == []
+    with pytest.raises(fgp.ForgeLedgerError):
+        _revoke(gh, "x")
+    assert gh.calls == []
+
+
+@pytest.mark.parametrize("status", [None, "", "skipped", "weird"])
+def test_an_unknown_or_missing_intent_status_also_refuses(gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch, status: Any) -> None:
+    monkeypatch.setattr(fgp, "emit_governance_receipt", lambda *a, **k: {"append_status": status})
+    with pytest.raises(fgp.ForgeLedgerError):
+        _publish(gh)
+    assert gh.calls == []
+
+
+def test_cli_exits_nonzero_on_a_duplicate_intent(
+    tmp_path: Path, capsys: pytest.CaptureFixture, gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fgp, "emit_governance_receipt", lambda *a, **k: {"append_status": "duplicate"})
+    rc, _, err = _cli(tmp_path, _evidence(), capsys, gh)
+    assert rc == 1 and "grootboek" in err and gh.calls == []
+
+
+def test_a_duplicate_outcome_is_logged_and_does_not_undo_the_call(
+    gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    real = fgp.emit_governance_receipt
+
+    def second_is_duplicate(event: str, **kw: Any) -> Dict[str, Any]:
+        if kw.get("phase") == "outcome":
+            return {"append_status": "duplicate"}
+        return real(event, **kw)
+
+    monkeypatch.setattr(fgp, "emit_governance_receipt", second_is_duplicate)
+    with caplog.at_level("ERROR"):
+        assert _publish(gh) == 900
+    assert "ledger: duplicate" in caplog.text
+    assert gh.methods() == ["GET", "POST", "GET"]

@@ -37,6 +37,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -1700,6 +1701,7 @@ class ForgeLedgerError(ForgeCheckRunError):
 
 
 DOOR_RECEIPT_SOURCE = "forge_gate_publisher"
+RECEIPT_WRITTEN = "appended"
 
 
 def _evidence_digest(evidence: Any) -> str:
@@ -1717,23 +1719,59 @@ def _evidence_gate_names(evidence: Any) -> List[str]:
     return [str(r.get("gate")) for r in records if isinstance(r, dict)]
 
 
-def _write_door_receipt(
-    event: str, *, status: str, receipts_file: Optional[str], **fields: Any
-) -> None:
-    """One receipt in the canonical ledger; a failed write raises :class:`ForgeLedgerError`.
+def _new_operation_id() -> str:
+    """A fresh identity for one permit operation: its intent and outcome receipts share it."""
+    return uuid.uuid4().hex
 
+
+def _write_door_receipt(
+    event: str, *, status: str, receipts_file: Optional[str], op_id: str, action: str,
+    phase: str, pr_number: int, head_sha: str, **fields: Any,
+) -> str:
+    """One receipt in the canonical ledger; returns the ``append_status``.
+
+    A failed write raises :class:`ForgeLedgerError`. ``trigger`` is the field the
+    canonical dedup key honours (``IDEMPOTENCY_FIELDS``) that is free for an event
+    without a dispatch: ``task_id`` would demand a ``dispatch_id`` and ``report_path``
+    names a report. It carries PR, full head, action, phase and the per-operation uuid, so two operations never
+    share a key and the second-resolution timestamp no longer decides identity.
     No field called ``verdict``: ``append_receipt`` overwrites it with its own.
     """
+    identity = f"door-permit:pr{pr_number}:{head_sha}:{action}:{phase}:{op_id}"
     try:
-        emit_governance_receipt(
+        receipt = emit_governance_receipt(
             event, receipt_kind="state_mutation", status=status, terminal="T0",
-            source=DOOR_RECEIPT_SOURCE, receipts_file=receipts_file, **fields,
+            source=DOOR_RECEIPT_SOURCE, receipts_file=receipts_file, trigger=identity,
+            operation_id=op_id, action=action, phase=phase, pr_number=pr_number,
+            head_sha=head_sha, **fields,
         )
     # vnx-broad-except: any way the ledger write can end is the same fail-closed answer.
     except Exception as exc:  # noqa: BLE001
         raise ForgeLedgerError(
             f"{event} ({status}) niet in het grootboek geschreven: {exc}"
         ) from exc
+    return receipt.get("append_status")
+
+
+def _write_intent_receipt(event: str, **kwargs: Any) -> None:
+    """The intent receipt must be written as its own line: anything else refuses the action."""
+    got = _write_door_receipt(event, phase="intent", **kwargs)
+    if got != RECEIPT_WRITTEN:
+        raise ForgeLedgerError(
+            f"{event} (intent) niet als eigen regel in het grootboek gekomen "
+            f"(append_status={got!r}): er gaat niets naar GitHub"
+        )
+
+
+def _write_outcome_receipt(event: str, **kwargs: Any) -> str:
+    """The outcome receipt after the GitHub call: a non-written status is logged, never undone."""
+    got = _write_door_receipt(event, phase="outcome", **kwargs)
+    if got != RECEIPT_WRITTEN:
+        logger.error(
+            "%s (outcome) niet als eigen regel vastgelegd, ledger: %s (operatie %s)",
+            event, got, kwargs.get("op_id"),
+        )
+    return got
 
 
 def _own_door_runs(sha: str, project_root: Path) -> List[Dict[str, Any]]:
@@ -1780,37 +1818,38 @@ def publish_door_permit(
     refused, recovery is a new commit (ADR-061 §3). After the call the run is
     read back and the outcome receipt carries the id and the conclusion read.
     """
+    op_id = _new_operation_id()
     base = {
-        "head_sha": sha, "pr_number": pr, "evidence_digest": _evidence_digest(evidence),
+        "head_sha": sha, "pr_number": pr, "receipts_file": receipts_file, "op_id": op_id,
+        "evidence_digest": _evidence_digest(evidence),
         "evidence_gates": _evidence_gate_names(evidence),
     }
     try:
         validate_door_evidence(evidence, sha=sha, pr=pr)
     except ForgeDoorRefused as exc:
-        _write_door_receipt(
-            "door_permit_published", status="blocked", receipts_file=receipts_file,
-            phase="outcome", reason=str(exc), **base,
+        _write_outcome_receipt(
+            "door_permit_published", status="blocked", action="publish",
+            reason=str(exc), **base,
         )
         raise
-    _write_door_receipt(
-        "door_permit_published", status="info", receipts_file=receipts_file,
-        phase="intent", reason="permit aangevraagd uit GO-evidence", **base,
+    _write_intent_receipt(
+        "door_permit_published", status="info", action="publish",
+        reason="permit aangevraagd uit GO-evidence", **base,
     )
     run_id: Optional[int] = None
     try:
         run_id, action = _apply_door_permit(sha, pr, project_root)
         run = read_back_door(sha, run_id, project_root=project_root)
     except ForgeCheckRunError as exc:
-        _write_door_receipt(
+        _write_outcome_receipt(
             "door_permit_published",
             status="blocked" if isinstance(exc, ForgeDoorRefused) else "failure",
-            receipts_file=receipts_file, phase="outcome", reason=str(exc),
+            action="publish", reason=str(exc),
             **({"check_run_id": run_id} if run_id is not None else {}), **base,
         )
         raise
-    _write_door_receipt(
-        "door_permit_published", status="success", receipts_file=receipts_file,
-        phase="outcome", action=action, check_run_id=run_id,
+    _write_outcome_receipt(
+        "door_permit_published", status="success", action=action, check_run_id=run_id,
         conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen", **base,
     )
     return run_id
@@ -1868,17 +1907,16 @@ def revoke_door(
     """
     if not sha or not sha.strip():
         raise ForgeCheckRunError("sha is leeg: een intrekking hoort bij een kop")
-    base = {"head_sha": sha, "pr_number": pr, "check_run_id": check_run_id, "action": "revoke"}
-    _write_door_receipt(
-        "door_permit_revoked", status="info", receipts_file=receipts_file,
-        phase="intent", reason=reason, **base,
-    )
+    base = {
+        "head_sha": sha, "pr_number": pr, "check_run_id": check_run_id, "action": "revoke",
+        "receipts_file": receipts_file, "op_id": _new_operation_id(),
+    }
+    _write_intent_receipt("door_permit_revoked", status="info", reason=reason, **base)
     result = _patch_door_failure(check_run_id, f"permit revoked: {reason}", sha, project_root)
     try:
-        _write_door_receipt(
+        _write_outcome_receipt(
             "door_permit_revoked", status="success" if result == REVOKED else "failure",
-            receipts_file=receipts_file, phase="outcome", reason=reason,
-            revoke_result=result, **base,
+            reason=reason, revoke_result=result, **base,
         )
     except ForgeLedgerError as exc:
         logger.error("uitkomst van intrekking %s niet vastgelegd: %s", check_run_id, exc)
@@ -1919,9 +1957,10 @@ def _run_door(args: argparse.Namespace) -> int:
         try:
             evidence = read_door_evidence(Path(args.evidence))
         except ForgeDoorRefused as exc:
-            _write_door_receipt(
+            _write_outcome_receipt(
                 "door_permit_published", status="blocked", receipts_file=args.receipts_file,
-                phase="outcome", head_sha=args.sha, pr_number=args.pr, reason=str(exc),
+                op_id=_new_operation_id(), action="publish", head_sha=args.sha,
+                pr_number=args.pr, reason=str(exc),
             )
             raise
         run_id = publish_door_permit(
