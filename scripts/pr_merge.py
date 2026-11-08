@@ -103,8 +103,9 @@ Receipt written to t0_receipts.ndjson:
     merge_method: "squash" | "merge" | "rebase"
     pr_title    : <from gh api>
     branch      : <from gh api>
-    preflight_gates: <list of 5 dicts — every preflight's own verdict; see
+    preflight_gates: <list of 6 dicts — every preflight's own verdict; see
                                  "Preflight ledger" below>
+    door_check  : <dict — ADR-061 contract (c), see "Door preflight" below>
     review_seats: <dict — the seat rule the merge was judged under (OI-2058,
                                  R5b; since R3b rule
                                  ``first_seat_or_every_seat_by_risk``, and since
@@ -166,7 +167,8 @@ Refusal receipt written to t0_receipts.ndjson (a refused merge):
     conclusion  : "refused"
     refused_by  : <str — the gate whose NO-GO stopped the merge>
     head_sha    : <str — the head the gates judged, "" when unresolvable>
-    preflight_gates: <list of 5 dicts, as above>
+    preflight_gates: <list of 6 dicts, as above>
+    door_check  : <dict, as above — not_evaluated when a gate before the door refused>
 
 Its own event_type, NOT a ``pr_merged`` carrying ``conclusion: "refused"``:
 every merged-PR reader in the tree filters on the literal string
@@ -216,12 +218,22 @@ mode, ``off`` included, and also when main has no file yet: onboarding a project
 is free, but the onboarding PR that names the workflow states why (operator
 decision 2026-09-25).
 
+Door preflight (deur D4, ADR-061): the sixth and last gate. When main's
+``branch_protection.yaml`` lists ``vnx-gate/door`` in ``checks[]`` (the read the
+branch-protection preflight already made), the door publishes that check on the
+exact head through ``forge_gate_publisher`` from GO-evidence of the five gates
+before it, reads it back and binds ``permit_id`` to its own run. A merge that does
+not happen, an unknown outcome and an exception before a confirmed merge revoke it
+(PATCH to ``failure``); a revocation that does not land is a blocker open item and
+a non-zero exit. ``door_check`` on both receipts records it (contract (c)).
+
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -247,7 +259,9 @@ sys.path.insert(0, str(SCRIPT_DIR))
 ENGINE_ROOT = SCRIPT_DIR.parent
 
 from vnx_paths import ensure_env
-from governance_receipts import dispatch_identity_fields, emit_governance_receipt
+from governance_receipts import dispatch_identity_fields, emit_governance_receipt, utc_now_iso
+import forge_gate_publisher
+from forge_gate_publisher import CONCLUSION_FAILURE, DOOR_CHECK_NAME, REVOKE_FAILED, REVOKED, ForgeCheckRunError
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
 from contract_invalid_ledger import (
@@ -276,6 +290,7 @@ from merge_target import (
     MergeTarget,
     MergeTargetError,
     door_reference,
+    read_install_version,
     resolve_merge_target,
 )
 
@@ -297,16 +312,26 @@ _PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
 # that is not recognized. Both must make the CLI exit non-zero.
 _RECEIPT_OK_STATUSES = frozenset({"appended", "duplicate"})
 
-#: The five preflights, in the exact order ``main()`` runs them. This order is
+#: The six preflights, in the exact order ``main()`` runs them. This order is
 #: what makes a refusal record readable: the door short-circuits on the first
-#: NO-GO, so everything at a later position never ran.
+#: NO-GO, so everything at a later position never ran. ``door`` is last (deur D4,
+#: ADR-061 §3): its permit is evidenced by the five before it and lies closest to
+#: the merge.
 PREFLIGHT_ORDER: tuple[str, ...] = (
     "ci",
     "review",
     "adr",
     "contract_invalid",
     "branch_protection",
+    "door",
 )
+DOOR_GATE = "door"
+
+#: ``door_check`` on ``pr_merged`` and ``pr_merge_refused`` (ADR-061 contract (c)).
+DOOR_CHECK_SCHEMA = 1
+DOOR_STATE_PERMITTED, DOOR_STATE_NOT_REQUIRED, DOOR_STATE_NOT_EVALUATED = "permitted", "not_required", "not_evaluated"
+REVOKE_NOT_NEEDED, REVOKE_SKIPPED_DRY_RUN = "not_needed", "skipped_dry_run"
+MERGE_MERGED, MERGE_NOT_MERGED, MERGE_UNKNOWN = "merged", "not_merged", "unknown"
 
 #: Third verdict value beside "GO" and "NO-GO" on a preflight record: this gate
 #: never got a turn because an earlier one refused. It is written EXPLICITLY
@@ -397,7 +422,7 @@ def _preflight_ledger(
     refused_by: str = "",
     unevaluated_message: str = "",
 ) -> list[Dict[str, Any]]:
-    """The five preflights in ``PREFLIGHT_ORDER``: those that ran, plus those
+    """The preflights in ``PREFLIGHT_ORDER``: those that ran, plus those
     that never got a turn marked ``not_evaluated``.
 
     ``refused_by`` names the gate whose NO-GO stopped the door; it goes into
@@ -469,6 +494,12 @@ def _lookup_dispatch_id_by_pr_number(pr_number: int) -> str:
 #: value, decided once, and that ``_gh`` and every gate read it from here.
 _ACTIVE_TARGET: Optional[MergeTarget] = None
 
+#: The ``branch_protection.yaml`` reads of the running merge, by ``(root, ref)``.
+#: Same lifetime as ``_ACTIVE_TARGET``: the door preflight reuses the
+#: branch-protection preflight's read of main instead of fetching it again
+#: (ADR-061 §4). ``None`` outside a run: nothing is kept between merges.
+_PROTECTION_READS: Optional[Dict[Tuple[str, str], Tuple[str, YamlFetchResult]]] = None
+
 
 def _target_root() -> Path:
     """Where every git/gh call that judges or performs this merge runs.
@@ -527,8 +558,15 @@ def _fetch_protection_yaml(project_root: Path, ref: str) -> Tuple[str, YamlFetch
     ``forge_protection_drift.fetch_project_yaml_from_ref`` does the walk, so the door,
     ``pre_merge_gate`` and the ``merge_preflight_ci_check`` CLI read the same paths in the
     same order. The read of each path goes through this module's ``fetch_yaml_from_ref``.
+    Within one run each ``(root, ref)`` is read once (``_PROTECTION_READS``).
     """
-    return fetch_project_yaml_from_ref(project_root, ref, fetch=fetch_yaml_from_ref)
+    key = (str(project_root), ref)
+    if _PROTECTION_READS is not None and key in _PROTECTION_READS:
+        return _PROTECTION_READS[key]
+    read = fetch_project_yaml_from_ref(project_root, ref, fetch=fetch_yaml_from_ref)
+    if _PROTECTION_READS is not None:
+        _PROTECTION_READS[key] = read
+    return read
 
 
 def _project_ci_workflow(override_reason: Optional[str]) -> Tuple[Optional[str], str]:
@@ -1903,6 +1941,7 @@ def _emit_receipt(
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
+    door_check: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -1938,6 +1977,10 @@ def _emit_receipt(
     reading the door computed next to that seat record. Written only when the
     door supplied one; a direct caller that ran no door omits it rather than
     claiming a shadow it never computed.
+
+    ``door_check`` (deur D4, ADR-061 contract (c)) is written always, like
+    ``preflight_gates``: a caller without the door records ``not_evaluated``.
+    This receipt follows a confirmed merge only, so ``merge_outcome`` is ``merged``.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -1959,6 +2002,8 @@ def _emit_receipt(
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
+    door = door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, "")
+    kwargs["door_check"] = dict(door, merge_outcome=MERGE_MERGED)
     return emit_governance_receipt(
         "pr_merged",
         receipt_kind="state_mutation",
@@ -1978,8 +2023,13 @@ def _emit_refusal_receipt(
     refused_by: str,
     head_sha: str = "",
     receipts_file: Optional[str] = None,
+    door_check: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write the ``pr_merge_refused`` receipt for a merge the door refused.
+
+    ``door_check`` (ADR-061 contract (c)) is written always: ``not_evaluated``
+    when the refusal came before the door preflight, the permit with its
+    revocation when the door published and the merge did not happen.
 
     Its OWN event_type, not a ``pr_merged`` with ``conclusion: "refused"`` —
     see the module docstring for the six readers that filter on the literal
@@ -2032,6 +2082,7 @@ def _emit_refusal_receipt(
         "preflight_gates": preflight_gates,
         "head_sha": head_sha or "",
         "commit_sha": head_sha or "",
+        "door_check": door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, head_sha),
     }
     if dispatch_id:
         kwargs["dispatch_id"] = dispatch_id
@@ -2059,6 +2110,7 @@ def _refuse_merge(
     json_key: str,
     dry_run: bool,
     receipts_file: Optional[str] = None,
+    door_check: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Record a refused merge and return the CLI's exit code.
 
@@ -2085,30 +2137,14 @@ def _refuse_merge(
     ``refusal_receipt_status`` reports it verbatim in the JSON payload.
     """
     ledger = _preflight_ledger(evaluated, refused_by=gate_name)
+    door_check = door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, head_sha)
 
     receipt_status = "skipped: dry-run"
     if not dry_run:
-        resolved_dispatch_id = dispatch_id or _lookup_dispatch_id_by_pr_number(pr_number)
-        try:
-            receipt = _emit_refusal_receipt(
-                pr_number=pr_number,
-                dispatch_id=resolved_dispatch_id,
-                preflight_gates=ledger,
-                refused_by=gate_name,
-                head_sha=head_sha,
-                receipts_file=receipts_file,
-            )
-            receipt_status = (receipt or {}).get("append_status", "unknown")
-        # Broad by intent: a failed record must never mask the refusal itself.
-        except Exception as exc:
-            receipt_status = f"error: {exc}"
-        if receipt_status not in _RECEIPT_OK_STATUSES:
-            print(
-                f"WARN: PR #{pr_number} was refused by the {gate_name} preflight, but the "
-                f"pr_merge_refused record did NOT land (append_status={receipt_status!r}). "
-                f"The refusal itself stands; only its audit-trail evidence is missing.",
-                file=sys.stderr,
-            )
+        receipt_status = _write_refusal_receipt(
+            pr_number=pr_number, dispatch_id=dispatch_id, gate_name=gate_name, ledger=ledger,
+            head_sha=head_sha, door_check=door_check, receipts_file=receipts_file,
+        )
 
     if json_output:
         print(json.dumps({
@@ -2118,12 +2154,38 @@ def _refuse_merge(
             json_key: gate,
             "refused_by": gate_name,
             "preflight_gates": ledger,
+            "door_check": door_check,
             "refusal_receipt_status": receipt_status,
             "target_repo": _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else "",
         }, indent=2))
     else:
         print(f"NO-GO: {gate['message']}", file=sys.stderr)
     return EXIT_ERROR
+
+
+def _write_refusal_receipt(
+    *, pr_number: int, dispatch_id: str, gate_name: str, ledger: list[Dict[str, Any]],
+    head_sha: str, door_check: Dict[str, Any], receipts_file: Optional[str] = None,
+) -> str:
+    """Write ``pr_merge_refused`` and return its append status; a failed write is reported, never raised."""
+    resolved_dispatch_id = dispatch_id or _lookup_dispatch_id_by_pr_number(pr_number)
+    try:
+        receipt = _emit_refusal_receipt(
+            pr_number=pr_number, dispatch_id=resolved_dispatch_id, preflight_gates=ledger,
+            refused_by=gate_name, head_sha=head_sha, receipts_file=receipts_file, door_check=door_check,
+        )
+        receipt_status = (receipt or {}).get("append_status", "unknown")
+    # Broad by intent: a failed record must never mask the refusal itself.
+    except Exception as exc:
+        receipt_status = f"error: {exc}"
+    if receipt_status not in _RECEIPT_OK_STATUSES:
+        print(
+            f"WARN: PR #{pr_number} was refused by the {gate_name} preflight, but the "
+            f"pr_merge_refused record did NOT land (append_status={receipt_status!r}). "
+            f"The refusal itself stands; only its audit-trail evidence is missing.",
+            file=sys.stderr,
+        )
+    return receipt_status
 
 
 def _emit_register_event(
@@ -2173,8 +2235,12 @@ def merge_pr(
     preflight_gates: Optional[list[Dict[str, Any]]] = None,
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
+    door_check: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
+
+    ``door_check`` (deur D4) is the door preflight's permit record, forwarded
+    onto the ``pr_merged`` receipt; ``None`` records ``not_evaluated``.
 
     ``contract_invalid_override`` (Golf B, B7): forwarded verbatim onto the
     ``pr_merged`` receipt's ``contract_invalid_override`` field when set —
@@ -2247,8 +2313,7 @@ def merge_pr(
         result["overlaps"] = _branch_overlaps(pr_number, result["branch"])
 
     if dry_run:
-        result["success"] = True
-        result["error"] = "dry_run: no merge executed"
+        result.update(success=True, error="dry_run: no merge executed")
         print(f"[dry-run] Would merge PR #{pr_number} via {merge_method}")
         if dispatch_id:
             print(f"[dry-run] dispatch_id: {dispatch_id}")
@@ -2285,7 +2350,7 @@ def merge_pr(
             contract_invalid_override=contract_invalid_override,
             preflight_gates=preflight_gates,
             review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
-            shadow_seat_rule=shadow_seat_rule,
+            shadow_seat_rule=shadow_seat_rule, door_check=door_check,
         )
         append_status = (receipt or {}).get("append_status", "unknown")
         result["receipt_status"] = append_status
@@ -2377,7 +2442,7 @@ def _run_with_target(args: argparse.Namespace) -> int:
     against the first preflight: a door that cannot say which repo it is judging
     must not judge.
     """
-    global _ACTIVE_TARGET
+    global _ACTIVE_TARGET, _PROTECTION_READS
     try:
         target = resolve_merge_target(ENGINE_ROOT)
     except MergeTargetError as exc:
@@ -2398,7 +2463,7 @@ def _run_with_target(args: argparse.Namespace) -> int:
             json_key="ci_gate",
             dry_run=args.dry_run,
         )
-    _ACTIVE_TARGET = target
+    _ACTIVE_TARGET, _PROTECTION_READS = target, {}
     try:
         # On stderr under --json: a refusal at the first gate leaves stdout as
         # nothing but the JSON object, and consumers parse it that way. The
@@ -2406,19 +2471,22 @@ def _run_with_target(args: argparse.Namespace) -> int:
         print(f"doelrepo: {target.repo}", file=sys.stderr if args.json else sys.stdout)
         return _run_door(args)
     finally:
-        _ACTIVE_TARGET = None
+        _ACTIVE_TARGET, _PROTECTION_READS = None, None
 
 
 def _door_refuser(
     args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
-) -> Callable[[str, Dict[str, Any], str], int]:
-    """The door's ``refuse(gate_name, gate_result, json_key)``, bound to one run's state.
+) -> Callable[..., int]:
+    """The door's ``refuse(gate_name, gate_result, json_key, door_check=None)``, bound to one run's state.
 
     Every preflight NO-GO goes through it, so the ledger it names, the head it
     pins and the CLI shape it answers in stay those of the door that decided
-    the refusal.
+    the refusal. Only the door preflight passes its own ``door_check``.
     """
-    def refuse(gate_name: str, gate_result: Dict[str, Any], json_key: str) -> int:
+    def refuse(
+        gate_name: str, gate_result: Dict[str, Any], json_key: str,
+        door_check: Optional[Dict[str, Any]] = None,
+    ) -> int:
         return _refuse_merge(
             pr_number=args.pr,
             dispatch_id=args.dispatch_id or "",
@@ -2429,13 +2497,285 @@ def _door_refuser(
             json_output=args.json,
             json_key=json_key,
             dry_run=args.dry_run,
+            door_check=door_check,
         )
 
     return refuse
 
 
+# ---------------------------------------------------------------------------
+# The door permit (deur D4, ADR-061 §3-§5): publish, read back, revoke, record
+# ---------------------------------------------------------------------------
+
+
+def _door_check_block(state: str, head_sha: str, **fields: Any) -> Dict[str, Any]:
+    """``door_check`` as ADR-061 contract (c) defines it, with every key on every record.
+
+    Where nothing was published the keys are there with ``None``/``False``. ADR-061
+    §4 writes the ``not_required`` block as ``{"schema": 1, "state": "not_required"}``;
+    this is that block with its other keys explicitly empty, so a reader never meets
+    a key on one record and a KeyError on the next (the rule of ``_preflight_record``).
+    """
+    block: Dict[str, Any] = {
+        "schema": DOOR_CHECK_SCHEMA, "state": state, "check_name": DOOR_CHECK_NAME,
+        "head_sha": head_sha or "", "app_id": None, "check_run_id": None, "permit_id": None,
+        "published_at": None, "read_back": None, "revoked": False,
+        "revoke_outcome": REVOKE_NOT_NEEDED, "merge_outcome": MERGE_NOT_MERGED,
+        "door_version": None, "integrity_sha256": None,
+    }
+    block.update(fields)
+    return block
+
+
+def _door_gate(verdict: str, message: str) -> Dict[str, Any]:
+    return {"verdict": verdict, "message": message, "overridden": False, "override_reason": None}
+
+
+def _door_required(target_root: Path) -> Tuple[Optional[bool], str]:
+    """Whether main's ``branch_protection.yaml`` lists ``vnx-gate/door`` in ``checks[]`` (ADR-061 §4).
+
+    The read is the branch-protection preflight's own (``_PROTECTION_READS``), not a
+    second fetch. ``None`` with the reason when it is unreadable or invalid: an
+    unreadable declaration is a refusal, never ``not_required``.
+    """
+    main_path, main_yaml = _fetch_protection_yaml(target_root, "main")
+    if main_yaml.not_found:
+        return False, "geen branch_protection.yaml op main"
+    if main_yaml.error:
+        return None, f"branch-protection-YAML op main niet leesbaar: {main_yaml.error}"
+    try:
+        config = parse_protection_config(main_yaml.text or "")
+    except ProtectionConfigError as exc:
+        return None, f"branch-protection-YAML op main ongeldig: {exc}"
+    return any(check.context == DOOR_CHECK_NAME for check in config.checks), main_path
+
+
+def _door_identity() -> Dict[str, Any]:
+    """``door_version`` and ``integrity_sha256`` of the running door; raises when unreadable.
+
+    The hash is sha256 over ``path NUL blob-id`` for each of ``_DOOR_INTEGRITY_PATHS``,
+    with the blob id git gives those bytes (what ``_door_blob_hash_gate`` compares).
+    """
+    digest = hashlib.sha256()
+    for path in _DOOR_INTEGRITY_PATHS:
+        data = (ENGINE_ROOT / path).read_bytes()
+        blob = hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
+        digest.update(f"{path}\0{blob}\n".encode("utf-8"))
+    return {"door_version": read_install_version(ENGINE_ROOT), "integrity_sha256": digest.hexdigest()}
+
+
+def _run_door_permit(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """The sixth preflight: ``(gate, door_check)``, with its record appended to ``evaluated``.
+
+    A GO is printed inside ``_merge_under_permit``'s guard, not here: from the
+    publication on, even a failed print must revoke.
+    """
+    gate, check = _door_permit(args, evaluated, head_sha)
+    gate["reason_code"] = check["state"]
+    evaluated.append(_preflight_record(DOOR_GATE, gate, head_sha))
+    return gate, check
+
+
+def _door_permit(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Not required, a dry run, or a permit published and bound; anything unproven is a NO-GO.
+
+    ``door_version`` and ``integrity_sha256`` are evidence for a permit, so they are
+    established on the publication path only and stay ``None`` where nothing is published.
+    """
+    blank = _door_check_block(DOOR_STATE_NOT_EVALUATED, head_sha)
+    required, where = _door_required(_target_root())
+    if required is None:
+        return _door_gate("NO-GO", f"{DOOR_CHECK_NAME}: {where}"), blank
+    dry = {"revoke_outcome": REVOKE_SKIPPED_DRY_RUN} if args.dry_run else {}
+    if not required:
+        not_required = _door_check_block(DOOR_STATE_NOT_REQUIRED, head_sha, **dry)
+        return _door_gate("GO", f"{DOOR_CHECK_NAME} niet vereist ({where}): niets gepubliceerd"), not_required
+    if args.dry_run:
+        return _door_gate("GO", f"dry-run: {DOOR_CHECK_NAME} vereist, niets gepubliceerd"), dict(blank, **dry)
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha or ""):
+        return _door_gate("NO-GO", f"{DOOR_CHECK_NAME}: geen volledige kop voor de toestemming ({head_sha!r})"), blank
+    try:
+        identity = _door_identity()
+    except (OSError, MergeTargetError) as exc:
+        return _door_gate("NO-GO", f"{DOOR_CHECK_NAME}: deur-identiteit niet vast te stellen: {exc}"), blank
+    evidence = {
+        "schema": forge_gate_publisher.DOOR_EVIDENCE_SCHEMA, "source": forge_gate_publisher.DOOR_EVIDENCE_SOURCE,
+        "pr_number": args.pr, "head_sha": head_sha,
+        # The records of the gates before the door, out of the ledger the receipt is built from (R7).
+        "preflight_gates": [record for record in _preflight_ledger(evaluated) if record["gate"] != DOOR_GATE],
+        "door_version": identity["door_version"],
+        "integrity": {"paths": len(_DOOR_INTEGRITY_PATHS), "sha256": identity["integrity_sha256"]},
+    }
+    return _publish_and_bind(args.pr, head_sha, evidence, dict(blank, **identity))
+
+
+def _publish_and_bind(
+    pr: int, head_sha: str, evidence: Dict[str, Any], check: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """Publish through D3, read back, bind ``permit_id`` to the run; revoke on any failure.
+
+    The head's door runs are read first: a head the door cannot read (no App key,
+    no network) is a NO-GO before anything is published, with nothing to revoke.
+    """
+    root = _target_root()
+    try:
+        forge_gate_publisher.door_runs_on_head(head_sha, project_root=root)
+    except ForgeCheckRunError as exc:
+        return _door_gate("NO-GO", f"{DOOR_CHECK_NAME}: deurruns niet leesbaar, niets gepubliceerd: {exc}"), check
+    run_id: Optional[int] = None
+    try:
+        run_id = forge_gate_publisher.publish_door_permit(evidence, sha=head_sha, pr=pr, project_root=root)
+        run = forge_gate_publisher.read_back_door(head_sha, run_id, project_root=root)
+        app_id = run["app"]["id"]
+        permit = dict(
+            check, state=DOOR_STATE_PERMITTED, app_id=app_id, check_run_id=run_id,
+            permit_id=f"{app_id}:{head_sha}:{run_id}", published_at=utc_now_iso(),
+            read_back={"conclusion": run["conclusion"], "id": run["id"]},
+        )
+    except ForgeCheckRunError as exc:
+        outcome = _revoke_door_runs(pr, head_sha, run_id, f"de deur weigerde: {exc}")
+        refused = dict(check, check_run_id=run_id, revoked=outcome == REVOKED, revoke_outcome=outcome)
+        return _door_gate("NO-GO", f"{DOOR_CHECK_NAME} niet bevestigd op {head_sha[:12]}: {exc}"), refused
+    except BaseException:
+        _revoke_during_exception(lambda: _revoke_door_runs(pr, head_sha, run_id, "uitzondering bij het publiceren"))
+        raise
+    return _door_gate("GO", f"{DOOR_CHECK_NAME} gepubliceerd en teruggelezen: {permit['permit_id']}"), permit
+
+
+def _revoke_door_runs(pr: int, head_sha: str, known_id: Optional[int], reason: str) -> str:
+    """Revoke every own door run on the head that could still permit, by D3's PATCH to ``failure``.
+
+    That is the run this call made or bound (``known_id``) plus every own run on the head
+    not on ``failure``: GitHub lets ``neutral`` and ``skipped`` satisfy a required check.
+    ``revoked`` only when the head was readable and every PATCH landed; otherwise
+    ``revoke_failed`` with a blocker open item (ADR-061 §5). No run: ``not_needed``.
+    """
+    root = _target_root()
+    try:
+        own, unseen = forge_gate_publisher.door_runs_on_head(head_sha, project_root=root).own, ""
+    except ForgeCheckRunError as exc:
+        own, unseen = [], f"deurruns op de kop niet leesbaar: {exc}"
+    ids = [] if known_id is None else [known_id]
+    ids += [run.get("id") for run in own if run.get("conclusion") != CONCLUSION_FAILURE and run.get("id") not in ids]
+    results = {run_id: _revoke_one(run_id, reason[:200], head_sha, pr, root) for run_id in ids}
+    failed = [f"run {run_id}: {result}" for run_id, result in results.items() if result != REVOKED]
+    if unseen or failed:
+        _file_revoke_blocker(pr, head_sha, ids, "; ".join(([unseen] if unseen else []) + failed))
+        return REVOKE_FAILED
+    return REVOKED if ids else REVOKE_NOT_NEEDED
+
+
+def _revoke_one(run_id: Any, reason: str, head_sha: str, pr: int, root: Path) -> str:
+    """D3's ``revoke_door`` for one run; a refusal before its PATCH is ``revoke_failed``."""
+    try:
+        return forge_gate_publisher.revoke_door(run_id, reason, sha=head_sha, pr=pr, project_root=root)
+    except ForgeCheckRunError as exc:
+        return f"{REVOKE_FAILED} ({exc})"
+
+
+def _revoke_during_exception(revoke: Callable[[], Any]) -> None:
+    """Revoke while an exception is on its way out; a failure here never replaces that exception."""
+    try:
+        revoke()
+    except Exception as exc:  # reported; the caller re-raises the exception it is handling
+        print(f"FATAL: intrekking tijdens een uitzondering faalde zelf: {exc}", file=sys.stderr)
+
+
+def _file_revoke_blocker(pr: int, head_sha: str, ids: List[Any], why: str) -> None:
+    """A revocation that did not land: the run may still read ``success``, so a blocker open item."""
+    recovery = f"python3 scripts/pr_merge.py --pr {pr}"
+    details = (
+        f"{DOOR_CHECK_NAME} op PR #{pr} (kop {head_sha}, runs {ids}) is niet ingetrokken en kan nog "
+        f"op success staan: {why}. Herstel: {recovery}"
+    )
+    print(f"BLOCKER: {details}", file=sys.stderr)
+    try:
+        from open_items_manager import add_item_programmatic
+        add_item_programmatic(
+            title=f"{DOOR_CHECK_NAME}: toestemming op PR #{pr} niet ingetrokken", severity="blocker",
+            dispatch_id="door-permit", details=details, dedup_key=f"door-revoke:{pr}:{head_sha}",
+            source="pr_merge_door",
+        )
+    except Exception as exc:  # the BLOCKER line above stands and the exit is non-zero either way
+        print(f"FATAL: blocker-open-item niet geschreven: {exc}", file=sys.stderr)
+
+
+def _merge_outcome_after_failure(pr_number: int) -> str:
+    """``not_merged`` or ``unknown`` for a merge that was not confirmed, read off GitHub's state.
+
+    ``not_merged`` only on positive evidence that no merge is pending: ``CLOSED``, or
+    ``OPEN`` with ``autoMergeRequest`` explicitly null. Unreadable, ``MERGED`` after a
+    reported failure, an armed auto-merge or a missing key: ``unknown``.
+    """
+    try:
+        result = _gh(["pr", "view", str(pr_number), "--json", "state,autoMergeRequest"])
+        data = json.loads(result.stdout) if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, TypeError, json.JSONDecodeError):
+        data = None
+    if not isinstance(data, dict) or "autoMergeRequest" not in data:
+        return MERGE_UNKNOWN
+    if data.get("state") == "CLOSED" or (data.get("state") == "OPEN" and data["autoMergeRequest"] is None):
+        return MERGE_NOT_MERGED
+    return MERGE_UNKNOWN
+
+
+def _revoke_after_merge(
+    args: argparse.Namespace, check: Dict[str, Any], evaluated: list[Dict[str, Any]],
+    head_sha: str, merge_outcome: str, reason: str,
+) -> Dict[str, Any]:
+    """Revoke the permit after a merge that is not confirmed, and record it as ``pr_merge_refused``."""
+    outcome = _revoke_door_runs(args.pr, head_sha, check["check_run_id"], f"merge {merge_outcome}: {reason}")
+    door_check = dict(check, merge_outcome=merge_outcome, revoked=outcome == REVOKED, revoke_outcome=outcome)
+    _write_refusal_receipt(
+        pr_number=args.pr, dispatch_id=args.dispatch_id or "", gate_name="merge",
+        ledger=_preflight_ledger(evaluated), head_sha=head_sha, door_check=door_check,
+    )
+    return door_check
+
+
+def _merge_under_permit(
+    args: argparse.Namespace, gate: Dict[str, Any], check: Dict[str, Any],
+    evaluated: list[Dict[str, Any]], head_sha: str, merge: Callable[[], Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The merge under the permit: only a confirmed merge leaves it standing (ADR-061 §5).
+
+    Three triggers revoke, each by D3's PATCH to ``failure``: a merge that did not
+    happen, an outcome that is unknown, and any exception before a confirmed merge
+    (revoked, then re-raised: this guard never swallows). Without a permit
+    (``not_required``, a dry run) the merge runs as it did before the door, and a
+    ``not_required`` result stays the shape it had (state A0: nothing changes for a
+    project without the entry); its receipt carries ``door_check`` all the same.
+    """
+    permitted = check["state"] == DOOR_STATE_PERMITTED
+    try:
+        print(f"Door gate: {gate['message']}")
+        result = merge()
+    except BaseException:
+        if permitted:
+            _revoke_during_exception(lambda: _revoke_after_merge(
+                args, check, evaluated, head_sha, MERGE_UNKNOWN, "uitzondering vóór een bevestigde merge",
+            ))
+        raise
+    if not permitted:
+        if check["state"] != DOOR_STATE_NOT_REQUIRED:  # a dry run under a required door
+            result["door_check"] = check
+        return result
+    if result.get("success") is True:
+        result["door_check"] = dict(check, merge_outcome=MERGE_MERGED)
+        return result
+    outcome = _merge_outcome_after_failure(args.pr)
+    result["door_check"] = _revoke_after_merge(
+        args, check, evaluated, head_sha, outcome, str(result.get("error") or "merge niet bevestigd"),
+    )
+    return result
+
+
 def _run_door(args: argparse.Namespace) -> int:
-    """The five preflights, then the merge, against the active target."""
+    """The six preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
 
     # Golf Bx, D3: every preflight's own verdict, appended as it is decided.
@@ -2513,9 +2853,6 @@ def _run_door(args: argparse.Namespace) -> int:
     for warning in protection_gate.get("warnings") or []:
         print(f"WARN: {warning}", file=sys.stderr)
 
-    # All five ran and approved: the ledger pads nothing here.
-    preflight_gates = _preflight_ledger(evaluated)
-
     contract_invalid_override = (
         {"flag": "--override-contract-invalid", "reason": contract_gate["override_reason"]}
         if contract_gate.get("overridden") else None
@@ -2527,17 +2864,28 @@ def _run_door(args: argparse.Namespace) -> int:
     # lands as UNKNOWN fields inside it.
     shadow_seat_rule = _door_shadow_seat_rule(args, head_sha, pr_data, review_gate)
 
-    result = merge_pr(
+    # ── Door preflight (deur D4, ADR-061 §3-§5): the sixth and last ────────
+    # Published right before the merge, and only when main requires it. From
+    # here on only a confirmed merge leaves the permit standing.
+    door_gate, door_check = _run_door_permit(args, evaluated, head_sha)
+    if door_gate["verdict"] != "GO":
+        return refuse("door", door_gate, "door_gate", door_check)
+
+    # All six ran and approved: the ledger pads nothing here.
+    result = _merge_under_permit(args, door_gate, door_check, evaluated, head_sha, lambda: merge_pr(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
         dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
-        preflight_gates=preflight_gates,
+        preflight_gates=_preflight_ledger(evaluated), door_check=door_check,
         review_seats=review_gate.get("review_seats"),
         shadow_seat_rule=shadow_seat_rule,
-    )
-
+    ))
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""
+    return _report_merge(args, result, method)
 
+
+def _report_merge(args: argparse.Namespace, result: Dict[str, Any], method: str) -> int:
+    """Print the merge outcome and return the CLI's exit code."""
     if args.json:
         print(json.dumps(result, indent=2))
     elif args.dry_run:
