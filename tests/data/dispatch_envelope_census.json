@@ -22,6 +22,20 @@
       "symbol": ""
     },
     {
+      "file": "tests/test_claude_skill_materialize.py",
+      "line": 21,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_claude_skill_materialize.py",
+      "line": 92,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
       "file": "tests/test_codex_model_registry.py",
       "line": 813,
       "mechanism": "direct-call",
