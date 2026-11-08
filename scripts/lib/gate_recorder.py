@@ -886,6 +886,15 @@ def stamp_request_identity(
     Every request that legitimately carries ``takeover: true`` sets all five
     fields together (see ``_stamp_takeover_annotations``), so a plain
     ``.get()`` with no additional per-field presence check is enough.
+
+    Gate profile (gate-profiel P6, B15): also copies ``profile``, ``profile_source`` and
+    ``profile_error`` from the request onto the result, so the ``review_gate_result``
+    receipt, which reads them off the result payload, names the profile the request
+    resolved. ``gate_request_handler`` writes them inside the request's ``review_seats``
+    record (``ReviewSeats.to_record``); a top-level key on the request wins over that
+    record. Only a non-empty text is copied, so a request from before P6 leaves the keys
+    ABSENT and the receipt reads as unknown, never as ``standard``. A value the result
+    already carries is never overwritten.
     """
     branch = (request_payload.get("branch") or "").strip()
     if not branch:
@@ -924,6 +933,8 @@ def stamp_request_identity(
     execution_id = request_payload.get(gate_status.EXECUTION_ID_FIELD)
     if gate_status.is_execution_id(execution_id):
         result_payload[gate_status.EXECUTION_ID_FIELD] = execution_id
+    for key, value in _profile_receipt_fields(request_payload).items():
+        result_payload.setdefault(key, value)
     return result_payload
 
 

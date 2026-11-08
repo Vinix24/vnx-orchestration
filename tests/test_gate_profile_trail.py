@@ -134,6 +134,9 @@ class TestRequestRecordCarriesTheProfile:
 
 
 class TestResultReceipt:
+    # Helper only: these hand _outcome_receipt_fields a payload that already carries the profile keys,
+    # which the production result writers do not. The proof of B15 on the production path is
+    # tests/test_gate_profile_result_path.py.
     def test_the_request_record_profile_lands_on_the_receipt(self):
         fields = _receipt(_payload(profile="heavy", profile_source="project_config", profile_error=None))
         assert fields["profile"] == "heavy" and fields["profile_source"] == "project_config"
