@@ -884,13 +884,33 @@ def _delivery_verdict(member: Dict[str, Any], by_source: Dict[str, Dict[str, int
             "reasons": reasons, "operator_actions": operator, "sources": by_source}
 
 
-def _cohort_members(count: Dict[str, Any], until: datetime) -> List[Dict[str, Any]]:
-    """N: delivered members plus ``receipt_missing`` ones, created before ``until`` (end exclusive)."""
+def _terminal_before(member: Dict[str, Any], moments: Dict[str, str], until: datetime):
+    """``True``/``False`` for a readable terminal moment before ``until``, ``None`` when unreadable."""
+    try:
+        at = lifecycle_count._parse_period_start(moments.get(member["dispatch_id"]))
+    except lifecycle_count.Unmeasured:
+        return None
+    return None if at is None else at < until
+
+
+def _cohort_members(count: Dict[str, Any], until: datetime, moments: Dict[str, str]) -> List[Dict[str, Any]]:
+    """N: delivered members plus ``receipt_missing`` ones (ADR-056: terminal in the period, end exclusive).
+
+    Two upper-bound rules: ``created_at < until`` and the terminal transition ``< until``. A member
+    whose terminal moment cannot be read stays in N as ``unknown`` with reason
+    ``terminal_at_unreadable`` (fail-closed, like ``created_at_unreadable``), never as delivered.
+    """
     kept = []
     for member in count["membership"]:
         counted = member["status"] == lifecycle_count.MEMBER_DELIVERED or (
             member["status"] == lifecycle_count.MEMBER_UNKNOWN and member["reason"] == "receipt_missing")
-        if counted and lifecycle_count._parse_period_start(member["created_at"]) < until:
+        if not counted or lifecycle_count._parse_period_start(member["created_at"]) >= until:
+            continue
+        before = _terminal_before(member, moments, until)
+        if before is None:
+            kept.append(lifecycle_count.Member(
+                member, status=lifecycle_count.MEMBER_UNKNOWN, reason="terminal_at_unreadable"))
+        elif before:
             kept.append(member)
     return kept
 
@@ -902,8 +922,9 @@ def measure_operator_cohort(state_dir: Path, project_id: str, since: str, until:
     if count["status"] != lifecycle_count.STATUS_MEASURED:
         raise lifecycle_count.Unmeasured(count["reason"])
     joined = _delivery_classes(lifecycle_count.source_rows(state_dir), project_id)
+    moments = lifecycle_count.terminal_moments(state_dir, project_id)
     deliveries = [_delivery_verdict(m, joined.get(m["dispatch_id"], {}))
-                  for m in _cohort_members(count, until_at)]
+                  for m in _cohort_members(count, until_at, moments)]
     tally = {v: sum(1 for d in deliveries if d["verdict"] == v) for v in ("zero", "operator", "unknown")}
     n = len(deliveries)
     coverage = lifecycle_count.measure_coverage(state_dir, project_id=project_id)

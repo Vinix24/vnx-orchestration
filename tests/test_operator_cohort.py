@@ -53,12 +53,19 @@ def make_store(state_dir: Path, project: str = PROJECT) -> Path:
 
 
 def add_delivery(sd: Path, did: str, state: str = "completed", *, pr_ref=None,
-                 created_at: str = INSIDE, project: str = PROJECT) -> None:
+                 created_at: str = INSIDE, project: str = PROJECT, terminal_at=INSIDE) -> None:
+    """A dispatch row; it also gets the ``dispatch_<state>`` transition event at ``terminal_at``."""
     with coordination_db.get_connection(sd) as conn:
         conn.execute(
             "INSERT INTO dispatches (dispatch_id, project_id, state, attempt_count, pr_ref, "
             "created_at, metadata_json) VALUES (?, ?, ?, 1, ?, ?, '{}')",
             (did, project, state, pr_ref, created_at))
+        if terminal_at is not None:
+            conn.execute(
+                "INSERT INTO coordination_events (event_id, event_type, entity_type, entity_id, "
+                "from_state, to_state, actor, metadata_json, occurred_at, project_id) "
+                "VALUES (?, ?, 'dispatch', ?, 'running', ?, 'runtime', '{}', ?, ?)",
+                (f"tr-{did}", f"dispatch_{state}", did, state, terminal_at, project))
         conn.commit()
 
 
@@ -200,6 +207,44 @@ def test_row_created_at_or_after_until_is_outside(sd):
     _, out = cohort(sd)
 
     assert out["N"] == 0
+
+
+def test_completed_after_until_is_outside_the_cohort(sd):
+    add_delivery(sd, "dlv-00000000000b", created_at=INSIDE, terminal_at=AFTER_END)
+    add_event(sd, "deliverable_promoted", "dlv-00000000000b", "t0")
+
+    proc, out = cohort(sd)
+
+    assert proc.returncode == 0, proc.stderr
+    assert out["N"] == 0
+
+
+def test_unreadable_terminal_moment_is_unknown(sd):
+    add_delivery(sd, "dlv-00000000000c", terminal_at=None)
+    add_event(sd, "deliverable_promoted", "dlv-00000000000c", "t0")
+    add_delivery(sd, "dlv-00000000000d", terminal_at="not-a-timestamp")
+    add_event(sd, "deliverable_promoted", "dlv-00000000000d", "t0")
+
+    _, out = cohort(sd)
+
+    assert out["N"] == 2 and out["unknown"] == 2 and out["zero"] == 0
+    assert {d["verdict"] for d in out["deliveries"]} == {"unknown"}
+    assert {d["reason"] for d in out["deliveries"]} == {"terminal_at_unreadable"}
+
+
+def test_terminal_event_of_another_state_is_not_the_moment(sd):
+    add_delivery(sd, "dlv-00000000000e", terminal_at=None)
+    add_event(sd, "deliverable_promoted", "dlv-00000000000e", "t0")
+    with coordination_db.get_connection(sd) as conn:
+        conn.execute(
+            "INSERT INTO coordination_events (event_id, event_type, entity_type, entity_id, to_state, "
+            "metadata_json, occurred_at, project_id) VALUES ('x-1', 'dispatch_expired', 'dispatch', "
+            "'dlv-00000000000e', 'expired', '{}', ?, ?)", (INSIDE, PROJECT))
+        conn.commit()
+
+    _, out = cohort(sd)
+
+    assert out["deliveries"][0]["reason"] == "terminal_at_unreadable"
 
 
 def test_n_zero_gives_null_rates(sd):

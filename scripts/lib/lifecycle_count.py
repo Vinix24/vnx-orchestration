@@ -412,6 +412,33 @@ def source_rows(state_dir) -> dict:
     }
 
 
+def terminal_moments(state_dir, project: str) -> dict:
+    """``{dispatch_id: occurred_at}`` of each ``dlv-`` dispatch's transition into its current terminal state.
+
+    The writer is ``runtime_state_machine.transition_dispatch``: it appends a
+    ``coordination_events`` row with ``entity_type='dispatch'``, ``event_type='dispatch_<state>'``
+    and ``to_state='<state>'``, stamped ``occurred_at``. Only that event of this project, matching
+    the dispatch's current terminal state, counts (``dispatches.updated_at`` moves on later writes).
+    A dispatch without such an event, or with an unparseable stamp, is absent: the reader never guesses.
+    """
+    state_path = Path(state_dir)
+    states = {_text(r.get("dispatch_id")): _text(r.get("state")) for r in _sql_rows(
+        state_path, "dispatches", "WHERE project_id = ? AND dispatch_id LIKE ?",
+        (project, DELIVERABLE_PREFIX + "%"))}
+    moments = {}
+    for event in _sql_rows(state_path, "coordination_events",
+                           "WHERE entity_type = ? AND project_id = ?", ("dispatch", project)):
+        did, to_state = _text(event.get("entity_id")), _text(event.get("to_state"))
+        if (to_state in TERMINAL_DISPATCH_STATES and states.get(did) == to_state
+                and event.get("event_type") == f"dispatch_{to_state}"):
+            try:
+                _parse_period_start(event.get("occurred_at"))
+            except Unmeasured:
+                continue
+            moments[did] = _text(event.get("occurred_at"))
+    return moments
+
+
 def _classify(entries: list, project: str) -> dict:
     """One source: another project's rows never count; no rows is ``no_data``, never covered."""
     kept = [(_text(scope), _text(pid), _text(did)) for scope, pid, did in entries
