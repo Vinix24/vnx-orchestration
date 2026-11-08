@@ -662,11 +662,12 @@ def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str
 
 def fresh_config_seats() -> Tuple[Optional[Tuple[str, ...]], str, str]:
     """``(seats, value, refusal)`` from a fresh ``resolve_review_seats()`` for this process's project."""
-    from review_seats import ReviewSeatError, resolve_review_seats
+    from dispatch_spec import ReviewGateConfigError
+    from review_seats import resolve_review_seats
 
     try:
         resolved = resolve_review_seats()
-    except ReviewSeatError as exc:
+    except ReviewGateConfigError as exc:  # the shared base: a bad stack and a bad governance profile both refuse by name
         return None, "", str(exc)
     return resolved.seats, resolved.value, ""
 
