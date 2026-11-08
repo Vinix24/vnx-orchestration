@@ -413,3 +413,38 @@ def test_command_path_expands_home_for_a_bare_tilde_path(env):
 @pytest.mark.parametrize("command", ["bash -c", "bash -c '/opt/a.sh", "bash -c ''"])
 def test_command_path_malformed_inline_script_is_none(env, command):
     assert _hooks_for(env, command)[0]["command_path"] is None
+
+
+@pytest.mark.parametrize("command", [
+    "node --eval=console.log(1) /SENTINEL-SECRET",
+    "node --require /SENTINEL-SECRET x.js",
+    "python3 -X dev /SENTINEL-SECRET",
+    "ruby -I /SENTINEL-SECRET x.rb",
+    "perl -I/SENTINEL-SECRET x.pl",
+    "bash --rcfile /SENTINEL-SECRET x.sh",
+    "bash -o pipefail /SENTINEL-SECRET",
+    "bash +o pipefail /SENTINEL-SECRET",
+    "bash -O extglob /SENTINEL-SECRET",
+    "bash -eo pipefail /SENTINEL-SECRET",
+])
+def test_option_before_the_script_gives_no_command_path(env, command):
+    import context_manifest
+
+    assert context_manifest._command_path(command) is None
+    assert _hooks_for(env, command)[0]["command_path"] is None
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("python3 /abs/hook.py --flag x", "/abs/hook.py"),
+    ("node /abs/hook.js", "/abs/hook.js"),
+    ("zsh -f /abs/hook.sh", "/abs/hook.sh"),
+    ("bash -eu /abs/hook.sh", "/abs/hook.sh"),
+    ("bash -c '/abs/inline.sh arg'", "/abs/inline.sh"),
+    ("python3 -c 'print(1)'", None),
+    ("python3 -m mod", None),
+    ("env FOO=bar python3 /abs/hook.py", "/abs/hook.py"),
+])
+def test_plain_shapes_keep_their_command_path(env, command, expected):
+    import context_manifest
+
+    assert context_manifest._command_path(command) == expected
