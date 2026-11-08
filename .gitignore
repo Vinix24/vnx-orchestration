@@ -164,3 +164,6 @@ scripts/benchmark/field-tests/tasks.local.yaml
 # Deze repo is publiek, dus die gaan er niet in. Backup staat buiten git in de
 # centrale per-project store: ~/.vnx-data/<project>/daily-log/
 daily-log/
+
+# Schaduwkopie van de skills per rol (ADR-050): nooit in git
+.vnx-agent-skills/

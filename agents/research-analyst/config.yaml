@@ -8,3 +8,8 @@ isolation:
     - "scripts/"
     - "dashboard/"
     - ".claude/"
+skills:
+  - data-analyst
+  - debugger
+  - reviewer
+  - fabric-reference

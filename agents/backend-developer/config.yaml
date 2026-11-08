@@ -6,3 +6,11 @@ isolation:
   allowed_paths:
     - "."
     - ".vnx-data/unified_reports/"
+skills:
+  - backend-developer
+  - api-developer
+  - database-engineer
+  - debugger
+  - refactor-safe
+  - test-engineer
+  - fabric-reference
