@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -401,3 +402,180 @@ def test_swapped_ancestor_of_the_error_manifest_is_not_followed(tmp_path, worktr
     result = asm.materialize_role_skills(worktree, ROLE, ["nonexistent"])
     assert result["status"] == "error"
     assert list(outside.rglob("*")) == []
+
+
+# --- r5: every destination file is new, untracked and ignored before the copy writes it ---
+
+IGNORE_ASSETS = IGNORE + ".claude/skills/*/assets/\n"
+
+
+def _asset(wt, slug="alpha"):
+    return wt / ".claude" / "skills" / slug / "assets" / "data.txt"
+
+
+def _track_asset(wt, content=b"existing tracked asset\n"):
+    _asset(wt).parent.mkdir(parents=True)
+    _asset(wt).write_bytes(content)
+    _git(wt, "add", "-f", ".claude/skills/alpha/assets/data.txt")
+    _git(wt, "commit", "-q", "-m", "tracked asset")
+
+
+def _assert_alpha_refused(result, reason):
+    assert (result["status"], result["reason"]) == ("partial", reason)
+    assert [e["slug"] for e in result["skills"]] == ["beta"]
+
+
+@pytest.mark.parametrize("gitignore", [IGNORE, IGNORE_ASSETS], ids=["assets-not-ignored", "assets-ignored"])
+def test_tracked_asset_without_skill_md_is_never_overwritten(tmp_path, gitignore):
+    wt = _make_worktree(tmp_path / "t", gitignore)
+    _ship_assets(wt)
+    _track_asset(wt)
+    result = _call(wt, tmp_path)
+    assert _asset(wt).read_bytes() == b"existing tracked asset\n"
+    assert not _dest(wt).exists()
+    _assert_alpha_refused(result, "not_owned:alpha")
+
+
+def test_tracked_asset_missing_from_the_worktree_is_still_not_ours(tmp_path):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    _track_asset(wt)
+    _asset(wt).unlink()
+    result = _call(wt, tmp_path)
+    assert not _asset(wt).exists()
+    assert not _dest(wt).exists()
+    _assert_alpha_refused(result, "not_owned:alpha")
+
+
+def test_asset_that_git_does_not_ignore_is_never_written(tmp_path, worktree):
+    _ship_assets(worktree)
+    result = _call(worktree, tmp_path)
+    assert ".claude" not in _git(worktree, "status", "--porcelain", "--untracked-files=all")
+    assert not (worktree / ".claude" / "skills" / "alpha").exists()
+    _assert_alpha_refused(result, "not_ignored")
+
+
+def test_existing_untracked_asset_is_never_overwritten(tmp_path):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    _asset(wt).parent.mkdir(parents=True)
+    _asset(wt).write_bytes(b"user-owned\n")
+    result = _call(wt, tmp_path)
+    assert _asset(wt).read_bytes() == b"user-owned\n"
+    assert not _dest(wt).exists()
+    _assert_alpha_refused(result, "not_owned:alpha")
+
+
+def test_asset_planted_after_the_last_check_is_never_overwritten(tmp_path, monkeypatch):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+
+    def plant():
+        _asset(wt).parent.mkdir(parents=True, exist_ok=True)
+        _asset(wt).write_bytes(b"planted\n")
+
+    _swap_after(monkeypatch, "_dest_ignored", plant)
+    result = _call(wt, tmp_path)
+    assert _asset(wt).read_bytes() == b"planted\n"
+    _assert_alpha_refused(result, "not_owned:alpha")
+    assert not _dest(wt).exists()
+
+
+def test_skill_md_only_skills_in_a_clean_worktree_are_ok(tmp_path, worktree):
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("ok", None)
+    assert [e["ownership"] for e in result["skills"]] == ["materialized", "materialized"]
+    assert result["skills"][0]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
+    assert result["skills"][0]["bytes"] == len(b"alpha\n")
+    assert _git(worktree, "status", "--porcelain", "--untracked-files=all") == ""
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes")
+def test_failed_copy_leaves_no_skill_md_and_the_next_attempt_copies_again(tmp_path):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    locked = _asset(wt).parent
+    locked.mkdir(parents=True)
+    locked.chmod(0o500)
+    try:
+        first = _call(wt, tmp_path)
+    finally:
+        locked.chmod(0o755)
+    assert not _dest(wt).exists()
+    _assert_alpha_refused(first, "copy_failed:PermissionError")
+    second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
+    assert (second["status"], second["reason"]) == ("ok", None)
+    assert [e["ownership"] for e in second["skills"]] == ["materialized", "native"]
+    assert _asset(wt).read_text() == "shipped\n"
+
+
+def test_source_link_leaving_the_skill_is_source_missing(tmp_path, worktree):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("s\n")
+    (worktree / "skills" / "alpha" / "leak.md").symlink_to(secret)
+    result = _call(worktree, tmp_path)
+    _assert_alpha_refused(result, "source_missing")
+    assert result["reason"] in asm.REASONS
+    assert not (worktree / ".claude" / "skills" / "alpha").exists()
+
+
+def test_linked_native_skill_md_refuses_before_any_copy(tmp_path, worktree):
+    (worktree / "agents" / ROLE / "config.yaml").write_text("skills:\n  - beta\n  - alpha\n")
+    _dest(worktree).parent.mkdir(parents=True)
+    _dest(worktree).symlink_to(worktree / "skills" / "alpha" / "SKILL.md")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"], result["skills"]) == ("skipped", "symlink_in_destination", [])
+    assert not (worktree / ".claude" / "skills" / "beta").exists()
+
+
+def test_duplicate_declared_slug_is_copied_once(tmp_path, worktree):
+    (worktree / "agents" / ROLE / "config.yaml").write_text("skills:\n  - alpha\n  - beta\n  - alpha\n")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("ok", None)
+    assert [e["slug"] for e in result["skills"]] == ["alpha", "beta"]
+
+
+def _git_spy(monkeypatch, answer=None):
+    """Record each git subcommand; *answer* maps a subcommand to a forced (returncode, stdout)."""
+    real_run = subprocess.run
+    calls: list[str] = []
+
+    def run(cmd, *args, **kwargs):
+        sub = cmd[3] if cmd[:2] == ["git", "-C"] else None
+        calls.append(sub)
+        if answer and sub in answer:
+            code, out = answer[sub]
+            return subprocess.CompletedProcess(cmd, code, out, b"")
+        return real_run(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(asm.subprocess, "run", run)
+    return calls
+
+
+def test_one_git_call_each_covers_every_file_of_every_slug(tmp_path, monkeypatch):
+    wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
+    _ship_assets(wt)
+    (wt / "skills" / "alpha" / "assets" / "more.txt").write_text("more\n")
+    calls = _git_spy(monkeypatch)
+    result = _call(wt, tmp_path)
+    assert (result["status"], result["reason"]) == ("ok", None)
+    assert sorted(c for c in calls if c in ("check-ignore", "ls-files")) == ["check-ignore", "ls-files"]
+    assert (_asset(wt).parent / "more.txt").read_text() == "more\n"
+
+
+ALL_IGNORED = b".claude/skills/alpha/SKILL.md\0.claude/skills/beta/SKILL.md\0"
+
+
+@pytest.mark.parametrize("answer", [
+    {"check-ignore": (128, b"")},
+    {"check-ignore": (1, ALL_IGNORED)},
+    {"check-ignore": (0, b"")},
+    {"check-ignore": (0, b"garbage\0")},
+    {"ls-files": (128, b"")},
+], ids=["check-ignore-fatal", "check-ignore-rc1-with-output", "check-ignore-empty",
+        "check-ignore-unknown-path", "ls-files-fatal"])
+def test_git_without_positive_evidence_writes_nothing(tmp_path, worktree, monkeypatch, answer):
+    _git_spy(monkeypatch, answer)
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"], result["skills"]) == ("skipped", "not_ignored", [])
+    assert not (worktree / ".claude").exists()
