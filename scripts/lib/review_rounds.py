@@ -770,23 +770,35 @@ def parse_round_cap(value: Optional[str]) -> int:
     return cap
 
 
-def round_cap(project_id: Optional[str] = None, state_dir: Optional[Path] = None) -> int:
-    """The configured round cap for the project store the caller names.
+def _profile_round_cap(project_id: Optional[str], state_dir: Optional[Path]) -> Optional[int]:
+    """The gate profile's round cap, or ``None`` when it contributes nothing.
 
-    ``state_dir`` and ``project_id`` are the round ledger's own store and
-    project (:func:`store_project_id`): a ledger read from another project's
-    state dir (``cap-verdict --data-dir``, a merge door on another store) is
-    judged against THAT project's threshold, never the launching process's.
-    With a state dir named, the DB source is read from its
-    ``runtime_coordination.db`` (``config_registry.get_for_project``), so the
-    process's own wiring does not leak in. Without either, the process's
-    configuration resolves, the behaviour for a caller with no ledger in hand.
-
-    The chain: ``VNX_OVERRIDE_REVIEW_ROUND_CAP`` (the rollback brake) > the
-    project's ``project_config`` row > ``VNX_REVIEW_ROUND_CAP`` > default ``3``.
-    A malformed value raises; it never falls back to the default. The imports
-    are local so this module needs no config layer to be imported.
+    ``None`` under ``standard`` and whenever an operator set ``VNX_REVIEW_ROUND_CAP``
+    through ``VNX_OVERRIDE_*`` or a ``project_config`` row (that outranks the profile). A
+    malformed profile raises ``GateProfileConfigError``; it never falls back. With a
+    state dir named, the profile key and the operator row are both read from THAT store.
     """
+    import gate_profile
+
+    if state_dir is None:
+        contributed = gate_profile.value("round_cap", project_id)
+        return None if contributed is None else int(contributed)
+    import config_registry
+    import config_store_db
+
+    pid = project_id or _state_dir_project_id(state_dir)
+    resolver = config_store_db.make_db_resolver(lambda _pid: state_dir)
+    contributed = gate_profile.resolve(pid, resolver=resolver).value("round_cap")
+    if contributed is None:
+        return None
+    _, own_source = config_registry.resolve_with_source(
+        ROUND_CAP_KEY, pid, resolver, use_default_resolver=False,
+    )
+    return None if own_source in ("override", "project_config") else int(contributed)
+
+
+def _configured_round_cap(project_id: Optional[str], state_dir: Optional[Path]) -> int:
+    """The cap from ``VNX_REVIEW_ROUND_CAP`` (override > project row > env > default 3)."""
     if state_dir is not None:
         import config_registry
 
@@ -801,6 +813,30 @@ def round_cap(project_id: Optional[str] = None, state_dir: Optional[Path] = None
 
         raw = config_runtime.get(ROUND_CAP_KEY)
     return parse_round_cap(raw)
+
+
+def round_cap(project_id: Optional[str] = None, state_dir: Optional[Path] = None) -> int:
+    """The configured round cap for the project store the caller names.
+
+    ``state_dir`` and ``project_id`` are the round ledger's own store and
+    project (:func:`store_project_id`): a ledger read from another project's
+    state dir (``cap-verdict --data-dir``, a merge door on another store) is
+    judged against THAT project's threshold, never the launching process's.
+    With a state dir named, the DB source is read from its
+    ``runtime_coordination.db`` (``config_registry.get_for_project``), so the
+    process's own wiring does not leak in. Without either, the process's
+    configuration resolves, the behaviour for a caller with no ledger in hand.
+
+    The chain: ``VNX_OVERRIDE_REVIEW_ROUND_CAP`` (the rollback brake) > the
+    project's ``project_config`` row > the gate profile (``light`` 2, ``heavy`` 5,
+    ``standard`` nothing) > ``VNX_REVIEW_ROUND_CAP`` > default ``3``.
+    A malformed value raises; it never falls back to the default. The imports
+    are local so this module needs no config layer to be imported.
+    """
+    contributed = _profile_round_cap(project_id, state_dir)
+    if contributed is not None:
+        return parse_round_cap(str(contributed))
+    return _configured_round_cap(project_id, state_dir)
 
 
 def _state_dir_project_id(state_dir: Path) -> str:

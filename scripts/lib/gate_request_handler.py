@@ -153,31 +153,45 @@ def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     return {names[i]: names[i + 1] for i in range(len(names) - 1)}
 
 
+def review_gate_takeover_chain_raw(project_id: Optional[str] = None) -> "tuple[str, str]":
+    """``(raw chain, source)`` of the takeover chain in force, fresh.
+
+    ``source`` is ``override`` / ``project_config`` (an operator chain, outranks the
+    profile), ``profile`` (``light`` or ``heavy`` contributed it), ``env`` or ``default``.
+    Precedence: ``VNX_OVERRIDE_*`` > ``project_config`` row > gate profile >
+    ``VNX_REVIEW_GATE_TAKEOVER_CHAIN`` env > registry default. A malformed profile raises
+    ``GateProfileConfigError``; there is no fallback to the default chain. ``project_id``
+    resolves the chain for that project; omitted, the process's project.
+    """
+    import config_registry
+    import config_runtime
+    import gate_profile
+
+    contributed = gate_profile.value("takeover_chain", project_id)
+    if contributed is not None:
+        return str(contributed), "profile"
+    config_runtime.autowire()
+    raw, source = config_registry.resolve_with_source("VNX_REVIEW_GATE_TAKEOVER_CHAIN", project_id)
+    return raw or "", source
+
+
 def _build_review_gate_takeover_chain() -> Dict[str, str]:
     """Resolve the operator's review-gate takeover chain from config
-    (BETA3-E1, 26-08), never a hardcoded dict. Reads through
-    ``config_runtime.get`` -- the SAME canonical-resolver + DB-override
-    precedence ``review_gate_manager._build_default_review_stack`` already
-    uses for ``VNX_DEFAULT_REVIEW_STACK``, and the one the OI-1462
-    cross-process contract test (PR #1694) pins -- never a raw
-    ``os.environ`` read that could silently disagree with what this same
-    module's ``_ci_gate_available`` resolves two lines away.
+    (BETA3-E1, 26-08), never a hardcoded dict. Reads through the same
+    canonical resolver + DB-override precedence ``config_runtime.get`` uses
+    (see :func:`review_gate_takeover_chain_raw`), with the gate profile between
+    the operator's ``project_config`` row and the env value.
 
     Resolved FRESH on every call (unlike ``DEFAULT_REVIEW_STACK``, which
     caches at module-import time): a takeover decision is made per gate per
     review request, so a config edit takes effect on the very next request
     instead of needing a process restart.
 
-    Logs, at each resolution, whether the active chain came from an operator
-    override or the built-in default -- comparing the resolved string
-    against ``_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`` verbatim, the same
-    provenance technique ``config_registry.all_effective`` already uses
-    (``is_default = value == entry.default``).
+    Logs, at each resolution, where the active chain came from (``profile``,
+    ``project_config``, ``override``, ``env`` or ``default``).
     """
-    import config_runtime
-    raw = config_runtime.get("VNX_REVIEW_GATE_TAKEOVER_CHAIN") or ""
+    raw, source = review_gate_takeover_chain_raw()
     chain = _parse_review_gate_takeover_chain(raw)
-    source = "standaard (registry default)" if raw == _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN else "operator-configuratie"
     logger.info(
         "gate_request_handler: review-gate takeover chain actief -- bron=%s waarde=%r keten=%r",
         source, raw, chain,

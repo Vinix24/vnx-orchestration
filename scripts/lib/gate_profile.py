@@ -146,13 +146,17 @@ def _contribution(profile: str) -> Mapping[str, Optional[Value]]:
     return MappingProxyType(dict(PROFILE_TABLE[profile]))
 
 
-def resolve(project_id: Optional[str] = None) -> ProfileResolution:
+def resolve(project_id: Optional[str] = None, *, resolver=None) -> ProfileResolution:
     """The gate profile in force for this process's project (or ``project_id``), fresh.
+
+    ``resolver`` reads the profile key from that store instead of the process's.
 
     Raises :class:`GateProfileConfigError` for a set value that is not a legal profile.
     """
     config_runtime.autowire()
-    raw, source = config_registry.resolve_with_source(PROFILE_KEY, project_id)
+    raw, source = config_registry.resolve_with_source(
+        PROFILE_KEY, project_id, resolver, use_default_resolver=resolver is None,
+    )
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return ProfileResolution(DEFAULT_PROFILE, source if source == "unset" else "default", None,
                                  _contribution(DEFAULT_PROFILE))
@@ -162,6 +166,7 @@ def resolve(project_id: Optional[str] = None) -> ProfileResolution:
 
 def value(
     field: str, project_id: Optional[str] = None, *, resolution: Optional[ProfileResolution] = None,
+    resolver=None,
 ) -> Optional[Value]:
     """The profile's contribution for ``field``, or ``None`` for "use your own chain".
 
@@ -169,10 +174,12 @@ def value(
     ``VNX_OVERRIDE_*`` or a ``project_config`` row: that choice outranks the profile (B4).
     A caller that already holds the resolution passes it, so the key is read once.
     """
-    resolution = resolution if resolution is not None else resolve(project_id)
+    resolution = resolution if resolution is not None else resolve(project_id, resolver=resolver)
     contributed = resolution.value(field)
     key = FIELD_REGISTRY_KEYS[field]
     if contributed is None or key is None:
         return contributed
-    _, own_source = config_registry.resolve_with_source(key, project_id)
+    _, own_source = config_registry.resolve_with_source(
+        key, project_id, resolver, use_default_resolver=resolver is None,
+    )
     return None if own_source in _OPERATOR_SOURCES else contributed
