@@ -54,5 +54,6 @@
 | Guides | `docs/guides/AGENT_CREATION_GUIDE.md` | How to define a new VNX agent role (skill-scoped worker, `CLAUDE.md` role file, `config.yaml`) |
 | Compliance | `docs/compliance/vnx_anthropic_billing_audit.pdf` | Anthropic billing audit evidence |
 | Intelligence | `docs/intelligence/` | Public intelligence references: `docs/intelligence/TAG_TAXONOMY.md`, `docs/intelligence/SELF_LEARNING_LOOP.md`, `docs/intelligence/SCOUT_PREPASS.md`, `docs/intelligence/COST_TRACKING_GUIDE.md` |
+| Agent-layout measurements | `docs/investigations/2026-11-08-agent-layout-metingen.md` | Probe cells A, C, D, H1, H2, L and B for points 3-5 of track `agents-als-map-fase-1`: the ancestor `CLAUDE.md`, the `projects` memory, the write-scope hook and the `--bare` lanes |
 | Examples | `docs/examples/` | Example orchestration flows: `docs/examples/example_coding_orchestration.md`, `docs/examples/example_content_orchestration.md`, `docs/examples/example_headless_research.md` |
 | Archive | `docs/_archive/` | Historical docs kept for traceability; see `docs/_archive/ARCHIVED_MANIFEST.md` for the archival rule and per-file provenance |

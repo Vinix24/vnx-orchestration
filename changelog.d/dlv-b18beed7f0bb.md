@@ -1,0 +1,1 @@
+- `scripts/probe_agent_layout.sh` measures cells A, C, D, H1, H2, L and B of track `agents-als-map-fase-1` (points 3, 4 and 5): the parent `CLAUDE.md`, the `projects` memory, the write-scope hook and the `--bare` lanes, one JSON line per cell with `ja`, `nee` or `niet gemeten` with a reason, plus `docs/investigations/2026-11-08-agent-layout-metingen.md` with one row per cell.
