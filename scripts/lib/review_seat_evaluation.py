@@ -707,8 +707,65 @@ def required_seats(
         )
     if not by_risk:
         return resolved
+    return _narrow_by_risk(resolved, risk)
+
+
+def _narrow_by_risk(resolved: RequiredSeats, risk: Any) -> RequiredSeats:
+    """``resolved`` narrowed by the class of the head, or refused by the ``light`` floor."""
     record = risk.to_record() if hasattr(risk, "to_record") else None
+    refusal = light_floor_refusal(resolved.stack, risk)
+    if refusal:
+        return replace(resolved, seats=(), risk=record, rule=RISK_SEAT_RULE, error=refusal)
     return replace(resolved, seats=seats_for_risk(resolved.stack, risk), risk=record, rule=RISK_SEAT_RULE)
+
+
+def _signal_risk(risk: Any) -> bool:
+    """Whether a head's risk is a safety-floor signal: anything but a known low/medium class, or a gate-merge-only head.
+
+    Fail-closed: ``None``, an unknown class, an unreadable class and a ``critical`` head are
+    signals. A head is exempt only when its class is ``high``, every deciding path is
+    ``gate-merge`` and the spec does not say irreversible (ADR-008 amendment, 2026-10-30).
+    """
+    import smart_router
+
+    value = getattr(risk, "risk_class", risk)
+    known = value.strip().lower() if isinstance(value, str) else ""
+    if known in _FIRST_SEAT_CLASSES:
+        return False
+    deciding = getattr(risk, "deciding", None) or ()
+    gate_merge_only = (
+        known == "high" and bool(deciding) and getattr(risk, "irreversible", None) is False
+        and all(category == smart_router.PLAN_SCOPE_GATE_MERGE for _path, category in deciding)
+    )
+    return not gate_merge_only
+
+
+def light_floor_refusal(stack: Sequence[str], risk: Any) -> str:
+    """The refusal text when profile ``light`` governs a one-seat stack on a signal path, else ``""``.
+
+    The safety floor under every profile (ADR-008 amendment, gate-profiel P0/P5): a security,
+    schema, irreversible, outside-repo or store-resolution head keeps two seats. ``light`` on
+    such a head is refused and says so; it is never quietly raised to two seats. The signal
+    set is the risk class's own (``review_risk_class``, from ``smart_router``), not a second
+    list. An explicit or operator-set stack with two seats does not refuse: the stack wins.
+    """
+    if len(_seat_names(list(stack))) >= 2 or not _signal_risk(risk):
+        return ""
+    from gate_profile import GateProfileConfigError
+    from review_seats import light_profile_governs_stack
+
+    try:
+        light = light_profile_governs_stack()
+    except GateProfileConfigError as exc:
+        return str(exc)
+    if light is None:
+        return ""
+    why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
+    return (
+        f"gate profile light (source: {light.source}) refuses this head: {why}. A security, schema, "
+        "irreversible, outside-repo or store-resolution head keeps two review seats under every "
+        "profile (ADR-008 floor). Name a two-seat stack in the request, or set the profile to standard."
+    )
 
 
 def _recorded_note(kept: Tuple[str, ...], fresh: Optional[Tuple[str, ...]], refusal: str) -> str:

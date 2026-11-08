@@ -1,0 +1,1 @@
+- The `light` gate profile gives one review seat and is refused on a security, schema, irreversible, outside-repo or store-resolution head; `VNX_GOVERNANCE_PROFILE` is registered as read (gate-profiel P5, OI-2652).

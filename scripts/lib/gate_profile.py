@@ -20,7 +20,8 @@ chain and the behaviour of today is a property of the construction. ``light`` an
 ``heavy`` contribute the value of their column, but never over a value an operator set
 for the field's own key through ``VNX_OVERRIDE_*`` or a ``project_config`` row.
 
-P1 wires the review stack only (``review_seats``). ``round_cap``, ``takeover_chain`` and
+P1 wires the review stack only (``review_seats``); P5 gives ``light`` a one-seat stack and
+refuses it below the safety floor. ``round_cap``, ``takeover_chain`` and
 ``plan_gate_seats`` are provided here with their tests; P3 and P4 read them.
 
 BILLING SAFETY: no Anthropic SDK, no network, no subprocess.
@@ -54,12 +55,13 @@ Value = Union[str, int]
 # The full 3 x 4 table. The ``standard`` column is not a design: it is the value measured
 # on origin/main (config_registry VNX_DEFAULT_REVIEW_STACK, VNX_REVIEW_ROUND_CAP,
 # VNX_REVIEW_GATE_TAKEOVER_CHAIN; configs/plan_gate_panel.yaml default_seat only), and a
-# test pins it to those defaults. ``light.review_stack`` equals ``standard`` until P5,
-# which lowers it to ``codex_gate`` in the same change that refuses ``light`` on a signal
-# path (B2): the one value that weakens a review does not land without its floor.
+# test pins it to those defaults. ``light.review_stack`` is ``codex_gate`` alone (P5): the
+# one value that weakens a review. It lands in the same change that refuses ``light`` on a
+# signal path (B2, ``review_seat_evaluation.light_floor_refusal``, ADR-008 amendment), so the
+# stack and its floor cannot be separated.
 PROFILE_TABLE: Mapping[str, Mapping[str, Value]] = MappingProxyType({
     "light": MappingProxyType({
-        "review_stack": "codex_gate,kimi_gate",
+        "review_stack": "codex_gate",
         "round_cap": 2,
         "takeover_chain": "codex_gate,kimi_gate,claude_gate",
         "plan_gate_seats": 1,

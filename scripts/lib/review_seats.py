@@ -218,6 +218,21 @@ def _explicit_profile_fields(project_id: Optional[str] = None) -> Dict[str, Opti
     return {"profile": resolution.profile, "profile_source": resolution.source, "profile_error": None}
 
 
+def light_profile_governs_stack(project_id: Optional[str] = None) -> Optional[gate_profile.ProfileResolution]:
+    """The resolution when profile ``light`` is what supplies the review stack, else ``None``.
+
+    ``None`` for ``standard``, ``heavy`` and for ``light`` when an operator set the stack
+    itself (``VNX_OVERRIDE_*`` or a ``project_config`` row): that stack wins, as with every
+    profile, so it is not ``light``'s one-seat stack and the floor has nothing to refuse.
+    Raises ``GateProfileConfigError`` for a profile value that is not legal (never a quiet ``None``).
+    """
+    resolution = gate_profile.resolve(project_id)
+    if resolution.profile != "light":
+        return None
+    contributed = gate_profile.value("review_stack", project_id, resolution=resolution)
+    return resolution if contributed is not None else None
+
+
 def resolve_review_seats(
     *,
     explicit_stack: Optional[Iterable[str]] = None,
