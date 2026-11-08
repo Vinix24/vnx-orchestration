@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -134,14 +135,18 @@ def _normal(text: object) -> str:
 
 def _expected_texts(run_dir: Path) -> list:
     """What the spawner types for this run, from files that exist before launch."""
-    texts = [KICKOFF_PREFIX + run_dir.name, _read_text(run_dir / "goal.txt")]
+    goal = run_dir / "goal.txt"
+    texts = [KICKOFF_PREFIX + run_dir.name, _read_text(goal) if is_contained(goal, run_dir) else None]
     return [t for t in (_normal(x) for x in texts) if t]
 
 
 def _fresh_run_dirs(sdir: Path, now: float) -> list:
     try:
         candidates = [p for p in sdir.glob(RUN_DIR_GLOB) if p.is_dir()]
-        return [p for p in candidates if 0 <= now - p.stat().st_mtime < LATCH_TTL_SECONDS]
+        inside = [p for p in candidates if is_contained(p, sdir)]
+        if len(inside) < len(candidates):
+            print("prompt_attribution: rotation run outside the state dir skipped", file=sys.stderr)
+        return [p for p in inside if 0 <= now - p.stat().st_mtime < LATCH_TTL_SECONDS]
     except OSError:
         return []
 

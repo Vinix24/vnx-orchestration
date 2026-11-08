@@ -257,3 +257,38 @@ def test_symlinked_rotation_dir_outside_root_is_not_read(home, tmp_path):
     run = _rotation_run(elsewhere, goal="/goal x")
     (state / "t0_rotation").symlink_to(elsewhere)
     assert _attribute(f"/kickoff rotatie {run.name}").actor_class == "operator"
+
+
+def test_symlinked_run_dir_outside_root_is_ignored(home, tmp_path):
+    _, state = home
+    sdir = state / "t0_rotation"
+    sdir.mkdir()
+    other = tmp_path / "other-project"
+    other.mkdir()
+    (other / "goal.txt").write_text("/goal vreemde opdracht")
+    (sdir / "rotation-x").symlink_to(other)
+    assert _attribute("/goal vreemde opdracht").actor_class == "operator"
+    assert _attribute("/kickoff rotatie rotation-x").actor_class == "operator"
+
+
+def test_goal_txt_symlink_outside_run_dir_is_ignored(home, tmp_path):
+    _, state = home
+    run = _rotation_run(state / "t0_rotation")
+    secret = tmp_path / "elders.txt"
+    secret.write_text("/goal uit een ander bestand")
+    (run / "goal.txt").symlink_to(secret)
+    assert _attribute("/goal uit een ander bestand").actor_class == "operator"
+    assert _attribute(f"/kickoff rotatie {run.name}").actor_class == "automation"
+
+
+def test_override_dir_does_not_widen_the_root(home, tmp_path, monkeypatch):
+    _, state = home
+    from t0_rotation_state import STATE_DIR_ENV
+    override = tmp_path / "override"
+    override.mkdir()
+    other = tmp_path / "andere"
+    other.mkdir()
+    (other / "goal.txt").write_text("/goal via override")
+    (override / "rotation-y").symlink_to(other)
+    env = {"VNX_PROJECT_ID": PID, STATE_DIR_ENV: str(override)}
+    assert _attribute("/goal via override", env=env).actor_class == "operator"
