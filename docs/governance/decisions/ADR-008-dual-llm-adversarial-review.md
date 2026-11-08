@@ -134,3 +134,86 @@ This amendment is written before the rule is active. The key `VNX_REVIEW_SEAT_RU
 - **Shadow test before activation.** The rule goes on only after at least 20 merges in shadow, with every receipt carrying the signals and the rule name, zero times fewer seats at an `unknown`, and the T0 having read every difference from the old rule.
 - **Rollback criterion.** The key goes back to `first_seat_or_every_seat_by_risk` as soon as, on the sample of clean heads, 2 or more FAILs that the T0 judges real fall in the first 10, or more than 10 percent after at least 20. The sample runs about 1 in 5, so 20 heads asks about 100 clean heads. The repeat measurement after 50 merges also counts what codex-only merges received as fix-forward afterwards.
 - **Accepted cost.** The rule misses 3 of the 16 faults on the measurement set, and #2184 sat on a `gate-merge` path without a warning. The sample and the repeat measurement keep the miss ratio visible; a miss ratio above 10 percent of the sample sends the key back.
+
+## Amendement 4 (08-11-2026): poortprofiel en veiligheidsondergrens
+
+**Status:** Accepted (dispatch dlv-eec805d0fb3e, track gate-profiel-per-project, levering P0)
+**Decided by:** T0, onder het mandaat van de operator voor golf 1-9. Het plan (`claudedocs/2026-11-07-naar-1-9/plannen/gate-profiel-per-project.md`, revisie 2 van 08-11) passeerde de plan-gate van 08-11 (codex-seat REVISE, tiebreaker deepseek-v4-pro START) op één bindende voorwaarde: een onbekende of malformed profielwaarde faalt dicht. Dit amendement is rij P0 van dat plan en legt het ondergrenscontract en de `gate-merge`-uitzondering vast vóór de eerste `light`-activatie in P5.
+**Gemeten op:** `origin/main` `e747573ac` (2026-11-08); elk regelnummer hieronder is op die commit gemeten.
+**Wijzigt:** niets aan de besluiten hierboven. Het legt een laag bovenop de zetelregels van de amendementen van 2026-09-26, 2026-10-23 en 2026-10-30, met één ondergrens die geen profiel mag zakken.
+
+### Het poortprofiel: drie namen, vier waarden
+
+Eén sleutel, `VNX_GOVERNANCE_PROFILE`, zet in één beweging de zwaarte van de reviewdeur en de plan-gate. De sleutel bestaat op deze commit nog niet: hij staat niet in `CONFIG_REGISTRY` (`scripts/lib/config_registry.py:83`). P1 van de track voegt hem toe als `enum` met default `standard` en categorie `gate`. Tot die rij bestaat, is elk profiel `standard` en verandert dit amendement geen gedrag. De leesfunctie wordt één: `gate_profile.resolve()` valideert de ruwe waarde en geeft `values = {review_stack, round_cap, takeover_chain, plan_gate_seats}` terug, met per waarde de herkomst; `None` betekent "geen bijdrage".
+
+| Waarde (veld) | Registry-key / bron | `light` | `standard` (= vandaag) | `heavy` |
+|---|---|---|---|---|
+| `review_stack` (wat de deur vraagt) | `VNX_DEFAULT_REVIEW_STACK` (`scripts/lib/config_registry.py:116-117`) | `codex_gate` (+ `ci_gate` als `VNX_CI_GATE_REQUIRED`) | `codex_gate,kimi_gate` (+ `ci_gate`) | `codex_gate,kimi_gate,claude_gate` (+ `ci_gate`) |
+| `round_cap` | `VNX_REVIEW_ROUND_CAP` (`scripts/lib/config_registry.py:190-191`) | `2` | `3` | `5` |
+| `takeover_chain` | `VNX_REVIEW_GATE_TAKEOVER_CHAIN` (`scripts/lib/config_registry.py:141-143`) | `codex_gate,kimi_gate,claude_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` |
+| `plan_gate_seats` (vanaf de start) | `configs/plan_gate_panel.yaml:47-48` | `1` | `1` | `2` |
+| `required_stack` (wat `vnx gate` verifieert) | enforcement-laag op `review_stack` | uit `review_stack` + enforcement | idem | idem |
+| zetelregel (`VNX_REVIEW_SEAT_RULE`) | `scripts/lib/review_seat_evaluation.py:112` | niet gezet | niet gezet | niet gezet |
+
+`standard` draagt niets bij: elke lezer valt door naar de keten van vandaag. De gemeten "vandaag"-kolom is de registry-default — `codex_gate,kimi_gate` (`scripts/lib/config_registry.py:116-117`), cap `3` (`:190-191`), vier ketennamen (`:141-143`) — zodat "standaard is het gedrag van vandaag" een constructie-eigenschap is en geen belofte. `ci_gate` is orthogonaal: de bestaande keten voegt hem toe wanneer `VNX_CI_GATE_REQUIRED` waar is, nooit het profiel.
+
+Eén functie is de bron, elke bestaande lezer houdt zijn eigen terugvalketen. De mapping van veld naar lezer, gemeten op deze commit:
+
+| Veld | Lezer(s) |
+|---|---|
+| `review_stack` | `review_seats.resolve_review_seats` (`scripts/lib/review_seats.py:193`) |
+| `round_cap` | `review_rounds.round_cap` (`scripts/lib/review_rounds.py:773`) |
+| `takeover_chain` | `gate_request_handler._build_review_gate_takeover_chain` (`scripts/lib/gate_request_handler.py:141`), `providers_cli._review_chain_consequence` (`scripts/providers_cli.py:223`) |
+| `plan_gate_seats` | `plan_gate_panel.compose_panel` (`scripts/lib/plan_gate_panel.py:632`), via `planning_cli._derive_panel_weight` (`scripts/planning_cli.py:4774`) |
+| `required_stack` | `scripts/commands/gate.sh::_g_required_gates` (`:33`), via `gate_profile_cli.py` |
+
+Alles aan dit profiel is deterministisch: de invoer is een gesloten enum van drie namen, de uitvoer een gesloten dict van vier waarden, en de regels zijn een tabel, een precedentieketen, een validatie en een weigering. Er is geen onderdeel waarvoor een model nodig is, en er komt er ook geen bij: de enige "model-achtige" beslissing is *welke* waarden `light` en `heavy` krijgen, en die staat als genummerd besluit in het plan, niet in code die een oordeel vraagt.
+
+### De veiligheidsondergrens
+
+De ondergrens staat onder elk profiel en is dezelfde in de reviewdeur en de plan-gate.
+
+- **Reviews.** Op een kop van klasse `high` of `critical` is elke stoel van de aanvraagstapel vereist: `seats_for_risk` (`scripts/lib/review_seat_evaluation.py:343`) geeft alleen bij `low` en `medium` één stoel (`_FIRST_SEAT_CLASSES`, `scripts/lib/review_seat_evaluation.py:130-132`); elke andere, onbekende of ontbrekende klasse geeft elke stoel. Elke `plan_scope`-categorie is `high` (`scripts/lib/review_risk_class.py:15-22`). `light` heeft een basisstapel van één stoel en **weigert** daarom op zo'n kop, behalve wanneer de beslissende categorie **uitsluitend** `gate-merge` is. De weigering staat in `RequiredSeats.error` (`scripts/lib/review_seat_evaluation.py:322`) en noemt het profiel en het pad. Een expliciete stack met twee stoelen blijft werken: expliciet wint.
+- **Plan-gate.** `second_seat_from_start` (`scripts/lib/plan_gate_panel.py:2360`) is een vloer onder elk profiel: schema, security, outside-repo en elke irreversible categorie geven de tweede zetel vanaf de start. `compose_panel` (`scripts/lib/plan_gate_panel.py:632`) gebruikt `max(profile_seats, vloer)`. `gate-merge` alleen geeft **geen** tweede zetel.
+- **Fail-closed.** Kan de overnameketen een vereiste stoel niet vullen, dan blokkeert de deur, met de reden in `RequiredSeats.error` (`scripts/lib/review_seat_evaluation.py:322`). Een `unknown`-uitkomst is nooit een pass.
+- **Eén signaalset.** De vloer en de plan-gate lezen dezelfde categorieën uit `scripts/lib/smart_router.py`: de constanten (`:965-969`, met `gate-merge` op `:967`), de prefixlijst (`_PLAN_SCOPE_PREFIXES`, `:995-1051`) en de onomkeerbare categorieën (`_IRREVERSIBLE_PREFIXES`, `:909-920`). Twee lezers, één tabel, dus de twee kunnen niet driften.
+
+`light` wordt op een signaalpad geweigerd en niet stil opgetrokken. Optrekken zou het profiel laten liegen: het project koos `light` en kreeg `standard`, en niemand ziet dat de keuze niet werkte. Een weigering met profiel en pad in de fout is zichtbaar, en de ontsnapping blijft expliciet — een twee-stoels stack in de aanvraag, geen codewijziging.
+
+### De `gate-merge`-uitzondering
+
+De uitzondering is het operatorbesluit van 30-10, woordelijk uit het amendement van 2026-10-30 hierboven: **"A head on a `gate-merge` path does not by itself require the second seat."**
+
+- **Wat het zegt.** Een pad dat alleen `gate-merge` is, is geen signaal en geen vloer: de reviewdeur vraagt bij `light` één stoel, de plan-gate houdt één zetel. Dat is een bewuste prijs: #2184 stond op zo'n pad zonder waarschuwing.
+- **Wat het niet zegt.** Elke andere categorie of elk signaal blijft werken. Een echte waarschuwing, een security-pad, een schema-pad of `irreversible` heffen de stapel naar elke stoel en geven de plan-gate haar tweede zetel, ongeacht het profiel. Een pad dat `gate-merge` is én een signaal draagt, is niet "alleen `gate-merge`".
+- **Wat het niet is.** Geen algemene ontsnapping aan de ondergrens: alleen een expliciete twee-stoels stack mag `light` op een signaalpad laten werken, en die keuze staat in de aanvraag, niet in het profiel.
+
+### Fail-closed bij een onbekende of malformed profielwaarde
+
+Dit is de bindende voorwaarde van de tiebreaker, en zij staat hier letterlijk als regel. `gate_profile.resolve()` leest de ruwe waarde en valideert **vóór** de tabelmapping:
+
+- afwezig, `None`, leeg of alleen witruimte → "niet gezet" → `standard`, bron `default` of `unset`;
+- na één `strip()` exact in `{light, standard, heavy}` → geldig;
+- al het andere (`zwaar`, `Heavy`, `high`, `standard heavy`, een tikfout) → `GateProfileConfigError` met de **ruwe** waarde, de **bron** en de reden.
+
+Geen enkele lezer vangt die fout weg: de deur weigert (blokkerend), `vnx gate` stopt met de fout, de plan-gate weigert, en `vnx gate-profile show` print de fout en exit 2. Het record draagt `profile_raw`, `profile_source` en `profile_error`; het schrijft **nooit** `profile: "standard"` op de fout. Een terugval op `standard` verzwakt de governance stil, en dat is precies wat deze regel uitsluit. De normalisatie is bewust minimaal — één `strip()`, case-sensitive: `" heavy "` is geldig, `"Heavy"` niet.
+
+### Het profielwijzigingscontract
+
+Een profielwijziging is een gewone configwijziging, maar de gevolgen liggen vast.
+
+- **Opgeslagen stapels.** Elk aanvraagrecord en elk resultaat-receipt draagt `profile`, `profile_source`, `stack` en `stack_source` van het moment van de aanvraag. Een latere profielwijziging herschrijft geen bestaand record. `SeatEvaluation.to_record()` (`scripts/lib/review_seat_evaluation.py:1554`) draagt die sleutels vandaag niet; P6 voegt ze toe, additief en zonder versiebump.
+- **Open verplichtingen.** Een open verplichting behoudt de eis waaronder hij is geboekt en wordt nooit stilzwijgend ingetrokken of vervuld. Een nog niet gestarte verplichting die een lichter profiel niet meer nodig heeft, krijgt de terminale status `retired` met een reden en een auditregel; alleen de deur of de runner mag dat doen — het spiegelbeeld van "Transition of obligations" in het amendement van 2026-10-30.
+- **Herkomst.** `profile_source` ∈ {`unset`, `override`, `project_config`, `env`, `default`}; `stack_source` ∈ {`profile`, `enforcement`, `override`, `project_config`, `env`, `default`}.
+- **Rollback.** De sleutel weghalen of op `standard` zetten herstelt de oude keten voor **toekomstige** aanvragen; open verplichtingen blijven staan. Geen migratie, geen dataverlies.
+- **Midden in de vlucht.** De merge-deur toetst tegen het **huidige** effectieve profiel; is dat strenger, dan blokkeert hij. Hij merget nooit op de lichtere eis van een ouder profiel.
+
+### Wat dit amendement niet doet
+
+Het activeert `light` niet (dat is P5), het zet `VNX_REVIEW_SEAT_RULE` niet (de sleutel blijft onbezet; de regel van 2026-10-30 beslist elke merge tot de schaduwtest haar aanzet), en het verandert geen code. De precedentie blijft die van `_resolve` (`scripts/lib/config_registry.py:648`): override > project_config-rij > enforcement > profiel > env > default.
+
+### Cross-references
+
+- ADR-030, amendement 2026-10-25 (de tweede plan-gate-zetel vanaf de start bij schema, security, outside-repo en irreversible)
+- ADR-041 (de tiebreaker bij de review-cap; de plan-gate van 08-11 en haar bindende voorwaarde)
+- `claudedocs/2026-11-07-naar-1-9/plannen/gate-profiel-per-project.md` (revisie 2; de profieltabel, B5, B13 en B14)
