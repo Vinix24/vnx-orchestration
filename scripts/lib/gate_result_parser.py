@@ -296,10 +296,6 @@ class GateResultParserMixin:
           Named before every kind-specific branch below, so a switched-off
           harness-lane gate is never booked ``gate_runner_missing`` and never
           looks like a missing binary (provider-schakelaar C).
-        * script-runner gate -> ``gate_runner_missing``. Reaching here means
-          the caller's own availability check (``_kimi_gate_available`` and
-          friends, which test for the runner FILE) already said no, so the
-          runner is absent — never a PATH question.
         * harness-lane gate -> ``gate_runner_missing``, defensively: since
           dispatch 20260911-c6 step 2 the request-time availability check is
           lane-aware (``gate_is_available`` returns True for a registered
@@ -311,7 +307,6 @@ class GateResultParserMixin:
         """
         from gate_recorder import (  # noqa: PLC0415
             GATE_PROVIDER_HARNESS_LANE,
-            GATE_PROVIDER_SCRIPT_RUNNER,
             PROVIDER_SWITCHED_OFF_REASON,
             gate_switch_refusal,
             resolve_gate_provider,
@@ -322,7 +317,7 @@ class GateResultParserMixin:
             return (
                 "unsupported_gate_type",
                 f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a PATH "
-                f"binary, a script runner, or a harness lane; no binary name is guessed "
+                f"binary, a harness lane, or a deterministic row; no binary name is guessed "
                 f"from the gate name",
             )
         refusal = gate_switch_refusal(
@@ -332,12 +327,6 @@ class GateResultParserMixin:
         if refusal is not None:
             return (PROVIDER_SWITCHED_OFF_REASON, refusal.detail())
         provider_kind, binary_name = provider
-        if provider_kind == GATE_PROVIDER_SCRIPT_RUNNER:
-            return (
-                "gate_runner_missing",
-                f"{binary_name} does not exist — {gate} is a script runner and its "
-                f"runner is not on disk; this is not a PATH lookup",
-            )
         if provider_kind == GATE_PROVIDER_HARNESS_LANE:
             return (
                 "gate_runner_missing",

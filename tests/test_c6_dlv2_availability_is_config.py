@@ -112,22 +112,25 @@ def test_deepseek_request_books_requested_not_runner_missing(manager_env, monkey
 
 
 # ---------------------------------------------------------------------------
-# 2. script_runner / path_binary without a file stay unavailable
+# 2. path_binary without a binary stays unavailable; a retired kind fails loud
 # ---------------------------------------------------------------------------
 
 
-def test_script_runner_without_file_is_still_unavailable(tmp_path, monkeypatch):
-    """klaar-wanneer #2: a gate that DOES need a file keeps that check."""
+def test_retired_script_runner_kind_fails_loud_not_unavailable(tmp_path, monkeypatch):
+    """The ``script_runner`` kind is gone (review-lane P5): a registration that
+    still names it is an unknown kind and raises, whether or not its file
+    exists. It is never booked available and never silently unavailable."""
     monkeypatch.setitem(
         _rec.GATE_PROVIDERS, "test_script_gate",
-        (_rec.GATE_PROVIDER_SCRIPT_RUNNER, "scripts/test_script_gate.py"),
+        ("script_runner", "scripts/test_script_gate.py"),
     )
-
-    assert _rec.gate_is_available("test_script_gate", repo_root=tmp_path) is False
+    with pytest.raises(_rec.UnknownGateProvider, match="test_script_gate"):
+        _rec.gate_is_available("test_script_gate")
 
     (tmp_path / "scripts").mkdir(parents=True)
     (tmp_path / "scripts" / "test_script_gate.py").write_text("# runner", encoding="utf-8")
-    assert _rec.gate_is_available("test_script_gate", repo_root=tmp_path) is True
+    with pytest.raises(_rec.UnknownGateProvider, match="test_script_gate"):
+        _rec.gate_is_available("test_script_gate")
 
 
 def test_path_binary_without_binary_is_still_unavailable(monkeypatch):
@@ -161,9 +164,7 @@ def test_unknown_gate_key_fails_loud():
     ("glm_gate", "glm-harness"),
     ("deepseek_gate", "deepseek-harness"),
 ])
-def test_all_three_chain_links_are_available_by_registration_alone(
-    tmp_path, gate, provider,
-):
+def test_all_three_chain_links_are_available_by_registration_alone(gate, provider):
     """The merge's klaar-wanneer #2: after the union, every link in the
     codex-outage takeover chain is harness-lane and available WITHOUT any
     file on disk.
@@ -174,11 +175,10 @@ def test_all_three_chain_links_are_available_by_registration_alone(
     kimi_gate/glm_gate were still script runners, so their registry kind was
     not ``harness_lane``. Only the union turns all three green at once.
 
-    ``repo_root=tmp_path`` is the proof that no file is consulted: the empty
-    tmp dir contains no runner script for ANY gate, yet a harness-lane gate
-    is available by registration alone.
+    Availability is a statement about registration, not about a runner file:
+    a harness-lane gate is available with no file consulted at all.
     """
     kind, name = _rec.GATE_PROVIDERS[gate]
     assert kind == _rec.GATE_PROVIDER_HARNESS_LANE
     assert name == provider
-    assert _rec.gate_is_available(gate, repo_root=tmp_path) is True
+    assert _rec.gate_is_available(gate) is True
