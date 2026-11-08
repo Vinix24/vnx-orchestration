@@ -12,6 +12,7 @@ Usage:
     python3 scripts/backfill_pr_merged_receipts.py --json   # structured output
 
     python3 scripts/backfill_pr_merged_receipts.py --report-only  # audit, never heals
+    python3 scripts/backfill_pr_merged_receipts.py --all-projects  # door audit for every project
 
 Idempotent: already-receipted PR numbers are skipped.
 
@@ -23,6 +24,17 @@ events/pr_merged.ndjson). Every merged PR lands in one bucket: `door`, `backfill
 or `missing`. Exit 0 = complete read, no gaps ("0 van <n>"); exit 1 = at least one
 missing; exit 2 = unmeasurable (failed read, page limit, unreadable ledger).
 
+--all-projects (deur D7b): the fleet runner. It enumerates the union of
+~/.vnx/projects.json and the installed com.vnx.ledger-health.* launchd labels and runs
+`--report-only --json` once per project in its own subprocess, with cwd=<project_root>
+and explicit VNX_PROJECT_ROOT / VNX_DATA_DIR / VNX_STATE_DIR. A project in only one list
+is a finding (`job_missing` / `unregistered_project`), never a silent skip. A project
+without a path or git repo, or whose child crashes, times out or prints something
+unparseable, is `unmeasurable`. `--project <id>` (repeatable) narrows the run; an unknown
+id is exit 2 with `onbekend project: <id>`. The run's exit is the maximum severity: 2 if
+any project is unmeasurable, else 1 if any has a gap or a finding, else 0. An empty
+enumeration is exit 2.
+
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
 
@@ -33,6 +45,7 @@ import datetime
 import fcntl
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -608,6 +621,164 @@ def _main_report_only(args: argparse.Namespace) -> int:
     return int(report["exit_code"])
 
 
+# ---------------------------------------------------------------------------
+# --all-projects: the fleet runner (deur D7b)
+# ---------------------------------------------------------------------------
+
+FLEET_CHILD_TIMEOUT_SECONDS = 900
+LEDGER_HEALTH_LABEL_PREFIX = "com.vnx.ledger-health."
+_CHILD_PATH_ENV = ("VNX_DISPATCH_DIR", "VNX_LOGS_DIR", "VNX_PIDS_DIR", "VNX_LOCKS_DIR", "VNX_SOCKETS_DIR",
+                   "VNX_REPORTS_DIR", "VNX_DB_DIR", "VNX_HEADLESS_REPORTS_DIR", "VNX_INTELLIGENCE_DIR")
+
+
+def _default_registry() -> Path:
+    return Path.home() / ".vnx" / "projects.json"
+
+
+def _installed_ledger_health_ids() -> Set[str]:
+    """Project ids of the installed com.vnx.ledger-health.<id> labels (one `launchctl list` call)."""
+    try:
+        proc = subprocess.run(["launchctl", "list"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AuditUnmeasurable(f"launchctl list failed: {exc}") from exc
+    if proc.returncode != 0:
+        raise AuditUnmeasurable(f"launchctl list exited {proc.returncode}: {(proc.stderr or '').strip()[:200]}")
+    ids: Set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        label = line.split()[-1] if line.split() else ""
+        if label.startswith(LEDGER_HEALTH_LABEL_PREFIX) and len(label) > len(LEDGER_HEALTH_LABEL_PREFIX):
+            ids.add(label[len(LEDGER_HEALTH_LABEL_PREFIX):])
+    return ids
+
+
+def enumerate_projects(registry_path: Path) -> List[Dict[str, Any]]:
+    """Union of the registry and the ledger-health labels; a one-sided project carries a `finding`."""
+    from fleet_role_drift import load_registry
+    try:
+        entries = load_registry(registry_path)
+    except (OSError, ValueError) as exc:
+        raise AuditUnmeasurable(f"project registry unreadable ({registry_path}): {exc}") from exc
+    labelled = _installed_ledger_health_ids()
+    projects: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        entry = entry if isinstance(entry, dict) else {}
+        pid = str(entry.get("project_id") or entry.get("name") or "?")
+        projects[pid] = {"project_id": pid, "path": entry.get("path") or "",
+                         "finding": "" if pid in labelled else "job_missing",
+                         "registry_ok": bool(entry.get("project_id"))}
+    for pid in sorted(labelled - set(projects)):
+        projects[pid] = {"project_id": pid, "path": "", "finding": "unregistered_project", "registry_ok": True}
+    return list(projects.values())
+
+
+def _project_data_dir(project_id: str, root: Path) -> Path:
+    """The store of ONE project. An inherited explicit data dir would point every project at the same store."""
+    from vnx_paths import resolve_project_data_root
+    saved = {k: os.environ.pop(k) for k in ("VNX_DATA_DIR_EXPLICIT", "VNX_DATA_DIR", "VNX_STATE_DIR") if k in os.environ}
+    try:
+        return resolve_project_data_root(project_id, root)
+    finally:
+        os.environ.update(saved)
+
+
+def _child_env(project_id: str, root: Path, data_dir: Path) -> Dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in _CHILD_PATH_ENV}
+    env.update({"VNX_PROJECT_ID": project_id, "VNX_PROJECT_ROOT": str(root), "PROJECT_ROOT": str(root),
+                "VNX_DATA_DIR": str(data_dir), "VNX_DATA_DIR_EXPLICIT": "1",
+                "VNX_STATE_DIR": str(data_dir / "state")})
+    return env
+
+
+def _project_row(project: Dict[str, Any], outcome: str, exit_code: int, gaps: int = 0, reason: str = "") -> Dict[str, Any]:
+    finding = project["finding"]
+    if finding and outcome == "clean":
+        outcome, exit_code = "finding", max(exit_code, EXIT_ERROR)
+    return {"project_id": project["project_id"], "outcome": outcome, "gaps": gaps,
+            "exit_code": exit_code, "finding": finding, "reason": reason}
+
+
+def _run_child(project: Dict[str, Any], since: Optional[str]) -> Tuple[str, int, int, str]:
+    """Run `--report-only --json` for one project. Returns (outcome, exit, gaps, reason); never raises."""
+    pid, raw_path = project["project_id"], project["path"]
+    if not project["registry_ok"]:
+        return "unmeasurable", EXIT_UNKNOWN, 0, "registry entry has no project_id"
+    root = Path(raw_path).expanduser() if raw_path else None
+    if root is None or not root.is_dir():
+        return "unmeasurable", EXIT_UNKNOWN, 0, f"no project path ({raw_path or 'none registered'})"
+    if not (root / ".git").exists():
+        return "unmeasurable", EXIT_UNKNOWN, 0, f"no git repo at {root}"
+    try:
+        data_dir = _project_data_dir(pid, root)
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--report-only", "--json"]
+        cmd += ["--since", since] if since else []
+        proc = subprocess.run(cmd, cwd=str(root), env=_child_env(pid, root.resolve(), data_dir),
+                              capture_output=True, text=True, timeout=FLEET_CHILD_TIMEOUT_SECONDS)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return "unmeasurable", EXIT_UNKNOWN, 0, f"child failed: {exc}"
+    return _read_child_report(proc)
+
+
+def _read_child_report(proc: Any) -> Tuple[str, int, int, str]:
+    wanted = {0: "clean", 1: "gaps", 2: "unknown"}
+    try:
+        report = json.loads(proc.stdout or "")
+        rc = proc.returncode
+        if wanted.get(rc) != report.get("outcome") or report.get("exit_code") != rc:
+            raise ValueError(f"exit {rc} does not match report outcome {report.get('outcome')!r}")
+        gaps = len(report["missing"])
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        tail = (proc.stderr or "").strip()[-200:]
+        return "unmeasurable", EXIT_UNKNOWN, 0, f"child output unusable: {exc} {tail}".strip()
+    if rc == EXIT_UNKNOWN:
+        return "unmeasurable", EXIT_UNKNOWN, 0, str(report.get("reason") or "child reported unknown")
+    return wanted[rc], rc, gaps, str(report.get("reason") or "")
+
+
+def run_fleet(selected: List[str], registry_path: Path, since: Optional[str]) -> Dict[str, Any]:
+    """Run the audit per project. Raises AuditUnmeasurable on an empty enumeration or an unknown id."""
+    projects = enumerate_projects(registry_path)
+    if not projects:
+        raise AuditUnmeasurable("no projects enumerated (registry and ledger-health labels are both empty)")
+    known = {p["project_id"] for p in projects}
+    for pid in selected:
+        if pid not in known:
+            raise UnknownProject(pid)
+    rows = [_project_row(p, *_run_child(p, since)) for p in projects if not selected or p["project_id"] in selected]
+    exit_code = max(r["exit_code"] for r in rows)
+    return {"mode": "all-projects", "rows": rows, "exit_code": exit_code}
+
+
+class UnknownProject(Exception):
+    pass
+
+
+def _print_fleet(result: Dict[str, Any]) -> None:
+    for r in result["rows"]:
+        extra = "  ".join(x for x in (r["finding"], r["reason"]) if x)
+        print(f"{r['project_id']:<24} {r['outcome']:<12} gaps={r['gaps']}  exit={r['exit_code']}  {extra}".rstrip())
+    rows = result["rows"]
+    print(f"Door audit fleet: {len(rows)} project(s), "
+          f"{sum(1 for r in rows if r['outcome'] == 'unmeasurable')} unmeasurable, "
+          f"{sum(r['gaps'] for r in rows)} gap(s), exit {result['exit_code']}")
+
+
+def _main_fleet(args: argparse.Namespace) -> int:
+    registry = Path(args.registry).expanduser() if args.registry else _default_registry()
+    try:
+        result = run_fleet(args.project or [], registry, args.since)
+    except UnknownProject as exc:
+        print(f"onbekend project: {exc}", file=sys.stderr)
+        return EXIT_UNKNOWN
+    except AuditUnmeasurable as exc:
+        print(f"Door audit fleet: UNMEASURABLE: {exc}")
+        return EXIT_UNKNOWN
+    if args.json:
+        print(json.dumps(result, indent=2, default=str))
+    else:
+        _print_fleet(result)
+    return int(result["exit_code"])
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Backfill pr_merged receipts for already-merged PRs",
@@ -620,8 +791,17 @@ def main(argv: Optional[List[str]] = None) -> int:
                         help="Door audit: compare, report, never heal (exit 0 clean, 1 gaps, 2 unmeasurable)")
     parser.add_argument("--no-write", action="store_true",
                         help="With --report-only: write no open items and no beacon")
+    parser.add_argument("--all-projects", action="store_true",
+                        help="Door audit for every enumerated project, one subprocess each (exit = max severity)")
+    parser.add_argument("--project", action="append", metavar="ID",
+                        help="With --all-projects: only this project id (repeatable); unknown id is exit 2")
+    parser.add_argument("--registry", default=None, help="With --all-projects: project registry (default ~/.vnx/projects.json)")
     args = parser.parse_args(argv)
 
+    if args.project and not args.all_projects:
+        parser.error("--project needs --all-projects")
+    if args.all_projects:
+        return _main_fleet(args)
     if args.report_only:
         return _main_report_only(args)
 

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.vnx.door-audit</string>
+  <!--
+    Deur D7b: ONE machine-wide daily job, not one per project. It runs
+    `backfill_pr_merged_receipts.py` in its all-projects mode, which enumerates the union of
+    ~/.vnx/projects.json and the installed com.vnx.ledger-health.* labels and audits
+    every project in its own subprocess (cwd and VNX_* paths of that project). The
+    Label carries no project id: this is deliberately not a per-project family.
+
+    A non-zero exit is expected: 1 = at least one merge without a pr_merged receipt
+    (one open item per gap, deduplicated on door-audit:<project>:<pr>), 2 = at least
+    one project unmeasurable. The job measures and records; it does not gate a build.
+
+    Daily at 06:30 local time. Each project's beacon <state_dir>/health/door_audit.json
+    expects a write every 2 days, so one missed run still leaves margin.
+
+    Installing is an operator step:
+      bash scripts/launchd/reload_plist.sh com.vnx.door-audit
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd ${VNX_HOME} &amp;&amp; PY=$(bash ${VNX_HOME}/scripts/launchd/vnx_python.sh ${VNX_HOME}) || exit 78; exec "$PY" scripts/backfill_pr_merged_receipts.py --all-projects</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>6</integer>
+    <key>Minute</key><integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/vnx-door-audit.log</string>
+  <key>StandardErrorPath</key><string>/tmp/vnx-door-audit.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VNX_HOME</key>
+    <string>${VNX_HOME}</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
