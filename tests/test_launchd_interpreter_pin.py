@@ -79,7 +79,7 @@ def test_py_job_starts_with_the_venv_of_the_engine_root(tmp_path: Path) -> None:
     result = _launch(tmp_path, home, engine)
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.strip() == f"venv ran {SCRIPT}"
+    assert result.stdout.strip() == f"venv ran {engine / SCRIPT}"
     assert "No module named yaml" not in result.stderr
 
 

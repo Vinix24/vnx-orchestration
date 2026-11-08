@@ -120,15 +120,16 @@ def test_program_arguments_call_the_pinned_launcher(tmp_path, monkeypatch) -> No
 def test_starts_an_older_pinned_tree_from_a_newer_launcher(tmp_path: Path) -> None:
     home = _home(tmp_path)
     versions = pinned_store(home, ["v1.7.5", "v1.7.6"], script=STUB, current="v1.7.6")
-    _checkout(tmp_path, home, pin="1.7.5")
+    checkout = _checkout(tmp_path, home, pin="1.7.5")
     pinned = versions / "v1.7.5"
 
     result = _run_launcher(home, "--flag", "value")
 
     assert result.returncode == 0, result.stderr
+    # The script is the pinned tree's; it runs in the project checkout (OI-2653).
     assert result.stdout.splitlines() == [
         str(pinned / RELATIVE_SCRIPT),
-        str(pinned),
+        str(checkout.resolve()),
         str(pinned),
         "--flag value",
     ]
