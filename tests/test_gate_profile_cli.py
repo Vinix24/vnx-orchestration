@@ -94,13 +94,14 @@ def test_enforcement_outranks_the_light_profile_and_adds_the_mandatory_seat(home
     _dials(home, VNX_DEV_DIALS)
     names, provenance = gate_profile.required_stack()
     assert names == ["codex_gate", "kimi_gate", "ci_gate"]
-    assert provenance["codex_gate"] == "profile" and provenance["kimi_gate"] == "enforcement"
+    assert set(provenance.values()) == {"enforcement"}  # the config defines the stack
 
 
-def test_level_1_advisory_and_level_0_off_both_require_nothing(home):
-    for level in ("0", "1"):
-        _dials(home, f"checks:\n  kimi_gate_required:\n    level: {level}\n")
-        assert gate_profile.required_stack()[0] == ["codex_gate"]
+def test_level_1_is_advisory_and_keeps_the_review_stack_level_0_removes_the_seat(home):
+    _dials(home, "checks:\n  kimi_gate_required:\n    level: 1\n")
+    assert gate_profile.required_stack()[0] == ["codex_gate", "kimi_gate"]
+    _dials(home, "checks:\n  kimi_gate_required:\n    level: 0\n")
+    assert gate_profile.required_stack()[0] == ["codex_gate"]
 
 
 def test_ci_gate_joins_on_level_2_and_on_an_explicit_env_flag_but_not_on_the_registry_default(home, monkeypatch):
@@ -152,9 +153,11 @@ def test_an_unreadable_config_file_refuses(home):
 
 def test_an_empty_result_refuses(home, monkeypatch):
     monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "ci_gate")
-    _dials(home, "checks:\n  ci_green_required:\n    level: 0\n")
     names, _ = gate_profile.required_stack()
     assert names == ["ci_gate"]  # an explicit stack naming only ci_gate is the operator's own choice
+    _dials(home, "checks:\n  ci_green_required:\n    level: 0\n")
+    with pytest.raises(ReviewGateConfigError, match="empty"):
+        gate_profile.required_stack()
     monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", " , ")
     with pytest.raises(ReviewGateConfigError, match="empty"):
         gate_profile.required_stack()

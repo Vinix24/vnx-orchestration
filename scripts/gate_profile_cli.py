@@ -33,7 +33,6 @@ from dispatch_spec import ReviewGateConfigError
 
 EXIT_OK = 0
 EXIT_REFUSED = 2
-STACK_VALUES = ("review_stack", "required_stack")
 VALUE_FIELDS = gate_profile.FIELDS + ("required_stack",)
 
 

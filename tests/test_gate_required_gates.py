@@ -240,9 +240,10 @@ def test_level_0_dial_removes_a_seat_of_the_heavy_stack(env):
     assert _gates(result) == ["codex_gate", "claude_gate"]
 
 
-def test_ci_gate_joins_on_ci_green_required_at_level_2(env):
+def test_ci_green_required_at_level_2_alone_requires_ci_gate_alone(env):
+    """The config defines the stack (the answer of the former gate.sh): a lone ci dial is ci_gate."""
     _write_enforcement_config(env, "version: 1\nchecks:\n  ci_green_required:\n    level: 2\n")
-    assert _gates(_run_required_gates(env)) == ["codex_gate", "kimi_gate", "ci_gate"]
+    assert _gates(_run_required_gates(env)) == ["ci_gate"]
 
 
 def test_ci_gate_stays_out_at_level_1_and_joins_on_the_env_flag(env):
@@ -278,3 +279,78 @@ def test_gate_sh_holds_no_literal_stack_and_no_inline_yaml_parser():
     text = GATE_SH.read_text(encoding="utf-8")
     assert "default_stack" not in text
     assert "gate_map" not in text
+
+
+# --- the four edge cases: the answer of the former bash function, run next to the new CLI ----
+#
+# 4b5c7dfb6 is origin/main before P7 (the parent of the commit that replaced the bash
+# function). The old `_g_required_gates` is sourced from that commit, so the comparison does
+# not depend on what main holds later.
+PRE_P7_COMMIT = "4b5c7dfb6"
+
+
+def _run_old_required_gates(env) -> subprocess.CompletedProcess:
+    shown = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "show", f"{PRE_P7_COMMIT}:scripts/commands/gate.sh"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert shown.returncode == 0, shown.stderr
+    old_sh = env["fake_home"].parent / "gate_pre_p7.sh"
+    old_sh.write_text(shown.stdout, encoding="utf-8")
+    driver = env["fake_home"].parent / "run_old_required_gates.sh"
+    driver.write_text(
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+log() {{ printf '%s\\n' "$*"; }}
+err() {{ printf 'ERROR: %s\\n' "$*" >&2; }}
+export VNX_HOME={env['fake_home']}
+export PROJECT_ROOT={env['project']}
+source {old_sh}
+_g_required_gates
+""",
+        encoding="utf-8",
+    )
+    return subprocess.run(
+        ["bash", str(driver)], capture_output=True, text=True, timeout=30, env=_clean_environ(env),
+    )
+
+
+EDGE_CASES = {
+    "a_only_codex_2": ("version: 1\nchecks:\n  codex_gate_required:\n    level: 2\n", ["codex_gate"]),
+    "b_every_dial_level_1": (
+        "version: 1\nchecks:\n  codex_gate_required:\n    level: 1\n  kimi_gate_required:\n    level: 1\n"
+        "  ci_green_required:\n    level: 1\n",
+        ["codex_gate", "kimi_gate"],
+    ),
+    "c_no_checks_block": ("version: 1\nmode: standard\n", ["codex_gate", "kimi_gate"]),
+    "d_no_config_file": (None, ["codex_gate", "kimi_gate"]),
+}
+
+
+@pytest.mark.parametrize("case", sorted(EDGE_CASES))
+def test_required_stack_equals_the_former_bash_function(env, case):
+    body, expected = EDGE_CASES[case]
+    if body is not None:
+        _write_enforcement_config(env, body)
+    old = _run_old_required_gates(env)
+    new = _run_required_gates(env)
+    assert old.returncode == 0, old.stderr
+    assert _gates(new) == [g for g in old.stdout.strip().split(",") if g] == expected
+
+
+def test_vnx_dev_dials_equal_the_former_bash_function_byte_for_byte(env):
+    _write_enforcement_config(env, CONFIG_VNX_DEV_DIALS)
+    old = _run_old_required_gates(env)
+    new = _run_required_gates(env)
+    # The old function ended with print(): a newline the $(...) capture in gate.sh dropped.
+    assert old.stdout.strip() == new.stdout == "codex_gate,kimi_gate,ci_gate"
+
+
+def test_enforcement_dials_are_derived_from_the_registry_rows():
+    import gate_lane_rows
+    import gate_profile
+
+    for row in gate_lane_rows.GATE_LANE_ROWS:
+        assert gate_profile.ENFORCEMENT_DIALS[f"{row.gate}_required"] == row.gate
+    assert gate_profile.ENFORCEMENT_DIALS["codex_gate_required"] == "codex_gate"
+    assert gate_profile.ENFORCEMENT_DIALS["ci_green_required"] == "ci_gate"

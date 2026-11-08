@@ -44,6 +44,8 @@ for _path in (str(_LIB_DIR), str(_SCRIPTS_DIR)):
 
 import config_registry
 import config_runtime
+import dispatch_spec
+import gate_lane_rows
 from dispatch_spec import ReviewGateConfigError
 
 PROFILE_KEY = "VNX_GOVERNANCE_PROFILE"
@@ -192,15 +194,24 @@ def value(
 # --- required_stack: the second view, with the enforcement layer (P7, B10) -----------------
 
 ENFORCEMENT_FILENAME = "governance_enforcement.yaml"
-CI_GATE = "ci_gate"
+CI_GATE = dispatch_spec.Gate.CI_GATE.value
 CI_GATE_KEY = "VNX_CI_GATE_REQUIRED"
-# The dial -> the gate it governs. ``ci_green_required`` maps to ``ci_gate``, the name
-# review_gate_manager knows (OI-1265); ``ci`` is not a name it knows.
-ENFORCEMENT_DIALS: Mapping[str, str] = MappingProxyType({
-    "codex_gate_required": "codex_gate",
-    "kimi_gate_required": "kimi_gate",
-    "ci_green_required": CI_GATE,
-})
+_DIAL_SUFFIX = "_required"
+CI_DIAL = "ci_green" + _DIAL_SUFFIX
+
+
+def _enforcement_dials() -> Dict[str, str]:
+    """The dial -> the gate it governs, derived from the registry: one ``<gate>_required``
+    dial per review gate (the codex gate and every row of ``gate_lane_rows.GATE_LANE_ROWS``),
+    plus ``ci_green_required`` -> ``ci_gate``, the name review_gate_manager knows (OI-1265;
+    ``ci`` is not a name it knows). A new provider row is a new dial without an edit here."""
+    reviewers = [dispatch_spec.Gate.CODEX_GATE.value] + [row.gate for row in gate_lane_rows.GATE_LANE_ROWS]
+    dials = {gate + _DIAL_SUFFIX: gate for gate in reviewers}
+    dials[CI_DIAL] = CI_GATE
+    return dials
+
+
+ENFORCEMENT_DIALS: Mapping[str, str] = MappingProxyType(_enforcement_dials())
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _CHECK_RE = re.compile(r"^  (\w+):")
 _LEVEL_RE = re.compile(r"^    level:\s*([^\s#]*)\s*(?:#.*)?$")
@@ -291,12 +302,10 @@ def review_stack(
     return _stack_names(raw), source
 
 
-def _ci_gate_source(level: Optional[int], project_id: Optional[str], resolver) -> Optional[str]:
-    """Why ``ci_gate`` is required, or ``None``: the dial at level >= 2, else a set
-    ``VNX_CI_GATE_REQUIRED``. The registry default ("1") is not a request: the stack of a
-    project with no dial never carried ``ci_gate`` here."""
-    if level is not None and level >= 2:
-        return "enforcement"
+def _ci_gate_source(project_id: Optional[str], resolver) -> Optional[str]:
+    """Why ``ci_gate`` joins beyond the dial, or ``None``: a set ``VNX_CI_GATE_REQUIRED``.
+    The registry default ("1") is not a request: the stack of a project with no dial never
+    carried ``ci_gate`` here."""
     raw, source = config_registry.resolve_with_source(
         CI_GATE_KEY, project_id, resolver, use_default_resolver=resolver is None,
     )
@@ -311,31 +320,30 @@ def required_stack(
 ) -> Tuple[List[str], Dict[str, str]]:
     """``(names, provenance)``: the stack ``vnx gate`` verifies (B10).
 
-    Starts from ``review_stack`` (what the door asks) and applies the ``checks.*_required``
-    dials of ``governance_enforcement.yaml``: level >= 2 makes the seat mandatory, level 1
-    is advisory and requires nothing, level 0 removes the seat. ``ci_gate`` joins when
-    ``ci_green_required`` >= 2 or ``VNX_CI_GATE_REQUIRED`` is set true. ``provenance`` names
-    the source of each returned name: ``profile``, ``enforcement``, ``override``,
-    ``project_config``, ``env`` or ``default``.
+    The answer ``_g_required_gates`` gave before P7. When the enforcement config sets a
+    ``checks.*_required`` dial at level >= 2, those gates, in file order, ARE the stack: the
+    config defines it, so a config naming only ``codex_gate_required: 2`` verifies
+    ``codex_gate`` alone. Level 1 is advisory and requires nothing. When no dial is at level
+    >= 2 (no config, no ``checks`` block, only advisory dials) the stack is ``review_stack``,
+    which under ``standard`` is the former literal default, minus a seat whose dial is level 0
+    (B10: "level 0 removes a seat"). ``ci_gate`` also joins when
+    ``VNX_CI_GATE_REQUIRED`` is set true. ``provenance`` names the source of each name:
+    ``profile``, ``enforcement``, ``override``, ``project_config``, ``env`` or ``default``.
 
     Raises :class:`GateProfileConfigError` for an invalid profile and ``ReviewGateConfigError``
     for an unreadable dial or an empty result: nothing is verified on a stack nobody can read.
     """
     resolution = resolution if resolution is not None else resolve(project_id, resolver=resolver)
-    names, source = review_stack(project_id, resolution, resolver)
     dials = read_enforcement_dials(config_path if config_path is not None else enforcement_config_path())
-    provenance = {name: source for name in names}
-    for dial, gate in ENFORCEMENT_DIALS.items():
-        level = dials.get(dial)
-        if gate == CI_GATE or level is None:
-            continue
-        if level >= 2 and gate not in provenance:
-            names.append(gate)
-            provenance[gate] = "enforcement"
-        elif level < 2 and gate in provenance:
-            names.remove(gate)
-            del provenance[gate]
-    ci_source = _ci_gate_source(dials.get("ci_green_required"), project_id, resolver)
+    mandatory = [ENFORCEMENT_DIALS[dial] for dial, level in dials.items() if level >= 2]
+    if mandatory:
+        names, provenance = mandatory, {name: "enforcement" for name in mandatory}
+    else:
+        names, source = review_stack(project_id, resolution, resolver)
+        off = {ENFORCEMENT_DIALS[dial] for dial, level in dials.items() if level == 0}
+        names = [name for name in names if name not in off]
+        provenance = {name: source for name in names}
+    ci_source = _ci_gate_source(project_id, resolver)
     if ci_source is not None and CI_GATE not in provenance:
         names.append(CI_GATE)
         provenance[CI_GATE] = ci_source
