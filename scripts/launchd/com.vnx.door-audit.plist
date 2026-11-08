@@ -5,20 +5,12 @@
 <dict>
   <key>Label</key><string>com.vnx.door-audit</string>
   <!--
-    Deur D7b: ONE machine-wide daily job, not one per project. It runs
-    `backfill_pr_merged_receipts.py` in its all-projects mode, which enumerates the union of
-    ~/.vnx/projects.json and the installed com.vnx.ledger-health.* labels and audits
-    every project in its own subprocess (cwd and VNX_* paths of that project). The
-    Label carries no project id: this is deliberately not a per-project family.
-
-    A non-zero exit is expected: 1 = at least one merge without a pr_merged receipt
-    (one open item per gap, deduplicated on door-audit:<project>:<pr>), 2 = at least
-    one project unmeasurable. The job measures and records; it does not gate a build.
-
-    Daily at 06:30 local time. Each project's beacon <state_dir>/health/door_audit.json
-    expects a write every 2 days, so one missed run still leaves margin.
-
-    Installing is an operator step:
+    Deur D7b: ONE machine-wide daily job (no project id in the Label, not a per-project
+    family). It runs the all-projects mode of backfill_pr_merged_receipts.py: one
+    subprocess per project over the union of ~/.vnx/projects.json and the installed
+    ledger-health labels. Exit 1 = a merge without receipt, 2 = a project unmeasurable;
+    the job records and never gates a build. Daily 06:30; each project's beacon
+    health/door_audit.json expects a write every 2 days. Installing is an operator step:
       bash scripts/launchd/reload_plist.sh com.vnx.door-audit
   -->
   <key>ProgramArguments</key>

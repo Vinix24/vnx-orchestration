@@ -12,7 +12,6 @@ Usage:
     python3 scripts/backfill_pr_merged_receipts.py --json   # structured output
 
     python3 scripts/backfill_pr_merged_receipts.py --report-only  # audit, never heals
-    python3 scripts/backfill_pr_merged_receipts.py --all-projects  # door audit for every project
 
 Idempotent: already-receipted PR numbers are skipped.
 
@@ -24,16 +23,11 @@ events/pr_merged.ndjson). Every merged PR lands in one bucket: `door`, `backfill
 or `missing`. Exit 0 = complete read, no gaps ("0 van <n>"); exit 1 = at least one
 missing; exit 2 = unmeasurable (failed read, page limit, unreadable ledger).
 
---all-projects (deur D7b): the fleet runner. It enumerates the union of
-~/.vnx/projects.json and the installed com.vnx.ledger-health.* launchd labels and runs
-`--report-only --json` once per project in its own subprocess, with cwd=<project_root>
-and explicit VNX_PROJECT_ROOT / VNX_DATA_DIR / VNX_STATE_DIR. A project in only one list
-is a finding (`job_missing` / `unregistered_project`), never a silent skip. A project
-without a path or git repo, or whose child crashes, times out or prints something
-unparseable, is `unmeasurable`. `--project <id>` (repeatable) narrows the run; an unknown
-id is exit 2 with `onbekend project: <id>`. The run's exit is the maximum severity: 2 if
-any project is unmeasurable, else 1 if any has a gap or a finding, else 0. An empty
-enumeration is exit 2.
+--all-projects (deur D7b): the fleet runner. It audits the union of ~/.vnx/projects.json and the
+installed com.vnx.ledger-health.* labels, one `--report-only --json` subprocess per project
+(that project's cwd and VNX_* paths). A project in one list only is a finding, one without
+path or repo or with a failing child is `unmeasurable`. `--project <id>` narrows; an unknown
+id is exit 2 (`onbekend project: <id>`). Exit = maximum severity; an empty enumeration is 2.
 
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
@@ -631,10 +625,6 @@ _CHILD_PATH_ENV = ("VNX_DISPATCH_DIR", "VNX_LOGS_DIR", "VNX_PIDS_DIR", "VNX_LOCK
                    "VNX_REPORTS_DIR", "VNX_DB_DIR", "VNX_HEADLESS_REPORTS_DIR", "VNX_INTELLIGENCE_DIR")
 
 
-def _default_registry() -> Path:
-    return Path.home() / ".vnx" / "projects.json"
-
-
 def _installed_ledger_health_ids() -> Set[str]:
     """Project ids of the installed com.vnx.ledger-health.<id> labels (one `launchctl list` call)."""
     try:
@@ -734,6 +724,10 @@ def _read_child_report(proc: Any) -> Tuple[str, int, int, str]:
     return wanted[rc], rc, gaps, str(report.get("reason") or "")
 
 
+class UnknownProject(Exception):
+    pass
+
+
 def run_fleet(selected: List[str], registry_path: Path, since: Optional[str]) -> Dict[str, Any]:
     """Run the audit per project. Raises AuditUnmeasurable on an empty enumeration or an unknown id."""
     projects = enumerate_projects(registry_path)
@@ -748,22 +742,16 @@ def run_fleet(selected: List[str], registry_path: Path, since: Optional[str]) ->
     return {"mode": "all-projects", "rows": rows, "exit_code": exit_code}
 
 
-class UnknownProject(Exception):
-    pass
-
-
 def _print_fleet(result: Dict[str, Any]) -> None:
     for r in result["rows"]:
         extra = "  ".join(x for x in (r["finding"], r["reason"]) if x)
         print(f"{r['project_id']:<24} {r['outcome']:<12} gaps={r['gaps']}  exit={r['exit_code']}  {extra}".rstrip())
     rows = result["rows"]
-    print(f"Door audit fleet: {len(rows)} project(s), "
-          f"{sum(1 for r in rows if r['outcome'] == 'unmeasurable')} unmeasurable, "
-          f"{sum(r['gaps'] for r in rows)} gap(s), exit {result['exit_code']}")
+    print(f"Door audit fleet: {len(rows)} project(s), {sum(r['gaps'] for r in rows)} gap(s), exit {result['exit_code']}")
 
 
 def _main_fleet(args: argparse.Namespace) -> int:
-    registry = Path(args.registry).expanduser() if args.registry else _default_registry()
+    registry = Path(args.registry).expanduser() if args.registry else Path.home() / ".vnx" / "projects.json"
     try:
         result = run_fleet(args.project or [], registry, args.since)
     except UnknownProject as exc:

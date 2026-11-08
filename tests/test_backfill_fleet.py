@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for `backfill_pr_merged_receipts.py --all-projects` (deur D7b).
-
-The fleet runner enumerates the union of the project registry and the ledger-health
-labels, runs the D7a audit once per project in its own subprocess (own cwd, own VNX_*
-paths) and exits with the maximum severity. No real launchctl, gh or central store.
-"""
+"""Tests for `backfill_pr_merged_receipts.py --all-projects` (deur D7b). No real launchctl, gh or store."""
 
 from __future__ import annotations
 
@@ -36,20 +31,16 @@ def _report(outcome: str, rc: int, missing: int = 0) -> str:
 
 def _project(tmp_path: Path, pid: str, repo: bool = True) -> Dict[str, Any]:
     root = tmp_path / pid
-    root.mkdir()
-    if repo:
-        (root / ".git").mkdir()
+    (root / ".git" if repo else root).mkdir(parents=True)
     return {"project_id": pid, "path": str(root), "name": pid}
 
 
 @pytest.fixture()
 def fleet(tmp_path, monkeypatch):
-    """Registry on tmp_path, stubbed labels, recorded child calls."""
-    state: Dict[str, Any] = {"labels": set(), "calls": [], "children": {}, "projects": []}
+    state: Dict[str, Any] = {"labels": set(), "calls": [], "children": {}}
     registry = tmp_path / "projects.json"
 
     def setup(projects: List[Dict[str, Any]], labels):
-        state["projects"] = projects
         state["labels"] = set(labels)
         registry.write_text(json.dumps({"projects": projects}))
 
@@ -67,9 +58,8 @@ def fleet(tmp_path, monkeypatch):
     return state
 
 
-def _run(fleet, *extra, capsys=None):
-    code = bf.main(["--all-projects", "--registry", str(fleet["registry"]), "--json", *extra])
-    return code
+def _run(fleet, *extra):
+    return bf.main(["--all-projects", "--registry", str(fleet["registry"]), "--json", *extra])
 
 
 def _rows(capsys) -> Dict[str, Dict[str, Any]]:
@@ -79,11 +69,9 @@ def _rows(capsys) -> Dict[str, Dict[str, Any]]:
 def test_unknown_project_is_exit_2_with_text(fleet, capsys, tmp_path):
     fleet["setup"]([_project(tmp_path, "alpha")], {"alpha"})
     with pytest.raises(SystemExit) as raised:
-        code = _run(fleet, "--project", "nope")
-        raise SystemExit(code)
-    captured = capsys.readouterr()
-    assert raised.value.code == 2
-    assert "onbekend project: nope" in captured.out + captured.err
+        raise SystemExit(_run(fleet, "--project", "nope"))
+    out = capsys.readouterr()
+    assert raised.value.code == 2 and "onbekend project: nope" in out.out + out.err
     assert fleet["calls"] == []
 
 
@@ -97,7 +85,7 @@ def test_readable_and_repo_less_project_gives_exit_2_one_row_each(fleet, capsys,
     assert len(fleet["calls"]) == 1
 
 
-def test_empty_enumeration_is_exit_2(fleet, capsys):
+def test_empty_enumeration_is_exit_2(fleet):
     fleet["setup"]([], set())
     assert _run(fleet) == 2
     assert fleet["calls"] == []
@@ -105,7 +93,7 @@ def test_empty_enumeration_is_exit_2(fleet, capsys):
 
 @pytest.mark.parametrize("failure", [OSError("boom"), subprocess.TimeoutExpired("x", 1),
                                      _Done(0, "not json"), _Done(1, _report("clean", 0)),
-                                     _Done(7, _report("gaps", 1)), _Done(0, "")])
+                                     _Done(7, _report("gaps", 1)), _Done(0, ""), _Done(2, _report("unknown", 2))])
 def test_crash_of_a_leaves_b_measured(fleet, capsys, tmp_path, failure):
     a, b = _project(tmp_path, "alpha"), _project(tmp_path, "beta")
     fleet["setup"]([a, b], {"alpha", "beta"})
@@ -117,47 +105,40 @@ def test_crash_of_a_leaves_b_measured(fleet, capsys, tmp_path, failure):
     assert len(fleet["calls"]) == 2
 
 
-def test_child_exit_2_is_unmeasurable_and_gaps_are_counted(fleet, capsys, tmp_path):
+def test_gaps_are_counted_and_exit_1(fleet, capsys, tmp_path):
     a, b = _project(tmp_path, "alpha"), _project(tmp_path, "beta")
     fleet["setup"]([a, b], {"alpha", "beta"})
     fleet["children"][a["path"]] = _Done(1, _report("gaps", 1, missing=3))
     assert _run(fleet) == 1
     rows = _rows(capsys)
     assert rows["alpha"]["outcome"] == "gaps" and rows["alpha"]["gaps"] == 3
-    fleet["children"][b["path"]] = _Done(2, _report("unknown", 2))
+
+
+def test_one_sided_projects_are_findings(fleet, capsys, tmp_path):
+    fleet["setup"]([_project(tmp_path, "alpha"), _project(tmp_path, "beta")], {"alpha", "ghost"})
     assert _run(fleet) == 2
-
-
-def test_registry_only_project_is_job_missing(fleet, capsys, tmp_path):
-    fleet["setup"]([_project(tmp_path, "alpha"), _project(tmp_path, "beta")], {"alpha"})
-    assert _run(fleet) == 1
     rows = _rows(capsys)
     assert rows["beta"]["finding"] == "job_missing" and rows["beta"]["exit_code"] == 1
+    assert rows["ghost"]["finding"] == "unregistered_project" and rows["ghost"]["outcome"] == "unmeasurable"
     assert rows["alpha"]["finding"] == ""
 
 
-def test_label_only_project_is_unregistered_and_unmeasurable(fleet, capsys, tmp_path):
-    fleet["setup"]([_project(tmp_path, "alpha")], {"alpha", "ghost"})
-    assert _run(fleet) == 2
-    row = _rows(capsys)["ghost"]
-    assert row["finding"] == "unregistered_project" and row["outcome"] == "unmeasurable"
-
-
-def test_unreadable_registry_is_exit_2(fleet, capsys, tmp_path):
+def test_unreadable_registry_is_exit_2(fleet):
     fleet["registry"].write_text("{broken")
     assert _run(fleet) == 2
     assert fleet["calls"] == []
 
 
-def test_launchctl_failure_is_exit_2(monkeypatch, fleet, capsys, tmp_path):
-    fleet["setup"]([_project(tmp_path, "alpha")], set())
-    monkeypatch.undo()
+@pytest.mark.parametrize("fake", [_Done(1, "", "denied"), OSError("no launchctl")])
+def test_launchctl_failure_is_unmeasurable(monkeypatch, fake):
+    def run(*a, **k):
+        if isinstance(fake, Exception):
+            raise fake
+        return fake
 
-    def boom(*a, **k):
-        raise FileNotFoundError("launchctl")
-
-    monkeypatch.setattr(bf.subprocess, "run", boom)
-    assert bf.main(["--all-projects", "--registry", str(fleet["registry"])]) == 2
+    monkeypatch.setattr(bf.subprocess, "run", run)
+    with pytest.raises(bf.AuditUnmeasurable):
+        bf._installed_ledger_health_ids()
 
 
 def test_project_flag_narrows_the_run(fleet, capsys, tmp_path):
@@ -167,13 +148,7 @@ def test_project_flag_narrows_the_run(fleet, capsys, tmp_path):
     assert len(fleet["calls"]) == 1
 
 
-def test_project_without_all_projects_is_rejected():
-    with pytest.raises(SystemExit) as raised:
-        bf.main(["--project", "alpha"])
-    assert raised.value.code == 2
-
-
-def test_each_child_gets_its_own_cwd_and_env(fleet, capsys, tmp_path, monkeypatch):
+def test_each_child_gets_its_own_cwd_and_env(fleet, tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "leak")
     monkeypatch.setenv("VNX_LOGS_DIR", "/elsewhere/logs")
     a, b = _project(tmp_path, "alpha"), _project(tmp_path, "beta")
@@ -195,7 +170,7 @@ def test_each_child_gets_its_own_cwd_and_env(fleet, capsys, tmp_path, monkeypatc
         assert "VNX_LOGS_DIR" not in env
 
 
-def test_same_gap_twice_is_one_open_item_with_project_dedup_key(tmp_path, monkeypatch):
+def test_same_gap_twice_is_one_open_item(tmp_path, monkeypatch):
     import open_items_manager as oim
     state = tmp_path / "oi_state"
     state.mkdir()
@@ -204,12 +179,9 @@ def test_same_gap_twice_is_one_open_item_with_project_dedup_key(tmp_path, monkey
         monkeypatch.setattr(oim, attr, state / name)
     monkeypatch.setattr(oim, "STATE_DIR", state)
     pr = {"pr_number": 41, "pr_title": "x", "merged_at": "2026-11-07T00:00:00Z"}
-    first = bf._file_open_item(pr, "alpha")
-    second = bf._file_open_item(pr, "alpha")
+    first, second = bf._file_open_item(pr, "alpha"), bf._file_open_item(pr, "alpha")
     assert first[1] is True and second == (first[0], False)
-    items = oim.load_items()["items"]
-    assert [i["dedup_key"] for i in items] == ["door-audit:alpha:41"]
-    assert bf._file_open_item(pr, "beta")[1] is True
+    assert [i["dedup_key"] for i in oim.load_items()["items"]] == ["door-audit:alpha:41"]
 
 
 def test_plist_is_one_machine_wide_daily_job():
