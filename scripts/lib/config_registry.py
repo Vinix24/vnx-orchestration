@@ -212,7 +212,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_GOVERNANCE_PROFILE > default). Any other value fails closed with "
         "GateProfileConfigError naming the raw value and its source; there is no fallback to "
         "standard.", approval=True,
-        subsystem="governance-enforcement-stack", status="LIVE", read_site_wired=False),
+        subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

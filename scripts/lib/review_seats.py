@@ -74,6 +74,7 @@ logger = logging.getLogger(__name__)
 REVIEW_STACK_KEY = "VNX_DEFAULT_REVIEW_STACK"
 SOURCE_CONFIG = "config"
 SOURCE_EXPLICIT = "explicit"
+STACK_SOURCE_PROFILE = "profile"
 
 # Review peers that are optional by name: they may never run, so a review never
 # waits on them and they never count as a seat.
@@ -97,6 +98,11 @@ class ReviewSeats:
     ``profile_stack`` is the stack a governance profile derived from the changed
     files when one applied (its extra gates are in ``stack``), else ``None``.
 
+    ``stack_source`` says who supplied the stack: ``profile`` (the gate profile's
+    ``review_stack``), ``override``, ``project_config``, ``env`` or ``default`` (the source
+    ``config_registry`` reports for ``VNX_DEFAULT_REVIEW_STACK``). A stack the caller named is
+    ``override``. A record can then tell a profile's one-seat stack from an operator's.
+
     ``profile``, ``profile_source`` and ``profile_error`` are the gate profile
     (``gate_profile``, ``VNX_GOVERNANCE_PROFILE``) in force when the seats were
     resolved. Not the glob governance profile above. A config-sourced review that
@@ -113,6 +119,7 @@ class ReviewSeats:
     profile: Optional[str] = None
     profile_source: Optional[str] = None
     profile_error: Optional[str] = None
+    stack_source: str = "override"
 
     @property
     def extra_gates(self) -> Tuple[str, ...]:
@@ -121,8 +128,9 @@ class ReviewSeats:
     def to_record(self) -> Dict[str, Any]:
         """The shape a request record carries, so an evaluator can use what was requested.
 
-        The gate profile fields stay off the record: the trail carries them from P6
-        (``gate-profiel-per-project``), which also moves the golden request line.
+        ``stack_source`` is on the record (P5): a one-seat stack the profile supplied must be told
+        from an operator's. The other gate profile fields stay off it: the trail carries them from P6
+        (``gate-profiel-per-project``), which moves the golden request line again.
         """
         return {
             "seats": list(self.seats),
@@ -131,6 +139,7 @@ class ReviewSeats:
             "key": REVIEW_STACK_KEY if self.source == SOURCE_CONFIG else "",
             "value": self.value,
             "profile_stack": list(self.profile_stack) if self.profile_stack is not None else None,
+            "stack_source": self.stack_source,
         }
 
 
@@ -218,6 +227,30 @@ def _explicit_profile_fields(project_id: Optional[str] = None) -> Dict[str, Opti
     return {"profile": resolution.profile, "profile_source": resolution.source, "profile_error": None}
 
 
+def _config_stack_source(contributed: Optional[str]) -> str:
+    """Who supplied a config-sourced stack: the profile, else the registry's own source for the key."""
+    if contributed is not None:
+        return STACK_SOURCE_PROFILE
+    import config_registry
+
+    return config_registry.resolve_with_source(REVIEW_STACK_KEY)[1]
+
+
+def light_profile_governs_stack(project_id: Optional[str] = None) -> Optional[gate_profile.ProfileResolution]:
+    """The resolution when profile ``light`` is what supplies the review stack, else ``None``.
+
+    ``None`` for ``standard``, ``heavy`` and for ``light`` when an operator set the stack
+    itself (``VNX_OVERRIDE_*`` or a ``project_config`` row): that stack wins, as with every
+    profile, so it is not ``light``'s one-seat stack and the floor has nothing to refuse.
+    Raises ``GateProfileConfigError`` for a profile value that is not legal (never a quiet ``None``).
+    """
+    resolution = gate_profile.resolve(project_id)
+    if resolution.profile != "light":
+        return None
+    contributed = gate_profile.value("review_stack", project_id, resolution=resolution)
+    return resolution if contributed is not None else None
+
+
 def resolve_review_seats(
     *,
     explicit_stack: Optional[Iterable[str]] = None,
@@ -246,6 +279,7 @@ def resolve_review_seats(
     resolution = gate_profile.resolve()
     contributed = gate_profile.value("review_stack", resolution=resolution)
     raw = contributed if contributed is not None else (config_runtime.get(REVIEW_STACK_KEY) or "")
+    stack_source = _config_stack_source(contributed)
     entries, profile = _config_stack_entries(raw, changed_files, project_root)
     seats, stack = classify_stack(entries, origin=REVIEW_STACK_KEY, value=raw)
     if not seats:
@@ -258,4 +292,5 @@ def resolve_review_seats(
         seats=seats, stack=stack, source=SOURCE_CONFIG, value=raw,
         profile_stack=tuple(profile) if profile is not None else None,
         profile=resolution.profile, profile_source=resolution.source, profile_error=None,
+        stack_source=stack_source,
     )

@@ -146,6 +146,7 @@
             "codex_gate"
           ],
           "source": "explicit",
+          "stack_source": "override",
           "value": "codex_gate"
         },
         "risk_class": "high",

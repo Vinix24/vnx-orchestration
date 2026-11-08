@@ -78,9 +78,9 @@ class TestHeavyAndLight:
         seats = resolve_review_seats()
         assert (seats.profile, seats.profile_source) == ("heavy", "env")
 
-    def test_light_keeps_the_standard_stack_until_the_floor_lands(self, monkeypatch):
+    def test_light_gives_one_seat_now_that_the_floor_exists(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
-        assert resolve_review_seats().seats == TODAY
+        assert resolve_review_seats().seats == ("codex_gate",)
 
     def test_the_override_source_is_named(self, monkeypatch):
         monkeypatch.setenv("VNX_OVERRIDE_GOVERNANCE_PROFILE", "heavy")
