@@ -154,3 +154,21 @@ class TestCaseD:
         # Codes may appear as **A1**, **A1 (label)**, or **A1:** — accept any bold start
         missing = [c for c in required if not re.search(rf"\*\*{re.escape(c)}[\s(*:]", text)]
         assert not missing, f"Expected policy codes missing from CLAUDE.md: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Case E: the shipped playbook ties the T0 to no single harness (ADR-058, SP-8)
+# ---------------------------------------------------------------------------
+
+class TestCaseE:
+    def test_no_claude_lock_sentence_for_the_t0(self):
+        text = SKILL_MD.read_text()
+        assert "T0 itself uses" not in text
+        lock = [ln for ln in text.splitlines() if re.search(r"\bT0\b.*\bonly\b.*CLAUDE\.md", ln)]
+        assert not lock, lock
+
+    def test_tri_file_line_says_the_t0_reads_its_role_through_its_harness(self):
+        text = SKILL_MD.read_text()
+        line = next(ln for ln in text.splitlines() if "Tri-file" in ln)
+        assert "CLAUDE.md" in line and "AGENTS.md" in line and "GEMINI.md" in line
+        assert "harness" in line
