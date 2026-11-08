@@ -233,6 +233,7 @@ BILLING SAFETY: No Anthropic SDK. No direct API calls.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import logging
@@ -2188,6 +2189,41 @@ def _write_refusal_receipt(
     return receipt_status
 
 
+def _write_merged_receipt(result: Dict[str, Any], **fields: Any) -> None:
+    """Write the binding ``pr_merged`` receipt for a merge that happened; its outcome lands on ``result``.
+
+    OI-1518: a merge whose proof could not be written must NOT exit 0. Two failure
+    shapes both land here: ``_emit_receipt`` raising an ``Exception``, and
+    ``_emit_receipt`` returning an ``append_status`` that is not a recognized success
+    value (including a missing key -> ``"unknown"`` default). Both set
+    ``receipt_ok=False`` so the CLI exits non-zero.
+    """
+    pr_number = fields["pr_number"]
+    try:
+        receipt = _emit_receipt(**fields)
+        append_status = (receipt or {}).get("append_status", "unknown")
+        result["receipt_status"] = append_status
+        result["receipt_ok"] = append_status in _RECEIPT_OK_STATUSES
+        if not result["receipt_ok"]:
+            print(
+                f"FATAL: merge happened for PR #{pr_number} but the receipt did NOT "
+                f"land (append_status={append_status!r}). The merge on GitHub is "
+                f"irreversible. Re-run `python3 scripts/pr_merge.py --pr {pr_number}` "
+                f"after fixing the receipts file so the audit-trail evidence is captured.",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        result["receipt_status"] = f"error: {exc}"
+        result["receipt_ok"] = False
+        print(
+            f"FATAL: merge happened for PR #{pr_number} but the receipt could NOT be "
+            f"written: {exc}. The merge on GitHub is irreversible. Re-run "
+            f"`python3 scripts/pr_merge.py --pr {pr_number}` after fixing the error "
+            f"so the audit-trail evidence is captured.",
+            file=sys.stderr,
+        )
+
+
 def _emit_register_event(
     *,
     pr_number: int,
@@ -2236,11 +2272,15 @@ def merge_pr(
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
     door_check: Optional[Dict[str, Any]] = None,
+    on_merged: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Merge a PR and emit audit trail.
 
     ``door_check`` (deur D4) is the door preflight's permit record, forwarded
     onto the ``pr_merged`` receipt; ``None`` records ``not_evaluated``.
+    ``on_merged`` is called once, the moment GitHub confirmed the merge and before
+    any bookkeeping (receipt, register event): the door's guard ends there, so an
+    exception in that bookkeeping never revokes the permit (deur D4, round 3).
 
     ``contract_invalid_override`` (Golf B, B7): forwarded verbatim onto the
     ``pr_merged`` receipt's ``contract_invalid_override`` field when set —
@@ -2327,6 +2367,8 @@ def merge_pr(
         return result
 
     result["success"] = True
+    if on_merged is not None:
+        on_merged()  # deur D4: confirmed before any bookkeeping, so nothing below can revoke the permit
 
     # Derive internal PR-N label from title for dual-scheme receipt
     pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
@@ -2334,45 +2376,18 @@ def merge_pr(
         dispatch_id = _lookup_dispatch_id_by_pr_number(pr_number)
     result["dispatch_id"] = dispatch_id
 
-    # Emit receipt to t0_receipts.ndjson. OI-1518: the receipt is BINDING — a
-    # merge whose proof could not be written must NOT exit 0. Two failure
-    # shapes both land here: _emit_receipt raising (handled below), and
-    # _emit_receipt returning an `append_status` that is not a recognized
-    # success value (including a missing key -> "unknown" default). Both set
-    # receipt_ok=False so the CLI exits non-zero. The register event stays
-    # best-effort and is not touched.
-    try:
-        receipt = _emit_receipt(
-            pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
-            pr_title=result["pr_title"], branch=result["branch"],
-            pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
-            receipts_file=receipts_file,
-            contract_invalid_override=contract_invalid_override,
-            preflight_gates=preflight_gates,
-            review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
-            shadow_seat_rule=shadow_seat_rule, door_check=door_check,
-        )
-        append_status = (receipt or {}).get("append_status", "unknown")
-        result["receipt_status"] = append_status
-        result["receipt_ok"] = append_status in _RECEIPT_OK_STATUSES
-        if not result["receipt_ok"]:
-            print(
-                f"FATAL: merge happened for PR #{pr_number} but the receipt did NOT "
-                f"land (append_status={append_status!r}). The merge on GitHub is "
-                f"irreversible. Re-run `python3 scripts/pr_merge.py --pr {pr_number}` "
-                f"after fixing the receipts file so the audit-trail evidence is captured.",
-                file=sys.stderr,
-            )
-    except Exception as exc:
-        result["receipt_status"] = f"error: {exc}"
-        result["receipt_ok"] = False
-        print(
-            f"FATAL: merge happened for PR #{pr_number} but the receipt could NOT be "
-            f"written: {exc}. The merge on GitHub is irreversible. Re-run "
-            f"`python3 scripts/pr_merge.py --pr {pr_number}` after fixing the error "
-            f"so the audit-trail evidence is captured.",
-            file=sys.stderr,
-        )
+    # Emit receipt to t0_receipts.ndjson (binding, OI-1518: see _write_merged_receipt).
+    # The register event after it stays best-effort and is not touched.
+    _write_merged_receipt(
+        result, pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
+        pr_title=result["pr_title"], branch=result["branch"],
+        pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
+        receipts_file=receipts_file,
+        contract_invalid_override=contract_invalid_override,
+        preflight_gates=preflight_gates,
+        review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
+        shadow_seat_rule=shadow_seat_rule, door_check=door_check,
+    )
 
     # Emit event to dispatch_register.ndjson (best-effort)
     result["register_ok"] = _emit_register_event(
@@ -2754,7 +2769,7 @@ def _revoke_after_merge(
 
 def _merge_under_permit(
     args: argparse.Namespace, gate: Dict[str, Any], check: Dict[str, Any],
-    evaluated: list[Dict[str, Any]], head_sha: str, merge: Callable[[], Dict[str, Any]],
+    evaluated: list[Dict[str, Any]], head_sha: str, merge: Callable[[Callable[[], None]], Dict[str, Any]],
 ) -> Dict[str, Any]:
     """The merge under the permit: only a confirmed merge leaves it standing (ADR-061 §5).
 
@@ -2764,17 +2779,25 @@ def _merge_under_permit(
     (``not_required``, a dry run) the merge runs as it did before the door, and a
     ``not_required`` result stays the shape it had (state A0: nothing changes for a
     project without the entry); its receipt carries ``door_check`` all the same.
+
+    ``merge`` gets the confirmation callback and calls it the moment the merge is
+    confirmed, before its bookkeeping (``merge_pr``'s ``on_merged``). From then on the
+    guard is off: an exception in the receipt write, the register event or anything
+    after it propagates, and never revokes or writes ``pr_merge_refused``.
     """
     permitted = check["state"] == DOOR_STATE_PERMITTED
+    confirmed: List[bool] = []  # a True the moment the merge is confirmed, before any bookkeeping
     revocation_done: List[bool] = []  # filled by `_revoke_after_merge` once its revocation completed
     try:
         print(f"Door gate: {gate['message']}")
-        result = merge()
+        result = merge(lambda: confirmed.append(True))
+        if result.get("success") is True and not confirmed:
+            confirmed.append(True)  # the same evidence from a merge that reports it only on return
         if not permitted:
             if check["state"] != DOOR_STATE_NOT_REQUIRED:  # a dry run under a required door
                 result["door_check"] = check
             return result
-        if result.get("success") is True:
+        if confirmed:
             result["door_check"] = dict(check, merge_outcome=MERGE_MERGED)
             return result
         outcome = _merge_outcome_after_failure(args.pr)
@@ -2785,13 +2808,30 @@ def _merge_under_permit(
         return result
     except BaseException:
         # Everything from the publication to a confirmed merge or a completed revocation is in
-        # here: the outcome lookup and the refusal result included. One revocation at most.
-        if permitted and not revocation_done:
+        # here: the outcome lookup and the refusal result included. One revocation at most, and
+        # none once the merge is confirmed: its pr_merged must never meet a pr_merge_refused.
+        if permitted and confirmed:
+            _say_permit_stands_after_merge(args.pr)
+        elif permitted and not revocation_done:
             _revoke_during_exception(lambda: _revoke_after_merge(
                 args, check, evaluated, head_sha, MERGE_UNKNOWN, "uitzondering vóór een bevestigde merge",
                 landed=revocation_done,
             ))
         raise
+
+
+def _say_permit_stands_after_merge(pr: int) -> None:
+    """A confirmed merge whose bookkeeping raised: said on stderr; the exception stays the one that leaves.
+
+    A broken or closed stderr (``OSError``, ``ValueError``) is suppressed so it never
+    replaces the exception the guard is re-raising.
+    """
+    with contextlib.suppress(OSError, ValueError):
+        print(
+            f"FATAL: PR #{pr} is gemerged; de boekhouding daarna brak af. De toestemming blijft staan: "
+            f"niets ingetrokken, geen pr_merge_refused. Het pr_merged-receipt kan ontbreken.",
+            file=sys.stderr,
+        )
 
 
 def _run_door(args: argparse.Namespace) -> int:
@@ -2892,32 +2932,38 @@ def _run_door(args: argparse.Namespace) -> int:
         return refuse("door", door_gate, "door_gate", door_check)
 
     # All six ran and approved: the ledger pads nothing here.
-    result = _merge_under_permit(args, door_gate, door_check, evaluated, head_sha, lambda: merge_pr(
+    result = _merge_under_permit(args, door_gate, door_check, evaluated, head_sha, lambda on_merged: merge_pr(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
         dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
         contract_invalid_override=contract_invalid_override,
         preflight_gates=_preflight_ledger(evaluated), door_check=door_check,
         review_seats=review_gate.get("review_seats"),
-        shadow_seat_rule=shadow_seat_rule,
+        shadow_seat_rule=shadow_seat_rule, on_merged=on_merged,
     ))
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""
     return _report_merge(args, result, method)
 
 
 def _report_merge(args: argparse.Namespace, result: Dict[str, Any], method: str) -> int:
-    """Print the merge outcome and return the CLI's exit code."""
+    """Print the merge outcome and return the CLI's exit code.
+
+    ``success`` and ``receipt_ok`` count only as ``True`` itself, the rule the door's
+    guard reads ``success`` by: a missing or non-bool value is a merge not confirmed.
+    """
+    merged = result.get("success") is True
+    proven = merged and result.get("receipt_ok") is True
     if args.json:
         print(json.dumps(result, indent=2))
     elif args.dry_run:
         # dry-run: no merge, no receipt, exit 0 (unchanged behavior).
         print(f"OK: PR #{args.pr} (dry-run) via {method}")
-    elif result["success"] and result["receipt_ok"]:
+    elif proven:
         # merge gebeurd + receipt geland -> exit 0
         print(f"OK: PR #{args.pr} merged via {method}")
         if result.get("receipt_status"):
             print(f"    receipt: {result['receipt_status']}")
         print(f"    register: {'ok' if result['register_ok'] else 'warn-not-written'}")
-    elif result["success"] and not result["receipt_ok"]:
+    elif merged:
         # merge gebeurd + receipt NIET geland -> non-zero, tekst maakt
         # onmiskenbaar duidelijk dat de merge wél is doorgegaan en alleen
         # het bewijs ontbreekt (OI-1518). De FATAL-regel is al op stderr
@@ -2930,13 +2976,13 @@ def _report_merge(args: argparse.Namespace, result: Dict[str, Any], method: str)
         )
     else:
         # merge niet gebeurd -> non-zero, bestaande tekst
-        print(f"ERROR: {result['error']}", file=sys.stderr)
+        print(f"ERROR: {result.get('error') or 'merge niet bevestigd'}", file=sys.stderr)
 
     # CLI verdict (OI-1518): exit 0 only on dry-run, or on a merge whose
     # binding receipt actually landed. A merge without proof is non-zero.
     if args.dry_run:
         return EXIT_OK
-    if result["success"] and result["receipt_ok"]:
+    if proven:
         return EXIT_OK
     return EXIT_ERROR
 

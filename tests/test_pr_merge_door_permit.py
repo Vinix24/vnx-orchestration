@@ -376,3 +376,205 @@ def test_exception_right_after_publication_before_the_merge_guard_revokes_once(
         _run()
     assert [(c[1].rsplit("/", 1)[1], c[2]["conclusion"]) for c in door.of("PATCH")] == [("900", "failure")]
     assert door.runs[0]["conclusion"] == "failure"
+
+
+# --- round 3: the guard ends at the confirmed merge -------------------------------------
+#
+# Every exit after a published permit, one test each. A confirmed merge is never followed
+# by a revocation or a pr_merge_refused; every exit before it revokes once.
+
+
+def _patch_runs(door: FakeGitHub) -> List[tuple]:
+    return [(c[1].rsplit("/", 1)[1], c[2]["conclusion"]) for c in door.of("PATCH")]
+
+
+def _raiser(exc_type: type, message: str) -> Any:
+    def raise_it(*args: Any, **kwargs: Any) -> Any:
+        raise exc_type(message)
+    return raise_it
+
+
+def _assert_permit_stands_after_merge(door: FakeGitHub) -> None:
+    assert door.of("PATCH") == [], "na een bevestigde merge trekt de deur niets in"
+    assert door.runs[0]["conclusion"] == "success"
+    assert door.receipts("pr_merge_refused") == [], "een bevestigde merge krijgt geen pr_merge_refused"
+    assert door.items == []
+
+
+def test_codex_reproduction_interrupt_in_the_register_event_after_a_confirmed_merge_never_revokes(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(pr_merge, "_emit_register_event", _raiser(KeyboardInterrupt, "register onderbroken"))
+    with pytest.raises(KeyboardInterrupt):
+        _run()
+    _assert_permit_stands_after_merge(door)
+    assert _merged(door)["door_check"]["merge_outcome"] == "merged"
+    assert "De toestemming blijft staan" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("step, exc_type, receipt_landed", [
+    ("_extract_pr_id", RuntimeError, False),
+    ("_extract_pr_id", KeyboardInterrupt, False),
+    ("_emit_receipt", KeyboardInterrupt, False),
+    ("_emit_register_event", RuntimeError, True),
+])
+def test_bookkeeping_exception_that_escapes_after_a_confirmed_merge_propagates_and_never_revokes(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, step: str, exc_type: type, receipt_landed: bool,
+) -> None:
+    monkeypatch.setattr(pr_merge, step, _raiser(exc_type, f"{step} brak af"))
+    with pytest.raises(exc_type):
+        _run()
+    _assert_permit_stands_after_merge(door)
+    assert len(door.receipts("pr_merged")) == (1 if receipt_landed else 0)
+
+
+def test_receipt_write_runtime_error_after_a_confirmed_merge_is_reported_and_never_revokes(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(pr_merge, "_emit_receipt", _raiser(RuntimeError, "t0_receipts.ndjson niet schrijfbaar"))
+    assert _run() == pr_merge.EXIT_ERROR
+    _assert_permit_stands_after_merge(door)
+    assert door.receipts("pr_merged") == []
+    err = capsys.readouterr().err
+    assert "receipt could NOT be written" in err and "WAS MERGED" in err
+
+
+def test_report_that_raises_after_a_confirmed_merge_never_revokes(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_merge, "_report_merge", _raiser(KeyboardInterrupt, "uitvoer onderbroken"))
+    with pytest.raises(KeyboardInterrupt):
+        _run()
+    _assert_permit_stands_after_merge(door)
+    assert len(door.receipts("pr_merged")) == 1
+
+
+def test_report_that_raises_after_a_revoked_merge_does_not_revoke_again(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _failed_merge(door)
+    monkeypatch.setattr(pr_merge, "_report_merge", _raiser(KeyboardInterrupt, "uitvoer onderbroken"))
+    with pytest.raises(KeyboardInterrupt):
+        _run()
+    assert _patch_runs(door) == [("900", "failure")]
+    assert _refusal(door)["door_check"]["merge_outcome"] == "not_merged"
+    assert door.receipts("pr_merged") == []
+
+
+def test_merge_that_is_interrupted_before_confirmation_revokes_once_and_propagates(door: FakeGitHub) -> None:
+    door.merge = _raiser(KeyboardInterrupt, "onderbroken tijdens gh pr merge")
+    with pytest.raises(KeyboardInterrupt):
+        _run()
+    assert _patch_runs(door) == [("900", "failure")]
+    check = _refusal(door)["door_check"]
+    assert (check["revoked"], check["merge_outcome"]) == (True, "unknown")
+    assert door.receipts("pr_merged") == []
+
+
+def test_door_gate_print_that_raises_before_the_merge_revokes_once(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    merges: List[int] = []
+    door.merge = lambda: merges.append(1) or (True, "")
+
+    def print_fails_on_the_door_line(*args: Any, **kwargs: Any) -> None:
+        if args and str(args[0]).startswith("Door gate:"):
+            raise BrokenPipeError("stdout dicht")
+
+    monkeypatch.setattr(pr_merge, "print", print_fails_on_the_door_line, raising=False)
+    with pytest.raises(BrokenPipeError):
+        _run()
+    assert merges == [] and _patch_runs(door) == [("900", "failure")]
+    assert _refusal(door)["door_check"]["merge_outcome"] == "unknown"
+
+
+def test_revocation_that_raises_after_a_failed_merge_is_completed_once_by_the_guard(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real, calls = pr_merge._revoke_door_runs, []
+
+    def first_attempt_raises(*args: Any) -> str:
+        calls.append(args[3])
+        if len(calls) == 1:
+            raise RuntimeError("intrekking brak af")
+        return real(*args)
+
+    _failed_merge(door)
+    monkeypatch.setattr(pr_merge, "_revoke_door_runs", first_attempt_raises)
+    with pytest.raises(RuntimeError, match="intrekking brak af"):
+        _run()
+    assert len(calls) == 2 and _patch_runs(door) == [("900", "failure")]
+    check = _refusal(door)["door_check"]
+    assert (check["revoked"], check["merge_outcome"]) == (True, "unknown")
+
+
+def test_revocation_that_raises_twice_propagates_the_first_and_writes_no_refusal(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    _failed_merge(door)
+    monkeypatch.setattr(pr_merge, "_revoke_door_runs", _raiser(RuntimeError, "intrekking brak af"))
+    with pytest.raises(RuntimeError, match="intrekking brak af"):
+        _run()
+    assert door.of("PATCH") == [] and door.receipts("pr_merge_refused") == []
+    assert "intrekking tijdens een uitzondering faalde zelf" in capsys.readouterr().err
+
+
+def test_confirmed_merge_with_clean_bookkeeping_leaves_one_pr_merged_and_no_refusal(door: FakeGitHub) -> None:
+    assert _run() == pr_merge.EXIT_OK
+    _assert_permit_stands_after_merge(door)
+    assert _merged(door)["door_check"]["merge_outcome"] == "merged"
+
+
+# --- the confirmation itself: merge_pr's on_merged, and the return value as the same evidence ---
+
+
+def test_merge_pr_confirms_once_before_any_bookkeeping(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    order: List[str] = []
+    monkeypatch.setattr(pr_merge, "_emit_receipt", lambda **k: order.append("receipt") or {"append_status": "appended"})
+    monkeypatch.setattr(pr_merge, "_emit_register_event", lambda **k: order.append("register") or True)
+    result = pr_merge.merge_pr(PR, dispatch_id="dlv-door-d4", pr_data=dict(PR_DATA), head_sha=SHA,
+                               on_merged=lambda: order.append("confirmed"))
+    assert result["success"] is True and order == ["confirmed", "receipt", "register"]
+
+
+@pytest.mark.parametrize("dry_run, merge", [(False, (False, "kop verschoven")), (True, (True, ""))])
+def test_merge_pr_never_confirms_a_merge_that_did_not_happen(
+    door: FakeGitHub, dry_run: bool, merge: tuple,
+) -> None:
+    confirmed: List[int] = []
+    door.merge = lambda: merge
+    pr_merge.merge_pr(PR, dispatch_id="dlv-door-d4", pr_data=dict(PR_DATA), head_sha=SHA, dry_run=dry_run,
+                      on_merged=lambda: confirmed.append(1))
+    assert confirmed == []
+
+
+_MISSING = object()
+
+
+def _fake_merge_pr(success: Any) -> Any:
+    def merge_pr(**kwargs: Any) -> Dict[str, Any]:
+        result = {"pr_number": PR, "dispatch_id": "dlv-door-d4", "merge_method": "squash", "pr_title": "",
+                  "branch": "", "receipt_status": "appended", "receipt_ok": True, "register_ok": True,
+                  "error": "", "dry_run": False, "overlaps": []}
+        if success is not _MISSING:
+            result["success"] = success
+        return result
+    return merge_pr
+
+
+def test_a_merge_that_reports_success_only_on_return_is_confirmed_and_never_revoked(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_merge, "merge_pr", _fake_merge_pr(True))
+    assert _run() == pr_merge.EXIT_OK
+    _assert_permit_stands_after_merge(door)
+
+
+@pytest.mark.parametrize("success", [_MISSING, None, "true", 1, False], ids=["missing", "none", "str", "int", "false"])
+def test_a_merge_without_a_true_success_and_without_the_callback_revokes_once(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, success: Any,
+) -> None:
+    monkeypatch.setattr(pr_merge, "merge_pr", _fake_merge_pr(success))
+    assert _run() == pr_merge.EXIT_ERROR, "the CLI reads success by the same rule as the guard"
+    assert _patch_runs(door) == [("900", "failure")]
+    assert _refusal(door)["door_check"]["merge_outcome"] == "not_merged"
