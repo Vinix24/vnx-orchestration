@@ -1926,6 +1926,29 @@ _OUTCOME_RECEIPT_EVENT = "review_gate_result"
 _OUTCOME_RECEIPT_ENVELOPE: Dict[str, str] = {"receipt_kind": "review_gate", "terminal": "T0", "source": "vnx_governance"}
 
 
+_PROFILE_RECEIPT_KEYS = ("profile", "profile_source", "profile_error")
+
+
+def _profile_receipt_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The gate profile of the request, stamped on the result receipt (gate-profiel P6, B8/B15).
+
+    Read from the payload top level, else from its ``review_seats`` record (the request's
+    seat record carries them). Only a non-empty text is stamped: a payload from before P6
+    writes no key, so the receipt reads as unknown, never as ``standard``. Additive, outside
+    the envelope and the hash path.
+    """
+    seat_record = payload.get("review_seats")
+    sources = (payload, seat_record if isinstance(seat_record, dict) else {})
+    stamped: Dict[str, Any] = {}
+    for key in _PROFILE_RECEIPT_KEYS:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                stamped[key] = value
+                break
+    return stamped
+
+
 def _outcome_receipt_fields(
     payload: Dict[str, Any], *, gate: str, pr_ref: str, extra_fields: Optional[Mapping[str, Any]],
     book_undecided: bool = False,
@@ -1964,6 +1987,7 @@ def _outcome_receipt_fields(
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
+    fields.update(_profile_receipt_fields(payload))
     # R1: the head the verdict is about, and an applied --override-b3 with its
     # reason, so the audit copy carries both. The head is stamped under both
     # names: ``commit_sha`` is the field ADR-045 point 4 names and the one the

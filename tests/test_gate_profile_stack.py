@@ -40,7 +40,8 @@ class TestNotSet:
         seats = resolve_review_seats()
         assert seats.seats == TODAY
         assert (seats.profile, seats.profile_source, seats.profile_error) == ("standard", "default", None)
-        assert "profile" not in seats.to_record()
+        assert {k: seats.to_record()[k] for k in ("profile", "profile_source", "profile_error")} == {
+            "profile": "standard", "profile_source": "default", "profile_error": None}
 
     @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
     def test_blank_is_not_set(self, monkeypatch, raw):
