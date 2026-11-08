@@ -175,3 +175,78 @@ class TestTheGovernsHelper:
 
         assert gate_profile.PROFILE_TABLE["light"]["review_stack"] == "codex_gate"
         assert config_registry.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default == ",".join(STANDARD_SEATS)
+
+
+# ---------------------------------------------------------------------------
+# Round 3: a recorded one-seat stack below the current configuration
+# ---------------------------------------------------------------------------
+
+SECURITY = ".github/workflows/ci.yml"
+
+
+def _record_request(tmp_path, name, requested_at, record):
+    import json
+
+    path = tmp_path / f"pr-1-{name}.json"
+    path.write_text(json.dumps({
+        "pr_id": "1", "commit_sha": HEAD, "requested_at": requested_at,
+        "review_seats": record,
+    }))
+
+
+def _record_under(monkeypatch, tmp_path, name, requested_at, profile=None, override=None):
+    """Record a request the way the request writer does: through resolve_review_seats().to_record()."""
+    for key, value in (("VNX_GOVERNANCE_PROFILE", profile), ("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", override)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    _record_request(tmp_path, name, requested_at, resolve_review_seats().to_record())
+
+
+class TestARecordedStackBelowTheCurrentConfiguration:
+    @pytest.mark.parametrize("profile", ["standard", "heavy"])
+    def test_a_recorded_light_stack_is_refused_after_switching_up(self, monkeypatch, tmp_path, profile):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", profile="light")
+        monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", profile)
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.seats == () and required.source == rse.SOURCE_RECORDED
+        assert "recorded stack (codex_gate)" in required.error
+        assert "A new review request on this head records the current stack" in required.error
+        assert "set the profile to standard" not in required.error
+
+    def test_a_newer_request_under_standard_clears_it_and_requires_both_seats(self, monkeypatch, tmp_path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", profile="light")
+        _record_under(monkeypatch, tmp_path, "b", "2026-11-08T11:00:00Z", profile="standard")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.error == "" and required.seats == STANDARD_SEATS
+
+    def test_a_recorded_light_stack_under_light_keeps_the_light_text(self, monkeypatch, tmp_path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", profile="light")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.seats == () and "gate profile light" in required.error
+        assert "set the profile to standard" not in required.error
+
+    def test_a_recorded_operator_one_seat_stack_with_the_override_still_set_is_not_refused(self, monkeypatch, tmp_path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", override="codex_gate")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.error == "" and required.seats == ("codex_gate",)
+
+    def test_a_recorded_two_seat_stack_under_a_later_light_is_not_refused(self, monkeypatch, tmp_path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", profile="standard")
+        monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.error == "" and required.seats == STANDARD_SEATS
+
+    def test_the_fresh_path_is_unchanged(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "standard")
+        assert _required(tmp_path, _risk(SECURITY)).seats == STANDARD_SEATS
+        monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
+        assert "gate profile light" in _required(tmp_path, _risk(SECURITY)).error
+
+    @pytest.mark.parametrize("path", ["docs/readme.md", "scripts/lib/review_seats.py"])
+    def test_a_reversible_or_gate_merge_only_head_is_not_refused(self, monkeypatch, tmp_path, path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", profile="light")
+        monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "standard")
+        required = _required(tmp_path, _risk(path))
+        assert required.error == "" and required.seats == ("codex_gate",)

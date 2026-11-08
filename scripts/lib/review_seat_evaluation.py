@@ -713,7 +713,8 @@ def required_seats(
 def _narrow_by_risk(resolved: RequiredSeats, risk: Any) -> RequiredSeats:
     """``resolved`` narrowed by the class of the head, or refused by the ``light`` floor."""
     record = risk.to_record() if hasattr(risk, "to_record") else None
-    refusal = light_floor_refusal(resolved.stack, risk)
+    recorded = resolved.source == SOURCE_RECORDED
+    refusal = light_floor_refusal(resolved.stack, risk, recorded=recorded) or _recorded_below_current(resolved, risk)
     if refusal:
         return replace(resolved, seats=(), risk=record, rule=RISK_SEAT_RULE, error=refusal)
     return replace(resolved, seats=seats_for_risk(resolved.stack, risk), risk=record, rule=RISK_SEAT_RULE)
@@ -740,7 +741,7 @@ def _signal_risk(risk: Any) -> bool:
     return not gate_merge_only
 
 
-def light_floor_refusal(stack: Sequence[str], risk: Any) -> str:
+def light_floor_refusal(stack: Sequence[str], risk: Any, *, recorded: bool = False) -> str:
     """The refusal text when profile ``light`` governs a one-seat stack on a signal path, else ``""``.
 
     The safety floor under every profile (ADR-008 amendment, gate-profiel P0/P5): a security,
@@ -748,6 +749,8 @@ def light_floor_refusal(stack: Sequence[str], risk: Any) -> str:
     such a head is refused and says so; it is never quietly raised to two seats. The signal
     set is the risk class's own (``review_risk_class``, from ``smart_router``), not a second
     list. An explicit or operator-set stack with two seats does not refuse: the stack wins.
+    On a ``recorded`` stack the text drops "set the profile to standard": that switch only
+    moves the refusal to :func:`_recorded_below_current`.
     """
     if len(_seat_names(list(stack))) >= 2 or not _signal_risk(risk):
         return ""
@@ -761,10 +764,29 @@ def light_floor_refusal(stack: Sequence[str], risk: Any) -> str:
     if light is None:
         return ""
     why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
+    fix = "Name a two-seat stack in the request." if recorded else "Name a two-seat stack in the request, or set the profile to standard."
     return (
         f"gate profile light (source: {light.source}) refuses this head: {why}. A security, schema, "
-        "irreversible, outside-repo or store-resolution head keeps two review seats under every "
-        "profile (ADR-008 floor). Name a two-seat stack in the request, or set the profile to standard."
+        f"irreversible, outside-repo or store-resolution head keeps two review seats under every profile (ADR-008 floor). {fix}"
+    )
+
+
+def _recorded_below_current(resolved: RequiredSeats, risk: Any) -> str:
+    """The refusal text when a recorded one-seat stack is below a two-seat current configuration on a signal head, else ``""``.
+
+    Fail-closed on the cases it can judge: only a recorded stack with fewer than two seats,
+    a fresh resolution of two or more and a signal head refuse. A fresh resolution that
+    itself refused (``None``) is left to :func:`light_floor_refusal`, as in round 1.
+    """
+    fresh = resolved.fresh
+    if resolved.source != SOURCE_RECORDED or fresh is None or len(fresh) < 2:
+        return ""
+    if len(_seat_names(list(resolved.stack))) >= 2 or not _signal_risk(risk):
+        return ""
+    why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
+    return (
+        f"the recorded stack ({', '.join(resolved.stack)}) is below the current configuration "
+        f"({', '.join(fresh)}) on this head: {why}. A new review request on this head records the current stack."
     )
 
 
