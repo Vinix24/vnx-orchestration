@@ -31,74 +31,18 @@ _g_pr_head_branch() {
 }
 
 _g_required_gates() {
-  # Read governance_enforcement.yaml and return comma-separated gate names
-  # that are level >= 2 (soft_mandatory or hard_mandatory).
-  local config="${VNX_HOME}/.vnx/governance_enforcement.yaml"
-  # Also try canonical .vnx/ relative to project root
-  [ -f "$config" ] || config="${PROJECT_ROOT}/.vnx/governance_enforcement.yaml"
-  [ -f "$config" ] || config="${VNX_HOME}/governance_enforcement.yaml"
-
-  # The default review stack: the two standing subscription seats
-  # (config_registry VNX_DEFAULT_REVIEW_STACK; test_gate_required_gates pins the
-  # two equal). Used when no config is found or it names no required gate.
-  local default_stack='codex_gate,kimi_gate'
-
-  if [ ! -f "$config" ]; then
-    printf '%s' "$default_stack"
-    return
+  # The stack `vnx gate` verifies, from the one function the merge door also reads
+  # (gate_profile.required_stack: the profile's review stack plus the
+  # governance_enforcement.yaml dials). Empty output or a failing CLI is a hard
+  # stop with the CLI's reason; there is no literal stack to fall back to.
+  local cli="${VNX_HOME}/scripts/gate_profile_cli.py"
+  local stack rc=0
+  stack=$(python3 "$cli" --value required_stack --csv) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$stack" ]; then
+    err "[gate] cannot read the required gate stack from gate_profile (exit $rc); refusing to guess one"
+    return 1
   fi
-
-  python3 -c "
-import sys
-config_path = '$config'
-gates = []
-try:
-    # Parse YAML manually (no PyYAML dependency required)
-    in_checks = False
-    current_check = None
-    with open(config_path) as f:
-        for line in f:
-            stripped = line.rstrip()
-            if stripped == 'checks:':
-                in_checks = True
-                continue
-            if in_checks:
-                # Top-level key under checks (2-space indent)
-                import re
-                m = re.match(r'^  (\w+):', stripped)
-                if m:
-                    current_check = m.group(1)
-                    continue
-                # Level line (4-space indent)
-                m = re.match(r'^    level:\s*(\d+)', stripped)
-                if m and current_check:
-                    level = int(m.group(1))
-                    if level >= 2:
-                        gates.append(current_check)
-                # Stop at next top-level section
-                if stripped and not stripped.startswith(' ') and stripped != 'checks:':
-                    in_checks = False
-except Exception as e:
-    print(f'warn: {e}', file=sys.stderr)
-
-# Map enforcement check names to gate names used by review_gate_manager.
-# The manager builds its stack with 'ci_gate' (scripts/review_gate_manager.py);
-# 'ci' is not a name it knows, so a ci_green_required requirement would
-# resolve to an orphan gate that the manager books as blocked and never
-# enforces (OI-1265).
-gate_map = {
-    'codex_gate_required': 'codex_gate',
-    'kimi_gate_required': 'kimi_gate',
-    'ci_green_required': 'ci_gate',
-}
-result = []
-for g in gates:
-    mapped = gate_map.get(g)
-    if mapped:
-        result.append(mapped)
-
-print(','.join(result) if result else '$default_stack')
-"
+  printf '%s' "$stack"
 }
 
 _g_normalize_gate() {
@@ -496,7 +440,7 @@ HELP
   else
     # Run all required gates
     local required_gates
-    required_gates=$(_g_required_gates)
+    required_gates=$(_g_required_gates) || return 1
 
     log "[gate] Required gates: $required_gates"
     log "[gate] Running all required gates for PR $pr_number (branch: $branch)"

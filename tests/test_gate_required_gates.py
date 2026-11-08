@@ -35,9 +35,29 @@ def env(tmp_path):
     _g_required_gates to resolve the enforcement config."""
     fake_home = tmp_path / "vnx-home"
     (fake_home / ".vnx").mkdir(parents=True)
+    # gate.sh reads the stack through $VNX_HOME/scripts/gate_profile_cli.py.
+    (fake_home / "scripts").symlink_to(REPO_ROOT / "scripts")
     project = tmp_path / "project"
     project.mkdir(parents=True)
-    return {"fake_home": fake_home, "project": project}
+    state = tmp_path / "state"
+    state.mkdir()
+    return {"fake_home": fake_home, "project": project, "state": state}
+
+
+_AMBIENT_KEYS = (
+    "VNX_GOVERNANCE_PROFILE", "VNX_DEFAULT_REVIEW_STACK", "VNX_CI_GATE_REQUIRED", "VNX_PROJECT_ID",
+    "VNX_OVERRIDE_GOVERNANCE_PROFILE", "VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "VNX_OVERRIDE_CI_GATE_REQUIRED",
+)
+
+
+def _clean_environ(env, extra=None) -> dict:
+    """The process environment without any ambient profile or stack setting, state dir in tmp."""
+    import os
+
+    clean = {k: v for k, v in os.environ.items() if k not in _AMBIENT_KEYS}
+    clean.update({"VNX_STATE_DIR": str(env["state"]), "VNX_DATA_DIR": str(env["state"].parent)})
+    clean.update(extra or {})
+    return clean
 
 
 def _write_enforcement_config(env, body: str) -> Path:
@@ -46,7 +66,7 @@ def _write_enforcement_config(env, body: str) -> Path:
     return cfg
 
 
-def _run_required_gates(env) -> subprocess.CompletedProcess:
+def _run_required_gates(env, extra_env=None) -> subprocess.CompletedProcess:
     """Source gate.sh and run `_g_required_gates`, printing the comma-separated
     gate stack to stdout."""
     driver = env["fake_home"].parent / "run_required_gates.sh"
@@ -65,7 +85,7 @@ _g_required_gates
     driver.chmod(0o755)
     return subprocess.run(
         ["bash", str(driver)],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=30, env=_clean_environ(env, extra_env),
     )
 
 
@@ -167,3 +187,94 @@ def test_kimi_gate_required_at_level_0_requests_codex_only(env):
     assert result.returncode == 0, result.stderr
     gates = [g for g in result.stdout.strip().split(",") if g]
     assert gates == ["codex_gate"]
+
+
+# The dials measured in vnx-dev's .vnx/governance_enforcement.yaml (codex 2, kimi 2, ci 3),
+# copied here so the lock does not follow the live file.
+CONFIG_VNX_DEV_DIALS = """\
+version: 1
+mode: standard
+checks:
+  gate_before_next_feature:
+    level: 3
+  codex_gate_required:
+    level: 2
+    scope: [scripts/, dashboard/, .github/]
+  kimi_gate_required:
+    level: 2
+  ci_green_required:
+    level: 3
+  max_pr_lines:
+    level: 1
+    threshold: 300
+"""
+
+
+def _gates(result) -> list[str]:
+    assert result.returncode == 0, result.stderr
+    return [g for g in result.stdout.strip().split(",") if g]
+
+
+def test_heavy_profile_without_enforcement_config_requires_three_seats(env):
+    result = _run_required_gates(env, {"VNX_GOVERNANCE_PROFILE": "heavy"})
+    assert _gates(result) == ["codex_gate", "kimi_gate", "claude_gate"]
+
+
+def test_c6_lock_vnx_dev_dials_without_a_profile_keep_todays_stack(env):
+    _write_enforcement_config(env, CONFIG_VNX_DEV_DIALS)
+    assert _gates(_run_required_gates(env)) == ["codex_gate", "kimi_gate", "ci_gate"]
+
+
+def test_level_1_dial_makes_a_seat_advisory(env):
+    _write_enforcement_config(
+        env, "version: 1\nchecks:\n  codex_gate_required:\n    level: 2\n  kimi_gate_required:\n    level: 1\n",
+    )
+    assert _gates(_run_required_gates(env)) == ["codex_gate"]
+
+
+def test_level_0_dial_removes_a_seat_of_the_heavy_stack(env):
+    _write_enforcement_config(
+        env, "version: 1\nchecks:\n  kimi_gate_required:\n    level: 0  # off\n",
+    )
+    result = _run_required_gates(env, {"VNX_GOVERNANCE_PROFILE": "heavy"})
+    assert _gates(result) == ["codex_gate", "claude_gate"]
+
+
+def test_ci_gate_joins_on_ci_green_required_at_level_2(env):
+    _write_enforcement_config(env, "version: 1\nchecks:\n  ci_green_required:\n    level: 2\n")
+    assert _gates(_run_required_gates(env)) == ["codex_gate", "kimi_gate", "ci_gate"]
+
+
+def test_ci_gate_stays_out_at_level_1_and_joins_on_the_env_flag(env):
+    _write_enforcement_config(env, "version: 1\nchecks:\n  ci_green_required:\n    level: 1\n")
+    assert _gates(_run_required_gates(env)) == ["codex_gate", "kimi_gate"]
+    assert _gates(_run_required_gates(env, {"VNX_CI_GATE_REQUIRED": "true"}))[-1] == "ci_gate"
+
+
+def test_a_failing_cli_stops_gate_sh_with_the_reason_and_prints_no_stack(env):
+    result = _run_required_gates(env, {"VNX_GOVERNANCE_PROFILE": "zwaar"})
+    assert result.returncode != 0
+    assert result.stdout.strip() == ""
+    assert "'zwaar'" in result.stderr and "refused" in result.stderr
+    assert "codex_gate" not in result.stdout
+
+
+def test_a_malformed_dial_level_stops_gate_sh_instead_of_guessing(env):
+    _write_enforcement_config(env, "version: 1\nchecks:\n  codex_gate_required:\n    level: hoog\n")
+    result = _run_required_gates(env)
+    assert result.returncode != 0
+    assert result.stdout.strip() == ""
+    assert "level='hoog'" in result.stderr
+
+
+def test_a_dial_without_a_level_stops_gate_sh(env):
+    _write_enforcement_config(env, "version: 1\nchecks:\n  kimi_gate_required:\n    description: x\n")
+    result = _run_required_gates(env)
+    assert result.returncode != 0 and result.stdout.strip() == ""
+    assert "no level" in result.stderr
+
+
+def test_gate_sh_holds_no_literal_stack_and_no_inline_yaml_parser():
+    text = GATE_SH.read_text(encoding="utf-8")
+    assert "default_stack" not in text
+    assert "gate_map" not in text

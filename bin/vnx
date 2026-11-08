@@ -370,6 +370,8 @@ Gate commands (pre-merge verification):
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
                         current head, and what closing each gap costs
                         (exit 0 ready, 1 not ready, 2 unmeasurable)
+  gate-profile show [--json]   The gate profile in force plus the stack the door asks and the stack vnx gate verifies
+  gate-profile --value <field> [--csv]   One field (review_stack, round_cap, takeover_chain, plan_gate_seats, required_stack)
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
@@ -2702,6 +2704,9 @@ main() {
       ;;
     providers)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/providers_cli.py" "$@"
+      ;;
+    gate-profile)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/gate_profile_cli.py" "$@"
       ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
