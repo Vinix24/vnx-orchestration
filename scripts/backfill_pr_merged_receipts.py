@@ -11,7 +11,17 @@ Usage:
     python3 scripts/backfill_pr_merged_receipts.py --since 2026-01-01  # only newer PRs
     python3 scripts/backfill_pr_merged_receipts.py --json   # structured output
 
+    python3 scripts/backfill_pr_merged_receipts.py --report-only  # audit, never heals
+
 Idempotent: already-receipted PR numbers are skipped.
+
+--report-only (door audit, deur D7a): the same comparison, but it reports instead
+of healing. The window is 7 days (--since overrides) and is proven by paginating
+`pulls?state=closed&sort=updated&direction=desc` until the oldest `updated_at` on
+a page is older than `since`. Both ledgers are read (state/t0_receipts.ndjson and
+events/pr_merged.ndjson). Every merged PR lands in one bucket: `door`, `backfilled`
+or `missing`. Exit 0 = complete read, no gaps ("0 van <n>"); exit 1 = at least one
+missing; exit 2 = unmeasurable (failed read, page limit, unreadable ledger).
 
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
@@ -27,7 +37,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +51,13 @@ from governance_receipts import emit_governance_receipt
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+EXIT_UNKNOWN = 2
+
+AUDIT_WINDOW_DAYS = 7
+AUDIT_PAGE_SIZE = 100
+AUDIT_PAGE_LIMIT = 50
+AUDIT_BEACON = "door_audit"
+DOOR_SOURCE = "pr_merge"
 
 _PR_LABEL_RE = re.compile(r"\bPR-([A-Z0-9]+(?:-[A-Z0-9]+)*)\b", re.IGNORECASE)
 
@@ -332,6 +349,265 @@ def backfill(
     return summary
 
 
+# ---------------------------------------------------------------------------
+# --report-only: fail-closed door audit (deur D7a)
+# ---------------------------------------------------------------------------
+
+class AuditUnmeasurable(Exception):
+    """The audit could not prove its window or read its evidence: outcome `unknown`, exit 2."""
+
+
+def _parse_ts(value: Any, what: str) -> datetime.datetime:
+    """Parse an ISO date/timestamp as UTC. Anything else is unmeasurable, never a default."""
+    if not isinstance(value, str) or not value.strip():
+        raise AuditUnmeasurable(f"{what} missing or not a string: {value!r}")
+    text = value.strip()
+    try:
+        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        raise AuditUnmeasurable(f"{what} is not a timestamp: {value!r}") from None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def _audit_since(since: Optional[str]) -> datetime.datetime:
+    if since:
+        return _parse_ts(since, "--since")
+    return datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=AUDIT_WINDOW_DAYS)
+
+
+def _gh_api_pulls_page(page: int) -> Any:
+    """One page of closed PRs, most recently updated first. Raises AuditUnmeasurable on any failure."""
+    endpoint = (
+        "repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc"
+        f"&per_page={AUDIT_PAGE_SIZE}&page={page}"
+    )
+    try:
+        result = subprocess.run(
+            ["gh", "api", endpoint], capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AuditUnmeasurable(f"gh api page {page} could not run: {exc}") from None
+    if result.returncode != 0:
+        raise AuditUnmeasurable(f"gh api page {page} failed (rc={result.returncode}): {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        raise AuditUnmeasurable(f"gh api page {page} returned unparseable JSON") from None
+
+
+def _page_entry(raw: Any, page: int) -> Dict[str, Any]:
+    """Validate one PR row of a page; a malformed row makes the window unprovable."""
+    if not isinstance(raw, dict) or isinstance(raw.get("number"), bool) or not isinstance(raw.get("number"), int):
+        raise AuditUnmeasurable(f"gh api page {page} has a row without an integer number")
+    updated = _parse_ts(raw.get("updated_at"), f"PR #{raw['number']} updated_at")
+    merged_raw = raw.get("merged_at")
+    merged = None if merged_raw is None else _parse_ts(merged_raw, f"PR #{raw['number']} merged_at")
+    head = raw.get("head")
+    branch = head.get("ref", "") if isinstance(head, dict) else ""
+    return {
+        "number": raw["number"],
+        "title": str(raw.get("title") or ""),
+        "branch": str(branch or ""),
+        "merged_at": merged,
+        "updated_at": updated,
+    }
+
+
+def list_merged_in_window(since: datetime.datetime) -> List[Dict[str, Any]]:
+    """Every PR merged at/after `since`, with the window proven by the updated_at stop condition.
+
+    `updated_at >= merged_at` for a merged PR, so once a page holds a PR updated
+    before `since`, no later page can hold a merge inside the window. Reaching the
+    page limit before that point, or any failed/malformed read, raises AuditUnmeasurable.
+    """
+    merged: List[Dict[str, Any]] = []
+    for page in range(1, AUDIT_PAGE_LIMIT + 1):
+        raw_page = _gh_api_pulls_page(page)
+        if not isinstance(raw_page, list):
+            raise AuditUnmeasurable(f"gh api page {page} is not a JSON list")
+        rows = [_page_entry(r, page) for r in raw_page]
+        merged.extend(r for r in rows if r["merged_at"] is not None and r["merged_at"] >= since)
+        if not rows or len(rows) < AUDIT_PAGE_SIZE:
+            return merged
+        if min(r["updated_at"] for r in rows) < since:
+            return merged
+    raise AuditUnmeasurable(
+        f"page limit {AUDIT_PAGE_LIMIT} reached before the stop condition (updated_at < since): window not proven"
+    )
+
+
+def _audit_ledger_paths() -> List[Path]:
+    """Both ledgers, resolved from the store the script already uses (no mkdir: read-only)."""
+    receipts = _resolve_receipts_path()
+    return [receipts, receipts.parent.parent / "events" / "pr_merged.ndjson"]
+
+
+def _is_door_evidence(rec: Dict[str, Any]) -> bool:
+    """Door evidence needs source exactly `pr_merge` and no backfilled marker at all (not even a falsy non-False)."""
+    return rec.get("source") == DOOR_SOURCE and ("backfilled" not in rec or rec["backfilled"] is False)
+
+
+def _classify_ledger_line(rec: Any, door: Set[int], backfilled: Set[int]) -> None:
+    if not isinstance(rec, dict):
+        return
+    if (rec.get("event_type") or rec.get("event") or "") != "pr_merged":
+        return
+    raw = rec.get("pr_number")
+    if isinstance(raw, bool):
+        return
+    try:
+        number = int(raw)
+    except (TypeError, ValueError):
+        return
+    (door if _is_door_evidence(rec) else backfilled).add(number)
+
+
+def read_provenance(paths: List[Path]) -> Dict[str, Any]:
+    """Read every ledger file; a missing t0_receipts file or an unreadable file is unmeasurable.
+
+    Malformed lines are skipped and counted: a line that cannot be parsed can
+    only ever fail to vouch for a PR, so skipping stays on the blocking side.
+    """
+    door: Set[int] = set()
+    backfilled: Set[int] = set()
+    malformed = 0
+    for index, path in enumerate(paths):
+        if not path.exists():
+            if index == 0:
+                raise AuditUnmeasurable(f"ledger not found: {path}")
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise AuditUnmeasurable(f"ledger unreadable: {path}: {exc}") from None
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                malformed += 1
+                continue
+            _classify_ledger_line(rec, door, backfilled)
+    return {"door": door, "backfilled": backfilled, "malformed_lines": malformed,
+            "ledgers": [str(p) for p in paths]}
+
+
+def _bucket_prs(merged: List[Dict[str, Any]], prov: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    buckets: Dict[str, List[Dict[str, Any]]] = {"door": [], "backfilled": [], "missing": []}
+    for pr in sorted(merged, key=lambda p: p["number"]):
+        row = {"pr_number": pr["number"], "pr_title": pr["title"],
+               "merged_at": pr["merged_at"].isoformat().replace("+00:00", "Z")}
+        if pr["number"] in prov["door"]:
+            buckets["door"].append(row)
+        elif pr["number"] in prov["backfilled"]:
+            buckets["backfilled"].append(row)
+        else:
+            buckets["missing"].append(row)
+    return buckets
+
+
+def run_report_only(since: Optional[str] = None) -> Dict[str, Any]:
+    """Compare merged PRs with both ledgers. Never writes, never reaches _emit_backfill_receipt."""
+    report: Dict[str, Any] = {"mode": "report-only", "outcome": "unknown", "exit_code": EXIT_UNKNOWN,
+                              "reason": "", "since": "", "total": 0,
+                              "door": [], "backfilled": [], "missing": []}
+    try:
+        since_dt = _audit_since(since)
+        report["since"] = since_dt.isoformat().replace("+00:00", "Z")
+        merged = list_merged_in_window(since_dt)
+        prov = read_provenance(_audit_ledger_paths())
+    except AuditUnmeasurable as exc:
+        report["reason"] = str(exc)
+        return report
+    report.update(_bucket_prs(merged, prov))
+    report["total"] = len(merged)
+    report["malformed_ledger_lines"] = prov["malformed_lines"]
+    report["ledgers"] = prov["ledgers"]
+    if report["missing"]:
+        report.update(outcome="gaps", exit_code=EXIT_ERROR, reason=f"{len(report['missing'])} merge(s) without a pr_merged receipt")
+    else:
+        report.update(outcome="clean", exit_code=EXIT_OK)
+    return report
+
+
+def _audit_project_id(state_dir: Path) -> str:
+    from vnx_paths import project_id_from_state_dir
+    from project_scope import current_project_id
+    return project_id_from_state_dir(state_dir) or current_project_id()
+
+
+def _file_open_item(pr: Dict[str, Any], project_id: str) -> Tuple[str, bool]:
+    from open_items_manager import add_item_programmatic
+    number = pr["pr_number"]
+    return add_item_programmatic(
+        title=f"PR #{number} merged without a pr_merged receipt ({pr['pr_title'][:60]})",
+        severity="warn",
+        dispatch_id="door-audit",
+        details=f"merged_at {pr['merged_at']}; found by backfill_pr_merged_receipts --report-only",
+        dedup_key=f"door-audit:{project_id}:{number}",
+        source="door_audit",
+    )
+
+
+def publish_report(report: Dict[str, Any]) -> None:
+    """File one open item per missing PR and write the beacon. Failures are recorded on the report.
+
+    A gap whose open item cannot be written stays exit 1. A clean or unknown read whose
+    beacon cannot be written becomes unknown (exit 2): a control nobody can see proves nothing.
+    """
+    state_dir = _audit_ledger_paths()[0].parent
+    errors: List[str] = []
+    project_id = _audit_project_id(state_dir)
+    report["project_id"] = project_id
+    report["open_items"] = []
+    for pr in report["missing"]:
+        try:
+            item_id, created = _file_open_item(pr, project_id)
+            report["open_items"].append({"pr_number": pr["pr_number"], "item_id": item_id, "created": created})
+        except Exception as exc:
+            errors.append(f"open item for PR #{pr['pr_number']}: {exc}")
+    try:
+        from health_beacon import HealthBeacon
+        HealthBeacon(state_dir.parent, AUDIT_BEACON, expected_interval_seconds=2 * 86400).heartbeat_strict(
+            status="ok" if report["outcome"] == "clean" else "fail",
+            details={"outcome": report["outcome"], "since": report["since"], "total": report["total"],
+                     "door": len(report["door"]), "backfilled": len(report["backfilled"]),
+                     "missing": [p["pr_number"] for p in report["missing"]], "reason": report["reason"]},
+        )
+    except Exception as exc:
+        errors.append(f"beacon: {exc}")
+        if report["outcome"] == "clean":
+            report.update(outcome="unknown", exit_code=EXIT_UNKNOWN, reason="beacon not written: control invisible")
+    report["write_errors"] = errors
+
+
+def _print_report(report: Dict[str, Any]) -> None:
+    print(f"Door audit (report-only) since {report['since'] or '?'}: {report['outcome']}")
+    if report["outcome"] == "unknown":
+        print(f"  UNMEASURABLE: {report['reason']}")
+        return
+    print(f"  {len(report['missing'])} van {report['total']} merges zonder pr_merged receipt "
+          f"(door {len(report['door'])}, backfilled {len(report['backfilled'])})")
+    for pr in report["missing"]:
+        print(f"  MISSING PR #{pr['pr_number']}  {pr['merged_at']}  {pr['pr_title'][:60]}")
+    for err in report.get("write_errors", []):
+        print(f"  WRITE ERROR: {err}", file=sys.stderr)
+
+
+def _main_report_only(args: argparse.Namespace) -> int:
+    report = run_report_only(since=args.since)
+    if not args.no_write:
+        publish_report(report)
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        _print_report(report)
+    return int(report["exit_code"])
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Backfill pr_merged receipts for already-merged PRs",
@@ -340,7 +616,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--limit", type=int, default=500, help="Max merged PRs to fetch (default 500)")
     parser.add_argument("--since", default=None, help="Only PRs merged on/after this date (YYYY-MM-DD)")
     parser.add_argument("--json", action="store_true", help="Output summary as JSON")
+    parser.add_argument("--report-only", action="store_true",
+                        help="Door audit: compare, report, never heal (exit 0 clean, 1 gaps, 2 unmeasurable)")
+    parser.add_argument("--no-write", action="store_true",
+                        help="With --report-only: write no open items and no beacon")
     args = parser.parse_args(argv)
+
+    if args.report_only:
+        return _main_report_only(args)
 
     summary = backfill(
         limit=args.limit,

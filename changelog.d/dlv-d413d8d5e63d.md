@@ -1,0 +1,1 @@
+- `backfill_pr_merged_receipts.py --report-only` is the daily door audit: it compares merged PRs (window proven by paginating `pulls` on `updated_at`, default 7 days) with both `pr_merged` ledgers, tells door evidence from backfill, files one open item per missing PR plus a `door_audit` beacon, and exits 0 (complete, no gaps), 1 (gaps) or 2 (unmeasurable).
