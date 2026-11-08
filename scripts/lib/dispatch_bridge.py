@@ -384,8 +384,7 @@ def stage_spec_bundle(
 
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
-    # 1a-quater. permissions P5: the policy is proven BEFORE any write, or nothing is staged.
-    permission_policy_digest = policy_digest_for_role(role)
+    permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
 
     # 1b. resolve the effective tenant ONCE, up front, so the physical staging store and
     # the spec's declared project_id are the SAME. Staging into the ambient _data_dir()
@@ -452,8 +451,7 @@ def stage_spec_bundle(
         # already parsed this key; nothing could write it before this parameter.
         "skill": skill,
         "pr_id": pr_id or None,
-        # OI-1137: explicit work-ref, stripped of an origin//refs/ prefix so the
-        # resolver fetches origin/<name> without double-prefixing.
+        # OI-1137: explicit work-ref, stripped of an origin//refs/ prefix (no double-prefixing).
         "work_ref": (work_ref or "").strip() or None,
         # Chain-link fields (dispatch-20260802-model-ssot-en-ketenlink).
         "task_class": (task_class or "").strip() or None,
