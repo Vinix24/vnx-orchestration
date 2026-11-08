@@ -21,7 +21,10 @@ Hard rules (PRD provider-governance-unification):
 
 from __future__ import annotations
 
+import fcntl
 import functools
+import hashlib
+import json
 import logging
 import os
 import re
@@ -73,6 +76,91 @@ def _validate_provider(provider: str) -> None:
             f"Invalid provider {provider!r}. "
             "Must match ^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_./-]*)?)?|local-gemma)$"
         )
+
+
+CONTEXT_MANIFEST_LEDGER = "context_manifests.ndjson"
+_MANIFEST_SCHEMA = 1
+
+
+def _manifest_stamp(status: str, reason: Optional[str] = None, sha256: Optional[str] = None) -> Dict[str, Any]:
+    stamp: Dict[str, Any] = {"schema": _MANIFEST_SCHEMA, "status": status}
+    if reason is not None:
+        stamp["reason"] = reason
+    if sha256 is not None:
+        stamp["sha256"] = sha256
+    return stamp
+
+
+def _manifest_line(dispatch_id: str, session_id: str, project_id: str, manifest: Dict[str, Any]) -> str:
+    """The sidecar line, without its newline. No timestamp: an identical
+    measurement of one session hashes the same, which is what dedup keys on."""
+    return json.dumps(
+        {"dispatch_id": dispatch_id, "session_id": session_id, "project_id": project_id, "manifest": manifest},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+
+
+def _append_manifest_line(path: Path, line: str) -> None:
+    """One ``write`` on an ``O_APPEND`` descriptor, then ``fsync`` (ADR-050 contract 6).
+
+    The line carries dispatch_id, session_id and the manifest, and its sha256 is
+    the receipt reference, so a line byte-equal to an existing one is exactly the
+    same ``(dispatch_id, session_id, sha256)``: it writes nothing. The flock spans
+    check and write so two emits of one dispatch cannot both append.
+    """
+    data = (line + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        with open(path, "rb") as existing:
+            if any(raw.rstrip(b"\n") == data[:-1] for raw in existing):
+                return
+        if os.write(fd, data) != len(data):
+            raise OSError("short write to the context manifest ledger")
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _context_manifest_stamp(
+    dispatch_id: str, provider: str, session_id: Optional[str], state_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """The receipt's ``context_manifest`` reference, or ``None`` under ``VNX_AGENT_LAYOUT=off``.
+
+    Sidecar first: the hash goes on the receipt only after the line is durably
+    in ``context_manifests.ndjson``. Never raises: the receipt emit must not fail
+    because of the manifest.
+    """
+    try:
+        import agent_layout
+        if not agent_layout.is_shadow():
+            return None
+        import context_manifest
+        manifest = context_manifest.capture(session_id, provider=provider)
+        status = manifest.get("status")
+        if status not in ("ok", "partial"):
+            return _manifest_stamp(str(status), manifest.get("reason"))
+        return _write_manifest_sidecar(dispatch_id, session_id or "", state_dir, manifest)
+    except Exception as exc:  # the manifest never fails the receipt
+        logger.warning("governance_emit: context manifest failed dispatch=%s: %s: %s",
+                       dispatch_id, type(exc).__name__, exc)
+        return _manifest_stamp("error", f"extract_failed:{type(exc).__name__}")
+
+
+def _write_manifest_sidecar(
+    dispatch_id: str, session_id: str, state_dir: Path, manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        from project_scope import resolve_stamp_project_id
+        project_id = resolve_stamp_project_id(db_path=Path(state_dir) / "t0_receipts.ndjson")
+        line = _manifest_line(dispatch_id, session_id, project_id, manifest)
+        _append_manifest_line(Path(state_dir) / CONTEXT_MANIFEST_LEDGER, line)
+    except Exception as exc:  # no line landed, so the receipt must carry no hash
+        logger.warning("governance_emit: context manifest ledger write failed dispatch=%s: %s: %s",
+                       dispatch_id, type(exc).__name__, exc)
+        return _manifest_stamp("error", f"ledger_write_failed:{type(exc).__name__}")
+    return _manifest_stamp(manifest["status"], sha256=hashlib.sha256(line.encode("utf-8")).hexdigest())
 
 
 def emit_dispatch_receipt(
@@ -343,7 +431,7 @@ def emit_dispatch_receipt(
         permission_posture=permission_posture,
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
-        model_resolved=model_resolved or None,
+        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir),
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
