@@ -196,7 +196,7 @@ class TestSeatResolver:
 
         assert resolve_review_seats().to_record() == {
             "seats": ["codex_gate", "kimi_gate"], "extra_gates": [], "source": "config",
-            "key": "VNX_DEFAULT_REVIEW_STACK", "value": "codex_gate,kimi_gate", "profile_stack": None,
+            "key": "VNX_DEFAULT_REVIEW_STACK", "value": "codex_gate,kimi_gate", "profile_stack": None, "stack_source": "override",
         }
         assert resolve_review_seats(explicit_stack=["kimi_gate"]).to_record()["key"] == ""
 
@@ -364,7 +364,7 @@ class TestTheRequestRecordCarriesTheSeats:
 
         expected = {
             "seats": ["codex_gate", "kimi_gate"], "extra_gates": [], "source": "config",
-            "key": "VNX_DEFAULT_REVIEW_STACK", "value": "codex_gate,kimi_gate", "profile_stack": None,
+            "key": "VNX_DEFAULT_REVIEW_STACK", "value": "codex_gate,kimi_gate", "profile_stack": None, "stack_source": "override",
         }
         assert result["review_seats"] == expected
         kimi, claude = _request_record(env, "kimi_gate"), _request_record(env, "claude_gate")

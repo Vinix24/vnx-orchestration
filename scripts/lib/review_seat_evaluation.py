@@ -326,6 +326,9 @@ class RequiredSeats:
     #: The raw :data:`SEAT_RULE_KEY` value this decision was made under; empty
     #: when the key was unset (the default, and every merge before PR 4).
     rule_value: str = ""
+    #: ``stack_source`` of the recorded request (``""`` for a record written before it existed
+    #: and for any stack that is not a recorded one).
+    stack_source: str = ""
 
     def risk_text(self) -> str:
         """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
@@ -704,6 +707,7 @@ def required_seats(
         resolved = RequiredSeats(
             kept, SOURCE_RECORDED, value=str(recorded.get("value") or ""), fresh=fresh,
             note=_recorded_note(kept, fresh, refusal), stack=kept,
+            stack_source=str(recorded.get("stack_source") or ""),
         )
     if not by_risk:
         return resolved
@@ -774,19 +778,22 @@ def light_floor_refusal(stack: Sequence[str], risk: Any, *, recorded: bool = Fal
 def _recorded_below_current(resolved: RequiredSeats, risk: Any) -> str:
     """The refusal text when a recorded one-seat stack is below a two-seat current configuration on a signal head, else ``""``.
 
-    Fail-closed on the cases it can judge: only a recorded stack with fewer than two seats,
-    a fresh resolution of two or more and a signal head refuse. A fresh resolution that
-    itself refused (``None``) is left to :func:`light_floor_refusal`, as in round 1.
+    Only a recorded stack whose record says ``stack_source == "profile"`` is not trusted: an
+    operator's one-seat stack is not refused fresh, so recorded it is not refused either, and a
+    record without the key wins (plan acceptance (b)). A fresh resolution that itself refused
+    (``None``) is left to :func:`light_floor_refusal`, as in round 1.
     """
     fresh = resolved.fresh
     if resolved.source != SOURCE_RECORDED or fresh is None or len(fresh) < 2:
+        return ""
+    if resolved.stack_source != "profile":
         return ""
     if len(_seat_names(list(resolved.stack))) >= 2 or not _signal_risk(risk):
         return ""
     why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
     return (
         f"the recorded stack ({', '.join(resolved.stack)}) is below the current configuration "
-        f"({', '.join(fresh)}) on this head: {why}. A new review request on this head records the current stack."
+        f"({', '.join(fresh)}) on this head and its record says stack_source=profile, so it is not trusted: {why}. A new review request on this head records the current stack."
     )
 
 

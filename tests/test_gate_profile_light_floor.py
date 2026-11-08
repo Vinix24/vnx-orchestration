@@ -212,6 +212,7 @@ class TestARecordedStackBelowTheCurrentConfiguration:
         required = _required(tmp_path, _risk(SECURITY))
         assert required.seats == () and required.source == rse.SOURCE_RECORDED
         assert "recorded stack (codex_gate)" in required.error
+        assert "stack_source=profile" in required.error
         assert "A new review request on this head records the current stack" in required.error
         assert "set the profile to standard" not in required.error
 
@@ -250,3 +251,56 @@ class TestARecordedStackBelowTheCurrentConfiguration:
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "standard")
         required = _required(tmp_path, _risk(path))
         assert required.error == "" and required.seats == ("codex_gate",)
+
+
+# ---------------------------------------------------------------------------
+# Round 4: the recorded stack's source decides whether it is trusted
+# ---------------------------------------------------------------------------
+
+def _record_without_stack_source(monkeypatch, tmp_path, override):
+    monkeypatch.delenv("VNX_GOVERNANCE_PROFILE", raising=False)
+    monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", override)
+    record = resolve_review_seats().to_record()
+    del record["stack_source"]
+    _record_request(tmp_path, "a", "2026-11-08T10:00:00Z", record)
+    monkeypatch.delenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK")
+
+
+class TestTheRecordedStackSource:
+    def test_a_recorded_override_stack_wins_after_the_override_is_removed(self, monkeypatch, tmp_path):
+        _record_under(monkeypatch, tmp_path, "a", "2026-11-08T10:00:00Z", override="codex_gate")
+        monkeypatch.delenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.error == "" and required.seats == ("codex_gate",)
+
+    def test_a_record_without_stack_source_wins(self, monkeypatch, tmp_path):
+        _record_without_stack_source(monkeypatch, tmp_path, "codex_gate")
+        required = _required(tmp_path, _risk(SECURITY))
+        assert required.error == "" and required.seats == ("codex_gate",)
+
+    @pytest.mark.parametrize("value", ["", None, 7, "unknown"])
+    def test_a_malformed_stack_source_is_not_profile_so_the_recorded_stack_wins(self, monkeypatch, tmp_path, value):
+        monkeypatch.delenv("VNX_GOVERNANCE_PROFILE", raising=False)
+        monkeypatch.setenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", "codex_gate")
+        record = dict(resolve_review_seats().to_record(), stack_source=value)
+        _record_request(tmp_path, "a", "2026-11-08T10:00:00Z", record)
+        monkeypatch.delenv("VNX_OVERRIDE_DEFAULT_REVIEW_STACK")
+        assert _required(tmp_path, _risk(SECURITY)).seats == ("codex_gate",)
+
+    def test_to_record_names_who_supplied_the_stack(self, monkeypatch):
+        def source(profile=None, override=None, row=None):
+            for key, val in (("VNX_GOVERNANCE_PROFILE", profile), ("VNX_OVERRIDE_DEFAULT_REVIEW_STACK", override)):
+                monkeypatch.delenv(key, raising=False)
+                if val is not None:
+                    monkeypatch.setenv(key, val)
+            if row is not None:
+                monkeypatch.setattr(
+                    config_registry, "_db_resolver",
+                    lambda project_id, key: row if key == "VNX_DEFAULT_REVIEW_STACK" else None,
+                )
+            return resolve_review_seats().to_record()["stack_source"]
+
+        assert source(profile="light") == "profile"
+        assert source(profile="standard") == "default"
+        assert source(override="codex_gate") == "override"
+        assert source(row="codex_gate") == "project_config"
