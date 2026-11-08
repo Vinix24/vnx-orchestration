@@ -29,6 +29,7 @@ import logging
 import os
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional
 
@@ -1335,8 +1336,24 @@ def _policy_at_merge_base(
     return digest, bool(profile.is_fallback)
 
 
+def _resolve_local_head_sha(project_root: Path) -> Optional[str]:
+    """The full 40-hex commit local HEAD points at, or None when git cannot prove it."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(project_root),
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    sha = result.stdout.strip().lower() if result.returncode == 0 else ""
+    if len(sha) != 40 or any(c not in "0123456789abcdef" for c in sha):
+        return None
+    return sha
+
+
 def _permission_outcome(
-    pr_id: str, project_root: Path, dispatch_dir: Path, pr_head: Optional["ResolvedPRRef"]
+    pr_id: str, project_root: Path, dispatch_dir: Path, pr_head: Optional["ResolvedPRRef"],
+    head_sha: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Classify the spec digest against a fresh composition at the merge base.
 
@@ -1348,7 +1365,7 @@ def _permission_outcome(
         "dispatch_id": dispatch_id, "role": None, "spec_digest": None,
         "merge_base": None, "merge_base_digest": None,
     }
-    head_ref = pr_head.head_ref if pr_head is not None else "HEAD"
+    head_ref = pr_head.head_ref if pr_head is not None else (head_sha or "HEAD")
     merge_base = (pr_head.merge_base if pr_head is not None else None) or \
         _resolve_merge_base(project_root, "origin/main", head_ref)
     result["merge_base"] = merge_base or None
@@ -1386,12 +1403,12 @@ def _permission_outcome(
             "detail": f"policy digest {fresh[:12]} matches the merge base"}
 
 
-_PERMISSION_RECEIPT_APPENDED = ("appended", "duplicate")
+_PERMISSION_RECEIPT_WRITTEN = "appended"  # AppendResult.status of a line that really landed; "duplicate" did not
 
 
 def _record_permission_receipt(
     pr_id: str,
-    pr_head: Optional["ResolvedPRRef"],
+    head_sha: str,
     result: Dict[str, Any],
     *,
     enforced: bool,
@@ -1405,8 +1422,10 @@ def _record_permission_receipt(
     ledger and writer the merge door (``pr_merge``) uses for its own gate outcomes. ``gate`` is
     stamped only with a real dispatch id (a ghost id would divert the receipt to the gate
     stream); it carries the outcome so two outcomes on one head keep distinct ADR-038 identities.
+    ``trigger`` is the field the dedup key honours (``IDEMPOTENCY_FIELDS``) that is free here:
+    it carries the PR, the full evaluated head, the merge base, the role and a fresh uuid, so no
+    two decisions share a key. Only ``append_status == "appended"`` counts as written.
     """
-    head_sha = (pr_head.head_ref if pr_head is not None else "") or ""
     if check_status == "GO":
         status = "unknown" if warning else "success"
     else:
@@ -1426,6 +1445,10 @@ def _record_permission_receipt(
         "detail": result.get("detail", ""),
     }
     receipts_file = str(state_dir / "t0_receipts.ndjson")
+    fields["trigger"] = (
+        f"permission-policy:{pr_id or 'local'}:{head_sha}:{result.get('merge_base') or 'none'}"
+        f":{result.get('role') or 'none'}:{uuid.uuid4().hex}"
+    )
     fields.update(dispatch_identity_fields(dispatch_id, receipts_file))
     if isinstance(dispatch_id, str) and dispatch_id:
         fields["gate"] = f"permission_policy:{result['outcome']}"
@@ -1438,7 +1461,7 @@ def _record_permission_receipt(
         receipts_file=receipts_file,
         **fields,
     )
-    if receipt.get("append_status") not in _PERMISSION_RECEIPT_APPENDED:
+    if receipt.get("append_status") != _PERMISSION_RECEIPT_WRITTEN:
         raise OSError(f"receipt not appended (append_status={receipt.get('append_status')!r})")
 
 
@@ -1458,7 +1481,23 @@ def check_permission_policy(
     blocks and only ``mismatch`` / ``evidence_refused`` carry a warning; with enforcement on
     anything but ``match`` blocks, and so does a fallback role.
     """
-    result = _permission_outcome(pr_id, project_root, dispatch_dir, pr_head)
+    if pr_head is not None:
+        head_sha = (pr_head.head_ref or "").strip() or None
+    else:
+        head_sha = _resolve_local_head_sha(project_root)
+    if head_sha is None:
+        return {
+            "check": "permission_policy",
+            "status": SKIPPED_UNVERIFIED,
+            "outcome": "evidence_refused",
+            "enforced": worker_permission_enforcement_enabled(),
+            "warning": True,
+            "is_fallback": False,
+            "receipt_written": False,
+            "detail": "WARNING evidence_refused: the evaluated HEAD commit cannot be resolved | "
+                      "ledger receipt NOT written: no head to record",
+        }
+    result = _permission_outcome(pr_id, project_root, dispatch_dir, pr_head, head_sha)
     outcome = result["outcome"]
     enforced = worker_permission_enforcement_enabled()
     warning = outcome in ("mismatch", "evidence_refused")
@@ -1476,7 +1515,7 @@ def check_permission_policy(
     receipt_written = True
     try:
         _record_permission_receipt(
-            pr_id, pr_head, result, enforced=enforced, check_status=status,
+            pr_id, head_sha, result, enforced=enforced, check_status=status,
             warning=warning, state_dir=state_dir,
         )
     except Exception as exc:  # fail-closed: an outcome that is not in the ledger is not verified

@@ -433,3 +433,94 @@ def test_unproven_append_status_makes_the_check_unverified(repo, tmp_path, monke
     monkeypatch.setattr(gate, "emit_governance_receipt", lambda *a, **k: {"append_status": append_status})
     check = _perm(_run(monkeypatch, root, dd, sha))
     assert check["status"] == gate.SKIPPED_UNVERIFIED and check["receipt_written"] is False
+
+
+# ---------------------------------------------------------------------------
+# Round 3: one receipt identity per decision, the evaluated head is always recorded,
+# and a deduplicated receipt is never reported as written.
+# ---------------------------------------------------------------------------
+
+def _local_check(root: Path, dd: Path) -> dict:
+    return gate.check_permission_policy("#1", root, dd, None, state_dir=dd.parent / "state")
+
+
+def _freeze_clock(monkeypatch) -> list:
+    """Freeze the receipt clock; returns the list that collects every emitted receipt (with its key)."""
+    import governance_receipts
+    monkeypatch.setattr(governance_receipts, "utc_now_iso", lambda: "2026-11-08T10:00:00Z")
+    emitted: list = []
+    real = gate.emit_governance_receipt
+
+    def capture(*a, **k):
+        receipt = real(*a, **k)
+        emitted.append(receipt)
+        return receipt
+
+    monkeypatch.setattr(gate, "emit_governance_receipt", capture)
+    return emitted
+
+
+def _two_local_heads(root: Path, sha: str, dd: Path):
+    """Two local heads with two different merge bases, checked in the same frozen second."""
+    _spec(dd, _digest_of(root, _profiles()))
+    _git(root, "update-ref", "refs/remotes/origin/main", sha)
+    (root / "a.txt").write_text("a")
+    head1 = _commit(root, "head1")
+    first = _local_check(root, dd)
+    _git(root, "update-ref", "refs/remotes/origin/main", head1)
+    (root / "b.txt").write_text("b")
+    head2 = _commit(root, "head2")
+    second = _local_check(root, dd)
+    return (sha, head1, first), (head1, head2, second)
+
+
+def test_local_head_checks_get_distinct_receipts_with_the_real_head(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    emitted = _freeze_clock(monkeypatch)
+    (base1, head1, first), (base2, head2, second) = _two_local_heads(root, sha, dd)
+    assert first["receipt_written"] is True and second["receipt_written"] is True
+    rows = _ledger(dd)
+    assert [(r["head_sha"], r["merge_base"]) for r in rows] == [(head1, base1), (head2, base2)]
+    assert all(len(r["head_sha"]) == 40 and r["commit_sha"] == r["head_sha"] for r in rows)
+    keys = [r["idempotency_key"] for r in emitted]
+    assert len(keys) == 2 and keys[0] != keys[1] and all(r["append_status"] == "appended" for r in emitted)
+
+
+def test_two_decisions_on_the_same_head_do_not_share_an_identity(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    emitted = _freeze_clock(monkeypatch)
+    _spec(dd, _digest_of(root, _profiles()))
+    assert _local_check(root, dd)["receipt_written"] is True
+    assert _local_check(root, dd)["receipt_written"] is True
+    rows = _ledger(dd)
+    assert len(rows) == 2 and rows[0]["trigger"] != rows[1]["trigger"]
+    assert emitted[0]["idempotency_key"] != emitted[1]["idempotency_key"]
+
+
+def test_duplicate_append_status_is_not_reported_as_written(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    _spec(dd, _digest_of(root, _profiles()))
+    monkeypatch.setattr(gate, "emit_governance_receipt", lambda *a, **k: {"append_status": "duplicate"})
+    check = _local_check(root, dd)
+    assert check["status"] == gate.SKIPPED_UNVERIFIED and check["receipt_written"] is False
+    assert "duplicate" in check["detail"]
+
+
+def test_unresolvable_local_head_is_unverified_and_writes_no_receipt(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    _spec(dd, _digest_of(root, _profiles()))
+    monkeypatch.setattr(gate, "_resolve_local_head_sha", lambda project_root: None)
+    check = _local_check(root, dd)
+    assert check["status"] == gate.SKIPPED_UNVERIFIED and check["receipt_written"] is False
+    assert _ledger(dd) == []
+
+
+def test_resolve_local_head_sha_is_none_outside_a_repository(tmp_path):
+    assert gate._resolve_local_head_sha(tmp_path / "not-a-repo") is None
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert gate._resolve_local_head_sha(plain) is None
