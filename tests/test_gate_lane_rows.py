@@ -54,7 +54,7 @@ def _row(**over) -> GateLaneRow:
         gate="synthetic_gate", lane="synthetic-lane", request_provider="synthetic",
         dispatcher="provider_dispatch", billing="provider_metered",
         model_env="VNX_SYNTHETIC_GATE_MODEL", model_default="synthetic-1",
-        single_shot=True, timeout=1234, diff_chars=4321,
+        single_shot=True, timeout=1234, diff_chars=4321, family="codex",
     )
     base.update(over)
     return GateLaneRow(**base)

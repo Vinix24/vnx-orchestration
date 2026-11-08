@@ -16,7 +16,8 @@ classification, itself importing gate_depth), and gate_depth.
 
 `vnx gate --only <gate>` also asks the provider switch first
 (provider-schakelaar C): it runs `scripts/providers_cli.py check`, which needs
-`provider_switch.py` and its two imports (`atomic_io`, `vnx_ids`). A fake
+`provider_switch.py` and its three imports (`gate_lane_rows`, `atomic_io`,
+`vnx_ids`). A fake
 VNX_HOME without them would make every `--only` run refuse fail-closed.
 `PROVIDER_SWITCH_LIB_MODULES` and `PROVIDER_SWITCH_SCRIPTS` are that closure.
 The decision reads the switch file at `VNX_PROVIDER_SWITCH_FILE`, so a harness
@@ -59,6 +60,7 @@ GATE_LIB_MODULES = (
 
 PROVIDER_SWITCH_LIB_MODULES = (
     "provider_switch.py",
+    "gate_lane_rows.py",
     "atomic_io.py",
     "vnx_ids.py",
 )

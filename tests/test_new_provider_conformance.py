@@ -57,7 +57,7 @@ def _synthetic_row() -> gate_lane_rows.GateLaneRow:
     return gate_lane_rows.GateLaneRow(
         gate=GATE, lane=LANE, request_provider=LABEL, dispatcher="provider_dispatch",
         billing=gate_lane_rows.BILLING_METERED, model_env=MODEL_ENV, model_default=MODEL,
-        single_shot=False, timeout=777, diff_chars=12_345,
+        single_shot=False, timeout=777, diff_chars=12_345, family="codex",
     )
 
 
@@ -158,15 +158,6 @@ def test_station_3_an_unavailable_row_has_no_report_path(registered, store):
     assert payload["provider"] == LABEL
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OI: provider_switch.family_of has no path from a gate row to a family, so a new "
-        "gate is refused as an unknown identifier and gate_recorder.gate_is_available "
-        "answers False for a registered harness-lane row (scripts/lib/provider_switch.py "
-        "_EXACT/_PREFIXES). Acceptance: the family comes from a column of the row."
-    ),
-)
 def test_station_4_availability_answers_true_for_a_registered_row(registered, store):
     assert gate_recorder.gate_is_available(GATE, state_dir=_state_dir()) is True
 

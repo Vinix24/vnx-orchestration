@@ -42,6 +42,7 @@ _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
+import gate_lane_rows  # noqa: E402
 from atomic_io import atomic_write_text  # noqa: E402
 from vnx_ids import PROJECT_ID_RE  # noqa: E402
 
@@ -152,12 +153,16 @@ class UnknownProviderError(ValueError):
 def family_of(identifier: str) -> str:
     """Return the family (or non-switchable class) of a provider identifier.
 
-    Explicit table plus prefix rules, case-insensitive. Raises :class:`UnknownProviderError`
+    A gate name registered in ``gate_lane_rows.GATE_LANE_ROWS`` answers with the family column
+    of its row. Any other identifier: explicit table plus prefix rules, case-insensitive. Raises :class:`UnknownProviderError`
     for an identifier nothing maps: the caller decides, and :func:`decide` refuses it.
     """
     if not isinstance(identifier, str) or not identifier.strip():
         raise UnknownProviderError(f"provider identifier {identifier!r} is empty or not a string")
     key = identifier.strip().lower()
+    row_family = gate_lane_rows.family_of_gate(identifier.strip(), gate_lane_rows.GATE_LANE_ROWS)
+    if row_family is not None:
+        return row_family
     if key in _EXACT:
         return _EXACT[key]
     for openrouter_prefix in ("litellm:openrouter/", "openrouter/"):
