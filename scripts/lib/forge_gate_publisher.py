@@ -30,6 +30,7 @@ BILLING SAFETY: No Anthropic SDK. No direct API calls to api.anthropic.com.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import shutil
@@ -68,6 +69,7 @@ from forge_check_run import (  # noqa: E402
     publish_check_run,
 )
 from forge_project_target import ForgeTarget, resolve_forge_target
+from governance_receipts import emit_governance_receipt
 from gate_status import (  # noqa: E402
     ALL_KNOWN_STATES,
     FAIL_STATES,
@@ -1693,22 +1695,56 @@ def validate_door_evidence(
         raise ForgeDoorRefused(reason)
 
 
-def _own_door_runs(sha: str) -> List[Dict[str, Any]]:
+class ForgeLedgerError(ForgeCheckRunError):
+    """A door-permit receipt could not be written: the action does not happen (or is reported)."""
+
+
+DOOR_RECEIPT_SOURCE = "forge_gate_publisher"
+
+
+def _evidence_digest(evidence: Any) -> str:
+    try:
+        raw = json.dumps(evidence, sort_keys=True, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raw = repr(evidence)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _evidence_gate_names(evidence: Any) -> List[str]:
+    records = evidence.get("preflight_gates") if isinstance(evidence, dict) else None
+    if not isinstance(records, list):
+        return []
+    return [str(r.get("gate")) for r in records if isinstance(r, dict)]
+
+
+def _write_door_receipt(
+    event: str, *, status: str, receipts_file: Optional[str], **fields: Any
+) -> None:
+    """One receipt in the canonical ledger; a failed write raises :class:`ForgeLedgerError`.
+
+    No field called ``verdict``: ``append_receipt`` overwrites it with its own.
+    """
+    try:
+        emit_governance_receipt(
+            event, receipt_kind="state_mutation", status=status, terminal="T0",
+            source=DOOR_RECEIPT_SOURCE, receipts_file=receipts_file, **fields,
+        )
+    # vnx-broad-except: any way the ledger write can end is the same fail-closed answer.
+    except Exception as exc:  # noqa: BLE001
+        raise ForgeLedgerError(
+            f"{event} ({status}) niet in het grootboek geschreven: {exc}"
+        ) from exc
+
+
+def _own_door_runs(sha: str, project_root: Path) -> List[Dict[str, Any]]:
     app_id = load_app_config().app_id
-    runs = list_check_runs(sha, DOOR_CHECK_NAME)
+    runs = list_check_runs(sha, DOOR_CHECK_NAME, project_root=project_root)
     return [r for r in runs if isinstance(r.get("app"), dict) and r["app"].get("id") == app_id]
 
 
-def publish_door_permit(evidence: Dict[str, Any], *, sha: str, pr: int) -> int:
-    """Create or re-permit the single ``vnx-gate/door`` run on ``sha``; return its id.
-
-    No door run: ``POST``. Exactly one: ``PATCH`` it back to ``success`` (the
-    re-permit on the same head). Two or more: refused, recovery is a new commit
-    (ADR-061 §3). A lost POST answer is not handled here; :func:`read_back_door`
-    is how the caller finds out what is on the head.
-    """
-    validate_door_evidence(evidence, sha=sha, pr=pr)
-    existing = _own_door_runs(sha)
+def _apply_door_permit(sha: str, pr: int, project_root: Path) -> Tuple[int, str]:
+    """The GitHub step: ``(check_run_id, action)`` with action ``create`` or ``re_permit``."""
+    existing = _own_door_runs(sha, project_root)
     title, summary = DOOR_CHECK_NAME, f"permit for PR #{pr} on {sha}"
     if len(existing) > 1:
         raise ForgeDoorRefused(
@@ -1718,20 +1754,72 @@ def publish_door_permit(evidence: Dict[str, Any], *, sha: str, pr: int) -> int:
     if existing:
         run_id = existing[0].get("id")
         patch_check_run(
-            run_id, CONCLUSION_SUCCESS, title, summary, name=DOOR_CHECK_NAME, head_sha=sha
+            run_id, CONCLUSION_SUCCESS, title, summary, name=DOOR_CHECK_NAME, head_sha=sha,
+            project_root=project_root,
         )
-        return run_id
-    created = publish_check_run(sha, DOOR_CHECK_NAME, CONCLUSION_SUCCESS, summary)
+        return run_id, "re_permit"
+    created = publish_check_run(
+        sha, DOOR_CHECK_NAME, CONCLUSION_SUCCESS, summary, project_root=project_root
+    )
     run_id = created.get("id")
     if isinstance(run_id, bool) or not isinstance(run_id, int):
         raise ForgeDoorRefused(f"POST gaf geen check_run_id terug: {created!r}")
+    return run_id, "create"
+
+
+def publish_door_permit(
+    evidence: Dict[str, Any], *, sha: str, pr: int, project_root: Path,
+    receipts_file: Optional[str] = None,
+) -> int:
+    """Create or re-permit the single ``vnx-gate/door`` run on ``sha``; return its id.
+
+    The ledger comes first (ADR-005): bad evidence writes a ``blocked`` receipt;
+    otherwise an intent receipt is written BEFORE the first GitHub call, and a
+    failed write stops everything. No door run: ``POST``. Exactly one: ``PATCH``
+    it back to ``success`` (the re-permit on the same head). Two or more:
+    refused, recovery is a new commit (ADR-061 §3). After the call the run is
+    read back and the outcome receipt carries the id and the conclusion read.
+    """
+    base = {
+        "head_sha": sha, "pr_number": pr, "evidence_digest": _evidence_digest(evidence),
+        "evidence_gates": _evidence_gate_names(evidence),
+    }
+    try:
+        validate_door_evidence(evidence, sha=sha, pr=pr)
+    except ForgeDoorRefused as exc:
+        _write_door_receipt(
+            "door_permit_published", status="blocked", receipts_file=receipts_file,
+            phase="outcome", reason=str(exc), **base,
+        )
+        raise
+    _write_door_receipt(
+        "door_permit_published", status="info", receipts_file=receipts_file,
+        phase="intent", reason="permit aangevraagd uit GO-evidence", **base,
+    )
+    run_id: Optional[int] = None
+    try:
+        run_id, action = _apply_door_permit(sha, pr, project_root)
+        run = read_back_door(sha, run_id, project_root=project_root)
+    except ForgeCheckRunError as exc:
+        _write_door_receipt(
+            "door_permit_published",
+            status="blocked" if isinstance(exc, ForgeDoorRefused) else "failure",
+            receipts_file=receipts_file, phase="outcome", reason=str(exc),
+            **({"check_run_id": run_id} if run_id is not None else {}), **base,
+        )
+        raise
+    _write_door_receipt(
+        "door_permit_published", status="success", receipts_file=receipts_file,
+        phase="outcome", action=action, check_run_id=run_id,
+        conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen", **base,
+    )
     return run_id
 
 
-def read_back_door(sha: str, check_run_id: int) -> Dict[str, Any]:
+def read_back_door(sha: str, check_run_id: int, *, project_root: Path) -> Dict[str, Any]:
     """The door run on ``sha`` with this id, own App and ``success``, or a named refusal."""
     app_id = load_app_config().app_id
-    runs = list_check_runs(sha, DOOR_CHECK_NAME)
+    runs = list_check_runs(sha, DOOR_CHECK_NAME, project_root=project_root)
     own = [r for r in runs if isinstance(r.get("app"), dict) and r["app"].get("id") == app_id]
     if len(own) > 1:
         raise ForgeDoorRefused(f"teruglezing: {len(own)} deurruns van de eigen App op {sha[:12]}")
@@ -1747,18 +1835,14 @@ def read_back_door(sha: str, check_run_id: int) -> Dict[str, Any]:
     return run
 
 
-def revoke_door(check_run_id: int, reason: str, *, sha: str = "") -> str:
-    """``PATCH`` the door run to ``failure`` (title ``permit revoked: <reason>``).
-
-    Three attempts with backoff. ``revoked`` only when GitHub's answer shows this
-    id on ``failure``; anything else is ``revoke_failed``. There is no DELETE.
-    """
-    title = f"permit revoked: {reason}"
+def _patch_door_failure(
+    check_run_id: int, title: str, sha: str, project_root: Path
+) -> str:
     for attempt in range(DOOR_REVOKE_ATTEMPTS):
         try:
             answer = patch_check_run(
                 check_run_id, CONCLUSION_FAILURE, title, title,
-                name=DOOR_CHECK_NAME, head_sha=sha,
+                name=DOOR_CHECK_NAME, head_sha=sha, project_root=project_root,
             )
             if answer.get("id") == check_run_id and answer.get("conclusion") == CONCLUSION_FAILURE:
                 return REVOKED
@@ -1767,6 +1851,38 @@ def revoke_door(check_run_id: int, reason: str, *, sha: str = "") -> str:
         if attempt < DOOR_REVOKE_ATTEMPTS - 1:
             time.sleep(_DOOR_REVOKE_BACKOFF_SECONDS[attempt])
     return REVOKE_FAILED
+
+
+def revoke_door(
+    check_run_id: int, reason: str, *, sha: str, pr: int, project_root: Path,
+    receipts_file: Optional[str] = None,
+) -> str:
+    """``PATCH`` the door run to ``failure`` (title ``permit revoked: <reason>``).
+
+    The intent receipt is written first; if that write fails nothing is sent to
+    GitHub and :class:`ForgeLedgerError` is raised. Three attempts with backoff.
+    ``revoked`` only when GitHub's answer shows this id on ``failure``; anything
+    else is ``revoke_failed``. There is no DELETE. The outcome receipt is
+    best-effort on its own failure: the revoke result is what the caller needs,
+    and the intent receipt already holds the attempt.
+    """
+    if not sha or not sha.strip():
+        raise ForgeCheckRunError("sha is leeg: een intrekking hoort bij een kop")
+    base = {"head_sha": sha, "pr_number": pr, "check_run_id": check_run_id, "action": "revoke"}
+    _write_door_receipt(
+        "door_permit_revoked", status="info", receipts_file=receipts_file,
+        phase="intent", reason=reason, **base,
+    )
+    result = _patch_door_failure(check_run_id, f"permit revoked: {reason}", sha, project_root)
+    try:
+        _write_door_receipt(
+            "door_permit_revoked", status="success" if result == REVOKED else "failure",
+            receipts_file=receipts_file, phase="outcome", reason=reason,
+            revoke_result=result, **base,
+        )
+    except ForgeLedgerError as exc:
+        logger.error("uitkomst van intrekking %s niet vastgelegd: %s", check_run_id, exc)
+    return result
 
 
 def _add_door_parser(sub: Any) -> None:
@@ -1783,14 +1899,35 @@ def _add_door_parser(sub: Any) -> None:
     door.add_argument("--evidence", required=True, help="GO-evidence-bestand van de deur")
     door.add_argument("--sha", required=True, help="kop waarop de toestemming komt")
     door.add_argument("--pr", type=int, required=True, help="PR-nummer")
+    door.add_argument(
+        "--project-root", default=None,
+        help="checkout van het doelproject (standaard afgeleid uit de resultatenmap)",
+    )
+    door.add_argument("--receipts-file", default=None, help="grootboekbestand (standaard het canonieke)")
+
+
+def _door_project_root(args: argparse.Namespace) -> Path:
+    if args.project_root:
+        return Path(args.project_root)
+    return resolve_forge_target(_default_results_dir()).project_root
 
 
 def _run_door(args: argparse.Namespace) -> int:
     """``door`` — validate, publish or re-permit, read back. Exit 1 with the reason on refusal."""
     try:
-        evidence = read_door_evidence(Path(args.evidence))
-        run_id = publish_door_permit(evidence, sha=args.sha, pr=args.pr)
-        read_back_door(args.sha, run_id)
+        project_root = _door_project_root(args)
+        try:
+            evidence = read_door_evidence(Path(args.evidence))
+        except ForgeDoorRefused as exc:
+            _write_door_receipt(
+                "door_permit_published", status="blocked", receipts_file=args.receipts_file,
+                phase="outcome", head_sha=args.sha, pr_number=args.pr, reason=str(exc),
+            )
+            raise
+        run_id = publish_door_permit(
+            evidence, sha=args.sha, pr=args.pr, project_root=project_root,
+            receipts_file=args.receipts_file,
+        )
     except ForgeCheckRunError as exc:
         print(f"{DOOR_CHECK_NAME}: {exc}", file=sys.stderr)
         return EXIT_ERROR

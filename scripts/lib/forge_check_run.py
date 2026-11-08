@@ -795,28 +795,51 @@ def _github_json(
     return parsed
 
 
+_CHECK_RUNS_PER_PAGE = 100
+_CHECK_RUNS_MAX_PAGES = 50
+
+
 def list_check_runs(
     head_sha: str, name: str, *, project_root: Optional[Path] = None
 ) -> list:
     """Every check-run named ``name`` on ``head_sha`` (any App), as GitHub returns them.
 
-    A response that says more runs exist than it carries (``total_count`` above
-    the page) raises: a partial read must not look like "no door run here".
+    The request carries ``filter=all``: GitHub's default is ``filter=latest``,
+    which hides every older run of the same name, and a guard that counts door
+    runs must see all of them. The list follows ``page`` until a short page, then
+    compares what it collected with ``total_count`` of the same filtered set. A
+    response that says more runs exist than were collected raises: a partial
+    read must not look like "no door run here".
     """
     if not head_sha or not head_sha.strip():
         raise ForgeCheckRunError("head_sha is leeg: check-runs lezen vraagt om een kop")
-    path = f"/commits/{head_sha.strip()}/check-runs?check_name={name}&per_page=100"
-    parsed = _github_json("GET", path, None, f"check-runs lezen voor {head_sha[:12]}", project_root)
-    runs = parsed.get("check_runs")
-    if not isinstance(runs, list):
-        raise ForgeAPIError(f"check-runs-respons mist de lijst check_runs voor {head_sha[:12]}")
-    total = parsed.get("total_count")
-    if isinstance(total, bool) or not isinstance(total, int) or total > len(runs):
-        raise ForgeAPIError(
-            f"check-runs-respons is niet volledig voor {head_sha[:12]}: "
-            f"total_count={total!r}, ontvangen={len(runs)}"
+    sha = head_sha.strip()
+    what = f"check-runs lezen voor {sha[:12]}"
+    collected: list = []
+    total: Any = None
+    for page in range(1, _CHECK_RUNS_MAX_PAGES + 1):
+        path = (
+            f"/commits/{sha}/check-runs?check_name={name}&filter=all"
+            f"&per_page={_CHECK_RUNS_PER_PAGE}&page={page}"
         )
-    return [run for run in runs if isinstance(run, dict) and run.get("name") == name]
+        parsed = _github_json("GET", path, None, what, project_root)
+        runs = parsed.get("check_runs")
+        if not isinstance(runs, list):
+            raise ForgeAPIError(f"check-runs-respons mist de lijst check_runs voor {sha[:12]}")
+        total = parsed.get("total_count")
+        collected.extend(runs)
+        if len(runs) < _CHECK_RUNS_PER_PAGE:
+            break
+    else:
+        raise ForgeAPIError(
+            f"check-runs voor {sha[:12]}: meer dan {_CHECK_RUNS_MAX_PAGES} pagina's, lijst niet af"
+        )
+    if isinstance(total, bool) or not isinstance(total, int) or total > len(collected):
+        raise ForgeAPIError(
+            f"check-runs-respons is niet volledig voor {sha[:12]}: "
+            f"total_count={total!r}, ontvangen={len(collected)}"
+        )
+    return [run for run in collected if isinstance(run, dict) and run.get("name") == name]
 
 
 def patch_check_run(
