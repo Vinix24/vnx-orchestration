@@ -107,6 +107,18 @@ class TestFailClosed:
         monkeypatch.setattr(evidence, "verify_plan_gate_pass", boom)
         assert _verify(tmp_path) is pge_enf.PromotionGrant.ABSENT
 
+    def test_verifier_exception_is_logged_as_warning(self, tmp_path, monkeypatch, caplog):
+        def boom(*a, **k):
+            raise RuntimeError("ledger exploded")
+
+        monkeypatch.setattr(evidence, "verify_plan_gate_pass", boom)
+        with caplog.at_level("WARNING", logger=pge_enf.__name__):
+            assert _verify(tmp_path) is pge_enf.PromotionGrant.ABSENT
+        assert any(
+            r.levelname == "WARNING" and "RuntimeError" in r.getMessage() and "ledger exploded" in r.getMessage()
+            for r in caplog.records
+        )
+
     @pytest.mark.parametrize("state", [None, "", "verified ", "VERIFIED", "bogus"])
     def test_unknown_state_is_absent(self, tmp_path, monkeypatch, state):
         rec = {"project_id": "vnx-dev", "signature": "sig"}

@@ -25,6 +25,7 @@ gate-shaped result, but both share this one truth.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 from enum import Enum
@@ -367,5 +368,9 @@ def verify_promotion_grant(
 
         state, record = pge.verify_plan_gate_pass(repo_root, track_id, project_id, allowed_signers)
         return _classify_grant(state, record, project_id, allowed_signers is not None)
-    except Exception:  # vnx-silent-except: read-only verifier; any failure must read as no grant (ABSENT), never VERIFIED
+    except Exception as exc:  # broad on purpose: a read-only verifier whose every failure reads as ABSENT, never VERIFIED; logged below
+        logging.getLogger(__name__).warning(
+            "promotion grant verification failed for track=%s project=%s: %s: %s",
+            track_id, project_id, type(exc).__name__, exc,
+        )
         return PromotionGrant.ABSENT
