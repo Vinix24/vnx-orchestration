@@ -80,6 +80,7 @@ def _validate_provider(provider: str) -> None:
 
 CONTEXT_MANIFEST_LEDGER = "context_manifests.ndjson"
 _MANIFEST_SCHEMA = 1
+_MANIFEST_LAYOUT_MODES = ("shadow", "on")  # the modes that stamp; "on" reads as "off" until R6 (ADR-059 decision 4)
 
 
 def _manifest_stamp(status: str, reason: Optional[str] = None, sha256: Optional[str] = None) -> Dict[str, Any]:
@@ -184,24 +185,53 @@ def _context_manifest_stamp(
 ) -> Optional[Dict[str, Any]]:
     """The receipt's ``context_manifest`` reference, or ``None`` under ``VNX_AGENT_LAYOUT=off``.
 
+    A session capture ``ok``/``partial`` wins, else the record decides (:func:`_materialized_stamp`).
     Sidecar first: the hash goes on the receipt only after the line is durably
     in ``context_manifests.ndjson``. Never raises: the receipt emit must not fail
     because of the manifest.
     """
     try:
         import agent_layout
-        if not agent_layout.is_shadow():
+        if agent_layout.layout_mode() not in _MANIFEST_LAYOUT_MODES:
             return None
         import context_manifest
         manifest = context_manifest.capture(session_id, provider=provider)
         status = manifest.get("status")
         if status not in ("ok", "partial"):
-            return _manifest_stamp(str(status), manifest.get("reason"))
+            session_stamp = _manifest_stamp(str(status), manifest.get("reason"))
+            return _materialized_stamp(dispatch_id, provider, session_id, state_dir, session_stamp)
         return _write_manifest_sidecar(dispatch_id, session_id or "", state_dir, manifest)
     except Exception as exc:  # the manifest never fails the receipt
         logger.warning("governance_emit: context manifest failed dispatch=%s: %s: %s",
                        dispatch_id, type(exc).__name__, exc)
         return _manifest_stamp("error", f"extract_failed:{type(exc).__name__}")
+
+
+def _materialized_stamp(dispatch_id: str, provider: str, session_id: Optional[str], state_dir: Path,
+                        session_stamp: Dict[str, Any]) -> Dict[str, Any]:
+    """The reference from this dispatch's materialisation record, when the session capture is not usable.
+
+    ``no_record`` keeps *session_stamp*: a dispatch without a record stamps what it stamps
+    today. A valid ``ok``/``partial`` record takes the same sidecar-first write with
+    ``source: materialized``; any other outcome is its non-``ok`` status and reason, no hash.
+    """
+    import agent_skill_evidence
+    try:
+        from project_scope import resolve_stamp_project_id
+        project_id: Optional[str] = resolve_stamp_project_id(db_path=Path(state_dir) / "t0_receipts.ndjson")
+    except Exception as exc:  # fail-closed: no project means project_mismatch, never ok
+        logger.warning("governance_emit: materialisation record project unresolved dispatch=%s: %s",
+                       dispatch_id, type(exc).__name__)
+        project_id = None
+    evidence = agent_skill_evidence.read_materialization(
+        state_dir, dispatch_id, provider, project_id=project_id, session_id=session_id)
+    manifest = evidence.get("manifest")
+    if manifest is None:
+        if evidence["reason"] == agent_skill_evidence.NO_RECORD:
+            return session_stamp
+        return _manifest_stamp(evidence["status"], evidence["reason"])
+    return _write_manifest_sidecar(dispatch_id, session_id or "", state_dir,
+                                   {"schema": _MANIFEST_SCHEMA, **manifest})
 
 
 def _write_manifest_sidecar(
