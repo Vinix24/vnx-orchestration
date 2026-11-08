@@ -368,9 +368,13 @@ def _default_stack() -> Sequence[str]:
     scripts_dir = str(Path(__file__).resolve().parent.parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
+    from dispatch_spec import ReviewGateConfigError
     from review_seats import resolve_review_seats
 
-    return list(resolve_review_seats().seats)
+    try:
+        return list(resolve_review_seats().seats)
+    except ReviewGateConfigError as exc:
+        raise VerificationError(f"review stack cannot be resolved: {exc}") from exc
 
 
 def _recorded_seats(record: Any) -> List[str]:
