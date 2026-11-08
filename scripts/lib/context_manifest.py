@@ -209,9 +209,9 @@ def _clean(value: Any) -> Optional[str]:
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
 _INTERPRETER = re.compile(r"^(python[0-9.]*|node|ruby|perl)$")
-_INTERPRETER_INLINE = frozenset({"-c", "-e", "-m"})
 _SHELL_META = frozenset(";|&$<>`")
 _INLINE_FLAG = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
+_PLAIN_SHELL_FLAG = re.compile(r"^-[A-Za-np-zA-NP-Z]+$")
 
 
 def _single_path(token: str) -> Optional[str]:
@@ -264,16 +264,27 @@ def _leading_flags(tokens: Sequence[str], start: int) -> int:
     return index
 
 
+def _plain_shell_flags(flags: Sequence[str]) -> bool:
+    """True when every flag is a short cluster that takes no argument (``-e``, ``-eu``, ``-l``).
+
+    One ``-`` followed by letters only, without ``o`` or ``O``: those, ``+o`` and any
+    ``--long`` option take an argument, so the next operand would not be the script.
+    """
+    return all(_PLAIN_SHELL_FLAG.match(flag) for flag in flags)
+
+
 def _script_path(tokens: Sequence[str], exe: int, shell: bool) -> Optional[str]:
-    """Path of the script a shell or interpreter runs; inline code (``-c``, ``-e``, ``-m``) is ``None`` or its first token."""
+    """Path of the script a shell or interpreter runs; inline code and option-taking flags give ``None``."""
+    if not shell:
+        follow = exe + 1
+        return _single_path(tokens[follow]) if follow < len(tokens) and not tokens[follow].startswith("-") else None
     end = _leading_flags(tokens, exe + 1)
     flags = tokens[exe + 1:end]
-    if shell:
-        for offset, flag in enumerate(flags):
-            if _INLINE_FLAG.match(flag):
-                follow = exe + 2 + offset
-                return _inline_script_path(tokens[follow]) if follow < len(tokens) else None
-    elif any(flag in _INTERPRETER_INLINE for flag in flags):
+    for offset, flag in enumerate(flags):
+        if _INLINE_FLAG.match(flag):
+            follow = exe + 2 + offset
+            return _inline_script_path(tokens[follow]) if follow < len(tokens) else None
+    if not _plain_shell_flags(flags):
         return None
     return _single_path(tokens[end]) if end < len(tokens) else None
 
@@ -283,9 +294,14 @@ def _command_path(command: str) -> Optional[str]:
 
     Positions are read, never scanned: leading ``KEY=value`` assignments and
     ``env`` (with its flags and assignments) are skipped, the next token is the
-    executable. For a shell or an interpreter the first non-flag operand is the
-    script instead; a shell ``-c`` yields the first token of its inline script,
-    and an interpreter ``-c``/``-e``/``-m`` yields ``None``. The result must be
+    executable. An interpreter (``python*``, ``node``, ``ruby``, ``perl``) gives
+    the script only for ``interpreter /abs/script ...``, the token right after
+    it; any flag in between (``-c``, ``-e``, ``-m``, ``-X dev``, ``-I dir``,
+    ``--require x``) gives ``None``. A shell gives the first non-flag operand
+    when every flag before it is a short cluster without an argument (letters
+    only, no ``o``/``O``: ``-e``, ``-eu``, ``-f``); a ``--long`` option, ``+o``,
+    ``-o`` or ``-O`` gives ``None``. A shell ``-c`` yields the first token of
+    its inline script. The result must be
     one bare absolute or ``~/`` path. No token after that position is read, so
     an argument never becomes the path.
     """
