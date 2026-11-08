@@ -2,8 +2,8 @@
 """vnx init — scaffold a new VNX project directory structure.
 
 PR-PIP-2 (clean init footprint): the in-project tree is now tracked config
-only — ``.vnx/`` (governance profiles + config.yml), a ``.vnx-project-id``
-marker, and an optional ``agents/`` scaffold. The runtime state tree
+only — ``.vnx/config.yml``, a ``.vnx-project-id`` marker, and an optional
+``agents/`` scaffold. The runtime state tree
 (dispatches, receipts, logs, state) is created under the *resolved* state root
 (a user-data-dir for pip installs), never inside the project map. This keeps
 the committed footprint tiny (< 10 KB) and stops a pip-installed VNX from
@@ -34,38 +34,16 @@ from vnx_cli import _engine, __version__
 # keeps using its own engine.
 _VERSION_PIN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
-GOVERNANCE_PROFILES_YAML = """\
-# VNX Governance Profiles
-# Each profile defines approval requirements and gate thresholds.
-
-profiles:
-  default:
-    description: Standard governance — human gate at every dispatch
-    approval_required: true
-    gates:
-      codex: true
-      review: true
-      ci: true
-
-  lightweight:
-    description: Reduced gates for rapid prototyping
-    approval_required: true
-    gates:
-      codex: false
-      review: true
-      ci: true
-
-  strict:
-    description: Regulated environments — all gates mandatory
-    approval_required: true
-    gates:
-      codex: true
-      review: true
-      ci: true
-    extra:
-      require_two_reviewers: true
-      audit_trail: true
-"""
+# P8 (gate-profiel-per-project): ``vnx init`` writes no profile file. The
+# template it used to write carried ``gates:``/``extra:`` keys, while the only
+# loader (scripts/lib/governance_profiles.py) reads ``required_gates:`` and
+# ``scopes:`` — so the file told an operator that a setting existed where it
+# did not. The profile is selected with ``VNX_GOVERNANCE_PROFILE``; this line is
+# the whole delivery, and any file an operator already keeps is left alone.
+GOVERNANCE_PROFILE_GUIDANCE = (
+    "  governance profile: set VNX_GOVERNANCE_PROFILE to light, standard or heavy"
+    " (standard = today's behaviour; the floor is documented in ADR-008)"
+)
 
 AGENTS_README = """\
 # agents/
@@ -1027,12 +1005,10 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     else:
         print(f"  exists  {_engine.PROJECT_FILE_NAME} (project_id: {project_id})")
 
-    profiles_path = vnx_dir / "governance_profiles.yaml"
-    if not profiles_path.exists():
-        _atomic_write(profiles_path, GOVERNANCE_PROFILES_YAML, project_dir)
-        print(f"  created {profiles_path.relative_to(project_dir)}")
-    else:
-        print(f"  exists  {profiles_path.relative_to(project_dir)}")
+    # P8: no profile file is written and an existing one is never deleted or
+    # rewritten — the profile is chosen with VNX_GOVERNANCE_PROFILE instead.
+    # A config file nothing reads is a lie about a setting that does not exist.
+    print(GOVERNANCE_PROFILE_GUIDANCE)
 
     # --- resolved runtime root (OUTSIDE the project map for fresh installs)
     data_root = _engine.resolve_data_root(project_dir)
@@ -1183,10 +1159,9 @@ def _vnx_init_scaffold(project_dir, template, force, set_version, project_id) ->
     print("VNX project initialised.")
     print()
     print("Next steps:")
-    print("  1. Review .vnx/governance_profiles.yaml and adjust gates")
-    print("  2. Edit .claude/terminals/T0/CLAUDE.md for project-specific T0 instructions")
-    print("  3. Run `vnx doctor` to validate your setup")
-    print(f"  4. `vnx track new <id> --project-id {project_id} --title '...' --goal '...'`")
-    print(f"  5. Provision a signing key — see docs/governance/KEY_PROVISIONING.md")
+    print("  1. Edit .claude/terminals/T0/CLAUDE.md for project-specific T0 instructions")
+    print("  2. Run `vnx doctor` to validate your setup")
+    print(f"  3. `vnx track new <id> --project-id {project_id} --title '...' --goal '...'`")
+    print("  4. Provision a signing key — see docs/governance/KEY_PROVISIONING.md")
 
     return 0

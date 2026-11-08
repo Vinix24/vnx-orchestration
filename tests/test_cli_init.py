@@ -2,7 +2,7 @@
 """Tests for `vnx init` CLI command (A-11 PR-1 scaffold).
 
 Validates the .claude/ skeleton, local .vnx-data/ layout, .vnx-version pin,
-root CLAUDE.md, FEATURE_PLAN.md, and safety/idempotency semantics.
+root CLAUDE.md, and safety/idempotency semantics.
 """
 
 import argparse
@@ -272,13 +272,13 @@ class TestVnxInitSymlinkHardening:
         assert "symlink" in err
         assert "agents" in err
 
-    def test_broken_symlink_at_profiles_path_refused(self, tmp_path, tmp_path_factory):
+    def test_broken_symlink_at_config_path_refused(self, tmp_path, tmp_path_factory):
         # A pre-planted (broken) symlink AT a scaffold target must be refused,
         # never followed — the escape target must not be created.
-        outside_target = tmp_path_factory.mktemp("outside") / "profiles.yaml"
+        outside_target = tmp_path_factory.mktemp("outside") / "config.yml"
         vnx_dir = tmp_path / ".vnx"
         vnx_dir.mkdir()
-        (vnx_dir / "governance_profiles.yaml").symlink_to(outside_target)
+        (vnx_dir / "config.yml").symlink_to(outside_target)
 
         rc = vnx_init(_args(tmp_path))
         assert rc != 0
@@ -308,8 +308,9 @@ class TestVnxInitSymlinkHardening:
         assert not outside.exists()
 
     def test_raw_callsites_routed_through_atomic_write(self, tmp_path, monkeypatch):
-        # The three previously-raw writes (profiles / agents README /
+        # The two remaining raw scaffold writes (agents README /
         # agents CLAUDE.md.template) must go through the atomic helper.
+        # .vnx/config.yml is covered by the refusal test above.
         from vnx_cli.commands import init_cmd
 
         written: list[Path] = []
@@ -324,15 +325,12 @@ class TestVnxInitSymlinkHardening:
         rc = vnx_init(_args(tmp_path))
         assert rc == 0
 
-        profiles = tmp_path / ".vnx" / "governance_profiles.yaml"
         agents_readme = tmp_path / "agents" / "README.md"
         agents_claude = tmp_path / "agents" / "CLAUDE.md.template"
-        assert profiles in written
         assert agents_readme in written
         assert agents_claude in written
 
         # Content is unchanged from the scaffold constants.
-        assert profiles.read_text() == init_cmd.GOVERNANCE_PROFILES_YAML
         assert agents_readme.read_text() == init_cmd.AGENTS_README
         assert agents_claude.read_text() == init_cmd.CLAUDE_MD_TEMPLATE
 
@@ -342,7 +340,6 @@ class TestVnxInitSymlinkHardening:
         assert rc == 0
         expected_files = [
             ".vnx-project-id",
-            ".vnx/governance_profiles.yaml",
             ".vnx/config.yml",
             ".vnx-version",
             "agents/README.md",
@@ -350,7 +347,6 @@ class TestVnxInitSymlinkHardening:
             ".claude/terminals/T0/CLAUDE.md",
             ".claude/settings.json",
             "CLAUDE.md",
-            "FEATURE_PLAN.md",
             ".gitignore",
             "CODEOWNERS",
             ".vnx-attest/allowed_signers",
@@ -359,6 +355,9 @@ class TestVnxInitSymlinkHardening:
         ]
         for rel in expected_files:
             assert (tmp_path / rel).is_file(), f"missing scaffold file: {rel}"
+        # P8: no inert governance profile file, and no plan file (ADR-047).
+        assert not (tmp_path / ".vnx" / "governance_profiles.yaml").exists()
+        assert not (tmp_path / "FEATURE_PLAN.md").exists()
 
 
 class TestVnxInitAttestDelivery:
