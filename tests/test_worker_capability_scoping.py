@@ -289,6 +289,30 @@ class TestDeliverSpawnArgv:
         assert "unknown_role" in result.failure_reason
         mock_popen.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "yaml_text,slug",
+        [("", "source-empty"), ("profiles: [unclosed", "source-broken-yaml")],
+    )
+    def test_refused_policy_source_refuses_delivery_with_its_reason(
+        self, tmp_path, monkeypatch, yaml_text, slug,
+    ):
+        """permissions P2 r2: a refused permission source refuses the dispatch
+        with the named reason, never a spawn on a fallback or wider scope."""
+        (tmp_path / ".vnx").mkdir()
+        (tmp_path / ".vnx" / "worker_permissions.yaml").write_text(yaml_text)
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        monkeypatch.setenv("VNX_WORKER_SCOPED", "1")
+        adapter = SubprocessAdapter()
+        with patch("subprocess.Popen") as mock_popen:
+            result = adapter.deliver(
+                "T1", "dispatch-cap-refused-source", instruction="do work",
+                role="backend-developer",
+            )
+        assert result.success is False
+        assert result.failure_reason is not None
+        assert slug in result.failure_reason
+        mock_popen.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # 6. feature flag helper
