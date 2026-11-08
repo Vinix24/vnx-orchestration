@@ -221,8 +221,8 @@ def _config():
 
 
 def _review_chain_consequence(project: Optional[str], config: Any) -> Optional[str]:
-    from gate_request_handler import _parse_review_gate_takeover_chain  # noqa: PLC0415
-    chain = _parse_review_gate_takeover_chain(config.get("VNX_REVIEW_GATE_TAKEOVER_CHAIN") or "")
+    from gate_request_handler import _parse_review_gate_takeover_chain, review_gate_takeover_chain_raw  # noqa: PLC0415
+    chain = _parse_review_gate_takeover_chain(review_gate_takeover_chain_raw()[0])
     after: List[str] = []
     gate = "codex_gate"
     while gate in chain and chain[gate] not in after:
@@ -286,6 +286,27 @@ def consequences(project: Optional[str]) -> List[str]:
     return lines
 
 
+def review_settings(project: Optional[str]) -> Dict[str, Any]:
+    """The effective round cap and takeover chain with the source each came from."""
+    from gate_request_handler import review_gate_takeover_chain_raw
+    import gate_profile
+    import review_rounds
+    try:
+        profile = gate_profile.resolve(project).profile
+        chain, chain_source = review_gate_takeover_chain_raw()
+        cap = review_rounds.round_cap(project_id=project)
+        cap_source = ("profile" if gate_profile.value("round_cap", project) is not None
+                      else _config_source("VNX_REVIEW_ROUND_CAP", project))
+    except Exception as exc:  # an unreadable profile or cap must show up here, not abort the listing
+        return {"error": str(exc)}
+    return {"profile": profile, "round_cap": cap, "round_cap_source": cap_source,
+            "takeover_chain": chain, "takeover_chain_source": chain_source}
+
+
+def _config_source(key: str, project: Optional[str]) -> str:
+    return _config().resolve_with_source(key, project)[1]
+
+
 def build_report(project: Optional[str]) -> Dict[str, Any]:
     state = ps.load_state()
     return {
@@ -300,6 +321,7 @@ def build_report(project: Optional[str]) -> Dict[str, Any]:
         "enforcement": enforcement_status(),
         "projects": project_rows(state),
         "overrides": override_rows(),
+        "review": review_settings(project),
         "consequences": consequences(project),
     }
 
@@ -394,9 +416,19 @@ def _render_overrides(report: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _render_review(report: Dict[str, Any]) -> List[str]:
+    review = report["review"]
+    if "error" in review:
+        return ["Review settings:", f"  could not read: {review['error']}"]
+    return ["Review settings:",
+            f"  gate profile  {review['profile']}",
+            f"  round cap     {review['round_cap']} ({review['round_cap_source']})",
+            f"  takeover chain {review['takeover_chain'] or '-'} ({review['takeover_chain_source']})"]
+
+
 def render_text(report: Dict[str, Any]) -> str:
     sections = (_render_header(report), _render_families(report), _render_enforcement(report),
-                _render_projects(report), _render_overrides(report),
+                _render_projects(report), _render_overrides(report), _render_review(report),
                 _consequence_lines(report["consequences"]))
     return "\n\n".join("\n".join(section) for section in sections)
 
