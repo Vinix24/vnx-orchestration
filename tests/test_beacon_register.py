@@ -350,6 +350,12 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     by ``ledger_health.write_count_beacon`` on the same daily run that writes
     the health surface. Periodic (86400), so a store whose reconciliation job
     stopped shows up as absent, not as a quiet zero.
+
+    deur D7a adds the 14th: ``door_audit``, written by
+    ``backfill_pr_merged_receipts.py --report-only`` on its periodic run
+    (``expected_interval_seconds=2 * 86400``, every two days). Periodic, so a
+    door audit that stopped running shows up as absent rather than as a clean
+    door -- the same fail-closed reading it demands of the receipts it audits.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
@@ -370,4 +376,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "cost-ledger",
         "fleet_pin_audit",
         "lifecycle_count",
+        "door_audit",
     }
