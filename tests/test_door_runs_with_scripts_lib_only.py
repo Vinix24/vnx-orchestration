@@ -301,7 +301,7 @@ class TestOneBillingTable:
             elif isinstance(node, ast.ImportFrom):
                 assert node.level == 0, "a relative import ties the table to a package layout"
                 imported.add((node.module or "").split(".")[0])
-        non_stdlib = sorted(imported - set(sys.stdlib_module_names) - {"__future__"})
+        non_stdlib = sorted(imported - set(sys.stdlib_module_names) - {"__future__", "gate_lane_rows"})
         assert non_stdlib == [], (
             f"gate_billing_table imports {non_stdlib}: the door reads this table with only "
             "scripts/lib on sys.path, so it must stay importable without any fabric module"

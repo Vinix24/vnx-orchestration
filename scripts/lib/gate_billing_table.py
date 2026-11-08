@@ -17,7 +17,8 @@ It lives in its own module, apart from ``gate_recorder`` and its registry
 ``governance_receipts`` -> ``append_receipt``, which lives in ``scripts/``. Read
 through ``gate_recorder``, the table was unreachable from the door, and every
 spec that named no gate was refused as ``gate-config-unreadable`` (OI-2022).
-This module therefore imports nothing outside the standard library.
+This module therefore imports nothing outside the standard library and
+``gate_lane_rows``, which is stdlib-only itself.
 ``gate_recorder`` imports the table from here, so the two cannot hold different
 copies; ``tests/test_review_stack_subscription_first.py`` pins that every gate
 in ``GATE_PROVIDERS`` is classified here and nothing else is.
@@ -32,23 +33,48 @@ from __future__ import annotations
 
 from typing import Dict, Iterable, Optional, Tuple
 
-GATE_BILLING_SUBSCRIPTION = "subscription"
-GATE_BILLING_METERED = "provider_metered"
-GATE_BILLING_NONE = "none"
+import gate_lane_rows  # stdlib-only; the harness-lane gates' billing is read from its rows
 
-GATE_BILLING: Dict[str, str] = {
+GATE_BILLING_SUBSCRIPTION = gate_lane_rows.BILLING_SUBSCRIPTION
+GATE_BILLING_METERED = gate_lane_rows.BILLING_METERED
+GATE_BILLING_NONE = gate_lane_rows.BILLING_NONE
+
+# Gates that have no harness-lane row: they run through another provider kind
+# (a path binary, a GitHub API read, a shell check), so their billing is written
+# here. A harness-lane gate is NOT written here: its billing is the ``billing``
+# column of its row in ``gate_lane_rows.GATE_LANE_ROWS``.
+_GATES_WITHOUT_LANE_ROW: Dict[str, str] = {
     "codex_gate": GATE_BILLING_SUBSCRIPTION,   # codex CLI, ChatGPT subscription
-    "kimi_gate": GATE_BILLING_SUBSCRIPTION,    # kimi CLI OAuth (kimi-via-cli-only)
-    "claude_gate": GATE_BILLING_SUBSCRIPTION,  # claude CLI on the operator's subscription, never an API key
     # gemini CLI on OAuth. VNX_GEMINI_ROUTING=vertex is an explicit opt-in that
     # bills the API; the default routing is oauth, so the default is a subscription.
     "gemini_review": GATE_BILLING_SUBSCRIPTION,
-    "glm_gate": GATE_BILLING_METERED,          # OpenRouter credit (zai-via-openrouter-only)
-    "deepseek_gate": GATE_BILLING_METERED,     # DeepSeek API credit
     "claude_github_optional": GATE_BILLING_NONE,
     "ci_gate": GATE_BILLING_NONE,
     "wiring_gate": GATE_BILLING_NONE,
 }
+
+
+def billing_from_rows(
+    rows: Iterable[gate_lane_rows.GateLaneRow],
+    explicit: Dict[str, str] = _GATES_WITHOUT_LANE_ROW,
+) -> Dict[str, str]:
+    """gate -> billing class: the explicit entries plus one entry per lane row.
+
+    A gate that is both written out and a lane row is refused: two places for
+    one answer is the drift this derivation exists to remove.
+    """
+    table = dict(explicit)
+    for row in rows:
+        if row.gate in table:
+            raise ValueError(
+                f"{row.gate} has a gate lane row and an explicit billing entry; "
+                f"drop the explicit entry, the row's billing column is the answer"
+            )
+        table[row.gate] = row.billing
+    return table
+
+
+GATE_BILLING: Dict[str, str] = billing_from_rows(gate_lane_rows.GATE_LANE_ROWS)
 
 
 class UnknownGateProvider(ValueError):

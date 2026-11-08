@@ -14,7 +14,9 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Dict, Iterable, Optional
+
+import gate_lane_rows  # stdlib-only; the Gate members of the harness-lane gates come from its rows
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -35,35 +37,56 @@ class Provider(str, Enum):
     LOCAL_GEMMA       = "local-gemma"
 
 
-class Gate(str, Enum):
-    """CLOSED set of the review-gate names the closure verifier reasons about (OI-845).
+# Gates that are enum members without a harness-lane row. They run through
+# another provider kind, so no row in ``gate_lane_rows.GATE_LANE_ROWS`` names them.
+# Order is the member order of ``Gate``; the lane-row gates follow.
+_NON_LANE_GATES = (
+    ("CODEX_GATE", "codex_gate"),
+    ("CLAUDE_GITHUB_OPTIONAL", "claude_github_optional"),
+    ("CI_GATE", "ci_gate"),
+    ("WIRING_GATE", "wiring_gate"),
+)
+
+
+def gate_members(rows: Iterable[gate_lane_rows.GateLaneRow]) -> Dict[str, str]:
+    """Member name -> value of ``Gate``: the non-lane gates, then one per lane row.
+
+    The member name is the upper-cased gate (``kimi_gate`` -> ``KIMI_GATE``).
+    A row whose gate is already a non-lane member is refused.
+    """
+    members = dict(_NON_LANE_GATES)
+    for row in rows:
+        name = row.gate.upper()
+        if name in members:
+            raise ValueError(
+                f"gate lane row {row.gate!r} collides with the existing Gate member {name}"
+            )
+        members[name] = row.gate
+    return members
+
+
+# Built with the functional API so a gate lane row is a member without a second
+# hand-written line. Attribute access (``Gate.KIMI_GATE``), ``Gate("kimi_gate")``
+# and ``Gate("")`` failing like any unknown value behave as the class form did.
+Gate = Enum("Gate", gate_members(gate_lane_rows.GATE_LANE_ROWS), type=str, module=__name__)
+Gate.__doc__ = """CLOSED set of the review-gate names the closure verifier reasons about (OI-845).
 
     The full set of LEGAL gate names is ``REGISTERED_GATE_NAMES`` below: this
     enum plus ``GATES_OUTSIDE_ENUM``. Read that, not this enum, to decide
     whether a name may be declared.
 
-    Mirrors the gate names ``gate_recorder.py``/``gate_request_handler.py`` already
-    dispatch on; this is the canonical enum they lacked. An empty string means
-    "no gate assigned" and is handled separately by callers — it is not a member
-    here so ``Gate("")`` fails the same as any other unknown value.
+    Members: the gates without a harness-lane row (``_NON_LANE_GATES``) and one
+    member per row of ``gate_lane_rows.GATE_LANE_ROWS`` (review-lane P2b), so a new
+    row is a member with no second line here. An empty string means "no gate
+    assigned" and is handled separately by callers: it is not a member, so
+    ``Gate("")`` fails the same as any other unknown value.
 
-    KIMI_GATE and GLM_GATE (dlv45), DEEPSEEK_GATE (OI-1984) and CLAUDE_GATE (R7,
-    2026-10-22) extend the closed set with the same discipline as every other
-    member: each has a
-    ``gate_request_handler`` dispatch branch and a
+    Every member needs a ``gate_request_handler`` dispatch branch and a
     ``closure_verifier._GATE_HANDLERS`` entry, pinned by
     ``test_closure_verifier_gate_enum_drift.py``. Extending the enum without
-    both is what OI-1094 exists to catch — see that test module before adding
+    both is what OI-1094 exists to catch: see that test module before adding
     another member.
     """
-    CODEX_GATE              = "codex_gate"
-    CLAUDE_GITHUB_OPTIONAL  = "claude_github_optional"
-    CI_GATE                 = "ci_gate"
-    WIRING_GATE             = "wiring_gate"
-    KIMI_GATE               = "kimi_gate"
-    GLM_GATE                = "glm_gate"
-    DEEPSEEK_GATE           = "deepseek_gate"
-    CLAUDE_GATE             = "claude_gate"
 
 
 # Review gates that are registered and runnable but deliberately NOT members of
