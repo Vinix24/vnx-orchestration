@@ -240,6 +240,18 @@ def test_probe_dir_has_no_double_slash_when_tmpdir_ends_in_a_slash(tmp_path):
     assert "//" not in proc.stdout, proc.stdout
 
 
+def test_tmp_base_returns_a_physical_path_when_tmpdir_is_a_symlink(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    proc = _sh(tmp_path, 'printf "%s" "$(tmp_base)"', tmpdir=str(link) + "/")
+    assert proc.stdout == os.path.realpath(str(real)), proc.stdout
+    proc = _sh(tmp_path, 'PROBE_DIR=""; ensure_probe; printf "%s" "$PROBE_DIR"', tmpdir=str(link))
+    assert proc.stdout.startswith(os.path.realpath(str(real)) + "/probe-agent-layout."), proc.stdout
+    assert str(link) not in proc.stdout
+
+
 def test_successful_write_without_is_error_is_written(tmp_path):
     for result in ({"content": "File created"}, {"is_error": None, "content": "File created"}, {"is_error": False, "content": "File created"}):
         assert _facts(tmp_path, result) == "written", result

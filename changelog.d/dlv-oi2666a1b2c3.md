@@ -1,0 +1,1 @@
+- The write-scope hook compares the write target and the cwd on their real paths, so a Write through a symlinked parent (macOS `/var` to `/private/var`) is no longer refused falsely. A directory symlink inside the worktree that points outside stays refused. The agent-layout probe builds its tree on the physical `$TMPDIR` path (OI-2666).

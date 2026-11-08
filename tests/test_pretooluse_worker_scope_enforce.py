@@ -336,6 +336,102 @@ class TestEvaluateUnit(HookTestCase):
         self.assertEqual(hook._relative_to_cwd("/wt/a.py", ""), "/wt/a.py")
 
 
+class TestSymlinkedPaths(HookTestCase):
+    """OI-2666: cwd and target are compared on their real paths.
+
+    ROLE (quality-engineer) file_write_scope: tests/**, scripts/check_*.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.real = (self.tmp / "real").resolve()
+        (self.real / "tests").mkdir(parents=True)
+        (self.real / "scripts").mkdir()
+        self.link = self.tmp / "link"
+        self.link.symlink_to(self.real)
+
+    def _decide(self, target: str, cwd: str, dispatch_paths=None):
+        payload = json.loads(make_payload("Write", {"file_path": target}, cwd=cwd))
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": ROLE,
+            "PROJECT_ROOT": "",
+            "VNX_PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        if dispatch_paths is not None:
+            env["VNX_DISPATCH_PATHS"] = json.dumps(dispatch_paths)
+        with patch.dict(os.environ, env, clear=False):
+            if dispatch_paths is None:
+                os.environ.pop("VNX_DISPATCH_PATHS", None)
+            return hook.evaluate(payload)
+
+    def test_symlinked_target_with_real_cwd_in_scope_allowed(self):
+        target = str(self.link / "tests" / "test_x.py")
+        self.assertEqual(self._decide(target, str(self.real)), ("allow", None))
+
+    def test_symlinked_target_in_scope_allowed_under_dispatch_paths(self):
+        target = str(self.link / "tests" / "test_x.py")
+        self.assertEqual(
+            self._decide(target, str(self.real), ["tests/"]), ("allow", None)
+        )
+
+    def test_symlinked_target_outside_scope_still_blocked(self):
+        target = str(self.link / "docs" / "x.md")
+        (self.real / "docs").mkdir()
+        decision, reason = self._decide(target, str(self.real))
+        self.assertEqual(decision, "block")
+        self.assertIn("docs/x.md", reason)
+        decision, _ = self._decide(
+            str(self.link / "scripts" / "x.py"), str(self.real), ["tests/"]
+        )
+        self.assertEqual(decision, "block")
+
+    def test_directory_symlink_pointing_outside_is_blocked(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.real / "tests").rmdir()
+        (self.real / "tests").symlink_to(outside)
+        decision, reason = self._decide(
+            str(self.real / "tests" / "test_x.py"), str(self.real)
+        )
+        self.assertEqual(decision, "block")
+        self.assertIn("outside", reason)
+        decision, _ = self._decide(
+            str(self.link / "tests" / "test_x.py"), str(self.link)
+        )
+        self.assertEqual(decision, "block")
+
+    def test_target_outside_cwd_keeps_the_existing_reason(self):
+        decision, reason = self._decide(str(self.tmp / "elsewhere.py"), str(self.real))
+        self.assertEqual(decision, "block")
+        self.assertIn(
+            f"worker-scope: write target '{self.tmp / 'elsewhere.py'}' is outside "
+            f"file_write_scope for role '{ROLE}'",
+            reason,
+        )
+
+    def test_final_component_symlink_stays_visible(self):
+        """A symlink as the last component is not resolved: the name is what the scope sees."""
+        (self.real / "scripts" / "evil.py").symlink_to(self.real / "tests")
+        rel = hook._relative_to_cwd(
+            str(self.link / "scripts" / "evil.py"), str(self.real)
+        )
+        self.assertEqual(rel, "scripts/evil.py")
+
+    def test_relative_to_cwd_resolves_both_sides(self):
+        self.assertEqual(
+            hook._relative_to_cwd(str(self.link / "tests" / "a.py"), str(self.real)),
+            "tests/a.py",
+        )
+        self.assertEqual(
+            hook._relative_to_cwd(str(self.real / "tests" / "a.py"), str(self.link)),
+            "tests/a.py",
+        )
+        outside = str(self.tmp / "nope" / "a.py")
+        self.assertEqual(hook._relative_to_cwd(outside, str(self.real)), outside)
+
+
 class TestDefaultEnforcement(HookTestCase):
     """15-08 flip REVERTED: enforcement is OFF by default — no env flag means a
     pure no-op. A truthy VNX_ENFORCE_WORKER_PERMISSIONS opts back in and
