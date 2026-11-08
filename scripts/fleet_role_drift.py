@@ -268,11 +268,8 @@ def _measure_startup(project_root: Path, t0_dir: Path) -> Dict[str, Any]:
 
 
 def _playbook_file_states(t0_dir: Path, current: Any) -> Dict[str, str]:
-    """Pointer state per provider file that EXISTS (ADR-058 decision 3).
-
-    A provider file that is not there is the gitignored-artefact coverage gap the
-    content axis already warns about; it is not judged here, a stale or missing
-    pointer in a file that exists is."""
+    """Pointer state per provider file that EXISTS. A file that is not there is the
+    gitignored-artefact coverage gap the content axis already warns about."""
     states: Dict[str, str] = {}
     for name in PROVIDER_FILES:
         text = _read(t0_dir / name)
@@ -291,10 +288,8 @@ def _worst_playbook_status(states: Dict[str, str], current: Any) -> str:
 
 
 def _measure_playbook(project_root: Path, t0_dir: Path) -> Dict[str, Any]:
-    """Axis 4: is the T0 playbook pointer present and fresh, and was it ever LOADED?
-
-    Present is not loaded (ADR-058 decision 6): `loading` is a value per provider,
-    `unverified` unless a valid record in playbook_loading.ndjson says otherwise."""
+    """Axis 4 (ADR-058): is the playbook pointer fresh, and was it LOADED? Present is
+    not loaded: `loading` is `unverified` unless a valid evidence record says otherwise."""
     current = t0_playbook.resolve(project_root)
     states = _playbook_file_states(t0_dir, current)
     status = _worst_playbook_status(states, current)

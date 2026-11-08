@@ -6,8 +6,7 @@ provider really read the playbook. A pointer block says the playbook is *present
 only a valid record here may say it was *loaded*. Every doubt is `unverified`.
 
 A record counts only for its own provider, and only when project_id, source_id,
-path and sha256 all equal the measured project and today's resolution. Nothing in
-this module writes the file: its producer is the follow-up track F1.
+path and sha256 equal the measured project and today's resolution. Read-only.
 """
 
 from __future__ import annotations
@@ -33,9 +32,7 @@ _SCHEMA = 1
 
 
 def resolve_project_state(project_root) -> "tuple[Optional[str], Optional[Path]]":
-    """(project_id, state dir) of one project through the existing path helpers.
-
-    Either is None when it cannot be resolved; the caller then reads `unverified`."""
+    """(project_id, state dir) via the path helpers; None when unresolvable (reads unverified)."""
     try:
         import vnx_paths
 
@@ -49,17 +46,14 @@ def resolve_project_state(project_root) -> "tuple[Optional[str], Optional[Path]]
 
 
 def _parse_observed_at(value: Any) -> bool:
-    if not isinstance(value, str) or not value:
-        return False
     try:
         datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, AttributeError):  # vnx-silent-except: unparseable timestamp makes the record invalid
         return False
-    return True
+    return bool(value)
 
 
 def _is_valid_shape(rec: Any) -> bool:
-    """A record is usable only with the full schema; anything else is not evidence."""
     if not isinstance(rec, dict) or rec.get("schema") != _SCHEMA:
         return False
     if rec.get("provider") not in PROVIDERS:

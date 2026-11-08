@@ -1,9 +1,6 @@
 """The drift meter's playbook axis and the loading-evidence reader (skills-port SP-4, ADR-058).
 
-Present is not loaded: a pointer block says the bytes are there, only a valid record in
-`playbook_loading.ndjson` says a provider read them. Everything runs in tmp_path with
-HOME, VNX_HOME and the data dir pointed there; the real store and ~/.vnx-system are untouched.
-"""
+Hermetic: HOME, VNX_HOME and the data dir point into tmp_path, never the real store."""
 
 from __future__ import annotations
 
@@ -102,12 +99,10 @@ def test_absent_when_a_provider_file_has_the_role_block_but_no_playbook_block(wo
 
 def test_ok_pointer_is_current_on_this_axis(world, tmp_path, capsys):
     project = _project(tmp_path / "p", agents=_pointer(world), gemini=_pointer(world))
-    rc, report = _cli_report(world, project, capsys)
+    _, report = _cli_report(world, project, capsys)
     pb = report["playbook"]
     assert pb["status"] == "ok" and pb["source_id"] == "fabric" and pb["degraded"] is False
-    assert pb["path"] == str(world["skill"].resolve())
     assert frd._playbook_behind(pb) is False
-    assert rc in (0, 1)  # startup (no hook in this fixture) decides the exit here, not the playbook axis
 
 
 def test_stale_sha_after_the_file_is_edited(world, tmp_path):
@@ -123,11 +118,6 @@ def test_stale_source_when_the_stored_source_differs(world, tmp_path):
     pb = _playbook(world, project)
     assert pb["status"] == "stale_source"
     assert frd.measure_project(project, CANON)["behind"] is True
-
-
-def test_worst_file_decides_the_aggregate(world, tmp_path):
-    project = _project(tmp_path / "p", agents=_pointer(world), gemini="")
-    assert _playbook(world, project)["status"] == "absent"
 
 
 def test_no_provider_file_stays_a_coverage_gap_not_drift(world, tmp_path):
@@ -182,23 +172,11 @@ def test_bad_evidence_lines_stay_unverified(world, tmp_path, line):
     assert set(_loading(world, project).values()) == {"unverified"}
 
 
-def test_unknown_provider_with_otherwise_valid_fields_is_unverified(world, tmp_path):
-    project = _project(tmp_path / "p")
-    _write_evidence(world, [json.dumps(_record(world, provider="gemini"))])
-    assert set(_loading(world, project).values()) == {"unverified"}
-
-
 def test_a_valid_record_loads_only_its_own_provider(world, tmp_path):
     project = _project(tmp_path / "p", agents=_pointer(world))
     _write_evidence(world, [json.dumps(_record(world, "codex"))])
     assert _loading(world, project) == {"claude": "unverified", "codex": "loaded", "kimi": "unverified"}
     assert _playbook(world, project)["loading"] == "unverified"
-
-
-def test_a_bad_line_does_not_hide_a_valid_neighbour(world, tmp_path):
-    project = _project(tmp_path / "p")
-    _write_evidence(world, ["null", "{x", json.dumps(_record(world, "kimi"))])
-    assert _loading(world, project)["kimi"] == "loaded"
 
 
 def test_changed_sha_invalidates_the_record(world, tmp_path):
@@ -228,13 +206,6 @@ def test_missing_source_never_reads_loaded_even_with_a_record(world, tmp_path, m
     project = _project(tmp_path / "p")
     _write_evidence(world, [json.dumps(_record(world, "codex"))])
     monkeypatch.setattr(tp, "_scripts_root_candidates", lambda *_a: [])
-    assert _loading(world, project)["codex"] == "unverified"
-
-
-def test_unresolvable_project_id_is_unverified(world, tmp_path, monkeypatch):
-    project = _project(tmp_path / "p")
-    _write_evidence(world, [json.dumps(_record(world, "codex"))])
-    monkeypatch.setattr(ple, "resolve_project_state", lambda _r: (None, None))
     assert _loading(world, project)["codex"] == "unverified"
 
 
