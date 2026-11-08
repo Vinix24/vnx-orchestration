@@ -139,12 +139,19 @@ TYPED_PIECES=0
 # /goal never runs (03-11 13:17Z: 913 bytes stored as <pasted_content>, no /goal record). The
 # split is Python's (`t0_rotation_state.py split-line`): bash under the tmux server's locale
 # slices bytes and can cut a multibyte character in half. The pieces concatenate to the line.
+#
+# Each piece goes in after `--`: a piece that starts with a dash (`-leren en golf`, 08-11) is text,
+# and tmux would parse it as flags (`unknown flag -e`, rc 1). A failed send-keys is not silent:
+# the tmux stderr is logged, no further piece and no Enter are typed, and type_line returns 1.
 type_line() {
-  local target="$1" text="$2" piece count=0
+  local target="$1" text="$2" piece count=0 err
   while IFS= read -r piece; do
     count=$((count + 1))
     if [ "$count" -gt 1 ]; then sleep "$CHUNK_PAUSE"; fi
-    tmux send-keys -t "$target" -l "$piece"
+    if ! err="$(tmux send-keys -t "$target" -l -- "$piece" 2>&1)"; then
+      log "type-line: send-keys failed on piece $count: $err; nothing further typed, no Enter sent"
+      return 1
+    fi
   done < <(printf '%s' "$text" | "$PYTHON" "$STATE_PY" split-line)
   if [ "$count" -eq 0 ]; then
     log "type-line: the splitter produced no piece (empty line or a refused split); nothing typed"
@@ -238,15 +245,21 @@ goal_followup() {
   if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
     outcome="turn_timeout"
   else
-    type_line "$target" "$goal"
-    goal_pieces=$TYPED_PIECES
-    if ! wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT"; then
-      if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
-        outcome="turn_timeout"
-      elif ! transcript_says goal "$transcript"; then
-        retry_goal "$target" "$transcript" "$goal_file"
-        goal_pieces=$TYPED_PIECES
-        wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT" || outcome="unconfirmed"
+    if ! type_line "$target" "$goal"; then
+      outcome="type_failed"
+    else
+      goal_pieces=$TYPED_PIECES
+      if ! wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT"; then
+        if ! wait_for_idle "$target" "$transcript" "$TURN_TIMEOUT"; then
+          outcome="turn_timeout"
+        elif ! transcript_says goal "$transcript"; then
+          if retry_goal "$target" "$transcript" "$goal_file"; then
+            goal_pieces=$TYPED_PIECES
+            wait_for_goal_entry "$target" "$transcript" "$GOAL_CONFIRM_TIMEOUT" || outcome="unconfirmed"
+          else
+            outcome="type_failed"
+          fi
+        fi
       fi
     fi
   fi
@@ -262,7 +275,9 @@ goal_followup() {
       tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), zie het bericht in dit venster" || true
       type_line "$target" "LET OP: het automatische /goal-vervolg na de context-rotatie is niet bevestigd ($outcome). Meld dit aan de operator en vraag hem deze regel zelf in te typen: $goal"
     else
-      tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), de beurt eindigde niet; typ de /goal-regel zelf (zie $goal_file)" || true
+      local reason="de beurt eindigde niet"
+      [ "$outcome" = "type_failed" ] && reason="typen mislukte (send-keys), geen Enter gestuurd"
+      tmux display-message -t "$target" "VNX t0-rotate: /goal-vervolg NIET bevestigd ($outcome), $reason; typ de /goal-regel zelf (zie $goal_file)" || true
     fi
     log "goal-followup: $outcome (fallback $fallback); the line: $goal"
   fi

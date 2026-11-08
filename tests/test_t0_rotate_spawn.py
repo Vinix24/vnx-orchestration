@@ -56,17 +56,61 @@ def calls():
     with open(os.path.join(stub, "calls.ndjson")) as fh:
         return [json.loads(l) for l in fh if l.strip()]
 
+# tmux 3.7c `send-keys` usage: [-FHKlMRX] [-c target-client] [-N repeat-count] [-t target-pane] [key ...]
+# Flags without an argument, then the three that take one. Anything else is `unknown flag`.
+SEND_KEYS_FLAGS = "FHKlMRX"
+SEND_KEYS_ARG_FLAGS = "cNt"
+
+def parse_send_keys(args):
+    """Parse `send-keys` arguments the way tmux's getopt does: flags run until the first argument
+    that does not start with `-`, or until `--`. Returns (flags, keys, error); an unknown flag
+    letter gives the error tmux prints and nothing else is trusted."""
+    flags, keys, i = set(), [], 1
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            keys = args[i + 1:]
+            break
+        if not arg.startswith("-") or arg == "-":
+            keys = args[i:]
+            break
+        j = 1
+        while j < len(arg):
+            letter = arg[j]
+            if letter in SEND_KEYS_ARG_FLAGS:
+                if j + 1 >= len(arg):
+                    i += 1
+                break
+            if letter not in SEND_KEYS_FLAGS:
+                return flags, [], "command send-keys: unknown flag -" + letter
+            flags.add(letter)
+            j += 1
+        i += 1
+    return flags, keys, None
+
+def reject_reason(c, pending):
+    """Why a send-keys call does not reach the pane, or None. STUB_FAIL_GOAL_PIECE=1 makes a
+    literal piece fail while the input box already holds the start of a /goal line."""
+    flags, _, error = parse_send_keys(c)
+    if error:
+        return error
+    if ("l" in flags and os.environ.get("STUB_FAIL_GOAL_PIECE")
+            and pending and pending.startswith("/goal ")):
+        return "stub: forced send-keys failure"
+    return None
+
 def submitted(upto=None):
     """Texts followed by a separate Enter keystroke, in order (over the first `upto` calls).
     Each `send-keys -l` appends to the input box, as the real one does: a line typed in pieces
-    submits the concatenation of its pieces."""
+    submits the concatenation of its pieces. A call tmux rejects appends nothing."""
     out, pending, eaten = [], None, False
     for c in calls()[:upto]:
-        if c[:1] != ["send-keys"]:
+        if c[:1] != ["send-keys"] or reject_reason(c, pending):
             continue
-        if "-l" in c:
-            pending = (pending or "") + c[-1]
-        elif c[-1] == "Enter":
+        flags, keys, _ = parse_send_keys(c)
+        if "l" in flags:
+            pending = (pending or "") + "".join(keys)
+        elif keys == ["Enter"]:
             if (os.environ.get("STUB_EAT_FIRST_GOAL_ENTER") and not eaten
                     and pending and pending.startswith("/goal ")):
                 eaten = True  # the slash autocomplete takes the first Enter
@@ -149,6 +193,12 @@ def submit(st, line):
         start_turn(st, 1)
 
 cmd = args[0] if args else ""
+if cmd == "send-keys":
+    refused = reject_reason(args, submitted(-1)[1])
+    if refused:
+        sys.stderr.write(refused + "\n")
+        sys.exit(1)
+
 def pane_path(target):
     """Folder of a pane: the old pane is configurable, the new window defaults to the -c folder of
     new-window and is overridable (STUB_NEW_PANE_PATH) for the wrong-folder case."""
@@ -185,10 +235,13 @@ elif cmd == "new-window":
     held = open(ledger).read() if ledger and os.path.isfile(ledger) else ""
     open(os.path.join(stub, "ledger_at_new_window"), "w").write(held)
     print("@7")
-elif cmd == "send-keys" and args[-1] == "Enter" and "-l" not in args:
+elif cmd == "send-keys" and parse_send_keys(args)[1] == ["Enter"] and "l" not in parse_send_keys(args)[0]:
     st = load()
     before, _ = submitted(-1)
     after, _ = submitted()
+    if len(after) > len(before):
+        with open(os.path.join(stub, "submitted.ndjson"), "a") as fh:
+            fh.write(json.dumps(after[-1]) + "\n")
     if st and len(after) > len(before):
         submit(st, after[-1])
         save(st)
@@ -544,6 +597,13 @@ def _turn_ends(rig) -> List[int]:
     transcript (the stub's clock)."""
     path = rig["stub"] / "turn.json"
     return json.loads(path.read_text())["ends"] if path.exists() else []
+
+
+def _submitted(rig) -> List[str]:
+    """The lines whose Enter reached the input box, as the stub recorded them (a send-keys call
+    the stub's flag parser rejects never lands)."""
+    path = rig["stub"] / "submitted.ndjson"
+    return [json.loads(l) for l in path.read_text().splitlines() if l.strip()] if path.exists() else []
 
 
 def _typed_at(rig, prefix: str) -> List[int]:
@@ -1994,6 +2054,59 @@ def test_a_goal_of_1500_bytes_is_typed_in_pieces_and_one_enter_submits_it(rig):
         "an Enter landed between the pieces"
     assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
     assert len(_goal_entries(rig)) == 1
+
+
+def _dash_goal_section() -> str:
+    """A ``## Actief /goal`` section whose line is split so that piece 2 starts with ``-leren en``:
+    ``/goal `` is 6 bytes, so 194 bytes of directive fill piece 1 and the dash opens piece 2."""
+    directive = "w" * 194 + "-leren en golf-3 " + "afronden " * 100
+    return f"\n## Actief /goal\nDirective: `/goal {directive.strip()}`\n"
+
+
+def test_a_goal_piece_starting_with_a_dash_is_typed_as_text(rig):
+    """Red run on origin/main (94ecddd1f): send-keys -l "-leren en ..." is `unknown flag -e` (rc 1),
+    errexit stops the follow-up after piece 1, no Enter, no event."""
+    _handoff(rig, HANDOFF_BASE + _dash_goal_section())
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded"})
+    assert proc.returncode == 0, proc.stderr
+
+    goal = _goal_file(rig)
+    assert len(goal.encode("utf-8")) > 780
+    calls = _calls(rig)
+    literal = [(i, c) for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c]
+    start = next(i for i, c in literal if c[-1].startswith("/goal "))
+    pieces = [c[-1] for i, c in literal if i >= start]
+    assert [s for s in _submitted(rig) if s.startswith("/goal ")] == [goal], \
+        "the submitted line is not the full goal"
+    enters = [c for c in calls[start:] if c[:1] == ["send-keys"] and c[-1] == "Enter"]
+    assert len(enters) == 1, "exactly one Enter must follow the last piece"
+    assert [r["outcome"] for r in _goal_outcomes(rig)] == ["confirmed"]
+    assert pieces[1].startswith("-leren en"), pieces[:2]
+    assert "".join(pieces) == goal
+    assert all(c[c.index("-l") + 1] == "--" for i, c in literal if i >= start), \
+        "a piece went in without `--`"
+
+
+def test_a_failed_send_keys_books_type_failed_and_types_no_enter(rig):
+    _handoff(rig, HANDOFF_BASE + _dash_goal_section())
+    proc = _spawn(rig, env_extra={"STUB_TRANSCRIPT": "expanded", "STUB_FAIL_GOAL_PIECE": "1"})
+    assert proc.returncode == 0, proc.stderr
+
+    [outcome] = _goal_outcomes(rig)
+    assert outcome["outcome"] == "type_failed"
+    assert outcome["fallback"] == "not_typed"
+    calls = _calls(rig)
+    goal_calls = [i for i, c in enumerate(calls) if c[:1] == ["send-keys"] and "-l" in c
+                  and c[-1].startswith("/goal ")]
+    assert len(goal_calls) == 1, "piece 2 failed: no piece may follow it"
+    first_piece = goal_calls[0]
+    after = [c for c in calls[first_piece + 1:] if c[:1] == ["send-keys"]]
+    assert [c[-1][:9] for c in after if "-l" in c] == ["-leren en"], "a piece followed the failed one"
+    assert [c for c in after if c[-1] == "Enter"] == [], "an Enter was typed after the failure"
+    assert not [c for c in after if c[-1].startswith("LET OP")], "the LET OP line was typed"
+    shown = [c for c in calls if c[:1] == ["display-message"] and "-p" not in c]
+    assert shown and "type_failed" in shown[-1][-1] and "goal.txt" in shown[-1][-1], shown
+    assert "send-keys failed on piece" in (_run_dir(rig) / "delivery_job.log").read_text()
 
 
 def test_a_goal_of_582_bytes_is_still_one_burst_then_enter(rig):
