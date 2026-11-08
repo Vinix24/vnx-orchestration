@@ -154,32 +154,34 @@ def _worker_extra_env(spec: EnvelopeSpec) -> Dict[str, str]:
 
 
 def _materialize_shadow_skills(spec: EnvelopeSpec, cwd: Optional[Path]) -> None:
-    """Agent-layout shadow step (agents-als-map PR-2b).
+    """Agent-layout step before the spawn: the shadow copy or the native claude copy.
 
-    Under ``VNX_AGENT_LAYOUT=shadow`` copies the role's declared skills into
-    ``<cwd>/.vnx-agent-skills/<role>/`` before the spawn. Fail-open: any miss or
-    exception logs one WARNING and the spawn starts as it would without it.
+    The mode comes from ``agent_layout.layout_mode()`` (``off`` does nothing). Fail-open:
+    any miss or exception logs one WARNING and the spawn starts as it would without it.
     """
     from dispatch_identity import normalize_role
 
-    role = normalize_role(spec.role)
-    if not role or cwd is None:
-        return
     try:
         import agent_layout
 
-        if not agent_layout.is_shadow():
+        mode = agent_layout.layout_mode()
+        if mode == "off":
             return
-        from agent_resolver import resolve_agent
-        from agent_skill_materialize import materialize_role_skills
+        project_id = None
+        try:
+            from project_scope import resolve_stamp_project_id
 
-        config = resolve_agent(role, cwd, engine_root=Path(__file__).resolve().parents[2])
-        if config is None:
-            logger.warning("agent skill shadow for role %r: no config", role)
-        elif config.skills:
-            materialize_role_skills(cwd, role, config.skills)
-    except Exception as exc:  # fail-open: the shadow never stops a dispatch
-        logger.warning("agent skill shadow for role %r: %s", role, type(exc).__name__)
+            project_id = resolve_stamp_project_id()
+        except Exception:  # vnx-silent-except: an unresolved tenant is reported as no_project_id
+            project_id = None
+        from agent_skill_materialize import materialize_skill_set
+
+        materialize_skill_set(
+            normalize_role(spec.role), worktree=cwd, provider="claude", mode=mode,
+            dispatch_id=spec.dispatch_id, state_dir=spec.state_dir, project_id=project_id,
+        )
+    except Exception as exc:  # fail-open: the materialisation never stops a dispatch
+        logger.warning("agent skill materialisation for role %r: %s", spec.role, type(exc).__name__)
 
 
 class ClaudeSubprocessAdapter:
