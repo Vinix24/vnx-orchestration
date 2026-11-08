@@ -317,6 +317,70 @@ def _playbook_behind(playbook: Dict[str, Any]) -> bool:
     return any(state != t0_playbook.STATE_OK for state in playbook["files"].values())
 
 
+BUDGET_CAP = 32768
+BUDGET_CAP_SOURCE = "kimi-cli 1.46.0 CHANGELOG.md:177"
+BUDGET_NAMES = ("AGENTS.md", ".kimi/AGENTS.md")
+
+
+def _budget_levels(project_root: Path, t0_dir: Path) -> List[Path]:
+    """The directories from the repo root down to and including the T0 cwd."""
+    try:
+        rel = t0_dir.relative_to(project_root)
+    except ValueError:
+        return [project_root]
+    levels = [project_root]
+    for part in rel.parts:
+        levels.append(levels[-1] / part)
+    return levels
+
+
+def _budget_file(project_root: Path, path: Path) -> Dict[str, Any]:
+    """One chain entry. `bytes` is None when the file is absent or exists but cannot be read."""
+    entry: Dict[str, Any] = {"path": str(path.relative_to(project_root)), "bytes": None, "present": False}
+    if not path.is_file():
+        return entry
+    entry["present"] = True
+    try:
+        entry["bytes"] = len(path.read_bytes())
+    except OSError:
+        entry["bytes"] = None
+    return entry
+
+
+def _measure_budget(project_root: Path, t0_dir: Path) -> Dict[str, Any]:
+    """Axis 5 (ADR-058 section 8): the AGENTS.md chain Kimi loads, against its 32,768-byte cap.
+
+    A reference metric, never a gate: it does not touch `behind` or the exit code. The
+    changelog does not say whether the cap is per file or for the whole chain, so both
+    are counted. No file at all, or a file that cannot be read, is `unmeasured`, never `ok`.
+    """
+    files = [
+        _budget_file(project_root, level / name)
+        for level in _budget_levels(project_root, t0_dir)
+        for name in BUDGET_NAMES
+    ]
+    present = [f for f in files if f["present"]]
+    unreadable = any(f["bytes"] is None for f in present)
+    sizes = [f["bytes"] for f in present if f["bytes"] is not None]
+    per_file_max = max(sizes) if sizes else 0
+    aggregate = sum(sizes)
+    if not present or unreadable:
+        status = "unmeasured"
+    elif per_file_max > BUDGET_CAP or aggregate > BUDGET_CAP:
+        status = "exceeded"
+    else:
+        status = "ok"
+    return {
+        "files": files,
+        "per_file_max": per_file_max,
+        "aggregate_bytes": aggregate,
+        "cap": BUDGET_CAP,
+        "cap_source": BUDGET_CAP_SOURCE,
+        "claim": "reference_metric_only",
+        "status": status,
+    }
+
+
 def measure_project(project_root: Path, canon: str, *, is_canon_source: bool = False) -> Dict[str, Any]:
     """All four axes for one repo."""
     t0_dir = project_root / T0_REL
@@ -363,6 +427,7 @@ def measure_project(project_root: Path, canon: str, *, is_canon_source: bool = F
         "reach": reach,
         "startup": startup,
         "playbook": playbook,
+        "budget": _measure_budget(project_root, t0_dir),
         "warnings": warnings,
         "behind": (
             bool(drifted) or role_absent or not reach["ok"] or not startup["ok"]
@@ -438,6 +503,11 @@ def _render_playbook(pb: Dict[str, Any]) -> List[str]:
     return lines
 
 
+def _render_budget(b: Dict[str, Any]) -> str:
+    return (f"           budget   {b['status'].upper():12s} aggregate {b['aggregate_bytes']} / "
+            f"per-file max {b['per_file_max']} of {b['cap']} bytes (reference metric only)")
+
+
 def render_text(report: Dict[str, Any]) -> str:
     out: List[str] = []
     out.append(f"canon: {report['canon']['path']}  sha={report['canon']['sha']}")
@@ -467,6 +537,7 @@ def render_text(report: Dict[str, Any]) -> str:
             for route, r in p["startup"]["routes"].items():
                 out.append(f"                      | {route}: {r['reason']}")
         out.extend(_render_playbook(p["playbook"]))
+        out.append(_render_budget(p["budget"]))
         out.append("")
     behind = report["summary"]["projects_behind"]
     total = report["summary"]["projects_measured"]
