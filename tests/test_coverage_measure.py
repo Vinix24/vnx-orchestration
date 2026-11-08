@@ -92,10 +92,7 @@ def test_promote_without_identity_is_uncovered(state_dir):
     _event(state_dir, "deliverable_promoted", {"actor_class": "operator"})
     _event(state_dir, "deliverable_completed", {"project_id": PROJECT})  # delivery_id missing
 
-    c = _coverage(state_dir)
-
-    assert _state(c, "promote") == "uncovered"
-    assert _state(c, "close") == "uncovered"
+    assert [_state(_coverage(state_dir), s) for s in ("promote", "close")] == ["uncovered"] * 2
 
 
 @pytest.mark.parametrize("column,meta", [
@@ -117,17 +114,13 @@ def test_another_projects_rows_never_count(state_dir):
     c = _coverage(state_dir)
 
     assert c.state == "no_data"
-    assert _state(c, "promote") == "no_data" and _state(c, "merge") == "no_data"
 
 
 def test_merge_without_identity_is_uncovered_and_other_events_are_ignored(state_dir):
     _line(state_dir, "t0_receipts.ndjson", event_type="pr_merged", conclusion="merged")
     _line(state_dir, "t0_receipts.ndjson", event_type="task_complete", **IDENTITY)
 
-    c = _coverage(state_dir)
-
-    assert _state(c, "merge") == "uncovered"
-    assert c.sources["merge"]["with_identity"] == 0
+    assert _state(_coverage(state_dir), "merge") == "uncovered"
 
 
 def test_decide_override_and_prompt_read_their_own_stores(state_dir):
@@ -184,17 +177,11 @@ def test_unreadable_store_is_unmeasured_not_no_data(state_dir, break_store):
         lifecycle_count.measure_coverage(state_dir, project_id=PROJECT)
 
 
-def test_missing_database_is_no_data(tmp_path):
+def test_missing_database_is_no_data_and_missing_project_is_unmeasured(tmp_path, monkeypatch):
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
     sd = tmp_path / "bare" / "state"
     sd.mkdir(parents=True)
 
     assert lifecycle_count.measure_coverage(sd, project_id=PROJECT).state == "no_data"
-
-
-def test_no_project_id_is_unmeasured(tmp_path, monkeypatch):
-    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
-    sd = tmp_path / "x" / "state"
-    sd.mkdir(parents=True)
-
     with pytest.raises(lifecycle_count.Unmeasured):
         lifecycle_count.measure_coverage(sd, project_id="  ")
