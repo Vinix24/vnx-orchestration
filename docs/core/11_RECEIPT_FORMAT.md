@@ -254,6 +254,21 @@ The field gives the receipt's idempotency key its commit dimension (`append_rece
 
 **Path asymmetry, grep-verified:** this resolution (`append_receipt_internals/enrichment.py::_enrich_session_metadata`) only runs on Path 2, via `_enrich_completion_receipt`. `governance_emit.py::emit_dispatch_receipt` (Path 1) has no `session_id` parameter and never calls it — a Path-1 receipt (subprocess/multi-provider lane) carries no `session_id` key at all, not even `"unknown"`. Path 2 receipts always get one (`setdefault`, so a caller-supplied value is never overwritten).
 
+## `context_manifest` — a reference to what the session loaded (ADR-050 contract 6)
+
+Optional field on the receipt written by `emit_dispatch_receipt`, stamped only when it is not `None` and never part of `IDEMPOTENCY_FIELDS`. It is a reference, not the manifest: the manifest (instruction files, skills, hooks, account kind, config dir; paths, types, lengths and hashes, never content, hook command text or an address) is one line in the sidecar `<state_dir>/context_manifests.ndjson`, written before the receipt (ADR-005 amendment of 2026-11-08).
+
+Three shapes:
+
+| Shape | When |
+|---|---|
+| `{"schema": 1, "status": "ok" \| "partial", "sha256": "<hash>"}` | The capture produced a manifest and its sidecar line is durable. `sha256` is the SHA-256 of that line as written, without its trailing newline. |
+| `{"schema": 1, "status": "error", "reason": "ledger_write_failed:<ExceptionClass>"}` | The sidecar write failed (or the project identity could not be resolved). No hash. The receipt still lands. |
+| `{"schema": 1, "status": "unavailable" \| "unsupported" \| "error", "reason": "<reason>"}` | The capture itself gave no manifest (`no_session_id`, `transcript_not_found`, `provider_not_supported:<provider>`, `extract_failed:<Class>`). No hash, no sidecar line. |
+| absent | `VNX_AGENT_LAYOUT=off` (the default): nothing is captured and the receipt is byte-equal to one without this feature. |
+
+A sidecar line is `{"dispatch_id", "session_id", "project_id", "manifest"}` with sorted keys and no timestamp, so the same measurement of the same session hashes the same. The sidecar is idempotent on `(dispatch_id, session_id, sha256)`: a second emit writes nothing, another session of the same dispatch writes its own line.
+
 ## `takeover_from` on a taken-over review seat
 
 A review seat that another reviewer filled (the takeover chain, `docs/core/PROVIDER_LANES.md`) carries `takeover_from` next to `takeover`, `takeover_reason`, `takeover_source_status` and `takeover_path`. The field is on the request and result records of the seat and, copied to the top level, on the `review_gate_request` receipt together with `failure_reason` (`scripts/lib/gate_request_handler.py` `_emit_review_request_receipt`; `scripts/lib/gate_recorder.py` `_TAKEOVER_FIELDS`).
