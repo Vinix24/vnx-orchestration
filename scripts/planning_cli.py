@@ -4779,6 +4779,42 @@ def _deliverable_dispatch_paths(state_dir, project_id: str, track_id: str) -> li
     return paths
 
 
+def _profile_panel_inputs(project_id):
+    """``(plan_gate_seats, "<profile> (<source>)")`` from the gate profile (gate-profiel P4).
+
+    ``plan_gate_seats`` is None when the profile contributes nothing (``standard``, unset,
+    or an operator value on the field's own key). The label is None while the key is not set
+    at all, so the trace of an unconfigured project stays what it was. A malformed profile raises
+    ``GateProfileConfigError``: the plan-gate refuses rather than run on a default.
+    """
+    import gate_profile
+
+    resolution = gate_profile.resolve(project_id)
+    seats = gate_profile.value("plan_gate_seats", project_id, resolution=resolution)
+    if resolution.source in ("default", "unset"):
+        return seats, None
+    return seats, f"{resolution.profile} ({resolution.source})"
+
+
+def _panel_gov_trace(variant, composition, switched) -> str:
+    """The ``gov_trace`` of one composition: weight, seats, why, profile, left-out seats."""
+    labels = ", ".join(s["label"] for s in composition.seats)
+    trace = f"weight={variant} -> {len(composition.seats)} seat(s) by {composition.chosen_by} ({labels})"
+    if composition.chosen_by == "operator":
+        trace += f"; OVERRIDES the default seat {composition.default_label}"
+    elif composition.second_seat:
+        trace += f"; both seats from the start ({composition.second_seat})"
+    elif composition.escalation is not None:
+        trace += f"; {composition.escalation['label']} reads on BLOCK"
+    elif len(composition.seats) > 1:
+        trace += "; both seats from the start (gate profile)"
+    if composition.profile:
+        trace += f"; profile={composition.profile}"
+    if switched.left_out:
+        trace += f"; {switched.note()}"
+    return trace
+
+
 def _derive_panel_weight(
     *, panel_seats, dispatch_paths, task_class, irreversible, deliverable_paths=None,
     project_id=None,
@@ -4821,24 +4857,16 @@ def _derive_panel_weight(
         second_seat_paths = list(deliverable_paths())
     else:
         second_seat_paths = paths or []
+    profile_seats, profile_label = _profile_panel_inputs(project_id)
     switched = plan_gate_panel.apply_provider_switch(
-        plan_gate_panel.compose_panel(requested or None, dispatch_paths=second_seat_paths),
+        plan_gate_panel.compose_panel(
+            requested or None, dispatch_paths=second_seat_paths,
+            profile_seats=profile_seats, profile=profile_label,
+        ),
         project_id=project_id,
     )
     composition = switched.composition
-    labels = ", ".join(s["label"] for s in composition.seats)
-    gov_trace = (
-        f"weight={gov.variant} -> {len(composition.seats)} seat(s) by "
-        f"{composition.chosen_by} ({labels})"
-    )
-    if composition.chosen_by == "operator":
-        gov_trace += f"; OVERRIDES the default seat {composition.default_label}"
-    elif composition.second_seat:
-        gov_trace += f"; both seats from the start ({composition.second_seat})"
-    elif composition.escalation is not None:
-        gov_trace += f"; {composition.escalation['label']} reads on BLOCK"
-    if switched.left_out:
-        gov_trace += f"; {switched.note()}"
+    gov_trace = _panel_gov_trace(gov.variant, composition, switched)
     return {
         "panel": composition.seats,
         "escalation": composition.escalation,

@@ -221,6 +221,32 @@ def test_a_minimal_variant_still_runs_the_default_seat(gate):
     assert outcome.variant == "minimal"
 
 
+def test_a_heavy_profile_runs_both_seats_from_the_start_on_a_docs_path(gate, monkeypatch):
+    """Gate profile P4: heavy on a docs path runs codex AND opus in the first round, quorum 2."""
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "heavy")
+    lanes = _Lanes({"codex": _seat_report("pass"), "claude": _seat_report("pass")})
+    gate.configure(max_rounds=1, lanes=lanes)
+
+    outcome = gate.run("## Problem\nREADME update\n", dispatch_paths="docs/operations/x.md")
+
+    assert sorted(lanes.seat_providers()) == ["claude", "codex"]
+    assert outcome.decision == "PASS"
+    assert "2 pass / 0 revise / 0 block" in _resolution_reason(gate.state_dir, "feat-p2")
+
+
+def test_a_malformed_profile_refuses_the_plan_gate_before_any_seat_runs(gate, monkeypatch):
+    """A profile that is not light/standard/heavy refuses the run: no seat is dispatched."""
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "zwaar")
+    lanes = _Lanes({"codex": _seat_report("pass")})
+    gate.configure(max_rounds=1, lanes=lanes)
+
+    outcome = gate.run("## Problem\nREADME update\n", dispatch_paths="docs/operations/x.md")
+
+    assert lanes.calls == []
+    assert outcome.exit_code != 0
+    assert "VNX_GOVERNANCE_PROFILE" in (outcome.error or "")
+
+
 def test_an_operator_override_with_several_seats_keeps_the_quorum_of_two(gate):
     """--panel-seats codex,kimi: codex PASS, kimi unreadable -> one readable verdict is below quorum."""
     lanes = _Lanes({
