@@ -579,3 +579,31 @@ def test_git_without_positive_evidence_writes_nothing(tmp_path, worktree, monkey
     result = _call(worktree, tmp_path)
     assert (result["status"], result["reason"], result["skills"]) == ("skipped", "not_ignored", [])
     assert not (worktree / ".claude").exists()
+
+
+class _ReadBlocked(Exception):
+    """Raised by the alarm; deliberately not an OSError, so no except-OSError branch can absorb it."""
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
+def test_native_skill_md_that_is_not_a_file_refuses_without_blocking(tmp_path, worktree, kind):
+    import signal
+
+    _dest(worktree).parent.mkdir(parents=True)
+    if kind == "fifo":
+        os.mkfifo(_dest(worktree))
+    else:
+        _dest(worktree).mkdir()
+
+    def interrupt(signum, frame):
+        raise _ReadBlocked("the native read blocked")
+
+    previous = signal.signal(signal.SIGALRM, interrupt)
+    signal.setitimer(signal.ITIMER_REAL, 5)
+    try:
+        result = _call(worktree, tmp_path)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+    assert (result["status"], result["reason"], result["skills"]) == ("skipped", "symlink_in_destination", [])
+    assert not (worktree / ".claude" / "skills" / "beta").exists()

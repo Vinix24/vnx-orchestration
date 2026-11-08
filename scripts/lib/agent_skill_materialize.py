@@ -227,7 +227,11 @@ def _rmtree_below(parent_fd: int, name: str) -> None:
 
 
 def _read_below_worktree(wt: Path, parts: tuple[str, ...]) -> bytes:
-    """Read the file at *parts* below the worktree root; every component is opened without following a link."""
+    """Read the regular file at *parts* below the worktree root; every component is opened without following a link.
+
+    ``O_NONBLOCK`` plus the ``fstat`` check: a FIFO at the name would otherwise block the
+    open forever, and a directory would raise; both refuse as a wrong-typed entry instead.
+    """
     fd = _open_worktree(wt)
     try:
         for part in parts[:-1]:
@@ -235,9 +239,12 @@ def _read_below_worktree(wt: Path, parts: tuple[str, ...]) -> bytes:
             os.close(fd)
             fd = nxt
         try:
-            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
         except OSError as exc:
             raise ShadowError("symlink_in_destination") from exc
+        if not stat.S_ISREG(os.fstat(file_fd).st_mode):
+            os.close(file_fd)
+            raise ShadowError("symlink_in_destination")
         with os.fdopen(file_fd, "rb") as handle:
             return handle.read()
     finally:
