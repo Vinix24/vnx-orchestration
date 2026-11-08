@@ -237,3 +237,79 @@ def test_the_ledger_helper_dedups_on_the_whole_line_and_ignores_malformed_lines(
     other = governance_emit._manifest_line("d", "s2", "p", {"status": "ok"})
     governance_emit._append_manifest_line(path, other)
     assert path.read_text().splitlines() == ["not json", line, other]
+
+
+def _emit_stamp(env):
+    (env["state"] / "t0_receipts.ndjson").unlink(missing_ok=True)  # a fresh receipt each time, the sidecar stays
+    emit_dispatch_receipt(**_kwargs(env))
+    return _receipts(env)[-1]["context_manifest"]
+
+
+def _complete_lines(env):
+    raw = (env["state"] / LEDGER).read_bytes()
+    assert raw.endswith(b"\n")
+    return [json.loads(l) for l in raw.decode().splitlines()]
+
+
+def test_an_unterminated_tail_is_dropped_counted_and_the_next_line_matches_its_hash(env, monkeypatch, caplog):
+    _shadow(monkeypatch)
+    (env["state"] / LEDGER).write_bytes(b'{"a":1}\n{"dispatch_id":"x","sess')
+    with caplog.at_level("WARNING"):
+        ref = _emit_stamp(env)
+    assert "dropped 24 bytes" in caplog.text and '"sess' not in caplog.text
+    rows = _sidecar(env)
+    assert rows[0] == '{"a":1}' and len(rows) == 2
+    assert [json.loads(r) for r in rows]
+    assert ref["status"] == "ok" and ref["sha256"] == hashlib.sha256(rows[1].encode()).hexdigest()
+
+
+def test_a_short_write_that_finishes_in_the_loop_gives_one_complete_line(env, monkeypatch):
+    _shadow(monkeypatch)
+    real, calls = governance_emit.os.write, []
+
+    def short(fd, data):
+        calls.append(len(data))
+        return real(fd, bytes(data)[: max(1, len(data) // 2)]) if len(calls) == 1 else real(fd, data)
+    monkeypatch.setattr(governance_emit.os, "write", short)
+    ref = _emit_stamp(env)
+    assert len(calls) == 2
+    [line] = _sidecar(env)
+    assert ref["sha256"] == hashlib.sha256(line.encode()).hexdigest()
+    assert len(_complete_lines(env)) == 1
+
+
+def test_a_write_that_fails_halfway_leaves_the_ledger_byte_equal_and_no_hash(env, monkeypatch):
+    _shadow(monkeypatch)
+    ledger = env["state"] / LEDGER
+    ledger.write_bytes(b'{"a":1}\n')
+    before = ledger.read_bytes()
+    real, calls = governance_emit.os.write, []
+
+    def half_then_fail(fd, data):
+        calls.append(1)
+        if len(calls) == 1:
+            return real(fd, bytes(data)[: len(data) // 2])
+        raise OSError("disk full")
+    monkeypatch.setattr(governance_emit.os, "write", half_then_fail)
+    ref = _emit_stamp(env)
+    assert ledger.read_bytes() == before
+    assert ref == {"schema": 1, "status": "error", "reason": "ledger_write_failed:OSError"}
+
+
+def test_a_zero_byte_write_rolls_back_and_fails(env, monkeypatch):
+    _shadow(monkeypatch)
+    monkeypatch.setattr(governance_emit.os, "write", lambda fd, data: 0)
+    ref = _emit_stamp(env)
+    assert _sidecar(env) == [] and "sha256" not in ref and ref["status"] == "error"
+
+
+def test_a_duplicate_with_a_failing_fsync_gives_no_hash_and_a_working_one_the_same_hash(env, monkeypatch):
+    _shadow(monkeypatch)
+    manifest = context_manifest.capture(SESSION, provider="claude")
+    args = ("d-1", SESSION, env["state"], manifest)
+    first = governance_emit._write_manifest_sidecar(*args)
+    assert first["status"] == "ok" and governance_emit._write_manifest_sidecar(*args) == first
+    monkeypatch.setattr(governance_emit.os, "fsync", lambda fd: (_ for _ in ()).throw(OSError("disk")))
+    assert governance_emit._write_manifest_sidecar(*args) == {
+        "schema": 1, "status": "error", "reason": "ledger_write_failed:OSError"}
+    assert len(_sidecar(env)) == 1

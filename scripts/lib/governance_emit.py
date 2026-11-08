@@ -100,24 +100,61 @@ def _manifest_line(dispatch_id: str, session_id: str, project_id: str, manifest:
     )
 
 
+def _recover_ledger_tail(fd: int) -> bytes:
+    """The ledger content with any unterminated tail cut off under the held lock.
+
+    A tail after the last newline is a fragment no caller ever got a hash for:
+    truncate to the last complete line and fsync, so neither the duplicate scan
+    can match it nor the next append join it. Logs the byte count, never content.
+    """
+    size = os.fstat(fd).st_size
+    content = os.pread(fd, size, 0) if size else b""
+    if not content or content.endswith(b"\n"):
+        return content
+    keep = content.rfind(b"\n") + 1
+    os.ftruncate(fd, keep)
+    os.fsync(fd)
+    logger.warning("governance_emit: context manifest ledger had an unterminated tail, dropped %d bytes",
+                   len(content) - keep)
+    return content[:keep]
+
+
+def _write_all_or_roll_back(fd: int, data: bytes, size_before: int) -> None:
+    """Write every byte (a short write is legal); on failure restore ``size_before``."""
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("zero-byte write to the context manifest ledger")
+            view = view[written:]
+    except BaseException as exc:
+        os.ftruncate(fd, size_before)
+        os.fsync(fd)
+        if isinstance(exc, OSError):
+            raise
+        raise OSError("write to the context manifest ledger failed") from exc
+
+
 def _append_manifest_line(path: Path, line: str) -> None:
-    """One ``write`` on an ``O_APPEND`` descriptor, then ``fsync`` (ADR-050 contract 6).
+    """Append ``line`` to the ledger, complete and durable, or raise (ADR-050 contract 6).
 
     The line carries dispatch_id, session_id and the manifest, and its sha256 is
     the receipt reference, so a line byte-equal to an existing one is exactly the
-    same ``(dispatch_id, session_id, sha256)``: it writes nothing. The flock spans
-    check and write so two emits of one dispatch cannot both append.
+    same ``(dispatch_id, session_id, sha256)``: it writes nothing, but is still
+    fsynced before success is reported. The flock spans tail recovery, check and
+    write, so two emits of one dispatch cannot both append and no fragment survives.
     """
     data = (line + "\n").encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        with open(path, "rb") as existing:
-            if any(raw.rstrip(b"\n") == data[:-1] for raw in existing):
-                return
-        if os.write(fd, data) != len(data):
-            raise OSError("short write to the context manifest ledger")
+        content = _recover_ledger_tail(fd)
+        if any(raw == data[:-1] for raw in content.split(b"\n")):
+            os.fsync(fd)
+            return
+        _write_all_or_roll_back(fd, data, len(content))
         os.fsync(fd)
     finally:
         os.close(fd)
