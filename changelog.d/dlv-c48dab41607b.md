@@ -1,0 +1,1 @@
+- Codex gets the role's skill set in `<worktree>/.agents/skills/<slug>/` with an ownership marker (`.vnx-managed.json`: only a folder carrying this run's `dispatch_id` is ever removed, an unmarked one stays and the run ends `partial` with `not_owned:<slug>`), and `spawn_codex` takes `role`, `state_dir` and `project_id` from all four codex routes (skilldisc R4, ADR-059).

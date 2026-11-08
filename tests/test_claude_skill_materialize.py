@@ -158,7 +158,7 @@ def test_missing_field_skips_with_one_warning(tmp_path, worktree, caplog, field,
 
 
 def test_unknown_role_and_provider_and_off_write_nothing(tmp_path, worktree):
-    assert _call(worktree, tmp_path, provider="codex")["status"] == "skipped"
+    assert _call(worktree, tmp_path, provider="kimi")["status"] == "skipped"
     assert _call(worktree, tmp_path, mode="off")["status"] == "skipped"
     assert not (tmp_path / "state").exists()
     assert _call(worktree, tmp_path, role="no-such-role")["reason"] == "no_role"
@@ -280,8 +280,8 @@ def test_link_planted_after_the_check_fails_the_write(tmp_path, worktree):
     dest = worktree / ".claude" / "skills" / "alpha"
     real_refuse = asm._refuse_dest_tree
 
-    def check_then_plant(wt, slug, src):
-        real_refuse(wt, slug, src)
+    def check_then_plant(wt, slug, src, *parts):
+        real_refuse(wt, slug, src, *parts)
         if slug == "alpha":
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "assets").symlink_to(outside, target_is_directory=True)
@@ -296,8 +296,8 @@ def test_file_link_planted_after_the_check_is_not_followed(tmp_path, worktree):
     dest = worktree / ".claude" / "skills" / "alpha"
     real_refuse = asm._refuse_dest_tree
 
-    def check_then_plant(wt, slug, src):
-        real_refuse(wt, slug, src)
+    def check_then_plant(wt, slug, src, *parts):
+        real_refuse(wt, slug, src, *parts)
         if slug == "alpha":
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "SKILL.md").symlink_to(outside / "data.txt")
@@ -490,18 +490,19 @@ def test_skill_md_only_skills_in_a_clean_worktree_are_ok(tmp_path, worktree):
     assert _git(worktree, "status", "--porcelain", "--untracked-files=all") == ""
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes")
 def test_failed_copy_leaves_no_skill_md_and_the_next_attempt_copies_again(tmp_path):
     wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
     _ship_assets(wt)
-    locked = _asset(wt).parent
-    locked.mkdir(parents=True)
-    locked.chmod(0o500)
-    try:
+    real_mkdir = os.mkdir
+
+    def refuse_alpha(path, mode=0o777, *, dir_fd=None):
+        if path == "alpha":
+            raise PermissionError("no")
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    with mock.patch.object(asm.os, "mkdir", refuse_alpha):
         first = _call(wt, tmp_path)
-    finally:
-        locked.chmod(0o755)
-    assert not _dest(wt).exists()
+    assert not os.path.lexists(_dest(wt).parent)
     _assert_alpha_refused(first, "copy_failed:PermissionError")
     second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
     assert (second["status"], second["reason"]) == ("ok", None)
@@ -689,8 +690,8 @@ def test_failed_asset_write_leaves_nothing_and_the_next_run_copies(tmp_path):
     with patch:
         first = _call(wt, tmp_path)
     assert fired == [len(b"shipped\n")]
-    assert list(_asset(wt).parent.iterdir()) == []
-    assert not os.path.lexists(_dest(wt))
+    assert not os.path.lexists(_asset(wt).parent)
+    assert not os.path.lexists(_dest(wt).parent)
     assert _partials(wt) == []
     _assert_alpha_refused(first, "copy_failed:OSError")
     second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
@@ -794,17 +795,25 @@ def _leftover(wt, content=None, link_to=None):
     return leftover
 
 
-@pytest.mark.parametrize("published", [False, True], ids=["killed-before-link", "killed-after-link"])
-def test_leftover_partial_of_a_killed_run_is_not_read_counted_or_removed(tmp_path, worktree, published):
-    leftover = _leftover(worktree, b"alpha\n" if published else b"al")
-    if published:
-        os.link(leftover, _dest(worktree))
+def test_leftover_partial_of_a_run_killed_after_the_link_is_not_read_counted_or_removed(tmp_path, worktree):
+    leftover = _leftover(worktree, b"alpha\n")
+    os.link(leftover, _dest(worktree))
     result = _call(worktree, tmp_path)
     assert (result["status"], result["reason"]) == ("ok", None)
-    assert [e["ownership"] for e in result["skills"]] == ["native" if published else "materialized", "materialized"]
+    assert [e["ownership"] for e in result["skills"]] == ["native", "materialized"]
     assert result["skills"][0]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
     assert _dest(worktree).read_bytes() == b"alpha\n"
-    assert leftover.read_bytes() == (b"alpha\n" if published else b"al")
+    assert leftover.read_bytes() == b"alpha\n"
+    assert _partials(worktree) == [leftover]
+
+
+def test_folder_of_a_run_killed_before_the_link_is_foreign_and_stays_untouched(tmp_path, worktree):
+    leftover = _leftover(worktree, b"al")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    assert [e["slug"] for e in result["skills"]] == ["beta"]
+    assert not os.path.lexists(_dest(worktree))
+    assert leftover.read_bytes() == b"al"
     assert _partials(worktree) == [leftover]
 
 
@@ -825,3 +834,142 @@ def test_repo_gitignore_ignores_a_leftover_partial():
                           capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.splitlines() == names
+
+
+# --- r3 (skilldisc R4): every removal is bound to one directory fd ---
+
+
+def _shadow_role(wt):
+    return wt / ".vnx-agent-skills" / ROLE
+
+
+def _foreign_into(folder, skill_md=True):
+    folder.mkdir(parents=True)
+    if skill_md:
+        (folder / "SKILL.md").write_text("theirs\n")
+    (folder / "user-data.txt").write_text("precious\n")
+    return folder
+
+
+def _assert_untouched(folder, names=("SKILL.md", "user-data.txt")):
+    """The foreign data first, so a run that deleted it fails on the deleted file itself."""
+    assert (folder / "user-data.txt").read_bytes() == b"precious\n"
+    if "SKILL.md" in names:
+        assert (folder / "SKILL.md").read_bytes() == b"theirs\n"
+    assert sorted(os.listdir(folder)) == sorted(names)
+
+
+@pytest.mark.parametrize("kind", ["folder", "link"])
+def test_role_folder_swapped_after_its_open_is_never_cleared(tmp_path, worktree, monkeypatch, kind):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    assert asm.materialize_role_skills(worktree, ROLE, ["alpha"])["status"] == "ok"  # a previous run's folder
+    role_dir = _shadow_role(worktree)
+    moved = tmp_path / "moved-role"
+    foreign = role_dir if kind == "folder" else tmp_path / "outside-role"
+    real = asm._remove_held
+    fired: list[str] = []
+
+    def swap_then_remove(parent_fd, name, held_fd):
+        if name == ROLE and not fired:
+            fired.append(name)
+            role_dir.rename(moved)
+            _foreign_into(foreign)
+            if kind == "link":
+                role_dir.symlink_to(foreign, target_is_directory=True)
+        return real(parent_fd, name, held_fd)
+
+    monkeypatch.setattr(asm, "_remove_held", swap_then_remove)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha", "beta"])
+    _assert_untouched(foreign)
+    assert fired == [ROLE]
+    assert (result["status"], result["reason"]) == ("error", "role_dir_replaced")
+    assert os.listdir(moved) == []  # the folder that was opened is the folder that was emptied
+
+
+@pytest.mark.parametrize("when", ["before-the-mkdir", "after-the-mkdir"])
+def test_role_folder_that_takes_the_name_around_the_claim_is_never_entered(tmp_path, worktree, monkeypatch, when):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    role_dir = _shadow_role(worktree)
+    real_mkdir = os.mkdir
+    fired: list[str] = []
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        if path != ROLE or dir_fd is None or fired:
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+        fired.append(path)
+        if when == "before-the-mkdir":
+            _foreign_into(role_dir)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        role_dir.rename(tmp_path / "moved-role")
+        _foreign_into(role_dir)
+        return None
+
+    monkeypatch.setattr(asm.os, "mkdir", racing)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha"])
+    _assert_untouched(role_dir)
+    assert fired == [ROLE]
+    assert (result["status"], result["reason"]) == ("error", "role_dir_replaced")
+
+
+def test_claude_folder_swapped_in_between_the_claim_and_its_open_is_never_entered(tmp_path, worktree):
+    real_mkdir = os.mkdir
+    folder = worktree / ".claude" / "skills" / "alpha"
+    fired: list[str] = []
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        out = real_mkdir(path, mode, dir_fd=dir_fd)
+        if path == "alpha" and dir_fd is not None and not fired:
+            fired.append(path)
+            folder.rename(tmp_path / "moved-alpha")
+            _foreign_into(folder, skill_md=False)
+        return out
+
+    with mock.patch.object(asm.os, "mkdir", racing):
+        result = _call(worktree, tmp_path)
+    _assert_untouched(folder, ("user-data.txt",))
+    assert fired == ["alpha"]
+    _assert_alpha_refused(result, "not_owned:alpha")
+
+
+def test_rmdir_and_unlink_act_only_on_the_entry_that_was_identified(tmp_path):
+    parent = tmp_path / "p"
+    (parent / "d").mkdir(parents=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    held = os.open(parent / "d", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        (parent / "d").rename(tmp_path / "away")
+        (parent / "d").mkdir()
+        assert asm._rmdir_if_same(parent_fd, "d", held) is False  # an empty stranger at the name stays
+        assert (parent / "d").is_dir()
+        (parent / "d").rmdir()
+        assert asm._rmdir_if_same(parent_fd, "d", held) is True  # nothing of the held folder at the name
+        assert (tmp_path / "away").is_dir()
+        (parent / "f").write_text("mine\n")
+        ident = asm._entry_ident(parent_fd, "f")
+        (parent / "g").write_text("theirs\n")
+        os.replace(parent / "g", parent / "f")
+        assert asm._unlink_if_same(parent_fd, "f", ident) is False
+        assert (parent / "f").read_text() == "theirs\n"
+        assert asm._unlink_if_same(parent_fd, "f", asm._entry_ident(parent_fd, "f")) is True
+        assert not (parent / "f").exists()
+    finally:
+        os.close(held)
+        os.close(parent_fd)
+
+
+def test_empty_fd_unlinks_links_and_never_follows_them(tmp_path):
+    outside = _foreign_into(tmp_path / "outside")
+    inner = tmp_path / "inner"
+    (inner / "sub").mkdir(parents=True)
+    (inner / "sub" / "x.txt").write_text("x\n")
+    (inner / "dirlink").symlink_to(outside, target_is_directory=True)
+    (inner / "filelink").symlink_to(outside / "user-data.txt")
+    os.mkfifo(inner / "pipe")
+    fd = os.open(inner, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert asm._empty_fd(fd) is True
+    finally:
+        os.close(fd)
+    assert os.listdir(inner) == []
+    _assert_untouched(outside)

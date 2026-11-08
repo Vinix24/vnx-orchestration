@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from envelope_types import EnvelopeSpec, _AdapterResult
 
@@ -34,6 +34,17 @@ def _switch_stamps(spec: EnvelopeSpec) -> Dict[str, str]:
 # ---------------------------------------------------------------------------
 # Adapters
 # ---------------------------------------------------------------------------
+
+
+def _codex_skill_inputs(spec: EnvelopeSpec) -> Dict[str, Any]:
+    """The role, state dir and project that ``spawn_codex`` needs to materialise the skill set (ADR-059 decision 13)."""
+    try:
+        from project_scope import resolve_stamp_project_id
+
+        project_id = resolve_stamp_project_id()
+    except Exception:  # vnx-silent-except: an unresolved tenant is reported as no_project_id
+        project_id = None
+    return {"role": spec.role, "state_dir": spec.state_dir, "project_id": project_id}
 
 
 class CodexAdapter:
@@ -60,6 +71,7 @@ class CodexAdapter:
                 event_writer=event_writer,
                 extra_env=_switch_stamps(spec),
                 cwd=cwd,
+                **_codex_skill_inputs(spec),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
