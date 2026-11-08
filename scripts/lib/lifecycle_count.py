@@ -39,6 +39,12 @@ DELIVERABLE_PREFIX = "dlv-"  # ADR-056: only these rows are deliverables
 MERGE_EVENT_TYPE, MERGE_CONCLUSION = "pr_merged", "merged"  # pr_merge.py's receipt
 MEMBER_DELIVERED, MEMBER_NOT_DELIVERED = "delivered", "not_delivered"
 MEMBER_UNKNOWN, MEMBER_OUT = "unknown", "out_of_cohort"
+COVERED, UNCOVERED, NO_DATA = "covered", "uncovered", "no_data"  # D13: per source and per project
+COVERAGE_SOURCES = ("promote", "close", "decide", "merge", "override", "prompt")
+PROMOTE_EVENT, CLOSE_EVENT = "deliverable_promoted", "deliverable_completed"  # planning_cli's events
+DECISION_LOG_FILENAME = "t0_decision_log.jsonl"
+PROMPT_LOG_FILENAME = "prompt_attribution.ndjson"  # the prompt hook's store (PR-8b); absent until then
+PROJECT_UNKNOWN = "unknown"  # ADR-056: a source that cannot name its project writes this
 
 
 class Unmeasured(Exception):
@@ -287,6 +293,110 @@ def _membership_summary(members: list) -> dict:
     for member in members:
         summary[member["status"]] += 1
     return summary
+
+
+class Coverage(Member):
+    """A project's coverage: ``state`` overall, ``sources`` per counted source (D13)."""
+
+    __slots__ = ()
+
+
+def _text(value) -> str:
+    """A stripped string, or "" for anything that is not one (a malformed field names nothing)."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _meta(raw) -> dict:
+    """``metadata_json`` as a dict; unparseable or not an object is an empty one, never a guess."""
+    try:
+        meta = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """``(scope, project_id, delivery_id)`` per row of a coordination-store table, read-only.
+
+    Scope is the column when the table has one, else the metadata; the identity reads the
+    metadata first. An absent store or table holds no rows; an unreadable one is a refusal.
+    """
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_UNREADABLE:
+        raise Unmeasured(f"{db_path} exists but is not a regular file; coverage is not measurable")
+    if store != STORE_PRESENT:
+        return []
+    try:
+        with get_connection(state_dir) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (table,)).fetchone() is None:
+                return []
+            rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table} {where}", params)]
+    except Exception as exc:  # vnx-silent-except: an unreadable store is a refusal, never "no rows"
+        raise Unmeasured(f"cannot read {db_path}: {exc}") from exc
+    entries = []
+    for row in rows:
+        meta = _meta(row.get("metadata_json"))
+        entries.append((row.get("project_id") or meta.get("project_id"),
+                        meta.get("project_id") or row.get("project_id"),
+                        meta.get("delivery_id") or row.get("delivery_id")))
+    return entries
+
+
+def _ndjson_entries(path: Path, event_type=None) -> list:
+    """``(scope, project_id, delivery_id)`` per line of an NDJSON store; an absent file has none."""
+    if not path.exists():
+        return []
+    try:
+        lines = read_ndjson_strict(path)
+    except (NdjsonCorruptionError, OSError) as exc:
+        raise Unmeasured(f"cannot read {path}: {exc}; coverage is not measurable") from exc
+    return [(ln.get("project_id"), ln.get("project_id"), ln.get("delivery_id"))
+            for ln in lines if isinstance(ln, dict)
+            and (event_type is None or ln.get("event_type") == event_type)]
+
+
+def _classify(entries: list, project: str) -> dict:
+    """One source: another project's rows never count; no rows is ``no_data``, never covered."""
+    kept = [(_text(scope), _text(pid), _text(did)) for scope, pid, did in entries
+            if _text(scope) in ("", PROJECT_UNKNOWN, project)]
+    # a row whose own project column says "unknown" is uncovered whatever its metadata claims
+    with_identity = sum(1 for scope, pid, did in kept
+                        if scope != PROJECT_UNKNOWN and pid == project and did)
+    state = NO_DATA if not kept else COVERED if with_identity else UNCOVERED
+    return {"state": state, "rows": len(kept), "with_identity": with_identity}
+
+
+def _coverage_entries(state_dir: Path) -> dict:
+    """Each counted source read from the store ADR-056 names for it, through its resolver."""
+    events = "WHERE event_type = ?"
+    return {
+        "promote": _sql_entries(state_dir, "coordination_events", events, (PROMOTE_EVENT,)),
+        "close": _sql_entries(state_dir, "coordination_events", events, (CLOSE_EVENT,)),
+        "decide": _ndjson_entries(state_dir / DECISION_LOG_FILENAME),
+        "merge": _ndjson_entries(state_dir / LEDGER_FILENAME, MERGE_EVENT_TYPE),
+        "override": _sql_entries(state_dir, "governance_overrides"),
+        "prompt": _ndjson_entries(state_dir / PROMPT_LOG_FILENAME),
+    }
+
+
+def measure_coverage(state_dir, *, project_id=None) -> Coverage:
+    """Per counted source: does its store hold rows of this project with ``(project_id, delivery_id)``?
+
+    Read-only. Overall ``state`` is ``no_data`` when no source has a row, ``covered`` when every
+    source is covered, else ``uncovered`` (D13). A store that cannot be read raises ``Unmeasured``.
+    """
+    state_path = Path(state_dir)
+    project = _text(project_id) or project_id_from_state_dir(state_path) or _text(
+        os.environ.get("VNX_PROJECT_ID"))
+    if not project:
+        raise Unmeasured(f"no project id for {state_path}: coverage is read per project")
+    entries = _coverage_entries(state_path)
+    sources = {name: _classify(entries[name], project) for name in COVERAGE_SOURCES}
+    states = {src["state"] for src in sources.values()}
+    overall = NO_DATA if states == {NO_DATA} else COVERED if states == {COVERED} else UNCOVERED
+    return Coverage(project_id=project, state=overall, sources=sources)
 
 
 def _sweep_age(state_dir: Path, evaluated: datetime):
