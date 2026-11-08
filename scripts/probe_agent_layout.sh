@@ -34,6 +34,8 @@ tmp_base() {
   local base="${TMPDIR:-/tmp}"
   while [ "${#base}" -gt 1 ] && [ "${base%/}" != "$base" ]; do base="${base%/}"; done
   if [ "$base" = / ]; then base=/tmp; fi
+  # Physical path: on macOS $TMPDIR runs through the /var -> /private/var symlink, and the CLI reports the real cwd (OI-2666).
+  if [ -d "$base" ]; then base="$(cd "$base" && pwd -P)"; fi
   printf '%s' "$base"
 }
 ensure_probe() {

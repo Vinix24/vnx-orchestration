@@ -134,14 +134,31 @@ def _relative_to_cwd(file_path: str, cwd: str) -> str:
     root for tmux/subprocess-spawned workers). A path that resolves outside
     cwd (relpath starting with "..") is left absolute — match_file_write_scope
     will then correctly fail to match any project-relative scope glob.
+
+    Both sides are compared on their real paths (OI-2666): Claude Code reports
+    the cwd as its real path (``/private/var/...``) while the model writes to
+    the path it was handed (``/var/...``, a symlink on macOS). The target's
+    PARENT directory is resolved, the final component is not: the file may not
+    exist yet, and a final-component symlink must stay visible to the scope
+    check. A directory symlink inside the worktree that points outside
+    (``docs -> /etc``) resolves outside the cwd, so the target stays absolute
+    and no project-relative glob matches it.
     """
     if not file_path or not os.path.isabs(file_path) or not cwd:
         return file_path
     try:
-        rel = os.path.relpath(file_path, cwd)
-    except ValueError:
+        real_cwd = os.path.realpath(cwd)
+        parent, base = os.path.split(file_path)
+        if base in ("", ".", ".."):
+            resolved = os.path.realpath(file_path)
+        else:
+            resolved = os.path.join(os.path.realpath(parent), base)
+        rel = os.path.relpath(resolved, real_cwd)
+    except (ValueError, OSError):
         return file_path
-    return file_path if rel.startswith("..") else rel
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        return file_path
+    return rel
 
 
 def _is_within_report_dir(file_path: str) -> bool:
