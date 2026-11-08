@@ -84,6 +84,8 @@ def _rotation_run(sdir: Path, expected=None, goal=None, age=0):
     run.mkdir(parents=True)
     if expected is not None:
         (run / "delivery.json").write_text(json.dumps({"expected": expected}))
+    (run / "prompt.txt").write_text("p")
+    (run / "continuation.json").write_text("{}")
     if goal is not None:
         (run / "goal.txt").write_text(goal)
     old = time.time() - age
@@ -91,12 +93,12 @@ def _rotation_run(sdir: Path, expected=None, goal=None, age=0):
     return run
 
 
-@pytest.mark.parametrize("kind", ["expected", "goal"])
+@pytest.mark.parametrize("kind", ["kickoff", "goal"])
 def test_rotation_text_is_automation_and_older_run_is_not(home, monkeypatch, kind):
     _, state = home
     sdir = state / "t0_rotation"
-    text = "/kickoff rotatie rotation-1" if kind == "expected" else "/goal doe dit tot het af is"
-    _rotation_run(sdir, **{kind: text})
+    run = _rotation_run(sdir, goal="/goal doe dit tot het af is")
+    text = f"/kickoff rotatie {run.name}" if kind == "kickoff" else "/goal doe dit tot het af is"
     assert _attribute(text).actor_class == "automation"
     assert _attribute("iets anders").actor_class == "operator"
     for p in sdir.glob("rotation-*"):
@@ -168,3 +170,56 @@ def test_coverage_reader_reads_the_line_as_prompt_source(home):
     _run_hook(json.dumps({"session_id": "s", "prompt": "p"}), home_dir, {"VNX_DISPATCH_ID": "dlv-abc"})
     cov = lifecycle_count.measure_coverage(state, project_id=PID)
     assert cov.sources["prompt"] == {"state": "covered", "rows": 1, "with_identity": 1}
+
+
+def test_kickoff_is_automation_without_delivery_json(home):
+    _, state = home
+    run = _rotation_run(state / "t0_rotation", goal="/goal x")
+    assert not (run / "delivery.json").exists()
+    for typed in (f"/kickoff rotatie {run.name}", f"kickoff rotatie {run.name}\n", f"  /kickoff rotatie {run.name}  "):
+        assert _attribute(typed).actor_class == "automation"
+    assert _attribute("/kickoff rotatie rotation-other").actor_class == "operator"
+    assert _attribute(f"/kickoff rotatie {run.name} extra").actor_class == "operator"
+    old = time.time() - 31 * 60
+    os.utime(run, (old, old))
+    assert _attribute(f"/kickoff rotatie {run.name}").actor_class == "operator"
+    assert _attribute("/goal x").actor_class == "operator"
+
+
+@pytest.mark.parametrize("bad", ["../../evil", "ABSOLUTE", "a/b"])
+def test_unsafe_project_id_is_unknown_and_writes_nothing_outside(tmp_path, bad):
+    home_dir = tmp_path / "home"
+    (home_dir / ".vnx-data").mkdir(parents=True)
+    (tmp_path / "evil" / "state").mkdir(parents=True)  # a dir the traversal would reach
+    if bad == "ABSOLUTE":
+        bad = str(tmp_path / "abs-evil")
+        (tmp_path / "abs-evil" / "state").mkdir(parents=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / ".vnx-project-id").write_text(bad + "\n")
+    done, _ = _run_hook(json.dumps({"session_id": "s", "cwd": str(work), "prompt": "x"}), home_dir,
+                        {"VNX_PROJECT_ID": ""})
+    assert done.returncode == 0 and done.stdout == ""
+    assert not list(tmp_path.rglob("prompt_attribution.ndjson"))
+    assert _attribute(env={}, cwd=str(work)).project_id == "unknown"
+
+
+def test_symlinked_state_dir_pointing_outside_writes_nothing(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    home_dir = tmp_path / "home"
+    root = home_dir / ".vnx-data" / PID
+    root.mkdir(parents=True)
+    (root / "state").symlink_to(outside)
+    done, _ = _run_hook(json.dumps({"session_id": "s", "prompt": "x"}), home_dir)
+    assert done.returncode == 0 and done.stdout == ""
+    assert "outside" in done.stderr
+    assert not list(outside.iterdir())
+
+
+def test_symlinked_rotation_dir_outside_root_is_not_read(home, tmp_path):
+    _, state = home
+    elsewhere = tmp_path / "elsewhere"
+    run = _rotation_run(elsewhere, goal="/goal x")
+    (state / "t0_rotation").symlink_to(elsewhere)
+    assert _attribute(f"/kickoff rotatie {run.name}").actor_class == "operator"

@@ -33,7 +33,7 @@ def run(raw: str) -> bool:
         return False
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     record = pa.build_record(attribution, session_id=payload.get("session_id"), prompt=prompt, ts_utc=stamp)
-    return pa.append_record(state, record)
+    return pa.append_record(state, record, root=pa.resolve_central_data_dir(attribution.project_id))
 
 
 def main() -> int:

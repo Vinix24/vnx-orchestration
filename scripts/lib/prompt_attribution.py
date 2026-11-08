@@ -9,9 +9,10 @@ The class of a prompt is NOT ``actor_class.derive()``: in a T0 session the envir
 (after PR-7c), but a prompt typed into that session is the operator's. So:
 
   - a dispatch marker (``VNX_DISPATCH_ID`` / ``VNX_CURRENT_DISPATCH_ID``) is ``worker``;
-  - a prompt equal to the ``expected`` first message in a rotation run's ``delivery.json``, or to the
-    content of that run's ``goal.txt``, for a run directory younger than 30 minutes, is ``automation``
-    (the rotation spawner typed it);
+  - a prompt equal to ``/kickoff rotatie <run>`` for a rotation run directory ``<run>`` younger than 30
+    minutes (the spawner's fixed first message, ``t0_rotate_spawn.sh``), or to the content of that run's
+    ``goal.txt``, is ``automation``. Only what exists before launch is read: ``delivery.json`` is written
+    after the first prompt and plays no part;
   - every other prompt is ``operator``.
 
 Pure functions, no network, no git subprocess, no DB. The prompt text is hashed and measured, never stored.
@@ -28,6 +29,7 @@ from typing import Any, Mapping, Optional
 from delivery_identity import delivery_identity_fields
 from governance_receipts import UNKNOWN_IDENTITY
 from project_root import resolve_central_data_dir
+from vnx_ids import PROJECT_ID_RE
 from t0_rotation_state import LATCH_TTL_SECONDS, STATE_DIR_ENV
 
 DISPATCH_MARKERS = ("VNX_DISPATCH_ID", "VNX_CURRENT_DISPATCH_ID")
@@ -36,6 +38,12 @@ CLASS_WORKER, CLASS_AUTOMATION, CLASS_OPERATOR = "worker", "automation", "operat
 STATUS_ATTRIBUTED, STATUS_AMBIGUOUS = "attributed", "ambiguous_session"
 RUN_DIR_GLOB = "rotation-*"
 PROJECT_MARKER = ".vnx-project-id"
+KICKOFF_PREFIX = "kickoff rotatie "
+
+
+def valid_project_id(value: str) -> str:
+    """``value`` when it is a single-component project slug, else ``unknown`` (never joined into a path)."""
+    return value if PROJECT_ID_RE.fullmatch(value or "") else UNKNOWN_IDENTITY
 
 
 @dataclass(frozen=True)
@@ -68,7 +76,7 @@ def resolve_project_id_light(cwd: str, env: Mapping[str, str]) -> str:
     """
     explicit = (env.get("VNX_PROJECT_ID") or "").strip()
     if explicit:
-        return explicit
+        return valid_project_id(explicit)
     try:
         start = Path(cwd).resolve()
     except (OSError, ValueError, RuntimeError):
@@ -81,13 +89,13 @@ def resolve_project_id_light(cwd: str, env: Mapping[str, str]) -> str:
             return UNKNOWN_IDENTITY  # a marker that exists but cannot be read: do not keep walking
         if lines is not None:
             first = lines[0].strip() if lines else ""
-            return first or UNKNOWN_IDENTITY
+            return valid_project_id(first)
     return UNKNOWN_IDENTITY
 
 
 def central_state_dir(project_id: str) -> Optional[Path]:
     """``~/.vnx-data/<project_id>/state``, or ``None`` when the project is unknown."""
-    if project_id == UNKNOWN_IDENTITY or not project_id:
+    if project_id == UNKNOWN_IDENTITY or valid_project_id(project_id) == UNKNOWN_IDENTITY:
         return None
     return resolve_central_data_dir(project_id) / "state"
 
@@ -98,7 +106,18 @@ def rotation_state_dir(project_id: str, env: Mapping[str, str]) -> Optional[Path
     if override:
         return Path(override).expanduser()
     state = central_state_dir(project_id)
-    return state / "t0_rotation" if state else None
+    if state is None:
+        return None
+    sdir = state / "t0_rotation"
+    return sdir if is_contained(sdir, resolve_central_data_dir(project_id)) else None
+
+
+def is_contained(path: Path, root: Path) -> bool:
+    """True when ``path`` resolves (symlinks followed) to ``root`` or below it."""
+    try:
+        return path.resolve().is_relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def _read_text(path: Path) -> Optional[str]:
@@ -108,16 +127,15 @@ def _read_text(path: Path) -> Optional[str]:
         return None
 
 
+def _normal(text: object) -> str:
+    """A prompt compared without surrounding whitespace and without the slash of a slash command."""
+    return text.strip().lstrip("/") if isinstance(text, str) else ""
+
+
 def _expected_texts(run_dir: Path) -> list:
-    texts = [_read_text(run_dir / "goal.txt")]
-    raw = _read_text(run_dir / "delivery.json")
-    try:
-        parsed = json.loads(raw) if raw is not None else None
-    except ValueError:
-        parsed = None
-    if isinstance(parsed, dict):
-        texts.append(parsed.get("expected"))
-    return [t.strip() for t in texts if isinstance(t, str) and t.strip()]
+    """What the spawner types for this run, from files that exist before launch."""
+    texts = [KICKOFF_PREFIX + run_dir.name, _read_text(run_dir / "goal.txt")]
+    return [t for t in (_normal(x) for x in texts) if t]
 
 
 def _fresh_run_dirs(sdir: Path, now: float) -> list:
@@ -130,7 +148,7 @@ def _fresh_run_dirs(sdir: Path, now: float) -> list:
 
 def is_automation(prompt: str, sdir: Optional[Path], now: Optional[float] = None) -> bool:
     """True when ``prompt`` equals the typed text of a rotation run younger than 30 minutes."""
-    wanted = (prompt or "").strip()
+    wanted = _normal(prompt)
     if not wanted or sdir is None:
         return False
     stamp = time.time() if now is None else now
@@ -167,12 +185,18 @@ def build_record(attribution: Attribution, *, session_id: Any, prompt: str, ts_u
     return record
 
 
-def append_record(state_dir: Path, record: dict) -> bool:
-    """Append one line under an exclusive lock. A missing state dir is not created: then ``False``."""
+def append_record(state_dir: Path, record: dict, root: Optional[Path] = None) -> bool:
+    """Append one line under an exclusive lock. A missing state dir is not created: then ``False``.
+
+    With ``root``, the resolved store file must lie under the resolved ``root``; otherwise nothing is
+    written and ``ValueError`` is raised.
+    """
     import fcntl
 
     if not state_dir.is_dir():
         return False
+    if root is not None and not is_contained(state_dir / STORE_FILENAME, root):
+        raise ValueError(f"store {state_dir / STORE_FILENAME} resolves outside {root}")
     line = json.dumps(record, separators=(",", ":")) + "\n"
     with (state_dir / STORE_FILENAME).open("a", encoding="utf-8") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
