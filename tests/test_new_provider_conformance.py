@@ -34,6 +34,7 @@ for _p in (REPO_ROOT / "scripts" / "lib", REPO_ROOT / "scripts", REPO_ROOT / "te
 import closure_verifier as cv
 import dispatch_spec
 import gate_billing_table
+import gate_dispatch_table
 import gate_lane_contract
 import gate_lane_rows
 import gate_recorder
@@ -67,9 +68,11 @@ def registered(monkeypatch):
     rows = gate_lane_rows.validate_rows((*gate_lane_rows.GATE_LANE_ROWS, _synthetic_row()))
     monkeypatch.setattr(gate_lane_rows, "GATE_LANE_ROWS", rows)
     monkeypatch.setattr(gate_request_handler, "GATE_LANE_ROWS", rows)
-    monkeypatch.setitem(
-        gate_recorder.GATE_PROVIDERS, GATE, (gate_recorder.GATE_PROVIDER_HARNESS_LANE, LANE)
+    monkeypatch.setattr(
+        gate_recorder, "GATE_PROVIDERS",
+        {**gate_recorder._NON_ROW_PROVIDERS, **gate_recorder.harness_providers(rows)},
     )
+    monkeypatch.setattr(gate_dispatch_table, "LANE_DISPATCHER_KEYS", gate_dispatch_table.lane_dispatcher_keys(rows))
     monkeypatch.setattr(gate_billing_table, "GATE_BILLING", gate_billing_table.billing_from_rows(rows))
     monkeypatch.setattr(gate_lane_contract, "MODEL_DEFAULTS", gate_lane_rows.model_defaults(rows))
     monkeypatch.setattr(gate_lane_contract, "SINGLE_SHOT_GATES", gate_lane_rows.single_shot_gates(rows))
@@ -260,17 +263,7 @@ def test_station_6_a_request_without_the_door_stamp_stays_off_the_door(registere
     assert pr_readiness.door_requested_gates_for_pr(path.parent, PR) == []
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OI: gate_dispatch_table.LANE_DISPATCHER_KEYS is a literal lane -> dispatcher table "
-        "(scripts/lib/gate_dispatch_table.py); the row's dispatcher column is data only. "
-        "Acceptance: unresolved_detail(gate, lane) reads the dispatcher from the row."
-    ),
-)
 def test_station_7_the_dispatch_table_resolves_the_rows_lane(registered):
-    import gate_dispatch_table
-
     assert gate_dispatch_table.unresolved_detail(GATE, LANE) is None
 
 

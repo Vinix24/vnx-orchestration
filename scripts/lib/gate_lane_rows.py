@@ -96,6 +96,25 @@ def _validate_text_columns(row: "GateLaneRow") -> None:
             raise _fail(row, column, f"must be a non-empty string, got {value!r}")
 
 
+def _known_families() -> FrozenSet[str]:
+    """The families a row may carry: the switchable ones plus claude and codex.
+
+    Imported when a row is built and not at the top: provider_switch reads this module
+    too, and the shipped rows are built while this module is still being imported.
+    """
+    import provider_switch
+
+    return frozenset(provider_switch.SWITCHABLE_FAMILIES) | {
+        provider_switch.CLAUDE, provider_switch.CODEX,
+    }
+
+
+def _validate_family(row: "GateLaneRow") -> None:
+    known = _known_families()
+    if row.family not in known:
+        raise _fail(row, "family", f"must be one of {sorted(known)}, got {row.family!r}")
+
+
 def _validate_number_columns(row: "GateLaneRow") -> None:
     for column in ("timeout", "diff_chars"):
         value = getattr(row, column)
@@ -113,6 +132,7 @@ def _validate_row(row: "GateLaneRow") -> None:
             row, "billing",
             f"must be one of {sorted(VALID_BILLING)}, got {row.billing!r}",
         )
+    _validate_family(row)
     _validate_number_columns(row)
 
 

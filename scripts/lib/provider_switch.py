@@ -42,7 +42,6 @@ _LIB = str(Path(__file__).resolve().parent)
 if _LIB not in sys.path:
     sys.path.insert(0, _LIB)
 
-import gate_lane_rows  # noqa: E402
 from atomic_io import atomic_write_text  # noqa: E402
 from vnx_ids import PROJECT_ID_RE  # noqa: E402
 
@@ -160,6 +159,9 @@ def family_of(identifier: str) -> str:
     if not isinstance(identifier, str) or not identifier.strip():
         raise UnknownProviderError(f"provider identifier {identifier!r} is empty or not a string")
     key = identifier.strip().lower()
+    # Imported here: gate_lane_rows reads SWITCHABLE_FAMILIES from this module while its rows build.
+    import gate_lane_rows
+
     row_family = gate_lane_rows.family_of_gate(identifier.strip(), gate_lane_rows.GATE_LANE_ROWS)
     if row_family is not None:
         return row_family
