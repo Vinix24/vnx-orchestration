@@ -320,3 +320,59 @@ def test_second_door_run_re_permits_the_same_run_and_merges(door: FakeGitHub) ->
     assert [c[2]["conclusion"] for c in door.of("PATCH")] == ["failure", "success"]
     assert _merged(door)["door_check"]["check_run_id"] == 900
     assert {call[0] for call in door.calls} <= {"GET", "POST", "PATCH"}, "geen enkel pad stuurt een DELETE"
+
+
+# --- round 2: every step between a published permit and a confirmed merge is guarded --------
+
+
+def _failed_merge(door: FakeGitHub) -> None:
+    door.merge = lambda: (False, "kop verschoven")
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, RuntimeError])
+def test_outcome_lookup_that_raises_after_a_failed_merge_revokes_once_and_propagates(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, exc_type: type,
+) -> None:
+    def lookup(pr: int) -> str:
+        raise exc_type("uitkomst niet op te halen")
+
+    _failed_merge(door)
+    monkeypatch.setattr(pr_merge, "_merge_outcome_after_failure", lookup)
+    with pytest.raises(exc_type):
+        _run()
+    assert [(c[1].rsplit("/", 1)[1], c[2]["conclusion"]) for c in door.of("PATCH")] == [("900", "failure")]
+    check = _refusal(door)["door_check"]
+    assert (check["revoked"], check["merge_outcome"]) == (True, "unknown")
+    assert door.runs[0]["conclusion"] == "failure"
+
+
+def test_exception_after_a_completed_revocation_does_not_patch_again(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def receipt_write_fails(**kwargs: Any) -> None:
+        raise OSError("schijf vol")
+
+    _failed_merge(door)
+    monkeypatch.setattr(pr_merge, "_write_refusal_receipt", receipt_write_fails)
+    with pytest.raises(OSError, match="schijf vol"):
+        _run()
+    assert len(door.of("PATCH")) == 1
+    assert door.runs[0]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize("exc_type", [KeyboardInterrupt, RuntimeError])
+def test_exception_right_after_publication_before_the_merge_guard_revokes_once(
+    door: FakeGitHub, monkeypatch: pytest.MonkeyPatch, exc_type: type,
+) -> None:
+    real = pr_merge._preflight_record
+
+    def record(name: str, gate: Dict[str, Any], head_sha: str = "") -> Dict[str, Any]:
+        if name == pr_merge.DOOR_GATE and gate.get("reason_code") == "permitted":
+            raise exc_type("na het publiceren")
+        return real(name, gate, head_sha)
+
+    monkeypatch.setattr(pr_merge, "_preflight_record", record)
+    with pytest.raises(exc_type):
+        _run()
+    assert [(c[1].rsplit("/", 1)[1], c[2]["conclusion"]) for c in door.of("PATCH")] == [("900", "failure")]
+    assert door.runs[0]["conclusion"] == "failure"

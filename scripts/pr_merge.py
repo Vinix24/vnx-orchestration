@@ -2573,8 +2573,16 @@ def _run_door_permit(
     publication on, even a failed print must revoke.
     """
     gate, check = _door_permit(args, evaluated, head_sha)
-    gate["reason_code"] = check["state"]
-    evaluated.append(_preflight_record(DOOR_GATE, gate, head_sha))
+    try:
+        gate["reason_code"] = check["state"]
+        evaluated.append(_preflight_record(DOOR_GATE, gate, head_sha))
+    except BaseException:
+        # A permit is already standing here and `_merge_under_permit`'s guard is not entered yet.
+        if check["state"] == DOOR_STATE_PERMITTED:
+            _revoke_during_exception(lambda: _revoke_door_runs(
+                args.pr, head_sha, check["check_run_id"], "uitzondering na het publiceren, vóór de merge",
+            ))
+        raise
     return gate, check
 
 
@@ -2636,6 +2644,7 @@ def _publish_and_bind(
             permit_id=f"{app_id}:{head_sha}:{run_id}", published_at=utc_now_iso(),
             read_back={"conclusion": run["conclusion"], "id": run["id"]},
         )
+        go = _door_gate("GO", f"{DOOR_CHECK_NAME} gepubliceerd en teruggelezen: {permit['permit_id']}")
     except ForgeCheckRunError as exc:
         outcome = _revoke_door_runs(pr, head_sha, run_id, f"de deur weigerde: {exc}")
         refused = dict(check, check_run_id=run_id, revoked=outcome == REVOKED, revoke_outcome=outcome)
@@ -2643,7 +2652,7 @@ def _publish_and_bind(
     except BaseException:
         _revoke_during_exception(lambda: _revoke_door_runs(pr, head_sha, run_id, "uitzondering bij het publiceren"))
         raise
-    return _door_gate("GO", f"{DOOR_CHECK_NAME} gepubliceerd en teruggelezen: {permit['permit_id']}"), permit
+    return go, permit
 
 
 def _revoke_door_runs(pr: int, head_sha: str, known_id: Optional[int], reason: str) -> str:
@@ -2725,10 +2734,16 @@ def _merge_outcome_after_failure(pr_number: int) -> str:
 
 def _revoke_after_merge(
     args: argparse.Namespace, check: Dict[str, Any], evaluated: list[Dict[str, Any]],
-    head_sha: str, merge_outcome: str, reason: str,
+    head_sha: str, merge_outcome: str, reason: str, landed: Optional[List[bool]] = None,
 ) -> Dict[str, Any]:
-    """Revoke the permit after a merge that is not confirmed, and record it as ``pr_merge_refused``."""
+    """Revoke the permit after a merge that is not confirmed, and record it as ``pr_merge_refused``.
+
+    ``landed`` gets a ``True`` the moment the revocation has completed (landed or reported
+    as a blocker), so a failure in the receipt write after it never triggers a second PATCH.
+    """
     outcome = _revoke_door_runs(args.pr, head_sha, check["check_run_id"], f"merge {merge_outcome}: {reason}")
+    if landed is not None:
+        landed.append(True)
     door_check = dict(check, merge_outcome=merge_outcome, revoked=outcome == REVOKED, revoke_outcome=outcome)
     _write_refusal_receipt(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", gate_name="merge",
@@ -2751,27 +2766,32 @@ def _merge_under_permit(
     project without the entry); its receipt carries ``door_check`` all the same.
     """
     permitted = check["state"] == DOOR_STATE_PERMITTED
+    revocation_done: List[bool] = []  # filled by `_revoke_after_merge` once its revocation completed
     try:
         print(f"Door gate: {gate['message']}")
         result = merge()
+        if not permitted:
+            if check["state"] != DOOR_STATE_NOT_REQUIRED:  # a dry run under a required door
+                result["door_check"] = check
+            return result
+        if result.get("success") is True:
+            result["door_check"] = dict(check, merge_outcome=MERGE_MERGED)
+            return result
+        outcome = _merge_outcome_after_failure(args.pr)
+        result["door_check"] = _revoke_after_merge(
+            args, check, evaluated, head_sha, outcome, str(result.get("error") or "merge niet bevestigd"),
+            landed=revocation_done,
+        )
+        return result
     except BaseException:
-        if permitted:
+        # Everything from the publication to a confirmed merge or a completed revocation is in
+        # here: the outcome lookup and the refusal result included. One revocation at most.
+        if permitted and not revocation_done:
             _revoke_during_exception(lambda: _revoke_after_merge(
                 args, check, evaluated, head_sha, MERGE_UNKNOWN, "uitzondering vóór een bevestigde merge",
+                landed=revocation_done,
             ))
         raise
-    if not permitted:
-        if check["state"] != DOOR_STATE_NOT_REQUIRED:  # a dry run under a required door
-            result["door_check"] = check
-        return result
-    if result.get("success") is True:
-        result["door_check"] = dict(check, merge_outcome=MERGE_MERGED)
-        return result
-    outcome = _merge_outcome_after_failure(args.pr)
-    result["door_check"] = _revoke_after_merge(
-        args, check, evaluated, head_sha, outcome, str(result.get("error") or "merge niet bevestigd"),
-    )
-    return result
 
 
 def _run_door(args: argparse.Namespace) -> int:
