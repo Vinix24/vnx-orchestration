@@ -9,7 +9,7 @@ De operator heeft op 07-11-2026 (beslissing 1 van de 1.9-sprint) bepaald:
 
 > "deur-afgedwongen: permit-check (verplichte status van de deur op de exacte kop; noodroute als override met reden)."
 
-Dit ADR legt vast wat die ene regel betekent, wie de toestemming mag maken, hoe lang zij leeft, wat een lezer ermee doet en in welke volgorde de deur wordt aangezet. Het bevat geen code. Alles erin is een regel over data: een YAML-entry, een check-run, een exitcode, een lijst PR's, een paginagrens. Er zit geen model in dit besluit en er is dus ook geen modelgestuurd deel met een veiligheidsnet. De rijen D2 tot en met D7b van het plan bouwen ertegen.
+Dit ADR legt vast wat die ene regel betekent, wie de toestemming mag maken, hoe lang zij leeft, wat een lezer ermee doet en in welke volgorde de deur wordt aangezet. Het bevat geen code. Alles erin is een regel over data: een YAML-entry, een check-run, een exitcode, een lijst PR's, een paginagrens. Er zit geen model in dit besluit en er is dus ook geen modelgestuurd deel met een veiligheidsnet. De rijen D2 tot en met D7c van het plan bouwen ertegen.
 
 ## Context
 
@@ -48,9 +48,11 @@ Dat is niet alleen een voorkeur. `parse_protection_config` weigert een `vnx-gate
 
 **Wat "één schrijver per artefact" hier wél en niet betekent.** Wel: de deurcheck wordt door precies één codepad gepubliceerd (`_run_door`, `scripts/pr_merge.py:2438`), de YAML bindt de check aan de App, en D3 reserveert de slug `door` op dezelfde manier waarop `review` vandaag geweigerd wordt (`check_run_name`, `scripts/lib/forge_gate_publisher.py:180-200`). Niet: gescheiden credentials. Dezelfde App-sleutel die `vnx-gate/door` maakt, kan ook `vnx-gate/review` maken. Dat is een **aanvaard restrisico** op besluit 1 van de operator, met een prijs die erbij hoort: een echte scheiding vraagt twee App-registraties, twee keychain-items, een schemawijziging van twee PR's en een operator-stap per consumer-repo. Die prijs wordt hier niet betaald en dus ook niet geclaimd.
 
-### 3. `door` is de zesde en laatste preflight
+### 3. `door` is de zesde en laatste preflight, maar haar bewijs zijn de vijf poorten daarvóór
 
 `PREFLIGHT_ORDER` (`scripts/pr_merge.py:303-309`, nu `ci, review, adr, contract_invalid, branch_protection`) krijgt `door` als zesde en laatste naam. De preflight publiceert de check op de kop, leest hem terug van GitHub, en weigert als wat er staat geen `success` van de eigen App is of niet de run is die deze aanroep publiceerde.
+
+**Het bewijs is de poorten vóór de deur, niet de deur zelf.** De deurpoort kan geen `GO` zijn voordat zij gepubliceerd heeft: `_preflight_ledger` (`scripts/pr_merge.py:394`) merkt een poort die nog geen oordeel had als `not_evaluated`, en de deur krijgt haar oordeel pas uit de teruglezing van de check-run. Een contract dat alle zes namen van `PREFLIGHT_ORDER` met `verdict: "GO"` eist vóórdat de deur publiceert, is dus cirkelredenerend en kan nooit slagen. Daarom draagt het evidence-bestand precies de namen van `PREFLIGHT_ORDER` **zonder** `door`, in die volgorde — op `main` van vandaag de vijf `ci, review, adr, contract_invalid, branch_protection` — elk met `verdict` exact `"GO"`. De uitgever valideert de namen en hun volgorde, niet alleen het aantal: een ontbrekende, een extra of een verkeerd geordende naam is elk een eigen weigeringstekst. Het eigen record van de deur (`verdict` uit de teruglezing) wordt pas aan de preflight-ledger toegevoegd nadat de teruglezing is geslaagd; die volledige lijst van zes is wat in de `pr_merged`-receipt naast `door_check` landt.
 
 - **Laatst, omdat** de toestemming zo dicht mogelijk bij de merge moet liggen; omdat hij afhangt van de branch-protection-preflight, die `main`'s `checks[]` leest (`main_config`, `scripts/pr_merge.py:1552`, uit `_fetch_protection_yaml` op `:524`, aangeroepen op `:1544`); en omdat een groene check op een kop die daarna alsnog door een eerdere poort geweigerd wordt, een valse toestemming is.
 - **Teruglezen, omdat** een POST die 201 antwoordt geen bewijs is dat de context op de kop groen staat, en een verloren antwoord een bestaand faaltype is (`_api_request`, `scripts/lib/forge_check_run.py:464-497`). De deur eist daarom drie dingen tegelijk: `conclusion == "success"`, de eigen `app.id`, en `id == <de run die deze aanroep maakte>`. Kan hij die run niet aanwijzen, dan weigert hij.
@@ -79,7 +81,9 @@ De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /r
 2. De uitkomst is **onbekend**: `gh` meldt succes maar `_pr_actually_merged` (`scripts/pr_merge.py:1836`) kan de PR-state niet lezen of leest geen `MERGED`. Dan intrekken, `merge_outcome: "unknown"`, exit non-zero.
 3. Een uitzondering na publicatie en vóór een bevestigde merge.
 
-**Wat een crash niet kan.** Een SIGKILL, segfault of stroomuitval tussen publicatie en merge laat de toestemming staan; geen enkel in-process mechanisme dekt dat. Daarvoor is de **verzoening** (D7b): elke **open** PR waarvan de kop een groene `vnx-gate/door` draagt die ouder is dan `--permit-ttl` (standaard 30 min), of waarvan de `permit_id` in geen enkele `pr_merged`/`pr_merge_refused`-regel voorkomt, is een bevinding.
+**Wat een crash niet kan.** Een SIGKILL, segfault of stroomuitval tussen publicatie en merge laat de toestemming staan; geen enkel in-process mechanisme dekt dat. Daarvoor is de **verzoening met intrekking** (rij **D7c**, nieuwe rij na D7b en D3 — niet D7b): zij leest elke **open** PR, en een groene `vnx-gate/door` op de huidige kop die ouder is dan `--permit-ttl` (standaard 30 min), of waarvan de `permit_id` in geen enkele `pr_merged`/`pr_merge_refused`-regel voorkomt, is een bevinding **en** wordt verwijderd via hetzelfde publisher-delete-pad als de in-process intrekking: drie pogingen met backoff, daarna de `failure`-fallback met merker en een blocker-open-item.
+
+**De grens is de job-cadans plus de TTL, niet de TTL.** Melden alleen is geen grens: niets op GitHub laat een check-run verlopen, dus tussen de publicatie en de volgende verzoeningsrun blijft de merge-toestemming staan, hoe oud zij ook is. Met de dagelijkse job is de grens daarom hooguit **24 uur plus 30 minuten**. Een kortere cadans is een keus van de operator en de enige manier om die grens te verkorten.
 
 **De blootstelling, in drie gevallen met een grens.** Dit is de tabel die "seconden" uit de eerste planrevisie vervangt; zij is de claim.
 
@@ -87,7 +91,7 @@ De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /r
 |---|---|---|
 | merge lukt | niets: de kop staat in `main`, de PR is dicht, een kale merge op die PR kan niet meer | 0 |
 | merge faalt, deur leeft | de toestemming tot de verwijdering terugkomt | seconde tot tientallen seconden; 3 pogingen met backoff, daarna fallback + blocker |
-| crash of verloren antwoord | de toestemming tot de verzoening haar ziet | `≤ permit-TTL` (30 min) voor de stale-permit-check, `≤ 24 u` tot de job het meldt |
+| crash of verloren antwoord | de toestemming tot de verzoening haar **intrekt** (zelfde delete-pad, daarna fallback + blocker) | **job-cadans + `permit-TTL`**: bij de dagelijkse job ≤ 24 u + 30 min; niets op GitHub laat haar vanzelf verlopen |
 
 ### 6. De lezer kent drie toestanden, met een herstelpad in de derde
 
@@ -133,13 +137,15 @@ D7b draait per project in een **eigen proces**, met een expliciet contract:
 - **Aggregatie** = maximum van de ernst: 2 als één project onmeetbaar is, anders 1 als één project een gat heeft, anders 0.
 - **Dedup** = `dedup_key = f"door-audit:{project_id}:{pr_number}"` (`add_item_programmatic`, `scripts/open_items_manager.py:212-238`), zodat een dagelijkse run geen 30 identieke items opent.
 
+**De verzoening met intrekking is rij D7c, niet D7b.** D7b blijft de vlootrunner hierboven: enumereren, per project isoleren, selecteren, aggregeren, dedup. D7c bouwt daarop en voegt de pass toe die §5 beschrijft — elke open PR, een te oude of onverklaarde groene `vnx-gate/door`, en de verwijdering via hetzelfde publisher-delete-pad als de in-process intrekking. Zonder D7c is de verzoening report-only en is de crash-grens uit §5 niet gehaald.
+
 Bewust **geen** nieuwe per-project launchd-familie: die zou `REQUIRED_PER_PROJECT_FAMILIES` raken (`scripts/launchd/launchd_project_scope.py:99-104`) en `vnx doctor` op elk project laten FAILen tot de sweep gedaan is. Eén machinebrede job met eigen enumeratie geeft hetzelfde bewijs zonder die koppeling.
 
 ### 10. De activering is een toestandsmachine A0 tot A3
 
 | Toestand | Wanneer | Wat er waar is | Wat er moet kloppen |
 |---|---|---|---|
-| **A0** code op main | na D1-D4, D6, D7a/b | niets verandert aan de bescherming | niets; de dev-checkout is identiek aan `main` |
+| **A0** code op main | na D1-D4, D6, D7a/b/c | niets verandert aan de bescherming | niets; de dev-checkout is identiek aan `main` |
 | **A1** YAML declareert, live nog niet | tussen de merge van D5 en de apply | `main` zegt 16, live 15 → drift → de deur weigert alles, zonder override | D3, D4 en D6 staan op `main`; de apply volgt direct, één T0-stap, niets ertussen |
 | **A2** live eist de check | na de apply | vanaf hier moet de deur publiceren of niemand mergt | de draaiende deur is de hoofdcheckout op `main`, die D3/D4/D6 bevat |
 | **A3** release + pins | na A2 op vnx-dev | consumers kunnen hetzelfde | **pas hierna** mag een consumer-project de entry krijgen; daar is de draaiende deur de gepinde installatie, en die moet 1.9.0 zijn (`door_reference`, `scripts/lib/merge_target.py:185-198`) |
@@ -160,13 +166,13 @@ evidence := {
   "source": "pr_merge._run_door",
   "pr_number": <int>,
   "head_sha": "<40 hex>",
-  "preflight_gates": [ <exact len(PREFLIGHT_ORDER) records uit _preflight_ledger> ],
+  "preflight_gates": [ <de records van PREFLIGHT_ORDER zonder "door", in die volgorde> ],
   "door_version": "<VERSION>",
   "integrity": {"paths": 8, "sha256": "<hash over pad+blob-hash-paren>"}
 }
 ```
 
-Geweigerd (elk met eigen tekst, exit 1) bij: ontbrekend of onparseerbaar bestand, `schema != 1` of onbekend, `source` anders dan `pr_merge._run_door`, `head_sha != --sha`, `pr_number` anders, `len(preflight_gates) != len(PREFLIGHT_ORDER)`, en **elk** record waarvan `verdict` niet exact `"GO"` is — ontbrekend, `null` en onbekend weigeren alle drie. De bron is `preflight_gates = _preflight_ledger(evaluated)` (`scripts/pr_merge.py:2518`): precies de lijst die ook in de receipt landt, dus geen tweede bron.
+Geweigerd (elk met eigen tekst, exit 1) bij: ontbrekend of onparseerbaar bestand, `schema != 1` of onbekend, `source` anders dan `pr_merge._run_door`, `head_sha != --sha`, `pr_number` anders, een **ontbrekende, extra of verkeerd geordende naam** in `preflight_gates` (vergeleken met `PREFLIGHT_ORDER` zonder `door`, in die volgorde — elk van de drie heeft zijn eigen tekst), en **elk** record waarvan `verdict` niet exact `"GO"` is — ontbrekend, `null` en onbekend weigeren alle drie. De bron is `preflight_gates = _preflight_ledger(evaluated)` (`scripts/pr_merge.py:2518`): het evidence-bestand neemt daar de vijf records vóór `door` uit, en de receipt schrijft dezelfde lijst plus het deurrecord dat pas na een geslaagde teruglezing wordt toegevoegd. Eén bron, geen tweede.
 
 **(b) Publicatie-autoriteit — wie mag een toestemming maken.**
 
@@ -199,8 +205,8 @@ Een `pr_merged`-regel met `source != "pr_merge"` **of** `backfilled: true` telt 
 
 - **Positief:** een merge buiten de deur wordt vanaf A2 door GitHub geweigerd, niet door een afspraak. De weigering is dezelfde voor de operator, voor een agent en voor een kale `gh pr merge`.
 - **Positief:** "niet gedekt" is per project en per receipt meetbaar (`door_check.state == "not_required"`), in plaats van een stilte. De terugweg is één regel in een bestaand bestand en een verzwakking die haar eigen receipt en blocker-open-item schrijft.
-- **Negatief, en aanvaard:** dit is **geen** credential-scheiding. Dezelfde App-sleutel kan de toestemming ook namens iets anders zetten. De maatregelen zijn detectie (de verzoening, de dagelijkse audit) en vastlegging (het `door_check`-blok), niet preventie. Wie preventie wil, betaalt de prijs uit §2.
-- **Negatief:** een crash tussen publicatie en merge laat een toestemming staan tot de verzoening haar ziet. De grens staat in §5; de verzoening is het enige net dat dit geval dekt.
+- **Negatief, en aanvaard:** dit is **geen** credential-scheiding. Dezelfde App-sleutel kan de toestemming ook namens iets anders zetten. De maatregelen zijn detectie en intrekking (de verzoening met intrekking, rij D7c, en de dagelijkse audit) en vastlegging (het `door_check`-blok), niet preventie. Wie preventie wil, betaalt de prijs uit §2.
+- **Negatief:** een crash tussen publicatie en merge laat een toestemming staan tot de verzoening haar **intrekt**; niets op GitHub laat een check-run verlopen. De grens is daarom de job-cadans plus de `permit-TTL` (bij de dagelijkse job hooguit 24 uur plus 30 minuten, zie §5); de verzoening met intrekking (D7c) is het enige net dat dit geval dekt.
 - **Negatief:** `permit_revoked` blokkeert een kop tot er een nieuwe commit is wanneer de verwijdering mislukt. Dat is de bewuste fallback: een blokkade met hersteltekst is beter dan een stil gat, en `revoke_outcome` maakt haar herkenbaar.
 - **Volgorde:** niets van dit alles is actief voordat D5 de entry zet en de apply draait (A1 → A2). Tot dan staat de code op `main` en verandert er niets aan de bescherming.
 
