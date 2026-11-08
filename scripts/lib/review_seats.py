@@ -66,6 +66,7 @@ for _path in (str(_LIB_DIR), str(_SCRIPTS_DIR)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+import gate_profile
 from dispatch_spec import REGISTERED_GATE_NAMES, ReviewGateConfigError, retired_gate_hint
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,13 @@ class ReviewSeats:
     gates. ``value`` is the stack as configured or named, verbatim.
     ``profile_stack`` is the stack a governance profile derived from the changed
     files when one applied (its extra gates are in ``stack``), else ``None``.
+
+    ``profile``, ``profile_source`` and ``profile_error`` are the gate profile
+    (``gate_profile``, ``VNX_GOVERNANCE_PROFILE``) in force when the seats were
+    resolved. Not the glob governance profile above. A config-sourced review that
+    meets an invalid profile value raises ``GateProfileConfigError``; only an
+    explicit stack, which does not read the profile, records the error here and
+    ``profile`` stays ``None``: a record never says ``standard`` for a value that failed.
     """
 
     seats: Tuple[str, ...]
@@ -102,6 +110,9 @@ class ReviewSeats:
     source: str
     value: str
     profile_stack: Optional[Tuple[str, ...]] = None
+    profile: Optional[str] = None
+    profile_source: Optional[str] = None
+    profile_error: Optional[str] = None
 
     @property
     def extra_gates(self) -> Tuple[str, ...]:
@@ -116,6 +127,9 @@ class ReviewSeats:
             "key": REVIEW_STACK_KEY if self.source == SOURCE_CONFIG else "",
             "value": self.value,
             "profile_stack": list(self.profile_stack) if self.profile_stack is not None else None,
+            "profile": self.profile,
+            "profile_source": self.profile_source,
+            "profile_error": self.profile_error,
         }
 
 
@@ -190,6 +204,19 @@ def _config_stack_entries(raw: str, changed_files: Sequence[str], project_root: 
     return list(config_seats) + [gate for gate in profile if gate not in profile_seats], profile
 
 
+def _explicit_profile_fields(project_id: Optional[str] = None) -> Dict[str, Optional[str]]:
+    """The profile record fields for an explicit stack, which wins over the profile.
+
+    The stack does not depend on the profile, so an invalid value does not stop it; it is
+    recorded by name instead (``profile`` stays ``None``).
+    """
+    try:
+        resolution = gate_profile.resolve(project_id)
+    except gate_profile.GateProfileConfigError as exc:
+        return {"profile": None, "profile_source": exc.source, "profile_error": str(exc)}
+    return {"profile": resolution.profile, "profile_source": resolution.source, "profile_error": None}
+
+
 def resolve_review_seats(
     *,
     explicit_stack: Optional[Iterable[str]] = None,
@@ -207,11 +234,17 @@ def resolve_review_seats(
         names = [str(item).strip() for item in explicit_stack if str(item).strip()]
         value = ",".join(names)
         seats, stack = classify_stack(names, origin="the requested review stack", value=value)
-        return ReviewSeats(seats=seats, stack=stack, source=SOURCE_EXPLICIT, value=value)
+        return ReviewSeats(
+            seats=seats, stack=stack, source=SOURCE_EXPLICIT, value=value, **_explicit_profile_fields(),
+        )
 
     import config_runtime
 
-    raw = config_runtime.get(REVIEW_STACK_KEY) or ""
+    # Raises GateProfileConfigError for an invalid profile value: nothing is requested on a
+    # configuration that cannot be read. The profile's stack never outranks one an operator set.
+    resolution = gate_profile.resolve()
+    contributed = gate_profile.value("review_stack", resolution=resolution)
+    raw = contributed if contributed is not None else (config_runtime.get(REVIEW_STACK_KEY) or "")
     entries, profile = _config_stack_entries(raw, changed_files, project_root)
     seats, stack = classify_stack(entries, origin=REVIEW_STACK_KEY, value=raw)
     if not seats:
@@ -223,4 +256,5 @@ def resolve_review_seats(
     return ReviewSeats(
         seats=seats, stack=stack, source=SOURCE_CONFIG, value=raw,
         profile_stack=tuple(profile) if profile is not None else None,
+        profile=resolution.profile, profile_source=resolution.source, profile_error=None,
     )

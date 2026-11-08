@@ -197,6 +197,22 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "There is no vnx config verb: a non-default goes through dashboard/api_config.py or a "
         "project_config row. Setting it high is the rollback without code.",
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # Track gate-profiel-per-project, P1: the project's gate weight. Read ONLY through
+    # gate_profile.resolve (never as a bare string by a reader), which validates it
+    # fail-closed: an unset value is "standard", any other value than light, standard or
+    # heavy (after one strip) raises GateProfileConfigError naming the raw value and its
+    # source. Nothing falls back to "standard" for a value that failed.
+    "VNX_GOVERNANCE_PROFILE": _e(
+        "VNX_GOVERNANCE_PROFILE", "enum", "standard", "gate",
+        "The project's gate profile: light, standard or heavy. Sets the review stack, the review "
+        "round cap, the takeover chain and the plan-gate seats in one choice (the table is "
+        "gate_profile.PROFILE_TABLE). standard (the default) contributes nothing: every reader "
+        "keeps its own chain, which is today's behaviour. Resolved through the same precedence "
+        "chain as every key (VNX_OVERRIDE_GOVERNANCE_PROFILE > project_config row > "
+        "VNX_GOVERNANCE_PROFILE > default). Any other value fails closed with "
+        "GateProfileConfigError naming the raw value and its source; there is no fallback to "
+        "standard.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE", read_site_wired=False),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
@@ -645,33 +661,50 @@ def _bare(key: str) -> str:
     return key[len("VNX_"):] if key.startswith("VNX_") else key
 
 
-def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
-    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+def resolve_with_source(
+    key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
+    *, use_default_resolver: bool = True,
+) -> "tuple[Optional[str], str]":
+    """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
-    ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
-    world. Shared by :func:`get` (the process's wired store) and
-    :func:`get_for_project` (a store the caller names), so the order of the
-    four sources cannot drift between them.
+    ``source`` is ``override`` (``VNX_OVERRIDE_<BARE>``), ``project_config`` (the DB layer),
+    ``env`` (``VNX_<BARE>`` as the process started), ``default`` (the registry default) or
+    ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
+    ``use_default_resolver`` the process's wired store and default project are used, as
+    :func:`get` does.
     """
     entry = CONFIG_REGISTRY.get(key)
-    # 1. operator emergency-brake override (always wins, even for unknown keys)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
     if override is not None:
-        return override
-    # 2. per-project DB value through the resolver in play
+        return override, "override"
+    if resolver is None and use_default_resolver:
+        resolver = _db_resolver
+        project_id = project_id if project_id is not None else _default_project_id
     if resolver is not None:
         try:
             db_val = resolver(project_id, key)
         except Exception:
             db_val = None
         if db_val is not None:
-            return db_val
-    # 3. process-start env value (today's behaviour, never broken)
+            return db_val, "project_config"
     env_val = os.environ.get(key)
     if env_val is not None:
-        return env_val
-    # 4. registry default
-    return entry.default if entry is not None else None
+        return env_val, "env"
+    if entry is not None:
+        return entry.default, "default"
+    return None, "unset"
+
+
+def _resolve(key: str, project_id: Optional[str], resolver: Optional[DbResolver]) -> Optional[str]:
+    """The precedence chain: override > ``resolver``'s DB value > env > registry default.
+
+    ``resolver`` is the step-2 DB layer in play, or ``None`` for the env-only
+    world. Shared by :func:`get` (the process's wired store) and
+    :func:`get_for_project` (a store the caller names), so the order of the
+    four sources cannot drift between them. The order lives in
+    :func:`resolve_with_source`; this returns its value.
+    """
+    return resolve_with_source(key, project_id, resolver, use_default_resolver=False)[0]
 
 
 def get(key: str, project_id: Optional[str] = None) -> Optional[str]:
