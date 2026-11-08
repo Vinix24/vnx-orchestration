@@ -7,8 +7,17 @@ length, sha256 per file). No harness discovers that directory, git ignores it,
 and it goes away with the worktree.
 
 The shadow fails open: any error gives one WARNING and ``status: error`` in the
-result (and in ``manifest.json`` once the ignore check has passed). Nothing here
+result (and in ``manifest.json`` once the role folder is claimed). Nothing here
 raises to the caller. Under ``off`` nothing happens and no directory is made.
+
+Every removal is bound to one directory fd (skilldisc R4 r3). A directory is entered
+only when this run made it (one ``mkdir``, then opened and found empty) or validated it
+through the fd it still holds. It is emptied through that fd (:func:`_empty_fd`: every
+subdirectory opened with ``O_NOFOLLOW`` relative to its parent fd, a link unlinked and
+never followed), and only the empty entry is removed by name, by an ``rmdir`` right
+after its ``st_dev``/``st_ino`` matched the held fd (:func:`_rmdir_if_same`). A file is
+unlinked by name only while it is the inode this run wrote or identified
+(:func:`_unlink_if_same`). No entry is ever replaced.
 """
 
 from __future__ import annotations
@@ -60,6 +69,12 @@ DEST_REFUSALS = frozenset({"symlink_in_destination", "path_outside_worktree"})
 PARTIAL_MARK = ".vnx-partial-"
 NO_LINK_ERRNOS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP})
 
+# Every directory below a held fd is opened with these: a link is never followed, a FIFO never blocks the open.
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK
+NOT_A_DIR_ERRNOS = frozenset({errno.ENOTDIR, errno.ELOOP})
+DIR_IN_THE_WAY_ERRNOS = frozenset({errno.EPERM, errno.EISDIR})
+NOT_EMPTY_ERRNOS = frozenset({errno.ENOTEMPTY, errno.EEXIST})
+
 
 class ShadowError(Exception):
     """A refusal with a stable reason string; caught inside the module."""
@@ -106,36 +121,25 @@ def materialize_role_skills(
     try:
         return _materialize(wt, role, list(slugs), Path(source_root) if source_root else wt)
     except ShadowError as exc:
-        return _fail(wt, role, exc.reason)
+        return _fail(role, exc.reason)
     except Exception as exc:  # fail-open: the shadow never stops a dispatch
-        return _fail(wt, role, f"unexpected:{type(exc).__name__}")
+        return _fail(role, f"unexpected:{type(exc).__name__}")
 
 
-def _fail(wt: Path, role: str, reason: str) -> dict[str, Any]:
+def _fail(role: str, reason: str, role_fd: int | None = None) -> dict[str, Any]:
+    """One WARNING and the error result; with *role_fd* the reason also goes into that folder's manifest.
+
+    *role_fd* is the role folder this run claimed and still holds. An error before the
+    claim writes no manifest: whatever stands at the role name then is not this run's.
+    """
     logger.warning("agent skill shadow for role %r: %s", role, reason)
     result: dict[str, Any] = {"status": "error", "reason": reason, "role": role}
-    if reason != "not_ignored":
-        _write_error_manifest(wt, role, result)
-    return result
-
-
-def _write_error_manifest(wt: Path, role: str, result: dict[str, Any]) -> None:
-    """Best effort: record the reason, but only for a safe role under an ignored dir."""
-    try:
-        if not _is_safe_agent_name(role) or not _is_ignored(wt):
-            return
-        _checked_base(wt)
-        root_fd = _open_worktree(wt)
+    if role_fd is not None:
         try:
-            role_fd = _open_role_dir(root_fd, role, reset=False)
-            try:
-                _write_manifest(role_fd, {"schema": MANIFEST_SCHEMA, **result})
-            finally:
-                os.close(role_fd)
-        finally:
-            os.close(root_fd)
-    except Exception as exc:  # fail-open: the reason is already in the WARNING
-        logger.warning("could not write error manifest: %s", type(exc).__name__)
+            _write_manifest(role_fd, {"schema": MANIFEST_SCHEMA, **result})
+        except Exception as exc:  # fail-open: the reason is already in the WARNING
+            logger.warning("could not write error manifest: %s", type(exc).__name__)
+    return result
 
 
 def _checked_base(wt: Path) -> Path:
@@ -163,21 +167,30 @@ def _materialize(wt: Path, role: str, slugs: list[str], source_root: Path) -> di
         raise ShadowError("not_ignored")
     if not _is_safe_agent_name(role):
         raise ShadowError(f"role_refused:{role}")
-    sources: dict[str, _Source] = {}
-    for slug in slugs:
-        sources.setdefault(slug, _load_source(source_root, slug))
     _checked_base(wt)
     root_fd = _open_worktree(wt)
     try:
-        role_fd = _open_role_dir(root_fd, role, reset=True)
-        try:
-            entries = [_copy_skill(role_fd, source_root, slug, src) for slug, src in sources.items()]
-            manifest = {"schema": MANIFEST_SCHEMA, "status": "ok", "role": role, "skills": entries}
-            _write_manifest(role_fd, manifest)
-        finally:
-            os.close(role_fd)
+        role_fd = _claim_role_dir(root_fd, role)
     finally:
         os.close(root_fd)
+    try:
+        return _fill_role_dir(role_fd, wt, role, slugs, source_root)
+    finally:
+        os.close(role_fd)
+
+
+def _fill_role_dir(role_fd: int, wt: Path, role: str, slugs: list[str], source_root: Path) -> dict[str, Any]:
+    """Read every source, then copy each below the claimed *role_fd*; the manifest, ok or error, is written there."""
+    try:
+        sources: dict[str, _Source] = {}
+        for slug in slugs:
+            sources.setdefault(slug, _load_source(source_root, slug))
+        entries = [_copy_skill(role_fd, source_root, slug, src) for slug, src in sources.items()]
+    except ShadowError as exc:
+        return _fail(role, exc.reason, role_fd)
+    except Exception as exc:  # fail-open: the shadow never stops a dispatch
+        return _fail(role, f"unexpected:{type(exc).__name__}", role_fd)
+    _write_manifest(role_fd, {"schema": MANIFEST_SCHEMA, "status": "ok", "role": role, "skills": entries})
     return {"status": "ok", "role": role, "dest": str(wt / SHADOW_DIR / role), "skills": entries}
 
 
@@ -213,37 +226,162 @@ def _open_worktree(wt: Path) -> int:
     return os.open(os.path.realpath(wt), flags)
 
 
-def _open_role_dir(root_fd: int, role: str, reset: bool) -> int:
-    """Open ``<SHADOW_DIR>/<role>`` below *root_fd*, one component at a time; *reset* empties it first."""
+def _claim_role_dir(root_fd: int, role: str) -> int:
+    """Clear ``<SHADOW_DIR>/<role>`` through one fd, then claim a fresh one with one ``mkdir``; returns its fd.
+
+    The previous folder is removed by :func:`_clear_role_dir`. Whatever takes the name
+    after that, before or right after the new ``mkdir``, is never entered: the run
+    refuses with ``role_dir_replaced``. Nothing is written into a role folder this run
+    did not make.
+    """
     base_fd = _descend(root_fd, (SHADOW_DIR,))
     try:
+        _clear_role_dir(base_fd, role)
         try:
-            mode = os.stat(role, dir_fd=base_fd, follow_symlinks=False).st_mode
-        except FileNotFoundError:
-            mode = None
-        if mode is not None and stat.S_ISLNK(mode):
-            raise ShadowError("role_dir_symlink")
-        if mode is not None and reset:
-            if not stat.S_ISDIR(mode):
-                os.unlink(role, dir_fd=base_fd)
-            else:
-                _rmtree_below(base_fd, role)
-        return _descend(base_fd, (role,))
+            os.mkdir(role, 0o755, dir_fd=base_fd)
+            return _open_claimed(base_fd, role)
+        except FileExistsError as exc:
+            raise ShadowError("role_dir_replaced") from exc
     finally:
         os.close(base_fd)
 
 
-def _rmtree_below(parent_fd: int, name: str) -> None:
-    """Remove directory *name* below *parent_fd*; links are unlinked, never followed."""
-    for _top, dirs, files, dir_fd in os.fwalk(name, topdown=False, dir_fd=parent_fd, follow_symlinks=False):
-        for entry in files:
-            os.unlink(entry, dir_fd=dir_fd)
-        for entry in dirs:
-            if stat.S_ISLNK(os.stat(entry, dir_fd=dir_fd, follow_symlinks=False).st_mode):
-                os.unlink(entry, dir_fd=dir_fd)
-            else:
-                os.rmdir(entry, dir_fd=dir_fd)
-    os.rmdir(name, dir_fd=parent_fd)
+def _clear_role_dir(base_fd: int, role: str) -> None:
+    """Remove the role folder a previous run left; the folder that is opened is the folder that is emptied.
+
+    The folder is opened once without following a link and emptied through that fd; its
+    entry is removed only while it is still that folder (:func:`_remove_held`). A folder
+    swapped in at the name meanwhile stays and refuses the run (``role_dir_replaced``). A
+    link at the name refuses (``role_dir_symlink``); another non-directory is unlinked,
+    never followed.
+    """
+    try:
+        role_fd = os.open(role, DIR_FLAGS, dir_fd=base_fd)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno not in NOT_A_DIR_ERRNOS:
+            raise
+        info = os.stat(role, dir_fd=base_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode):
+            raise ShadowError("role_dir_symlink") from exc
+        if not _unlink_if_same(base_fd, role, _ident(info)):
+            raise ShadowError("role_dir_replaced") from exc
+        return
+    try:
+        if not _remove_held(base_fd, role, role_fd):
+            raise ShadowError("role_dir_replaced")
+    finally:
+        os.close(role_fd)
+
+
+def _ident(info: os.stat_result) -> tuple[int, int]:
+    return info.st_dev, info.st_ino
+
+
+def _entry_ident(parent_fd: int, name: str) -> tuple[int, int] | None:
+    """``st_dev``/``st_ino`` of the entry *name* below *parent_fd* itself (a link is not followed); None when it is gone."""
+    try:
+        return _ident(os.stat(name, dir_fd=parent_fd, follow_symlinks=False))
+    except FileNotFoundError:
+        return None
+
+
+def _rmdir_if_same(parent_fd: int, name: str, held_fd: int) -> bool:
+    """Remove the empty entry *name* below *parent_fd* only while it is the directory *held_fd* holds.
+
+    The entry's ``st_dev``/``st_ino`` is compared with ``fstat`` of the held fd right
+    before the ``rmdir``; any other entry stays. ``rmdir`` refuses a directory that is not
+    empty, so between the comparison and the removal at most an empty directory can take
+    the name: nothing with content is ever removed by name. True when the name no longer
+    holds anything of the held directory (removed, or gone already); False leaves the entry.
+    """
+    now = _entry_ident(parent_fd, name)
+    if now is None:
+        return True
+    if now != _ident(os.fstat(held_fd)):
+        return False
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if exc.errno in NOT_EMPTY_ERRNOS:
+            return False
+        raise
+    return True
+
+
+def _unlink_if_same(dir_fd: int, name: str, ident: tuple[int, int]) -> bool:
+    """Unlink *name* below *dir_fd* only while it is the inode *ident* this run wrote or identified.
+
+    True when the name is gone afterwards; False when another entry stands there (it stays).
+    """
+    now = _entry_ident(dir_fd, name)
+    if now is None:
+        return True
+    return now == ident and _unlink_entry(dir_fd, name)
+
+
+def _unlink_entry(dir_fd: int, name: str) -> bool:
+    """Unlink the entry *name* below *dir_fd*: a link is removed, never followed, and a directory is never removed.
+
+    True when the name is gone; False when a directory stands there (``unlink`` refuses it).
+    """
+    try:
+        os.unlink(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if exc.errno in DIR_IN_THE_WAY_ERRNOS:
+            return False
+        raise
+    return True
+
+
+def _empty_fd(dir_fd: int, keep: str | None = None) -> bool:
+    """Remove every entry of the directory *dir_fd* holds, except *keep*; True only when all of them are gone.
+
+    The listing is read through the fd, so the entries removed are entries of that
+    directory, wherever it stands now. An entry that cannot be removed safely stays.
+    """
+    clean = True
+    for name in os.listdir(dir_fd):
+        if name != keep and not _remove_entry(dir_fd, name):
+            clean = False
+    return clean
+
+
+def _remove_entry(parent_fd: int, name: str) -> bool:
+    """Remove the entry *name* of a directory this run holds: a directory through its own fd, anything else by identity.
+
+    A directory is opened with :data:`DIR_FLAGS` relative to *parent_fd* and must be the
+    directory the ``lstat`` saw; it is emptied through that fd before its entry goes. A
+    file, link, FIFO or socket is unlinked only while it is the inode the ``lstat`` saw.
+    """
+    try:
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISDIR(info.st_mode):
+        return _unlink_if_same(parent_fd, name, _ident(info))
+    try:
+        child = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    except FileNotFoundError:
+        return True
+    except OSError as exc:
+        if exc.errno in NOT_A_DIR_ERRNOS:
+            return False  # a non-directory replaced it since the lstat: it stays
+        raise
+    try:
+        return _ident(os.fstat(child)) == _ident(info) and _remove_held(parent_fd, name, child)
+    finally:
+        os.close(child)
+
+
+def _remove_held(parent_fd: int, name: str, held_fd: int) -> bool:
+    """Empty the directory *held_fd* through that fd, then remove its entry *name* while it is still that directory."""
+    return _empty_fd(held_fd) and _rmdir_if_same(parent_fd, name, held_fd)
 
 
 def _read_below_worktree(wt: Path, parts: tuple[str, ...]) -> bytes:
@@ -272,8 +410,9 @@ def _read_below_worktree(wt: Path, parts: tuple[str, ...]) -> bytes:
 
 
 def _write_manifest(role_fd: int, manifest: dict[str, Any]) -> None:
+    """Publish ``manifest.json`` in the role folder this run claimed: written once, it never replaces an entry."""
     data = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    _write_nofollow(role_fd, Path(MANIFEST_NAME), data, 0o644)
+    _publish_file(role_fd, MANIFEST_NAME, data, 0o644)
 
 
 def _skill_files(src: Path) -> list[Path]:
@@ -291,15 +430,19 @@ def _skill_files(src: Path) -> list[Path]:
 
 def _open_dir_nofollow(parent_fd: int, name: str) -> int:
     """Open the single-component directory *name* below *parent_fd* without following a link."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        return os.open(name, flags, dir_fd=parent_fd)
+        return os.open(name, DIR_FLAGS, dir_fd=parent_fd)
     except OSError as exc:
         raise ShadowError("symlink_in_destination") from exc
 
 
 def _descend(root_fd: int, parts: tuple[str, ...]) -> int:
-    """Create-and-enter each directory of *parts* below *root_fd*; a link or file fails the write."""
+    """Create-and-enter each directory of *parts* below *root_fd*; a link or file fails the write.
+
+    Only for the shared parent folders (``.vnx-agent-skills``, ``.claude/skills``,
+    ``.agents/skills``). Inside one this module claims a new name with ``mkdir``, removes
+    only an entry it validated through a held fd, and never writes a file into it itself.
+    """
     fd = os.dup(root_fd)
     for part in parts:
         try:
@@ -314,56 +457,25 @@ def _descend(root_fd: int, parts: tuple[str, ...]) -> int:
     return fd
 
 
-def _write_nofollow(root_fd: int, rel: Path, data: bytes, mode: int) -> None:
-    """Write or replace *data* at *rel* below *root_fd*; no component of the path is ever followed.
+def _publish_file(dir_fd: int, name: str, data: bytes, mode: int) -> tuple[int, int]:
+    """The write-then-link publish of one file into the already opened directory *dir_fd*.
 
-    Only the shadow manifest uses this: ``.vnx-agent-skills/<role>/`` is the fabric's own
-    ignored folder (ADR-050), so replacing its manifest is the contract. Skill files are
-    never replaced: they go through :func:`_publish_file`.
+    Returns the ``st_dev``/``st_ino`` of the published file, so a take-back unlinks the
+    final name only while it is still this file.
     """
-    dir_fd = _descend(root_fd, rel.parts[:-1])
-    tmp = f".{rel.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
-    try:
-        try:
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
-        except OSError as exc:
-            raise ShadowError("symlink_in_destination") from exc
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            os.fchmod(handle.fileno(), mode)
-        final = os.stat(rel.name, dir_fd=dir_fd, follow_symlinks=False) if _lexists(rel.name, dir_fd) else None
-        if final is not None and not stat.S_ISREG(final.st_mode):
-            raise ShadowError("symlink_in_destination")
-        os.replace(tmp, rel.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-    except BaseException:
-        if _lexists(tmp, dir_fd):
-            os.unlink(tmp, dir_fd=dir_fd)
-        raise
-    finally:
-        os.close(dir_fd)
-
-
-def _lexists(name: str, dir_fd: int) -> bool:
-    try:
-        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    return True
-
-
-def _publish_file(dir_fd: int, name: str, data: bytes, mode: int) -> None:
-    """The write-then-link publish of one file into the already opened directory *dir_fd*."""
-    tmp = _write_partial(dir_fd, name, data, mode)
+    tmp, ident = _write_partial(dir_fd, name, data, mode)
     try:
         _publish(dir_fd, tmp, name)
     finally:
-        os.unlink(tmp, dir_fd=dir_fd)
+        _unlink_if_same(dir_fd, tmp, ident)
+    return ident
 
 
-def _write_partial(dir_fd: int, name: str, data: bytes, mode: int) -> str:
+def _write_partial(dir_fd: int, name: str, data: bytes, mode: int) -> tuple[str, tuple[int, int]]:
     """Write *data* to a new private name next to *name*, synced and length-checked; a failure removes it again."""
     tmp = f".{name}{PARTIAL_MARK}{uuid.uuid4().hex}"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+    ident = _ident(os.fstat(fd))
     try:
         with os.fdopen(fd, "wb") as handle:  # vnx-atomic-write: private O_EXCL name, published by os.link
             handle.write(data)
@@ -373,9 +485,9 @@ def _write_partial(dir_fd: int, name: str, data: bytes, mode: int) -> str:
             if os.fstat(handle.fileno()).st_size != len(data):
                 raise IncompleteWrite(errno.EIO, f"{name}: the private copy is not {len(data)} bytes")
     except BaseException:
-        os.unlink(tmp, dir_fd=dir_fd)
+        _unlink_if_same(dir_fd, tmp, ident)
         raise
-    return tmp
+    return tmp, ident
 
 
 def _publish(dir_fd: int, tmp: str, name: str) -> None:
@@ -402,34 +514,36 @@ def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source,
     """Claim ``<slug>/`` below *parent_fd* with one ``mkdir`` and copy every file of *src* into it.
 
     The claim is the only way in: a directory that exists by now (``FileExistsError``) was
-    not created by this run and nothing is written into it, no marker and no file. The same
-    holds for every nested directory of the skill. Every file appears at its final name only
-    with all its bytes (:func:`_publish_file`), and SKILL.md is published last, so a SKILL.md
-    at the final name is complete and a copy that fails halfway leaves none.
+    not created by this run and nothing is written into it, no marker and no file. The
+    folder is opened right after the ``mkdir`` and must still be empty
+    (:func:`_open_claimed`), so a folder swapped in between is never entered either. The
+    same holds for every nested directory of the skill, and each one is held open for the
+    whole copy, never re-opened by name. Every file appears at its final name only with
+    all its bytes (:func:`_publish_file`), and SKILL.md is published last, after every
+    folder of the copy proved it still stands at its name (:func:`_verify_claims`), so a
+    SKILL.md at the final name is complete and sits in this run's own folder.
 
     A *marker* is published first, below the claimed fd. A failed copy keeps it (the next
     attempt of the same dispatch may reclaim the folder), except on ``FileExistsError``: a
     racing entry means the folder is no longer solely this run's, so everything this run
     published is taken back and the marker goes with it. Without a *marker* a failed copy
-    takes back what it made. Only entries this run created are ever removed.
+    takes back what it made. Only entries this run created are ever removed, each through
+    the fd it was made in and only while it is still the entry this run made.
     """
     os.mkdir(slug, 0o755, dir_fd=parent_fd)
-    made: list[tuple[str, ...]] = []
-    published: list[tuple[str, ...]] = []
-    slug_fd = _open_dir_nofollow(parent_fd, slug)
+    slug_fd = _open_claimed(parent_fd, slug)
+    made: dict[tuple[str, ...], int] = {}
+    published: list[tuple[int, str, tuple[int, int]]] = []
     keep = False
     try:
         if marker is not None:
-            _publish_file(slug_fd, MARKER_NAME, marker, 0o644)
-            published.append((MARKER_NAME,))
+            published.append((slug_fd, MARKER_NAME, _publish_file(slug_fd, MARKER_NAME, marker, 0o644)))
         try:
             for rel, data, mode in sorted(src.files, key=lambda item: item[0] == SKILL_FILE):
                 dir_fd = _claim_dirs(slug_fd, rel.parts[:-1], made)
-                try:
-                    _publish_file(dir_fd, rel.name, data, mode)
-                finally:
-                    os.close(dir_fd)
-                published.append(rel.parts)
+                if rel == SKILL_FILE:
+                    _verify_claims(parent_fd, slug, slug_fd, made)
+                published.append((dir_fd, rel.name, _publish_file(dir_fd, rel.name, data, mode)))
         except FileExistsError:
             raise
         except BaseException:
@@ -437,9 +551,11 @@ def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source,
             raise
     except BaseException:
         if not keep:
-            _take_back(slug_fd, parent_fd, slug, made, published)
+            _take_back(parent_fd, slug, slug_fd, made, published)
         raise
     finally:
+        for fd in made.values():
+            os.close(fd)
         os.close(slug_fd)
     files = [{"path": rel.as_posix(), "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
              for rel, data, _mode in src.files]
@@ -447,62 +563,72 @@ def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source,
     return {"slug": slug, "source_dir": src.root.relative_to(real_root).as_posix(), "files": files}
 
 
-def _claim_dirs(root_fd: int, parts: tuple[str, ...], made: list[tuple[str, ...]]) -> int:
-    """Enter *parts* below *root_fd*; a directory this copy has not made itself is created, never adopted."""
-    fd = os.dup(root_fd)
-    for depth, part in enumerate(parts, start=1):
-        try:
-            if parts[:depth] not in made:
-                os.mkdir(part, 0o755, dir_fd=fd)
-                made.append(parts[:depth])
-            nxt = _open_dir_nofollow(fd, part)
-        finally:
-            os.close(fd)
-        fd = nxt
+def _open_claimed(parent_fd: int, name: str) -> int:
+    """Open the directory this run just made at *name*; it must still be empty, or it is not this run's claim.
+
+    ``mkdir`` returns no handle, so the folder is opened by name right after it. A link
+    there refuses the run (``symlink_in_destination``); a directory that already holds an
+    entry was put in its place, so FileExistsError is raised and it is never entered.
+    """
+    fd = _open_dir_nofollow(parent_fd, name)
+    try:
+        if os.listdir(fd):
+            raise FileExistsError(errno.EEXIST, f"{name}: not the empty folder this run made")
+    except BaseException:
+        os.close(fd)
+        raise
     return fd
 
 
-def _take_back(slug_fd: int, parent_fd: int, slug: str, made: list[tuple[str, ...]],
-               published: list[tuple[str, ...]]) -> None:
+def _claim_dirs(slug_fd: int, parts: tuple[str, ...], made: dict[tuple[str, ...], int]) -> int:
+    """The fd of directory *parts* below *slug_fd*; each directory on the way is made by this copy and held in *made*.
+
+    A directory is made with one ``mkdir`` and opened once (:func:`_open_claimed`); a later
+    file in it goes through the held fd, never through a new lookup of its name. The
+    returned fd is borrowed from *made* (or is *slug_fd*): the caller does not close it.
+    """
+    fd = slug_fd
+    for depth in range(1, len(parts) + 1):
+        key = parts[:depth]
+        if key not in made:
+            os.mkdir(key[-1], 0o755, dir_fd=fd)
+            made[key] = _open_claimed(fd, key[-1])
+        fd = made[key]
+    return fd
+
+
+def _verify_claims(parent_fd: int, slug: str, slug_fd: int, made: dict[tuple[str, ...], int]) -> None:
+    """Raise FileExistsError unless the claimed folder and every folder the copy made still stand at their names."""
+    held = [(parent_fd, slug, slug_fd)]
+    held += [(made.get(key[:-1], slug_fd), key[-1], fd) for key, fd in made.items()]
+    for parent, name, fd in held:
+        if _entry_ident(parent, name) != _ident(os.fstat(fd)):
+            raise FileExistsError(errno.EEXIST, f"{name}: no longer the folder this copy made")
+
+
+def _take_back(parent_fd: int, slug: str, slug_fd: int, made: dict[tuple[str, ...], int],
+               published: list[tuple[int, str, tuple[int, int]]]) -> None:
     """Unlink what this copy published, then the directories it made, deepest first, then the claimed folder.
 
-    A directory that is not empty (something else moved in) is left: ``rmdir`` refuses and
-    nothing foreign is touched.
+    Each entry is removed through the fd it was made in and only while it is still the
+    entry this copy made (:func:`_unlink_if_same`, :func:`_rmdir_if_same`). A directory
+    that is not empty (something else moved in) or that another entry replaced is left,
+    and nothing foreign is touched.
     """
-    for parts in reversed(published):
+    for dir_fd, name, ident in reversed(published):
         try:
-            leaf = _open_chain(slug_fd, parts[:-1])
-            try:
-                os.unlink(parts[-1], dir_fd=leaf)
-            finally:
-                os.close(leaf)
+            _unlink_if_same(dir_fd, name, ident)
         except OSError:
             continue  # vnx-silent-except: best-effort take-back of this run's own entry; a leftover stays foreign-safe
-    for parts in sorted(made, key=len, reverse=True):
+    for key in sorted(made, key=len, reverse=True):
         try:
-            parent = _open_chain(slug_fd, parts[:-1])
-            try:
-                os.rmdir(parts[-1], dir_fd=parent)
-            finally:
-                os.close(parent)
+            _rmdir_if_same(made.get(key[:-1], slug_fd), key[-1], made[key])
         except OSError:
             continue  # vnx-silent-except: rmdir refuses a directory something else filled; it stays
     try:
-        os.rmdir(slug, dir_fd=parent_fd)
+        _rmdir_if_same(parent_fd, slug, slug_fd)
     except OSError:
         pass  # vnx-silent-except: rmdir refuses a folder that still holds entries; it stays
-
-
-def _open_chain(root_fd: int, parts: tuple[str, ...]) -> int:
-    """Open the existing directories *parts* below *root_fd* without following a link; creates nothing."""
-    fd = os.dup(root_fd)
-    for part in parts:
-        try:
-            nxt = _open_dir_nofollow(fd, part)
-        finally:
-            os.close(fd)
-        fd = nxt
-    return fd
 
 
 def _refuse_dest_tree(wt: Path, slug: str, src: _Source, parts: tuple[str, ...] = NATIVE_PARTS) -> None:
@@ -668,68 +794,97 @@ def _copy_native(wt: Path, slugs: list[str], parts: tuple[str, ...] = NATIVE_PAR
 
 
 def _reclaim_owned(wt: Path, parts: tuple[str, ...], owner: dict[str, Any]) -> list[str]:
-    """Remove every folder below the destination marked for this run; return the names that are not (foreign).
+    """Remove every folder below the destination marked for this run; return the names that stay (foreign).
 
-    A folder is owned only when it carries ``.vnx-managed.json`` with this run's
-    ``dispatch_id``, its own ``slug`` and the marker schema. Nothing else is ever removed.
+    The destination is opened once below the worktree fd and listed through that fd; each
+    entry is decided and removed by :func:`_reclaim_one`. A folder is owned only when it
+    carries ``.vnx-managed.json`` with this run's ``dispatch_id``, its own ``slug`` and the
+    marker schema. Nothing else is ever removed.
     """
-    for depth in range(1, len(parts) + 1):
-        if os.path.islink(wt.joinpath(*parts[:depth])):
-            raise ShadowError("symlink_in_destination")
-    base = wt.joinpath(*parts)
-    if not os.path.lexists(base):
+    root_fd = _open_worktree(wt)
+    try:
+        base_fd = _open_existing(root_fd, parts)
+    finally:
+        os.close(root_fd)
+    if base_fd is None:
         return []
-    names = sorted(os.listdir(base))
-    owned = [n for n in names if _is_owned(wt, parts, n, owner["dispatch_id"])]
-    if owned:
-        root_fd = _open_worktree(wt)
+    try:
+        return [name for name in sorted(os.listdir(base_fd))
+                if not _reclaim_one(base_fd, name, owner["dispatch_id"])]
+    finally:
+        os.close(base_fd)
+
+
+def _open_existing(root_fd: int, parts: tuple[str, ...]) -> int | None:
+    """Open the directories *parts* below *root_fd* without following a link; None when one does not exist yet.
+
+    A link or a non-directory on the way refuses the run (``symlink_in_destination``).
+    """
+    fd = os.dup(root_fd)
+    for part in parts:
         try:
-            base_fd = _descend(root_fd, parts)
-            try:
-                for name in owned:
-                    _rmtree_below(base_fd, name)
-            finally:
-                os.close(base_fd)
-        finally:
-            os.close(root_fd)
-    return [n for n in names if n not in owned]
+            nxt = os.open(part, DIR_FLAGS, dir_fd=fd)
+        except FileNotFoundError:
+            nxt = None
+        except OSError as exc:
+            os.close(fd)
+            raise ShadowError("symlink_in_destination") from exc
+        os.close(fd)
+        if nxt is None:
+            return None
+        fd = nxt
+    return fd
 
 
-def _is_owned(wt: Path, parts: tuple[str, ...], name: str, dispatch_id: str) -> bool:
-    """True only on a readable marker of this run for this folder; anything else is foreign (fail-closed).
+def _reclaim_one(base_fd: int, name: str, dispatch_id: str) -> bool:
+    """Remove the folder *name* below *base_fd* when it is this run's; True only when its name is free afterwards.
 
-    The marker must be a regular file with one link (a symlink, FIFO, directory or a hard
-    link to another file is foreign), and carry the marker schema, this folder's own
-    ``slug`` and this run's ``dispatch_id``.
+    The folder is opened once. Its marker is read and checked through that fd
+    (:func:`_owned_marker`), the folder is emptied through that same fd with the marker
+    last, and only the empty entry is removed by name, while it is still that folder
+    (:func:`_rmdir_if_same`). A folder that is not owned, or that another process replaced
+    or filled meanwhile, is left as it is and counts as foreign.
     """
     try:
-        marker = json.loads(_read_marker(wt, (*parts, name, MARKER_NAME)))
-    except (ShadowError, ValueError):
-        return False
-    return (isinstance(marker, dict) and marker.get("schema") == MARKER_SCHEMA
-            and marker.get("slug") == name and marker.get("dispatch_id") == dispatch_id)
-
-
-def _read_marker(wt: Path, parts: tuple[str, ...]) -> bytes:
-    """Read the marker file at *parts*; refuses (``ShadowError``) anything but a regular file with one link."""
-    fd = _open_worktree(wt)
+        slug_fd = os.open(name, DIR_FLAGS, dir_fd=base_fd)
+    except OSError:
+        return False  # fail-closed: a link, a file or a vanished name is no owned folder; nothing is removed
     try:
-        for part in parts[:-1]:
-            nxt = _open_dir_nofollow(fd, part)
-            os.close(fd)
-            fd = nxt
-        try:
-            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        except OSError as exc:
-            raise ShadowError("symlink_in_destination") from exc
-        info = os.fstat(file_fd)
+        marker = _owned_marker(slug_fd, name, dispatch_id)
+        if marker is None:
+            return False
+        emptied = _empty_fd(slug_fd, keep=MARKER_NAME)
+        unmarked = _unlink_if_same(slug_fd, MARKER_NAME, marker)
+        return emptied and unmarked and _rmdir_if_same(base_fd, name, slug_fd)
+    finally:
+        os.close(slug_fd)
+
+
+def _owned_marker(slug_fd: int, name: str, dispatch_id: str) -> tuple[int, int] | None:
+    """The ``st_dev``/``st_ino`` of this run's marker in the folder *slug_fd* holds; None for anything else (fail-closed).
+
+    The marker is opened below *slug_fd*, so the folder the decision is about is the folder
+    that is emptied afterwards. It must be a regular file with one link (a symlink, FIFO,
+    directory or a hard link to another file is foreign), and carry the marker schema,
+    this folder's own ``slug`` and this run's ``dispatch_id``.
+    """
+    try:
+        fd = os.open(MARKER_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=slug_fd)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            os.close(file_fd)
-            raise ShadowError("symlink_in_destination")
-        with os.fdopen(file_fd, "rb") as handle:
-            return handle.read()
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            marker = json.loads(handle.read())
+    except ValueError:
+        return None
     finally:
         os.close(fd)
+    owned = (isinstance(marker, dict) and marker.get("schema") == MARKER_SCHEMA
+             and marker.get("slug") == name and marker.get("dispatch_id") == dispatch_id)
+    return _ident(info) if owned else None
 
 
 def _marker_bytes(owner: dict[str, Any], slug: str, src: _Source) -> bytes:

@@ -834,3 +834,142 @@ def test_repo_gitignore_ignores_a_leftover_partial():
                           capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.splitlines() == names
+
+
+# --- r3 (skilldisc R4): every removal is bound to one directory fd ---
+
+
+def _shadow_role(wt):
+    return wt / ".vnx-agent-skills" / ROLE
+
+
+def _foreign_into(folder, skill_md=True):
+    folder.mkdir(parents=True)
+    if skill_md:
+        (folder / "SKILL.md").write_text("theirs\n")
+    (folder / "user-data.txt").write_text("precious\n")
+    return folder
+
+
+def _assert_untouched(folder, names=("SKILL.md", "user-data.txt")):
+    """The foreign data first, so a run that deleted it fails on the deleted file itself."""
+    assert (folder / "user-data.txt").read_bytes() == b"precious\n"
+    if "SKILL.md" in names:
+        assert (folder / "SKILL.md").read_bytes() == b"theirs\n"
+    assert sorted(os.listdir(folder)) == sorted(names)
+
+
+@pytest.mark.parametrize("kind", ["folder", "link"])
+def test_role_folder_swapped_after_its_open_is_never_cleared(tmp_path, worktree, monkeypatch, kind):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    assert asm.materialize_role_skills(worktree, ROLE, ["alpha"])["status"] == "ok"  # a previous run's folder
+    role_dir = _shadow_role(worktree)
+    moved = tmp_path / "moved-role"
+    foreign = role_dir if kind == "folder" else tmp_path / "outside-role"
+    real = asm._remove_held
+    fired: list[str] = []
+
+    def swap_then_remove(parent_fd, name, held_fd):
+        if name == ROLE and not fired:
+            fired.append(name)
+            role_dir.rename(moved)
+            _foreign_into(foreign)
+            if kind == "link":
+                role_dir.symlink_to(foreign, target_is_directory=True)
+        return real(parent_fd, name, held_fd)
+
+    monkeypatch.setattr(asm, "_remove_held", swap_then_remove)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha", "beta"])
+    _assert_untouched(foreign)
+    assert fired == [ROLE]
+    assert (result["status"], result["reason"]) == ("error", "role_dir_replaced")
+    assert os.listdir(moved) == []  # the folder that was opened is the folder that was emptied
+
+
+@pytest.mark.parametrize("when", ["before-the-mkdir", "after-the-mkdir"])
+def test_role_folder_that_takes_the_name_around_the_claim_is_never_entered(tmp_path, worktree, monkeypatch, when):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    role_dir = _shadow_role(worktree)
+    real_mkdir = os.mkdir
+    fired: list[str] = []
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        if path != ROLE or dir_fd is None or fired:
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+        fired.append(path)
+        if when == "before-the-mkdir":
+            _foreign_into(role_dir)
+            return real_mkdir(path, mode, dir_fd=dir_fd)
+        real_mkdir(path, mode, dir_fd=dir_fd)
+        role_dir.rename(tmp_path / "moved-role")
+        _foreign_into(role_dir)
+        return None
+
+    monkeypatch.setattr(asm.os, "mkdir", racing)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha"])
+    _assert_untouched(role_dir)
+    assert fired == [ROLE]
+    assert (result["status"], result["reason"]) == ("error", "role_dir_replaced")
+
+
+def test_claude_folder_swapped_in_between_the_claim_and_its_open_is_never_entered(tmp_path, worktree):
+    real_mkdir = os.mkdir
+    folder = worktree / ".claude" / "skills" / "alpha"
+    fired: list[str] = []
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        out = real_mkdir(path, mode, dir_fd=dir_fd)
+        if path == "alpha" and dir_fd is not None and not fired:
+            fired.append(path)
+            folder.rename(tmp_path / "moved-alpha")
+            _foreign_into(folder, skill_md=False)
+        return out
+
+    with mock.patch.object(asm.os, "mkdir", racing):
+        result = _call(worktree, tmp_path)
+    _assert_untouched(folder, ("user-data.txt",))
+    assert fired == ["alpha"]
+    _assert_alpha_refused(result, "not_owned:alpha")
+
+
+def test_rmdir_and_unlink_act_only_on_the_entry_that_was_identified(tmp_path):
+    parent = tmp_path / "p"
+    (parent / "d").mkdir(parents=True)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+    held = os.open(parent / "d", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        (parent / "d").rename(tmp_path / "away")
+        (parent / "d").mkdir()
+        assert asm._rmdir_if_same(parent_fd, "d", held) is False  # an empty stranger at the name stays
+        assert (parent / "d").is_dir()
+        (parent / "d").rmdir()
+        assert asm._rmdir_if_same(parent_fd, "d", held) is True  # nothing of the held folder at the name
+        assert (tmp_path / "away").is_dir()
+        (parent / "f").write_text("mine\n")
+        ident = asm._entry_ident(parent_fd, "f")
+        (parent / "g").write_text("theirs\n")
+        os.replace(parent / "g", parent / "f")
+        assert asm._unlink_if_same(parent_fd, "f", ident) is False
+        assert (parent / "f").read_text() == "theirs\n"
+        assert asm._unlink_if_same(parent_fd, "f", asm._entry_ident(parent_fd, "f")) is True
+        assert not (parent / "f").exists()
+    finally:
+        os.close(held)
+        os.close(parent_fd)
+
+
+def test_empty_fd_unlinks_links_and_never_follows_them(tmp_path):
+    outside = _foreign_into(tmp_path / "outside")
+    inner = tmp_path / "inner"
+    (inner / "sub").mkdir(parents=True)
+    (inner / "sub" / "x.txt").write_text("x\n")
+    (inner / "dirlink").symlink_to(outside, target_is_directory=True)
+    (inner / "filelink").symlink_to(outside / "user-data.txt")
+    os.mkfifo(inner / "pipe")
+    fd = os.open(inner, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        assert asm._empty_fd(fd) is True
+    finally:
+        os.close(fd)
+    assert os.listdir(inner) == []
+    _assert_untouched(outside)

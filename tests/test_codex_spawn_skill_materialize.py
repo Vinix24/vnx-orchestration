@@ -329,10 +329,11 @@ def test_adapter_execute_without_a_worktree_is_skipped_no_cwd(tmp_path, worktree
 # --- the slug folder is claimed atomically, an existing folder is never adopted ------------------
 
 
-def _foreign_folder(wt, slug="alpha"):
+def _foreign_folder(wt, slug="alpha", skill_md=True):
     folder = _skills(wt) / slug
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "SKILL.md").write_text("theirs\n")
+    if skill_md:
+        (folder / "SKILL.md").write_text("theirs\n")
     (folder / "user-data.txt").write_text("precious\n")
 
 
@@ -460,3 +461,231 @@ def test_marker_carrying_another_slug_is_never_reclaimed(tmp_path, worktree):
     result = _call(worktree, tmp_path)
     assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
     _assert_foreign_intact(worktree)
+
+
+# --- r3: ownership is checked and acted on through one directory fd ------------------------------
+
+
+def _owned_alpha(wt):
+    """A folder of an earlier attempt of this dispatch: marked for ``dlv-r4``, so the reclaim removes it."""
+    _marker(wt, "alpha")
+    (_skills(wt) / "alpha" / "SKILL.md").write_text("stale\n")
+
+
+def _outside_folder(tmp_path, name="outside-alpha"):
+    outside = tmp_path / name
+    outside.mkdir()
+    (outside / "SKILL.md").write_text("theirs\n")
+    (outside / "user-data.txt").write_text("precious\n")
+    return outside
+
+
+def _assert_untouched(folder, names=("SKILL.md", "user-data.txt")):
+    """The foreign data first, so a run that deleted it fails on the deleted file itself."""
+    assert (folder / "user-data.txt").read_bytes() == b"precious\n"
+    if "SKILL.md" in names:
+        assert (folder / "SKILL.md").read_bytes() == b"theirs\n"
+    assert sorted(os.listdir(folder)) == sorted(names)
+
+
+def _swap_after_ownership_check(swap, slug="alpha"):
+    """Run *swap* right after *slug*'s marker is parsed: the window between the ownership check and the removal.
+
+    The seam is the marker's ``json.loads``. The pathname check of round 2 and the fd-bound check
+    both call it at the decision, so the same test runs against either implementation.
+    """
+    real = json.loads
+    fired: list[str] = []
+
+    def loads(data, *args, **kwargs):
+        out = real(data, *args, **kwargs)
+        if not fired and isinstance(out, dict) and out.get("slug") == slug and out.get("dispatch_id") == "dlv-r4":
+            fired.append(slug)
+            swap()
+        return out
+
+    return mock.patch.object(asm.json, "loads", loads), fired
+
+
+def test_folder_replaced_after_the_ownership_check_is_never_removed(tmp_path, worktree):
+    _owned_alpha(worktree)
+    moved = tmp_path / "moved-alpha"
+
+    def swap():
+        (_skills(worktree) / "alpha").rename(moved)
+        _foreign_folder(worktree)
+
+    patch, fired = _swap_after_ownership_check(swap)
+    with patch:
+        result = _call(worktree, tmp_path)
+    _assert_untouched(_skills(worktree) / "alpha")
+    assert fired == ["alpha"]
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    assert os.listdir(moved) == []  # the folder that was checked is the folder that was emptied
+    assert (_skills(worktree) / "beta" / "SKILL.md").read_text() == "beta\n"
+
+
+def test_folder_replaced_by_a_link_after_the_ownership_check_is_never_followed(tmp_path, worktree):
+    _owned_alpha(worktree)
+    outside = _outside_folder(tmp_path)
+
+    def swap():
+        (_skills(worktree) / "alpha").rename(tmp_path / "moved-alpha")
+        (_skills(worktree) / "alpha").symlink_to(outside, target_is_directory=True)
+
+    patch, fired = _swap_after_ownership_check(swap)
+    with patch:
+        result = _call(worktree, tmp_path)
+    _assert_untouched(outside)
+    assert fired == ["alpha"]
+    assert os.path.islink(_skills(worktree) / "alpha")
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    assert (_skills(worktree) / "beta" / "SKILL.md").read_text() == "beta\n"
+
+
+@pytest.mark.parametrize("with_files", [False, True], ids=["empty-replacement", "replacement-with-data"])
+def test_folder_replaced_after_it_was_emptied_is_never_removed(tmp_path, worktree, with_files):
+    _owned_alpha(worktree)
+    real = asm._unlink_if_same
+    seen: dict[str, int] = {}
+
+    def unlink_then_swap(dir_fd, name, ident):
+        out = real(dir_fd, name, ident)
+        if name == asm.MARKER_NAME and not seen:  # the marker goes last, right before the rmdir by name
+            (_skills(worktree) / "alpha").rename(tmp_path / "moved-alpha")
+            if with_files:
+                _foreign_folder(worktree)
+            else:
+                (_skills(worktree) / "alpha").mkdir()
+            seen["ino"] = (_skills(worktree) / "alpha").stat().st_ino
+        return out
+
+    with mock.patch.object(asm, "_unlink_if_same", unlink_then_swap):
+        result = _call(worktree, tmp_path)
+    assert (_skills(worktree) / "alpha").stat().st_ino == seen["ino"]
+    if with_files:
+        _assert_untouched(_skills(worktree) / "alpha")
+    else:
+        assert os.listdir(_skills(worktree) / "alpha") == []
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+
+
+def test_nested_folder_replaced_by_a_link_before_the_reclaim_reaches_it_is_unlinked_not_followed(tmp_path, worktree):
+    _owned_alpha(worktree)
+    nested = _skills(worktree) / "alpha" / "refs"
+    nested.mkdir()
+    (nested / "old.md").write_text("old\n")
+    outside = _outside_folder(tmp_path)
+    real = asm._remove_entry
+    fired: list[str] = []
+
+    def swap_then_remove(parent_fd, name):
+        if name == "refs" and not fired:
+            fired.append(name)
+            nested.rename(tmp_path / "moved-refs")
+            nested.symlink_to(outside, target_is_directory=True)
+        return real(parent_fd, name)
+
+    with mock.patch.object(asm, "_remove_entry", swap_then_remove):
+        result = _call(worktree, tmp_path)
+    _assert_untouched(outside)
+    assert fired == ["refs"]
+    assert (result["status"], result["reason"]) == ("ok", None)
+    assert sorted(os.listdir(_skills(worktree) / "alpha")) == [".vnx-managed.json", "SKILL.md"]
+
+
+def test_nested_folder_replaced_by_a_link_after_its_lstat_is_never_followed(tmp_path, worktree):
+    _owned_alpha(worktree)
+    nested = _skills(worktree) / "alpha" / "refs"
+    nested.mkdir()
+    outside = _outside_folder(tmp_path)
+    real_open = os.open
+    fired: list[str] = []
+
+    def swap_then_open(path, flags, *args, **kwargs):
+        if path == "refs" and flags == asm.DIR_FLAGS and not fired:
+            fired.append(path)
+            nested.rename(tmp_path / "moved-refs")
+            nested.symlink_to(outside, target_is_directory=True)
+        return real_open(path, flags, *args, **kwargs)
+
+    with mock.patch.object(asm.os, "open", swap_then_open):
+        result = _call(worktree, tmp_path)
+    _assert_untouched(outside)
+    assert fired == ["refs"]
+    assert os.path.islink(nested)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+
+
+def test_unswapped_owned_folder_is_fully_reclaimed_and_its_links_are_never_followed(tmp_path, worktree):
+    _owned_alpha(worktree)
+    alpha = _skills(worktree) / "alpha"
+    (alpha / "a" / "b").mkdir(parents=True)
+    (alpha / "a" / "b" / "deep.txt").write_text("deep\n")
+    outside = _outside_folder(tmp_path)
+    (alpha / "dirlink").symlink_to(outside, target_is_directory=True)
+    (alpha / "filelink").symlink_to(outside / "user-data.txt")
+    os.mkfifo(alpha / "pipe")
+    (alpha / (".SKILL.md.vnx-partial-" + "0" * 32)).write_bytes(b"al")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("ok", None)
+    _assert_untouched(outside)
+    assert set(os.listdir(_skills(worktree))) == DECLARED
+    assert sorted(os.listdir(alpha)) == [".vnx-managed.json", "SKILL.md"]
+    assert (alpha / "SKILL.md").read_text() == "alpha\n"
+
+
+@pytest.mark.parametrize("skill_md", [True, False], ids=["with-skill-md", "without-skill-md"])
+def test_folder_swapped_in_between_the_claim_and_its_open_is_never_entered(tmp_path, worktree, skill_md):
+    real_mkdir = os.mkdir
+    fired: list[str] = []
+    names = ("SKILL.md", "user-data.txt") if skill_md else ("user-data.txt",)
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        out = real_mkdir(path, mode, dir_fd=dir_fd)
+        if path == "alpha" and dir_fd is not None and not fired:
+            fired.append(path)
+            (_skills(worktree) / "alpha").rename(tmp_path / "moved-alpha")
+            _foreign_folder(worktree, skill_md=skill_md)
+        return out
+
+    with mock.patch.object(asm.os, "mkdir", racing):
+        first = _call(worktree, tmp_path)
+    _assert_untouched(_skills(worktree) / "alpha", names)
+    assert fired == ["alpha"]
+    assert (first["status"], first["reason"]) == ("partial", "not_owned:alpha")
+    second = _call(worktree, tmp_path)
+    _assert_untouched(_skills(worktree) / "alpha", names)
+    assert (second["status"], second["reason"]) == ("partial", "not_owned:alpha")
+
+
+def test_nested_folder_swapped_between_two_files_is_never_written_into(tmp_path, worktree):
+    refs = worktree / "skills" / "alpha" / "refs"
+    refs.mkdir()
+    (refs / "a.md").write_text("a\n")
+    (refs / "b.md").write_text("b\n")
+    dest = _skills(worktree) / "alpha" / "refs"
+    real = asm._publish_file
+    fired: list[str] = []
+
+    def swap_after_a(dir_fd, name, data, mode):
+        out = real(dir_fd, name, data, mode)
+        if name == "a.md" and not fired:
+            fired.append(name)
+            dest.rename(tmp_path / "moved-refs")
+            dest.mkdir()
+            (dest / "user-data.txt").write_text("precious\n")
+        return out
+
+    with mock.patch.object(asm, "_publish_file", swap_after_a):
+        first = _call(worktree, tmp_path)
+    _assert_untouched(dest, ("user-data.txt",))
+    assert fired == ["a.md"]
+    assert (first["status"], first["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+    assert not (_skills(worktree) / "alpha" / "SKILL.md").exists()
+    assert os.listdir(tmp_path / "moved-refs") == []  # what the copy wrote went to its own folder and was taken back
+    second = _call(worktree, tmp_path)
+    _assert_untouched(dest, ("user-data.txt",))
+    assert (second["status"], second["reason"]) == ("partial", "not_owned:alpha")
