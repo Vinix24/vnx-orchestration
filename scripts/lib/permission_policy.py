@@ -179,6 +179,11 @@ def load_isolation(role: str, agents_dir: Optional[Path]) -> Optional[dict]:
             f"role {role!r} is not a valid agent directory name", "role-name-invalid")
     config = Path(agents_dir) / role / "config.yaml"
     if not config.is_file():
+        # Only a path that does not exist at all (no file, no symlink) is absent
+        # isolation. A directory, a dead symlink or another non-regular file is a
+        # source that cannot be read, so it refuses rather than reading as "none".
+        if config.is_symlink() or config.exists():
+            raise _malformed(f"agents/{role}/config.yaml is not a regular file")
         return None
     data = _read_yaml(config, f"agents/{role}/config.yaml")
     if not isinstance(data, dict):
@@ -220,6 +225,9 @@ def compose_policy(
     if unknown:
         raise PermissionPolicyRefused(
             f"unknown role field(s): {unknown}", "unknown-source-key")
+    for key, value in fields.items():
+        if not isinstance(value, (list, tuple)) or not all(isinstance(v, str) for v in value):
+            raise _malformed(f"role field {key!r} must be a list of strings")
     iso = isolation or {}
     allow = list(fields.get("allowed_tools", []))
     allow += [f"bash_allow:{p}" for p in fields.get("bash_allow_patterns", [])]
