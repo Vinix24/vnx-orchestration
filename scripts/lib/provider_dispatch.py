@@ -2923,6 +2923,32 @@ def _codex_event_store() -> "Any | None":
         return None
 
 
+def _codex_skill_inputs(args: argparse.Namespace, worker_cwd: Any) -> dict:
+    """The role, state dir and project that ``spawn_codex`` needs to materialise the skill set (ADR-059 decision 13).
+
+    A ``worker_cwd`` that is the project root is not isolated: the record says
+    ``skipped`` + ``not_isolated`` and the spawner gets no state dir, so it writes nothing.
+    """
+    role, state_dir, project_id = getattr(args, "role", None), None, None
+    try:
+        from agent_skill_materialize import record_skipped  # noqa: PLC0415
+        from dispatch_worktree_isolation import resolve_consumer_project_root  # noqa: PLC0415
+        from project_scope import resolve_stamp_project_id  # noqa: PLC0415
+
+        import agent_layout  # noqa: PLC0415
+
+        state_dir = _resolve_state_dir()
+        project_id = resolve_stamp_project_id(db_path=state_dir / "quality_intelligence.db")
+        if (worker_cwd is not None and agent_layout.layout_mode() != "off"
+                and Path(worker_cwd).resolve() == resolve_consumer_project_root()):
+            record_skipped("not_isolated", role=role, provider="codex", worktree=worker_cwd,
+                           dispatch_id=args.dispatch_id, state_dir=state_dir, project_id=project_id)
+            state_dir = None
+    except Exception as exc:  # vnx-silent-except: a missing input is reported by the materialiser as no_state_dir/no_project_id
+        logger.warning("codex skill inputs for %s: %s", args.dispatch_id, type(exc).__name__)
+    return {"role": role, "state_dir": state_dir, "project_id": project_id}
+
+
 def _dispatch_codex(args: argparse.Namespace) -> int:
     """Route to spawn_codex for codex-provider dispatches (PR-4.6.3).
 
@@ -2965,7 +2991,7 @@ def _dispatch_codex(args: argparse.Namespace) -> int:
             dispatch_id=args.dispatch_id,
             terminal_id=args.terminal_id,
             event_writer=event_store.append if event_store is not None else None,
-            cwd=worker_cwd,
+            cwd=worker_cwd, **_codex_skill_inputs(args, worker_cwd),
             total_deadline=float(getattr(args, "deadline_seconds", 900)),
             extra_env=_args_worker_env(args),
         )

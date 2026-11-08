@@ -38,6 +38,10 @@ MANIFEST_SCHEMA = 1
 
 NATIVE_DIR = ".claude/skills"
 NATIVE_PARTS = tuple(Path(NATIVE_DIR).parts)
+CODEX_PARTS = (".agents", "skills")
+DESTS = {"claude": NATIVE_PARTS, "codex": CODEX_PARTS}
+MARKER_NAME = ".vnx-managed.json"
+MARKER_SCHEMA = 1
 SKILL_FILE = Path("SKILL.md")
 RECORD_DIR = "agent_skill_materializations"
 RECORD_SCHEMA = 1
@@ -423,11 +427,11 @@ def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source) -> d
     return {"slug": slug, "source_dir": src.root.relative_to(real_root).as_posix(), "files": files}
 
 
-def _refuse_dest_tree(wt: Path, slug: str, src: _Source) -> None:
+def _refuse_dest_tree(wt: Path, slug: str, src: _Source, parts: tuple[str, ...] = NATIVE_PARTS) -> None:
     """Refuse before any write when the destination tree holds a link, a wrong-typed entry or leaves *wt*."""
     real_wt = Path(os.path.realpath(wt))
-    dest = wt / NATIVE_DIR / slug
-    chain = [wt / ".claude", wt / NATIVE_DIR, dest]
+    dest = wt.joinpath(*parts, slug)
+    chain = [wt / parts[0], wt.joinpath(*parts), dest]
     for _dirpath, dirs, names in os.walk(dest):
         chain += [Path(_dirpath) / n for n in dirs + names]
     for rel, _data, _mode in src.files:
@@ -470,26 +474,38 @@ def materialize_skill_set(
 ) -> dict[str, Any]:
     """Make *role*'s declared skill set visible to *provider* (ADR-059 decision 13).
 
-    ``shadow`` delegates to :func:`materialize_role_skills`. ``on`` with ``claude``
-    copies to ``<worktree>/.claude/skills/<slug>/``, writes one record per attempt
+    ``shadow`` delegates to :func:`materialize_role_skills`. ``on`` copies to
+    ``<worktree>/.claude/skills/<slug>/`` (claude) or ``<worktree>/.agents/skills/<slug>/``
+    (codex, each folder with an ownership marker), writes one record per attempt
     and returns ``status`` in :data:`STATUSES`. Anything else is ``skipped`` without
-    a write (``off``, or a provider other than claude). Never reads the environment
-    and never raises: the dispatch runs on.
+    a write (``off``, or a provider without a destination). Never reads the
+    environment and never raises: the dispatch runs on.
     """
     if mode == "shadow":
         return _shadow_delegate(worktree, role)
     if mode != "on":
         return {"status": "skipped", "reason": "layout_off"}
-    if provider != "claude":
+    if provider not in DESTS:
         return {"status": "skipped", "reason": "provider_unsupported"}
     ids = {"role": role, "provider": provider, "dispatch_id": dispatch_id, "project_id": project_id,
            "worktree": str(worktree) if worktree else None}
     try:
-        result = _native_claude(role, worktree, dispatch_id, state_dir, project_id)
+        result = _native(provider, role, worktree, dispatch_id, state_dir, project_id)
     except Exception as exc:  # fail-open: materialisation never stops a dispatch
         result = _outcome("error", f"copy_failed:{type(exc).__name__}")
     if result["status"] != "ok":
         logger.warning("agent skill materialisation for role %r: %s", role, result.get("reason"))
+    result["record"] = _write_record(state_dir, ids, result)
+    return result
+
+
+def record_skipped(reason: str, *, role: str | None, provider: str, worktree: Path | str | None,
+                   dispatch_id: str | None, state_dir: Path | str | None, project_id: str | None) -> dict[str, Any]:
+    """A caller that decides before the materialiser runs (the route is not isolated) writes the record itself."""
+    logger.warning("agent skill materialisation for role %r: %s", role, reason)
+    result = _outcome("skipped", reason)
+    ids = {"role": role, "provider": provider, "dispatch_id": dispatch_id, "project_id": project_id,
+           "worktree": str(worktree) if worktree else None}
     result["record"] = _write_record(state_dir, ids, result)
     return result
 
@@ -512,7 +528,7 @@ def _outcome(status: str, reason: str | None = None, skills: list | None = None)
     return {"status": status, "reason": reason, "skills": skills or []}
 
 
-def _native_claude(role, worktree, dispatch_id, state_dir, project_id) -> dict[str, Any]:
+def _native(provider, role, worktree, dispatch_id, state_dir, project_id) -> dict[str, Any]:
     for value, reason in ((role, "no_role"), (worktree, "no_cwd"), (state_dir, "no_state_dir"),
                           (dispatch_id, "no_dispatch_id"), (project_id, "no_project_id")):
         if not value:
@@ -527,7 +543,8 @@ def _native_claude(role, worktree, dispatch_id, state_dir, project_id) -> dict[s
         return _outcome("skipped", "no_role")
     if not config.skills:
         return _outcome("skipped", "no_declared_set")
-    return _copy_native(wt, config.skills)
+    owner = {"dispatch_id": dispatch_id, "role": role} if provider == "codex" else None
+    return _copy_native(wt, config.skills, DESTS[provider], owner)
 
 
 def _worktree_is_isolated(wt: Path) -> bool:
@@ -539,33 +556,85 @@ def _worktree_is_isolated(wt: Path) -> bool:
     return not any(_inside(real, (Path.home() / d).resolve()) for d in (".claude", ".codex"))
 
 
-def _copy_native(wt: Path, slugs: list[str]) -> dict[str, Any]:
+def _copy_native(wt: Path, slugs: list[str], parts: tuple[str, ...] = NATIVE_PARTS,
+                 owner: dict[str, Any] | None = None) -> dict[str, Any]:
     """Decision 6 per destination file: every check for every slug runs before the first byte is written.
 
     Order: the native reads (``already_native``), the on-disk tree of each pending slug
     (a link, a wrong type or an escape refuses the whole run), then one pass that proves
     every file new, untracked and ignored (a slug that fails is refused, the rest copies).
+    With an *owner* (codex) the folders marked for this run are reclaimed first, so every
+    declared slug is pending; an unmarked folder is foreign and stays (``not_owned``).
     """
-    base = wt / NATIVE_DIR
+    base = wt.joinpath(*parts)
     if base.exists() and not _inside(Path(os.path.realpath(base)), Path(os.path.realpath(wt))):
         return _outcome("skipped", "path_outside_worktree")
     slugs = list(dict.fromkeys(slugs))
     failures = {s: "source_missing" for s in slugs if not skill_search_paths(wt, s)}
-    valid = [s for s in slugs if s not in failures]
-    pending = [s for s in valid if not os.path.lexists(base / s / "SKILL.md")]
     try:
-        entries = {s: _native_entry(wt, s) for s in valid if s not in pending}
-        sources = _vet_pending(wt, pending, failures)
-        failures.update(_refuse_foreign_files(wt, sources))
+        foreign = _reclaim_owned(wt, parts, owner) if owner else []
+        failures.update({s: f"not_owned:{s}" for s in slugs if s in foreign and s not in failures})
+        valid = [s for s in slugs if s not in failures]
+        pending = [s for s in valid if owner or not os.path.lexists(base / s / "SKILL.md")]
+        entries = {s: _native_entry(wt, s, parts) for s in valid if s not in pending}
+        sources = _vet_pending(wt, pending, failures, parts)
+        failures.update(_refuse_foreign_files(wt, sources, parts))
     except ShadowError as exc:
         if exc.reason not in DEST_REFUSALS:
             raise
         return _outcome("skipped", exc.reason)
-    stop = _write_pending(wt, sources, entries, failures)
-    return _native_outcome(slugs, entries, failures, stop)
+    stop = _write_pending(wt, sources, entries, failures, parts, owner)
+    extra = [name for name in foreign if name not in slugs]
+    failures.update({name: f"not_owned:{name}" for name in extra})
+    return _native_outcome(slugs + extra, entries, failures, stop)
 
 
-def _vet_pending(wt: Path, pending: list[str], failures: dict[str, str]) -> dict[str, _Source]:
+def _reclaim_owned(wt: Path, parts: tuple[str, ...], owner: dict[str, Any]) -> list[str]:
+    """Remove every folder below the destination marked for this run; return the names that are not (foreign).
+
+    A folder is owned only when it carries ``.vnx-managed.json`` with this run's
+    ``dispatch_id``, its own ``slug`` and the marker schema. Nothing else is ever removed.
+    """
+    for depth in range(1, len(parts) + 1):
+        if os.path.islink(wt.joinpath(*parts[:depth])):
+            raise ShadowError("symlink_in_destination")
+    base = wt.joinpath(*parts)
+    if not os.path.lexists(base):
+        return []
+    names = sorted(os.listdir(base))
+    owned = [n for n in names if _is_owned(wt, parts, n, owner["dispatch_id"])]
+    if owned:
+        root_fd = _open_worktree(wt)
+        try:
+            base_fd = _descend(root_fd, parts)
+            try:
+                for name in owned:
+                    _rmtree_below(base_fd, name)
+            finally:
+                os.close(base_fd)
+        finally:
+            os.close(root_fd)
+    return [n for n in names if n not in owned]
+
+
+def _is_owned(wt: Path, parts: tuple[str, ...], name: str, dispatch_id: str) -> bool:
+    """True only on a readable marker of this run for this folder; anything else is foreign (fail-closed)."""
+    try:
+        marker = json.loads(_read_below_worktree(wt, (*parts, name, MARKER_NAME)))
+    except (ShadowError, ValueError):
+        return False
+    return (isinstance(marker, dict) and marker.get("schema") == MARKER_SCHEMA
+            and marker.get("slug") == name and marker.get("dispatch_id") == dispatch_id)
+
+
+def _marker_bytes(owner: dict[str, Any], slug: str, src: _Source) -> bytes:
+    marker = {"schema": MARKER_SCHEMA, "dispatch_id": owner["dispatch_id"], "role": owner["role"],
+              "slug": slug, "sha256": hashlib.sha256(src.skill_md).hexdigest()}
+    return json.dumps(marker, indent=2).encode("utf-8")
+
+
+def _vet_pending(wt: Path, pending: list[str], failures: dict[str, str],
+                 parts: tuple[str, ...] = NATIVE_PARTS) -> dict[str, _Source]:
     """Read each pending source once; a destination link, wrong type or escape raises for the whole run."""
     sources: dict[str, _Source] = {}
     for slug in pending:
@@ -574,12 +643,13 @@ def _vet_pending(wt: Path, pending: list[str], failures: dict[str, str]) -> dict
         except ShadowError:
             failures[slug] = "source_missing"  # unknown slug, outside the skill trees, or a link leaving it
             continue
-        _refuse_dest_tree(wt, slug, src)
+        _refuse_dest_tree(wt, slug, src, parts)
         sources[slug] = src
     return sources
 
 
-def _refuse_foreign_files(wt: Path, sources: dict[str, _Source]) -> dict[str, str]:
+def _refuse_foreign_files(wt: Path, sources: dict[str, _Source],
+                          parts: tuple[str, ...] = NATIVE_PARTS) -> dict[str, str]:
     """The pending slugs whose copy would write a file that is not new, untracked and ignored.
 
     One ``git ls-files`` and one ``git check-ignore`` cover every file of every slug. A
@@ -587,11 +657,11 @@ def _refuse_foreign_files(wt: Path, sources: dict[str, _Source]) -> dict[str, st
     ``not_owned:<slug>``. A file git does not positively report ignored: ``not_ignored``.
     The on-disk check runs last, component by component below the worktree fd.
     """
-    plan = {slug: [(*NATIVE_PARTS, slug, *rel.parts) for rel, _data, _mode in src.files]
+    plan = {slug: [(*parts, slug, *rel.parts) for rel, _data, _mode in src.files]
             for slug, src in sources.items()}
     if not plan:
         return {}
-    listed = _tracked_paths(wt)
+    listed = _tracked_paths(wt, parts)
     names = ["/".join(parts) for group in plan.values() for parts in group]
     # an index git cannot list proves nothing, so then no file of any slug counts as ignored
     ignored = set() if listed is None else _ignored_paths(wt, names)
@@ -609,9 +679,9 @@ def _refuse_foreign_files(wt: Path, sources: dict[str, _Source]) -> dict[str, st
     return refused
 
 
-def _tracked_paths(wt: Path) -> set[str] | None:
-    """Every path the index of *wt* holds under ``.claude``; None when git gives no answer."""
-    proc = subprocess.run(["git", "-C", str(wt), "ls-files", "-z", "--", NATIVE_PARTS[0]],
+def _tracked_paths(wt: Path, parts: tuple[str, ...] = NATIVE_PARTS) -> set[str] | None:
+    """Every path the index of *wt* holds under the destination's top folder; None when git gives no answer."""
+    proc = subprocess.run(["git", "-C", str(wt), "ls-files", "-z", "--", parts[0]],
                           capture_output=True, check=False)
     if proc.returncode != 0:
         return None
@@ -671,13 +741,14 @@ def _entry_below(root_fd: int, parts: tuple[str, ...]) -> bool:
 
 
 def _write_pending(wt: Path, sources: dict[str, _Source], entries: dict[str, dict[str, Any]],
-                   failures: dict[str, str]) -> str | None:
+                   failures: dict[str, str], parts: tuple[str, ...] = NATIVE_PARTS,
+                   owner: dict[str, Any] | None = None) -> str | None:
     """Copy each slug that passed every check; a destination refusal stops the run and is returned."""
     for slug, src in sources.items():
         if slug in failures:
             continue
         try:
-            entries[slug] = _materialize_one(wt, slug, src)
+            entries[slug] = _materialize_one(wt, slug, src, parts, owner)
         except ShadowError as exc:
             failures[slug] = exc.reason
             if exc.reason in DEST_REFUSALS:
@@ -687,12 +758,19 @@ def _write_pending(wt: Path, sources: dict[str, _Source], entries: dict[str, dic
     return None
 
 
-def _materialize_one(wt: Path, slug: str, src: _Source) -> dict[str, Any]:
-    """Copy one checked slug below the worktree fd; a name that exists by now is foreign and stays."""
+def _materialize_one(wt: Path, slug: str, src: _Source, parts: tuple[str, ...] = NATIVE_PARTS,
+                     owner: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Copy one checked slug below the worktree fd; a name that exists by now is foreign and stays.
+
+    With an *owner* the marker is published first, so a copy that stops halfway is
+    still this run's and the next attempt of the same dispatch can reclaim it.
+    """
     root_fd = _open_worktree(wt)
     try:
-        base_fd = _descend(root_fd, NATIVE_PARTS)
+        base_fd = _descend(root_fd, parts)
         try:
+            if owner:
+                _create_nofollow(base_fd, Path(slug) / MARKER_NAME, _marker_bytes(owner, slug, src), 0o644)
             _copy_skill(base_fd, wt, slug, src)
         except FileExistsError as exc:
             raise ShadowError(f"not_owned:{slug}") from exc
@@ -700,16 +778,16 @@ def _materialize_one(wt: Path, slug: str, src: _Source) -> dict[str, Any]:
             os.close(base_fd)
     finally:
         os.close(root_fd)
-    return _skill_entry(slug, src.skill_md, "materialized")
+    return _skill_entry(slug, src.skill_md, "materialized", parts)
 
 
-def _native_entry(wt: Path, slug: str) -> dict[str, Any]:
+def _native_entry(wt: Path, slug: str, parts: tuple[str, ...] = NATIVE_PARTS) -> dict[str, Any]:
     """The entry of a skill whose SKILL.md already exists; read below the worktree fd, never written."""
-    return _skill_entry(slug, _read_below_worktree(wt, (*NATIVE_PARTS, slug, "SKILL.md")), "native")
+    return _skill_entry(slug, _read_below_worktree(wt, (*parts, slug, "SKILL.md")), "native", parts)
 
 
-def _skill_entry(slug: str, data: bytes, ownership: str) -> dict[str, Any]:
-    return {"slug": slug, "dest": f"{NATIVE_DIR}/{slug}", "sha256": hashlib.sha256(data).hexdigest(),
+def _skill_entry(slug: str, data: bytes, ownership: str, parts: tuple[str, ...] = NATIVE_PARTS) -> dict[str, Any]:
+    return {"slug": slug, "dest": "/".join((*parts, slug)), "sha256": hashlib.sha256(data).hexdigest(),
             "bytes": len(data), "ownership": ownership}
 
 

@@ -158,7 +158,7 @@ def test_missing_field_skips_with_one_warning(tmp_path, worktree, caplog, field,
 
 
 def test_unknown_role_and_provider_and_off_write_nothing(tmp_path, worktree):
-    assert _call(worktree, tmp_path, provider="codex")["status"] == "skipped"
+    assert _call(worktree, tmp_path, provider="kimi")["status"] == "skipped"
     assert _call(worktree, tmp_path, mode="off")["status"] == "skipped"
     assert not (tmp_path / "state").exists()
     assert _call(worktree, tmp_path, role="no-such-role")["reason"] == "no_role"
@@ -280,8 +280,8 @@ def test_link_planted_after_the_check_fails_the_write(tmp_path, worktree):
     dest = worktree / ".claude" / "skills" / "alpha"
     real_refuse = asm._refuse_dest_tree
 
-    def check_then_plant(wt, slug, src):
-        real_refuse(wt, slug, src)
+    def check_then_plant(wt, slug, src, *parts):
+        real_refuse(wt, slug, src, *parts)
         if slug == "alpha":
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "assets").symlink_to(outside, target_is_directory=True)
@@ -296,8 +296,8 @@ def test_file_link_planted_after_the_check_is_not_followed(tmp_path, worktree):
     dest = worktree / ".claude" / "skills" / "alpha"
     real_refuse = asm._refuse_dest_tree
 
-    def check_then_plant(wt, slug, src):
-        real_refuse(wt, slug, src)
+    def check_then_plant(wt, slug, src, *parts):
+        real_refuse(wt, slug, src, *parts)
         if slug == "alpha":
             dest.mkdir(parents=True, exist_ok=True)
             (dest / "SKILL.md").symlink_to(outside / "data.txt")

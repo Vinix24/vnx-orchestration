@@ -706,6 +706,28 @@ def _drain_stream(
 # Main spawn function
 # ---------------------------------------------------------------------------
 
+def _materialize_skills(role, cwd, dispatch_id, state_dir, project_id) -> None:
+    """Agent-layout step before the launch: the role's skill set into ``<cwd>/.agents/skills``.
+
+    ``off`` does nothing. Fail-open: any miss or exception logs one WARNING and codex
+    starts as it would without it.
+    """
+    try:
+        import agent_layout
+        from agent_skill_materialize import materialize_skill_set
+        from dispatch_identity import normalize_role
+
+        mode = agent_layout.layout_mode()
+        if mode == "off":
+            return
+        materialize_skill_set(
+            normalize_role(role), worktree=cwd, provider="codex", mode=mode,
+            dispatch_id=dispatch_id, state_dir=state_dir, project_id=project_id,
+        )
+    except Exception as exc:  # fail-open: the materialisation never stops a dispatch
+        logger.warning("agent skill materialisation for codex role %r: %s", role, type(exc).__name__)
+
+
 def spawn_codex(
     prompt: str,
     model: Optional[str],
@@ -721,9 +743,13 @@ def spawn_codex(
     event_store: Optional[Any] = None,
     chunk_timeout: float = 60.0,
     total_deadline: float = 600.0,
+    role: Optional[str] = None, state_dir: Optional[Any] = None, project_id: Optional[str] = None,
     **kwargs: Any,
 ) -> CodexSpawnResult:
     """Spawn `codex exec --json` and consume the NDJSON event stream.
+
+    ``role``, ``state_dir`` and ``project_id`` are the skill-materialisation inputs every
+    caller passes (ADR-059 decision 13); the spawner reads no ambient env for them.
 
     Returns CodexSpawnResult on completion (success OR controlled failure).
     Returns CodexSpawnResult(returncode=127, spawn_refused="codex binary not found: ...")
@@ -760,6 +786,7 @@ def spawn_codex(
     if early_result is not None:
         return early_result
 
+    _materialize_skills(role, cwd, dispatch_id, state_dir, project_id)
     proc, early_result = _launch_codex_proc(prompt, launch_model, extra_env, cwd)
     if early_result is not None:
         return early_result
