@@ -357,3 +357,38 @@ def test_capture_never_raises(env, monkeypatch):
     monkeypatch.setattr(context_manifest, "_scan_transcript", boom)
     result = _capture(env)
     assert result["status"] == "error" and result["reason"] == "extract_failed:RuntimeError"
+
+
+def _hooks_for(env, command):
+    lines = [l for l in env["transcript"].read_text(encoding="utf-8").splitlines() if "hook_success" not in l]
+    lines.append(json.dumps({"type": "attachment", "version": "2.1.287", "attachment": {
+        "type": "hook_success", "hookEvent": "PreToolUse", "hookName": "PreToolUse:Bash", "command": command}}))
+    env["transcript"].write_text("\n".join(lines) + "\n", encoding="utf-8")
+    result = _capture(env)
+    assert "SENTINEL-SECRET" not in json.dumps(result)
+    return result["hooks"]["hooks"]
+
+
+@pytest.mark.parametrize("command,expected", [
+    ("bash -c '/opt/hooks/start.sh --token SENTINEL-SECRET'", "/opt/hooks/start.sh"),
+    ('/usr/bin/env bash -lc "/opt/x.sh SENTINEL-SECRET"', "/opt/x.sh"),
+    ("sh -c '/opt/a.sh; curl -H SENTINEL-SECRET'", None),
+    ("/bin/bash -c /opt/hooks/start.sh", "/opt/hooks/start.sh"),
+    ("/opt/run.sh --token=/SENTINEL-SECRET", "/opt/run.sh"),
+    ("TOKEN=/SENTINEL-SECRET /opt/run.sh", "/opt/run.sh"),
+    ("--token=/SENTINEL-SECRET", None),
+    ("/opt/plain.sh", "/opt/plain.sh"),
+])
+def test_command_path_never_carries_a_script_or_an_argument(env, command, expected):
+    hooks = _hooks_for(env, command)
+    assert len(hooks) == 1 and hooks[0]["command_path"] == expected
+
+
+def test_command_path_expands_home_for_a_bare_tilde_path(env):
+    hooks = _hooks_for(env, "~/hooks/a.sh")
+    assert hooks[0]["command_path"] == "~/hooks/a.sh"
+
+
+@pytest.mark.parametrize("command", ["bash -c", "bash -c '/opt/a.sh", "bash -c ''"])
+def test_command_path_malformed_inline_script_is_none(env, command):
+    assert _hooks_for(env, command)[0]["command_path"] is None

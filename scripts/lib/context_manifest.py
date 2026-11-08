@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import time
 from pathlib import Path
@@ -206,20 +207,55 @@ def _clean(value: Any) -> Optional[str]:
     return value if isinstance(value, str) and value and "@" not in value else None
 
 
-def _command_path(command: str) -> Optional[str]:
-    """First absolute (or ``~/``) path token of a hook command, else ``None``.
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
+_WRAPPERS = _SHELLS | {"env"}
+_SHELL_META = frozenset(";|&$<>`")
+_INLINE_FLAG = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
 
-    Only the path is kept, never the arguments or an inline script.
+
+def _single_path(token: str) -> Optional[str]:
+    """``token`` as an absolute or ``~/`` path when it is one bare path, else ``None``.
+
+    Whitespace, ``=`` and shell metacharacters make it an argument or a script, not a path.
+    """
+    if not token.startswith(("/", "~/")):
+        return None
+    if any(c.isspace() or c == "=" or c in _SHELL_META for c in token):
+        return None
+    return str(_home()) + token[1:] if token.startswith("~/") else token
+
+
+def _inline_script_path(script: str) -> Optional[str]:
+    """The first token of an inline ``-c`` script, only when that token alone is a single path."""
+    try:
+        tokens = shlex.split(script)
+    except ValueError:
+        return None
+    return _single_path(tokens[0]) if tokens else None
+
+
+def _command_path(command: str) -> Optional[str]:
+    """First bare absolute (or ``~/``) path token of a hook command, else ``None``.
+
+    Only the path is kept, never an argument, an assignment or an inline script.
+    ``env`` and shell wrappers are skipped; the operand of a shell ``-c`` yields
+    its first token only when that token alone is a single path.
     """
     try:
         tokens = shlex.split(command)
     except ValueError:
         return None
-    for token in tokens:
-        if token.startswith("~/"):
-            return str(_home()) + token[1:]
-        if token.startswith("/"):
-            return token
+    in_shell = False
+    for index, token in enumerate(tokens):
+        if in_shell and _INLINE_FLAG.match(token):
+            return _inline_script_path(tokens[index + 1]) if index + 1 < len(tokens) else None
+        base = token.rsplit("/", 1)[-1]
+        if base in _WRAPPERS and (base == token or token.startswith("/")):
+            in_shell = in_shell or base in _SHELLS
+            continue
+        path = _single_path(token)
+        if path is not None:
+            return path
     return None
 
 
