@@ -1,0 +1,1 @@
+- The agent skill materializer gains the native claude destination `.claude/skills/<slug>/` (ignore gate, existence gate, path gate, closed status and reason sets) and one record per attempt under `agent_skill_materializations/`, and `ClaudeSubprocessAdapter.run` calls it by layout mode; `on` still reads as `off` until R6 (skilldisc R3).

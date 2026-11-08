@@ -14,10 +14,12 @@ raises to the caller. Under ``off`` nothing happens and no directory is made.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import shutil
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -31,6 +33,16 @@ logger = logging.getLogger(__name__)
 SHADOW_DIR = ".vnx-agent-skills"
 MANIFEST_NAME = "manifest.json"
 MANIFEST_SCHEMA = 1
+
+NATIVE_DIR = ".claude/skills"
+RECORD_DIR = "agent_skill_materializations"
+RECORD_SCHEMA = 1
+STATUSES = frozenset({"ok", "partial", "error", "skipped"})
+REASONS = frozenset({
+    "no_role", "no_declared_set", "no_cwd", "no_state_dir", "no_dispatch_id",
+    "no_project_id", "not_isolated", "not_ignored", "already_native",
+    "source_missing", "copy_failed:<Class>", "not_owned:<slug>", "path_outside_worktree",
+})
 
 
 class ShadowError(Exception):
@@ -191,3 +203,152 @@ def _copy_skill(role_dir: Path, source_root: Path, slug: str, src: Path) -> dict
         )
     real_root = Path(os.path.realpath(source_root))
     return {"slug": slug, "source_dir": src.relative_to(real_root).as_posix(), "files": files}
+
+
+def materialize_skill_set(
+    role: str | None,
+    *,
+    worktree: Path | str | None,
+    provider: str,
+    mode: str,
+    dispatch_id: str | None,
+    state_dir: Path | str | None,
+    project_id: str | None = None,
+) -> dict[str, Any]:
+    """Make *role*'s declared skill set visible to *provider* (ADR-059 decision 13).
+
+    ``shadow`` delegates to :func:`materialize_role_skills`. ``on`` with ``claude``
+    copies to ``<worktree>/.claude/skills/<slug>/``, writes one record per attempt
+    and returns ``status`` in :data:`STATUSES`. Anything else is ``skipped`` without
+    a write (``off``, or a provider other than claude). Never reads the environment
+    and never raises: the dispatch runs on.
+    """
+    if mode == "shadow":
+        return _shadow_delegate(worktree, role)
+    if mode != "on":
+        return {"status": "skipped", "reason": "layout_off"}
+    if provider != "claude":
+        return {"status": "skipped", "reason": "provider_unsupported"}
+    ids = {"role": role, "provider": provider, "dispatch_id": dispatch_id, "project_id": project_id,
+           "worktree": str(worktree) if worktree else None}
+    try:
+        result = _native_claude(role, worktree, dispatch_id, state_dir, project_id)
+    except Exception as exc:  # fail-open: materialisation never stops a dispatch
+        result = _outcome("error", f"copy_failed:{type(exc).__name__}")
+    if result["status"] != "ok":
+        logger.warning("agent skill materialisation for role %r: %s", role, result.get("reason"))
+    result["record"] = _write_record(state_dir, ids, result)
+    return result
+
+
+def _shadow_delegate(worktree: Path | str | None, role: str | None) -> dict[str, Any]:
+    if not role or worktree is None:
+        return {"status": "skipped", "reason": "no_role" if not role else "no_cwd"}
+    from agent_resolver import resolve_agent
+
+    config = resolve_agent(role, worktree, engine_root=Path(__file__).resolve().parents[2])
+    if config is None:
+        logger.warning("agent skill shadow for role %r: no config", role)
+        return {"status": "skipped", "reason": "no_role"}
+    if not config.skills:
+        return {"status": "skipped", "reason": "no_declared_set"}
+    return materialize_role_skills(worktree, role, config.skills)
+
+
+def _outcome(status: str, reason: str | None = None, skills: list | None = None) -> dict[str, Any]:
+    return {"status": status, "reason": reason, "skills": skills or []}
+
+
+def _native_claude(role, worktree, dispatch_id, state_dir, project_id) -> dict[str, Any]:
+    for value, reason in ((role, "no_role"), (worktree, "no_cwd"), (state_dir, "no_state_dir"),
+                          (dispatch_id, "no_dispatch_id"), (project_id, "no_project_id")):
+        if not value:
+            return _outcome("skipped", reason)
+    wt = Path(worktree)
+    if not _worktree_is_isolated(wt):
+        return _outcome("skipped", "path_outside_worktree")
+    from agent_resolver import resolve_agent
+
+    config = resolve_agent(role, wt, engine_root=Path(__file__).resolve().parents[2])
+    if config is None:
+        return _outcome("skipped", "no_role")
+    if not config.skills:
+        return _outcome("skipped", "no_declared_set")
+    return _copy_native(wt, config.skills)
+
+
+def _worktree_is_isolated(wt: Path) -> bool:
+    from dispatch_worktree_isolation import resolve_consumer_project_root
+
+    real = wt.resolve()
+    if real == resolve_consumer_project_root():
+        return False
+    return not any(_inside(real, (Path.home() / d).resolve()) for d in (".claude", ".codex"))
+
+
+def _copy_native(wt: Path, slugs: list[str]) -> dict[str, Any]:
+    base = wt / NATIVE_DIR
+    if base.exists() and not _inside(Path(os.path.realpath(base)), Path(os.path.realpath(wt))):
+        return _outcome("skipped", "path_outside_worktree")
+    pending = [s for s in slugs if skill_search_paths(wt, s) and not os.path.lexists(base / s / "SKILL.md")]
+    if any(not _dest_ignored(wt, s) for s in pending):
+        return _outcome("skipped", "not_ignored")
+    entries: list[dict[str, Any]] = []
+    failure: str | None = None
+    for slug in slugs:
+        try:
+            entries.append(_native_entry(wt, base, slug, slug in pending))
+        except ShadowError as exc:
+            failure = failure or ("source_missing" if exc.reason.startswith("slug_") else exc.reason)
+        except Exception as exc:  # fail-open per skill: the next slug still gets its copy
+            failure = failure or f"copy_failed:{type(exc).__name__}"
+    copied = any(e["ownership"] == "materialized" for e in entries)
+    if failure:
+        return _outcome("partial" if entries else "error", failure, entries)
+    return _outcome("ok", None if copied else "already_native", entries)
+
+
+def _dest_ignored(wt: Path, slug: str) -> bool:
+    proc = subprocess.run(["git", "-C", str(wt), "check-ignore", "-q", f"{NATIVE_DIR}/{slug}/SKILL.md"],
+                          capture_output=True, check=False)
+    return proc.returncode == 0
+
+
+def _native_entry(wt: Path, base: Path, slug: str, to_copy: bool) -> dict[str, Any]:
+    if to_copy:
+        src = _vet_slug(wt, slug)
+        base.mkdir(parents=True, exist_ok=True)
+        _copy_skill(base, wt, slug, src)
+    elif not skill_search_paths(wt, slug):
+        raise ShadowError(f"slug_refused:{slug}")
+    data = (base / slug / "SKILL.md").read_bytes()
+    return {"slug": slug, "dest": f"{NATIVE_DIR}/{slug}", "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data), "ownership": "materialized" if to_copy else "native"}
+
+
+def _write_record(state_dir, ids: dict[str, Any], result: dict[str, Any]) -> str | None:
+    """One file per attempt, ``n`` chosen with ``O_CREAT|O_EXCL``; best effort."""
+    dispatch_id = ids["dispatch_id"]
+    if not state_dir or not dispatch_id or dispatch_id != Path(str(dispatch_id)).name:
+        return None
+    skills = result["skills"]
+    body = {"schema": RECORD_SCHEMA, "status": result["status"], "reason": result["reason"], **ids,
+            "session_id": None, "captured_at": datetime.now(timezone.utc).isoformat(), "skills": skills,
+            "manifest_sha256": hashlib.sha256(json.dumps(skills, sort_keys=True).encode()).hexdigest()}
+    try:
+        folder = Path(state_dir) / RECORD_DIR / dispatch_id
+        folder.mkdir(parents=True, exist_ok=True)
+        attempt = 1
+        while True:
+            path = folder / f"{ids['provider']}.attempt-{attempt}.json"
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                break
+            except FileExistsError:
+                attempt += 1
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:  # vnx-atomic-write: O_EXCL create is the exclusivity
+            json.dump({**body, "attempt": attempt}, handle, indent=2)
+        return str(path)
+    except Exception as exc:  # fail-open: the reason is already in the WARNING
+        logger.warning("could not write materialisation record: %s", type(exc).__name__)
+        return None
