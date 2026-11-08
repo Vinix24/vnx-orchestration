@@ -384,6 +384,27 @@ def test_command_path_never_carries_a_script_or_an_argument(env, command, expect
     assert len(hooks) == 1 and hooks[0]["command_path"] == expected
 
 
+@pytest.mark.parametrize("command,expected", [
+    ("curl --token /SENTINEL-SECRET", None),
+    ("bash hooks/run.sh /SENTINEL-SECRET", None),
+    ('python -c "print(1)" /SENTINEL-SECRET', None),
+    ("python3 -m tool /SENTINEL-SECRET", None),
+    ("/opt/hooks/run.sh /SENTINEL-SECRET", "/opt/hooks/run.sh"),
+    ("bash /opt/hooks/run.sh /SENTINEL-SECRET", "/opt/hooks/run.sh"),
+    ("/usr/bin/env FOO=bar python3 /opt/hooks/check.py --key /SENTINEL-SECRET", "/opt/hooks/check.py"),
+    ("node ~/hooks/x.js /SENTINEL-SECRET", "~/hooks/x.js"),
+    ("bash -e /opt/hooks/run.sh /SENTINEL-SECRET", "/opt/hooks/run.sh"),
+    ("env -i FOO=bar curl /SENTINEL-SECRET", None),
+    ("python3.12 relative.py /SENTINEL-SECRET", None),
+    ("FOO=bar bash", None),
+    ("env", None),
+])
+def test_command_path_reads_the_executable_or_script_position_only(env, command, expected):
+    hooks = _hooks_for(env, command)
+    assert len(hooks) == 1 and hooks[0]["command_path"] == expected
+    assert "SENTINEL-SECRET" not in json.dumps(hooks)
+
+
 def test_command_path_expands_home_for_a_bare_tilde_path(env):
     hooks = _hooks_for(env, "~/hooks/a.sh")
     assert hooks[0]["command_path"] == "~/hooks/a.sh"

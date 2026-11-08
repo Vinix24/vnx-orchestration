@@ -208,7 +208,8 @@ def _clean(value: Any) -> Optional[str]:
 
 
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash"})
-_WRAPPERS = _SHELLS | {"env"}
+_INTERPRETER = re.compile(r"^(python[0-9.]*|node|ruby|perl)$")
+_INTERPRETER_INLINE = frozenset({"-c", "-e", "-m"})
 _SHELL_META = frozenset(";|&$<>`")
 _INLINE_FLAG = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
 
@@ -234,29 +235,71 @@ def _inline_script_path(script: str) -> Optional[str]:
     return _single_path(tokens[0]) if tokens else None
 
 
-def _command_path(command: str) -> Optional[str]:
-    """First bare absolute (or ``~/``) path token of a hook command, else ``None``.
+def _is_assignment(token: str) -> bool:
+    name, eq, _ = token.partition("=")
+    return bool(eq) and name.isidentifier()
 
-    Only the path is kept, never an argument, an assignment or an inline script.
-    ``env`` and shell wrappers are skipped; the operand of a shell ``-c`` yields
-    its first token only when that token alone is a single path.
+
+def _is_env(token: str) -> bool:
+    return token == "env" or (token.startswith("/") and token.rsplit("/", 1)[-1] == "env")
+
+
+def _executable_index(tokens: Sequence[str]) -> Optional[int]:
+    """Index of the executable: past leading ``KEY=value`` and an ``env`` with its flags and assignments."""
+    index = 0
+    while index < len(tokens) and _is_assignment(tokens[index]):
+        index += 1
+    if index < len(tokens) and _is_env(tokens[index]):
+        index += 1
+        while index < len(tokens) and (tokens[index].startswith("-") or _is_assignment(tokens[index])):
+            index += 1
+    return index if index < len(tokens) else None
+
+
+def _leading_flags(tokens: Sequence[str], start: int) -> int:
+    """Index of the first token from ``start`` that is not a flag (``len(tokens)`` when none)."""
+    index = start
+    while index < len(tokens) and tokens[index].startswith("-"):
+        index += 1
+    return index
+
+
+def _script_path(tokens: Sequence[str], exe: int, shell: bool) -> Optional[str]:
+    """Path of the script a shell or interpreter runs; inline code (``-c``, ``-e``, ``-m``) is ``None`` or its first token."""
+    end = _leading_flags(tokens, exe + 1)
+    flags = tokens[exe + 1:end]
+    if shell:
+        for offset, flag in enumerate(flags):
+            if _INLINE_FLAG.match(flag):
+                follow = exe + 2 + offset
+                return _inline_script_path(tokens[follow]) if follow < len(tokens) else None
+    elif any(flag in _INTERPRETER_INLINE for flag in flags):
+        return None
+    return _single_path(tokens[end]) if end < len(tokens) else None
+
+
+def _command_path(command: str) -> Optional[str]:
+    """The executable or script path of a hook command, else ``None``.
+
+    Positions are read, never scanned: leading ``KEY=value`` assignments and
+    ``env`` (with its flags and assignments) are skipped, the next token is the
+    executable. For a shell or an interpreter the first non-flag operand is the
+    script instead; a shell ``-c`` yields the first token of its inline script,
+    and an interpreter ``-c``/``-e``/``-m`` yields ``None``. The result must be
+    one bare absolute or ``~/`` path. No token after that position is read, so
+    an argument never becomes the path.
     """
     try:
         tokens = shlex.split(command)
     except ValueError:
         return None
-    in_shell = False
-    for index, token in enumerate(tokens):
-        if in_shell and _INLINE_FLAG.match(token):
-            return _inline_script_path(tokens[index + 1]) if index + 1 < len(tokens) else None
-        base = token.rsplit("/", 1)[-1]
-        if base in _WRAPPERS and (base == token or token.startswith("/")):
-            in_shell = in_shell or base in _SHELLS
-            continue
-        path = _single_path(token)
-        if path is not None:
-            return path
-    return None
+    index = _executable_index(tokens)
+    if index is None:
+        return None
+    base = tokens[index].rsplit("/", 1)[-1]
+    if base in _SHELLS or _INTERPRETER.match(base):
+        return _script_path(tokens, index, base in _SHELLS)
+    return _single_path(tokens[index])
 
 
 def _hook_record(attachment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
