@@ -29,7 +29,7 @@ Er is geen dagelijkse controle. `compute_health` (`scripts/ledger_health.py:527`
 
 Twee meetbare gevolgen van de bestaande lezers bepalen de vorm van dit besluit:
 
-- Een intrekking als `failure` is onomkeerbaar. `_classify_present` (`scripts/lib/ci_contexts.py:315`) is bewust conservatief op duplicaten: "any terminal non-passing conclusion makes it `failed`, even when a sibling run of the same name passed" (`:319-323`). Een tweede publicatie op dezelfde kop kan dat niet meer rechtzetten.
+- Een `failure` op die naam is met een **tweede** run niet recht te zetten. `_classify_present` (`scripts/lib/ci_contexts.py:315`) is bewust conservatief op duplicaten: "any terminal non-passing conclusion makes it `failed`, even when a sibling run of the same name passed" (`:319-323`). Een tweede publicatie op dezelfde kop lost een `failure` dus nooit op; een `PATCH` op diezelfde run wel. Dat is de reden voor één deurrun per kop (§3) en voor intrekken door bijwerken (§5), en het is de reden dat een tweede run als herstel niet helpt.
 - Een verplichte deurcheck maakt `vnx pr-ready` permanent rood. `classify_contexts` (`scripts/lib/ci_contexts.py:491`) geeft `STATE_UNVERIFIED` voor een context zonder check-run en zonder workflow-job (`:537-551`), en `required_contexts_gate` maakt daar `SKIPPED_UNVERIFIED` van (`scripts/lib/required_contexts_gate.py:99`). Voor `vnx-gate/review` is dat juist; voor de deurcheck geldt het omgekeerde, want alleen de deur kan hem zetten en pas wanneer hij merget.
 
 ## Besluit
@@ -50,14 +50,23 @@ Dat is niet alleen een voorkeur. `parse_protection_config` weigert een `vnx-gate
 
 ### 3. `door` is de zesde en laatste preflight, maar haar bewijs zijn de vijf poorten daarvóór
 
-`PREFLIGHT_ORDER` (`scripts/pr_merge.py:303-309`, nu `ci, review, adr, contract_invalid, branch_protection`) krijgt `door` als zesde en laatste naam. De preflight publiceert de check op de kop, leest hem terug van GitHub, en weigert als wat er staat geen `success` van de eigen App is of niet de run is die deze aanroep publiceerde.
+`PREFLIGHT_ORDER` (`scripts/pr_merge.py:303-309`, nu `ci, review, adr, contract_invalid, branch_protection`) krijgt `door` als zesde en laatste naam. De preflight **maakt of werkt bij** de check op de kop, leest hem terug van GitHub, en weigert als wat er staat geen `success` van de eigen App is of niet de run is die deze aanroep maakte of bijwerkte.
+
+**Eén deurrun per kop.** Op een kop houdt de deur hooguit één `vnx-gate/door`-run van zijn eigen App. De preflight leest eerst de runs op de kop met `GET /repos/{owner}/{repo}/commits/{sha}/check-runs?check_name=vnx-gate/door` en splitst ze op `app.id` met dezelfde regel als de lezer (`_split_by_app`, `scripts/lib/ci_contexts.py:295-312`: een run zonder `app`-object matcht niet). Vier gevallen, elk met een eigen uitkomst:
+
+1. **Nul** runs van de eigen App en geen vreemde run → de deur **maakt** hem (`POST /repos/{owner}/{repo}/check-runs`, `publish_check_run`, `scripts/lib/forge_check_run.py:677-713`). Dit is de eerste deurrun op die kop.
+2. **Eén** run van de eigen App → de deur **werkt die bij** met `PATCH /repos/{owner}/{repo}/check-runs/{id}` en maakt geen tweede. Het `PATCH`-lichaam zet dezelfde velden die `publish_check_run` in zijn `POST` zet: `status: "completed"` en `conclusion: "success"` (`:700-706`).
+3. **Twee of meer** runs van de eigen App → **NO-GO** met een eigen reden (een race, of een erfenis uit een eerdere stand). De herstelweg is een nieuwe commit: de lezer houdt de context rood zolang één van die runs niet-slagend is (§6), en de deur kiest niet zelf welke van de twee hij bijwerkt.
+4. **Alleen** runs van een **andere** App → een weigering, geen adoptie en geen tweede run ernaast, zoals §6 en R4 al schrijven.
+
+Het HTTP-seam bestaat al: `_api_request` neemt de methode als eerste argument (`scripts/lib/forge_check_run.py:464-497`), dus dit is een pad erbij en geen tweede client.
 
 **Het bewijs is de poorten vóór de deur, niet de deur zelf.** De deurpoort kan geen `GO` zijn voordat zij gepubliceerd heeft: `_preflight_ledger` (`scripts/pr_merge.py:394`) merkt een poort die nog geen oordeel had als `not_evaluated`, en de deur krijgt haar oordeel pas uit de teruglezing van de check-run. Een contract dat alle zes namen van `PREFLIGHT_ORDER` met `verdict: "GO"` eist vóórdat de deur publiceert, is dus cirkelredenerend en kan nooit slagen. Daarom draagt het evidence-bestand precies de namen van `PREFLIGHT_ORDER` **zonder** `door`, in die volgorde — op `main` van vandaag de vijf `ci, review, adr, contract_invalid, branch_protection` — elk met `verdict` exact `"GO"`. De uitgever valideert de namen en hun volgorde, niet alleen het aantal: een ontbrekende, een extra of een verkeerd geordende naam is elk een eigen weigeringstekst. Het eigen record van de deur (`verdict` uit de teruglezing) wordt pas aan de preflight-ledger toegevoegd nadat de teruglezing is geslaagd; die volledige lijst van zes is wat in de `pr_merged`-receipt naast `door_check` landt.
 
 - **Laatst, omdat** de toestemming zo dicht mogelijk bij de merge moet liggen; omdat hij afhangt van de branch-protection-preflight, die `main`'s `checks[]` leest (`main_config`, `scripts/pr_merge.py:1552`, uit `_fetch_protection_yaml` op `:524`, aangeroepen op `:1544`); en omdat een groene check op een kop die daarna alsnog door een eerdere poort geweigerd wordt, een valse toestemming is.
-- **Teruglezen, omdat** een POST die 201 antwoordt geen bewijs is dat de context op de kop groen staat, en een verloren antwoord een bestaand faaltype is (`_api_request`, `scripts/lib/forge_check_run.py:464-497`). De deur eist daarom drie dingen tegelijk: `conclusion == "success"`, de eigen `app.id`, en `id == <de run die deze aanroep maakte>`. Kan hij die run niet aanwijzen, dan weigert hij.
+- **Teruglezen, omdat** een POST die 201 antwoordt of een PATCH die 200 antwoordt geen bewijs is dat de context op de kop groen staat, en een verloren antwoord een bestaand faaltype is (`_api_request`, `scripts/lib/forge_check_run.py:464-497`). De deur eist daarom drie dingen tegelijk: `conclusion == "success"`, de eigen `app.id`, en `id ==` de run die deze aanroep maakte of bijwerkte. Kan hij die run niet aanwijzen — of wijst de teruglezing op die kop meer dan één deur-App-run aan — dan weigert hij.
 
-De eigen `check_run_id` is daarmee de identiteit van de toestemming: `permit_id` is `<app_id>:<head_sha>:<check_run_id>`.
+De eigen `check_run_id` is daarmee de identiteit van de toestemming: `permit_id` is `<app_id>:<head_sha>:<check_run_id>`. Omdat de deur één run per kop houdt, heeft een toestemming die na een intrekking opnieuw gezet wordt **dezelfde** `check_run_id` — het is dezelfde run die terug op `success` gaat. Het grootboek onderscheidt twee toestemmingen daarom niet alleen op `permit_id` maar ook op `published_at`: elke intrekking en elke heropbouw zet dat veld opnieuw.
 
 ### 4. De deur publiceert alleen als `main` de check eist — dat is de ene configregel per project
 
@@ -69,11 +78,13 @@ Eén bron van waarheid, geen tweede vlag die met de eerste kan divergeren — en
 
 **Waarom géén nieuw `door:`-veld in de YAML.** `FORGE_GATE.md` §7 zegt van de deur: "De deur zelf kent het verschil niet en krijgt er ook geen ontsnappingsluik voor", en §7.2 stap 3: "Er is geen vlag die dit opent, en die komt er ook niet." Een `door: {enforcement: off}` die een merge doorlaat zou precies dat luik zijn, en het zou een schemawijziging van twee PR's vragen (§10) voor iets wat in de bestaande vorm één regel in een bestaande lijst is.
 
-### 5. De toestemming wordt **verwijderd**, niet rood gezet; de blootstelling is begrensd
+### 5. De toestemming wordt **met een `PATCH` ingetrokken**, want GitHub kent geen `DELETE` op een check-run; de blootstelling is begrensd
 
-De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /repos/{owner}/{repo}/check-runs/{id}`). Lukt dat niet, dan publiceert hij als fallback `conclusion: failure` — dat blokkeert GitHub hoe dan ook — en meldt dat met een eigen merker (`revoke_outcome: failed_delete_published_failure`).
+De deur trekt de toestemming in door **dezelfde check-run naar `conclusion: failure` te `PATCH`en** (`PATCH /repos/{owner}/{repo}/check-runs/{id}`), met een `output.title` die de intrekking bij name noemt (`permit revoked: <reden>`). Dat is het enige mechanisme; er is geen tweede pad en er is geen fallback. Dat is geen keus maar een eigenschap van de API: de Checks-REST-API kent **geen `DELETE` op een check-run**. Haar endpoints zijn `POST /check-runs`, `GET /check-runs/{id}`, `PATCH /check-runs/{id}`, `GET /check-runs/{id}/annotations`, `POST /check-runs/{id}/rerequest`, `GET /check-suites/{id}/check-runs` en `GET /commits/{ref}/check-runs` (docs.github.com/en/rest/checks/runs, gelezen 08-11-2026). Het eerdere paar "eerst de run verwijderen, anders `failure` als fallback" is daarmee vervallen: er was nooit een verwijderpad, en een fallback naast het enige mechanisme is geen fallback maar dezelfde aanroep. Wat het plan in §12 "twee mechanismen" noemt, is er dus één.
 
-**Waarom verwijderen en niet rood zetten.** `_classify_present` (`scripts/lib/ci_contexts.py:315`) houdt de context `failed` zolang één run op die naam niet-slagend is (`:319-323`). Een `failure` als intrekking is dus een eenrichtingsdeur op die kop: een tweede publicatie kan het niet meer rechtzetten. Verwijderen brengt de context terug naar "geen run" — de toestand die §6 al kent — waarna de volgende deurrun schoon publiceert. De bewijswaarde blijft in het grootboek: `check_run_id`, `permit_id`, `revoked: true`.
+**Drie pogingen met backoff, en daarna geen stilte.** Lukt de `PATCH` drie keer niet, dan staat de run nog op `success` — dat is een gat, geen blokkade. De deur claimt de intrekking dan niet: hij schrijft een blocker-open-item met het herstelcommando (`python3 scripts/pr_merge.py --pr N`) en eindigt non-zero, zodat de mislukte intrekking in het grootboek staat en niet alleen in een logregel.
+
+**Waarom dezelfde run bijwerken en geen tweede run publiceren.** `_classify_present` (`scripts/lib/ci_contexts.py:315-348`) houdt de context `failed` zolang één run op die naam niet-slagend is (`:319-323`). Een tweede, groene run naast een `failure` maakt de context dus niet groen; alleen de run die je terugzet kan dat. Daarom houdt de deur één run per kop (§3) en is "terug op `success`" een `PATCH` op precies die run, geen nieuwe publicatie. De bewijswaarde blijft in het grootboek: `check_run_id`, `permit_id`, `published_at`, `revoked: true`, `revoke_outcome`.
 
 **De drie triggers, alle drie expliciet.**
 
@@ -81,7 +92,7 @@ De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /r
 2. De uitkomst is **onbekend**: `gh` meldt succes maar `_pr_actually_merged` (`scripts/pr_merge.py:1836`) kan de PR-state niet lezen of leest geen `MERGED`. Dan intrekken, `merge_outcome: "unknown"`, exit non-zero.
 3. Een uitzondering na publicatie en vóór een bevestigde merge.
 
-**Wat een crash niet kan.** Een SIGKILL, segfault of stroomuitval tussen publicatie en merge laat de toestemming staan; geen enkel in-process mechanisme dekt dat. Daarvoor is de **verzoening met intrekking** (rij **D7c**, nieuwe rij na D7b en D3 — niet D7b): zij leest elke **open** PR, en een groene `vnx-gate/door` op de huidige kop die ouder is dan `--permit-ttl` (standaard 30 min), of waarvan de `permit_id` in geen enkele `pr_merged`/`pr_merge_refused`-regel voorkomt, is een bevinding **en** wordt verwijderd via hetzelfde publisher-delete-pad als de in-process intrekking: drie pogingen met backoff, daarna de `failure`-fallback met merker en een blocker-open-item.
+**Wat een crash niet kan.** Een SIGKILL, segfault of stroomuitval tussen publicatie en merge laat de toestemming staan; geen enkel in-process mechanisme dekt dat. Daarvoor is de **verzoening met intrekking** (rij **D7c**, nieuwe rij na D7b en D3 — niet D7b): zij leest elke **open** PR, en een groene `vnx-gate/door` op de huidige kop die ouder is dan `--permit-ttl` (standaard 30 min), of waarvan de `permit_id` in geen enkele `pr_merged`/`pr_merge_refused`-regel voorkomt, is een bevinding **en** wordt op dezelfde manier ingetrokken als de in-process intrekking — **dezelfde `PATCH` naar `failure`**: drie pogingen met backoff, daarna een blocker-open-item met het herstelcommando en een non-zero exit. Er is één mechanisme voor beide paden; D7c roept hetzelfde pad aan als §5 hierboven.
 
 **De grens is de job-cadans plus de TTL, niet de TTL.** Melden alleen is geen grens: niets op GitHub laat een check-run verlopen, dus tussen de publicatie en de volgende verzoeningsrun blijft de merge-toestemming staan, hoe oud zij ook is. Met de dagelijkse job is de grens daarom hooguit **24 uur plus 30 minuten**. Een kortere cadans is een keus van de operator en de enige manier om die grens te verkorten.
 
@@ -90,8 +101,8 @@ De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /r
 | Geval | Wat er overblijft | Grens |
 |---|---|---|
 | merge lukt | niets: de kop staat in `main`, de PR is dicht, een kale merge op die PR kan niet meer | 0 |
-| merge faalt, deur leeft | de toestemming tot de verwijdering terugkomt | seconde tot tientallen seconden; 3 pogingen met backoff, daarna fallback + blocker |
-| crash of verloren antwoord | de toestemming tot de verzoening haar **intrekt** (zelfde delete-pad, daarna fallback + blocker) | **job-cadans + `permit-TTL`**: bij de dagelijkse job ≤ 24 u + 30 min; niets op GitHub laat haar vanzelf verlopen |
+| merge faalt, deur leeft | de toestemming tot de `PATCH` naar `failure` landt | seconde tot tientallen seconden; 3 pogingen met backoff, daarna blocker + non-zero exit |
+| crash of verloren antwoord | de toestemming tot de verzoening haar **intrekt** (dezelfde `PATCH`, daarna blocker + non-zero exit) | **job-cadans + `permit-TTL`**: bij de dagelijkse job ≤ 24 u + 30 min; niets op GitHub laat haar vanzelf verlopen |
 
 ### 6. De lezer kent drie toestanden, met een herstelpad in de derde
 
@@ -100,16 +111,18 @@ De deur trekt de toestemming in door **de check-run te verwijderen** (`DELETE /r
 | Toestand | Voorwaarde | Blokkeert | Wat de lezer zegt |
 |---|---|---|---|
 | `published_at_merge` | verplicht, **geen** check-run op de kop, geen vreemde-App-run | nee | "de deur publiceert deze bij de merge" |
-| `permit_revoked` | een run van **de deur-App** met `conclusion: failure` | ja, met hersteltekst | "de deur heeft de toestemming ingetrokken na een mislukte merge; herstel: `python3 scripts/pr_merge.py --pr N`; blijft dit blokkeren, push dan een nieuwe commit" |
+| `permit_revoked` | een run van **de deur-App** met `conclusion: failure` | ja, met hersteltekst | "de deur heeft de toestemming ingetrokken na een mislukte merge; herstel: `python3 scripts/pr_merge.py --pr N` — de deur draait elke preflight opnieuw en zet deze run alleen bij een GO terug op `success`" |
 | al het andere | — | bestaand gedrag | bestaand gedrag |
 
 `required_contexts_gate` neemt `published_at_merge` op in een eigen veld en telt hem niet als `unverified`; bij `permit_revoked` blijft het verdict `HOLD` (blokkeren is juist) maar krijgt de payload een `recovery`-veld met het commando. `pr_readiness` toont dezelfde regel; `scripts/pre_merge_gate.py` erft dat via `check_required_contexts` (`:51` import, `:1360` aanroep).
 
 **Dit is geen fail-open.** De uitzondering geldt voor een **gesloten verzameling van één naam**, alleen als de context verplicht is, en alleen als er géén check-run is. Staat er een run van de verkeerde App, dan valt de bestaande `wrong_app`-tak eerder in (`scripts/lib/ci_contexts.py:517-533`) en blijft het `UNVERIFIED` en blokkerend. Een onbekende of verkeerd gespelde context krijgt de uitzondering nooit. Een test bindt de constante aan `forge_gate_publisher.CHECK_RUN_NAME_PREFIX`.
 
-**Waarom `permit_revoked` alleen op een `failure` van de deur-App mag afgaan.** Er is precies één producent van die context (§2 en §3), dus een `failure` betekent: de deur heeft geweigerd of kon niet intrekken. Een CI-job kan die naam niet zetten zonder de App-sleutel.
+**Waarom `permit_revoked` alleen op een `failure` van de deur-App mag afgaan.** Er is precies één producent van die context (§2 en §3), dus een `failure` betekent: de deur heeft deze toestemming ingetrokken (§5). Een CI-job kan die naam niet zetten zonder de App-sleutel. Een **mislukte** intrekking is hier nooit als `failure` te lezen: die laat de run op `success` staan en landt als blocker-open-item plus non-zero exit (§5) — een lezer mag een `failure` dus niet als "de intrekking is geprobeerd" lezen, maar alleen als "de intrekking staat er".
 
-**Het herstelpad is getest, niet beloofd.** D6 levert vier proeven: (a) geen run → `published_at_merge`, niet-blokkerend; (b) een `failure` van de deur-App → `permit_revoked`, blokkerend, met `recovery` gevuld; (c) na een geslaagde verwijdering (runlijst zonder deur-run) → weer `published_at_merge`; (d) verwijdering mislukt en er staat een `failure` → blijft `permit_revoked`, en de hersteltekst zegt dat een nieuwe commit nodig is.
+**Waarom een `failure` hier geen eenrichtingsdeur is.** Niet dank zij een tweede run — die lost niets op, want `_classify_present` houdt de context rood zolang er één niet-slagende run staat (`scripts/lib/ci_contexts.py:319-323`, §5) — maar dank zij **dezelfde** run: de deur `PATCH`t hem terug naar `success` en dan is er geen niet-slagende run meer op die kop. Daarom is de hersteltekst een deurrun (`python3 scripts/pr_merge.py --pr N`) en geen nieuwe commit; een nieuwe commit is alleen nodig als er twee deurruns op de kop staan (§3).
+
+**Het herstelpad is getest, niet beloofd.** D6 levert vier proeven: (a) geen run → `published_at_merge`, niet-blokkerend; (b) een `failure` van de deur-App → `permit_revoked`, blokkerend, met `recovery` gevuld; (c) diezelfde run met een geslaagde `PATCH` terug op `success` → de context leest `success` en blokkeert niet, want er staat geen tweede, niet-slagende run naast; (d) twee deur-App-runs op één kop waarvan één niet-slagend → blijft `failed`, en dat is precies waarom de deur één run per kop houdt en een tweede run een NO-GO is (§3).
 
 ### 7. De merge-queue wordt gelezen, en een ingeschakelde queue is drift
 
@@ -137,7 +150,7 @@ D7b draait per project in een **eigen proces**, met een expliciet contract:
 - **Aggregatie** = maximum van de ernst: 2 als één project onmeetbaar is, anders 1 als één project een gat heeft, anders 0.
 - **Dedup** = `dedup_key = f"door-audit:{project_id}:{pr_number}"` (`add_item_programmatic`, `scripts/open_items_manager.py:212-238`), zodat een dagelijkse run geen 30 identieke items opent.
 
-**De verzoening met intrekking is rij D7c, niet D7b.** D7b blijft de vlootrunner hierboven: enumereren, per project isoleren, selecteren, aggregeren, dedup. D7c bouwt daarop en voegt de pass toe die §5 beschrijft — elke open PR, een te oude of onverklaarde groene `vnx-gate/door`, en de verwijdering via hetzelfde publisher-delete-pad als de in-process intrekking. Zonder D7c is de verzoening report-only en is de crash-grens uit §5 niet gehaald.
+**De verzoening met intrekking is rij D7c, niet D7b.** D7b blijft de vlootrunner hierboven: enumereren, per project isoleren, selecteren, aggregeren, dedup. D7c bouwt daarop en voegt de pass toe die §5 beschrijft — elke open PR, een te oude of onverklaarde groene `vnx-gate/door`, en de intrekking door **dezelfde `PATCH` naar `failure`** als de in-process intrekking, met dezelfde drie pogingen, hetzelfde blocker-open-item en dezelfde non-zero exit. Er is één mechanisme; D7c is een tweede **aanroeper** van dat pad, geen tweede pad. Zonder D7c is de verzoening report-only en is de crash-grens uit §5 niet gehaald.
 
 Bewust **geen** nieuwe per-project launchd-familie: die zou `REQUIRED_PER_PROJECT_FAMILIES` raken (`scripts/launchd/launchd_project_scope.py:99-104`) en `vnx doctor` op elk project laten FAILen tot de sweep gedaan is. Eén machinebrede job met eigen enumeratie geeft hetzelfde bewijs zonder die koppeling.
 
@@ -189,11 +202,13 @@ Eén schrijver: `pr_merge._run_door` (`scripts/pr_merge.py:2438`). De CLI `forge
   "check_name": "vnx-gate/door", "head_sha": "<40 hex>", "app_id": 4869217,
   "check_run_id": <int|null>, "permit_id": "<app_id:head_sha:check_run_id>",
   "published_at": "<RFC3339|null>", "read_back": {"conclusion": "success", "id": <int>},
-  "revoked": true|false, "revoke_outcome": "not_needed|deleted|failed_delete_published_failure|skipped_dry_run",
+  "revoked": true|false, "revoke_outcome": "not_needed|revoked|revoke_failed|skipped_dry_run",
   "merge_outcome": "merged|not_merged|unknown",
   "door_version": "<VERSION>", "integrity_sha256": "<hash>"
 }
 ```
+
+**De vier `revoke_outcome`-waarden, fail-closed:** `not_needed` (er was niets in te trekken), `revoked` (de teruglezing van de `PATCH` gaf `conclusion: failure`), `revoke_failed` (de `PATCH` landde niet: blocker-open-item en non-zero exit, nooit een stille `revoked: false`) en `skipped_dry_run`. `revoked: true` hoort alleen bij `revoked`; elke andere combinatie is een inconsistente regel en leest als onbewezen, niet als intrekking. Er is geen `deleted`-waarde meer, want GitHub heeft geen `DELETE` op een check-run (§5).
 
 **Fail-closed leesregel:** een `pr_merged`-regel **zonder** `door_check` leest als `unwitnessed` — een merge van vóór deze track — en **nooit** als "de deur stond het toe". De tegenhanger is `pr_merge_refused` (`_emit_refusal_receipt`, `scripts/pr_merge.py:1974`), dat hetzelfde blok krijgt; daarmee is een intrekking herkenbaar in het grootboek en niet alleen op GitHub.
 
@@ -201,15 +216,24 @@ Eén schrijver: `pr_merge._run_door` (`scripts/pr_merge.py:2438`). De CLI `forge
 
 Een `pr_merged`-regel met `source != "pr_merge"` **of** `backfilled: true` telt als **backfilled**, nooit als deurbewijs. D7a rapporteert drie buckets: `door`, `backfilled`, `missing`. Gemeten vandaag: 735 `pr_merge`-regels in `state/t0_receipts.ndjson` en 2 `backfill_pr_merged_receipts`-regels met `backfilled: true` in `events/pr_merged.ndjson` — een lezer moet dus **beide** bestanden lezen. De backfill-writer houdt zijn bestaande merkers (`scripts/backfill_pr_merged_receipts.py:214`, `:221`).
 
+### 12. Het bewijs staat op GitHub, niet in dit document
+
+Alles in §3 tot en met §6 is vandaag **gedocumenteerd, niet bewezen**. Er is geen echte-API-meting van `POST` + `PATCH` op een deurrun, dus de reeks hieronder is de enige verificatie die telt, en tot zij gelopen is, is dit ADR een ontwerp.
+
+**Operator-stap 2 van het plan (de test-PR) oefent precies besluiten 1 tot en met 4.** Op één kop, in deze volgorde: (a) de deur **maakt** de run (`POST`) en leest hem terug als `success` van de eigen App; (b) de deur **`PATCH`t dezelfde run naar `failure`** met de titel `permit revoked: <reden>` — de PR blijft geblokkeerd, en de context leest `permit_revoked` (§6), niet "geen run"; (c) de deur **`PATCH`t diezelfde run terug naar `success`** op dezelfde kop — de context leest weer `success`, zonder tweede run en zonder nieuwe commit. Stap (c) is de proef op besluit 1 en besluit 4 samen: één run per kop is wat herstel op dezelfde kop mogelijk maakt.
+
+Wat die stap niet bewijst, staat er ook: de drie-pogingen-backoff en het blocker-pad bij een mislukte `PATCH` (§5) zijn op een echte API alleen met een gestubde client te forceren, en dat blijft een unittest-bewijs (D3/D4), geen productiebewijs. Ook de verzoening (D7c, §9) roept hetzelfde `PATCH`-pad aan en erft daarmee dezelfde proef, mits D7c zijn eigen aanroep test.
+
 ## Consequenties
 
 - **Positief:** een merge buiten de deur wordt vanaf A2 door GitHub geweigerd, niet door een afspraak. De weigering is dezelfde voor de operator, voor een agent en voor een kale `gh pr merge`.
 - **Positief:** "niet gedekt" is per project en per receipt meetbaar (`door_check.state == "not_required"`), in plaats van een stilte. De terugweg is één regel in een bestaand bestand en een verzwakking die haar eigen receipt en blocker-open-item schrijft.
 - **Negatief, en aanvaard:** dit is **geen** credential-scheiding. Dezelfde App-sleutel kan de toestemming ook namens iets anders zetten. De maatregelen zijn detectie en intrekking (de verzoening met intrekking, rij D7c, en de dagelijkse audit) en vastlegging (het `door_check`-blok), niet preventie. Wie preventie wil, betaalt de prijs uit §2.
 - **Negatief:** een crash tussen publicatie en merge laat een toestemming staan tot de verzoening haar **intrekt**; niets op GitHub laat een check-run verlopen. De grens is daarom de job-cadans plus de `permit-TTL` (bij de dagelijkse job hooguit 24 uur plus 30 minuten, zie §5); de verzoening met intrekking (D7c) is het enige net dat dit geval dekt.
-- **Negatief:** `permit_revoked` blokkeert een kop tot er een nieuwe commit is wanneer de verwijdering mislukt. Dat is de bewuste fallback: een blokkade met hersteltekst is beter dan een stil gat, en `revoke_outcome` maakt haar herkenbaar.
+- **Negatief:** een mislukte intrekking (`revoke_failed`) is een gat en geen blokkade: de run staat dan nog op `success`. Daarom is er in dat geval een blocker-open-item met het herstelcommando én een non-zero exit, en geen stille `revoked: false`. `permit_revoked` zelf blokkeert een kop tot de deur op diezelfde kop slaagt; dat is geen eenrichtingsdeur zolang er één deurrun op de kop staat.
+- **Bewijs:** tot operator-stap 2 (§12) gelopen is, is het mechanisme gedocumenteerd en niet bewezen. De reeks maken → `PATCH` naar `failure` → `PATCH` terug naar `success` op één kop is de enige echte-API-verificatie van besluiten 1 tot en met 4.
 - **Volgorde:** niets van dit alles is actief voordat D5 de entry zet en de apply draait (A1 → A2). Tot dan staat de code op `main` en verandert er niets aan de bescherming.
 
 ## Wat dit ADR niet doet
 
-Het lost de dubbele `pr_number` (PR 1695) niet op, het verhuist de dagelijkse telling niet naar `ledger_health.py`, en het installeert de App niet op consumer-repo's (operator, na parkeerpunt 3). Het verandert niets aan het schema van `branch_protection.yaml` — de entry in §4 is een regel in een bestaande lijst, geen nieuw veld. En het claimt geen uitvoering: zie §1.
+Het lost de dubbele `pr_number` (PR 1695) niet op, het verhuist de dagelijkse telling niet naar `ledger_health.py`, en het installeert de App niet op consumer-repo's (operator, na parkeerpunt 3). Het verandert niets aan het schema van `branch_protection.yaml` — de entry in §4 is een regel in een bestaande lijst, geen nieuw veld. En het claimt geen uitvoering: zie §1. En het bewijst de intrekking niet: dat doet operator-stap 2 op een echte kop, en tot die gelopen is, is het mechanisme gedocumenteerd en niet bewezen (§12).
