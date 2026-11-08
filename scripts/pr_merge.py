@@ -247,7 +247,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 ENGINE_ROOT = SCRIPT_DIR.parent
 
 from vnx_paths import ensure_env
-from governance_receipts import emit_governance_receipt
+from governance_receipts import dispatch_identity_fields, emit_governance_receipt
 from merge_preflight_ci_check import check_ci_run_for_head, _resolve_override_reason
 from merge_preflight_adr_check import check_adr_numbers_for_pr
 from contract_invalid_ledger import (
@@ -1950,8 +1950,7 @@ def _emit_receipt(
         kwargs["pr_id"] = pr_id
     elif pr_id_resolution:
         kwargs["pr_id_resolution"] = pr_id_resolution
-    if dispatch_id:
-        kwargs["dispatch_id"] = dispatch_id
+    kwargs.update(dispatch_identity_fields(dispatch_id, receipts_file))
     if contract_invalid_override:
         kwargs["contract_invalid_override"] = contract_invalid_override
     kwargs["preflight_gates"] = preflight_gates or _preflight_ledger(
