@@ -72,6 +72,7 @@ import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
 import actor_class  # noqa: E402
+from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
 import schema_manifest
@@ -2828,9 +2829,9 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state=None,
             to_state="proposed",
-            actor="operator",
             reason=f"deliverable add: {title!r}",
             project_id=project_id,
+            **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )
         conn.commit()
     finally:
