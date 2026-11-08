@@ -586,6 +586,169 @@ class TestTriFilePlaybookMechanismGap:
         assert "PLAYBOOK-MECHANISM-GAP" not in r.stdout
 
 
+class TestPlaybookPointerStates:
+    """Track `orchestrator-skills-port-codex-kimi`, SP-5 (ADR-058 decisions 4, 6, 7).
+
+    The audit reads the T0-PLAYBOOK pointer through `t0_playbook` and the
+    loading evidence through `playbook_loading_evidence`. A pointer, however
+    current, never closes PLAYBOOK-MECHANISM-GAP; only a valid evidence record
+    does, and only for its own provider. Each fixture runs a COPY of the audit
+    and its lib in a tmp fabric, so the playbook sources (a)-(e) are controlled.
+    """
+
+    ROLE_BLOCK = "<!-- VNX:BEGIN T0-ROLE -->\n# T0\n<!-- VNX:END T0-ROLE -->\n"
+
+    def _fabric(self, tmp_path, monkeypatch, with_skill=True):
+        import shutil
+
+        fabric = tmp_path / "fabric"
+        (fabric / "scripts").mkdir(parents=True)
+        shutil.copytree(REPO / "scripts" / "lib", fabric / "scripts" / "lib",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "scripts" / "commands", fabric / "scripts" / "commands",
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        skill = fabric / "skills" / "t0-orchestrator" / "SKILL.md"
+        if with_skill:
+            skill.parent.mkdir(parents=True)
+            skill.write_text("# T0 Orchestrator\n\nplaybook body\n")
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("VNX_HOME", raising=False)
+        monkeypatch.setenv("VNX_DATA_DIR", str(tmp_path / "data" / "audit-fixture"))
+        monkeypatch.setenv("VNX_DATA_DIR_EXPLICIT", "1")
+        monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+        monkeypatch.setenv("VNX_PROJECT_ID", "audit-fixture")
+        return fabric, skill
+
+    def _project(self, tmp_path, block):
+        project = _make_project(tmp_path)
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "CLAUDE.md").write_text("@role-orchestrator.md\n")
+        (t0 / "role-orchestrator.md").write_text("# T0\n")
+        (t0 / "AGENTS.md").write_text(self.ROLE_BLOCK + block)
+        return project, t0
+
+    @staticmethod
+    def _pointer(path, sha, source_id="fabric"):
+        return (
+            "<!-- VNX:BEGIN T0-PLAYBOOK -->\nT0 playbook: pointer.\n"
+            f"path: {path}\nsource_id: {source_id}\nsha256: {sha}\n<!-- VNX:END T0-PLAYBOOK -->\n"
+        )
+
+    @staticmethod
+    def _audit(fabric, project):
+        return subprocess.run(
+            ["bash", str(fabric / "scripts" / "commands" / "t0_role_audit.sh"), "--static", str(project)],
+            capture_output=True, text=True,
+        )
+
+    def _write_evidence(self, tmp_path, skill, provider):
+        import hashlib
+
+        state = tmp_path / "data" / "audit-fixture" / "state"
+        state.mkdir(parents=True)
+        rec = {"schema": 1, "provider": provider, "project_id": "audit-fixture",
+               "source_id": "fabric", "path": str(skill.resolve()),
+               "sha256": hashlib.sha256(skill.read_bytes()).hexdigest(),
+               "observed_at": "2026-11-08T10:00:00Z", "evidence": "fixture"}
+        (state / "playbook_loading.ndjson").write_text(json.dumps(rec) + "\n")
+
+    def _setup_current(self, tmp_path, monkeypatch):
+        import hashlib
+
+        fabric, skill = self._fabric(tmp_path, monkeypatch)
+        sha = hashlib.sha256(skill.read_bytes()).hexdigest()
+        project, t0 = self._project(tmp_path, self._pointer(skill.resolve(), sha))
+        return fabric, skill, project
+
+    def test_current_pointer_reports_pointer_only_next_to_gap(self, tmp_path, monkeypatch):
+        fabric, _skill, project = self._setup_current(tmp_path, monkeypatch)
+        r = self._audit(fabric, project)
+        assert r.returncode != 0
+        assert "POINTER-ONLY" in r.stdout, r.stdout + r.stderr
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        assert "POINTER-STALE" not in r.stdout
+
+    def test_stale_sha_pointer_reports_stale_state_next_to_gap(self, tmp_path, monkeypatch):
+        fabric, skill, project = self._setup_current(tmp_path, monkeypatch)
+        skill.write_text("# T0 Orchestrator\n\nplaybook body, edited\n")
+        r = self._audit(fabric, project)
+        assert "POINTER-STALE" in r.stdout and "state=stale_sha" in r.stdout, r.stdout
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        assert "POINTER-ONLY" not in r.stdout
+
+    def test_stale_source_pointer_reports_stale_source(self, tmp_path, monkeypatch):
+        fabric, skill = self._fabric(tmp_path, monkeypatch)
+        import hashlib
+
+        sha = hashlib.sha256(skill.read_bytes()).hexdigest()
+        project, _t0 = self._project(tmp_path, self._pointer("/old/release/SKILL.md", sha))
+        r = self._audit(fabric, project)
+        assert "state=stale_source" in r.stdout, r.stdout
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        assert "POINTER-ONLY" not in r.stdout
+
+    def test_no_pointer_reports_the_gap_alone(self, tmp_path, monkeypatch):
+        fabric, _skill = self._fabric(tmp_path, monkeypatch)
+        project, _t0 = self._project(tmp_path, "")
+        r = self._audit(fabric, project)
+        assert r.returncode != 0
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        for word in ("POINTER-ONLY", "POINTER-STALE", "PLAYBOOK-SOURCE-MISSING"):
+            assert word not in r.stdout, r.stdout
+
+    def test_all_sources_missing_reports_source_missing_plus_gap(self, tmp_path, monkeypatch):
+        fabric, _skill = self._fabric(tmp_path, monkeypatch, with_skill=False)
+        project, _t0 = self._project(tmp_path, self._pointer("/gone/SKILL.md", "a" * 64))
+        r = self._audit(fabric, project)
+        assert r.returncode != 0
+        assert "PLAYBOOK-SOURCE-MISSING" in r.stdout, r.stdout + r.stderr
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        assert "POINTER-ONLY" not in r.stdout
+
+    def test_valid_evidence_closes_the_gap_for_its_own_provider(self, tmp_path, monkeypatch):
+        fabric, skill, project = self._setup_current(tmp_path, monkeypatch)
+        self._write_evidence(tmp_path, skill, "codex")
+        r = self._audit(fabric, project)
+        assert "PLAYBOOK-MECHANISM-GAP" not in r.stdout
+        assert "POINTER-ONLY" not in r.stdout
+        assert r.returncode == 0, r.stdout + r.stderr
+
+    def test_evidence_of_another_provider_does_not_close_the_gap(self, tmp_path, monkeypatch):
+        fabric, skill, project = self._setup_current(tmp_path, monkeypatch)
+        self._write_evidence(tmp_path, skill, "kimi")
+        r = self._audit(fabric, project)
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout and "POINTER-ONLY" in r.stdout
+        assert r.returncode != 0
+
+    def test_evidence_does_not_close_the_gemini_surface(self, tmp_path, monkeypatch):
+        fabric, skill, project = self._setup_current(tmp_path, monkeypatch)
+        t0 = project / ".claude" / "terminals" / "T0"
+        (t0 / "AGENTS.md").unlink()
+        (t0 / "GEMINI.md").write_text(self.ROLE_BLOCK)
+        self._write_evidence(tmp_path, skill, "codex")
+        r = self._audit(fabric, project)
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout and "GEMINI.md" in r.stdout
+
+    def test_evidence_for_a_changed_playbook_is_void(self, tmp_path, monkeypatch):
+        fabric, skill, project = self._setup_current(tmp_path, monkeypatch)
+        self._write_evidence(tmp_path, skill, "codex")
+        skill.write_text("# T0 Orchestrator\n\nchanged after the observation\n")
+        r = self._audit(fabric, project)
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+
+    @pytest.mark.parametrize("line", ["", "not json", "null", '{"schema": 1, "provider": "nobody"}'])
+    def test_malformed_evidence_never_closes_the_gap(self, tmp_path, monkeypatch, line):
+        fabric, _skill, project = self._setup_current(tmp_path, monkeypatch)
+        state = tmp_path / "data" / "audit-fixture" / "state"
+        state.mkdir(parents=True)
+        (state / "playbook_loading.ndjson").write_text(line + "\n")
+        r = self._audit(fabric, project)
+        assert "PLAYBOOK-MECHANISM-GAP" in r.stdout
+        assert r.returncode != 0
+
+
 class TestProviderRoleContentDrift:
     """Track `orchestrator-provider-agnostic-role`, goal point 4: the audit
     must FAIL when the `<!-- VNX:BEGIN T0-ROLE -->` block in AGENTS.md or
