@@ -119,7 +119,11 @@ class ReviewSeats:
         return tuple(gate for gate in self.stack if gate not in self.seats)
 
     def to_record(self) -> Dict[str, Any]:
-        """The shape a request record carries, so an evaluator can use what was requested."""
+        """The shape a request record carries, so an evaluator can use what was requested.
+
+        The gate profile fields stay off the record: the trail carries them from P6
+        (``gate-profiel-per-project``), which also moves the golden request line.
+        """
         return {
             "seats": list(self.seats),
             "extra_gates": list(self.extra_gates),
@@ -127,9 +131,6 @@ class ReviewSeats:
             "key": REVIEW_STACK_KEY if self.source == SOURCE_CONFIG else "",
             "value": self.value,
             "profile_stack": list(self.profile_stack) if self.profile_stack is not None else None,
-            "profile": self.profile,
-            "profile_source": self.profile_source,
-            "profile_error": self.profile_error,
         }
 
 

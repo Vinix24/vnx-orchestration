@@ -39,8 +39,8 @@ class TestNotSet:
     def test_unset_gives_todays_seats_and_the_c6_lock_in_the_record(self):
         seats = resolve_review_seats()
         assert seats.seats == TODAY
-        record = seats.to_record()
-        assert (record["profile"], record["profile_source"], record["profile_error"]) == ("standard", "default", None)
+        assert (seats.profile, seats.profile_source, seats.profile_error) == ("standard", "default", None)
+        assert "profile" not in seats.to_record()
 
     @pytest.mark.parametrize("raw", ["", "   ", "\t\n"])
     def test_blank_is_not_set(self, monkeypatch, raw):
@@ -58,7 +58,7 @@ class TestNotSet:
         assert all(resolution.value(field) is None for field in gate_profile.FIELDS)
         seats = resolve_review_seats()
         assert seats.seats == TODAY
-        assert seats.to_record()["profile_source"] == "env"
+        assert seats.profile_source == "env"
 
     def test_standard_leaves_the_operator_stack_alone(self, monkeypatch):
         monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "codex_gate")
@@ -71,13 +71,12 @@ class TestHeavyAndLight:
         project_config["VNX_GOVERNANCE_PROFILE"] = "heavy"
         seats = resolve_review_seats()
         assert seats.seats == ("codex_gate", "kimi_gate", "claude_gate")
-        record = seats.to_record()
-        assert (record["profile"], record["profile_source"], record["profile_error"]) == ("heavy", "project_config", None)
+        assert (seats.profile, seats.profile_source, seats.profile_error) == ("heavy", "project_config", None)
 
     def test_heavy_from_the_environment_names_env_as_source(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", " heavy ")
-        record = resolve_review_seats().to_record()
-        assert (record["profile"], record["profile_source"]) == ("heavy", "env")
+        seats = resolve_review_seats()
+        assert (seats.profile, seats.profile_source) == ("heavy", "env")
 
     def test_light_keeps_the_standard_stack_until_the_floor_lands(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
@@ -144,14 +143,14 @@ class TestPrecedence:
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", profile)
         seats = resolve_review_seats(explicit_stack=["kimi_gate"])
         assert (seats.source, seats.seats) == ("explicit", ("kimi_gate",))
-        assert seats.to_record()["profile"] == profile
+        assert seats.profile == profile
 
     def test_an_explicit_stack_records_an_invalid_profile_instead_of_standard(self, monkeypatch):
         monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "zwaar")
-        record = resolve_review_seats(explicit_stack=["kimi_gate"]).to_record()
-        assert record["profile"] is None
-        assert record["profile_source"] == "env"
-        assert "zwaar" in record["profile_error"]
+        seats = resolve_review_seats(explicit_stack=["kimi_gate"])
+        assert seats.profile is None
+        assert seats.profile_source == "env"
+        assert "zwaar" in seats.profile_error
 
     def test_a_project_config_stack_wins_over_heavy(self, project_config):
         project_config["VNX_GOVERNANCE_PROFILE"] = "heavy"
