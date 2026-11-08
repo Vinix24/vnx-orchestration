@@ -370,3 +370,32 @@ def test_fleet_row_carries_publication_errors(tmp_path, monkeypatch):
     assert result["exit_code"] == 2
     assert row["project_id"] == "p" and row["outcome"] == "publication_failed"
     assert "2 write error(s)" in row["reason"]
+
+
+def _broken_beacon(monkeypatch) -> None:
+    def broken(*a, **k):
+        raise OSError("beacon disk full")
+
+    monkeypatch.setattr(bf, "_heartbeat_audit", broken)
+
+
+def test_standalone_reconcile_beacon_failure_is_unclean(env, monkeypatch, capsys):
+    _setup(env, [_run(11, minutes=2)])
+    _ledger(env, _vouch(11))
+    _broken_beacon(monkeypatch)
+    assert _main() == 2
+    captured = capsys.readouterr()
+    doc = json.loads(captured.out)
+    assert doc["outcome"] == "unknown" and doc["exit_code"] == 2 and doc["publication_errors"] == 1
+    assert any(e.startswith("beacon:") for e in doc["write_errors"])
+    assert "WRITE ERROR: beacon: beacon disk full" in captured.err
+
+
+def test_standalone_reconcile_beacon_failure_keeps_findings_exit(env, monkeypatch, capsys):
+    _setup(env, [_run(11, minutes=45)])
+    env.gh.patch_status = 500
+    _broken_beacon(monkeypatch)
+    assert _main() == 1
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["exit_code"] == 1 and "beacon not written" in doc["reason"]
+    assert any(e.startswith("beacon:") for e in doc["write_errors"])

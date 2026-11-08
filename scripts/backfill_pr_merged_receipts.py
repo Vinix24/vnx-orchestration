@@ -574,6 +574,20 @@ def _heartbeat_audit(state_dir: Path, status: str, details: Dict[str, Any]) -> N
         status=status, details=details)
 
 
+def _beacon_guard(doc: Dict[str, Any], state_dir: Path, details: Dict[str, Any], errors: List[str]) -> None:
+    """Write the beacon. A failure is a publication error: clean becomes unknown (exit 2), a finding keeps its exit."""
+    try:
+        _heartbeat_audit(state_dir, "ok" if doc["outcome"] == "clean" else "fail", details)
+    except Exception as exc:
+        errors.append(f"beacon: {exc}")
+        print(f"WRITE ERROR: beacon: {exc}", file=sys.stderr)
+        doc["publication_errors"] = int(doc.get("publication_errors") or 0) + 1
+        if doc["outcome"] == "clean":
+            doc.update(outcome="unknown", exit_code=EXIT_UNKNOWN, reason="beacon not written: control invisible")
+        else:
+            doc["reason"] = f"{doc.get('reason') or ''}; beacon not written".lstrip("; ")
+
+
 def publish_report(report: Dict[str, Any]) -> None:
     """File one open item per missing PR and write the beacon. Failures are recorded on the report.
 
@@ -596,12 +610,7 @@ def publish_report(report: Dict[str, Any]) -> None:
                "missing": [p["pr_number"] for p in report["missing"]], "reason": report["reason"]}
     if "reconcile" in report:
         details["reconcile"] = report["reconcile"]["counts"]
-    try:
-        _heartbeat_audit(state_dir, "ok" if report["outcome"] == "clean" else "fail", details)
-    except Exception as exc:
-        errors.append(f"beacon: {exc}")
-        if report["outcome"] == "clean":
-            report.update(outcome="unknown", exit_code=EXIT_UNKNOWN, reason="beacon not written: control invisible")
+    _beacon_guard(report, state_dir, details, errors)
     report["write_errors"] = errors
 
 
@@ -848,8 +857,9 @@ def _main_reconcile(args: argparse.Namespace) -> int:
     if not args.no_write:
         publish_reconcile(rec)
         _fold_publication(rec, rec["write_errors"])
-        _heartbeat_audit(_audit_ledger_paths()[0].parent, "ok" if rec["outcome"] == "clean" else "fail",
-                         {"outcome": rec["outcome"], "reconcile": rec["counts"], "reason": rec["reason"]})
+        _beacon_guard(rec, _audit_ledger_paths()[0].parent,
+                      {"outcome": rec["outcome"], "reconcile": rec["counts"], "reason": rec["reason"]},
+                      rec["write_errors"])
     if args.json:
         print(json.dumps(rec, indent=2, default=str))
     else:
