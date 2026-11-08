@@ -10,10 +10,13 @@ docstring for the split's seam order.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
 from envelope_types import EnvelopeSpec, _AdapterResult
+
+logger = logging.getLogger(__name__)
 
 
 def _switch_stamps(spec: EnvelopeSpec) -> Dict[str, str]:
@@ -114,6 +117,71 @@ class CodexAdapter:
         )
 
 
+def _worker_extra_env(spec: EnvelopeSpec) -> Dict[str, str]:
+    """The env the claude worker gets on top of the scrubbed ambient one."""
+    # A-bis-2: the headless lane never exported VNX_DATA_DIR into the
+    # worker's own shell, so a worker guessing "$VNX_DATA_DIR/unified_reports/
+    # <id>.md" (base_worker.md) resolved it wherever its cwd happened to
+    # land — often not the central store GOVERN reads back from (measured
+    # 2026-09-06: reports orphaned in a repo-local .vnx-data instead of the
+    # central one). VNX_REPORT_PATH gives the worker the exact absolute
+    # file to write, no guessing required; VNX_DATA_DIR/_EXPLICIT mirror
+    # the two-key contract other lanes already export (plan_gate_panel.py).
+    _report_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
+    extra_env = {
+        **_switch_stamps(spec),
+        "VNX_DATA_DIR": str(spec.data_dir),
+        "VNX_DATA_DIR_EXPLICIT": "1",
+        "VNX_REPORT_PATH": str(_report_path),
+    }
+
+    # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
+    # (TmuxInteractiveDispatch._spawn_session) was removed with the tmux lane
+    # itself (#1868) and never replaced here, so a headless dispatch declaring
+    # dispatch_paths was never actually narrowed by the PreToolUse worker-scope
+    # hook — only the role's coarse file_write_scope applied. Mirrors
+    # provider_dispatch._worker_role_env via the same shared setters.
+    from dispatch_identity import normalize_role  # noqa: PLC0415
+    from worker_permissions import dispatch_paths_env_value  # noqa: PLC0415
+
+    _resolved_role = normalize_role(spec.role)
+    if _resolved_role:
+        extra_env["VNX_WORKER_ROLE"] = _resolved_role
+    _dp_env = dispatch_paths_env_value(spec.dispatch_paths)
+    if _dp_env is not None:
+        extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+    return extra_env
+
+
+def _materialize_shadow_skills(spec: EnvelopeSpec, cwd: Optional[Path]) -> None:
+    """Agent-layout shadow step (agents-als-map PR-2b).
+
+    Under ``VNX_AGENT_LAYOUT=shadow`` copies the role's declared skills into
+    ``<cwd>/.vnx-agent-skills/<role>/`` before the spawn. Fail-open: any miss or
+    exception logs one WARNING and the spawn starts as it would without it.
+    """
+    from dispatch_identity import normalize_role
+
+    role = normalize_role(spec.role)
+    if not role or cwd is None:
+        return
+    try:
+        import agent_layout
+
+        if not agent_layout.is_shadow():
+            return
+        from agent_resolver import resolve_agent
+        from agent_skill_materialize import materialize_role_skills
+
+        config = resolve_agent(role, cwd, engine_root=Path(__file__).resolve().parents[2])
+        if config is None:
+            logger.warning("agent skill shadow for role %r: no config", role)
+        elif config.skills:
+            materialize_role_skills(cwd, role, config.skills)
+    except Exception as exc:  # fail-open: the shadow never stops a dispatch
+        logger.warning("agent skill shadow for role %r: %s", role, type(exc).__name__)
+
+
 class ClaudeSubprocessAdapter:
     """Wraps spawn_claude — reuses existing spawn without reimplementation.
 
@@ -135,37 +203,8 @@ class ClaudeSubprocessAdapter:
         from env_scrub_patterns import DEFAULT_SCRUB_KEY_PATTERNS  # noqa: PLC0415
         from provider_spawns.claude_spawn import spawn_claude  # noqa: PLC0415
 
-        # A-bis-2: the headless lane never exported VNX_DATA_DIR into the
-        # worker's own shell, so a worker guessing "$VNX_DATA_DIR/unified_reports/
-        # <id>.md" (base_worker.md) resolved it wherever its cwd happened to
-        # land — often not the central store GOVERN reads back from (measured
-        # 2026-09-06: reports orphaned in a repo-local .vnx-data instead of the
-        # central one). VNX_REPORT_PATH gives the worker the exact absolute
-        # file to write, no guessing required; VNX_DATA_DIR/_EXPLICIT mirror
-        # the two-key contract other lanes already export (plan_gate_panel.py).
-        _report_path = Path(spec.data_dir) / "unified_reports" / f"{spec.dispatch_id}.md"
-        extra_env = {
-            **_switch_stamps(spec),
-            "VNX_DATA_DIR": str(spec.data_dir),
-            "VNX_DATA_DIR_EXPLICIT": "1",
-            "VNX_REPORT_PATH": str(_report_path),
-        }
-
-        # OI-1886: the tmux lane's VNX_WORKER_ROLE / VNX_DISPATCH_PATHS export
-        # (TmuxInteractiveDispatch._spawn_session) was removed with the tmux lane
-        # itself (#1868) and never replaced here, so a headless dispatch declaring
-        # dispatch_paths was never actually narrowed by the PreToolUse worker-scope
-        # hook — only the role's coarse file_write_scope applied. Mirrors
-        # provider_dispatch._worker_role_env via the same shared setters.
-        from dispatch_identity import normalize_role  # noqa: PLC0415
-        from worker_permissions import dispatch_paths_env_value  # noqa: PLC0415
-
-        _resolved_role = normalize_role(spec.role)
-        if _resolved_role:
-            extra_env["VNX_WORKER_ROLE"] = _resolved_role
-        _dp_env = dispatch_paths_env_value(spec.dispatch_paths)
-        if _dp_env is not None:
-            extra_env["VNX_DISPATCH_PATHS"] = _dp_env
+        extra_env = _worker_extra_env(spec)
+        _materialize_shadow_skills(spec, cwd)
 
         try:
             result = spawn_claude(
