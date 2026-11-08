@@ -518,6 +518,8 @@ class TestDigestStableAndPermitCompatible:
         assert "parent_dispatch" not in canonical, (
             "chain-link metadata is advisory, must not be in canonical_dict"
         )
+        # Permissions P4: unset means the key is absent, so the pre-P4 digest is unchanged.
+        assert "permission_policy_digest" not in canonical
 
 
 # ---------------------------------------------------------------------------

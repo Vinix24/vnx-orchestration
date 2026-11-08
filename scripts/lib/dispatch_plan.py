@@ -195,6 +195,10 @@ class ExecutionPlan:
                                         # "no MCP" for a dispatch that already gets MCP. It IS in digest():
                                         # MCP access changes worker behavior, so a permit for a
                                         # requires_mcp plan must not validate a force-empty plan.
+    permission_policy_digest: Optional[str] = None  # permissions P4: the digest of the policy the
+                                        # worker runs under. IN digest() when set, so a permit binds
+                                        # the policy. Omitted from canonical_dict() when None: a spec
+                                        # without it keeps the digest it had before P4.
 
     def canonical_dict(self) -> dict:
         """Return the canonical, order-independent decision dict.
@@ -202,8 +206,11 @@ class ExecutionPlan:
         This is the same dict that digest() hashes — extracting it lets the door
         persist the full routing decision alongside the fingerprint (OI-849).
         Excludes advisory fields (warnings, role, pr_id, chain-link metadata).
+        ``permission_policy_digest`` is present only when set: the key is absent for a
+        spec without it, so its digest (and every staged permit) is byte-identical to
+        before permissions P4.
         """
-        return {
+        canonical = {
             "dispatch_id": self.dispatch_id,
             "project_id": self.project_id,
             "provider": self.provider.value,
@@ -235,6 +242,9 @@ class ExecutionPlan:
                 for dp in self.dispatch_paths
             ],
         }
+        if self.permission_policy_digest is not None:
+            canonical["permission_policy_digest"] = self.permission_policy_digest
+        return canonical
 
     def digest(self) -> str:
         """Stable sha256 over the canonical, order-independent field set.
@@ -490,11 +500,10 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         require_worktree=require_worktree,
         seed_materialize=seed_materialize,
         requires_mcp=spec.requires_mcp, skill=spec.skill,
+        permission_policy_digest=spec.permission_policy_digest,
         instruction_delivery=instruction_delivery,
-        report_contract=report_contract,
-        warmup=warmup,
-        deadline_seconds=spec.deadline_seconds,
-        base_ref=spec.base_ref,
+        report_contract=report_contract, warmup=warmup,
+        deadline_seconds=spec.deadline_seconds, base_ref=spec.base_ref,
         dispatch_paths=dispatch_paths,
         instruction_file=spec.instruction_file,
         route_reason=",".join(fired),
