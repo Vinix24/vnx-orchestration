@@ -51,6 +51,7 @@ from gate_findings_bridge import record_gate_finding, resolve_gate_finding
 from required_contexts_gate import check_required_contexts
 from forge_protection_drift import fetch_ci_workflow_from_main
 from worker_permissions import resolve_worker_profile, worker_permission_enforcement_enabled
+from governance_receipts import dispatch_identity_fields, emit_governance_receipt
 
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
@@ -1283,12 +1284,15 @@ def _git_show_bytes(project_root: Path, revision: str, path: str) -> bytes:
 
 def _materialize_policy_sources(
     project_root: Path, merge_base: str, role: str, dest: Path
-) -> Optional[Path]:
+) -> Path:
     """Write the role sources as they are at *merge_base* into *dest*; returns the agents dir.
 
     The permissions YAML is evidence (a missing one raises OSError). The agents register is
-    reproduced as ``agents/<name>/CLAUDE.md`` markers plus the role's ``config.yaml``; a
-    merge base without an ``agents/`` tree gives None, the same as an install without one.
+    reproduced as ``agents/<name>/CLAUDE.md`` markers plus the role's ``config.yaml``. A merge
+    base without an ``agents/`` tree still gets a real, empty ``dest/agents``: returning None
+    would let ``resolve_worker_profile`` discover a registry in the working tree or the
+    install, and the merge-base digest would then depend on local files. The returned
+    directory is always inside *dest*, so no source of the digest lies outside the merge base.
     """
     yaml_path = dest / _PERMISSION_SOURCE_YAML
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1299,9 +1303,9 @@ def _materialize_policy_sources(
     )
     if tree.returncode != 0:
         raise OSError(f"git ls-tree {merge_base} agents failed: {tree.stderr.strip()}")
+    agents_dir = dest / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
     names = [n for n in tree.stdout.splitlines() if n]
-    if not names:
-        return None
     for name in names:
         target = dest / name
         if name.endswith("/CLAUDE.md"):
@@ -1310,7 +1314,7 @@ def _materialize_policy_sources(
         elif name == f"agents/{role}/config.yaml":
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(_git_show_bytes(project_root, merge_base, name))
-    return dest / "agents"
+    return agents_dir
 
 
 def _policy_at_merge_base(
@@ -1334,11 +1338,23 @@ def _policy_at_merge_base(
 def _permission_outcome(
     pr_id: str, project_root: Path, dispatch_dir: Path, pr_head: Optional["ResolvedPRRef"]
 ) -> Dict[str, Any]:
-    """Classify the spec digest against a fresh composition at the merge base."""
+    """Classify the spec digest against a fresh composition at the merge base.
+
+    Every result carries the evidence the ledger receipt needs: ``role``, ``spec_digest``,
+    ``merge_base`` and ``merge_base_digest`` (None where the step was never reached).
+    """
     dispatch_id = _permission_dispatch_id(pr_id, dispatch_dir, pr_head)
+    result: Dict[str, Any] = {
+        "dispatch_id": dispatch_id, "role": None, "spec_digest": None,
+        "merge_base": None, "merge_base_digest": None,
+    }
+    head_ref = pr_head.head_ref if pr_head is not None else "HEAD"
+    merge_base = (pr_head.merge_base if pr_head is not None else None) or \
+        _resolve_merge_base(project_root, "origin/main", head_ref)
+    result["merge_base"] = merge_base or None
     spec_path = _find_spec_by_dispatch_id(dispatch_id or "", dispatch_dir)
     if spec_path is None:
-        return {"outcome": "spec_missing", "dispatch_id": dispatch_id,
+        return {**result, "outcome": "spec_missing",
                 "detail": f"no dispatch-spec.json found for Dispatch-ID {dispatch_id!r}"}
     try:
         spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -1347,27 +1363,83 @@ def _permission_outcome(
         recorded = spec.get("permission_policy_digest")
         role = spec.get("role")
     except (OSError, ValueError) as exc:
-        return {"outcome": "evidence_refused", "dispatch_id": dispatch_id,
+        return {**result, "outcome": "evidence_refused",
                 "detail": f"spec {spec_path} cannot be read: {exc}"}
+    result["role"] = role if isinstance(role, str) else None
+    result["spec_digest"] = recorded if isinstance(recorded, str) else None
     if recorded is None:
-        return {"outcome": "policy_absent", "dispatch_id": dispatch_id,
+        return {**result, "outcome": "policy_absent",
                 "detail": "spec carries no permission_policy_digest (staged before P5)"}
-    head_ref = pr_head.head_ref if pr_head is not None else "HEAD"
-    merge_base = (pr_head.merge_base if pr_head is not None else None) or \
-        _resolve_merge_base(project_root, "origin/main", head_ref)
     if not isinstance(role, str) or not role.strip() or not isinstance(recorded, str) or not merge_base:
-        return {"outcome": "evidence_refused", "dispatch_id": dispatch_id,
+        return {**result, "outcome": "evidence_refused",
                 "detail": "spec role, spec digest or merge base is missing or malformed"}
     try:
         fresh, is_fallback = _policy_at_merge_base(project_root, merge_base, role.strip())
     except Exception as exc:  # fail-closed: any refusal while composing is evidence_refused
-        return {"outcome": "evidence_refused", "dispatch_id": dispatch_id,
+        return {**result, "outcome": "evidence_refused",
                 "detail": f"policy for role {role!r} at merge base {merge_base[:12]} cannot be proven: {exc}"}
+    result["merge_base_digest"] = fresh
     if fresh != recorded:
-        return {"outcome": "mismatch", "dispatch_id": dispatch_id, "is_fallback": is_fallback,
+        return {**result, "outcome": "mismatch", "is_fallback": is_fallback,
                 "detail": f"spec digest {recorded} != merge-base digest {fresh}"}
-    return {"outcome": "match", "dispatch_id": dispatch_id, "is_fallback": is_fallback,
+    return {**result, "outcome": "match", "is_fallback": is_fallback,
             "detail": f"policy digest {fresh[:12]} matches the merge base"}
+
+
+_PERMISSION_RECEIPT_APPENDED = ("appended", "duplicate")
+
+
+def _record_permission_receipt(
+    pr_id: str,
+    pr_head: Optional["ResolvedPRRef"],
+    result: Dict[str, Any],
+    *,
+    enforced: bool,
+    check_status: str,
+    warning: bool,
+    state_dir: Path,
+) -> None:
+    """Append the permission outcome to the canonical ledger; raises when it cannot be proven written.
+
+    Written with ``emit_governance_receipt`` into ``<state_dir>/t0_receipts.ndjson``, the same
+    ledger and writer the merge door (``pr_merge``) uses for its own gate outcomes. ``gate`` is
+    stamped only with a real dispatch id (a ghost id would divert the receipt to the gate
+    stream); it carries the outcome so two outcomes on one head keep distinct ADR-038 identities.
+    """
+    head_sha = (pr_head.head_ref if pr_head is not None else "") or ""
+    if check_status == "GO":
+        status = "unknown" if warning else "success"
+    else:
+        status = "blocked"
+    dispatch_id = result.get("dispatch_id")
+    fields: Dict[str, Any] = {
+        "pr": pr_id,
+        "head_sha": head_sha,
+        "commit_sha": head_sha,
+        "merge_base": result.get("merge_base"),
+        "role": result.get("role"),
+        "spec_digest": result.get("spec_digest"),
+        "merge_base_digest": result.get("merge_base_digest"),
+        "enforcement": "on" if enforced else "off",
+        "outcome": result["outcome"],
+        "check_status": check_status,
+        "detail": result.get("detail", ""),
+    }
+    receipts_file = str(state_dir / "t0_receipts.ndjson")
+    fields.update(dispatch_identity_fields(dispatch_id, receipts_file))
+    if isinstance(dispatch_id, str) and dispatch_id:
+        fields["gate"] = f"permission_policy:{result['outcome']}"
+    receipt = emit_governance_receipt(
+        "permission_policy_checked",
+        receipt_kind="review_gate",
+        status=status,
+        terminal="T0",
+        source="pre_merge_gate",
+        receipts_file=receipts_file,
+        **fields,
+    )
+    if receipt.get("append_status") not in _PERMISSION_RECEIPT_APPENDED:
+        raise OSError(f"receipt not appended (append_status={receipt.get('append_status')!r})")
 
 
 def check_permission_policy(
@@ -1375,12 +1447,16 @@ def check_permission_policy(
     project_root: Path,
     dispatch_dir: Path,
     pr_head: Optional["ResolvedPRRef"] = None,
+    *,
+    state_dir: Path,
 ) -> Dict[str, Any]:
     """Permissions P7: the spec's policy digest must equal a fresh composition at the merge base.
 
-    The outcome is always recorded. With enforcement off (fleet default) nothing blocks and
-    only ``mismatch`` / ``evidence_refused`` carry a warning; with enforcement on anything but
-    ``match`` blocks, and so does a fallback role.
+    The outcome is written to the ledger first (``_record_permission_receipt``); only then is
+    the check returned for the list and the derived writes. A receipt that cannot be written
+    makes the check ``SKIPPED_UNVERIFIED``. With enforcement off (fleet default) nothing else
+    blocks and only ``mismatch`` / ``evidence_refused`` carry a warning; with enforcement on
+    anything but ``match`` blocks, and so does a fallback role.
     """
     result = _permission_outcome(pr_id, project_root, dispatch_dir, pr_head)
     outcome = result["outcome"]
@@ -1397,6 +1473,16 @@ def check_permission_policy(
         detail += " (fallback role profile)"
     if warning:
         detail = f"WARNING {detail}"
+    receipt_written = True
+    try:
+        _record_permission_receipt(
+            pr_id, pr_head, result, enforced=enforced, check_status=status,
+            warning=warning, state_dir=state_dir,
+        )
+    except Exception as exc:  # fail-closed: an outcome that is not in the ledger is not verified
+        receipt_written = False
+        status = SKIPPED_UNVERIFIED
+        detail = f"{detail} | ledger receipt NOT written: {exc}"
     return {
         "check": "permission_policy",
         "status": status,
@@ -1404,6 +1490,7 @@ def check_permission_policy(
         "enforced": enforced,
         "warning": warning,
         "is_fallback": bool(result.get("is_fallback", False)),
+        "receipt_written": receipt_written,
         "detail": detail,
     }
 
@@ -1490,7 +1577,7 @@ def run_gate_checks(
     checks.append(check_contract_verification(pr_id, dispatch_dir, project_root, state_dir))
     checks.append(check_quality_advisory(project_root))
     checks.append(check_pr_size(project_root, head_ref=head_ref))
-    checks.extend([check_artifacts(pr_id, dispatch_dir, project_root), check_permission_policy(pr_id, project_root, dispatch_dir, pr_head)])
+    checks.extend([check_artifacts(pr_id, dispatch_dir, project_root), check_permission_policy(pr_id, project_root, dispatch_dir, pr_head, state_dir=state_dir)])
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root, head_ref=head_ref))
 

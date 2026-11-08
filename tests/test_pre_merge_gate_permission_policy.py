@@ -262,3 +262,174 @@ def test_malformed_spec_is_evidence_refused(repo, tmp_path, monkeypatch):
 def test_dispatch_id_path_traversal_not_resolved(tmp_path):
     assert gate._find_spec_by_dispatch_id("../x", tmp_path) is None
     assert gate._find_spec_by_dispatch_id("", tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# Round 2: isolated merge-base registry and ledger-first outcomes
+# ---------------------------------------------------------------------------
+
+LOCAL_CONFIG = "isolation:\n  scope_type: coding_worktree\n  allowed_paths: ['/', '/tmp']\n"
+
+
+@pytest.fixture
+def repo_without_agents(tmp_path, monkeypatch):
+    """A repo whose merge base has the permissions YAML and no ``agents/`` tree at all."""
+    monkeypatch.delenv("VNX_ENFORCE_WORKER_PERMISSIONS", raising=False)
+    monkeypatch.delenv("VNX_WORKER_ENFORCEMENT_SKIP", raising=False)
+    root = tmp_path / "repo-noagents"
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    (root / ".vnx").mkdir()
+    (root / YAML_PATH).write_text(_profiles())
+    return root, _commit(root, "base without agents")
+
+
+def _local_agents(tmp_path: Path, monkeypatch) -> Path:
+    """A local registry the working tree / install could discover, widening the role's policy."""
+    local = tmp_path / "local-install"
+    (local / "agents" / ROLE).mkdir(parents=True)
+    (local / "agents" / ROLE / "CLAUDE.md").write_text("# local\n")
+    (local / "agents" / ROLE / "config.yaml").write_text(LOCAL_CONFIG)
+    monkeypatch.setenv("VNX_PROJECT_ROOT", str(local))
+    monkeypatch.setenv("PROJECT_ROOT", str(local))
+    monkeypatch.setenv("VNX_HOME", str(local))
+    return local / "agents"
+
+
+def _empty_registry_digest(tmp_path: Path) -> str:
+    scratch = tmp_path / "empty-registry"
+    (scratch / ".vnx").mkdir(parents=True, exist_ok=True)
+    (scratch / "agents").mkdir(exist_ok=True)
+    (scratch / YAML_PATH).write_text(_profiles())
+    return resolve_worker_profile(ROLE, yaml_path=scratch / YAML_PATH,
+                                  agents_dir=scratch / "agents").policy_digest
+
+
+def _local_digest(local_agents: Path, tmp_path: Path) -> str:
+    scratch = tmp_path / "local-digest"
+    (scratch / ".vnx").mkdir(parents=True, exist_ok=True)
+    (scratch / YAML_PATH).write_text(_profiles())
+    return resolve_worker_profile(ROLE, yaml_path=scratch / YAML_PATH,
+                                  agents_dir=local_agents).policy_digest
+
+
+def _ledger(dispatch_dir: Path) -> list:
+    path = dispatch_dir.parent / "state" / "t0_receipts.ndjson"
+    if not path.is_file():
+        return []
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    return [r for r in rows if r.get("event_type") == "permission_policy_checked"]
+
+
+def test_merge_base_without_agents_ignores_local_registry(repo_without_agents, tmp_path, monkeypatch):
+    root, sha = repo_without_agents
+    expected = _empty_registry_digest(tmp_path)
+    plain = gate._policy_at_merge_base(root, sha, ROLE)[0]
+    local_agents = _local_agents(tmp_path, monkeypatch)
+    widened = _local_digest(local_agents, tmp_path)
+    assert widened != expected, "the local registry must change the digest for this test to mean anything"
+    assert gate._policy_at_merge_base(root, sha, ROLE)[0] == plain == expected
+
+
+def test_local_registry_digest_in_spec_is_mismatch_and_hold_under_enforcement(
+        repo_without_agents, tmp_path, monkeypatch):
+    root, sha = repo_without_agents
+    local_agents = _local_agents(tmp_path, monkeypatch)
+    monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "1")
+    dd = tmp_path / "dispatches"
+    _spec(dd, _local_digest(local_agents, tmp_path))
+    result = _run(monkeypatch, root, dd, sha)
+    check = _perm(result)
+    assert check["outcome"] == "mismatch" and check["status"] == "HOLD"
+    assert result["verdict"] == "HOLD"
+
+
+def test_materialized_agents_dir_is_inside_dest_when_merge_base_has_no_agents(repo_without_agents, tmp_path):
+    root, sha = repo_without_agents
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    agents = gate._materialize_policy_sources(root, sha, ROLE, dest)
+    assert agents == dest / "agents" and agents.is_dir() and list(agents.iterdir()) == []
+
+
+def _prepare(case: str, root: Path, sha: str, dd: Path, monkeypatch):
+    """Returns (merge_base_sha, expected outcome, expected enforcement label)."""
+    enforcement = "on" if case == "mismatch_on" else "off"
+    if enforcement == "on":
+        monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "1")
+    if case == "match":
+        _spec(dd, _digest_of(root, _profiles()))
+        return sha, "match", enforcement
+    if case in ("mismatch_on", "mismatch_off"):
+        _spec(dd, "b" * 64)
+        return sha, "mismatch", enforcement
+    if case == "policy_absent":
+        _spec(dd, None)
+        return sha, "policy_absent", enforcement
+    (root / YAML_PATH).write_text("profiles: [unclosed\n")
+    broken = _commit(root, "broken")
+    _spec(dd, "a" * 64)
+    return broken, "evidence_refused", enforcement
+
+
+@pytest.mark.parametrize("case", ["match", "mismatch_on", "mismatch_off", "policy_absent", "evidence_refused"])
+def test_every_outcome_lands_in_the_ledger_before_the_check_is_listed(repo, tmp_path, monkeypatch, case):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    merge_base, outcome, enforcement = _prepare(case, root, sha, dd, monkeypatch)
+    seen_at_listing = []
+    real_check = gate.check_permission_policy
+
+    def spy(*a, **k):
+        check = real_check(*a, **k)
+        seen_at_listing.append(len(_ledger(dd)))  # ledger rows once the check exists, before any derived write
+        return check
+
+    monkeypatch.setattr(gate, "check_permission_policy", spy)
+    result = _run(monkeypatch, root, dd, merge_base)
+    rows = _ledger(dd)
+    assert len(rows) == 1 and seen_at_listing == [1]
+    row = rows[0]
+    assert row["outcome"] == outcome and row["enforcement"] == enforcement
+    assert row["pr"] == "#1" and row["head_sha"] == merge_base and row["merge_base"] == merge_base
+    assert row["role"] == ROLE and row["dispatch_id"] == DISPATCH_ID
+    assert row["spec_digest"] == (None if case == "policy_absent" else row["spec_digest"])
+    if outcome in ("match", "mismatch"):
+        assert row["merge_base_digest"] == _digest_of(root, _profiles())
+    else:
+        assert row["merge_base_digest"] is None
+    assert _perm(result)["receipt_written"] is True
+
+
+def test_spec_missing_outcome_lands_in_the_ledger(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    dd.mkdir()
+    _run(monkeypatch, root, dd, sha)
+    rows = _ledger(dd)
+    assert [r["outcome"] for r in rows] == ["spec_missing"] and rows[0]["spec_digest"] is None
+
+
+def test_failing_receipt_writer_makes_the_check_unverified(repo, tmp_path, monkeypatch):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    _spec(dd, _digest_of(root, _profiles()))
+
+    def boom(*a, **k):
+        raise OSError("ledger unavailable")
+
+    monkeypatch.setattr(gate, "emit_governance_receipt", boom)
+    result = _run(monkeypatch, root, dd, sha)
+    check = _perm(result)
+    assert check["status"] == gate.SKIPPED_UNVERIFIED and check["receipt_written"] is False
+    assert "ledger unavailable" in check["detail"] and result["verdict"] == "HOLD"
+
+
+@pytest.mark.parametrize("append_status", [None, "", "refused", "failed"])
+def test_unproven_append_status_makes_the_check_unverified(repo, tmp_path, monkeypatch, append_status):
+    root, sha = repo
+    dd = tmp_path / "dispatches"
+    _spec(dd, _digest_of(root, _profiles()))
+    monkeypatch.setattr(gate, "emit_governance_receipt", lambda *a, **k: {"append_status": append_status})
+    check = _perm(_run(monkeypatch, root, dd, sha))
+    assert check["status"] == gate.SKIPPED_UNVERIFIED and check["receipt_written"] is False
