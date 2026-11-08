@@ -284,6 +284,18 @@ def _require_known_skill(raw: Optional[str]) -> Optional[str]:
     return slug
 
 
+def _spec_dispatch_paths(dispatch_paths: tuple[dict, ...]) -> list[dict]:
+    """The ``dispatch_paths`` entries as the spec file carries them."""
+    return [
+        {
+            "path": str(PurePosixPath(str(p["path"]))),
+            "access": p.get("access", "read_write"),
+            "materialize_at_cwd": p.get("materialize_at_cwd") is True,
+        }
+        for p in dispatch_paths
+    ]
+
+
 def policy_digest_for_role(role: str) -> Optional[str]:
     """The ``policy_digest`` of the permission policy composed for *role* (permissions P5).
 
@@ -437,14 +449,7 @@ def stage_spec_bundle(
         "role": (role or "").strip(),
         "target_slot": target_slot,
         "gate": _canonical_gate(gate),
-        "dispatch_paths": [
-            {
-                "path": str(PurePosixPath(str(p["path"]))),
-                "access": p.get("access", "read_write"),
-                "materialize_at_cwd": p.get("materialize_at_cwd") is True,
-            }
-            for p in dispatch_paths
-        ],
+        "dispatch_paths": _spec_dispatch_paths(dispatch_paths),
         "provider": _canonical_provider(provider).value,
         "model": model or None,
         # RS-1: the verified skill slug (or null). dispatch_spec.DispatchSpec.skill
