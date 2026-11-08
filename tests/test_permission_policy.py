@@ -178,3 +178,41 @@ def test_non_string_key_message_names_the_type_not_the_value():
     with pytest.raises(PermissionPolicyRefused) as info:
         check_profile_entry("r", {"secret-value-9": [], 7: []})
     assert "int" in str(info.value) and "7" not in str(info.value)
+
+
+def test_load_isolation_directory_config_refuses_not_absent(tmp_path):
+    """OI-2650: a config.yaml that is a directory is not 'no isolation'."""
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "config.yaml").mkdir()
+    with pytest.raises(PermissionPolicyRefused) as info:
+        load_isolation("r", tmp_path)
+    assert info.value.reason == "source-malformed"
+
+
+def test_load_isolation_dead_symlink_refuses_not_absent(tmp_path):
+    """OI-2650: a dead symlink exists as a path; it is a broken source, not an absent one."""
+    (tmp_path / "r").mkdir()
+    (tmp_path / "r" / "config.yaml").symlink_to(tmp_path / "nowhere.yaml")
+    with pytest.raises(PermissionPolicyRefused) as info:
+        load_isolation("r", tmp_path)
+    assert info.value.reason == "source-malformed"
+
+
+@pytest.mark.parametrize("bad", ["Read", 5, None, [1], ["ok", None]])
+def test_compose_refuses_non_string_list_values(bad):
+    """OI-2651 pt.2: a role field that is not a list of strings raises the named refusal."""
+    with pytest.raises(PermissionPolicyRefused) as info:
+        _compose({**FIELDS, "allowed_tools": bad})
+    assert info.value.reason == "source-malformed"
+
+
+def test_historical_profile_falls_back_on_any_refusal(monkeypatch):
+    """OI-2651 pt.4: replaying history survives a refused source, not only an unknown role."""
+    sys.path.insert(0, str(REPO_ROOT / "scripts" / "analysis"))
+    import worker_scope_enforcement_measure as measure
+
+    def refuse(role):
+        raise PermissionPolicyRefused("broken", "source-malformed")
+
+    monkeypatch.setattr(measure, "resolve_worker_profile", refuse)
+    assert measure._historical_profile("any").file_write_scope is not None

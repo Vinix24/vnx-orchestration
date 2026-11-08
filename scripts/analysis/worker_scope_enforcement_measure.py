@@ -61,7 +61,7 @@ _LIB = REPO_ROOT / "scripts" / "lib"
 if str(_LIB) not in sys.path:
     sys.path.insert(0, str(_LIB))
 from worker_permissions import (  # noqa: E402
-    UnknownRoleError,
+    PermissionPolicyRefused,
     default_code_worker_profile,
     match_file_write_scope,
     resolve_dispatch_write_scope,
@@ -81,7 +81,7 @@ def _historical_profile(role: str):
     """
     try:
         return resolve_worker_profile(role)
-    except UnknownRoleError:
+    except PermissionPolicyRefused:
         return default_code_worker_profile()
 
 
