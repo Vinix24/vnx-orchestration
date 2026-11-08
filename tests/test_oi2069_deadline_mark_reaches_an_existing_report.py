@@ -650,7 +650,10 @@ class TestAMarkThatKeepsFailingFailsClosed:
                          during_lane=[(atomic_io, "atomic_write_text", _refuse_write(calls))])
 
         assert run.lane == [1], "a report step that reached its fail-closed end state does not raise"
-        assert len(calls) == pd._EMIT_MAX_RETRIES, "the retry loop retried the mark, then gave up"
+        # The kimi spawn writes its policy record (permissions P6) through the same primitive;
+        # that evidence write is not a mark attempt, so it is not counted.
+        mark_calls = [c for c in calls if "permission_records" not in c.parts]
+        assert len(mark_calls) == pd._EMIT_MAX_RETRIES, "the retry loop retried the mark, then gave up"
         assert (run.record["status"], run.record["reason"], run.rc) == ("unavailable", "timeout", 1)
         assert run.door["verdict"] == "NO-GO", run.door["message"]
         assert run.aside.read_text(encoding="utf-8") == _EARLY_PASS_BODY, "the worker's bytes survive"
