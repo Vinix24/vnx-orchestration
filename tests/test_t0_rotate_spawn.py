@@ -249,7 +249,7 @@ elif cmd == "capture-pane":
     subs, typed = submitted()
     screen = "vincent@mac project % "
     # A T0-folder start first types a plain `cd -- <folder>`; the launch line is a later one.
-    launched = any(s and s.startswith(("claude ", "CLAUDE_CONFIG_DIR=")) for s in subs)
+    launched = any(s and s.startswith(("claude ", "CLAUDE_CONFIG_DIR=", "CLAUDE_ROLE=")) for s in subs)
     if launched and not os.environ.get("STUB_NO_FOOTER"):
         st = load()
         busy = tick(st) if st else False
@@ -539,6 +539,7 @@ def _typed(rig) -> List[str]:
     return [c[-1] for c in _calls(rig) if c[:1] == ["send-keys"] and "-l" in c]
 
 
+ROLE_EXPORT = "CLAUDE_ROLE=orchestrator "
 LAUNCH_TAIL_RE = re.compile(r" --session-id ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}) "
                             r"/kickoff\\ rotatie\\ (rotation-\S+)$")
 
@@ -550,7 +551,7 @@ def _launch_line(rig) -> str:
 
 def _launch(rig) -> str:
     """The typed launch line without its start arguments: what is left is the old launch line."""
-    return LAUNCH_TAIL_RE.sub("", _launch_line(rig))
+    return LAUNCH_TAIL_RE.sub("", _launch_line(rig)).replace(ROLE_EXPORT, "", 1)
 
 
 def _run_dir(rig) -> Path:
