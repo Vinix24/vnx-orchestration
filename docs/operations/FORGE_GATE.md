@@ -2,6 +2,10 @@
 
 Operator-runbook voor golf B (`gate-enforcement-to-forge`). Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md` (deliverables B4, OP-B3, B5). Privé planningsdocument: `claudedocs/` is gitignored en staat niet in de repo. Doel: GitHub weigert elke merge naar `main` zonder een gepubliceerd poortoordeel op exact de PR-head, ook een kale `gh pr merge`, ook van de operator zelf.
 
+## De deur als permit (ADR-061)
+
+De semantiek van de deur staat sinds 08-11-2026 in `docs/governance/decisions/ADR-061-deur-afgedwongen.md`. De garantie is daar een **permit**: een verplichte status `vnx-gate/door` die alleen de deur op de exacte kop publiceert, terugleest en aan zijn eigen `check_run_id` bindt, waarna de merge aan die kop gepind is (`--match-head-commit`). "Toegestaan door de deur" is daarmee bewezen; "uitgevoerd door de deur" wordt niet geclaimd, want een statuscheck is een uitspraak over één commit en geen uitvoeringsbewijs. Trekt de deur haar toestemming in, dan **verwijdert** hij de check-run (met `failure` als fallback) en legt hij de uitkomst vast in het `door_check`-blok van de receipt; een `pr_merged`-regel zonder dat blok leest als `unwitnessed` en nooit als toestemming. De terugweg blijft één configregel per project: de `vnx-gate/door`-entry uit `checks[]` halen is een verzwakking en vraagt `--allow-weaken "<reden>"` (zie §7.1 en §11.3); de rest van dit runbook beschrijft nog steeds alleen `vnx-gate/review`, en waar de twee elkaar raken is de ADR de bron.
+
 ## 0. Wat bestaat er vandaag, wat nog niet (gemeten 2026-11-07 op `d8b58c359`)
 
 Dit runbook beschrijft twee lagen. De statustabel is op 2026-11-07 opnieuw gemeten tegen `origin/main` (`d8b58c359`, tag `v1.8.0` staat op een eerdere stand) en tegen de live bescherming. De meetcorrecties onder de tabel zijn gemeten op 2026-09-07 en blijven staan als geschiedenis.
@@ -440,6 +444,7 @@ De lezer van `enforcement` en `ci_workflow` staat sinds OI-1849 op `main`. Het v
 ## Cross-references
 
 - Plan: `claudedocs/plans/2026-09-06-golf-B-forge-dwingt-af.md`
+- Deursemantiek (permit, identiteit, receipt-eigenaar, levensloop, activering): `docs/governance/decisions/ADR-061-deur-afgedwongen.md`
 - Merge-deur en zijn gates: `docs/core/DISPATCH_RULES.md` §2
 - De andere veertien vereiste checks en de keten van deur tot branch protection: `docs/core/ENFORCEMENT_CHAIN.md`
 - Stoelen, overnameketen en signaalregime: `scripts/lib/review_seat_evaluation.py` (`seats_for_risk`, `active_seat_rule`), `scripts/lib/gate_request_handler.py` (`_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`), `scripts/lib/forge_gate_publisher.py` (`review_verdict`, `refresh_review_summary`)
