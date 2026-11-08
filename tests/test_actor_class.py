@@ -15,6 +15,8 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts"):
         sys.path.insert(0, str(_p))
 
 import actor_class  # noqa: E402
+
+_REAL_STDIN_PROBE = actor_class._stdin_isatty
 import planning_cli  # noqa: E402
 
 PID = "vnx-dev"
@@ -80,6 +82,8 @@ def test_derive_reads_process_env_and_probe_by_default(monkeypatch):
 
 
 def test_stdin_probe_without_stdin_is_not_a_tty(monkeypatch):
+    # The suite-wide operator default patches the probe; this test needs the real one.
+    monkeypatch.setattr(actor_class, "_stdin_isatty", _REAL_STDIN_PROBE)
     monkeypatch.setattr(sys, "stdin", None)
     assert actor_class._stdin_isatty() is False
 

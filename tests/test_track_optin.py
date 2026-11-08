@@ -264,3 +264,11 @@ def test_agent_promote_refused(tmp_path):
     )
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert _state(state_dir) == "proposed"
+
+
+def test_default_operator_fixture_patches_probe_not_stdin():
+    """The suite-wide operator default leaves sys.stdin alone and patches only the probe."""
+    assert not type(sys.stdin).__name__.startswith("_Tty")
+    assert hasattr(sys.stdin, "read") and hasattr(sys.stdin, "readline")
+    assert actor_class._stdin_isatty() is True
+    assert actor_class.derive(env={}) == actor_class.OPERATOR
