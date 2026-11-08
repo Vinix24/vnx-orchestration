@@ -229,6 +229,48 @@ _t0_static_provider_role_drift() {
   done
 }
 
+# Pointer state and loading evidence for one codex/gemini T0 surface, read
+# through t0_playbook and playbook_loading_evidence (ADR-058), never parsed
+# here. Prints "<pointer state> <loading of $3>"; the pointer state is
+# ok | stale_sha | stale_source | absent | missing.
+_T0_PLAYBOOK_PROBE='
+import sys
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+import t0_playbook as tp
+import playbook_loading_evidence as ev
+root, provider_file, provider = sys.argv[2], sys.argv[3], sys.argv[4]
+current = tp.resolve(root)
+pointer = tp.parse_block(Path(provider_file).read_text(encoding="utf-8"))
+project_id, state_dir = ev.resolve_project_state(root)
+loading = ev.loading_by_provider(project_id, state_dir, current)
+print(tp.pointer_state(pointer, current), loading.get(provider, ev.UNVERIFIED))
+'
+
+# Findings for one T0 surface that carries the role block. The gap closes
+# only on a valid evidence record of the provider that reads this surface
+# (AGENTS.md = codex). A pointer, however current, never closes it, and a
+# probe that cannot run leaves the gap standing.
+#   POINTER-ONLY           — current pointer, nothing proves it was loaded.
+#   POINTER-STALE          — the pointer no longer matches today's source.
+#   PLAYBOOK-SOURCE-MISSING — none of the five playbook sources exists.
+# Valid evidence prints no gap line at all: the static output is findings
+# only, so a closed gap leaves that surface clean.
+_t0_static_playbook_findings() {
+  local root="$1" provider_file="$2" provider="$3" lib_dir probe state loading
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
+  probe="$(python3 -c "$_T0_PLAYBOOK_PROBE" "$lib_dir" "$root" "$provider_file" "$provider" 2>/dev/null)" || probe=""
+  state="${probe%% *}"
+  loading="${probe##* }"
+  [ "$loading" = "loaded" ] || loading="unverified"
+  case "$state" in
+    missing) echo "PLAYBOOK-SOURCE-MISSING: no T0 playbook in sources (a)-(e), so $provider_file cannot point at one" ;;
+    ok) [ "$loading" = "loaded" ] || echo "POINTER-ONLY: $provider_file points at the current t0-orchestrator playbook, but a pointer is not a load: no loading evidence for this provider" ;;
+    stale_sha|stale_source) echo "POINTER-STALE: $provider_file state=$state, its T0-PLAYBOOK pointer no longer matches the current playbook source (run 'vnx role sync --apply')" ;;
+  esac
+  [ "$loading" = "loaded" ] || echo "PLAYBOOK-MECHANISM-GAP: $provider_file carries the T0 role but has no SessionStart-hook equivalent to deliver the t0-orchestrator playbook body in-context on this surface (tracked open item, not currently blocking)"
+}
+
 # Static role<->skill invocability check for one project root. Prints one
 # finding per line (IMPORT-MISSING / SKILL-UNLOADABLE) to stdout; returns 0
 # when clean, 1 when any finding was printed.
@@ -346,8 +388,12 @@ _t0_static_check() {
   for provider_file in "$t0_dir/AGENTS.md" "$t0_dir/GEMINI.md"; do
     [ -f "$provider_file" ] || continue
     grep -q '<!-- VNX:BEGIN T0-ROLE -->' "$provider_file" 2>/dev/null || continue
-    echo "PLAYBOOK-MECHANISM-GAP: $provider_file carries the T0 role but has no SessionStart-hook equivalent to deliver the t0-orchestrator playbook body in-context on this surface (tracked open item, not currently blocking)"
-    findings=$((findings + 1))
+    local playbook_out provider=""
+    [ "$(basename "$provider_file")" = "AGENTS.md" ] && provider="codex"
+    playbook_out="$(_t0_static_playbook_findings "$root" "$provider_file" "$provider")"
+    [ -n "$playbook_out" ] || continue
+    printf '%s\n' "$playbook_out"
+    findings=$((findings + $(printf '%s\n' "$playbook_out" | wc -l)))
   done
 
   local provider_drift_out
