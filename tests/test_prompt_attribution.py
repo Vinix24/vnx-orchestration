@@ -1,0 +1,170 @@
+"""Prompt attribution (ADR-056, zelfst PR-8b): real functions and the real hook script, tmp stores."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parent.parent
+for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts"):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+
+try:
+    import prompt_attribution
+except ImportError:  # the red run on the old code: the module does not exist yet
+    prompt_attribution = None
+
+import lifecycle_count
+
+HOOK = _ROOT / "scripts" / "hooks" / "log_prompt_time.py"
+PID = "p-test"
+SECRET = "geheime prompttekst 42"
+
+
+def _attribute(prompt="hallo", env=None, cwd="/nonexistent", now=None):
+    assert getattr(prompt_attribution, "attribute", None) is not None
+    return prompt_attribution.attribute(prompt, {"VNX_PROJECT_ID": PID} if env is None else env, cwd, now)
+
+
+@pytest.fixture()
+def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    state = tmp_path / ".vnx-data" / PID / "state"
+    state.mkdir(parents=True)
+    return tmp_path, state
+
+
+def test_session_with_two_deliveries_is_unknown():
+    a = _attribute(env={"VNX_PROJECT_ID": PID})
+    assert a.status == "ambiguous_session"
+    assert a.delivery_id == "unknown"
+    assert a.reason == "ambiguous_session"
+
+
+def test_worker_marker_attributes_to_base_delivery():
+    a = _attribute(env={"VNX_PROJECT_ID": PID, "VNX_DISPATCH_ID": "dlv-abc-r2"})
+    assert (a.status, a.actor_class, a.delivery_id, a.project_id) == ("attributed", "worker", "dlv-abc", PID)
+    b = _attribute(env={"VNX_PROJECT_ID": PID, "VNX_CURRENT_DISPATCH_ID": "dlv-abc"})
+    assert (b.actor_class, b.delivery_id) == ("worker", "dlv-abc")
+
+
+def test_no_marker_is_operator_and_ambiguous():
+    a = _attribute()
+    assert (a.actor_class, a.status) == ("operator", "ambiguous_session")
+
+
+def test_t0_environment_does_not_make_a_typed_prompt_automation():
+    a = _attribute(env={"VNX_PROJECT_ID": PID, "VNX_ACTOR_CLASS": "t0"})
+    assert a.actor_class == "operator"
+
+
+def test_project_id_is_never_vnx_dev_by_default(tmp_path):
+    a = _attribute(env={}, cwd=str(tmp_path))
+    assert a.project_id == "unknown"
+    assert a.project_id != "vnx-dev"
+
+
+def test_project_marker_file_resolves_project(tmp_path):
+    (tmp_path / ".vnx-project-id").write_text("from-marker\n")
+    sub = tmp_path / "a" / "b"
+    sub.mkdir(parents=True)
+    assert _attribute(env={}, cwd=str(sub)).project_id == "from-marker"
+
+
+def _rotation_run(sdir: Path, expected=None, goal=None, age=0):
+    run = sdir / "rotation-20261108-100000-1"
+    run.mkdir(parents=True)
+    if expected is not None:
+        (run / "delivery.json").write_text(json.dumps({"expected": expected}))
+    if goal is not None:
+        (run / "goal.txt").write_text(goal)
+    old = time.time() - age
+    os.utime(run, (old, old))
+    return run
+
+
+@pytest.mark.parametrize("kind", ["expected", "goal"])
+def test_rotation_text_is_automation_and_older_run_is_not(home, monkeypatch, kind):
+    _, state = home
+    sdir = state / "t0_rotation"
+    text = "/kickoff rotatie rotation-1" if kind == "expected" else "/goal doe dit tot het af is"
+    _rotation_run(sdir, **{kind: text})
+    assert _attribute(text).actor_class == "automation"
+    assert _attribute("iets anders").actor_class == "operator"
+    for p in sdir.glob("rotation-*"):
+        old = time.time() - 31 * 60
+        os.utime(p, (old, old))
+    assert _attribute(text).actor_class == "operator"
+
+
+def test_record_holds_no_prompt_text():
+    a = _attribute(SECRET)
+    rec = prompt_attribution.build_record(a, session_id="s1", prompt=SECRET, ts_utc="2026-11-08T10:00:00Z")
+    assert SECRET not in json.dumps(rec)
+    assert rec["prompt_len"] == len(SECRET) and len(rec["prompt_sha256"]) == 64
+    assert rec["reason"] == "ambiguous_session"
+
+
+def test_append_record_does_not_create_missing_state_dir(tmp_path):
+    a = _attribute()
+    rec = prompt_attribution.build_record(a, session_id="s", prompt="x", ts_utc="t")
+    assert prompt_attribution.append_record(tmp_path / "missing", rec) is False
+    assert not (tmp_path / "missing").exists()
+
+
+def _run_hook(stdin: str, home_dir: Path, extra_env=None):
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
+    env.update({"HOME": str(home_dir), "VNX_PROJECT_ID": PID, **(extra_env or {})})
+    start = time.monotonic()
+    done = subprocess.run([sys.executable, str(HOOK)], input=stdin, capture_output=True, text=True,
+                          env=env, cwd=str(home_dir), check=False)
+    return done, time.monotonic() - start
+
+
+def test_hook_writes_one_line_prints_nothing_exits_zero(home):
+    home_dir, state = home
+    payload = json.dumps({"session_id": "s1", "cwd": str(home_dir), "prompt": SECRET})
+    done, elapsed = _run_hook(payload, home_dir)
+    assert done.returncode == 0 and done.stdout == ""
+    lines = (state / "prompt_attribution.ndjson").read_text().splitlines()
+    assert len(lines) == 1 and SECRET not in lines[0]
+    row = json.loads(lines[0])
+    assert row["actor_class"] == "operator" and row["delivery_id"] == "unknown"
+    assert row["project_id"] == PID and row["session_id"] == "s1"
+    assert elapsed < 2.0  # generous CI bound; the cold-start time is reported in the dispatch report
+
+
+def test_hook_with_worker_marker_writes_delivery_key(home):
+    home_dir, state = home
+    done, _ = _run_hook(json.dumps({"session_id": "s", "prompt": "p"}), home_dir, {"VNX_DISPATCH_ID": "dlv-abc-r2"})
+    row = json.loads((state / "prompt_attribution.ndjson").read_text().splitlines()[0])
+    assert done.returncode == 0
+    assert (row["actor_class"], row["delivery_id"], "reason" in row) == ("worker", "dlv-abc", False)
+
+
+@pytest.mark.parametrize("stdin", ["{not json", "", "[1,2]", "null", '{"prompt": 5}'])
+def test_hook_exits_zero_and_silent_on_bad_input(home, stdin):
+    home_dir, _ = home
+    done, _ = _run_hook(stdin, home_dir)
+    assert done.returncode == 0 and done.stdout == ""
+
+
+def test_hook_exits_zero_when_store_is_missing(tmp_path):
+    done, _ = _run_hook(json.dumps({"prompt": "x"}), tmp_path)
+    assert done.returncode == 0 and done.stdout == ""
+    assert not (tmp_path / ".vnx-data").exists()
+
+
+def test_coverage_reader_reads_the_line_as_prompt_source(home):
+    home_dir, state = home
+    _run_hook(json.dumps({"session_id": "s", "prompt": "p"}), home_dir, {"VNX_DISPATCH_ID": "dlv-abc"})
+    cov = lifecycle_count.measure_coverage(state, project_id=PID)
+    assert cov.sources["prompt"] == {"state": "covered", "rows": 1, "with_identity": 1}

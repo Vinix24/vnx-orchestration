@@ -1,0 +1,1 @@
+- A repo-side UserPromptSubmit hook (`scripts/hooks/log_prompt_time.py`) records each prompt with its derived class (worker, automation, operator) and, only when a dispatch marker makes it unambiguous, its delivery key, into `prompt_attribution.ndjson`; it prints nothing, never blocks and never stores the prompt text (ADR-056, zelfst PR-8b).
