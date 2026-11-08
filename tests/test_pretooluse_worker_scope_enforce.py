@@ -564,6 +564,96 @@ class TestUnknownRoleFallback(HookTestCase):
         self.assertEqual(res.stdout.strip(), "", res.stdout)
 
 
+class TestRefusedPolicyFailsClosed(HookTestCase):
+    """A refused permission source never turns the hook fail-open (permissions P2 r2).
+
+    ``resolve_worker_profile`` raises ``PermissionPolicyRefused`` for a broken
+    source. The hook must hand out the code-worker fallback and BLOCK an
+    out-of-scope write, as it does for ``UnknownRoleError``.
+    """
+
+    def _evaluate(self, yaml_text: "str | None", *, no_yaml_module: bool = False):
+        root = self.tmp / "proj"
+        (root / ".vnx").mkdir(parents=True)
+        if yaml_text is not None:
+            (root / ".vnx" / "worker_permissions.yaml").write_text(yaml_text)
+        target = self.wt / "a" / "b" / "c" / "d" / "e" / "f" / "out.md"
+        payload = {
+            "tool_name": "Write",
+            "tool_input": {"file_path": str(target)},
+            "cwd": str(self.wt),
+        }
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": "backend-developer",
+            "VNX_PROJECT_ROOT": str(root),
+            "PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        mods = {"yaml": None} if no_yaml_module else {}
+        with patch.dict(os.environ, env, clear=False), patch.dict(sys.modules, mods):
+            return hook.evaluate(payload)
+
+    def _assert_blocked(self, decision, reason):
+        self.assertEqual(decision, "block", reason)
+        self.assertIn("code-worker", reason)
+
+    def test_source_empty_blocks_out_of_scope_write(self):
+        self._assert_blocked(*self._evaluate(""))
+
+    def test_source_broken_yaml_blocks_out_of_scope_write(self):
+        self._assert_blocked(*self._evaluate("profiles: [unclosed"))
+
+    def test_yaml_unavailable_blocks_out_of_scope_write(self):
+        self._assert_blocked(*self._evaluate("profiles: {}\n", no_yaml_module=True))
+
+    def test_end_to_end_empty_source_blocks_through_the_launcher(self):
+        """The whole hook (main() included), enforcement on: an empty source
+        must end as a block, not as the fail-open implicit allow."""
+        root = self.tmp / "proj-e2e"
+        (root / ".vnx").mkdir(parents=True)
+        (root / ".vnx" / "worker_permissions.yaml").write_text("")
+        target = self.wt / "a" / "b" / "c" / "d" / "e" / "f" / "out.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role="backend-developer",
+            data_dir=self.data_dir,
+            extra_env={"VNX_PROJECT_ROOT": str(root)},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        decision = parse_block(res.stdout)
+        self.assertIn("code-worker", decision["reason"])
+        self.assertIn("source-empty", res.stderr)
+
+    def test_refusal_reason_goes_to_stderr_without_policy_content(self):
+        import io
+        from contextlib import redirect_stderr
+
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            self._evaluate("")
+        self.assertIn("permission policy refused (source-empty)", buf.getvalue())
+        self.assertNotIn("allowed_tools", buf.getvalue())
+
+    def test_unknown_role_still_falls_back(self):
+        root = self.tmp / "proj2"
+        (root / ".vnx").mkdir(parents=True)
+        (root / ".vnx" / "worker_permissions.yaml").write_text("profiles: {}\n")
+        target = self.wt / "a" / "b" / "c" / "d" / "e" / "f" / "out.md"
+        payload = {"tool_name": "Write", "tool_input": {"file_path": str(target)}, "cwd": str(self.wt)}
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": "nonexistent-role-fallback-test",
+            "VNX_PROJECT_ROOT": str(root),
+            "PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            decision, reason = hook.evaluate(payload)
+        self._assert_blocked(decision, reason)
+
+
 class TestDispatchPathsNarrowing(HookTestCase):
     """OI-1196: VNX_DISPATCH_PATHS narrows file_write_scope, never widens it.
 

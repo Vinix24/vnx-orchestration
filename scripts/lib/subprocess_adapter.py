@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 # skip-permissions).
 try:
     from worker_permissions import (
+        PermissionPolicyRefused,
         UnknownRoleError,
         build_claude_scope_args,
         resolve_worker_profile,
@@ -68,7 +69,10 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     worker_scoped_enabled = None
     worker_permission_enforcement_enabled = None
 
-    class UnknownRoleError(Exception):  # pragma: no cover - placeholder, unreachable:
+    class PermissionPolicyRefused(Exception):  # pragma: no cover - placeholder, unreachable
+        reason = "refused"
+
+    class UnknownRoleError(PermissionPolicyRefused):  # pragma: no cover - placeholder, unreachable:
         # resolve_worker_profile is None above, so _build_worker_scope_args never
         # calls it and this class is never actually raised in this branch.
         pass
@@ -141,9 +145,11 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
         return [_LEGACY_SKIP_FLAG]
     try:
         return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
-    except UnknownRoleError:
-        # A role absent from every register (OI-1069 pt.5) must refuse the
-        # dispatch, not degrade into a fallback scope — re-raise so
+    except PermissionPolicyRefused:
+        # A role absent from every register (OI-1069 pt.5) and every other
+        # refused permission source (empty, broken YAML, unknown key, no
+        # PyYAML) must refuse the dispatch, not degrade into a fallback scope
+        # — re-raise so
         # deliver() converts it into a proper DeliveryResult(success=False)
         # before any subprocess spawns, instead of the generic handler
         # below silently continuing with _FALLBACK_SCOPE_ARGS.
@@ -502,10 +508,12 @@ class SubprocessAdapter:
         cmd.append(effective_instruction)
         try:
             cmd.extend(_resolve_scope_args(effective_role, requires_mcp, scope_args))
-        except UnknownRoleError as exc:
+        except PermissionPolicyRefused as exc:
             # Refuse before any subprocess spawns (OI-1069 pt.5) — no cmd has
-            # been Popen'd yet, so this is a clean pre-flight rejection.
-            return _refused_delivery(terminal_id, dispatch_id, f"unknown_role: {exc}")
+            # been Popen'd yet, so this is a clean pre-flight rejection. The
+            # named reason is the refusal's own slug.
+            slug = "unknown_role" if isinstance(exc, UnknownRoleError) else exc.reason
+            return _refused_delivery(terminal_id, dispatch_id, f"{slug}: {exc}")
 
         # Resolve stderr logfile path.  Writing stderr to an append-mode file
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the

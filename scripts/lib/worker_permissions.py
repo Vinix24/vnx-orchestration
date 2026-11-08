@@ -609,7 +609,7 @@ def role_grants_write(role: Optional[str], yaml_path: Path | None = None) -> boo
     """
     try:
         profile = resolve_worker_profile(role, yaml_path)
-    except UnknownRoleError:
+    except PermissionPolicyRefused:
         logger.warning(
             "role_grants_write: role %r unresolvable — assuming writing "
             "(fail-closed for gate enforcement)", role,
@@ -882,7 +882,7 @@ def classify_permission_posture(argv: "list[str]", role: Optional[str] = None) -
         # describe historical or synthetic argv.
         try:
             profile = resolve_worker_profile(role)
-        except UnknownRoleError:
+        except PermissionPolicyRefused:
             profile = default_code_worker_profile()
         return {
             "permission_posture": "scoped-allowlist",

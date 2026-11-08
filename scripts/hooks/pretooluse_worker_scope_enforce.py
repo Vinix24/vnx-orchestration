@@ -101,7 +101,7 @@ if str(_SCRIPTS_LIB) not in sys.path:
 
 try:
     from worker_permissions import (  # noqa: E402
-        UnknownRoleError,
+        PermissionPolicyRefused,
         default_code_worker_profile,
         match_bash_deny,
         match_file_write_scope,
@@ -203,14 +203,18 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
     role = os.environ.get("VNX_WORKER_ROLE") or None
     try:
         profile = resolve_worker_profile(role)
-    except UnknownRoleError:
+    except PermissionPolicyRefused as exc:
         # This hook enforces tool calls for an ALREADY-RUNNING worker — there
         # is no "refuse the dispatch" available at this point, only allow/block
         # for one tool call. A role absent from every register (OI-1069 pt.5)
-        # still gets the restrictive code-worker fallback here, exactly as
-        # before that change; letting the exception reach main()'s fail-open
-        # catch would silently DROP enforcement for this call (implicit
-        # allow), the opposite of what an unknown role should get.
+        # and every other refused source (empty, unreadable or broken YAML,
+        # unknown key, no PyYAML, bad role name, digest mismatch) still gets
+        # the restrictive code-worker fallback here, as on main; letting the
+        # exception reach main()'s fail-open catch would silently DROP
+        # enforcement for this call (implicit allow), the opposite of what a
+        # broken permission source should get. Only the reason slug goes to
+        # stderr, never the policy content.
+        print(f"worker-scope: permission policy refused ({exc.reason}); using code-worker fallback", file=sys.stderr)
         profile = default_code_worker_profile()
 
     if tool_name == "Bash":

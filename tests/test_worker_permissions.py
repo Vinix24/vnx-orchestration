@@ -22,6 +22,7 @@ from worker_permissions import (
     UnknownRoleError,
     build_claude_scope_args,
     classify_permission_posture,
+    role_grants_write,
     default_code_worker_profile,
     dispatch_paths_env_value,
     generate_claude_settings,
@@ -1145,3 +1146,20 @@ def test_policy_digest_isolation_empty_is_present_not_missing(tmp_path):
     yaml_path, agents = _policy_fixture(tmp_path, isolation={})
     profile = resolve_worker_profile("alpha", yaml_path=yaml_path, agents_dir=agents)
     assert profile.policy.sources["agent_isolation"] == {"state": "present-empty"}
+
+
+class TestRefusedSourceInternalCallers:
+    """permissions P2 r2: internal callers survive a refused source fail-closed."""
+
+    def test_role_grants_write_assumes_writing_on_refused_source(self, tmp_path):
+        broken = tmp_path / "worker_permissions.yaml"
+        broken.write_text("")
+        assert role_grants_write("code-reviewer", broken) is True
+
+    def test_classify_posture_falls_back_on_refused_source(self, tmp_path, monkeypatch):
+        (tmp_path / ".vnx").mkdir()
+        (tmp_path / ".vnx" / "worker_permissions.yaml").write_text("")
+        monkeypatch.setenv("VNX_PROJECT_ROOT", str(tmp_path))
+        result = classify_permission_posture(["claude", "--allowedTools", "Read"], "backend-developer")
+        assert result["permission_posture"] == "scoped-allowlist"
+        assert result["permission_profile"] == "code-worker"
