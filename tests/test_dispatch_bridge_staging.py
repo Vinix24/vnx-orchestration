@@ -29,7 +29,7 @@ _GOOD_ID = "20260101-120000-feat"
 
 def _stage(tmp_path, **over):
     base = dict(
-        instruction_text="do the thing", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="do the thing", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", provider="claude", data_dir=tmp_path,
     )
     base.update(over)
@@ -168,7 +168,7 @@ def test_stage_refuses_symlinked_bundle_dir_escape(tmp_path):
 
 def test_bridge_dispatch_rejects_unsafe_id_as_exit_1(tmp_path):
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id="../evil", role="dev",
+        instruction_text="x", dispatch_id="../evil", role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
     assert rc == 1  # clean reject — never falls back to a side-door delivery
@@ -192,7 +192,7 @@ def test_bridge_headless_open_by_default_reaches_staging(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path,
         allow_headless=True, headless_reason="benchmark", dry_run=True,
     )
@@ -211,7 +211,7 @@ def test_bridge_headless_wrong_override_value_still_reaches_staging(tmp_path, mo
     monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path,
         allow_headless=True, headless_reason="benchmark", dry_run=True,
     )
@@ -241,7 +241,7 @@ def test_bridge_headless_override_reaches_staging(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path,
         allow_headless=True, headless_reason="benchmark", dry_run=True,
     )
@@ -278,7 +278,7 @@ def test_bridge_non_headless_dispatch_never_consults_the_gate(tmp_path, monkeypa
     monkeypatch.setattr(dispatch_cli, "run_dispatch", _mock_run_dispatch)
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
 
@@ -299,7 +299,7 @@ def test_bridge_failed_dispatch_moves_bundle_to_failed(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 1)
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
 
@@ -317,7 +317,7 @@ def test_bridge_settle_never_overwrites_an_existing_settled_bundle(tmp_path, mon
     monkeypatch.setattr(dispatch_cli, "run_dispatch", lambda spec_file, dry_run=False: 0)
 
     kwargs = dict(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
     assert dispatch_bridge.bridge_dispatch(**kwargs) == 0
@@ -339,7 +339,7 @@ def test_bridge_settle_failure_does_not_change_exit_code(tmp_path, monkeypatch, 
     (tmp_path / "dispatches" / "completed").write_text("blocked", encoding="utf-8")
 
     rc = dispatch_bridge.bridge_dispatch(
-        instruction_text="x", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="x", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", data_dir=tmp_path, dry_run=True,
     )
 

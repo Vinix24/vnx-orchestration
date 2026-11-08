@@ -47,7 +47,7 @@ def _stage_escalation(tmp_path, **over):
         failure_class="model_error",
         instruction_text="escalate: the cheap attempt was rejected",
         dispatch_id=_FOLLOWUP_ID,
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         data_dir=tmp_path,
@@ -133,7 +133,7 @@ def test_normal_bundle_keeps_chain_link_fields_empty(tmp_path):
     spec_file = dispatch_bridge.stage_spec_bundle(
         instruction_text="normal work",
         dispatch_id="20260815-110000-normal",
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         data_dir=tmp_path,
