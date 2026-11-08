@@ -104,7 +104,7 @@ def _validate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gate: str):
 
 def _stage(tmp_path: Path, *, gate: str) -> Path:
     return dispatch_bridge.stage_spec_bundle(
-        instruction_text="do the thing", dispatch_id=_GOOD_ID, role="dev",
+        instruction_text="do the thing", dispatch_id=_GOOD_ID, role="backend-developer",
         target_slot="T1", project_id="p1", provider="claude", data_dir=tmp_path,
         gate=gate,
     )
