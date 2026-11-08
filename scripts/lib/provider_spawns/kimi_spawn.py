@@ -526,6 +526,85 @@ def _build_kimi_cmd(
     return cmd
 
 
+_POLICY_DIGEST_ENV = "VNX_PERMISSION_POLICY_DIGEST"
+_POLICY_ABSENT = "policy_absent"
+_KIMI_HOOK = "PreToolUse ^Shell$"
+
+
+def _policy_digest(extra_env: Optional[Dict[str, str]]) -> str:
+    """The spec's policy digest from the spawn env, or ``policy_absent``; never invented."""
+    value = (extra_env or {}).get(_POLICY_DIGEST_ENV) or os.environ.get(_POLICY_DIGEST_ENV)
+    return value.strip() if isinstance(value, str) and value.strip() else _POLICY_ABSENT
+
+
+def _kimi_policy_record(
+    cmd: list, work_dir: Optional[Any], digest: str, dispatch_id: str, terminal_id: str,
+) -> Dict[str, Any]:
+    """The kimi layer-0/layer-1 record, shaped like the P3 material record plus the two layers.
+
+    An unknown lane raises (``ValueError``): ``capability_for`` alone would answer
+    ``unsupported`` for it, which is not a record of this lane.
+    """
+    import permission_harness_map as phm
+
+    at = cmd.index("-p") + 1 if "-p" in cmd else -1
+    flags = [f"<prompt:{len(t)}chars>" if i == at else t for i, t in enumerate(cmd[1:], 1)]
+    record = phm.material_record(
+        "kimi", None if digest == _POLICY_ABSENT else digest, flags, dispatch_id,
+    )
+    if not record["lane_known"]:
+        raise ValueError("kimi lane is not in the capability matrix")
+    record["terminal_id"] = terminal_id
+    if digest == _POLICY_ABSENT:
+        record["policy_state"] = _POLICY_ABSENT
+    record["layer0"] = {
+        "git_boundary": "worktree" if work_dir else "none",
+        "sandbox": "none",
+        "cwd": str(work_dir) if work_dir else None,
+    }
+    record["layer1"] = {
+        "yolo": "--yolo" in cmd,
+        "hook": _KIMI_HOOK,
+        "tools": {"deny": phm.capability_for("kimi", "tools_deny")["level"]},
+        "filesystem": {
+            d: phm.capability_for("kimi", d)["level"]
+            for d in ("filesystem_read", "filesystem_write", "filesystem_deny")
+        },
+    }
+    return record
+
+
+def _write_kimi_policy_record(
+    cmd: list, work_dir: Optional[Any], extra_env: Optional[Dict[str, str]],
+    dispatch_id: str, terminal_id: str,
+) -> None:
+    """Write the record next to the P3 records, atomically. A failed write is a WARNING, never a refusal."""
+    try:
+        from atomic_io import atomic_write_json
+
+        data_dir = os.environ.get("VNX_DATA_DIR", "")
+        if not data_dir:
+            from vnx_paths import resolve_paths
+            data_dir = resolve_paths()["VNX_DATA_DIR"]
+        record = _kimi_policy_record(cmd, work_dir, _policy_digest(extra_env), dispatch_id, terminal_id)
+        atomic_write_json(
+            Path(data_dir) / "state" / "permission_records" / f"{terminal_id}_{dispatch_id}.json",
+            record,
+        )
+    except Exception as exc:  # vnx-silent-except: recording evidence never refuses the spawn; WARNING names it
+        logger.warning("kimi_spawn: policy record not written for %s: %s", dispatch_id, exc)
+
+
+def _build_recorded_kimi_cmd(
+    prompt: str, model: Optional[str], work_dir: Optional[Any], config_path: Path,
+    extra_env: Optional[Dict[str, str]], dispatch_id: str, terminal_id: str,
+) -> list:
+    """:func:`_build_kimi_cmd` unchanged, plus the layer-0 policy record of the argv it built."""
+    cmd = _build_kimi_cmd(prompt, model, work_dir, config_path)
+    _write_kimi_policy_record(cmd, work_dir, extra_env, dispatch_id, terminal_id)
+    return cmd
+
+
 # kimi prints the resume handle to stderr after every --print run:
 #   "To resume this session: kimi -r <session_id>"
 # The session id is the key to the session's wire.jsonl, where the CLI records
@@ -1412,7 +1491,7 @@ def spawn_kimi(
     # The per-run config (guard hook + user config) lives in a private temp file,
     # never on argv; this caller owns its lifetime (see _write_kimi_config_file).
     config_path = _write_kimi_config_file()
-    cmd = _build_kimi_cmd(prompt, model, cwd, config_path)
+    cmd = _build_recorded_kimi_cmd(prompt, model, cwd, config_path, extra_env, dispatch_id, terminal_id)
 
     # Never launch --yolo silently: log the effective argv (prompt redacted to a
     # char count) and, when an event sink is wired, record it as an "info" event
