@@ -16,6 +16,7 @@ import sqlite3
 import uuid
 from typing import Any, Dict, FrozenSet, List, Optional
 
+import actor_class
 from runtime_coordination import _append_event, _now_utc, get_connection
 
 # ---------------------------------------------------------------------------
@@ -377,11 +378,13 @@ def _insert_override_record(
 
     ``project_id`` and ``delivery_id`` (ADR-056 identity) go into ``metadata_json``
     and into the event metadata, ``unknown`` when missing: no column, no migration.
+    ``actor_class`` is derived by ``actor_class.derive()`` at the write, never passed in.
     """
     now = _now_utc()
     identity = {
         "project_id": _identity_value(project_id),
         "delivery_id": _identity_value(delivery_id),
+        "actor_class": actor_class.derive(),
     }
     conn.execute(
         """

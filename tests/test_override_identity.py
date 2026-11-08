@@ -19,6 +19,7 @@ for _p in (str(ROOT / "scripts"), str(ROOT / "scripts" / "lib")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+import actor_class  # noqa: E402
 import coordination_db  # noqa: E402
 import dispatch_cli  # noqa: E402
 import governance_escalation  # noqa: E402
@@ -55,6 +56,13 @@ def _record(state_dir, **extra):
         )
         conn.commit()
     return row
+
+
+def _identity(raw):
+    """The ADR-056 key of a metadata_json; the derived actor_class (PR-7c) is env-dependent and pinned in test_source_actor_class."""
+    meta = json.loads(raw)
+    assert meta.pop("actor_class") in actor_class.ACTOR_CLASSES
+    return meta
 
 
 def _round(dispatch_id, at):
@@ -103,7 +111,7 @@ class TestRecordOverrideIdentity:
     def test_neither_given_is_unknown_not_omitted(self, state_dir):
         _record(state_dir)
         meta = json.loads(_override_rows(state_dir)[0]["metadata_json"])
-        assert meta == {"project_id": "unknown", "delivery_id": "unknown"}
+        assert _identity(json.dumps(meta)) == {"project_id": "unknown", "delivery_id": "unknown"}
 
     def test_unknown_override_type_is_still_refused(self, state_dir):
         with coordination_db.get_connection(state_dir) as conn, pytest.raises(governance_escalation.GovernanceError):
@@ -143,15 +151,15 @@ class TestB3OverrideWritesTheRow:
         assert first["justification"] == "operator: one-line fix"
         assert first["actor"] == "operator"
         assert first["override_scope"] == dispatch_cli.B3_OVERRIDE_REASON_ENV
-        assert json.loads(first["metadata_json"]) == {"project_id": "vnx-dev", "delivery_id": "dlv-abc"}
-        assert json.loads(second["metadata_json"]) == {"project_id": "vnx-dev", "delivery_id": "dlv-def"}
+        assert _identity(first["metadata_json"]) == {"project_id": "vnx-dev", "delivery_id": "dlv-abc"}
+        assert _identity(second["metadata_json"]) == {"project_id": "vnx-dev", "delivery_id": "dlv-def"}
         ledger = review_rounds.ledger_path(state / "review_gates")
         assert len(ledger.read_text(encoding="utf-8").splitlines()) == 2
 
     def test_empty_ledger_project_is_unknown_not_a_default_project(self, tmp_path, monkeypatch):
         state = self._book(tmp_path, monkeypatch, [_cap(77, "dlv-abc-r1")], project_id="")
         meta = json.loads(_override_rows(state)[0]["metadata_json"])
-        assert meta == {"project_id": "unknown", "delivery_id": "dlv-abc"}
+        assert _identity(json.dumps(meta)) == {"project_id": "unknown", "delivery_id": "dlv-abc"}
 
     def test_a_pr_without_a_dispatch_id_is_named_by_pr_with_unknown_delivery(self, tmp_path, monkeypatch):
         state = self._book(tmp_path, monkeypatch, [_cap(77, "")])

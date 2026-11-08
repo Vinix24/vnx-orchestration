@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import actor_class
 from dispatch_identity import validate_receipt_kind
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ def _resolve_receipt_project_id(receipts_file: Optional[str]) -> str:
 
 
 def dispatch_identity_fields(dispatch_id: Any, receipts_file: Optional[str] = None) -> Dict[str, str]:
-    """The delivery identity ``(project_id, delivery_id)`` of ADR-056, plus ``dispatch_id`` when one is known.
+    """The delivery identity ``(project_id, delivery_id)`` of ADR-056, the derived ``actor_class``, plus ``dispatch_id`` when one is known.
 
     Both identity keys are always present: a source that cannot resolve one writes ``unknown``
     and is never booked silently as ``vnx-dev``.
@@ -122,6 +123,7 @@ def dispatch_identity_fields(dispatch_id: Any, receipts_file: Optional[str] = No
     fields: Dict[str, str] = {
         "project_id": _resolve_receipt_project_id(receipts_file),
         "delivery_id": base_delivery_id(dispatch_id),
+        "actor_class": actor_class.derive(),
     }
     if isinstance(dispatch_id, str) and dispatch_id:
         fields["dispatch_id"] = dispatch_id

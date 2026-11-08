@@ -26,7 +26,7 @@
 #      start first types a plain `cd -- <folder>` and reads the new pane's folder: another folder
 #      closes the window (exit 5) before claude exists, so nothing runs in the successor. Only
 #      then it types `claude --model opus` (plus `--remote-control "<name>"` when this session is
-#      bridged, and CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane),
+#      bridged, and CLAUDE_ROLE=orchestrator plus CLAUDE_CONFIG_DIR when set: tmux does not carry a bare export into the pane),
 #      then `--session-id <uuid>` (generated here) and the first message `/kickoff rotatie
 #      <run_id>` as the positional prompt argument. The first message is never typed into the TUI
 #      input box: a redraw during startup (Remote Control connecting) wiped everything typed so
@@ -496,6 +496,8 @@ esac
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
   launch="CLAUDE_CONFIG_DIR=$(printf '%q' "$CLAUDE_CONFIG_DIR") $launch"
 fi
+# derive() in the successor reads this marker; tmux would not carry a bare export into the pane.
+launch="CLAUDE_ROLE=orchestrator $launch"
 launch="$launch --session-id $SUCCESSOR_UUID $(printf '%q' "$FIRST_MESSAGE")"
 
 NEW_WIN="$(tmux new-window -a -t "$OLD_WIN" -c "$START_DIR" -n "$OLD_NAME" -P -F '#{window_id}')"
