@@ -40,6 +40,14 @@ from typing import Optional
 
 from dispatch_identity import _IDENTITY_UNRESOLVED
 from dispatch_spec import PathAccess, WRITE_GRANTING_PATH_ACCESS
+from permission_policy import (
+    PermissionPolicy,
+    PermissionPolicyRefused,
+    check_profile_entry,
+    compose_policy,
+    load_isolation,
+    load_role_profiles,
+)
 from mcp_server_config import (
     global_mcp_config_path,
     load_global_mcp_servers,
@@ -216,7 +224,7 @@ def _agents_registry_roles(agents_dir: Optional[Path] = None) -> Optional[frozen
         return None
 
 
-class UnknownRoleError(ValueError):
+class UnknownRoleError(PermissionPolicyRefused):
     """Raised by :func:`resolve_worker_profile` when *role* appears in NO register.
 
     OI-1069 pt.5: a role name that is neither a key in worker_permissions.yaml's
@@ -237,7 +245,12 @@ class UnknownRoleError(ValueError):
     given, but it does not exist anywhere". Reusing it here would collapse two
     distinct failure modes into one, which is exactly the ambiguity OI-981
     built that sentinel to avoid.
+
+    A :class:`PermissionPolicyRefused` with ``reason == "unknown-role"``: a role in
+    no register is one of the evidence refusals of the permission policy.
     """
+
+    reason = "unknown-role"
 
 
 @dataclass
@@ -256,6 +269,11 @@ class PermissionProfile:
     # restrictive vs blanket-skip (no MCP, WebSearch/WebFetch denied, acceptEdits);
     # the point is visibility, not looser tools.
     is_fallback: bool = False
+    # Set by resolve_worker_profile only (permissions P2): the policy this profile
+    # resolved to and its digest. None on a profile built any other way. Excluded
+    # from equality so existing profile comparisons keep their meaning.
+    policy_digest: Optional[str] = field(default=None, compare=False)
+    policy: Optional[PermissionPolicy] = field(default=None, compare=False, repr=False)
 
 
 def _load_yaml(path: Path) -> dict:
@@ -452,6 +470,39 @@ def default_code_worker_profile() -> PermissionProfile:
     )
 
 
+def _strict_role_entry(role: str, yaml_path: Path | None) -> None:
+    """Read the profile source as evidence: refuse when it cannot be proven."""
+    path = yaml_path if yaml_path is not None else _resolve_permissions_yaml()
+    check_profile_entry(role, load_role_profiles(path).get(role))
+
+
+def _with_policy(
+    profile: PermissionProfile, role: Optional[str], agents_dir: Path | None
+) -> PermissionProfile:
+    """Attach the PermissionPolicy and its digest; refuses rather than defaulting."""
+    isolation = None
+    if role and role != _IDENTITY_UNRESOLVED:
+        isolation = load_isolation(
+            role, agents_dir if agents_dir is not None else _resolve_agents_dir()
+        )
+    profile.policy = compose_policy(
+        {
+            "allowed_tools": profile.allowed_tools,
+            "denied_tools": profile.denied_tools,
+            "bash_allow_patterns": profile.bash_allow_patterns,
+            "bash_deny_patterns": profile.bash_deny_patterns,
+            "file_write_scope": profile.file_write_scope,
+            "mcp_servers": profile.mcp_servers,
+        },
+        isolation,
+        is_fallback=profile.is_fallback,
+        implicit_tool_deny=WORKER_CLI_DENIED_TOOLS,
+        mcp_namespace_deny=MCP_NAMESPACE_DENY,
+    )
+    profile.policy_digest = profile.policy.policy_digest
+    return profile
+
+
 def resolve_worker_profile(
     role: Optional[str],
     yaml_path: Path | None = None,
@@ -509,9 +560,10 @@ def resolve_worker_profile(
             _IDENTITY_UNRESOLVED,
         )
     elif role:
+        _strict_role_entry(role, yaml_path)
         profile = load_permissions(role, yaml_path)
         if profile.allowed_tools:
-            return profile
+            return _with_policy(profile, role, agents_dir)
         agents_roles = _agents_registry_roles(agents_dir)
         if agents_roles is not None and role not in agents_roles:
             message = (
@@ -539,7 +591,7 @@ def resolve_worker_profile(
             "resolve_worker_profile: role is None — resolving to the restrictive "
             "code-worker fallback (is_fallback=True)."
         )
-    return default_code_worker_profile()
+    return _with_policy(default_code_worker_profile(), role, agents_dir)
 
 
 def role_grants_write(role: Optional[str], yaml_path: Path | None = None) -> bool:

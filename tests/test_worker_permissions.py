@@ -1033,3 +1033,115 @@ class TestIdentityUnresolvedSentinelFallsBack:
             for rec in caplog.records
         ), "a role known elsewhere must still log the explicit-fallback warning (OI-1100)"
 
+
+
+# ---------------------------------------------------------------------------
+# policy_digest (permissions P2): the boundary a resolved profile carries
+# ---------------------------------------------------------------------------
+
+def _policy_fixture(tmp_path, *, write=("src/**",), deny=("WebFetch",), isolation=None,
+                    governance="standard", role="alpha", profiles=None):
+    """Write a permissions yaml and an agents/ registry into tmp_path."""
+    entry = {"allowed_tools": ["Read", "Write"], "denied_tools": list(deny),
+             "file_write_scope": list(write)}
+    yaml_path = tmp_path / "worker_permissions.yaml"
+    yaml_path.write_text(yaml.safe_dump({"profiles": profiles or {role: entry}}))
+    agents = tmp_path / "agents"
+    for name in (profiles or {role: entry}):
+        (agents / name).mkdir(parents=True, exist_ok=True)
+        (agents / name / "CLAUDE.md").write_text("x")
+        config = {"governance_profile": governance}
+        if isolation is not None:
+            config["isolation"] = isolation
+        (agents / name / "config.yaml").write_text(yaml.safe_dump(config))
+    return yaml_path, agents
+
+
+def _digest(tmp_path, role="alpha", **kwargs):
+    yaml_path, agents = _policy_fixture(tmp_path, role=role, **kwargs)
+    profile = resolve_worker_profile(role, yaml_path=yaml_path, agents_dir=agents)
+    digest = getattr(profile, "policy_digest", None)
+    assert isinstance(digest, str) and len(digest) == 64
+    return digest
+
+
+def _refusal(yaml_path, agents, role="alpha"):
+    try:
+        resolve_worker_profile(role, yaml_path=yaml_path, agents_dir=agents)
+    except ValueError as exc:
+        return exc
+    return None
+
+
+def test_policy_digest_is_stable_and_ignores_yaml_key_order(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path)
+    first = resolve_worker_profile("alpha", yaml_path=yaml_path, agents_dir=agents)
+    reordered = {"profiles": {"alpha": {"file_write_scope": ["src/**"],
+                                        "denied_tools": ["WebFetch"],
+                                        "allowed_tools": ["Write", "Read"]}}}
+    yaml_path.write_text(yaml.safe_dump(reordered, sort_keys=False))
+    again = resolve_worker_profile("alpha", yaml_path=yaml_path, agents_dir=agents)
+    assert isinstance(first.policy_digest, str) and len(first.policy_digest) == 64
+    assert first.policy_digest == again.policy_digest
+
+
+@pytest.mark.parametrize("change", [
+    {"write": ("src/**", "docs/**")}, {"deny": ("WebFetch", "Bash(rm:*)")},
+    {"isolation": {"allowed_paths": ["."]}}, {"isolation": {"scope_type": "x"}},
+])
+def test_policy_digest_changes_with_the_boundary(tmp_path, change):
+    (tmp_path / "base").mkdir()
+    (tmp_path / "changed").mkdir()
+    assert _digest(tmp_path / "base") != _digest(tmp_path / "changed", **change)
+
+
+def test_policy_digest_ignores_role_name_and_governance_profile(tmp_path):
+    for name in ("a", "b", "c"):
+        (tmp_path / name).mkdir()
+    base = _digest(tmp_path / "a", role="alpha")
+    assert _digest(tmp_path / "b", role="beta") == base
+    assert _digest(tmp_path / "c", governance="strict") == base
+
+
+def test_policy_digest_refuses_a_missing_source_without_a_digest(tmp_path):
+    _, agents = _policy_fixture(tmp_path)
+    exc = _refusal(tmp_path / "absent.yaml", agents)
+    assert getattr(exc, "reason", None) == "source-missing"
+
+
+def test_policy_digest_refuses_none_source(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path)
+    yaml_path.write_text("")
+    assert getattr(_refusal(yaml_path, agents), "reason", None) == "source-empty"
+    yaml_path.write_text("profiles:\n")
+    assert getattr(_refusal(yaml_path, agents), "reason", None) == "source-malformed"
+
+
+def test_policy_digest_refuses_broken_yaml(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path)
+    yaml_path.write_text("profiles: [unclosed\n  alpha: {")
+    assert getattr(_refusal(yaml_path, agents), "reason", None) == "source-broken-yaml"
+
+
+def test_policy_digest_refuses_unknown_role_and_unknown_key(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path)
+    assert getattr(_refusal(yaml_path, agents, role="nobody"), "reason", None) == "unknown-role"
+    yaml_path.write_text(yaml.safe_dump({"profiles": {"alpha": {
+        "allowed_tools": ["Read"], "surprise": True}}}))
+    assert getattr(_refusal(yaml_path, agents), "reason", None) == "unknown-source-key"
+
+
+def test_policy_digest_resolves_fallback_and_shows_it_in_sources(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path)
+    (agents / "empty").mkdir()
+    (agents / "empty" / "CLAUDE.md").write_text("x")
+    profile = resolve_worker_profile("empty", yaml_path=yaml_path, agents_dir=agents)
+    assert profile.is_fallback and len(profile.policy_digest) == 64
+    assert profile.policy.sources["role_profile"] == {"state": "fallback"}
+    assert profile.policy.sources["governance_profile"] == {"state": "excluded_source"}
+
+
+def test_policy_digest_isolation_empty_is_present_not_missing(tmp_path):
+    yaml_path, agents = _policy_fixture(tmp_path, isolation={})
+    profile = resolve_worker_profile("alpha", yaml_path=yaml_path, agents_dir=agents)
+    assert profile.policy.sources["agent_isolation"] == {"state": "present-empty"}
