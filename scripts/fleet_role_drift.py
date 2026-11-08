@@ -97,8 +97,13 @@ for _p in (_HERE / "lib", _HERE):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+import t0_playbook
+import playbook_loading_evidence
+
 ROLE_MARKER_BEGIN = "<!-- VNX:BEGIN T0-ROLE -->"
 ROLE_MARKER_END = "<!-- VNX:END T0-ROLE -->"
+# Worst first: the aggregate playbook status is the worst state over the judged files.
+_PLAYBOOK_SEVERITY = ("missing", "absent", "stale_source", "stale_sha", "ok")
 ROLE_BASENAME = "role-orchestrator.md"
 PROVIDER_FILES = ("AGENTS.md", "GEMINI.md")
 T0_REL = Path(".claude/terminals/T0")
@@ -262,8 +267,58 @@ def _measure_startup(project_root: Path, t0_dir: Path) -> Dict[str, Any]:
     }
 
 
+def _playbook_file_states(t0_dir: Path, current: Any) -> Dict[str, str]:
+    """Pointer state per provider file that EXISTS. A file that is not there is the
+    gitignored-artefact coverage gap the content axis already warns about."""
+    states: Dict[str, str] = {}
+    for name in PROVIDER_FILES:
+        text = _read(t0_dir / name)
+        if text is not None:
+            states[name] = t0_playbook.pointer_state(t0_playbook.parse_block(text), current)
+    return states
+
+
+def _worst_playbook_status(states: Dict[str, str], current: Any) -> str:
+    """`missing` when no source resolves, `absent` when no file is judged, else the worst file."""
+    if current.state != t0_playbook.STATE_OK:
+        return t0_playbook.STATE_MISSING
+    if not states:
+        return t0_playbook.STATE_ABSENT
+    return min(states.values(), key=_PLAYBOOK_SEVERITY.index)
+
+
+def _measure_playbook(project_root: Path, t0_dir: Path) -> Dict[str, Any]:
+    """Axis 4 (ADR-058): is the playbook pointer fresh, and was it LOADED? Present is
+    not loaded: `loading` is `unverified` unless a valid evidence record says otherwise."""
+    current = t0_playbook.resolve(project_root)
+    states = _playbook_file_states(t0_dir, current)
+    status = _worst_playbook_status(states, current)
+    pid, state_dir = playbook_loading_evidence.resolve_project_state(project_root)
+    loading = playbook_loading_evidence.loading_by_provider(pid, state_dir, current)
+    report: Dict[str, Any] = {
+        "status": status,
+        "source_id": current.source_id,
+        "path": current.path,
+        "degraded": current.degraded,
+        "source_missing": current.state != t0_playbook.STATE_OK,
+        "probed": list(current.probed),
+        "files": states,
+        "loading": "loaded" if all(v == "loaded" for v in loading.values()) else "unverified",
+    }
+    for provider, value in loading.items():
+        report[provider] = {"loading": value}
+    return report
+
+
+def _playbook_behind(playbook: Dict[str, Any]) -> bool:
+    """Only `ok` is current; a missing source is behind even when no provider file exists."""
+    if playbook["source_missing"]:
+        return True
+    return any(state != t0_playbook.STATE_OK for state in playbook["files"].values())
+
+
 def measure_project(project_root: Path, canon: str, *, is_canon_source: bool = False) -> Dict[str, Any]:
-    """All three axes for one repo."""
+    """All four axes for one repo."""
     t0_dir = project_root / T0_REL
     surfaces: Dict[str, Any] = {}
 
@@ -278,6 +333,7 @@ def measure_project(project_root: Path, canon: str, *, is_canon_source: bool = F
 
     reach = _measure_reach(t0_dir)
     startup = _measure_startup(project_root, t0_dir)
+    playbook = _measure_playbook(project_root, t0_dir)
 
     # An ABSENT provider mirror is a coverage gap, not drift, and the two must
     # not share a verdict. AGENTS.md and GEMINI.md are GITIGNORED
@@ -306,8 +362,12 @@ def measure_project(project_root: Path, canon: str, *, is_canon_source: bool = F
         "content": {"ok": not drifted and not role_absent, "surfaces": surfaces},
         "reach": reach,
         "startup": startup,
+        "playbook": playbook,
         "warnings": warnings,
-        "behind": bool(drifted) or role_absent or not reach["ok"] or not startup["ok"],
+        "behind": (
+            bool(drifted) or role_absent or not reach["ok"] or not startup["ok"]
+            or _playbook_behind(playbook)
+        ),
     }
 
 
@@ -368,6 +428,16 @@ def _measure_canon_freshness(canon_path: Path, canon: str, projects: List[Dict[s
     }
 
 
+def _render_playbook(pb: Dict[str, Any]) -> List[str]:
+    where = f"{pb['source_id']} {pb['path']}" if not pb["source_missing"] else "no source in (a)-(e)"
+    lines = [f"           playbook {pb['status'].upper():12s} {where}"]
+    for src in pb["probed"] if pb["source_missing"] else []:
+        lines.append(f"                      | tried {src}")
+    loaded = ", ".join(f"{p}={pb[p]['loading']}" for p in playbook_loading_evidence.PROVIDERS)
+    lines.append(f"                      | loading {loaded}")
+    return lines
+
+
 def render_text(report: Dict[str, Any]) -> str:
     out: List[str] = []
     out.append(f"canon: {report['canon']['path']}  sha={report['canon']['sha']}")
@@ -396,6 +466,7 @@ def render_text(report: Dict[str, Any]) -> str:
         if not p["startup"]["ok"]:
             for route, r in p["startup"]["routes"].items():
                 out.append(f"                      | {route}: {r['reason']}")
+        out.extend(_render_playbook(p["playbook"]))
         out.append("")
     behind = report["summary"]["projects_behind"]
     total = report["summary"]["projects_measured"]
