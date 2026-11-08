@@ -135,6 +135,8 @@ A required check is not a verdict either: the `Dispatch-ID Slug-Match Gate` is a
 
 This table routes a dispatch to a role. Binding a *skill* — a method document that rides along with an existing role — is a spec field, not a routing decision: see §15 (ADR-048).
 
+A role also declares a *set* of skills (`agents/<role>/config.yaml:skills`). That set is a second, independent axis from the single bound slug, and from `VNX_AGENT_LAYOUT=on` (R6 of `agent-skill-discovery-binding`) it is materialised where the provider discovers it: see §15 "Where the role's skills land" (ADR-059).
+
 ## 5. Lane selection (which dispatch path)
 
 | Task | Lane |
@@ -409,3 +411,27 @@ The block is additive, never a replacement: the role source (`agents/<role>/CLAU
 | any reviewer seat | nowhere | nothing; `enrichment_allowed` (`scripts/lib/reviewer_roles.py:32`) refuses it and the receipt reads `reviewer_bound` |
 
 **Rollback (ADR-048 §6).** RS-3 (the receipt fields), then RS-2 (the injection), then RS-1 (the staging refusal); RS-5 and the ADR revert independently of those three.
+
+### Where the role's skills land (ADR-059, operating half)
+
+The bound slug above is one skill, delivered as prompt text. The role's declared set is a second, independent axis: the list in `agents/<role>/config.yaml:skills`, copied (never symlinked) into the disposable worktree of the dispatch at the place the provider's CLI discovers on its own. The mechanism, the closed status and reason sets and the record contract live in ADR-059; this is what an operator needs.
+
+| Provider | Skills land in | Evidence |
+|---|---|---|
+| claude | `<worktree>/.claude/skills/<slug>/` | the session listing contains every declared slug; the rest is counted per origin |
+| codex | `<worktree>/.agents/skills/<slug>/` | the placement is exactly the declared set (C3a) and the CLI names the skill (C3b) |
+| kimi, gemini, the `--bare` harness lanes | nowhere; kimi and gemini stay prompt-only, `--bare` is unmeasured (cell C2) | none |
+
+**What `VNX_AGENT_LAYOUT` means for a dispatch.**
+
+| Value | Effect |
+|---|---|
+| `off` (default) | Nothing is copied, no record is written, the receipt is byte-equal to today's. |
+| `shadow` | The phase-1 shadow copy under `.vnx-agent-skills/`, which no CLI discovers; observation only. |
+| `on` | Works only from R6 of `agent-skill-discovery-binding`. Until then it reads as `off` with one WARNING (`scripts/lib/agent_layout.py:41`). From R6 the declared set is materialised at the native destination above. The flag is set per project, never fleet-wide. |
+
+**What to expect.** In the fabric repo every declared skill is already tracked, so `on` reports `already_native` per slug and copies nothing; the gain there is the measurement. A skill folder is never overwritten and nothing under `.claude/skills` is ever deleted. Codex removes only a folder that carries its own `.vnx-managed.json` marker for this dispatch; a foreign folder stays and the run ends `partial` with `not_owned:<slug>`. The materialiser never refuses a dispatch: it fails open with a WARNING and a `skipped` or `error` record.
+
+**Authoring a skill.** A shared skill is authored in `skills/<slug>/SKILL.md`. A new `.claude/skills/<slug>/SKILL.md` is a generated, ignored path and needs `git add -f` to be tracked (ADR-059 decision 6).
+
+**Where to read the evidence.** The receipt's `context_manifest` pointer (`{schema, status, sha256}`, plus `source` = `session` or `materialized`) resolves to the record at `<state_dir>/agent_skill_materializations/<dispatch_id>/<provider>.attempt-<n>.json`. A missing, unparseable or identity-foreign record never reads as `ok`. The measured outcomes per cell are committed in `docs/investigations/2026-11-09-agent-skill-discovery.md` (R8), run by the T0 and never by a builder.
