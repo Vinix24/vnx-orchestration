@@ -22,7 +22,7 @@ from dispatch_lifecycle import (  # its table, its grace, its parser: never a co
     ABANDON_GRACE_SECONDS, END_INTENT_DIRNAME, END_STATE_TARGET, PROJECTION_ROUTES,
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
 )
-from coordination_db import DISPATCH_TRANSITIONS  # the legal hops, never a copy
+from coordination_db import DISPATCH_TRANSITIONS, TERMINAL_DISPATCH_STATES  # never a copy
 from ledger_end_line import end_line
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
@@ -35,6 +35,10 @@ DEFECTS = ("start_without_end", "end_without_start", "double_end", "projection_c
 KEY_FIELDS = ("project_id", "dispatch_id", "attempt")
 GIT_TIMEOUT_SECONDS = 10.0  # a git that hangs must never hang the count
 DEFAULT_REPO = Path(__file__).resolve().parent  # the checkout that writes the lines
+DELIVERABLE_PREFIX = "dlv-"  # ADR-056: only these rows are deliverables
+MERGE_EVENT_TYPE, MERGE_CONCLUSION = "pr_merged", "merged"  # pr_merge.py's receipt
+MEMBER_DELIVERED, MEMBER_NOT_DELIVERED = "delivered", "not_delivered"
+MEMBER_UNKNOWN, MEMBER_OUT = "unknown", "out_of_cohort"
 
 
 class Unmeasured(Exception):
@@ -196,6 +200,95 @@ def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated
     return found
 
 
+class Member(dict):
+    """One deliverable's cohort membership; a dict (JSON-safe) that also reads as attributes."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+def _parse_period_start(value):
+    """The period start as an aware datetime; ``None`` stays ``None``, junk is ``Unmeasured``."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        stamp = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise Unmeasured(f"period start {value!r} is not an ISO timestamp") from exc
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+
+
+def _has_merge_receipt(lines, project: str) -> bool:
+    """A ``pr_merged`` receipt with conclusion exactly ``merged`` for this project (positive match)."""
+    for line in lines:
+        pid = line.get("project_id")
+        if isinstance(pid, str) and pid.strip() and pid.strip() != project:
+            continue
+        if line.get("event_type") == MERGE_EVENT_TYPE and line.get("conclusion") == MERGE_CONCLUSION:
+            return True
+    return False
+
+
+def _member(row: dict, project: str, period_start, records: dict) -> Member:
+    """Decide one terminal row (D9, D10); anything unreadable is ``unknown``, never delivered."""
+    did, state = str(row["dispatch_id"]), str(row.get("state") or "").strip()
+
+    def make(status: str, reason: str) -> Member:
+        return Member(project_id=project, dispatch_id=did, state=state, status=status, reason=reason)
+
+    if period_start is not None:
+        try:
+            created = _parse_period_start(row.get("created_at"))
+        except Unmeasured:
+            return make(MEMBER_UNKNOWN, "created_at_unreadable")
+        if created is None:
+            return make(MEMBER_UNKNOWN, "created_at_unreadable")
+        if created < period_start:
+            return make(MEMBER_OUT, "created_before_period")
+    if state != "completed":
+        return make(MEMBER_NOT_DELIVERED, state)
+    pr_ref = row.get("pr_ref")
+    if isinstance(pr_ref, str) and pr_ref.strip() and not _has_merge_receipt(records.get(did, ()), project):
+        return make(MEMBER_UNKNOWN, "receipt_missing")
+    return make(MEMBER_DELIVERED, "completed")
+
+
+def _membership(state_dir: Path, project: str, period_start, records: dict) -> list:
+    """Every terminal ``dlv-`` row of this project with its membership, sorted by dispatch id."""
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_UNREADABLE:
+        raise Unmeasured(f"{db_path} exists but is not a regular file; membership is not measurable")
+    if store != STORE_PRESENT:
+        return []
+    marks = ",".join("?" for _ in TERMINAL_DISPATCH_STATES)
+    try:
+        with get_connection(state_dir) as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT dispatch_id, state, pr_ref, created_at FROM dispatches "
+                f"WHERE project_id = ? AND dispatch_id LIKE ? AND state IN ({marks}) "
+                "ORDER BY dispatch_id", (project, DELIVERABLE_PREFIX + "%",
+                                         *sorted(TERMINAL_DISPATCH_STATES)))]
+    except Exception as exc:  # vnx-silent-except: an unreadable store is a refusal, never "no rows"
+        raise Unmeasured(f"cannot read {db_path}: {exc}") from exc
+    return [_member(row, project, period_start, records) for row in rows]
+
+
+def _membership_summary(members: list) -> dict:
+    """Counts per status, so a reader sees the cohort without walking the list."""
+    summary = dict.fromkeys((MEMBER_DELIVERED, MEMBER_NOT_DELIVERED, MEMBER_UNKNOWN, MEMBER_OUT), 0)
+    for member in members:
+        summary[member["status"]] += 1
+    return summary
+
+
 def _sweep_age(state_dir: Path, evaluated: datetime):
     """The heartbeat K-6 writes: ``(age_seconds, None)``, or ``(None, reason)`` when absent."""
     path = state_dir / END_INTENT_DIRNAME / SWEEP_HEARTBEAT_FILENAME
@@ -214,6 +307,7 @@ def _unmeasured(reason: str, problems=None) -> dict:
     return {"status": STATUS_UNMEASURED, "reason": reason, "cohort": None,
             "counts": dict.fromkeys(DEFECTS), "findings": {name: [] for name in DEFECTS},
             "sweep_heartbeat_age_seconds": None, "sweep_heartbeat_reason": reason,
+            "membership": None, "membership_summary": None, "period_start": None,
             "problems": list(problems) if problems else [reason]}
 
 
@@ -266,12 +360,14 @@ def briefing_line(count: dict, now=None) -> str:
 
 
 def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=None, repo=None,
-                            now=None) -> dict:
+                            now=None, period_start=None) -> dict:
     """Count the five defects over this project's ``v3`` lines. Read-only.
 
     ``activation_commit`` narrows the cohort (without it every ``v3`` line is in
     and ``cohort`` says ``all_v3``), ``repo`` is the checkout the provenance is
     read against, ``now`` the evaluation instant (absent: the real clock).
+    ``period_start`` bounds the deliverable cohort (D9): a ``dlv-`` row created
+    before it is ``out_of_cohort``; absent, no row is excluded by age.
     """
     state_path = Path(state_dir)
     evaluated = _as_utc(now) or datetime.now(timezone.utc)
@@ -290,6 +386,8 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
         starts, ends, unknown, problems, records = _records(
             state_path, repo, activation, project)
         found = _defects(state_path, starts, ends, records, evaluated, problems)
+        start = _parse_period_start(period_start)
+        members = _membership(state_path, project, start, records)
         if problems:  # a problem is not a measurement: no zero may stand for it
             return _unmeasured("; ".join(problems), problems)
     except Unmeasured as exc:
@@ -301,4 +399,6 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
             "evaluated_at": evaluated.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "counts": dict(counts, total=sum(counts.values())), "findings": found,
             "sweep_heartbeat_age_seconds": age, "sweep_heartbeat_reason": age_reason,
+            "membership": members, "membership_summary": _membership_summary(members),
+            "period_start": start.strftime("%Y-%m-%dT%H:%M:%SZ") if start else None,
             "problems": problems}
