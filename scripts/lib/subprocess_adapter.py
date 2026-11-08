@@ -154,12 +154,12 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
         # before any subprocess spawns, instead of the generic handler
         # below silently continuing with _FALLBACK_SCOPE_ARGS.
         raise
-    except Exception as exc:  # logged below; the fallback stays scoped, never skip-permissions
-        logger.warning(
-            "subprocess_adapter: scope-arg build failed (%s); using scoped code-worker default",
-            exc,
-        )
-        return _fallback_scope_args(requires_mcp)
+    except Exception as exc:
+        # An unexpected failure while resolving a known role's policy is an
+        # unproven policy: refuse the dispatch, never degrade to a fallback.
+        raise PermissionPolicyRefused(
+            f"policy resolution failed: {type(exc).__name__}", "policy-resolution-error",
+        ) from exc
 
 
 def _refusal_slug(exc: "PermissionPolicyRefused") -> str:

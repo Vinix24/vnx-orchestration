@@ -156,3 +156,25 @@ def test_load_isolation_refuses_a_non_mapping_document(tmp_path, config):
 
 def test_load_isolation_a_mapping_without_isolation_is_absent(tmp_path):
     assert load_isolation("r", _agents(tmp_path, "r", "{}\n")) is None
+
+
+@pytest.mark.parametrize("bad_key", [1, True, None, 1.5])
+def test_non_string_keys_refuse_with_source_malformed_in_profile_and_isolation(tmp_path, bad_key):
+    # Mixed key types used to raise TypeError inside sorted() (codex r3 blocker).
+    entry = {bad_key: [], "unexpected": []}
+    with pytest.raises(PermissionPolicyRefused) as info:
+        check_profile_entry("code-reviewer", entry)
+    assert info.value.reason == "source-malformed"
+    assert type(bad_key).__name__ in str(info.value)
+    with pytest.raises(PermissionPolicyRefused) as info:
+        load_isolation("r", _agents(tmp_path, "r", yaml.safe_dump({"isolation": entry})))
+    assert info.value.reason == "source-malformed"
+    with pytest.raises(PermissionPolicyRefused) as info:
+        _compose({bad_key: [], "unexpected": []})
+    assert info.value.reason == "source-malformed"
+
+
+def test_non_string_key_message_names_the_type_not_the_value():
+    with pytest.raises(PermissionPolicyRefused) as info:
+        check_profile_entry("r", {"secret-value-9": [], 7: []})
+    assert "int" in str(info.value) and "7" not in str(info.value)

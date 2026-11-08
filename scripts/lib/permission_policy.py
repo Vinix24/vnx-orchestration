@@ -136,9 +136,20 @@ def load_role_profiles(path: Path) -> Mapping[str, Any]:
     return data["profiles"]
 
 
+def _require_str_keys(where: str, block: Mapping[Any, Any]) -> None:
+    """Refuse a block with a non-string key before any set difference or sort.
+
+    The message names the key's type, never its value.
+    """
+    for key in block:
+        if not isinstance(key, str):
+            raise _malformed(f"{where} has a non-string key of type {type(key).__name__}")
+
+
 def _check_keys(where: str, block: Any, known: frozenset, lists: Iterable[str]) -> None:
     if not isinstance(block, dict):
         raise _malformed(f"{where} is not a mapping")
+    _require_str_keys(where, block)
     unknown = sorted(set(block) - known)
     if unknown:
         raise PermissionPolicyRefused(
@@ -204,6 +215,7 @@ def compose_policy(
     ``implicit_tool_deny`` is denied to every worker whatever the role says;
     ``mcp_namespace_deny`` is denied when the role names no MCP server.
     """
+    _require_str_keys("role fields", fields)
     unknown = sorted(set(fields) - PROFILE_KEYS)
     if unknown:
         raise PermissionPolicyRefused(

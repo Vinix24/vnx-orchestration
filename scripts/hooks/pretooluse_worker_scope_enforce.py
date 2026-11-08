@@ -72,9 +72,15 @@ Audit: every block decision appends one ``worker_scope_block`` event to
 $VNX_DATA_DIR/events/worker_scope_block.ndjson via atomic_io.audit_event_append
 (same audit channel as the rest of the fabric).
 
-Fail-open by construction: any missing dependency, malformed payload, or
-unexpected exception results in an "allow" decision. This hook must never be
-the reason a legitimate tool call is refused.
+Fail-open outside the policy, fail-closed inside it. Fail-open: a missing
+dependency at import, a malformed hook payload, an unreadable dispatch-paths
+variable and an audit-write failure result in an "allow" decision; the hook must
+never be the reason a legitimate tool call is refused for those. Fail-closed:
+the one call that resolves the role's permission policy. A refusal
+(``PermissionPolicyRefused``) and any other exception there (reason slug
+``policy-resolution-error``, exception type name only) block every Bash and
+write-like tool call, because an unproven policy is not a permission. Only
+``UnknownRoleError`` keeps the code-worker fallback.
 """
 
 from __future__ import annotations
@@ -231,6 +237,11 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
         # main()'s fail-open catch would be an implicit allow. Read-only tools
         # (everything but Bash/Write/Edit/MultiEdit) stay allowed.
         return _refused_decision(tool_name, exc.reason, role)
+    except Exception as exc:  # fail CLOSED on policy resolution only
+        # Any other failure while resolving the policy is an unproven policy,
+        # the same as a refusal: block. Only the exception type name goes out.
+        return _refused_decision(
+            tool_name, f"policy-resolution-error: {type(exc).__name__}", role)
 
     if tool_name == "Bash":
         command = tool_input.get("command")
