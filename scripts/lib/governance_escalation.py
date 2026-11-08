@@ -11,6 +11,7 @@ Escalation state machine follows the escalation model (41_FPD_ESCALATION_MODEL.m
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from typing import Any, Dict, FrozenSet, List, Optional
@@ -58,7 +59,12 @@ OVERRIDE_TYPES = frozenset({
     "dead_letter_override",
     "hold_release",
     "escalation_resolve",
+    "b3_cap_override",
 })
+
+#: What an override source writes for a key part it cannot resolve (ADR-056): never
+#: omitted and never booked silently as a default project.
+UNKNOWN_IDENTITY = "unknown"
 
 GATE_ACTORS = frozenset({"t0", "operator"})
 
@@ -343,6 +349,12 @@ def _validate_override_params(
         raise GovernanceError(f"Override outcome must be 'granted' or 'denied', got: {outcome!r}")
 
 
+def _identity_value(value: Optional[str]) -> str:
+    """A key part as written: the stripped value, ``unknown`` when missing or empty."""
+    text = value.strip() if isinstance(value, str) else ""
+    return text or UNKNOWN_IDENTITY
+
+
 def _insert_override_record(
     conn: sqlite3.Connection,
     *,
@@ -358,21 +370,31 @@ def _insert_override_record(
     policy_class: Optional[str],
     decision_type: Optional[str],
     override_scope: Optional[str],
+    project_id: Optional[str] = None,
+    delivery_id: Optional[str] = None,
 ) -> None:
-    """Insert override record and emit governance_override event."""
+    """Insert override record and emit governance_override event.
+
+    ``project_id`` and ``delivery_id`` (ADR-056 identity) go into ``metadata_json``
+    and into the event metadata, ``unknown`` when missing: no column, no migration.
+    """
     now = _now_utc()
+    identity = {
+        "project_id": _identity_value(project_id),
+        "delivery_id": _identity_value(delivery_id),
+    }
     conn.execute(
         """
         INSERT INTO governance_overrides
             (override_id, entity_type, entity_id, actor, override_type,
              justification, outcome, previous_level, new_level,
-             policy_class, decision_type, override_scope, occurred_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             policy_class, decision_type, override_scope, occurred_at, metadata_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             override_id, entity_type, entity_id, actor, override_type,
             justification, outcome, previous_level, new_level,
-            policy_class, decision_type, override_scope, now,
+            policy_class, decision_type, override_scope, now, json.dumps(identity),
         ),
     )
     _append_event(
@@ -391,6 +413,7 @@ def _insert_override_record(
             "policy_class": policy_class,
             "decision_type": decision_type,
             "override_scope": override_scope,
+            **identity,
         },
     )
 
@@ -407,8 +430,14 @@ def record_override(
     policy_class: Optional[str] = None,
     decision_type: Optional[str] = None,
     override_scope: Optional[str] = None,
+    project_id: Optional[str] = None,
+    delivery_id: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Record a governance override event. Returns the override record dict."""
+    """Record a governance override event. Returns the override record dict.
+
+    ``project_id`` and ``delivery_id`` are the ADR-056 key; a missing or empty one
+    is written as ``unknown``.
+    """
     _validate_override_params(actor, override_type, justification, outcome)
 
     override_id = str(uuid.uuid4())
@@ -421,6 +450,7 @@ def record_override(
         actor=actor, override_type=override_type, justification=justification,
         outcome=outcome, previous_level=previous_level, new_level=new_level,
         policy_class=policy_class, decision_type=decision_type, override_scope=override_scope,
+        project_id=project_id, delivery_id=delivery_id,
     )
 
     if outcome == "granted" and new_level != previous_level:
