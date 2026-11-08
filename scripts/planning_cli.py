@@ -71,6 +71,7 @@ import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
+import actor_class  # noqa: E402
 import plan_scope
 import provider_switch
 import schema_manifest
@@ -2253,6 +2254,15 @@ def _format_decision_ref(decision_ref: Optional[str]) -> str:
     return f"{decision} ({n_reports} report(s), {n_rejected} rejected alternative(s))"
 
 
+def _derived_actor(name: str, metadata: Optional[dict] = None) -> dict:
+    """``actor`` and ``metadata`` kwargs for an event: *name* stays in the legacy column and
+    ``metadata.actor_class`` carries the class derived from the signals (ADR-056)."""
+    return {
+        "actor": name,
+        "metadata": {**(metadata or {}), "actor_class": actor_class.derive()},
+    }
+
+
 def _append_coordination_event(
     conn: sqlite3.Connection,
     *,
@@ -3254,7 +3264,7 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state="proposed",
             to_state="ready",
-            actor="operator",
+            **_derived_actor("operator"),
             reason="operator gate: proposed -> ready",
             project_id=project_id,
         )
@@ -3370,14 +3380,13 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state="ready",
             to_state="completed",
-            actor="operator",
             reason=f"deliverable close: PR {pr_ref} (operator attestation)",
             project_id=project_id,
-            metadata={
+            **_derived_actor("operator", {
                 "evidence_pr": evidence_number,
                 "pr_ref": pr_ref,
                 "attestation": "operator",
-            },
+            }),
         )
         conn.commit()
     finally:
@@ -3492,11 +3501,10 @@ def _book_superseded_attempt(
         dispatch_id=dispatch_id,
         from_state=from_state,
         to_state="expired",
-        actor="operator",
         reason=f"deliverable close: PR {pr_ref} delivered by round {round_id} (operator attestation)",
         project_id=project_id,
-        metadata={"evidence_pr": evidence_number, "pr_ref": pr_ref,
-                  "superseded_by": round_id, "attestation": "operator"},
+        **_derived_actor("operator", {"evidence_pr": evidence_number, "pr_ref": pr_ref,
+                                      "superseded_by": round_id, "attestation": "operator"}),
     )
     return {"action": "superseded", "round": round_id}
 
