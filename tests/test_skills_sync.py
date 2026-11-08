@@ -140,5 +140,120 @@ class TestDirectoryBasedSyncSet:
         assert "fixture-shipped" in sync_set  # sanity: non-opted-out still included
 
 
+def _run_for(project_root: Path, tmp_path: Path, *args: str, extra_env=None):
+    """Run the sync with codex/gemini absent from PATH and HOME/VNX_HOME isolated."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for tool in ("bash", "rsync", "date", "cp", "mkdir", "grep", "git", "dirname", "basename",
+                 "cat", "sed", "tr", "uname", "env", "python3", "sort", "head", "wc", "readlink"):
+        found = shutil.which(tool)
+        if found and not (bindir / tool).exists():
+            (bindir / tool).symlink_to(found)
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    env = {
+        "PATH": str(bindir), "HOME": str(home),
+        "VNX_PROJECT_ROOT": str(project_root),
+        "VNX_HOME": str(REPO), "VNX_STATE_DIR": str(tmp_path / "state"),
+    }
+    env.update(extra_env or {})
+    return subprocess.run(
+        [shutil.which("bash"), str(VNX), "skills", "sync", *args],
+        capture_output=True, text=True, env=env, cwd=str(project_root),
+    )
+
+
+@pytest.mark.skipif(shutil.which("rsync") is None, reason="rsync required for skills sync")
+class TestSkillsSyncForProvider:
+    def test_codex_mirrors_without_cli(self, project, tmp_path):
+        assert shutil.which("codex", path=str(tmp_path / "bin")) is None
+        r = _run_for(project["root"], tmp_path, "--for", "codex", "--apply")
+        mirrored = project["root"] / ".agents/skills/horizon/SKILL.md"
+        assert mirrored.is_file(), f"codex mirror absent without the CLI: {r.stderr.strip()}"
+        assert r.returncode == 0, r.stderr
+
+    def test_gemini_mirrors_without_cli(self, project, tmp_path):
+        r = _run_for(project["root"], tmp_path, "--for", "gemini", "--apply")
+        assert r.returncode == 0, r.stderr
+        assert (project["root"] / ".gemini/skills/horizon/SKILL.md").is_file()
+        assert not (project["root"] / ".agents/skills").exists()
+
+    def test_mirrors_even_when_claude_skills_already_current(self, project, tmp_path):
+        _run_for(project["root"], tmp_path, "--apply")
+        r = _run_for(project["root"], tmp_path, "--for", "codex", "--apply")
+        assert r.returncode == 0, r.stderr
+        assert (project["root"] / ".agents/skills/horizon/SKILL.md").is_file()
+
+    def test_dry_run_with_for_writes_nothing(self, project, tmp_path):
+        r = _run_for(project["root"], tmp_path, "--for", "codex")
+        assert r.returncode == 0, r.stderr
+        assert "dry-run" in (r.stdout + r.stderr)
+        assert not (project["root"] / ".agents").exists()
+        assert _backups(project["skills"]) == []
+
+    def test_unknown_provider_is_refused(self, project, tmp_path):
+        r = _run_for(project["root"], tmp_path, "--for", "kimi", "--apply")
+        assert r.returncode != 0
+        assert "--for" in (r.stdout + r.stderr)
+        assert not (project["root"] / ".agents").exists()
+
+    def test_for_without_value_is_refused(self, project, tmp_path):
+        r = _run_for(project["root"], tmp_path, "--for")
+        assert r.returncode != 0
+
+    def test_auto_detect_without_for_keeps_cli_probe(self, project, tmp_path):
+        (project["root"] / ".agents/skills").mkdir(parents=True)
+        r = _run_for(project["root"], tmp_path, "--apply")
+        assert r.returncode == 0, r.stderr
+        # codex is not on PATH: today's probe leaves the existing mirror untouched.
+        assert not (project["root"] / ".agents/skills/horizon/SKILL.md").exists()
+
+    def test_auto_detect_mirrors_when_cli_present(self, project, tmp_path):
+        (project["root"] / ".agents/skills").mkdir(parents=True)
+        fake = tmp_path / "bin"
+        fake.mkdir(exist_ok=True)
+        (fake / "codex").write_text("#!/bin/sh\nexit 0\n")
+        (fake / "codex").chmod(0o755)
+        r = _run_for(project["root"], tmp_path, "--apply")
+        assert r.returncode == 0, r.stderr
+        assert (project["root"] / ".agents/skills/horizon/SKILL.md").is_file()
+
+    def test_detector_is_called_and_unsafe_names_reported(self, project, tmp_path):
+        shim = tmp_path / "shim"
+        shim.mkdir()
+        log = tmp_path / "detector.log"
+        (shim / "sitecustomize.py").write_text(f"import sys\nsys.path.insert(0, {str(shim)!r})\n")
+        (shim / "skill_portability.py").write_text(
+            "import importlib.util, sys\n"
+            f"spec = importlib.util.spec_from_file_location('_real_sp', {str(REPO / 'scripts/lib/skill_portability.py')!r})\n"
+            "real = importlib.util.module_from_spec(spec)\n"
+            "sys.modules['_real_sp'] = real\n"
+            f"sys.path.insert(0, {str(REPO / 'scripts/lib')!r})\n"
+            "spec.loader.exec_module(real)\n"
+            "def provider_unsafe_skills(tree):\n"
+            f"    open({str(log)!r}, 'a').write(str(tree) + '\\n')\n"
+            "    return ['zz-fake-unsafe'] + real.provider_unsafe_skills(tree)\n"
+        )
+        r = _run_for(project["root"], tmp_path, "--for", "codex", "--apply",
+                     extra_env={"PYTHONPATH": str(shim)})
+        out = r.stdout + r.stderr
+        assert r.returncode == 0, out
+        assert log.exists(), out
+        assert log.read_text().strip() == str(REPO / "skills")
+        lines = [ln for ln in out.splitlines() if "zz-fake-unsafe" in ln]
+        assert len(lines) == 1 and "codex" in lines[0]
+        # Warning, not a gate: the unsafe skills are still mirrored.
+        assert (project["root"] / ".agents/skills/architect/SKILL.md").is_file()
+
+    def test_real_detector_reports_each_unsafe_skill_by_name(self, project, tmp_path):
+        sys.path.insert(0, str(REPO / "scripts" / "lib"))
+        from skill_portability import provider_unsafe_skills  # noqa: E402
+        names = provider_unsafe_skills(SHIPPED_SKILLS)
+        r = _run_for(project["root"], tmp_path, "--for", "gemini")
+        out = r.stdout + r.stderr
+        for name in names:
+            assert sum(1 for ln in out.splitlines() if f"{name}" in ln and "WARN" in ln) == 1
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
