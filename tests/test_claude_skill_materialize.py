@@ -305,3 +305,99 @@ def test_file_link_planted_after_the_check_is_not_followed(tmp_path, worktree):
         result = _call(worktree, tmp_path)
     assert result["status"] != "ok"
     assert (outside / "data.txt").read_text() == "original"
+
+
+def _empty_outside(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return outside
+
+
+def _swap_after(monkeypatch, name, swap):
+    """Run the original validation, then let *swap* replace an ancestor (the check-then-use window)."""
+    real = getattr(asm, name)
+    seen: list[str] = []
+
+    def wrapper(*args, **kwargs):
+        out = real(*args, **kwargs)
+        seen.append(name)
+        # the native ignore check is the last validation and runs once per slug (alpha, beta): swap after the last one
+        if name != "_dest_ignored" or len(seen) == 2:
+            swap()
+        return out
+
+    monkeypatch.setattr(asm, name, wrapper)
+
+
+def test_swapped_dot_claude_ancestor_is_not_followed(tmp_path, worktree, monkeypatch):
+    outside = _empty_outside(tmp_path)
+    (outside / "skills").mkdir()
+
+    def swap():
+        (worktree / ".claude").symlink_to(outside, target_is_directory=True)
+
+    _swap_after(monkeypatch, "_dest_ignored", swap)
+    result = _call(worktree, tmp_path)
+    assert result["status"] != "ok"
+    assert list(outside.rglob("*")) == [outside / "skills"]
+
+
+def test_swapped_existing_dot_claude_ancestor_is_not_followed(tmp_path, worktree, monkeypatch):
+    outside = _empty_outside(tmp_path)
+    (outside / "skills").mkdir()
+    (worktree / ".claude" / "skills").mkdir(parents=True)
+
+    def swap():
+        moved = tmp_path / "moved-claude"
+        (worktree / ".claude").rename(moved)
+        (worktree / ".claude").symlink_to(outside, target_is_directory=True)
+
+    _swap_after(monkeypatch, "_dest_ignored", swap)
+    result = _call(worktree, tmp_path)
+    assert result["status"] != "ok"
+    assert list(outside.rglob("*")) == [outside / "skills"]
+
+
+def test_swapped_shadow_dir_is_not_followed(tmp_path, worktree, monkeypatch):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    outside = _empty_outside(tmp_path)
+
+    def swap():
+        (worktree / ".vnx-agent-skills").symlink_to(outside, target_is_directory=True)
+
+    _swap_after(monkeypatch, "_checked_base", swap)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha", "beta"])
+    assert result["status"] == "error"
+    assert list(outside.rglob("*")) == []
+
+
+def test_swapped_shadow_ancestor_blocks_the_manifest_write(tmp_path, worktree, monkeypatch):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    outside = _empty_outside(tmp_path)
+    real_write = asm._write_manifest
+
+    def swap_then_write(role_fd, manifest):
+        shadow = worktree / ".vnx-agent-skills"
+        moved = tmp_path / "moved"
+        shadow.rename(moved)
+        shadow.symlink_to(outside, target_is_directory=True)
+        real_write(role_fd, manifest)
+
+    monkeypatch.setattr(asm, "_write_manifest", swap_then_write)
+    result = asm.materialize_role_skills(worktree, ROLE, ["alpha"])
+    assert result["status"] == "ok"
+    assert list(outside.rglob("*")) == []
+    assert (tmp_path / "moved" / ROLE / "manifest.json").is_file()
+
+
+def test_swapped_ancestor_of_the_error_manifest_is_not_followed(tmp_path, worktree, monkeypatch):
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", "shadow")
+    outside = _empty_outside(tmp_path)
+
+    def swap():
+        (worktree / ".vnx-agent-skills").symlink_to(outside, target_is_directory=True)
+
+    _swap_after(monkeypatch, "_checked_base", swap)
+    result = asm.materialize_role_skills(worktree, ROLE, ["nonexistent"])
+    assert result["status"] == "error"
+    assert list(outside.rglob("*")) == []

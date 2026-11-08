@@ -17,7 +17,6 @@ import hashlib
 import json
 import logging
 import os
-import shutil
 import stat
 import subprocess
 from datetime import datetime, timezone
@@ -26,7 +25,6 @@ from typing import Any, Iterable
 
 import agent_layout
 from agent_resolver import _is_safe_agent_name
-from atomic_io import atomic_write_json
 from skill_prefix import SKILL_TREES, resolve_skill_dir, skill_search_paths
 
 logger = logging.getLogger(__name__)
@@ -91,10 +89,16 @@ def _write_error_manifest(wt: Path, role: str, result: dict[str, Any]) -> None:
     try:
         if not _is_safe_agent_name(role) or not _is_ignored(wt):
             return
-        role_dir = _safe_error_dir(wt, role)
-        if role_dir is None:
-            return
-        atomic_write_json(role_dir / MANIFEST_NAME, {"schema": MANIFEST_SCHEMA, **result})
+        _checked_base(wt)
+        root_fd = _open_worktree(wt)
+        try:
+            role_fd = _open_role_dir(root_fd, role, reset=False)
+            try:
+                _write_manifest(role_fd, {"schema": MANIFEST_SCHEMA, **result})
+            finally:
+                os.close(role_fd)
+        finally:
+            os.close(root_fd)
     except Exception as exc:  # fail-open: the reason is already in the WARNING
         logger.warning("could not write error manifest: %s", type(exc).__name__)
 
@@ -107,20 +111,6 @@ def _checked_base(wt: Path) -> Path:
     if base.exists() and not _inside(Path(os.path.realpath(base)), Path(os.path.realpath(wt))):
         raise ShadowError("shadow_dir_outside_worktree")
     return base
-
-
-def _safe_error_dir(wt: Path, role: str) -> Path | None:
-    """The role dir for an error manifest, or None when any component is unsafe."""
-    try:
-        base = _checked_base(wt)
-    except ShadowError:
-        return None
-    role_dir = base / role
-    if role_dir.is_symlink() or (role_dir.exists() and not role_dir.is_dir()):
-        return None
-    base.mkdir(exist_ok=True)
-    role_dir.mkdir(exist_ok=True)
-    return role_dir
 
 
 def _is_ignored(wt: Path) -> bool:
@@ -139,11 +129,19 @@ def _materialize(wt: Path, role: str, slugs: list[str], source_root: Path) -> di
     if not _is_safe_agent_name(role):
         raise ShadowError(f"role_refused:{role}")
     sources = [(slug, _vet_slug(source_root, slug)) for slug in slugs]
-    role_dir = _reset_role_dir(wt, role)
-    entries = [_copy_skill(role_dir, source_root, slug, src) for slug, src in sources]
-    manifest = {"schema": MANIFEST_SCHEMA, "status": "ok", "role": role, "skills": entries}
-    atomic_write_json(role_dir / MANIFEST_NAME, manifest)
-    return {"status": "ok", "role": role, "dest": str(role_dir), "skills": entries}
+    _checked_base(wt)
+    root_fd = _open_worktree(wt)
+    try:
+        role_fd = _open_role_dir(root_fd, role, reset=True)
+        try:
+            entries = [_copy_skill(role_fd, source_root, slug, src) for slug, src in sources]
+            manifest = {"schema": MANIFEST_SCHEMA, "status": "ok", "role": role, "skills": entries}
+            _write_manifest(role_fd, manifest)
+        finally:
+            os.close(role_fd)
+    finally:
+        os.close(root_fd)
+    return {"status": "ok", "role": role, "dest": str(wt / SHADOW_DIR / role), "skills": entries}
 
 
 def _vet_slug(source_root: Path, slug: str) -> Path:
@@ -163,20 +161,66 @@ def _inside(path: Path, root: Path) -> bool:
     return path == root or root in path.parents
 
 
-def _reset_role_dir(wt: Path, role: str) -> Path:
-    """Remove a leftover ``<role>`` dir (only that one) and recreate it empty."""
-    base = _checked_base(wt)
-    base.mkdir(exist_ok=True)
-    real_base = Path(os.path.realpath(base))
-    role_dir = base / role
-    if role_dir.is_symlink():
-        raise ShadowError("role_dir_symlink")
-    if role_dir.exists():
-        if not _inside(Path(os.path.realpath(role_dir)), real_base):
-            raise ShadowError("leftover_outside_worktree")
-        shutil.rmtree(role_dir)
-    role_dir.mkdir()
-    return role_dir
+def _open_worktree(wt: Path) -> int:
+    """The one open by absolute path: the worktree root the caller passed in (trusted)."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    return os.open(os.path.realpath(wt), flags)
+
+
+def _open_role_dir(root_fd: int, role: str, reset: bool) -> int:
+    """Open ``<SHADOW_DIR>/<role>`` below *root_fd*, one component at a time; *reset* empties it first."""
+    base_fd = _descend(root_fd, (SHADOW_DIR,))
+    try:
+        try:
+            mode = os.stat(role, dir_fd=base_fd, follow_symlinks=False).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and stat.S_ISLNK(mode):
+            raise ShadowError("role_dir_symlink")
+        if mode is not None and reset:
+            if not stat.S_ISDIR(mode):
+                os.unlink(role, dir_fd=base_fd)
+            else:
+                _rmtree_below(base_fd, role)
+        return _descend(base_fd, (role,))
+    finally:
+        os.close(base_fd)
+
+
+def _rmtree_below(parent_fd: int, name: str) -> None:
+    """Remove directory *name* below *parent_fd*; links are unlinked, never followed."""
+    for _top, dirs, files, dir_fd in os.fwalk(name, topdown=False, dir_fd=parent_fd, follow_symlinks=False):
+        for entry in files:
+            os.unlink(entry, dir_fd=dir_fd)
+        for entry in dirs:
+            if stat.S_ISLNK(os.stat(entry, dir_fd=dir_fd, follow_symlinks=False).st_mode):
+                os.unlink(entry, dir_fd=dir_fd)
+            else:
+                os.rmdir(entry, dir_fd=dir_fd)
+    os.rmdir(name, dir_fd=parent_fd)
+
+
+def _read_below_worktree(wt: Path, parts: tuple[str, ...]) -> bytes:
+    """Read the file at *parts* below the worktree root; every component is opened without following a link."""
+    fd = _open_worktree(wt)
+    try:
+        for part in parts[:-1]:
+            nxt = _open_dir_nofollow(fd, part)
+            os.close(fd)
+            fd = nxt
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        except OSError as exc:
+            raise ShadowError("symlink_in_destination") from exc
+        with os.fdopen(file_fd, "rb") as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
+
+
+def _write_manifest(role_fd: int, manifest: dict[str, Any]) -> None:
+    data = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
+    _write_nofollow(role_fd, Path(MANIFEST_NAME), data, 0o644)
 
 
 def _skill_files(src: Path) -> list[Path]:
@@ -192,8 +236,8 @@ def _skill_files(src: Path) -> list[Path]:
     return sorted(files)
 
 
-def _open_dir_nofollow(parent_fd: int | None, name: str) -> int:
-    """Open directory *name* (absolute path when *parent_fd* is None) without following a link."""
+def _open_dir_nofollow(parent_fd: int, name: str) -> int:
+    """Open the single-component directory *name* below *parent_fd* without following a link."""
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
         return os.open(name, flags, dir_fd=parent_fd)
@@ -249,13 +293,10 @@ def _lexists(name: str, dir_fd: int) -> bool:
     return True
 
 
-def _copy_skill(role_dir: Path, source_root: Path, slug: str, src: Path) -> dict[str, Any]:
+def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: Path) -> dict[str, Any]:
+    """Copy *src* to ``<slug>/`` below the directory *parent_fd*; nothing is opened by a multi-component path."""
     files = []
-    role_fd = _open_dir_nofollow(None, str(role_dir))
-    try:
-        root_fd = _descend(role_fd, (slug,))
-    finally:
-        os.close(role_fd)
+    root_fd = _descend(parent_fd, (slug,))
     try:
         for path in _skill_files(src):
             rel = path.relative_to(src)
@@ -432,11 +473,18 @@ def _dest_ignored(wt: Path, slug: str) -> bool:
 def _native_entry(wt: Path, base: Path, slug: str, to_copy: bool) -> dict[str, Any]:
     if to_copy:
         src = _vet_slug(wt, slug)
-        base.mkdir(parents=True, exist_ok=True)
-        _copy_skill(base, wt, slug, src)
+        root_fd = _open_worktree(wt)
+        try:
+            base_fd = _descend(root_fd, tuple(Path(NATIVE_DIR).parts))
+            try:
+                _copy_skill(base_fd, wt, slug, src)
+            finally:
+                os.close(base_fd)
+        finally:
+            os.close(root_fd)
     elif not skill_search_paths(wt, slug):
         raise ShadowError(f"slug_refused:{slug}")
-    data = (base / slug / "SKILL.md").read_bytes()
+    data = _read_below_worktree(wt, (*Path(NATIVE_DIR).parts, slug, "SKILL.md"))
     return {"slug": slug, "dest": f"{NATIVE_DIR}/{slug}", "sha256": hashlib.sha256(data).hexdigest(),
             "bytes": len(data), "ownership": "materialized" if to_copy else "native"}
 
