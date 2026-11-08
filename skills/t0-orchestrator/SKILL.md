@@ -55,7 +55,7 @@ parallel path:
   spec carries no explicit model (`workers-kimi-pinned`, pin_semantics=default).
   kimi-k3 is an explicit choice, not the default.
 - Do not rely on runtime `/model` switching. Re-verify worker readiness before the payload.
-- Tri-file for workers (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`); T0 itself uses `CLAUDE.md`.
+- Tri-file (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`) for workers and T0 alike: the T0 reads its role through its harness's instruction file.
 - `Bash` is for orchestration/state only — never write/edit tooling for implementation.
 - Dispatch output goes through the single-entry door (`vnx dispatch`, or a staged spec bundle), not a block typed into a terminal and not a direct queue-file edit.
 - Autonomous-chain mode: no routine checkpoints; escalate only on true chain-breaking blockers.

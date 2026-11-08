@@ -119,18 +119,67 @@ def test_r2_the_state_read_resolves_the_central_store_from_the_t0_folder(tmp_pat
 # ── R3 ───────────────────────────────────────────────────────────────────────
 
 
-def test_r3_startup_fallback_reads_the_playbook_file():
+ADR = REPO / "docs" / "governance" / "decisions" / "ADR-058-t0-playbook-source-en-verwijzing.md"
+ROLE_BYTE_CEILING = 33659
+LEGACY_COPY = ".claude/skills/t0-orchestrator"
+
+
+def _adr_sources() -> list[str]:
+    """The five playbook sources of ADR-058 section 2, in resolution order."""
+    rows = re.findall(r"^\| \([a-e]\) \| `([^`]+)` \|", ADR.read_text(encoding="utf-8"), re.M)
+    assert len(rows) == 5, rows
+    return rows
+
+
+def test_r3_startup_names_the_adr_sources_in_the_adr_order():
     s = _startup_section()
-    assert ".claude/skills/t0-orchestrator/SKILL.md" in s
+    sources = _adr_sources()
+    positions = [s.find(src) for src in sources]
+    assert all(p >= 0 for p in positions), dict(zip(sources, positions))
+    assert positions == sorted(positions)
+
+
+def test_r3_the_first_source_is_the_fabric_skills_tree_not_the_claude_copy():
+    s = _startup_section()
+    first = _adr_sources()[0]
+    assert first == "$_VNX_SCRIPTS_ROOT/../skills/t0-orchestrator/SKILL.md"
+    assert s.index(first) < s.index(LEGACY_COPY)
+
+
+def test_r3_the_legacy_copy_is_named_once_and_only_as_the_degraded_fallback():
+    role = _role()
+    assert role.count(LEGACY_COPY) == 1
+    line = next(ln for ln in role.splitlines() if LEGACY_COPY in ln)
+    assert "degraded" in line and "fallback" in line
+    assert line.lstrip().startswith("5.")
+
+
+def test_r3_present_is_not_loaded_is_said_and_the_read_tool_fallback_stays():
+    s = _startup_section()
+    assert "Present is not loaded" in s
     assert "Read tool" in s
     assert "absolute path" in s
 
 
-def test_r3_stop_only_for_a_missing_file():
+def test_r3_stop_only_when_no_source_exists():
     s = _startup_section()
-    assert "STOP only when that file does not exist" in s
+    assert "STOP only when none of the five exists" in s
+    assert "STOP only when that file does not exist" not in s
     assert "Unknown skill" not in s
     assert "invoke `@t0-orchestrator`" not in s
+
+
+def test_r3_the_runtime_policy_tri_file_line_names_each_harness_file():
+    role = _role()
+    line = role[role.index("Tri-file support"):]
+    line = line[:line.index("`vnx role sync --apply`")]
+    for needle in ("CLAUDE.md", "AGENTS.md", "GEMINI.md", "Codex", "Kimi", "Gemini"):
+        assert needle in line
+    assert "Kimi/Gemini (`GEMINI.md`)" not in line
+
+
+def test_r3_the_role_does_not_grow_past_the_pre_sp8_size():
+    assert len(ROLE.read_bytes()) <= ROLE_BYTE_CEILING
 
 
 # ── R4 ───────────────────────────────────────────────────────────────────────
