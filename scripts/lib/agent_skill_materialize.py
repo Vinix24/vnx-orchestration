@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,8 +42,10 @@ STATUSES = frozenset({"ok", "partial", "error", "skipped"})
 REASONS = frozenset({
     "no_role", "no_declared_set", "no_cwd", "no_state_dir", "no_dispatch_id",
     "no_project_id", "not_isolated", "not_ignored", "already_native",
-    "source_missing", "copy_failed:<Class>", "not_owned:<slug>", "path_outside_worktree",
+    "source_missing", "copy_failed:<Class>", "not_owned:<slug>", "path_outside_worktree", "symlink_in_destination",
 })
+
+DEST_REFUSALS = frozenset({"symlink_in_destination", "path_outside_worktree"})
 
 
 class ShadowError(Exception):
@@ -189,20 +192,116 @@ def _skill_files(src: Path) -> list[Path]:
     return sorted(files)
 
 
+def _open_dir_nofollow(parent_fd: int | None, name: str) -> int:
+    """Open directory *name* (absolute path when *parent_fd* is None) without following a link."""
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    try:
+        return os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ShadowError("symlink_in_destination") from exc
+
+
+def _descend(root_fd: int, parts: tuple[str, ...]) -> int:
+    """Create-and-enter each directory of *parts* below *root_fd*; a link or file fails the write."""
+    fd = os.dup(root_fd)
+    for part in parts:
+        try:
+            os.mkdir(part, 0o755, dir_fd=fd)
+        except FileExistsError:
+            pass  # vnx-silent-except: an existing entry is re-opened with O_NOFOLLOW just below
+        try:
+            nxt = _open_dir_nofollow(fd, part)
+        finally:
+            os.close(fd)
+        fd = nxt
+    return fd
+
+
+def _write_nofollow(root_fd: int, rel: Path, data: bytes, mode: int) -> None:
+    """Write *data* at *rel* below *root_fd*; no component of the path is ever followed."""
+    dir_fd = _descend(root_fd, rel.parts[:-1])
+    tmp = f".{rel.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    try:
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dir_fd)
+        except OSError as exc:
+            raise ShadowError("symlink_in_destination") from exc
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            os.fchmod(handle.fileno(), mode)
+        final = os.stat(rel.name, dir_fd=dir_fd, follow_symlinks=False) if _lexists(rel.name, dir_fd) else None
+        if final is not None and not stat.S_ISREG(final.st_mode):
+            raise ShadowError("symlink_in_destination")
+        os.replace(tmp, rel.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        if _lexists(tmp, dir_fd):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    finally:
+        os.close(dir_fd)
+
+
+def _lexists(name: str, dir_fd: int) -> bool:
+    try:
+        os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _copy_skill(role_dir: Path, source_root: Path, slug: str, src: Path) -> dict[str, Any]:
-    dest = role_dir / slug
     files = []
-    for path in _skill_files(src):
-        rel = path.relative_to(src)
-        target = dest / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        data = target.read_bytes()
-        files.append(
-            {"path": rel.as_posix(), "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-        )
+    role_fd = _open_dir_nofollow(None, str(role_dir))
+    try:
+        root_fd = _descend(role_fd, (slug,))
+    finally:
+        os.close(role_fd)
+    try:
+        for path in _skill_files(src):
+            rel = path.relative_to(src)
+            data = path.read_bytes()
+            _write_nofollow(root_fd, rel, data, path.stat().st_mode & 0o777)
+            files.append({"path": rel.as_posix(), "length": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    finally:
+        os.close(root_fd)
     real_root = Path(os.path.realpath(source_root))
     return {"slug": slug, "source_dir": src.relative_to(real_root).as_posix(), "files": files}
+
+
+def _refuse_dest_tree(wt: Path, slug: str, src: Path) -> None:
+    """Refuse before any write when the destination tree holds a link, a wrong-typed entry or leaves *wt*."""
+    real_wt = Path(os.path.realpath(wt))
+    dest = wt / NATIVE_DIR / slug
+    chain = [wt / ".claude", wt / NATIVE_DIR, dest]
+    for _dirpath, dirs, names in os.walk(dest):
+        chain += [Path(_dirpath) / n for n in dirs + names]
+    for rel in (p.relative_to(src) for p in _skill_files(src)):
+        chain += [dest.joinpath(*rel.parts[:i]) for i in range(1, len(rel.parts) + 1)]
+    for entry in chain:
+        try:
+            mode = os.lstat(entry).st_mode
+        except FileNotFoundError:
+            continue
+        except NotADirectoryError as exc:
+            raise ShadowError("symlink_in_destination") from exc
+        if stat.S_ISLNK(mode):
+            raise ShadowError("symlink_in_destination")
+        if not _inside(Path(os.path.realpath(entry)), real_wt):
+            raise ShadowError("path_outside_worktree")
+    _refuse_wrong_types(dest, src)
+
+
+def _refuse_wrong_types(dest: Path, src: Path) -> None:
+    """A file where a directory belongs, or a directory where a file belongs, refuses the skill."""
+    for path in _skill_files(src):
+        rel = path.relative_to(src)
+        for i in range(1, len(rel.parts)):
+            parent = dest.joinpath(*rel.parts[:i])
+            if os.path.lexists(parent) and not stat.S_ISDIR(os.lstat(parent).st_mode):
+                raise ShadowError("symlink_in_destination")
+        target = dest / rel
+        if os.path.lexists(target) and not stat.S_ISREG(os.lstat(target).st_mode):
+            raise ShadowError("symlink_in_destination")
 
 
 def materialize_skill_set(
@@ -291,6 +390,9 @@ def _copy_native(wt: Path, slugs: list[str]) -> dict[str, Any]:
     if base.exists() and not _inside(Path(os.path.realpath(base)), Path(os.path.realpath(wt))):
         return _outcome("skipped", "path_outside_worktree")
     pending = [s for s in slugs if skill_search_paths(wt, s) and not os.path.lexists(base / s / "SKILL.md")]
+    refusal = _first_dest_refusal(wt, pending)
+    if refusal:
+        return _outcome("skipped", refusal)
     if any(not _dest_ignored(wt, s) for s in pending):
         return _outcome("skipped", "not_ignored")
     entries: list[dict[str, Any]] = []
@@ -299,6 +401,8 @@ def _copy_native(wt: Path, slugs: list[str]) -> dict[str, Any]:
         try:
             entries.append(_native_entry(wt, base, slug, slug in pending))
         except ShadowError as exc:
+            if exc.reason in DEST_REFUSALS:
+                return _outcome("skipped", exc.reason)
             failure = failure or ("source_missing" if exc.reason.startswith("slug_") else exc.reason)
         except Exception as exc:  # fail-open per skill: the next slug still gets its copy
             failure = failure or f"copy_failed:{type(exc).__name__}"
@@ -306,6 +410,17 @@ def _copy_native(wt: Path, slugs: list[str]) -> dict[str, Any]:
     if failure:
         return _outcome("partial" if entries else "error", failure, entries)
     return _outcome("ok", None if copied else "already_native", entries)
+
+
+def _first_dest_refusal(wt: Path, pending: list[str]) -> str | None:
+    for slug in pending:
+        try:
+            _refuse_dest_tree(wt, slug, _vet_slug(wt, slug))
+        except ShadowError as exc:
+            if exc.reason in DEST_REFUSALS:
+                return exc.reason
+            # vnx-silent-except: an unknown slug is reported per skill by _native_entry
+    return None
 
 
 def _dest_ignored(wt: Path, slug: str) -> bool:

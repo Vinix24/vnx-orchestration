@@ -182,7 +182,7 @@ def test_status_and_reason_sets_are_pinned():
     assert asm.REASONS == frozenset({
         "no_role", "no_declared_set", "no_cwd", "no_state_dir", "no_dispatch_id", "no_project_id",
         "not_isolated", "not_ignored", "already_native", "source_missing", "copy_failed:<Class>",
-        "not_owned:<slug>", "path_outside_worktree",
+        "not_owned:<slug>", "path_outside_worktree", "symlink_in_destination",
     })
 
 
@@ -212,3 +212,96 @@ def test_shadow_mode_is_byte_equal_to_materialize_role_skills(tmp_path, worktree
     via = _call(worktree, tmp_path, mode="shadow")
     assert via == direct and via["status"] == "ok"
     assert not (worktree / ".claude").exists()
+
+
+def _ship_assets(wt):
+    (wt / "skills" / "alpha" / "assets").mkdir()
+    (wt / "skills" / "alpha" / "assets" / "data.txt").write_text("shipped\n")
+
+
+def _outside(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("original")
+    return outside
+
+
+def _assert_refused(result, outside=None):
+    assert (result["status"], result["reason"]) == ("skipped", "symlink_in_destination")
+    assert result["skills"] == []
+    if outside is not None:
+        assert (outside / "data.txt").read_text() == "original"
+
+
+def test_linked_subdirectory_of_destination_refuses(tmp_path, worktree):
+    _ship_assets(worktree)
+    outside = _outside(tmp_path)
+    dest = worktree / ".claude" / "skills" / "alpha"
+    dest.mkdir(parents=True)
+    (dest / "assets").symlink_to(outside, target_is_directory=True)
+    result = _call(worktree, tmp_path)
+    assert (outside / "data.txt").read_text() == "original"
+    assert result["status"] == "skipped"
+    assert result["reason"] == "symlink_in_destination"
+    assert result["skills"] == []
+    assert not _dest(worktree).exists()
+
+
+def test_linked_slug_directory_refuses(tmp_path, worktree):
+    outside = _outside(tmp_path)
+    (worktree / ".claude" / "skills").mkdir(parents=True)
+    (worktree / ".claude" / "skills" / "alpha").symlink_to(outside, target_is_directory=True)
+    _assert_refused(_call(worktree, tmp_path), outside)
+    assert not (outside / "SKILL.md").exists()
+
+
+def test_linked_skills_directory_refuses(tmp_path, worktree):
+    real = worktree / "elsewhere"
+    real.mkdir()
+    (worktree / ".claude").mkdir()
+    (worktree / ".claude" / "skills").symlink_to(real, target_is_directory=True)
+    _assert_refused(_call(worktree, tmp_path))
+    assert list(real.iterdir()) == []
+
+
+def test_file_where_directory_belongs_refuses(tmp_path, worktree):
+    _ship_assets(worktree)
+    dest = worktree / ".claude" / "skills" / "alpha"
+    dest.mkdir(parents=True)
+    (dest / "assets").write_text("a file\n")
+    _assert_refused(_call(worktree, tmp_path))
+    assert (dest / "assets").read_text() == "a file\n"
+
+
+def test_link_planted_after_the_check_fails_the_write(tmp_path, worktree):
+    _ship_assets(worktree)
+    outside = _outside(tmp_path)
+    dest = worktree / ".claude" / "skills" / "alpha"
+    real_refuse = asm._refuse_dest_tree
+
+    def check_then_plant(wt, slug, src):
+        real_refuse(wt, slug, src)
+        if slug == "alpha":
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "assets").symlink_to(outside, target_is_directory=True)
+
+    with mock.patch.object(asm, "_refuse_dest_tree", check_then_plant):
+        result = _call(worktree, tmp_path)
+    _assert_refused(result, outside)
+
+
+def test_file_link_planted_after_the_check_is_not_followed(tmp_path, worktree):
+    outside = _outside(tmp_path)
+    dest = worktree / ".claude" / "skills" / "alpha"
+    real_refuse = asm._refuse_dest_tree
+
+    def check_then_plant(wt, slug, src):
+        real_refuse(wt, slug, src)
+        if slug == "alpha":
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "SKILL.md").symlink_to(outside / "data.txt")
+
+    with mock.patch.object(asm, "_refuse_dest_tree", check_then_plant):
+        result = _call(worktree, tmp_path)
+    assert result["status"] != "ok"
+    assert (outside / "data.txt").read_text() == "original"
