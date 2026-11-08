@@ -324,3 +324,139 @@ def test_adapter_execute_without_a_worktree_is_skipped_no_cwd(tmp_path, worktree
         CodexAdapter("T1").execute("do it", {"role": ROLE, "dispatch_id": "dlv-r4"})
     assert [(r["status"], r["reason"]) for r in results] == [("skipped", "no_cwd")]
     assert not (worktree / ".agents").exists()
+
+
+# --- the slug folder is claimed atomically, an existing folder is never adopted ------------------
+
+
+def _foreign_folder(wt, slug="alpha"):
+    folder = _skills(wt) / slug
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "SKILL.md").write_text("theirs\n")
+    (folder / "user-data.txt").write_text("precious\n")
+
+
+def _no_marker(wt, slug="alpha"):
+    assert not (_skills(wt) / slug / ".vnx-managed.json").exists()
+
+
+def _assert_foreign_intact(wt, slug="alpha"):
+    assert (_skills(wt) / slug / "SKILL.md").read_bytes() == b"theirs\n"
+    assert (_skills(wt) / slug / "user-data.txt").read_bytes() == b"precious\n"
+
+
+def test_folder_created_between_the_check_and_the_claim_is_never_adopted(tmp_path, worktree):
+    real = asm._materialize_one
+
+    def racing(wt, slug, src, *args, **kwargs):
+        if slug == "alpha":
+            _foreign_folder(wt)
+        return real(wt, slug, src, *args, **kwargs)
+
+    with mock.patch.object(asm, "_materialize_one", racing):
+        first = _call(worktree, tmp_path)
+    assert (first["status"], first["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+    _assert_foreign_intact(worktree)
+    second = _call(worktree, tmp_path)
+    assert (second["status"], second["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+    _assert_foreign_intact(worktree)
+    assert (_skills(worktree) / "beta" / "SKILL.md").read_text() == "beta\n"
+
+
+def test_folder_that_exists_before_the_run_gets_no_marker_and_no_file(tmp_path, worktree):
+    _foreign_folder(worktree)
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+    _assert_foreign_intact(worktree)
+
+
+def test_nested_folder_created_after_the_claim_refuses_the_slug_and_takes_the_marker_back(tmp_path, worktree):
+    (worktree / "skills" / "alpha" / "refs").mkdir()
+    (worktree / "skills" / "alpha" / "refs" / "a.md").write_text("ref\n")
+    real_mkdir = os.mkdir
+
+    def racing(path, mode=0o777, *, dir_fd=None):
+        if path == "refs" and dir_fd is not None:
+            real_mkdir(path, mode, dir_fd=dir_fd)
+            (_skills(worktree) / "alpha" / "refs" / "theirs.txt").write_text("precious\n")
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    with mock.patch.object(asm.os, "mkdir", racing):
+        result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _no_marker(worktree)
+    assert (_skills(worktree) / "alpha" / "refs" / "theirs.txt").read_text() == "precious\n"
+    assert not (_skills(worktree) / "alpha" / "SKILL.md").exists()
+
+
+def test_copy_failing_after_the_claim_keeps_the_marker_and_the_next_attempt_reclaims(tmp_path, worktree):
+    real = asm._publish_file
+
+    def failing(dir_fd, name, data, mode):
+        if name == "SKILL.md" and data == b"alpha\n":
+            raise PermissionError("no")
+        return real(dir_fd, name, data, mode)
+
+    with mock.patch.object(asm, "_publish_file", failing):
+        first = _call(worktree, tmp_path)
+    assert (first["status"], first["reason"]) == ("partial", "copy_failed:PermissionError")
+    marker = json.loads((_skills(worktree) / "alpha" / ".vnx-managed.json").read_text())
+    assert (marker["dispatch_id"], marker["slug"]) == ("dlv-r4", "alpha")
+    assert not (_skills(worktree) / "alpha" / "SKILL.md").exists()
+    second = _call(worktree, tmp_path)
+    assert (second["status"], second["reason"]) == ("ok", None)
+    assert (_skills(worktree) / "alpha" / "SKILL.md").read_text() == "alpha\n"
+
+
+def test_marker_that_cannot_be_published_leaves_no_claimed_folder(tmp_path, worktree):
+    real = asm._publish_file
+
+    def failing(dir_fd, name, data, mode):
+        if name == ".vnx-managed.json" and b'"alpha"' in data:
+            raise PermissionError("no")
+        return real(dir_fd, name, data, mode)
+
+    with mock.patch.object(asm, "_publish_file", failing):
+        result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "copy_failed:PermissionError")
+    assert not (_skills(worktree) / "alpha").exists()
+
+
+def test_marker_that_is_a_symlink_is_never_reclaimed(tmp_path, worktree):
+    _foreign_folder(worktree)
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"schema": 1, "dispatch_id": "dlv-r4", "role": ROLE, "slug": "alpha"}))
+    (_skills(worktree) / "alpha" / ".vnx-managed.json").symlink_to(elsewhere)
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _assert_foreign_intact(worktree)
+
+
+def test_marker_that_is_a_hard_link_is_never_reclaimed(tmp_path, worktree):
+    _foreign_folder(worktree)
+    elsewhere = tmp_path / "elsewhere.json"
+    elsewhere.write_text(json.dumps({"schema": 1, "dispatch_id": "dlv-r4", "role": ROLE, "slug": "alpha"}))
+    os.link(elsewhere, _skills(worktree) / "alpha" / ".vnx-managed.json")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _assert_foreign_intact(worktree)
+
+
+def test_marker_that_is_a_directory_is_never_reclaimed(tmp_path, worktree):
+    _foreign_folder(worktree)
+    (_skills(worktree) / "alpha" / ".vnx-managed.json").mkdir()
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _assert_foreign_intact(worktree)
+
+
+def test_marker_carrying_another_slug_is_never_reclaimed(tmp_path, worktree):
+    _foreign_folder(worktree)
+    (_skills(worktree) / "alpha" / ".vnx-managed.json").write_text(
+        json.dumps({"schema": 1, "dispatch_id": "dlv-r4", "role": ROLE, "slug": "beta"}))
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    _assert_foreign_intact(worktree)

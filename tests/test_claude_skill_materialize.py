@@ -490,18 +490,19 @@ def test_skill_md_only_skills_in_a_clean_worktree_are_ok(tmp_path, worktree):
     assert _git(worktree, "status", "--porcelain", "--untracked-files=all") == ""
 
 
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory modes")
 def test_failed_copy_leaves_no_skill_md_and_the_next_attempt_copies_again(tmp_path):
     wt = _make_worktree(tmp_path / "t", IGNORE_ASSETS)
     _ship_assets(wt)
-    locked = _asset(wt).parent
-    locked.mkdir(parents=True)
-    locked.chmod(0o500)
-    try:
+    real_mkdir = os.mkdir
+
+    def refuse_alpha(path, mode=0o777, *, dir_fd=None):
+        if path == "alpha":
+            raise PermissionError("no")
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    with mock.patch.object(asm.os, "mkdir", refuse_alpha):
         first = _call(wt, tmp_path)
-    finally:
-        locked.chmod(0o755)
-    assert not _dest(wt).exists()
+    assert not os.path.lexists(_dest(wt).parent)
     _assert_alpha_refused(first, "copy_failed:PermissionError")
     second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
     assert (second["status"], second["reason"]) == ("ok", None)
@@ -689,8 +690,8 @@ def test_failed_asset_write_leaves_nothing_and_the_next_run_copies(tmp_path):
     with patch:
         first = _call(wt, tmp_path)
     assert fired == [len(b"shipped\n")]
-    assert list(_asset(wt).parent.iterdir()) == []
-    assert not os.path.lexists(_dest(wt))
+    assert not os.path.lexists(_asset(wt).parent)
+    assert not os.path.lexists(_dest(wt).parent)
     assert _partials(wt) == []
     _assert_alpha_refused(first, "copy_failed:OSError")
     second = _call(wt, tmp_path, dispatch_id="dlv-r3b")
@@ -794,17 +795,25 @@ def _leftover(wt, content=None, link_to=None):
     return leftover
 
 
-@pytest.mark.parametrize("published", [False, True], ids=["killed-before-link", "killed-after-link"])
-def test_leftover_partial_of_a_killed_run_is_not_read_counted_or_removed(tmp_path, worktree, published):
-    leftover = _leftover(worktree, b"alpha\n" if published else b"al")
-    if published:
-        os.link(leftover, _dest(worktree))
+def test_leftover_partial_of_a_run_killed_after_the_link_is_not_read_counted_or_removed(tmp_path, worktree):
+    leftover = _leftover(worktree, b"alpha\n")
+    os.link(leftover, _dest(worktree))
     result = _call(worktree, tmp_path)
     assert (result["status"], result["reason"]) == ("ok", None)
-    assert [e["ownership"] for e in result["skills"]] == ["native" if published else "materialized", "materialized"]
+    assert [e["ownership"] for e in result["skills"]] == ["native", "materialized"]
     assert result["skills"][0]["sha256"] == hashlib.sha256(b"alpha\n").hexdigest()
     assert _dest(worktree).read_bytes() == b"alpha\n"
-    assert leftover.read_bytes() == (b"alpha\n" if published else b"al")
+    assert leftover.read_bytes() == b"alpha\n"
+    assert _partials(worktree) == [leftover]
+
+
+def test_folder_of_a_run_killed_before_the_link_is_foreign_and_stays_untouched(tmp_path, worktree):
+    leftover = _leftover(worktree, b"al")
+    result = _call(worktree, tmp_path)
+    assert (result["status"], result["reason"]) == ("partial", "not_owned:alpha")
+    assert [e["slug"] for e in result["skills"]] == ["beta"]
+    assert not os.path.lexists(_dest(worktree))
+    assert leftover.read_bytes() == b"al"
     assert _partials(worktree) == [leftover]
 
 

@@ -319,7 +319,7 @@ def _write_nofollow(root_fd: int, rel: Path, data: bytes, mode: int) -> None:
 
     Only the shadow manifest uses this: ``.vnx-agent-skills/<role>/`` is the fabric's own
     ignored folder (ADR-050), so replacing its manifest is the contract. Skill files are
-    never replaced: they go through :func:`_create_nofollow`.
+    never replaced: they go through :func:`_publish_file`.
     """
     dir_fd = _descend(root_fd, rel.parts[:-1])
     tmp = f".{rel.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
@@ -351,23 +351,13 @@ def _lexists(name: str, dir_fd: int) -> bool:
     return True
 
 
-def _create_nofollow(root_fd: int, rel: Path, data: bytes, mode: int) -> None:
-    """Publish *data* at *rel* below *root_fd* only once it is complete; an existing name is never replaced.
-
-    The bytes go to a private name in the same directory (:func:`_write_partial`), and a
-    hard link publishes it (:func:`_publish`): ``link`` fails on any existing entry, so the
-    final name is either absent or holds every byte. The private name is unlinked by
-    ``dir_fd`` on every path out, so a failure leaves neither name. No replace, no rename.
-    """
-    dir_fd = _descend(root_fd, rel.parts[:-1])
+def _publish_file(dir_fd: int, name: str, data: bytes, mode: int) -> None:
+    """The write-then-link publish of one file into the already opened directory *dir_fd*."""
+    tmp = _write_partial(dir_fd, name, data, mode)
     try:
-        tmp = _write_partial(dir_fd, rel.name, data, mode)
-        try:
-            _publish(dir_fd, tmp, rel.name)
-        finally:
-            os.unlink(tmp, dir_fd=dir_fd)
+        _publish(dir_fd, tmp, name)
     finally:
-        os.close(dir_fd)
+        os.unlink(tmp, dir_fd=dir_fd)
 
 
 def _write_partial(dir_fd: int, name: str, data: bytes, mode: int) -> str:
@@ -407,24 +397,112 @@ def _publish(dir_fd: int, tmp: str, name: str) -> None:
         raise
 
 
-def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source) -> dict[str, Any]:
-    """Create ``<slug>/`` and every file of *src* below *parent_fd*; nothing is opened by a multi-component path.
+def _copy_skill(parent_fd: int, source_root: Path, slug: str, src: _Source,
+                marker: bytes | None = None) -> dict[str, Any]:
+    """Claim ``<slug>/`` below *parent_fd* with one ``mkdir`` and copy every file of *src* into it.
 
-    Every file appears at its final name only with all its bytes (:func:`_create_nofollow`),
-    and SKILL.md is published last. So a SKILL.md at the final name is complete, and its
-    presence means every other file of the copy is published too: a copy that fails
-    halfway leaves no SKILL.md, and the next attempt never reads it as ``already_native``.
+    The claim is the only way in: a directory that exists by now (``FileExistsError``) was
+    not created by this run and nothing is written into it, no marker and no file. The same
+    holds for every nested directory of the skill. Every file appears at its final name only
+    with all its bytes (:func:`_publish_file`), and SKILL.md is published last, so a SKILL.md
+    at the final name is complete and a copy that fails halfway leaves none.
+
+    A *marker* is published first, below the claimed fd. A failed copy keeps it (the next
+    attempt of the same dispatch may reclaim the folder), except on ``FileExistsError``: a
+    racing entry means the folder is no longer solely this run's, so everything this run
+    published is taken back and the marker goes with it. Without a *marker* a failed copy
+    takes back what it made. Only entries this run created are ever removed.
     """
-    root_fd = _descend(parent_fd, (slug,))
+    os.mkdir(slug, 0o755, dir_fd=parent_fd)
+    made: list[tuple[str, ...]] = []
+    published: list[tuple[str, ...]] = []
+    slug_fd = _open_dir_nofollow(parent_fd, slug)
+    keep = False
     try:
-        for rel, data, mode in sorted(src.files, key=lambda item: item[0] == SKILL_FILE):
-            _create_nofollow(root_fd, rel, data, mode)
+        if marker is not None:
+            _publish_file(slug_fd, MARKER_NAME, marker, 0o644)
+            published.append((MARKER_NAME,))
+        try:
+            for rel, data, mode in sorted(src.files, key=lambda item: item[0] == SKILL_FILE):
+                dir_fd = _claim_dirs(slug_fd, rel.parts[:-1], made)
+                try:
+                    _publish_file(dir_fd, rel.name, data, mode)
+                finally:
+                    os.close(dir_fd)
+                published.append(rel.parts)
+        except FileExistsError:
+            raise
+        except BaseException:
+            keep = marker is not None
+            raise
+    except BaseException:
+        if not keep:
+            _take_back(slug_fd, parent_fd, slug, made, published)
+        raise
     finally:
-        os.close(root_fd)
+        os.close(slug_fd)
     files = [{"path": rel.as_posix(), "length": len(data), "sha256": hashlib.sha256(data).hexdigest()}
              for rel, data, _mode in src.files]
     real_root = Path(os.path.realpath(source_root))
     return {"slug": slug, "source_dir": src.root.relative_to(real_root).as_posix(), "files": files}
+
+
+def _claim_dirs(root_fd: int, parts: tuple[str, ...], made: list[tuple[str, ...]]) -> int:
+    """Enter *parts* below *root_fd*; a directory this copy has not made itself is created, never adopted."""
+    fd = os.dup(root_fd)
+    for depth, part in enumerate(parts, start=1):
+        try:
+            if parts[:depth] not in made:
+                os.mkdir(part, 0o755, dir_fd=fd)
+                made.append(parts[:depth])
+            nxt = _open_dir_nofollow(fd, part)
+        finally:
+            os.close(fd)
+        fd = nxt
+    return fd
+
+
+def _take_back(slug_fd: int, parent_fd: int, slug: str, made: list[tuple[str, ...]],
+               published: list[tuple[str, ...]]) -> None:
+    """Unlink what this copy published, then the directories it made, deepest first, then the claimed folder.
+
+    A directory that is not empty (something else moved in) is left: ``rmdir`` refuses and
+    nothing foreign is touched.
+    """
+    for parts in reversed(published):
+        try:
+            leaf = _open_chain(slug_fd, parts[:-1])
+            try:
+                os.unlink(parts[-1], dir_fd=leaf)
+            finally:
+                os.close(leaf)
+        except OSError:
+            continue  # vnx-silent-except: best-effort take-back of this run's own entry; a leftover stays foreign-safe
+    for parts in sorted(made, key=len, reverse=True):
+        try:
+            parent = _open_chain(slug_fd, parts[:-1])
+            try:
+                os.rmdir(parts[-1], dir_fd=parent)
+            finally:
+                os.close(parent)
+        except OSError:
+            continue  # vnx-silent-except: rmdir refuses a directory something else filled; it stays
+    try:
+        os.rmdir(slug, dir_fd=parent_fd)
+    except OSError:
+        pass  # vnx-silent-except: rmdir refuses a folder that still holds entries; it stays
+
+
+def _open_chain(root_fd: int, parts: tuple[str, ...]) -> int:
+    """Open the existing directories *parts* below *root_fd* without following a link; creates nothing."""
+    fd = os.dup(root_fd)
+    for part in parts:
+        try:
+            nxt = _open_dir_nofollow(fd, part)
+        finally:
+            os.close(fd)
+        fd = nxt
+    return fd
 
 
 def _refuse_dest_tree(wt: Path, slug: str, src: _Source, parts: tuple[str, ...] = NATIVE_PARTS) -> None:
@@ -618,13 +696,40 @@ def _reclaim_owned(wt: Path, parts: tuple[str, ...], owner: dict[str, Any]) -> l
 
 
 def _is_owned(wt: Path, parts: tuple[str, ...], name: str, dispatch_id: str) -> bool:
-    """True only on a readable marker of this run for this folder; anything else is foreign (fail-closed)."""
+    """True only on a readable marker of this run for this folder; anything else is foreign (fail-closed).
+
+    The marker must be a regular file with one link (a symlink, FIFO, directory or a hard
+    link to another file is foreign), and carry the marker schema, this folder's own
+    ``slug`` and this run's ``dispatch_id``.
+    """
     try:
-        marker = json.loads(_read_below_worktree(wt, (*parts, name, MARKER_NAME)))
+        marker = json.loads(_read_marker(wt, (*parts, name, MARKER_NAME)))
     except (ShadowError, ValueError):
         return False
     return (isinstance(marker, dict) and marker.get("schema") == MARKER_SCHEMA
             and marker.get("slug") == name and marker.get("dispatch_id") == dispatch_id)
+
+
+def _read_marker(wt: Path, parts: tuple[str, ...]) -> bytes:
+    """Read the marker file at *parts*; refuses (``ShadowError``) anything but a regular file with one link."""
+    fd = _open_worktree(wt)
+    try:
+        for part in parts[:-1]:
+            nxt = _open_dir_nofollow(fd, part)
+            os.close(fd)
+            fd = nxt
+        try:
+            file_fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+        except OSError as exc:
+            raise ShadowError("symlink_in_destination") from exc
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            os.close(file_fd)
+            raise ShadowError("symlink_in_destination")
+        with os.fdopen(file_fd, "rb") as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
 
 
 def _marker_bytes(owner: dict[str, Any], slug: str, src: _Source) -> bytes:
@@ -760,18 +865,22 @@ def _write_pending(wt: Path, sources: dict[str, _Source], entries: dict[str, dic
 
 def _materialize_one(wt: Path, slug: str, src: _Source, parts: tuple[str, ...] = NATIVE_PARTS,
                      owner: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Copy one checked slug below the worktree fd; a name that exists by now is foreign and stays.
+    """Copy one checked slug below the worktree fd; a folder that exists by now is foreign and stays.
 
-    With an *owner* the marker is published first, so a copy that stops halfway is
-    still this run's and the next attempt of the same dispatch can reclaim it.
+    :func:`_copy_skill` claims the slug folder with one ``mkdir`` before anything is written
+    into it, so ``FileExistsError`` (the folder, or a nested one) is ``not_owned:<slug>`` with
+    no marker and no file written. With an *owner* the marker is published first below the
+    claimed folder, so a copy that stops halfway is still this run's and the next attempt of
+    the same dispatch can reclaim it.
     """
     root_fd = _open_worktree(wt)
     try:
         base_fd = _descend(root_fd, parts)
         try:
             if owner:
-                _create_nofollow(base_fd, Path(slug) / MARKER_NAME, _marker_bytes(owner, slug, src), 0o644)
-            _copy_skill(base_fd, wt, slug, src)
+                _copy_skill(base_fd, wt, slug, src, marker=_marker_bytes(owner, slug, src))
+            else:
+                _copy_skill(base_fd, wt, slug, src)
         except FileExistsError as exc:
             raise ShadowError(f"not_owned:{slug}") from exc
         finally:
