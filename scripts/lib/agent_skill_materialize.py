@@ -76,11 +76,36 @@ def _write_error_manifest(wt: Path, role: str, result: dict[str, Any]) -> None:
     try:
         if not _is_safe_agent_name(role) or not _is_ignored(wt):
             return
-        role_dir = wt / SHADOW_DIR / role
-        role_dir.mkdir(parents=True, exist_ok=True)
+        role_dir = _safe_error_dir(wt, role)
+        if role_dir is None:
+            return
         atomic_write_json(role_dir / MANIFEST_NAME, {"schema": MANIFEST_SCHEMA, **result})
     except Exception as exc:  # fail-open: the reason is already in the WARNING
         logger.warning("could not write error manifest: %s", type(exc).__name__)
+
+
+def _checked_base(wt: Path) -> Path:
+    """The shadow dir: not a symlink and, once it exists, resolving inside the worktree."""
+    base = wt / SHADOW_DIR
+    if base.is_symlink():
+        raise ShadowError("shadow_dir_symlink")
+    if base.exists() and not _inside(Path(os.path.realpath(base)), Path(os.path.realpath(wt))):
+        raise ShadowError("shadow_dir_outside_worktree")
+    return base
+
+
+def _safe_error_dir(wt: Path, role: str) -> Path | None:
+    """The role dir for an error manifest, or None when any component is unsafe."""
+    try:
+        base = _checked_base(wt)
+    except ShadowError:
+        return None
+    role_dir = base / role
+    if role_dir.is_symlink() or (role_dir.exists() and not role_dir.is_dir()):
+        return None
+    base.mkdir(exist_ok=True)
+    role_dir.mkdir(exist_ok=True)
+    return role_dir
 
 
 def _is_ignored(wt: Path) -> bool:
@@ -125,15 +150,13 @@ def _inside(path: Path, root: Path) -> bool:
 
 def _reset_role_dir(wt: Path, role: str) -> Path:
     """Remove a leftover ``<role>`` dir (only that one) and recreate it empty."""
-    base = wt / SHADOW_DIR
+    base = _checked_base(wt)
     base.mkdir(exist_ok=True)
     real_base = Path(os.path.realpath(base))
-    if not _inside(real_base, Path(os.path.realpath(wt))):
-        raise ShadowError("shadow_dir_outside_worktree")
     role_dir = base / role
     if role_dir.is_symlink():
-        role_dir.unlink()  # drops the link itself, never what it points at
-    elif role_dir.exists():
+        raise ShadowError("role_dir_symlink")
+    if role_dir.exists():
         if not _inside(Path(os.path.realpath(role_dir)), real_base):
             raise ShadowError("leftover_outside_worktree")
         shutil.rmtree(role_dir)

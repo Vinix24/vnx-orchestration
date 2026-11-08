@@ -154,17 +154,16 @@ def test_leftover_directory_is_replaced(tmp_path, shadow):
     assert (other_role / "keep.txt").exists()
 
 
-def test_leftover_symlink_to_outside_is_unlinked_and_target_survives(tmp_path, shadow):
+def test_leftover_symlink_to_outside_is_refused_and_target_survives(tmp_path, shadow):
     _, wt = _make_repo(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "precious.txt").write_text("p")
     (wt / ".vnx-agent-skills").mkdir()
     (wt / ".vnx-agent-skills" / "backend-developer").symlink_to(outside)
-    assert _run(wt)["status"] == "ok"
+    assert _run(wt)["status"] == "error"
     assert (outside / "precious.txt").read_text() == "p"
     assert list(outside.iterdir()) == [outside / "precious.txt"]
-    assert not (wt / ".vnx-agent-skills" / "backend-developer").is_symlink()
 
 
 def test_shadow_dir_symlinked_outside_the_worktree_is_refused(tmp_path, shadow):
@@ -201,3 +200,22 @@ def test_role_config_declares_resolvable_skills(role):
     assert "fabric-reference" in cfg.skills
     for slug in cfg.skills:
         assert resolve_skill_dir(REPO, slug) is not None, slug
+
+
+@pytest.mark.parametrize("link_role", [True, False])
+@pytest.mark.parametrize("slugs", [("no-such-skill",), ("alpha",)])
+def test_symlinked_destination_is_refused_and_outside_stays_byte_identical(
+    tmp_path, shadow, link_role, slugs
+):
+    _, wt = _make_repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "manifest.json").write_bytes(b"sentinel\n")
+    if link_role:
+        (wt / ".vnx-agent-skills").mkdir()
+        (wt / ".vnx-agent-skills" / "backend-developer").symlink_to(outside)
+    else:
+        (wt / ".vnx-agent-skills").symlink_to(outside)
+    assert _run(wt, slugs=slugs)["status"] == "error"
+    assert (outside / "manifest.json").read_bytes() == b"sentinel\n"
+    assert [p.name for p in outside.iterdir()] == ["manifest.json"]
