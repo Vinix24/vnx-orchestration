@@ -112,3 +112,31 @@ def test_adr_marks_write_once_marker(adr_text: str) -> None:
     section = _section(adr_text, "## Write-once uitkomstmarker")
     assert "write-once" in section.lower()
     assert "PR-7b" in section
+
+
+def test_adr_is_accepted_with_the_t0_decision_date(adr_text: str) -> None:
+    status = next(line for line in adr_text.splitlines() if line.startswith("**Status:**"))
+    assert "Aanvaard" in status
+    assert "08-11-2026" in status
+    assert "Voorgesteld" not in status
+    assert "autonomie-akkoord van 27-10" in adr_text
+
+
+def test_adr_fixes_the_period_with_exclusive_end(adr_text: str) -> None:
+    section = _section(adr_text, "## Periode en noemer")
+    assert "2026-10-30" in section and "2026-11-09" in section
+    assert "2026-11-30" not in section
+    assert "einde exclusief" in section
+
+
+def test_adr_fixes_thresholds_and_orientation(adr_text: str) -> None:
+    section = _section(adr_text, "## Drempel")
+    assert "0.80" in section and "0.20" in section
+    assert "een hoge waarde is zelfstandig" in section
+    assert "onvoldoende_meting" in section and "niet_selfstandig" in section
+    assert "weigert PR-7b een oordeel" not in section
+
+
+def test_adr_marks_plan_d3_actor_classes_as_superseded(adr_text: str) -> None:
+    norm = _section(adr_text, "## Norm")
+    assert "D3" in norm and "vervangt" in norm

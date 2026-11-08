@@ -1,6 +1,6 @@
 # ADR-056 - Zelfstandigheid als meetbaar begrip: norm, sleutel, periode, drempel en wie mag promoveren
 
-**Status:** Voorgesteld 08-11-2026 (track `zelfstandigheid-meten`, PR-1). De waarden onder "Periode en noemer" en "Drempel" worden bevestigd door de operator in stap 1 van het plan; tot dan is de status Voorgesteld.
+**Status:** Aanvaard 08-11-2026 (track `zelfstandigheid-meten`, PR-1, ronde 2). De periode en de drempels onder "Periode en noemer" en "Drempel" zijn op 08-11-2026 vastgesteld door de T0, op het autonomie-akkoord van 27-10 (`claudedocs/2026-10-24-nachtrun-golf-1-3/draaiboek.md` §0). De operator kan elk ervan wijzigen met een amendement.
 **Datum:** 2026-11-08
 **Besloten door:** de operator voor de bevoegdheid (beslissing 2 van de 1.9-sprint, 07-11-2026 ~14:30Z, hieronder letterlijk); T0 voor de rest, op het plan `claudedocs/2026-11-07-naar-1-9/plannen/zelfstandigheid-meten.md` (revisie 2, plan-gate-bevindingen F1 tot en met F7 en de tiebreaker-voorwaarde T). ADR-056 was vrij op `origin/main` `8c96dc306`.
 **Cross-refs:** ADR-005 (eerst het grootboek), ADR-007 (`project_id` in elke sleutel), ADR-045 (het grootboek legt elke dispatch vast), ADR-047 (de tracks-DB is de enige planbron), ADR-055 (een falsifieerbaar grootboek).
@@ -37,6 +37,8 @@ Een handeling is autonoom als de afgeleide actorklasse niet `operator` is en nie
 | `automation` | Geen TTY, geen agentmarker, wel een bekende proceseigenaar (daemon, reconciler, geplande taak) | autonoom |
 | `unknown` | Alles wat in geen van de vier past, ook een agent zonder marker en zonder TTY | niet te meten |
 
+Deze vijf klassen zijn bindend. Het ADR vervangt hiermee de vier van plan D3 (D3 is superseded: `operator`, `agent`, `delegated`, `system`): `unknown` is nodig voor `unknown_rate`, en `t0` en `worker` splitsen de agentklasse langs de lijn die de promoteregel nodig heeft. T0-besluit 08-11-2026, op het autonomie-akkoord van 27-10.
+
 De afleiding is één pure functie `derive_actor_class(env, isatty)` zonder I/O, in `scripts/lib/actor_class.py` (PR-2). Twee onafhankelijke signalen (TTY en marker) bepalen de klasse. Een agent zonder marker wordt dus `unknown` en nooit `operator`, anders zou de zelfstandigheid te laag gemeten worden. Een tweede implementatie bij een aanroeper is niet toegestaan.
 
 Een `t0`-handeling onder een gedelegeerde bevoegdheid draagt `metadata.grant` met de verwijzing naar het plan-gate-record dat haar dekt (F1, zie "Wie mag promoveren"). Zonder die verwijzing is het geen gedelegeerde promotie en weigert PR-5b haar.
@@ -61,28 +63,30 @@ Een bron die geen `project_id` kan bepalen schrijft `project_id=unknown` en telt
 
 ## Periode en noemer
 
-Een cohort is de verzameling leveringen die in de periode een terminale toestand bereikte (F5, D9 tot D11). De periode is begrensd en staat vast vóór de meting. Voorgesteld: `2026-10-30T00:00:00Z` tot `2026-11-30T00:00:00Z` (einde exclusief). De ingangsdatum is de datum waarop de dev-state 183 afgeronde `dlv-`-leveringen telde. De operator bevestigt of verschuift beide data in stap 1 van het plan. Een andere periode is een nieuwe marker, geen aanpassing.
+Een cohort is de verzameling leveringen die in de periode een terminale toestand bereikte (F5, D9 tot D11). De periode is begrensd en staat vast vóór de meting. Vastgesteld door de T0 op 08-11-2026, op het autonomie-akkoord van 27-10: `2026-10-30T00:00:00Z` tot `2026-11-09T00:00:00Z` (einde exclusief), vast vóór enige meting. De ingangsdatum is de datum waarop de dev-state 183 afgeronde `dlv-`-leveringen telde. Een latere periode is een nieuwe marker met een nieuwe naam, geen aanpassing van deze (D17).
 
 - Een levering komt in aanmerking als `id LIKE 'dlv-%'` en `created_at` op of na de start van de periode ligt.
 - `completed` telt als geleverd. Alleen dan is de levering echt de deur uit.
 - `withdrawn`, `expired` en `dead_letter` zijn niet geleverd. Ze staan met hun reden in de uitvoer en niet in de noemer (PR-6a). Meetellen zou de zelfstandigheid opblazen, want er is niets geleverd om zelfstandig te laten.
 - Een `completed` levering met `pr_ref` maar zonder merge-receipt is `unknown: receipt_missing`. Dat is niet nul.
-- `N` is het aantal in aanmerking komende, geleverde leveringen. `zero_rate` is het aantal met nul operatorhandelingen gedeeld door `N`. `unknown_rate` is het aantal met minstens één bron op `unknown` gedeeld door `N`. Beide gaan over leveringen en nooit over events.
+- `N` is het aantal in aanmerking komende, geleverde leveringen. `zero_rate` is het aandeel in aanmerking komende leveringen met nul operatorhandelingen, het aantal gedeeld door `N` (D9). Een hoge waarde is zelfstandig. D16 in het plan las dit omgekeerd; dit ADR corrigeert dat. `unknown_rate` is het aantal met minstens één bron op `unknown` gedeeld door `N`. Beide gaan over leveringen en nooit over events.
 - Per project is de dekking `covered` (in elke bron minstens één geldige sleutel), `uncovered` (minstens één bron ontbreekt) of `no_data` (geen enkele levering in de periode). Een leeg project is `no_data` en nooit `covered` (PR-6b). Het telt niet mee in een rate tot het data heeft.
 
 ## Drempel
 
 Het cohort is groot genoeg als `N >= 50`. Dit getal is bevroren in dit ADR en geldt voor de meetperiode hierboven. Reden: bij 50 leveringen is een rate van 0,1 nog leesbaar, en 30 maakt het oordeel te ruisgevoelig. De teller toont `N` altijd, zodat de lezer de steekproef ziet.
 
-Het oordeel heeft drie waarden:
+Vastgesteld door de T0 op 08-11-2026, op het autonomie-akkoord van 27-10. Het oordeel heeft drie waarden, in deze volgorde van toetsing:
 
 | Oordeel | Voorwaarde |
 |---|---|
-| `onvoldoende_meting` | `N < 50`, of `unknown_rate` boven de afkapwaarde |
-| `selfstandig` | `N >= 50` en `zero_rate` aan de goede kant van de afkapwaarde |
-| `niet_selfstandig` | `N >= 50` en `zero_rate` aan de verkeerde kant van de afkapwaarde |
+| `onvoldoende_meting` | `N < 50`, of `unknown_rate` > 0.20 |
+| `selfstandig` | anders, en `zero_rate` >= 0.80 |
+| `niet_selfstandig` | anders |
 
-Een `N` onder de 50 geeft nooit `selfstandig`. De afkapwaarden voor `zero_rate` en `unknown_rate` stelt het plan niet vast. De operator zet ze in stap 1 van het plan, in een amendement op dit ADR, vóór PR-7b draait. Zolang ze ontbreken weigert PR-7b een oordeel te geven en meldt de reden (fail-closed). Het wijzigen van `50` of van een afkapwaarde is een nieuw amendement op dit ADR en nooit een codewijziging.
+Orientatie: `zero_rate` is het aandeel leveringen zonder operatorhandeling, dus een hoge waarde is zelfstandig.
+
+Een `N` onder de 50 geeft nooit `selfstandig`, en een `unknown_rate` boven 0.20 ook niet. Het wijzigen van `50`, `0.80` of `0.20` is een nieuw amendement op dit ADR en nooit een codewijziging. PR-7b leest deze waarden en weigert niet meer wegens ontbrekende afkapwaarden. Bij een waarde die ontbreekt of niet te lezen is, geeft zij `onvoldoende_meting` en meldt de reden (fail-closed).
 
 ## Wie mag promoveren
 
@@ -106,7 +110,7 @@ De eerste echte uitkomst mag achteraf niet bijgesteld kunnen worden. PR-7b schri
 
 De track is klaar als aan de volgende punten tegelijk voldaan is:
 
-- deze ADR bestaat met de zes secties en een bevestigde periode en afkapwaarden;
+- deze ADR bestaat met de zes secties, een vaste periode en vaste afkapwaarden;
 - elke bron schrijft `(project_id, delivery_id)` of staat met reden als `uncovered` in de dekking;
 - `receipt_query.py operator-cohort` toont `N`, `zero_rate` en `unknown_rate` voor een project, en per project `covered`, `uncovered` of `no_data`;
 - de marker bestaat, bevat de vijf projecten, de periode, de drempels en het oordeel, en een tweede schrijfpoging faalt.
