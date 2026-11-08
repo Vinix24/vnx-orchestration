@@ -32,6 +32,9 @@ SHIPPED_ROLE = REPO / ".claude" / "terminals" / "T0" / "role-orchestrator.md"
 
 ROLE_MARKER_BEGIN = "<!-- VNX:BEGIN T0-ROLE -->"
 ROLE_MARKER_END = "<!-- VNX:END T0-ROLE -->"
+PB_BEGIN = "<!-- VNX:BEGIN T0-PLAYBOOK -->"
+PB_END = "<!-- VNX:END T0-PLAYBOOK -->"
+SHIPPED_PLAYBOOK = REPO / "skills" / "t0-orchestrator" / "SKILL.md"
 
 
 # ---------------------------------------------------------------------------
@@ -511,9 +514,8 @@ def fake_central_vnx_home(tmp_path):
 
     (home / "bin" / "vnx").write_text(VNX.read_text())
     (home / "bin" / "vnx").chmod(0o755)
-    (home / "scripts" / "lib" / "vnx_marked_blocks.sh").write_text(
-        (REPO / "scripts" / "lib" / "vnx_marked_blocks.sh").read_text()
-    )
+    for helper in ("vnx_marked_blocks.sh", "t0_playbook.py", "atomic_io.py"):
+        (home / "scripts" / "lib" / helper).write_text((REPO / "scripts" / "lib" / helper).read_text())
     (home / ".claude" / "terminals" / "T0" / "role-orchestrator.md").write_text(
         SHIPPED_ROLE.read_text()
     )
@@ -698,3 +700,91 @@ class TestSyncGitCleanliness:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ---------------------------------------------------------------------------
+# T0-PLAYBOOK pointer block (ADR-058, skills-port SP-3)
+# ---------------------------------------------------------------------------
+
+def _pb_block(text: str) -> str:
+    return text[text.index(PB_BEGIN):text.index(PB_END) + len(PB_END)]
+
+
+class TestPlaybookPointerBlock:
+    def test_apply_writes_pointer_with_path_source_and_sha_of_the_named_file(self, tmp_path):
+        import hashlib
+        project = _make_project(tmp_path)
+        r = _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        t0 = project / ".claude" / "terminals" / "T0"
+        for name in ("AGENTS.md", "GEMINI.md"):
+            content = (t0 / name).read_text()
+            assert content.count(PB_BEGIN) == 1, name
+            block = _pb_block(content)
+            assert f"path: {SHIPPED_PLAYBOOK.resolve()}" in block
+            assert "source_id: fabric" in block
+            named = Path(next(l for l in block.splitlines() if l.startswith("path: "))[6:])
+            assert f"sha256: {hashlib.sha256(named.read_bytes()).hexdigest()}" in block
+
+    def test_second_apply_changes_no_byte_and_makes_no_backup(self, tmp_path):
+        project = _make_project(tmp_path)
+        t0 = project / ".claude" / "terminals" / "T0"
+        _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        before = {n: (t0 / n).read_bytes() for n in ("AGENTS.md", "GEMINI.md", "CLAUDE.md")}
+        r = _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert {n: (t0 / n).read_bytes() for n in before} == before
+        assert _backups(t0, "AGENTS.md") == [] and _backups(t0, "GEMINI.md") == []
+
+
+    def test_role_block_is_byte_identical_with_or_without_the_playbook_block(self, tmp_path):
+        project = _make_project(tmp_path)
+        _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        agents = (project / ".claude" / "terminals" / "T0" / "AGENTS.md").read_text()
+        role_block = agents[agents.index(ROLE_MARKER_BEGIN):agents.index(ROLE_MARKER_END) + len(ROLE_MARKER_END)]
+        assert role_block == ROLE_MARKER_BEGIN + "\n" + SHIPPED_ROLE.read_text() + ROLE_MARKER_END
+
+
+    def test_stale_block_is_refreshed(self, tmp_path):
+        project = _make_project(tmp_path)
+        t0 = project / ".claude" / "terminals" / "T0"
+        _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        agents = (t0 / "AGENTS.md").read_text()
+        (t0 / "AGENTS.md").write_text(agents.replace("source_id: fabric", "source_id: installed"))
+        _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        assert "source_id: fabric" in (t0 / "AGENTS.md").read_text()
+
+    def test_worker_terminals_get_no_playbook_block(self, tmp_path):
+        project = _make_project(tmp_path)
+        for t in ("T1", "T2", "T3"):
+            d = project / ".claude" / "terminals" / t
+            d.mkdir(parents=True)
+            (d / "AGENTS.md").write_text("worker\n")
+        _run_bash("--apply", "--project-dir", str(project), cwd=tmp_path)
+        for t in ("T1", "T2", "T3"):
+            assert (project / ".claude" / "terminals" / t / "AGENTS.md").read_text() == "worker\n"
+
+    def test_missing_source_says_so_on_stderr_writes_no_block_and_still_syncs_the_role(self, tmp_path):
+        # A VNX_HOME copy with the role but without skills/ and without a playbook
+        # anywhere on the probe path; HOME is empty so step (c) cannot match.
+        fake = tmp_path / "vnxhome"
+        for rel in ("bin", "scripts", ".claude/terminals/T0"):
+            (fake / rel).mkdir(parents=True)
+        (fake / "scripts" / "lib").mkdir()
+        for f in ("t0_playbook.py", "atomic_io.py", "vnx_paths.py", "vnx_marked_blocks.sh"):
+            (fake / "scripts" / "lib" / f).write_text((REPO / "scripts" / "lib" / f).read_text())
+        (fake / ".claude/terminals/T0/role-orchestrator.md").write_text(SHIPPED_ROLE.read_text())
+        (fake / "bin" / "vnx").write_text(VNX.read_text())
+        home = tmp_path / "home"
+        home.mkdir()
+        project = _make_project(tmp_path)
+        r = subprocess.run(
+            ["bash", str(fake / "bin" / "vnx"), "role", "sync", "--apply", "--project-dir", str(project)],
+            capture_output=True, text=True, cwd=str(tmp_path),
+            env={**os.environ, "HOME": str(home)},
+        )
+        t0 = project / ".claude" / "terminals" / "T0"
+        assert r.returncode == 0, r.stderr
+        assert "T0 PLAYBOOK SOURCE MISSING" in r.stderr
+        assert PB_BEGIN not in (t0 / "AGENTS.md").read_text()
+        assert ROLE_MARKER_BEGIN in (t0 / "AGENTS.md").read_text()

@@ -1503,6 +1503,49 @@ _role_sync_block_current() {
   [ "$probe_result" -eq 0 ]
 }
 
+# _role_sync_upsert_block FILE SNIPPET BEGIN END LABEL APPLY — one marked block
+# in one provider file. Dry-run reports; --apply backs the file up once per run
+# (the caller's $touched_files) before the first real change, then upserts.
+# Appends to the caller's $changed_files and $touched_files (dynamic scope).
+_role_sync_upsert_block() {
+  local provider_file="$1" snippet_file="$2" marker_begin="$3" marker_end="$4" label="$5" apply="$6"
+  local base result
+  base="$(basename "$provider_file")"
+
+  if _role_sync_block_current "$provider_file" "$snippet_file" "$marker_begin" "$marker_end"; then
+    log "[role-sync] $base $label already current (no changes)"
+    return 0
+  fi
+
+  if [ "$apply" -eq 0 ]; then
+    log "[role-sync] would sync $label -> $provider_file"
+    return 0
+  fi
+
+  if [ -f "$provider_file" ] && [[ "$touched_files" != *"|$provider_file|"* ]]; then
+    local ts backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="$provider_file.bak.$ts"
+    if ! cp "$provider_file" "$backup"; then
+      err "[role-sync] backup failed for $provider_file; aborting"; return 1
+    fi
+    log "[role-sync] backed up $base -> $backup"
+  fi
+  touched_files="$touched_files|$provider_file|"
+
+  if vnx_upsert_marked_block "$provider_file" "$snippet_file" "$marker_begin" "$marker_end"; then
+    result=0
+  else
+    result=$?
+  fi
+  case "$result" in
+    0) log "[role-sync] $base $label already current (no changes)" ;;
+    1) log "[role-sync] created $provider_file"; [[ " ${changed_files[*]-} " == *" $base "* ]] || changed_files+=("$base") ;;
+    2) log "[role-sync] updated $provider_file ($label)"; [[ " ${changed_files[*]-} " == *" $base "* ]] || changed_files+=("$base") ;;
+    *) err "[role-sync] failed to update $provider_file"; return 1 ;;
+  esac
+}
+
 # cmd_role_sync — idempotent refresh of a project's CANONICAL orchestrator role
 # (.claude/terminals/T0/role-orchestrator.md) from the installed VNX, and
 # provider-agnostic mirrors of it (marked block in AGENTS.md / GEMINI.md,
@@ -1686,45 +1729,33 @@ cmd_role_sync() {
   # block those commands manage.
   local role_marker_begin="<!-- VNX:BEGIN T0-ROLE -->"
   local role_marker_end="<!-- VNX:END T0-ROLE -->"
+  local playbook_marker_begin="<!-- VNX:BEGIN T0-PLAYBOOK -->"
+  local playbook_marker_end="<!-- VNX:END T0-PLAYBOOK -->"
   local changed_files=()
-  local provider_file base
+  local touched_files=""
+  local provider_file
+
+  # T0-PLAYBOOK pointer block (ADR-058): resolved by scripts/lib/t0_playbook.py,
+  # the one resolver. Exit 3 = no playbook source anywhere: say so, write no
+  # block, keep syncing the role.
+  local playbook_snippet playbook_rc=0
+  playbook_snippet="$(mktemp)"
+  "$VNX_PYTHON" "$VNX_HOME/scripts/lib/t0_playbook.py" body \
+    --project-root "$target_root" --vnx-home "$VNX_HOME" --out "$playbook_snippet" >/dev/null || playbook_rc=$?
+  if [ "$playbook_rc" -ne 0 ] && [ "$playbook_rc" -ne 3 ]; then
+    rm -f "$playbook_snippet"
+    err "[role-sync] playbook source resolution failed (rc=$playbook_rc); aborting (no changes made)"; return 1
+  fi
 
   for provider_file in "$project_t0_dir/AGENTS.md" "$project_t0_dir/GEMINI.md"; do
-    base="$(basename "$provider_file")"
-
-    if _role_sync_block_current "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
-      log "[role-sync] $base already current (no changes)"
-      continue
+    _role_sync_upsert_block "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end" \
+      "role block" "$apply" || { rm -f "$playbook_snippet"; return 1; }
+    if [ "$playbook_rc" -eq 0 ]; then
+      _role_sync_upsert_block "$provider_file" "$playbook_snippet" "$playbook_marker_begin" "$playbook_marker_end" \
+        "T0-PLAYBOOK block" "$apply" || { rm -f "$playbook_snippet"; return 1; }
     fi
-
-    if [ "$apply" -eq 0 ]; then
-      log "[role-sync] would sync canonical role block -> $provider_file"
-      continue
-    fi
-
-    if [ -f "$provider_file" ]; then
-      local ts backup
-      ts="$(date +%Y%m%d-%H%M%S)"
-      backup="$provider_file.bak.$ts"
-      if ! cp "$provider_file" "$backup"; then
-        err "[role-sync] backup failed for $provider_file; aborting"; return 1
-      fi
-      log "[role-sync] backed up $base -> $backup"
-    fi
-
-    local result
-    if vnx_upsert_marked_block "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
-      result=0
-    else
-      result=$?
-    fi
-    case "$result" in
-      0) log "[role-sync] $base already current (no changes)" ;;
-      1) log "[role-sync] created $provider_file"; changed_files+=("$base") ;;
-      2) log "[role-sync] updated $provider_file"; changed_files+=("$base") ;;
-      *) err "[role-sync] failed to update $provider_file"; return 1 ;;
-    esac
   done
+  rm -f "$playbook_snippet"
 
   if [ "$apply" -eq 0 ]; then
     log "[role-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
