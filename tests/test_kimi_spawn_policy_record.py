@@ -105,3 +105,24 @@ def test_failed_write_is_a_warning_and_cmd_still_builds(monkeypatch, caplog):
 def test_enforcement_stays_off_and_untouched(monkeypatch):
     monkeypatch.setenv("VNX_ENFORCE_WORKER_PERMISSIONS", "1")
     assert _build() == ORIGIN_MAIN_CMD
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_extra_env_digest_does_not_fall_back_to_parent(tmp_path, monkeypatch, blank):
+    monkeypatch.setenv(DIGEST_ENV, "parent-digest")
+    _build({DIGEST_ENV: blank})
+    assert _record(tmp_path)["policy_state"] == "policy_absent"
+
+
+@pytest.mark.parametrize("extra,parent,expected", [
+    ({}, "parent-digest", "parent-digest"),
+    ({DIGEST_ENV: "child"}, "parent-digest", "child"),
+    ({DIGEST_ENV: ""}, "parent-digest", "policy_absent"),
+    (None, "parent-digest", "parent-digest"),
+    (None, None, "policy_absent"),
+    ({}, "  ", "policy_absent"),
+])
+def test_digest_source_by_key_presence(monkeypatch, extra, parent, expected):
+    if parent is not None:
+        monkeypatch.setenv(DIGEST_ENV, parent)
+    assert kimi_spawn._policy_digest(extra) == expected

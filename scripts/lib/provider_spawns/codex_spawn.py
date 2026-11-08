@@ -358,7 +358,6 @@ def _resolve_codex_model(model: Optional[str]) -> str:
 
 
 _CODEX_SANDBOX_MODES = ("workspace-write", "read-only", "danger-full-access")
-_POLICY_DIGEST_ENV = "VNX_PERMISSION_POLICY_DIGEST"
 _POLICY_ABSENT = "policy_absent"
 
 
@@ -412,8 +411,9 @@ def _write_codex_policy_record(
         if not data_dir:
             from vnx_paths import resolve_paths
             data_dir = resolve_paths()["VNX_DATA_DIR"]
-        value = (extra_env or {}).get(_POLICY_DIGEST_ENV) or os.environ.get(_POLICY_DIGEST_ENV)
-        digest = value.strip() if isinstance(value, str) and value.strip() else _POLICY_ABSENT
+        from provider_spawns.kimi_spawn import _policy_digest
+
+        digest = _policy_digest(extra_env)
         record = _codex_policy_record(_build_cmd(model), cwd, digest, dispatch_id, terminal_id)
         atomic_write_json(
             Path(data_dir) / "state" / "permission_records" / f"{terminal_id}_{dispatch_id}.json",

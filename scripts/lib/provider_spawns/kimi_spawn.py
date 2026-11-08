@@ -58,6 +58,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Mapping
 import tomllib
 import zipfile
 from dataclasses import dataclass
@@ -532,8 +533,13 @@ _KIMI_HOOK = "PreToolUse ^Shell$"
 
 
 def _policy_digest(extra_env: Optional[Dict[str, str]]) -> str:
-    """The spec's policy digest from the spawn env, or ``policy_absent``; never invented."""
-    value = (extra_env or {}).get(_POLICY_DIGEST_ENV) or os.environ.get(_POLICY_DIGEST_ENV)
+    """The digest the child gets, or ``policy_absent``; never invented.
+
+    Key presence decides the source, like the child env merge ``{**os.environ, **extra_env}``:
+    a key in ``extra_env`` wins even when blank (blank -> ``policy_absent``, no parent fallback).
+    """
+    source = extra_env if isinstance(extra_env, Mapping) and _POLICY_DIGEST_ENV in extra_env else os.environ
+    value = source.get(_POLICY_DIGEST_ENV)
     return value.strip() if isinstance(value, str) and value.strip() else _POLICY_ABSENT
 
 

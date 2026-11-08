@@ -111,3 +111,24 @@ def test_failed_write_is_a_warning_and_spawn_still_launches(monkeypatch, launch,
         proc, early = launch(dispatch_id="d-2")
     assert proc is not None and early is None
     assert any("policy record not written for d-2" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_extra_env_digest_does_not_fall_back_to_parent(tmp_path, monkeypatch, launch, blank):
+    monkeypatch.setenv(DIGEST_ENV, "parent-digest")
+    launch({DIGEST_ENV: blank})
+    assert _record(tmp_path)["policy_state"] == "policy_absent"
+
+
+@pytest.mark.parametrize("extra,parent,expected", [
+    ({}, "parent-digest", "parent-digest"),
+    ({DIGEST_ENV: "child"}, "parent-digest", "child"),
+    ({DIGEST_ENV: ""}, "parent-digest", None),
+    (None, "parent-digest", "parent-digest"),
+    (None, None, None),
+])
+def test_digest_source_by_key_presence(tmp_path, monkeypatch, launch, extra, parent, expected):
+    if parent is not None:
+        monkeypatch.setenv(DIGEST_ENV, parent)
+    launch(extra)
+    assert _record(tmp_path)["policy_digest"] == expected
