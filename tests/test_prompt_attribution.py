@@ -122,6 +122,40 @@ def test_append_record_does_not_create_missing_state_dir(tmp_path):
     assert not (tmp_path / "missing").exists()
 
 
+def _record():
+    return prompt_attribution.build_record(_attribute(), session_id="s", prompt="x", ts_utc="t")
+
+
+def test_uncontended_append_writes_exactly_one_line(home):
+    _, state = home
+    assert prompt_attribution.append_record(state, _record()) is True
+    assert len((state / prompt_attribution.STORE_FILENAME).read_text().splitlines()) == 1
+
+
+def test_append_never_waits_on_a_held_ledger_lock(home, capsys):
+    import fcntl
+    import threading
+
+    _, state = home
+    store = state / prompt_attribution.STORE_FILENAME
+    store.write_text("")
+    holder = store.open("a")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(prompt_attribution.append_record(state, _record())), daemon=True)
+    started = time.monotonic()
+    worker.start()
+    worker.join(timeout=2)
+    elapsed = time.monotonic() - started
+    fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+    holder.close()
+    worker.join(timeout=2)
+    assert elapsed < 0.2, f"append blocked for {elapsed:.2f}s on a held lock"
+    assert result == [False]
+    assert store.read_text() == ""
+    assert "ledger busy, line dropped" in capsys.readouterr().err
+
+
 def _run_hook(stdin: str, home_dir: Path, extra_env=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("VNX_")}
     env.update({"HOME": str(home_dir), "VNX_PROJECT_ID": PID, **(extra_env or {})})

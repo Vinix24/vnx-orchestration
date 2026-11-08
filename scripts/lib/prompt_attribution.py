@@ -185,13 +185,37 @@ def build_record(attribution: Attribution, *, session_id: Any, prompt: str, ts_u
     return record
 
 
+LOCK_BUDGET_SECONDS = 0.05
+LOCK_RETRY_SECONDS = 0.005
+
+
+def _acquire_bounded(fd: int) -> bool:
+    """Take the exclusive lock without ever waiting longer than ``LOCK_BUDGET_SECONDS`` in total."""
+    import fcntl
+
+    deadline = time.monotonic() + LOCK_BUDGET_SECONDS
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(LOCK_RETRY_SECONDS)
+
+
 def append_record(state_dir: Path, record: dict, root: Optional[Path] = None) -> bool:
     """Append one line under an exclusive lock. A missing state dir is not created: then ``False``.
+
+    The hook runs on every prompt submission and must never delay it, so the lock is bounded to 50 ms.
+    When it is still held after that, nothing is written, ``prompt_attribution: ledger busy, line
+    dropped`` goes to stderr and the result is ``False``. Trade-off: a dropped line is a measured gap in
+    the prompt source, not a hung prompt.
 
     With ``root``, the resolved store file must lie under the resolved ``root``; otherwise nothing is
     written and ``ValueError`` is raised.
     """
-    import fcntl
+    import sys
 
     if not state_dir.is_dir():
         return False
@@ -199,6 +223,8 @@ def append_record(state_dir: Path, record: dict, root: Optional[Path] = None) ->
         raise ValueError(f"store {state_dir / STORE_FILENAME} resolves outside {root}")
     line = json.dumps(record, separators=(",", ":")) + "\n"
     with (state_dir / STORE_FILENAME).open("a", encoding="utf-8") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        if not _acquire_bounded(fh.fileno()):
+            sys.stderr.write("prompt_attribution: ledger busy, line dropped\n")
+            return False
         fh.write(line)
     return True
