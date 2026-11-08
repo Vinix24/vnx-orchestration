@@ -1,0 +1,3 @@
+- Context manifest (track `agents-als-map-fase-1`, PR-4a2): `context_manifest.capture` now also reports the hooks that ran, the account (auth kind and an org hash, never an address) and the config home; `provider` other than `claude` gives `unsupported` without reading any file.
+- Context manifest hooks: `command_path` is only ever one bare path; an inline `-c` script, an argument token and `KEY=/path` or `--flag=/path` forms are never recorded.
+- Context manifest hooks (round 3): `command_path` is read from the executable or script position only. An argument after a non-path executable (`curl --token /x`), a relative script or an interpreter `-c`/`-m` is never promoted to the path.
