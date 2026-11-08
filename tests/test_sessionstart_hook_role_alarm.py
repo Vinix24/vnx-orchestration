@@ -190,12 +190,13 @@ def test_prose_that_mentions_the_role_file_without_importing_it_is_not_an_import
 
 def test_the_alarm_does_not_stop_the_rest_of_the_injection(tmp_path):
     root = _make_project(tmp_path, CLAUDE_MD_WITHOUT_IMPORT)
-    _skill(root)
     result, ctx = _run(HOOK, _t0(root), _env(tmp_path))
     assert result.returncode == 0
     assert ctx.startswith(ALARM)
     assert INJECTION_HEAD in ctx
-    assert SKILL_MARKER in ctx, "the playbook must still be delivered next to the alarm"
+    # ADR-058: the playbook comes from the fabric source (<repo>/skills), not the project copy.
+    repo_body = (REPO / "skills" / "t0-orchestrator" / "SKILL.md").read_text(encoding="utf-8")
+    assert repo_body.rstrip("\n") in ctx, "the playbook must still be delivered next to the alarm"
 
 
 # ── T0 only ───────────────────────────────────────────────────────────────────

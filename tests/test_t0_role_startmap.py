@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -212,14 +213,28 @@ def _context(root: Path, tmp_path: Path) -> str:
 def test_r4_the_first_kilobyte_carries_the_playbook_path(tmp_path):
     root = _project(tmp_path, with_skill=True)
     ctx = _context(root, tmp_path)
-    playbook = root / ".claude" / "skills" / "t0-orchestrator" / "SKILL.md"
+    # ADR-058: the advertised path is the resolved fabric source, not the project copy.
+    playbook = (REPO / "skills" / "t0-orchestrator" / "SKILL.md").resolve()
     assert str(playbook) in ctx.encode()[:1024].decode(errors="ignore")
 
 
 def test_r4_a_missing_playbook_is_said_in_the_same_place(tmp_path):
     root = _project(tmp_path, with_skill=False)
-    head = _context(root, tmp_path).encode()[:1024].decode(errors="ignore")
-    assert "NOT FOUND" in head
+    # A fabric copy without skills/, so no step of the resolver finds a playbook.
+    fab = tmp_path / "fab"
+    shutil.copytree(REPO / "scripts", fab / "scripts",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv"))
+    (fab / "hooks").mkdir()
+    shutil.copy2(HOOK, fab / "hooks" / "sessionstart.sh")
+    result = subprocess.run(
+        ["bash", str(fab / "hooks" / "sessionstart.sh")],
+        cwd=str(root / ".claude" / "terminals" / "T0"),
+        env=_env(tmp_path), capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    ctx = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    head = ctx.encode()[:1024].decode(errors="ignore")
+    assert "T0 PLAYBOOK SOURCE MISSING" in head
     assert str(root / ".claude" / "skills" / "t0-orchestrator" / "SKILL.md") in head
 
 
