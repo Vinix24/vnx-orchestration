@@ -641,7 +641,9 @@ def test_security_path_kind_per_kind(kind, positives, negative):
     ("schema", ["scripts/migrations/0040_x.sql", "schemas/migrations/0041_y.sql", "schemas/runtime_coordination.sql"],
      "docs/core/SCHEMA_NOTES.md"),
     ("gate-merge", ["scripts/pr_merge.py", "scripts/lib/plan_gate_panel.py", "scripts/lib/verify_pr.py",
-                    "scripts/lib/gate_executor.py", "scripts/ci/xdist_parity_history.py"],
+                    "scripts/lib/gate_executor.py", "scripts/ci/xdist_parity_history.py",
+                    "configs/plan_gate_panel.yaml", ".vnx/governance_profiles.yaml",
+                    ".vnx/governance_enforcement.yaml"],
      "scripts/lib/report_writer.py"),
     ("store-resolution", ["scripts/lib/vnx_paths.py", "scripts/lib/project_root.py", "vnx_cli/_engine.py"],
      "vnx_cli/main.py"),
@@ -651,6 +653,17 @@ def test_plan_scope_path_category_per_category(category, positives, negative):
     for path in positives:
         assert category_of(path) == category, path
     assert category_of(negative) is None
+
+
+def test_the_files_that_set_the_review_weight_are_gate_merge_and_the_rule_version_moved():
+    category_of = _new("smart_router", "plan_scope_path_category")
+    version = _new("smart_router", "plan_scope_rule_version")
+    for path in ("configs/plan_gate_panel.yaml", ".vnx/governance_profiles.yaml", ".vnx/governance_enforcement.yaml"):
+        assert category_of(path) == "gate-merge", path
+    for path in ("config/x.yaml", "configs_old/x.yaml", ".vnx-data/x.yaml", "docs/configs/x.yaml", "scripts/lib/report_writer.py"):
+        assert category_of(path) is None, path
+    assert version() != "67591075cb2c59b7", "the table changed, so the version moved"
+    assert version() == version(), "the version is stable across two calls"
 
 
 def test_dispatch_rule_is_none_for_a_light_change_and_names_the_rule_otherwise():
