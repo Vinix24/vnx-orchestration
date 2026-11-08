@@ -747,3 +747,104 @@ def publish_check_run(
             body=response_body[:_ERROR_BODY_LIMIT],
         )
     return parsed
+
+
+# ---------------------------------------------------------------------------
+# Door permit transport (deur D3): list, PATCH — and no DELETE
+# ---------------------------------------------------------------------------
+# GitHub's Checks API has no DELETE on a check-run (ADR-061 §5), so there is no
+# delete function here and there must never be one: the door keeps one run per
+# head and moves it between success and failure with PATCH.
+
+
+def _github_json(
+    method: str, path: str, payload: Optional[str], what: str, project_root: Optional[Path]
+) -> Dict[str, Any]:
+    """One App-authenticated call under ``/repos/{owner_repo}``; the parsed object.
+
+    The same single forced-refresh retry on a 401 as :func:`publish_check_run`.
+    A non-2xx, a non-JSON body and a non-object body all raise: the caller
+    decides on a positive answer only.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{resolve_owner_repo(project_root)}{path}"
+    token, minted = _installation_token_with_freshness()
+    status, body = _api_request(method, url, headers=_github_headers(token), payload=payload)
+    if status == 401 and not minted:
+        token, _ = _installation_token_with_freshness(force_refresh=True)
+        status, body = _api_request(method, url, headers=_github_headers(token), payload=payload)
+    if status >= 400:
+        raise ForgeAPIError(
+            f"{what} faalde (HTTP {status}): {body[:_ERROR_BODY_LIMIT]}",
+            status=status,
+            body=body[:_ERROR_BODY_LIMIT],
+        )
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise ForgeAPIError(
+            f"{what}: respons was geen JSON (HTTP {status}): {body[:_ERROR_BODY_LIMIT]}",
+            status=status,
+            body=body[:_ERROR_BODY_LIMIT],
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ForgeAPIError(
+            f"{what}: respons was geen object: {body[:_ERROR_BODY_LIMIT]}",
+            status=status,
+            body=body[:_ERROR_BODY_LIMIT],
+        )
+    return parsed
+
+
+def list_check_runs(
+    head_sha: str, name: str, *, project_root: Optional[Path] = None
+) -> list:
+    """Every check-run named ``name`` on ``head_sha`` (any App), as GitHub returns them.
+
+    A response that says more runs exist than it carries (``total_count`` above
+    the page) raises: a partial read must not look like "no door run here".
+    """
+    if not head_sha or not head_sha.strip():
+        raise ForgeCheckRunError("head_sha is leeg: check-runs lezen vraagt om een kop")
+    path = f"/commits/{head_sha.strip()}/check-runs?check_name={name}&per_page=100"
+    parsed = _github_json("GET", path, None, f"check-runs lezen voor {head_sha[:12]}", project_root)
+    runs = parsed.get("check_runs")
+    if not isinstance(runs, list):
+        raise ForgeAPIError(f"check-runs-respons mist de lijst check_runs voor {head_sha[:12]}")
+    total = parsed.get("total_count")
+    if isinstance(total, bool) or not isinstance(total, int) or total > len(runs):
+        raise ForgeAPIError(
+            f"check-runs-respons is niet volledig voor {head_sha[:12]}: "
+            f"total_count={total!r}, ontvangen={len(runs)}"
+        )
+    return [run for run in runs if isinstance(run, dict) and run.get("name") == name]
+
+
+def patch_check_run(
+    check_run_id: int,
+    conclusion: str,
+    title: str,
+    summary: str,
+    *,
+    name: str,
+    head_sha: str = "",
+    project_root: Optional[Path] = None,
+) -> Dict[str, Any]:
+    """PATCH one existing check-run to a completed ``conclusion``; GitHub's object.
+
+    Carries the same test-mode guard as :func:`publish_check_run`: a PATCH from
+    a pytest run could flip a real required check just as a POST could.
+    """
+    if isinstance(check_run_id, bool) or not isinstance(check_run_id, int) or check_run_id <= 0:
+        raise ForgeCheckRunError(f"check_run_id moet een positief geheel getal zijn: {check_run_id!r}")
+    _refuse_test_post_without_opt_in(name, head_sha)
+    payload = json.dumps(
+        {
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {"title": title, "summary": summary},
+        }
+    )
+    return _github_json(
+        "PATCH", f"/check-runs/{check_run_id}", payload,
+        f"check-run {check_run_id} bijwerken", project_root,
+    )
