@@ -2571,6 +2571,25 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_objective_set_autonomous_promotion(args: argparse.Namespace) -> int:
+    """Set the track opt-in ``autonomous_promotion_eligible`` (true|false); audited with the actor class."""
+    state_dir = _resolve_state_dir(args.state_dir)
+    try:
+        tracks_lib.set_autonomous_promotion_eligible(
+            state_dir, args.track_id, args.project_id, args.eligible == "true",
+            actor="operator", actor_class=actor_class.derive(),
+        )
+    except tracks_lib.TrackNotFoundError:
+        print(
+            f"objective set-autonomous-promotion: track not found: {args.track_id!r} "
+            f"(project {args.project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    print(f"Set autonomous_promotion_eligible={args.eligible} on {args.track_id}")
+    return 0
+
+
 def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
     """Set a track's plan_scope by hand (architecture|light), always with ``--reason``.
 
@@ -3202,6 +3221,50 @@ def _track_blocks_promotion(
     return True
 
 
+def _promotion_refusal(
+    state_dir: Path, project_id: str, row: Any, track_id: Optional[str],
+) -> tuple[Optional[str], dict]:
+    """``(refusal, extra_metadata)`` for a promote by this actor (ADR-056, "Wie mag promoveren").
+
+    The operator promotes as before. Any other class is refused unless the track
+    carries the opt-in AND the plan-gate grant reads VERIFIED for this track and
+    project; then the grant travels in the event metadata. Learning and dreaming
+    outcomes are never promoted by an agent. Anything unreadable refuses.
+    """
+    cls = actor_class.derive()
+    if cls == actor_class.OPERATOR:
+        return None, {}
+    kind = row["output_kind"] if "output_kind" in row.keys() else None
+    if kind in tracks_lib.OPERATOR_ONLY_OUTPUT_KINDS:
+        return f"output_kind {kind!r} is never promoted by an agent (actor class {cls!r})", {}
+    if not track_id or not tracks_lib.track_autonomous_promotion_eligible(
+        state_dir, track_id, project_id,
+    ):
+        return (
+            f"actor class {cls!r} may not promote: track {track_id!r} has no "
+            "autonomous_promotion_eligible opt-in; the operator promotes", {},
+        )
+    if cls != actor_class.T0:
+        return f"actor class {cls!r} may not promote, only the operator or the T0 on an opted-in track", {}
+    grant = _promotion_grant(project_id, track_id)
+    if grant != plan_gate_enforcement.PromotionGrant.VERIFIED:
+        return f"plan-gate grant for track {track_id!r} is {grant.value}, not verified", {}
+    return None, {"grant": {"track_id": track_id, "project_id": project_id, "state": grant.value}}
+
+
+def _promotion_grant(project_id: str, track_id: str) -> "plan_gate_enforcement.PromotionGrant":
+    """The grant state of a track; a failing verifier or missing trust anchor is never VERIFIED."""
+    absent = plan_gate_enforcement.PromotionGrant.ABSENT
+    try:
+        import delegation_mandate  # noqa: PLC0415
+        repo_root = Path(os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+        signers = delegation_mandate.resolve_allowed_signers_for_runtime(repo_root)
+        return plan_gate_enforcement.verify_promotion_grant(track_id, project_id, repo_root, signers)
+    except Exception as exc:  # vnx-silent-except: a failing verifier refuses the promote (ABSENT), reason printed by the caller
+        logging.getLogger(__name__).warning("promotion grant lookup failed: %s: %s", type(exc).__name__, exc)
+        return absent
+
+
 def cmd_deliverable_promote(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -3237,6 +3300,11 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
         if track_id and _track_blocks_promotion(state_dir, project_id, dispatch_id, track_id):
             return 1
 
+        refusal, grant_meta = _promotion_refusal(state_dir, project_id, row, track_id)
+        if refusal:
+            print(f"Cannot promote {dispatch_id!r}: {refusal}", file=sys.stderr)
+            return 1
+
         now = _now_utc()
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         if has_oaa:
@@ -3264,7 +3332,7 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state="proposed",
             to_state="ready",
-            **_derived_actor("operator"),
+            **_derived_actor("operator", grant_meta),
             reason="operator gate: proposed -> ready",
             project_id=project_id,
         )
@@ -6773,6 +6841,17 @@ def _add_objective_set_goal_parser(obj_sub: Any, common: Callable[[Any], None]) 
     p_set_goal.set_defaults(func=cmd_objective_set_goal)
 
 
+def _add_objective_set_autonomous_promotion_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    p = obj_sub.add_parser(
+        "set-autonomous-promotion",
+        help="set the track opt-in autonomous_promotion_eligible (true|false); default false",
+    )
+    common(p)
+    p.add_argument("track_id")
+    p.add_argument("eligible", choices=("true", "false"))
+    p.set_defaults(func=cmd_objective_set_autonomous_promotion)
+
+
 def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) -> None:
     """The eight `objective` write actions, one builder each.
 
@@ -6786,6 +6865,7 @@ def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) ->
     _add_objective_remove_dependency_parser(obj_sub, common)
     _add_objective_unmark_delivery_parser(obj_sub, common)
     _add_objective_reopen_parser(obj_sub, common)
+    _add_objective_set_autonomous_promotion_parser(obj_sub, common)
     _add_objective_add_parser(obj_sub, common)
     _add_objective_set_goal_parser(obj_sub, common)
 

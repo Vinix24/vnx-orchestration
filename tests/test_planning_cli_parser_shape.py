@@ -41,6 +41,7 @@ FIXTURE = Path(__file__).resolve().parent / "fixtures" / "planning_cli_parser_sh
 COMMAND_LINES: List[List[str]] = [
     ["objective", "list"],
     ["objective", "show", "x"],
+    ["objective", "set-autonomous-promotion", "x", "true"],
     ["horizon", "show", "x"],
     ["plan-gate", "run", "t", "--doc", "d", "--panel-seats", "codex"],
     ["plan-gate", "status", "t"],

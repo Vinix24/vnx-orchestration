@@ -326,6 +326,7 @@ _OBJECTIVE_ARGV = {
     "set-lane-hint": ["delegate-track", "governed"],
     "set-plan-scope": ["delegate-track", "light", "--reason", "parity check"],
     "set-goal": ["delegate-track", "Delegate goal state"],
+    "set-autonomous-promotion": ["delegate-track", "true"],
 }
 _DELIVERABLE_ARGV = {
     "add": ["--objective", "delegate-track", "--output-kind", "doc", "--title", "Delegate deliverable"],

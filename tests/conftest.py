@@ -964,3 +964,27 @@ def make_vnx_dispatch_bundle(vnx_dispatch_dir: Path):
         return make_dispatch_bundle(vnx_dispatch_dir, dispatch_id, prompt, task_class)
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """In-process planning commands run as the operator unless a test says otherwise.
+
+    ``vnx deliverable promote`` refuses every actor class but the operator (ADR-056),
+    and the class needs a TTY that pytest and CI do not have. No agent marker and a
+    TTY give ``operator``; a test that exercises another class sets its own markers
+    or patches ``actor_class._stdin_isatty`` after this fixture (the later call wins).
+    """
+    for marker in (
+        "CLAUDE_ROLE", "VNX_TERMINAL", "VNX_TERMINAL_ID", "VNX_DISPATCH_ID",
+        "VNX_CURRENT_DISPATCH_ID", "VNX_PROCESS_OWNER",
+    ):
+        monkeypatch.delenv(marker, raising=False)
+    lib_dir = str(Path(__file__).resolve().parent.parent / "scripts" / "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import actor_class
+
+    # Patch the probe, not the stream: derive() resolves _stdin_isatty at call time,
+    # and sys.stdin stays what pytest provides for every other code path.
+    monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: True)
