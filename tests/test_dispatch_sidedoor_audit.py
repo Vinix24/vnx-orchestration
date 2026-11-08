@@ -109,6 +109,14 @@ def test_scan_detects_known_raw_claude_spawns():
         assert caller in found, f"scanner no longer detects {caller}"
 
 
+def test_probe_agent_layout_is_an_audited_raw_claude_caller():
+    probe = "scripts/probe_agent_layout.sh"
+    result = audit_mod.audit()
+    assert probe in result["raw_claude_found"], "the scan no longer sees the probe's claude -p spawn"
+    assert probe in result["raw_claude_known"]
+    assert probe not in result["raw_claude_unaudited"]
+
+
 def test_raw_claude_docstring_only_not_flagged():
     # a file that only mentions the primitive in a docstring/comment must NOT be flagged.
     found = audit_mod.scan_raw_claude_spawns()
