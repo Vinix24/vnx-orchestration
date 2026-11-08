@@ -123,3 +123,26 @@ def test_providers_cli_names_a_malformed_profile_instead_of_hiding_it(monkeypatc
 
     monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "zwaar")
     assert "zwaar" in providers_cli.review_settings(None)["error"]
+
+
+def test_review_settings_reports_the_chain_of_the_named_project(monkeypatch):
+    import providers_cli
+
+    rows = {("proj-b", "VNX_GOVERNANCE_PROFILE"): "light"}
+    config_registry.set_db_resolver(lambda pid, key: rows.get((pid, key)))
+    monkeypatch.setattr("config_runtime.autowire", lambda *a, **k: True)
+    review = providers_cli.review_settings("proj-b")
+    assert review["profile"] == "light"
+    assert (review["takeover_chain"], review["takeover_chain_source"]) == (
+        "codex_gate,kimi_gate,claude_gate", "profile")
+    other = providers_cli.review_settings("proj-a")
+    assert (other["takeover_chain"], other["takeover_chain_source"]) == (
+        grh._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN, "default")
+
+
+def test_the_raw_chain_resolves_an_operator_row_for_the_named_project(monkeypatch):
+    rows = {("proj-b", "VNX_REVIEW_GATE_TAKEOVER_CHAIN"): "codex_gate,deepseek_gate"}
+    config_registry.set_db_resolver(lambda pid, key: rows.get((pid, key)))
+    monkeypatch.setattr("config_runtime.autowire", lambda *a, **k: True)
+    assert grh.review_gate_takeover_chain_raw("proj-b") == ("codex_gate,deepseek_gate", "project_config")
+    assert grh.review_gate_takeover_chain_raw("proj-a")[1] == "default"

@@ -776,8 +776,7 @@ def _profile_round_cap(project_id: Optional[str], state_dir: Optional[Path]) -> 
     ``None`` under ``standard`` and whenever an operator set ``VNX_REVIEW_ROUND_CAP``
     through ``VNX_OVERRIDE_*`` or a ``project_config`` row (that outranks the profile). A
     malformed profile raises ``GateProfileConfigError``; it never falls back. With a
-    state dir named, the operator row is read from THAT store; the profile key itself is
-    read from the process's configuration (``gate_profile`` has no state-dir reader).
+    state dir named, the profile key and the operator row are both read from THAT store.
     """
     import gate_profile
 
@@ -788,12 +787,12 @@ def _profile_round_cap(project_id: Optional[str], state_dir: Optional[Path]) -> 
     import config_store_db
 
     pid = project_id or _state_dir_project_id(state_dir)
-    contributed = gate_profile.resolve(pid).value("round_cap")
+    resolver = config_store_db.make_db_resolver(lambda _pid: state_dir)
+    contributed = gate_profile.resolve(pid, resolver=resolver).value("round_cap")
     if contributed is None:
         return None
     _, own_source = config_registry.resolve_with_source(
-        ROUND_CAP_KEY, pid, config_store_db.make_db_resolver(lambda _pid: state_dir),
-        use_default_resolver=False,
+        ROUND_CAP_KEY, pid, resolver, use_default_resolver=False,
     )
     return None if own_source in ("override", "project_config") else int(contributed)
 

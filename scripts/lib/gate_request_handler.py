@@ -153,24 +153,25 @@ def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     return {names[i]: names[i + 1] for i in range(len(names) - 1)}
 
 
-def review_gate_takeover_chain_raw() -> "tuple[str, str]":
+def review_gate_takeover_chain_raw(project_id: Optional[str] = None) -> "tuple[str, str]":
     """``(raw chain, source)`` of the takeover chain in force, fresh.
 
     ``source`` is ``override`` / ``project_config`` (an operator chain, outranks the
     profile), ``profile`` (``light`` or ``heavy`` contributed it), ``env`` or ``default``.
     Precedence: ``VNX_OVERRIDE_*`` > ``project_config`` row > gate profile >
     ``VNX_REVIEW_GATE_TAKEOVER_CHAIN`` env > registry default. A malformed profile raises
-    ``GateProfileConfigError``; there is no fallback to the default chain.
+    ``GateProfileConfigError``; there is no fallback to the default chain. ``project_id``
+    resolves the chain for that project; omitted, the process's project.
     """
     import config_registry
     import config_runtime
     import gate_profile
 
-    contributed = gate_profile.value("takeover_chain")
+    contributed = gate_profile.value("takeover_chain", project_id)
     if contributed is not None:
         return str(contributed), "profile"
     config_runtime.autowire()
-    raw, source = config_registry.resolve_with_source("VNX_REVIEW_GATE_TAKEOVER_CHAIN")
+    raw, source = config_registry.resolve_with_source("VNX_REVIEW_GATE_TAKEOVER_CHAIN", project_id)
     return raw or "", source
 
 

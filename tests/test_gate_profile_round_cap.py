@@ -118,3 +118,24 @@ def test_a_malformed_profile_raises_with_a_state_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "zwaar")
     with pytest.raises(GateProfileConfigError):
         review_rounds.round_cap(project_id="proj-sd", state_dir=tmp_path)
+
+
+def _store_with_profile(path, project, profile):
+    import sqlite3
+
+    import config_store_db
+
+    path.mkdir()
+    conn = sqlite3.connect(path / "runtime_coordination.db")
+    try:
+        config_store_db.set_config(conn, project, "VNX_GOVERNANCE_PROFILE", profile, actor="test", approval_id="ap-test")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_the_profile_is_read_from_the_named_store_not_the_process_store(monkeypatch, tmp_path):
+    _store_with_profile(tmp_path / "b", "proj-b", "heavy")
+    assert review_rounds.round_cap() == 3
+    assert review_rounds.round_cap(project_id="proj-b", state_dir=tmp_path / "b") == 5
+

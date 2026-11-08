@@ -293,7 +293,7 @@ def review_settings(project: Optional[str]) -> Dict[str, Any]:
     import review_rounds
     try:
         profile = gate_profile.resolve(project).profile
-        chain, chain_source = review_gate_takeover_chain_raw()
+        chain, chain_source = review_gate_takeover_chain_raw(project)
         cap = review_rounds.round_cap(project_id=project)
         cap_source = ("profile" if gate_profile.value("round_cap", project) is not None
                       else _config_source("VNX_REVIEW_ROUND_CAP", project))
