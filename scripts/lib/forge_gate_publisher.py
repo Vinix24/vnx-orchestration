@@ -40,7 +40,7 @@ import time
 import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -71,6 +71,10 @@ from forge_check_run import (  # noqa: E402
 )
 from forge_project_target import ForgeTarget, resolve_forge_target
 from governance_receipts import emit_governance_receipt
+# The door splits its own runs from foreign ones with the reader's rule itself
+# (ADR-061 §3), imported and not copied: a copy could drift from the reader and
+# turn a state the reader blocks on into a permit again.
+from ci_contexts import _split_by_app
 from gate_status import (  # noqa: E402
     ALL_KNOWN_STATES,
     FAIL_STATES,
@@ -1774,23 +1778,69 @@ def _write_outcome_receipt(event: str, **kwargs: Any) -> str:
     return got
 
 
-def _own_door_runs(sha: str, project_root: Path) -> List[Dict[str, Any]]:
+class DoorRuns(NamedTuple):
+    """Every ``vnx-gate/door`` run on one head, split into the own App's and foreign ones."""
+
+    own: List[Dict[str, Any]]
+    foreign: List[Dict[str, Any]]
+    app_id: int
+
+    def foreign_trail(self) -> List[Dict[str, Any]]:
+        """Each foreign run as its id and the ``app.id`` GitHub showed (``None``: no ``app`` object)."""
+        trail = []
+        for run in self.foreign:
+            app = run.get("app")
+            trail.append(
+                {"check_run_id": run.get("id"), "app_id": app.get("id") if isinstance(app, dict) else None}
+            )
+        return trail
+
+
+def door_runs_on_head(sha: str, *, project_root: Path) -> DoorRuns:
+    """Every door run on ``sha``, split on ``app.id`` by the reader's own rule.
+
+    ``ci_contexts._split_by_app``: a run whose ``app`` is not an object, or whose
+    ``app.id`` is not the own App, is foreign. Nothing is dropped, so a decision
+    sees the foreign runs too. ``load_app_config`` refuses a missing or
+    non-integer ``app_id``, so the helper's unbound branch (every run counts as
+    own) is never taken from here.
+    """
     app_id = load_app_config().app_id
     runs = list_check_runs(sha, DOOR_CHECK_NAME, project_root=project_root)
-    return [r for r in runs if isinstance(r.get("app"), dict) and r["app"].get("id") == app_id]
+    own, foreign = _split_by_app(runs, app_id)
+    return DoorRuns(own=list(own), foreign=list(foreign), app_id=app_id)
 
 
-def _apply_door_permit(sha: str, pr: int, project_root: Path) -> Tuple[int, str]:
-    """The GitHub step: ``(check_run_id, action)`` with action ``create`` or ``re_permit``."""
-    existing = _own_door_runs(sha, project_root)
+def _foreign_only_reason(head: DoorRuns, sha: str) -> str:
+    observed = [entry["app_id"] for entry in head.foreign_trail()]
+    return (
+        f"{len(head.foreign)} deurrun(s) van een andere App op {sha[:12]} en geen van de eigen "
+        f"App (app_id {head.app_id}): waargenomen app.id {observed}. De lezer houdt die kop "
+        "blokkerend (wrong_app); de deur adopteert die run niet en zet er geen eigen run naast "
+        "(ADR-061 §3, geval 4)"
+    )
+
+
+def _apply_door_permit(head: DoorRuns, sha: str, pr: int, project_root: Path) -> Tuple[int, str]:
+    """The GitHub step of ADR-061 §3: ``(check_run_id, action)``, ``create`` or ``re_permit``.
+
+    The case split is the reader's (``ci_contexts.classify_contexts``). Foreign
+    runs and no own run is its blocking ``wrong_app`` state, so the door refuses
+    (case 4) and makes no call: an own success next to it would turn that state
+    into a permit. With an own run present the reader classifies the own runs
+    only, so the own count decides (case 2 or 3) on a mixed head as well; the
+    foreign runs go into the receipt.
+    """
+    if head.foreign and not head.own:
+        raise ForgeDoorRefused(_foreign_only_reason(head, sha))
     title, summary = DOOR_CHECK_NAME, f"permit for PR #{pr} on {sha}"
-    if len(existing) > 1:
+    if len(head.own) > 1:
         raise ForgeDoorRefused(
-            f"{len(existing)} deurruns van de eigen App op {sha[:12]}: een tweede run houdt de "
+            f"{len(head.own)} deurruns van de eigen App op {sha[:12]}: een tweede run houdt de "
             "context rood; herstel is een nieuwe commit"
         )
-    if existing:
-        run_id = existing[0].get("id")
+    if head.own:
+        run_id = head.own[0].get("id")
         patch_check_run(
             run_id, CONCLUSION_SUCCESS, title, summary, name=DOOR_CHECK_NAME, head_sha=sha,
             project_root=project_root,
@@ -1813,10 +1863,13 @@ def publish_door_permit(
 
     The ledger comes first (ADR-005): bad evidence writes a ``blocked`` receipt;
     otherwise an intent receipt is written BEFORE the first GitHub call, and a
-    failed write stops everything. No door run: ``POST``. Exactly one: ``PATCH``
-    it back to ``success`` (the re-permit on the same head). Two or more:
-    refused, recovery is a new commit (ADR-061 §3). After the call the run is
-    read back and the outcome receipt carries the id and the conclusion read.
+    failed write stops everything. The four cases of ADR-061 §3, split as the
+    reader splits (:func:`door_runs_on_head`): no door run at all, ``POST``;
+    exactly one own run, ``PATCH`` it back to ``success`` (the re-permit on the
+    same head); two or more own runs, refused, recovery is a new commit; only
+    foreign runs, refused with no call. After the call the run is read back and
+    the outcome receipt carries the id, the conclusion read and every foreign
+    door run either list showed (``foreign_door_runs``).
     """
     op_id = _new_operation_id()
     base = {
@@ -1837,36 +1890,67 @@ def publish_door_permit(
         reason="permit aangevraagd uit GO-evidence", **base,
     )
     run_id: Optional[int] = None
+    heads: List[DoorRuns] = []
     try:
-        run_id, action = _apply_door_permit(sha, pr, project_root)
-        run = read_back_door(sha, run_id, project_root=project_root)
+        heads.append(door_runs_on_head(sha, project_root=project_root))
+        run_id, action = _apply_door_permit(heads[0], sha, pr, project_root)
+        heads.append(door_runs_on_head(sha, project_root=project_root))
+        run = read_back_door(sha, run_id, project_root=project_root, listed=heads[1])
     except ForgeCheckRunError as exc:
         _write_outcome_receipt(
             "door_permit_published",
             status="blocked" if isinstance(exc, ForgeDoorRefused) else "failure",
             action="publish", reason=str(exc),
-            **({"check_run_id": run_id} if run_id is not None else {}), **base,
+            **({"check_run_id": run_id} if run_id is not None else {}),
+            **_foreign_field(heads), **base,
         )
         raise
     _write_outcome_receipt(
         "door_permit_published", status="success", action=action, check_run_id=run_id,
-        conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen", **base,
+        conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen",
+        **_foreign_field(heads), **base,
     )
     return run_id
 
 
-def read_back_door(sha: str, check_run_id: int, *, project_root: Path) -> Dict[str, Any]:
-    """The door run on ``sha`` with this id, own App and ``success``, or a named refusal."""
-    app_id = load_app_config().app_id
-    runs = list_check_runs(sha, DOOR_CHECK_NAME, project_root=project_root)
-    own = [r for r in runs if isinstance(r.get("app"), dict) and r["app"].get("id") == app_id]
-    if len(own) > 1:
-        raise ForgeDoorRefused(f"teruglezing: {len(own)} deurruns van de eigen App op {sha[:12]}")
-    run = next((r for r in runs if r.get("id") == check_run_id), None)
+def _foreign_field(heads: List[DoorRuns]) -> Dict[str, Any]:
+    """``foreign_door_runs`` over every list this operation read, each foreign run once.
+
+    Absent, not ``[]``, when no list was read: a head that could not be listed
+    is not a head without foreign runs.
+    """
+    if not heads:
+        return {}
+    seen: List[Dict[str, Any]] = []
+    for head in heads:
+        for entry in head.foreign_trail():
+            if entry not in seen:
+                seen.append(entry)
+    return {"foreign_door_runs": seen}
+
+
+def read_back_door(
+    sha: str, check_run_id: int, *, project_root: Path, listed: Optional[DoorRuns] = None
+) -> Dict[str, Any]:
+    """The door run on ``sha`` with this id, own App and ``success``, or a named refusal.
+
+    ``listed`` is the list read AFTER the call, when the caller already holds it
+    (:func:`publish_door_permit` does, so its receipt names what this verdict
+    saw); without it the runs are read here. Split as the reader splits: more
+    than one own run refuses; the id must be one of the own runs, and an id that
+    is a foreign run (another App, or no ``app`` object) refuses. A foreign run
+    NEXT TO the own success run does not refuse: with an own run present the
+    reader classifies the own runs only (``classify_contexts``), so the context
+    reads green on that run and the permit is the run this call made or patched.
+    """
+    head = listed if listed is not None else door_runs_on_head(sha, project_root=project_root)
+    if len(head.own) > 1:
+        raise ForgeDoorRefused(f"teruglezing: {len(head.own)} deurruns van de eigen App op {sha[:12]}")
+    run = next((r for r in head.own if r.get("id") == check_run_id), None)
     if run is None:
+        if any(r.get("id") == check_run_id for r in head.foreign):
+            raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} is van een andere App")
         raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} staat niet op {sha[:12]}")
-    if (run.get("app") or {}).get("id") != app_id:
-        raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} is van een andere App")
     if run.get("conclusion") != CONCLUSION_SUCCESS:
         raise ForgeDoorRefused(
             f"teruglezing: deurrun {check_run_id} heeft conclusion {run.get('conclusion')!r}"

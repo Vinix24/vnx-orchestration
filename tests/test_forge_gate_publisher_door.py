@@ -231,10 +231,46 @@ def test_publish_refuses_two_door_runs(gh: FakeGitHub) -> None:
     assert gh.methods() == ["GET"]
 
 
-def test_publish_ignores_a_door_run_of_another_app(gh: FakeGitHub) -> None:
+def _appless(run_id: int, conclusion: str = "success") -> Dict[str, Any]:
+    """A door run GitHub shows without an ``app`` object: the reader cannot call it the own App."""
+    return {"id": run_id, "name": fgp.DOOR_CHECK_NAME, "conclusion": conclusion}
+
+
+def _assert_case_4_refused(
+    gh: FakeGitHub, tmp_path: Path, capsys: pytest.CaptureFixture, observed: List[Optional[int]]
+) -> None:
+    """ADR-061 §3 case 4: a refusal with its own text, no POST, no PATCH, a blocked receipt, exit 1."""
+    with pytest.raises(fgp.ForgeDoorRefused, match="andere App") as exc:
+        _publish(gh)
+    assert f"waargenomen app.id {observed}" in str(exc.value)
+    assert gh.methods() == ["GET"]  # the list only: no POST, no PATCH
+    intent, outcome = _receipts(gh.ledger)
+    assert (intent["phase"], intent["status"]) == ("intent", "info")
+    assert (outcome["phase"], outcome["status"]) == ("outcome", "blocked")
+    assert "geval 4" in outcome["reason"] and "check_run_id" not in outcome
+    assert outcome["foreign_door_runs"] == [
+        {"check_run_id": r["id"], "app_id": a} for r, a in zip(gh.runs, observed)
+    ]
+    rc, out, err = _cli(tmp_path, _evidence(), capsys, gh)
+    assert rc == 1 and "check_run_id=" not in out and "geval 4" in err
+    assert gh.methods() == ["GET", "GET"]  # the CLI also only listed
+    assert len(gh.runs) == len(observed)  # nothing was created next to the foreign run
+
+
+def test_publish_refuses_a_head_with_only_another_apps_door_run(
+    gh: FakeGitHub, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Red run on 90f3f147: the foreign run was filtered away, a POST followed and 900 came back."""
     gh.runs = [_door(55, app=1)]
-    assert _publish(gh) == 900
-    assert gh.methods() == ["GET", "POST", "GET"]  # list, create, read back
+    _assert_case_4_refused(gh, tmp_path, capsys, [1])
+
+
+def test_publish_refuses_a_head_with_only_a_door_run_without_an_app(
+    gh: FakeGitHub, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """Red run on 90f3f147: a run without an app object counted as no run at all."""
+    gh.runs = [_appless(55)]
+    _assert_case_4_refused(gh, tmp_path, capsys, [None])
 
 
 def test_publish_validates_before_any_call(gh: FakeGitHub) -> None:
@@ -628,3 +664,135 @@ def test_a_duplicate_outcome_is_logged_and_does_not_undo_the_call(
         assert _publish(gh) == 900
     assert "ledger: duplicate" in caplog.text
     assert gh.methods() == ["GET", "POST", "GET"]
+
+
+# --- r4: ADR-061 §3 case by case, the foreign run is kept, not filtered away -----
+
+
+def test_case_4_names_the_count_and_every_observed_app_id(gh: FakeGitHub) -> None:
+    """Red run on 90f3f147: two foreign runs read as an empty head and a POST went out."""
+    gh.runs = [_door(55, app=1), _appless(56, "failure"), _door(57, app=APP_ID + 1)]
+    with pytest.raises(fgp.ForgeDoorRefused) as exc:
+        _publish(gh)
+    text = str(exc.value)
+    assert text.startswith("3 deurrun(s) van een andere App")
+    assert f"waargenomen app.id [1, None, {APP_ID + 1}]" in text and f"app_id {APP_ID}" in text
+    assert gh.methods() == ["GET"]
+
+
+@pytest.mark.parametrize("app", [None, "vnx-gate", [], {"slug": "vnx-gate"}, {"id": str(APP_ID)}, {"id": True}])
+def test_case_4_holds_for_every_app_value_that_is_not_the_own_id(gh: FakeGitHub, app: Any) -> None:
+    """Red run on 90f3f147: each of these was dropped before the decision and a POST followed."""
+    gh.runs = [{"id": 55, "name": fgp.DOOR_CHECK_NAME, "app": app, "conclusion": "success"}]
+    with pytest.raises(fgp.ForgeDoorRefused, match="geval 4"):
+        _publish(gh)
+    assert gh.methods() == ["GET"]
+
+
+def test_the_split_is_the_readers_own_rule() -> None:
+    """One rule in one place: the publisher imports the reader's split instead of copying it."""
+    import ci_contexts
+
+    assert fgp._split_by_app is ci_contexts._split_by_app
+
+
+def test_case_1_no_run_at_all_posts_once_and_names_no_foreign_run(gh: FakeGitHub) -> None:
+    assert _publish(gh) == 900
+    assert gh.methods() == ["GET", "POST", "GET"]
+    outcome = _receipts(gh.ledger)[-1]
+    assert (outcome["status"], outcome["action"], outcome["foreign_door_runs"]) == ("success", "create", [])
+
+
+def test_case_2_patches_the_one_own_run_and_posts_nothing(gh: FakeGitHub) -> None:
+    gh.runs = [_door(55, "failure")]
+    assert _publish(gh) == 55
+    assert [m for m in gh.methods() if m != "GET"] == ["PATCH"]
+    assert gh.calls[1][1].endswith("/check-runs/55") and gh.calls[1][2]["conclusion"] == "success"
+    outcome = _receipts(gh.ledger)[-1]
+    assert (outcome["action"], outcome["check_run_id"], outcome["foreign_door_runs"]) == ("re_permit", 55, [])
+
+
+def test_a_mixed_head_follows_the_own_run_and_names_the_foreign_one(gh: FakeGitHub) -> None:
+    """Red run on 90f3f147: the PATCH went out, but the receipt did not name the foreign run."""
+    gh.runs = [_door(60, "failure", app=1), _door(55, "failure"), _appless(61)]
+    assert _publish(gh) == 55
+    assert gh.methods() == ["GET", "PATCH", "GET"]
+    assert gh.calls[1][1].endswith("/check-runs/55")
+    assert [r["conclusion"] for r in gh.runs] == ["failure", "success", "success"]  # foreign runs untouched
+    outcome = _receipts(gh.ledger)[-1]
+    assert (outcome["status"], outcome["action"], outcome["check_run_id"]) == ("success", "re_permit", 55)
+    assert outcome["foreign_door_runs"] == [
+        {"check_run_id": 60, "app_id": 1}, {"check_run_id": 61, "app_id": None},
+    ]
+
+
+def test_a_mixed_head_with_two_own_runs_is_case_3_and_names_the_foreign_one(gh: FakeGitHub) -> None:
+    """Red run on 90f3f147: refused, but the blocked receipt did not name the foreign run."""
+    gh.runs = [_door(55, "failure"), _door(56), _door(60, app=1)]
+    with pytest.raises(fgp.ForgeDoorRefused, match="2 deurruns van de eigen App"):
+        _publish(gh)
+    assert gh.methods() == ["GET"]
+    outcome = _receipts(gh.ledger)[-1]
+    assert outcome["status"] == "blocked"
+    assert outcome["foreign_door_runs"] == [{"check_run_id": 60, "app_id": 1}]
+
+
+def test_a_head_that_could_not_be_listed_carries_no_foreign_field(gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unread head is not a head without foreign runs: the field is absent, never ``[]``."""
+    monkeypatch.setattr(
+        fcr, "_api_request",
+        lambda *a, **k: (200, json.dumps({"total_count": 3, "check_runs": [_door(1)]})),
+    )
+    with pytest.raises(fcr.ForgeAPIError):
+        _publish(gh)
+    outcome = _receipts(gh.ledger)[-1]
+    assert outcome["status"] == "failure" and "foreign_door_runs" not in outcome
+
+
+def test_read_back_accepts_the_own_success_run_next_to_a_foreign_one(gh: FakeGitHub) -> None:
+    """The reader reads only the own runs when one is present, so a foreign neighbour does not refuse."""
+    gh.runs = [_door(60, "failure", app=1), _door(55), _appless(61, "failure")]
+    assert fgp.read_back_door(SHA, 55, project_root=gh.root)["id"] == 55
+
+
+def test_read_back_refuses_the_asked_id_when_it_is_a_foreign_run(gh: FakeGitHub) -> None:
+    gh.runs = [_door(55), _door(60, app=1), _appless(61)]
+    for foreign_id in (60, 61):
+        with pytest.raises(fgp.ForgeDoorRefused, match=f"deurrun {foreign_id} is van een andere App"):
+            fgp.read_back_door(SHA, foreign_id, project_root=gh.root)
+
+
+@pytest.mark.parametrize("app", ["vnx-gate", [], 7])
+def test_read_back_refuses_a_run_whose_app_is_not_an_object(gh: FakeGitHub, app: Any) -> None:
+    """Red run on 90f3f147: ``(run.get("app") or {}).get`` raised AttributeError, not a named refusal."""
+    gh.runs = [{"id": 55, "name": fgp.DOOR_CHECK_NAME, "app": app, "conclusion": "success"}]
+    with pytest.raises(fgp.ForgeDoorRefused, match="andere App"):
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+
+
+def test_read_back_refuses_two_own_runs_next_to_a_foreign_one(gh: FakeGitHub) -> None:
+    gh.runs = [_door(55), _door(56), _door(60, app=1)]
+    with pytest.raises(fgp.ForgeDoorRefused, match="teruglezing: 2 deurruns van de eigen App"):
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+
+
+def test_a_foreign_run_appearing_after_the_create_is_named_and_does_not_undo_the_permit(
+    gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Case 1 at the list, a mixed head at the read back: the own success run is still the permit.
+
+    Red run on 90f3f147: the permit stood, but the receipt did not name the foreign run.
+    """
+    real = fgp.publish_check_run
+
+    def post_then_foreign(*a: Any, **k: Any) -> Dict[str, Any]:
+        created = real(*a, **k)
+        gh.runs.append(_door(70, app=1))
+        return created
+
+    monkeypatch.setattr(fgp, "publish_check_run", post_then_foreign)
+    assert _publish(gh) == 900
+    assert gh.methods() == ["GET", "POST", "GET"]  # list, create, read back: no extra call
+    outcome = _receipts(gh.ledger)[-1]
+    assert (outcome["status"], outcome["action"]) == ("success", "create")
+    assert outcome["foreign_door_runs"] == [{"check_run_id": 70, "app_id": 1}]
