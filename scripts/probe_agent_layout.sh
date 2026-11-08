@@ -29,11 +29,18 @@ decisive_of() { if [ "$1" = C ]; then printf false; else printf true; fi; }
 read_version() { "$CLAUDE_BIN" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true; }
 have_claude() { command -v "$CLAUDE_BIN" >/dev/null 2>&1; }
 new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
+# tmp_base: $TMPDIR without trailing slashes (macOS ends it in "/", which would put "//" in every probe path).
+tmp_base() {
+  local base="${TMPDIR:-/tmp}"
+  while [ "${#base}" -gt 1 ] && [ "${base%/}" != "$base" ]; do base="${base%/}"; done
+  if [ "$base" = / ]; then base=/tmp; fi
+  printf '%s' "$base"
+}
 ensure_probe() {
-  if [ -z "$PROBE_DIR" ]; then PROBE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/probe-agent-layout.XXXXXX")"
+  if [ -z "$PROBE_DIR" ]; then PROBE_DIR="$(mktemp -d "$(tmp_base)/probe-agent-layout.XXXXXX")"
     trap cleanup EXIT; mkdir -p "$PROBE_DIR/raw" "$PROBE_DIR/data"; fi
 }
-cleanup() { case "$PROBE_DIR" in "${TMPDIR:-/tmp}"/*|/tmp/*|/var/folders/*) rm -rf -- "$PROBE_DIR" ;; esac; }
+cleanup() { case "$PROBE_DIR" in "$(tmp_base)"/*|/tmp/*|/var/folders/*) rm -rf -- "$PROBE_DIR" ;; esac; }
 emit_cell() {
   local cell="$1" outcome="$2" reason="$3" command="$4" raw="${5:-}" sha="-" version="$VERSION" line
   if [ -n "$raw" ] && [ -s "$raw" ]; then sha="$(sha256_of "$raw")"; fi
@@ -59,7 +66,7 @@ capture_session() { PYTHONPATH="$REPO_ROOT/scripts/lib" python3 -c 'import json,
 # inspect <capture.json> <instructions|auto_memory> <sentinel-path> -> "outcome<TAB>reason"
 inspect() {
   python3 - "$@" <<'PY'
-import json, sys
+import json, os, sys
 try: doc = json.load(open(sys.argv[1], encoding="utf-8"))
 except Exception as exc: print("niet_gemeten\ttranscript scan unreadable: %s" % type(exc).__name__); raise SystemExit
 if doc.get("status") not in ("ok", "partial"):
@@ -69,15 +76,20 @@ if sys.argv[2] == "auto_memory":
     print("ja\tauto_memory.path=%s" % m.get("path") if m.get("loaded") else "nee\tno AutoMem instruction loaded for this cwd")
     raise SystemExit
 files = (doc.get("instructions") or {}).get("files") or []
-hit = [f for f in files if str(f.get("path", "")).endswith(sys.argv[3]) and str(f.get("type", "")).lower() == "project"]
+def same_file(reported, expected):
+    # The CLI reports a normalised path; $TMPDIR may carry "//" or a symlinked prefix, so compare both normalised.
+    if not reported or not expected: return False
+    return os.path.realpath(reported) == os.path.realpath(expected) or os.path.normpath(reported).endswith(os.path.normpath(expected))
+hit = [f for f in files if same_file(str(f.get("path", "")), sys.argv[3]) and str(f.get("type", "")).lower() == "project"]
 print("ja\tProject instruction at %s" % hit[0].get("path") if hit else
       "nee\tno Project instruction for the sentinel (seen types: %s)" % (",".join(sorted({str(f.get("type")) for f in files})) or "none"))
 PY
 }
 # stream_facts <raw> auth | stream_facts <raw> write <abs-path> -> one token, read from parsed stream-json events.
 # auth: oauth (init apiKeySource == "none") | api_key (any other string) | unproven (no init event or no string field).
-# write: denied (Write on the path, tool_result is_error with the hook refusal) | written (Write on the path, tool_result
-# is_error false) | no_hook_denial (Write on the path, any other result) | auth_failed | no_attempt.
+# write: denied (Write on the path, tool_result is_error true with the hook refusal) | written (tool_result for that tool_use id
+# with is_error absent, null or false and no refusal text; 2.1.319 omits is_error on success) | tool_error (is_error true, no hook
+# text) | unclear_result (any other result, e.g. the refusal text without is_error true) | no_tool_result | auth_failed | no_attempt.
 stream_facts() {
   python3 - "$@" <<'PY'
 import json, os, sys
@@ -106,17 +118,23 @@ def flat(content):
 ids = set()
 for blk in blocks():
     inp = blk.get("input")
-    if blk.get("type") == "tool_use" and blk.get("name") == "Write" and isinstance(inp, dict) \
+    if blk.get("type") == "tool_use" and blk.get("name") == "Write" and isinstance(inp, dict) and isinstance(blk.get("id"), str) \
             and isinstance(inp.get("file_path"), str) and os.path.realpath(inp["file_path"]) == target:
-        ids.add(blk.get("id"))
+        ids.add(blk["id"])
 results = [b for b in blocks() if b.get("type") == "tool_result" and ids and b.get("tool_use_id") in ids]
+def refusal(r):
+    body = flat(r.get("content"))
+    return "worker-scope: write target" in body and "is outside" in body
+def clean_success(r):
+    return ("is_error" not in r or r["is_error"] is None or r["is_error"] is False) and not refusal(r)
 if not ids:
     low = text.lower()
     print("auth_failed" if any(m in low for m in ("authentication_error", "invalid api key", "please run /login", "oauth token has expired")) else "no_attempt")
-elif any(r.get("is_error") is True and "worker-scope: write target" in flat(r.get("content")) and "is outside" in flat(r.get("content")) for r in results):
-    print("denied")
-elif any(r.get("is_error") is False for r in results): print("written")
-else: print("no_hook_denial")
+elif any(r.get("is_error") is True and refusal(r) for r in results): print("denied")
+elif not results: print("no_tool_result")
+elif any(clean_success(r) for r in results): print("written")
+elif any(r.get("is_error") is True for r in results): print("tool_error")
+else: print("unclear_result")
 PY
 }
 classify_b() {
@@ -129,6 +147,12 @@ classify_b() {
   elif [ "$auth" = api_key ]; then printf 'niet_gemeten\tauth_source_api_key: init event names an API key source\n'
   else printf 'niet_gemeten\tauth_source_unproven: no init event with an apiKeySource\n'; fi
 }
+# cli_error_class <raw>: a fixed class for a failed call, never the CLI's own text (it may carry secrets).
+cli_error_class() {
+  if grep -Eiq 'ANTHROPIC_API_KEY|api[ _-]key' "$1" 2>/dev/null; then printf requires_api_key
+  elif grep -Eiq 'unknown (option|flag|argument)|unrecognized (option|flag|argument)|invalid (option|flag)' "$1" 2>/dev/null; then printf unknown_flag
+  else printf other; fi
+}
 # cell_call <cell> <extra-flag> <sentinel: yes|no>: A/C/D share one non-interactive call.
 cell_call() {
   local cell="$1" extra="$2" sentinel="$3" root="$PROBE_DIR/$1" sid status raw verdict oc rc cmd
@@ -140,7 +164,9 @@ cell_call() {
   # shellcheck disable=SC2086 # $extra is an intentional flag list ("" or "--bare")
   status="$(run_in_probe "$root/klant" "$call" -p "Reply with OK." --output-format text --session-id "$sid" $extra)"
   cmd="cd $root/klant && VNX_DATA_DIR=$PROBE_DIR/data VNX_DATA_DIR_EXPLICIT=1 $CLAUDE_BIN -p 'Reply with OK.' --output-format text --session-id $sid $extra"
-  if [ "$status" != 0 ]; then emit_cell "$cell" niet_gemeten "claude exited $status without a completed call" "$cmd" "$call"; return; fi
+  if [ "$status" != 0 ]; then
+    emit_cell "$cell" niet_gemeten "claude exited ${status:-unknown} without a completed call (stderr class: $(cli_error_class "$call"))" "$cmd" "$call"; return
+  fi
   raw="$PROBE_DIR/raw/$cell.txt"
   capture_session "$sid" >"$raw" 2>/dev/null || true
   if [ "$sentinel" = yes ]; then verdict="$(inspect "$raw" instructions "$root/CLAUDE.md")"; else verdict="$(inspect "$raw" auto_memory "")"; fi
@@ -181,22 +207,36 @@ cell_write() {
   IFS=$'\t' read -r oc rc <<<"$(judge_write "$r1" "$s1" "$allowed" "$r2" "$s2" "$denied")"
   emit_cell "$cell" "$oc" "$rc" "$cmd" "$raw"
 }
-# why_not <status> <token>: the reason a call gave no proof (timeout, auth, CLI exit, then what the stream lacks).
+# why_not <status> <token> <allowed|denied>: why a call gave no proof (timeout, auth, CLI exit, then what the stream shows).
+# no_hook_denial is only ever the reason for the denied call.
 why_not() {
-  if [ "$1" = 142 ]; then printf timeout
-  elif [ "$2" = auth_failed ]; then printf auth_failed
-  elif [ "$1" != 0 ]; then printf 'cli_exit_%s' "$1"
-  elif [ "$2" = no_attempt ]; then printf no_write_attempt
-  else printf no_hook_denial; fi
+  if [ "$1" = 142 ]; then printf timeout; return; fi
+  if [ "$2" = auth_failed ]; then printf auth_failed; return; fi
+  if [ "$1" != 0 ]; then printf 'cli_exit_%s' "${1:-unknown}"; return; fi
+  case "$2:$3" in
+    no_attempt:*) printf no_write_attempt ;;
+    no_tool_result:*) printf no_tool_result ;;
+    tool_error:allowed) printf write_error_without_hook_text ;;
+    unclear_result:allowed) printf write_result_unclear ;;
+    denied:allowed) printf hook_refused_the_allowed_write ;;
+    written:allowed) printf allowed_file_not_as_expected ;;
+    tool_error:denied) printf 'no_hook_denial: the Write failed without the hook text' ;;
+    unclear_result:denied) printf 'no_hook_denial: the Write result is neither a clean success nor the hook refusal' ;;
+    written:denied) printf 'no_hook_denial: the out-of-scope Write reported success' ;;
+    *) printf unknown_write_state ;;
+  esac
 }
-# judge_write <r1> <s1> <allowed> <r2> <s2> <denied> -> "outcome<TAB>reason": ja only on recorded evidence of both calls.
+# judge_write <r1> <s1> <allowed> <r2> <s2> <denied> -> "outcome<TAB>reason": ja only on recorded evidence of both calls,
+# and never when either call exited non-zero (checked first).
 judge_write() {
   local r1="$1" s1="$2" allowed="$3" r2="$4" s2="$5" denied="$6" t1 t2
-  if [ -f "$denied" ]; then printf 'nee\tout-of-scope write succeeded\n'; return; fi
   t1="$(stream_facts "$r1" write "$allowed")"; t2="$(stream_facts "$r2" write "$denied")"
+  if [ "$s1" != 0 ]; then printf 'niet_gemeten\tpositive control gave no proof: %s (exit %s)\n' "$(why_not "$s1" "$t1" allowed)" "${s1:-unknown}"; return; fi
+  if [ "$s2" != 0 ]; then printf 'niet_gemeten\t%s (exit %s): no recorded hook denial of the out-of-scope Write\n' "$(why_not "$s2" "$t2" denied)" "${s2:-unknown}"; return; fi
+  if [ -f "$denied" ]; then printf 'nee\tout-of-scope write succeeded\n'; return; fi
   if [ "$t1" != written ] || [ ! -f "$allowed" ] || [ "$(tr -d '[:space:]' <"$allowed")" != probe ]; then
-    printf 'niet_gemeten\tpositive control gave no proof: %s (exit %s)\n' "$(why_not "$s1" "$t1")" "$s1"
-  elif [ "$t2" != denied ]; then printf 'niet_gemeten\t%s (exit %s): no recorded hook denial of the out-of-scope Write\n' "$(why_not "$s2" "$t2")" "$s2"
+    printf 'niet_gemeten\tpositive control gave no proof: %s (exit %s)\n' "$(why_not "$s1" "$t1" allowed)" "$s1"
+  elif [ "$t2" != denied ]; then printf 'niet_gemeten\t%s (exit %s): no recorded hook denial of the out-of-scope Write\n' "$(why_not "$s2" "$t2" denied)" "$s2"
   else printf 'ja\tout-of-scope Write attempted and refused by the hook; allowed Write performed\n'; fi
 }
 # Cell L is static: which lane starters in scripts/ start claude with --bare.
@@ -265,4 +305,4 @@ main() {
   for cell in $cells; do run_cell "$cell"; done
   if [ "$SELF_CHECK" = 1 ]; then validate_cells "$OUT"; fi
 }
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi

@@ -87,6 +87,8 @@ if not prompt.startswith("Use the Write tool"):
     elif mode == "nosrc":
         emit({"type": "system", "subtype": "init"})
     emit({"type": "result", "is_error": False, "result": "OK"})
+    if os.environ.get("FAKE_STDERR"):
+        print(os.environ["FAKE_STDERR"], file=sys.stderr)
     raise SystemExit(int(os.environ.get("FAKE_B_EXIT", "0")))
 target = prompt.rsplit(" to ", 1)[1]
 denied = target.endswith("H1-outside.txt") or target.endswith("scripts/x.py")
@@ -98,6 +100,10 @@ if mode == "write":
     os.makedirs(os.path.dirname(target), exist_ok=True)
     open(target, "w").write("probe\n")
     write_call({"is_error": False, "content": "File created"})
+elif mode in ("writenoflag", "writenone"):
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    open(target, "w").write("probe\n")
+    write_call({"content": "File created"} if mode == "writenoflag" else {"is_error": None, "content": "File created"})
 elif mode == "deny":
     write_call({"is_error": True, "content": FAKE_HOOK})
 elif mode == "denylist":
@@ -182,3 +188,179 @@ def test_cell_b_without_proof_of_the_credential_path_is_niet_gemeten(tmp_path):
         assert row["outcome"] == "niet_gemeten" and "auth_source_unproven" in row["reason"], (mode, row)
     row = _fake_cell(tmp_path, "B", FAKE_B="oauth", FAKE_B_EXIT="4")
     assert row["outcome"] == "niet_gemeten" and "cli_exit_4" in row["reason"], row
+
+
+# --- round 4: the probe reads a successful Write and an ancestor CLAUDE.md correctly ---------
+
+def _sh(tmp_path, snippet, tmpdir=None):
+    """Run a snippet with the probe's functions loaded; the CLI binary does not exist, so nothing can start.
+
+    `--self-check` keeps the old layout (which ran main on source) harmless; the new layout ignores it.
+    """
+    env = dict(os.environ, HOME=str(tmp_path), TMPDIR=tmpdir or str(tmp_path), PROBE_CLAUDE_BIN="/nonexistent/claude")
+    script = 'source "%s" --self-check >/dev/null 2>&1 || true\n%s' % (PROBE, snippet)
+    return subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, check=False)
+
+
+def _stream(path, target, result, tool_id="t1"):
+    events = [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tool_id, "name": "Write", "input": {"file_path": str(target)}}]}}]
+    if result is not None:
+        events.append({"type": "user", "message": {"content": [dict(type="tool_result", tool_use_id=tool_id, **result)]}})
+    path.write_text("\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
+    return path
+
+
+def _facts(tmp_path, result, target=None):
+    target = target or tmp_path / "t" / "allowed.txt"
+    raw = _stream(tmp_path / "raw.ndjson", target, result)
+    return _sh(tmp_path, 'stream_facts "%s" write "%s"' % (raw, target)).stdout.strip()
+
+
+def test_ancestor_claude_md_is_found_under_a_tmpdir_that_ends_in_a_slash(tmp_path):
+    base = tmp_path / "base"
+    (base / "A").mkdir(parents=True)
+    (base / "A" / "CLAUDE.md").write_text("x\n", encoding="utf-8")
+    cap = tmp_path / "cap.json"
+    cap.write_text(json.dumps({"status": "ok", "instructions": {"files": [{"path": str(base / "A" / "CLAUDE.md"), "type": "Project"}]}}), encoding="utf-8")
+    out = _sh(tmp_path, 'inspect "%s" instructions "%s//A/CLAUDE.md"' % (cap, base)).stdout
+    assert out.startswith("ja\t"), out
+
+
+def test_ancestor_claude_md_of_another_path_is_still_nee(tmp_path):
+    cap = tmp_path / "cap.json"
+    cap.write_text(json.dumps({"status": "ok", "instructions": {"files": [{"path": "/elsewhere/A/CLAUDE.md", "type": "Project"}]}}), encoding="utf-8")
+    assert _sh(tmp_path, 'inspect "%s" instructions "%s//A/CLAUDE.md"' % (cap, tmp_path)).stdout.startswith("nee\t")
+    cap.write_text(json.dumps({"status": "ok", "instructions": {"files": [{"path": str(tmp_path / "A" / "CLAUDE.md"), "type": "User"}]}}), encoding="utf-8")
+    assert _sh(tmp_path, 'inspect "%s" instructions "%s//A/CLAUDE.md"' % (cap, tmp_path)).stdout.startswith("nee\t")
+
+
+def test_probe_dir_has_no_double_slash_when_tmpdir_ends_in_a_slash(tmp_path):
+    proc = _sh(tmp_path, 'PROBE_DIR=""; ensure_probe; printf "%s" "$PROBE_DIR"', tmpdir=str(tmp_path) + "/")
+    assert proc.stdout.startswith(str(tmp_path) + "/probe-agent-layout."), proc.stdout
+    assert "//" not in proc.stdout, proc.stdout
+
+
+def test_successful_write_without_is_error_is_written(tmp_path):
+    for result in ({"content": "File created"}, {"is_error": None, "content": "File created"}, {"is_error": False, "content": "File created"}):
+        assert _facts(tmp_path, result) == "written", result
+
+
+def test_write_result_that_is_not_a_clean_success_is_not_written(tmp_path):
+    hook = HOOK_TEXT
+    cases = [
+        ({"is_error": "false", "content": "ok"}, "unclear_result"),
+        ({"is_error": 0, "content": "ok"}, "unclear_result"),
+        ({"is_error": 1, "content": "ok"}, "unclear_result"),
+        ({"content": hook}, "unclear_result"),
+        ({"is_error": None, "content": [{"type": "text", "text": hook}]}, "unclear_result"),
+        ({"is_error": True, "content": "permission denied by user"}, "tool_error"),
+        (None, "no_tool_result"),
+    ]
+    for result, token in cases:
+        assert _facts(tmp_path, result) == token, result
+
+
+def test_hook_refusal_is_denied_and_needs_the_exact_shape(tmp_path):
+    assert _facts(tmp_path, {"is_error": True, "content": HOOK_TEXT}) == "denied"
+    assert _facts(tmp_path, {"is_error": True, "content": [{"type": "text", "text": HOOK_TEXT}]}) == "denied"
+    assert _facts(tmp_path, {"is_error": True, "content": "worker-scope: write target 'x' is allowed"}) == "tool_error"
+
+
+def test_result_of_another_tool_use_id_does_not_count_and_a_missing_id_never_matches(tmp_path):
+    target = tmp_path / "t" / "allowed.txt"
+    raw = tmp_path / "raw.ndjson"
+    events = [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Write", "input": {"file_path": str(target)}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": "File created"}]}},
+    ]
+    raw.write_text("\n".join(json.dumps(e) for e in events), encoding="utf-8")
+    assert _sh(tmp_path, 'stream_facts "%s" write "%s"' % (raw, target)).stdout.strip() == "no_attempt"
+    _stream(raw, target, {"content": "File created"}, tool_id="other")
+    other = json.loads(raw.read_text().splitlines()[1])
+    other["message"]["content"][0]["tool_use_id"] = "not-t1"
+    raw.write_text(raw.read_text().splitlines()[0] + "\n" + json.dumps(other) + "\n", encoding="utf-8")
+    assert _sh(tmp_path, 'stream_facts "%s" write "%s"' % (raw, target)).stdout.strip() == "no_tool_result"
+
+
+def test_why_not_names_what_happened(tmp_path):
+    def why(status, token, which):
+        return _sh(tmp_path, 'why_not "%s" "%s" "%s"' % (status, token, which)).stdout
+    assert why(0, "no_attempt", "allowed") == "no_write_attempt"
+    assert why(0, "no_tool_result", "allowed") == "no_tool_result"
+    assert why(0, "no_tool_result", "denied") == "no_tool_result"
+    assert why(0, "tool_error", "allowed") == "write_error_without_hook_text"
+    assert why(0, "unclear_result", "allowed") == "write_result_unclear"
+    assert why(0, "denied", "allowed") == "hook_refused_the_allowed_write"
+    assert why(0, "written", "allowed") == "allowed_file_not_as_expected"
+    assert why(0, "tool_error", "denied").startswith("no_hook_denial")
+    assert why(0, "unclear_result", "denied").startswith("no_hook_denial")
+    assert why(0, "bogus", "allowed") == "unknown_write_state"
+    assert "no_hook_denial" not in why(0, "tool_error", "allowed") + why(0, "no_attempt", "denied")
+    assert why(142, "written", "allowed") == "timeout" and why(1, "auth_failed", "denied") == "auth_failed"
+    assert why(7, "written", "denied") == "cli_exit_7" and why("", "written", "denied") == "cli_exit_unknown"
+
+
+def _judge(tmp_path, s1, s2, allowed_text="probe\n", deny_exists=False, a_result=None, d_result=None):
+    allowed, denied = tmp_path / "w" / "allowed.txt", tmp_path / "w" / "denied.txt"
+    allowed.parent.mkdir(exist_ok=True)
+    if allowed_text is not None:
+        allowed.write_text(allowed_text, encoding="utf-8")
+    if deny_exists:
+        denied.write_text("x", encoding="utf-8")
+    r1 = _stream(tmp_path / "r1.ndjson", allowed, a_result if a_result is not None else {"content": "File created"})
+    r2 = _stream(tmp_path / "r2.ndjson", denied, d_result if d_result is not None else {"is_error": True, "content": HOOK_TEXT})
+    return _sh(tmp_path, 'judge_write "%s" "%s" "%s" "%s" "%s" "%s"' % (r1, s1, allowed, r2, s2, denied)).stdout.strip()
+
+
+def test_judge_write_ja_on_a_clean_pair_of_calls(tmp_path):
+    assert _judge(tmp_path, 0, 0).startswith("ja\t")
+
+
+def test_judge_write_never_ja_when_a_call_exited_non_zero(tmp_path):
+    cases = ((3, 0, "positive control", "(exit 3)"), (0, 3, "hook denial", "(exit 3)"), (142, 0, "timeout", "(exit 142)"),
+             ("", 0, "cli_exit_unknown", "(exit unknown)"), (0, "", "cli_exit_unknown", "(exit unknown)"))
+    for s1, s2, word, exit_text in cases:
+        out = _judge(tmp_path, s1, s2)
+        assert out.startswith("niet_gemeten\t"), (s1, s2, out)
+        assert word in out and exit_text in out, (s1, s2, out)
+
+
+def test_judge_write_stays_blocking_on_missing_or_odd_evidence(tmp_path):
+    assert _judge(tmp_path, 0, 0, allowed_text=None).startswith("niet_gemeten\t")
+    assert _judge(tmp_path, 0, 0, allowed_text="other\n").startswith("niet_gemeten\t")
+    assert _judge(tmp_path, 0, 0, a_result={"is_error": "false", "content": "ok"}).startswith("niet_gemeten\t")
+    assert _judge(tmp_path, 0, 0, d_result={"content": HOOK_TEXT}).startswith("niet_gemeten\t")
+    assert _judge(tmp_path, 0, 0, deny_exists=True).startswith("nee\t")
+
+
+def test_write_cell_is_ja_when_the_successful_write_has_no_is_error(tmp_path):
+    for cell in ("H1", "H2"):
+        for mode in ("writenoflag", "writenone"):
+            row = _fake_cell(tmp_path, cell, FAKE_ALLOWED=mode)
+            assert row["outcome"] == "ja", (cell, mode, row)
+
+
+def test_write_cell_reason_names_the_allowed_write_failure(tmp_path):
+    row = _fake_cell(tmp_path, "H1", FAKE_ALLOWED="deny")
+    assert row["outcome"] == "niet_gemeten" and "hook_refused_the_allowed_write" in row["reason"], row
+    assert "no_hook_denial" not in row["reason"], row
+    row = _fake_cell(tmp_path, "H2", FAKE_ALLOWED="nohook")
+    assert "write_error_without_hook_text" in row["reason"] and "no_hook_denial" not in row["reason"], row
+
+
+def test_cell_c_records_the_class_of_a_failed_bare_call(tmp_path):
+    cases = {
+        "error: ANTHROPIC_API_KEY is required with --bare": "requires_api_key",
+        "error: unknown option '--bare'": "unknown_flag",
+        "something else entirely sk-secret-123": "other",
+    }
+    for text, cls in cases.items():
+        row = _fake_cell(tmp_path, "C", FAKE_B_EXIT="1", FAKE_STDERR=text)
+        assert row["outcome"] == "niet_gemeten", row
+        assert "stderr class: %s" % cls in row["reason"], row
+        assert "sk-secret" not in row["reason"] and "ANTHROPIC_API_KEY" not in row["reason"], row
+
+
+def test_script_sourced_does_not_run_main(tmp_path):
+    proc = _sh(tmp_path, "type -t main inspect stream_facts judge_write why_not | tr '\\n' ' '")
+    assert proc.stdout.strip() == "function function function function function", proc.stdout
