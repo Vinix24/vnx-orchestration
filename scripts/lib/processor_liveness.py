@@ -33,9 +33,10 @@ from typing import Any, Dict, Optional
 
 HEARTBEAT_FILENAME = "receipt_processor_heartbeat.json"
 SCHEMA_VERSION = 1
-# One constant. 90 s is an assumption until ADR-055's measurement of the
-# longest single processor step (p99 of ``last_cycle_seconds``) replaces it.
-WINDOW_SECONDS = 90
+# One constant. Three times the measured p99 cycle (314 s, n = 171, 2026-11-08
+# 21:29Z to 2026-11-09 08:51Z, PID 75922), by the ADR-055 section 5 rule. A later
+# measurement replaces it the same way; it is not derived at run time.
+WINDOW_SECONDS = 942
 CLOCK_SKEW_SECONDS = 30
 _TIME_FIELDS = ("started_at", "updated_at", "last_progress_at")
 
@@ -73,6 +74,8 @@ def _load_heartbeat(path: Path) -> Any:
         raw = path.read_text(encoding="utf-8")
     except OSError as exc:
         return (f"heartbeat unreadable: {exc.__class__.__name__}",)
+    except UnicodeError:
+        return ("heartbeat is not valid UTF-8",)
     try:
         return json.loads(raw)
     except ValueError:

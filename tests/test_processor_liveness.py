@@ -58,7 +58,8 @@ def dead_pid() -> int:
 
 
 def test_stalled_when_heartbeat_older_than_window_with_live_pid(tmp_path: Path) -> None:
-    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=120))
+    from processor_liveness import WINDOW_SECONDS
+    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=WINDOW_SECONDS + 30))
     result = _read(tmp_path)
     assert result["state"] == "stalled"
     assert result["overall"] == "fail"
@@ -89,6 +90,22 @@ def test_window_boundary_is_inclusive(tmp_path: Path) -> None:
     assert _read(tmp_path)["state"] == "stalled"
 
 
+def test_measured_longest_cycle_reads_fresh_and_past_the_window_reads_stalled(tmp_path: Path) -> None:
+    # Measured on PID 75922, 2026-11-08 21:29Z to 2026-11-09 08:51Z: max cycle 350 s, p99 314 s.
+    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=350))
+    assert _read(tmp_path)["state"] == "fresh"
+    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=943))
+    assert _read(tmp_path)["state"] == "stalled"
+
+
+@pytest.mark.parametrize("raw", [b"\xff\xfe{\"schema\": 1", b"\x80\x81\x82", b"{\"schema\": 1, \"pid\": \"\xc3\x28\"}"])
+def test_invalid_utf8_heartbeat_reads_unknown_without_raising(tmp_path: Path, raw: bytes) -> None:
+    (tmp_path / FILE).write_bytes(raw)
+    result = _read(tmp_path)
+    assert (result["state"], result["overall"]) == ("unknown", "unknown")
+    assert "UTF-8" in result["reason"]
+
+
 def test_absent_without_file(tmp_path: Path) -> None:
     result = _read(tmp_path)
     assert (result["state"], result["overall"]) == ("absent", "unknown")
@@ -98,7 +115,8 @@ def test_permission_error_on_kill_means_alive(tmp_path: Path) -> None:
     _write(tmp_path, _heartbeat(4242, age_seconds=5))
     with mock.patch("processor_liveness.os.kill", side_effect=PermissionError):
         assert _read(tmp_path)["state"] == "fresh"
-    _write(tmp_path, _heartbeat(4242, age_seconds=500))
+    from processor_liveness import WINDOW_SECONDS
+    _write(tmp_path, _heartbeat(4242, age_seconds=WINDOW_SECONDS + 1))
     with mock.patch("processor_liveness.os.kill", side_effect=PermissionError):
         assert _read(tmp_path)["state"] == "stalled"
 
@@ -168,7 +186,8 @@ def test_naive_timestamp_is_read_as_utc(tmp_path: Path) -> None:
 
 
 def test_freshness_comes_from_the_field_not_the_mtime(tmp_path: Path) -> None:
-    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=600))
+    from processor_liveness import WINDOW_SECONDS
+    _write(tmp_path, _heartbeat(os.getpid(), age_seconds=WINDOW_SECONDS + 60))
     os.utime(tmp_path / FILE, (NOW.timestamp(), NOW.timestamp()))  # mtime says "just now"
     assert _read(tmp_path)["state"] == "stalled"
 

@@ -83,17 +83,23 @@ De huidige `_combine_liveness_overall` geeft bij een mengsel van `ok` en `unknow
 
 ### 5. Het venster
 
-`WINDOW_SECONDS = 90`, één constante in `scripts/lib/processor_liveness.py`.
+`WINDOW_SECONDS = 942`, één constante in `scripts/lib/processor_liveness.py`.
 
-**Dit is een aanname, geen meting.** De onderbouwing: de poll-lus slaapt `POLL_INTERVAL` (standaard 5 s, `scripts/receipt_processor.sh`) en schrijft twee keer per cyclus. Het grootste gat tussen twee schrijfacties is dus de langste enkele stap: het verwerken van de rapporten van één cyclus of één converter-scan. Negentig seconden is dat gat met ruime marge, zonder dat de gemeten waarde er al achter staat.
+**Dit is een meting, geen aanname.** De poll-lus schrijft twee keer per cyclus: aan het begin en aan het eind. Het grootste gat tussen twee schrijfacties is dus één cyclus. De regel was: ligt de p99 van de cyclusduur boven 30 s, dan wordt het venster drie keer de gemeten p99, met de meting erbij.
 
-**Hoe PR 2 het meet.** PR 2 meet die stap op de echte processor: de rode run plus een uur `last_cycle_seconds` uit het live heartbeatbestand na de uitrol, met de p99 in het rapport. Ligt die p99 boven 30 s, dan gaat het venster naar drie keer de gemeten p99, in een eigen PR en met de meting erbij. Tot die meting staat 90 s in deze ADR als aanname.
+De meting op de draaiende processor (PID 75922, gestart 2026-11-08T19:57:39Z), van 2026-11-08 21:29Z tot 2026-11-09 08:51Z. Methode: de tijdstempels van een regel die de processor precies één keer per cyclus logt in `receipt_processor_supervisor.log` (`Already processed: ...`). Uitkomst: n = 171 cycli, min 221 s, p50 231 s, p90 274 s, p99 314 s, max 350 s. Alle 171 liggen boven 90 s.
+
+Het heartbeatbestand, elke 5 s bemonsterd op 2026-11-09: `updated_at` 08:42:59Z (cyclus 189), 08:47:02Z (189), 08:47:07Z (190), 08:51:28Z (190), 08:51:34Z (191). De langste gaten tussen twee schrijfacties waren 243 s en 261 s. `last_cycle_seconds` las 247,69, 243,159 en 261,382.
+
+De vorige processor (PID 2021, 2026-11-06 23:48Z tot 2026-11-08 19:56Z, andere marker per cyclus): n = 895, p50 153 s, p99 441 s, max 661 s. Ook die lag overal boven 90 s.
+
+Met 90 s noemde de lezer een gezonde processor `stalled` voor het grootste deel van elke cyclus. Drie keer 314 s is 942 s. Een latere meting vervangt dit getal op dezelfde manier, in een eigen PR en met de meting erbij.
 
 ### 6. Wat "zichtbaar" betekent
 
-`t0_state.json` wordt gebouwd door `scripts/build_t0_state.py` (SessionStart-hook of handmatig). "Zichtbaar binnen 3 minuten" betekent daarom: **een bouw van de state die meer dan `WINDOW_SECONDS` na de laatste heartbeat start, meldt `stalled` of `dead`.** Het is geen push en geen alarm. Er draait niets dat tussen twee bouwen kijkt.
+`t0_state.json` wordt gebouwd door `scripts/build_t0_state.py` (SessionStart-hook of handmatig). "Zichtbaar binnen het venster" (942 s, ruim 15 minuten) betekent daarom: **een bouw van de state die meer dan `WINDOW_SECONDS` na de laatste heartbeat start, meldt `stalled` of `dead`.** Het is geen push en geen alarm. Er draait niets dat tussen twee bouwen kijkt.
 
-De meting voor "klaar" roept de bouw daarom zelf aan op vaste tijden: na een `SIGSTOP` op de PID uit het heartbeatbestand (gecontroleerd met `ps -o stat= -p <pid>`, verwacht `T`) staat op T+120 s de toestand op `stalled` en `system_health.status` op `degraded`; na `SIGCONT` is hij binnen 30 s weer `fresh`.
+De meting voor "klaar" roept de bouw daarom zelf aan op vaste tijden: na een `SIGSTOP` op de PID uit het heartbeatbestand (gecontroleerd met `ps -o stat= -p <pid>`, verwacht `T`) staat op T+975 s (het venster plus 30 s marge) de toestand op `stalled` en `system_health.status` op `degraded`; na `SIGCONT` is hij binnen 30 s weer `fresh`.
 
 ### 7. Mergevolgorde: schrijver vóór lezer
 
@@ -125,5 +131,5 @@ Een schrijver terugdraaien terwijl de lezer blijft staan is dus veilig, maar het
 - `system_health.status` kan voor het eerst `degraded` worden om een reden die geen daemon of launchd-job is. Een lezer van `system_health` die alleen die twee componenten kent, ziet een nieuwe sleutel en moet de bestaande niet anders lezen.
 - Het contract kost de processor twee kleine atomische schrijfacties per cyclus. Een schrijffout stopt de processor niet.
 - `last_progress_at` en `watermark_hash` worden geschreven maar beslissen niets in deze versie. Ze staan er zodat een latere track "leeft maar verwerkt niets" kan meten zonder het schema te wijzigen (`schema` blijft dan 1, tenzij een veld van betekenis verandert).
-- Het venster van 90 s is een aanname tot PR 2 de p99 van `last_cycle_seconds` heeft gemeten. Een te krap venster geeft vals alarm bij een trage cyclus; daarom bestaat de meetvoorwaarde in §5.
+- Het venster van 942 s is gemeten: drie keer de p99 van 314 s over 171 cycli (§5). Een stilgevallen processor wordt daardoor pas na ruim 15 minuten `stalled`. Dat is de prijs van een venster dat een gezonde cyclus van 350 s niet vals afkeurt.
 - Buiten dit ADR: de PR-koppeling op het eind-receipt (track `audit-spoor-volledig`), de 32 foutbestanden van de converter en de 18 huidige afwijzingen (operatorbeoordeling, datawijziging), en het aansluiten van `unlinked_gate_evidence` op `system_health`.
