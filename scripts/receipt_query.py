@@ -103,6 +103,7 @@ from open_outcomes import (
 from open_outcomes_recount import add_recount
 from vnx_paths import project_id_from_state_dir, resolve_project_data_root
 import lifecycle_count
+import cohort_outcome
 
 LEDGER_NAME = "t0_receipts.ndjson"
 RUNTIME_COORDINATION_DB_NAME = "runtime_coordination.db"
@@ -1016,6 +1017,50 @@ def _add_cohort_parsers(sub: Any) -> None:
         p.set_defaults(func=func)
 
 
+def _project_coverage(project_id: str) -> Dict[str, Any]:
+    """The coverage state of one ADR project in its own central store; unreadable is ``unmeasured``."""
+    try:
+        state_dir = resolve_project_data_root(project_id) / "state"
+        return {"state": lifecycle_count.measure_coverage(state_dir, project_id=project_id)["state"]}
+    except (lifecycle_count.Unmeasured, ValueError, OSError) as exc:
+        return {"state": "unmeasured", "reason": str(exc)}
+
+
+def _cmd_operator_outcome(args: argparse.Namespace) -> int:
+    result = _measure_one(args, args.project)
+    judged = cohort_outcome.verdict(result.get("N"), result.get("zero_rate"), result.get("unknown_rate"))
+    shown = dict(result, verdict=judged["verdict"], reason=judged["reason"])
+    shown.pop("deliveries", None)
+    if args.write_marker is not None:
+        if result.get("status") == "unmeasured":
+            print(f"error: no marker for an unmeasured project: {result['reason']}", file=sys.stderr)
+            return 1
+        coverage = {pid: _project_coverage(pid) for pid in COHORT_PROJECTS}
+        name = args.write_marker or cohort_outcome.default_marker_name(args.since, args.until)
+        content = cohort_outcome.build_marker(result, coverage, cohort_outcome.git_sha(Path(__file__).resolve().parent))
+        try:
+            shown["marker"] = str(cohort_outcome.write_marker(_cohort_state_dir(args, args.project), name, content))
+        except (cohort_outcome.MarkerExists, ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    print(json.dumps(shown, indent=2) if args.json else
+          f"{args.project}: N={shown.get('N')} verdict={judged['verdict']} ({judged['reason']})")
+    return 1 if result.get("status") == "unmeasured" else 0
+
+
+def _add_outcome_verdict_parser(sub: Any) -> None:
+    doc = "The ADR-056 autonomy verdict, optionally frozen as a write-once marker"
+    p = sub.add_parser("operator-outcome", help=doc, description=doc)
+    p.add_argument("--project", required=True, help="project id (read from its own central store)")
+    p.add_argument("--state-dir", help="read this state dir instead of the central store")
+    p.add_argument("--since", default=COHORT_SINCE)
+    p.add_argument("--until", default=COHORT_UNTIL, help="end exclusive")
+    p.add_argument("--write-marker", nargs="?", const="", default=None, metavar="NAME",
+                   help="write autonomy_markers/<NAME>.json once; never overwritten")
+    p.add_argument("--json", action="store_true")
+    p.set_defaults(func=_cmd_operator_outcome, all_projects=False)
+
+
 def _add_outcome_parsers(sub: Any) -> None:
     """``open-outcomes`` and ``decide``: the T0's open points (fabric-state-herstel D4b)."""
     p_open = sub.add_parser(
@@ -1161,6 +1206,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_lookup_parsers(sub)
     _add_digest_parsers(sub)
     _add_cohort_parsers(sub)
+    _add_outcome_verdict_parser(sub)
     return parser
 
 
