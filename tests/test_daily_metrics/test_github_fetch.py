@@ -102,3 +102,12 @@ def test_one_population_per_run_and_clear_cache_starts_a_new_one(gh):
     gh.clear_cache()
     assert gh.fetch_merged(DAY, DAY, project_root=ROOT, now=NOW, runner=runner) is not first
     assert len(calls) == 2
+
+def test_a_failed_read_is_never_memoised_and_the_next_call_retries(gh):
+    responses = [(1, "", "HTTP 502"), _ok([_row(1, "2026-11-09T01:00:00Z")])]
+    runner, calls = _runner(lambda args: responses.pop(0))
+    first = gh.fetch_merged(DAY, DAY, project_root=ROOT, now=NOW, runner=runner)
+    assert first.error == "gh_failed"
+    second = gh.fetch_merged(DAY, DAY, project_root=ROOT, now=NOW, runner=runner)
+    assert second.error is None and len(second.rows) == 1
+    assert len(calls) == 2

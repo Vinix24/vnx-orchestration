@@ -138,10 +138,19 @@ def _dedupe(rows: list) -> list:
 def fetch_merged(
     from_day: date, to_day: date, *, project_root: Path, now: datetime,
     extra_fields: tuple[str, ...] = (), runner: Callable[..., tuple] | None = None,
+    use_cache: bool = True,
 ) -> MergedPopulation:
+    """Read merged PRs for ``[from_day, to_day]``, memoised per key.
+
+    ``use_cache=False`` neither reads nor writes ``_CACHE`` (the receipt watcher
+    needs fresh rows); a population carrying an ``error`` is never stored, so a
+    transient ``gh`` failure is retried by the next caller.
+    """
     root = Path(project_root)
+    # ``use_cache=False`` works on a private dict: it neither reads nor writes _CACHE.
+    cache = _CACHE if use_cache else {}
     key = (str(root.resolve()), from_day, to_day, tuple(extra_fields))
-    if key not in _CACHE:
+    if key not in cache:
         start = datetime.combine(from_day, time(0, 0, 0), tzinfo=timezone.utc)
         end = datetime.combine(to_day, time(23, 59, 59), tzinfo=timezone.utc)
         rows, calls, truncated, error, detail = _scan(
@@ -156,8 +165,11 @@ def fetch_merged(
                     error = ROW_OUTSIDE_RANGE
                     break
         fetched = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
-        _CACHE[key] = MergedPopulation(
+        population = MergedPopulation(
             rows=tuple(rows), range_from=start, range_to=end,
             fetched_at=fetched.astimezone(timezone.utc), truncated=truncated,
             error=error, calls=calls, error_detail=detail if error else None)
-    return _CACHE[key]
+        if population.error is None:  # a failed read is retried by the next caller
+            cache[key] = population
+        return population
+    return cache[key]

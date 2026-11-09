@@ -112,11 +112,12 @@ def _get_merged_today(
 
     The old ``--limit 30`` is gone (decision 21): ``truncated`` says the count is
     unknown rather than short, and ``rows`` is empty when the read failed or
-    could not be proven.
+    could not be proven. ``use_cache=False``: this runs inside the long-lived
+    receipt watcher, so every rebuild must see the merges that landed since.
     """
     now = datetime.now(timezone.utc)
     population = fetch_merged(now.date(), now.date(), project_root=project_root, now=now,
-                              extra_fields=("title", "headRefName"))
+                              extra_fields=("title", "headRefName"), use_cache=False)
     if population.error is not None:
         detail = (population.error_detail if population.error == "gh_failed"
                   else population.error)

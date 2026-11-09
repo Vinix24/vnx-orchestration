@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 from pr_queue_state import (
     _build_gates_map,
+    _get_merged_today,
     build_pr_queue_state,
     write_pr_queue_state,
 )
@@ -630,3 +631,28 @@ class TestMergedTodayCoverage:
         assert {"schema", "timestamp", "available", "reason", "open_prs",
                 "merged_today", "register_error"} <= set(section)
         assert section["merged_truncated"] is True
+
+
+class TestMergedTodayIsReadFreshOnEveryCall:
+    def test_a_second_call_sees_a_merge_that_landed_after_the_first(self, tmp_path):
+        first = {"number": 1, "title": "PR 1", "headRefName": "feat/1",
+                 "mergedAt": "2026-11-09T01:00:00Z"}
+        second = {"number": 2, "title": "PR 2", "headRefName": "feat/2",
+                  "mergedAt": "2026-11-09T05:00:00Z"}
+        answers, calls = [[first], [first, second]], []
+
+        def fake_run(argv, **kwargs):
+            assert argv[1:3] == ["pr", "list"], argv
+            calls.append(list(argv))
+            rows = answers[len(calls) - 1]
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(rows), stderr="")
+
+        with patch("pr_queue_state.datetime", _fixed_clock()), \
+             patch("subprocess.run", fake_run):
+            first_rows, first_error, _ = _get_merged_today(tmp_path)
+            second_rows, second_error, _ = _get_merged_today(tmp_path)
+
+        assert len(calls) == 2, "the second call must read gh again, not replay the memo"
+        assert first_error is None and second_error is None
+        assert [row["number"] for row in first_rows] == [1]
+        assert [row["number"] for row in second_rows] == [1, 2]
