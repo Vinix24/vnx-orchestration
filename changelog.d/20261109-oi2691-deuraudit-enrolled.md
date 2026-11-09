@@ -1,0 +1,1 @@
+- The fleet door audit (`backfill_pr_merged_receipts.py --all-projects`) now reads per project whether main requires `vnx-gate/door`, as the door does. A project without that requirement is reported `not_enrolled` and no child starts, so it gets no open items; an unreadable or invalid declaration is `unmeasurable` (OI-2691).

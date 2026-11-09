@@ -64,6 +64,8 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 from vnx_paths import ensure_env
 from governance_receipts import emit_governance_receipt
+from forge_gate_publisher import DOOR_CHECK_NAME
+from forge_protection_drift import ProtectionConfigError, fetch_project_yaml_from_ref, parse_protection_config
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -957,6 +959,28 @@ def _project_row(project: Dict[str, Any], outcome: str, exit_code: int, gaps: in
             "exit_code": exit_code, "finding": finding, "reason": reason}
 
 
+def _door_required(root: Path) -> Tuple[Optional[bool], str]:
+    """Whether main's ``branch_protection.yaml`` lists the door check, read as the door reads it (ADR-061 §4).
+
+    ``None`` with the reason when the declaration is unreadable or invalid: never ``not_enrolled`` on that.
+    """
+    try:
+        path, fetched = fetch_project_yaml_from_ref(root, "main")
+    except Exception as exc:  # vnx-silent-except: any read failure is unmeasurable, reported with its text
+        return None, f"branch-protection-YAML op main niet leesbaar: {exc}"
+    if fetched.not_found:
+        return False, "geen branch_protection.yaml op main"
+    if fetched.error:
+        return None, f"branch-protection-YAML op main niet leesbaar: {fetched.error}"
+    try:
+        config = parse_protection_config(fetched.text or "")
+    except ProtectionConfigError as exc:
+        return None, f"branch-protection-YAML op main ongeldig: {exc}"
+    if any(check.context == DOOR_CHECK_NAME for check in config.checks):
+        return True, path
+    return False, f"{path} op main bevat {DOOR_CHECK_NAME} niet"
+
+
 def _run_child(project: Dict[str, Any], since: Optional[str], permit_ttl: int = PERMIT_TTL_MINUTES,
                dry_run: bool = False) -> Tuple[str, int, int, str]:
     """Run `--report-only --reconcile-open-permits --json` for one project. Returns (outcome, exit, gaps, reason); never raises."""
@@ -968,6 +992,11 @@ def _run_child(project: Dict[str, Any], since: Optional[str], permit_ttl: int = 
         return "unmeasurable", EXIT_UNKNOWN, 0, f"no project path ({raw_path or 'none registered'})"
     if not (root / ".git").exists():
         return "unmeasurable", EXIT_UNKNOWN, 0, f"no git repo at {root}"
+    required, why = _door_required(root)
+    if required is None:
+        return "unmeasurable", EXIT_UNKNOWN, 0, why
+    if not required:
+        return "not_enrolled", EXIT_OK, 0, why
     try:
         data_dir = _project_data_dir(pid, root)
         cmd = [sys.executable, str(Path(__file__).resolve()), "--report-only", "--reconcile-open-permits",
