@@ -183,7 +183,7 @@ def test_a_capture_that_raises_never_fails_the_receipt(env, monkeypatch):
     assert _receipts(env)[0]["context_manifest"] == {"schema": 1, "status": "error", "reason": "extract_failed:RuntimeError"}
 
 
-@pytest.mark.parametrize("value", [None, "", "off", "on", "bogus"])
+@pytest.mark.parametrize("value", [None, "", "off", "bogus"])
 def test_off_and_unrecognised_modes_are_byte_equal_to_origin_main(env, monkeypatch, value):
     if value is not None:
         monkeypatch.setenv("VNX_AGENT_LAYOUT", value)
