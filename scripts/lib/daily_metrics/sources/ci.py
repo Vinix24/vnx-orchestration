@@ -7,10 +7,15 @@ metric is the median over those PR durations.
 
 Fail-closed everywhere: ``gh run list --commit`` silently returns zero rows for
 a sha that is not 40 hex characters, so the sha is validated before the call.
-An invalid sha, a failed ``gh`` call, a run that is not ``completed`` or a run
+An invalid sha, a failed ``gh`` call, a run list that reaches ``RUN_LIMIT`` (the
+truncation is not proven either way), a run that is not ``completed`` or a run
 without a parseable ``startedAt``/``updatedAt`` makes the PR unreadable and the
 whole metric ``None`` with a transient reason. A successful call with ``[]`` is
 a measured fact: that PR counts in ``details.no_run_prs`` and out of the median.
+
+Unreadability is counted per row, never per PR number: ``fetch_merged`` does not
+guarantee ``number``, so a row without one is still counted in the reason and in
+``details.unreadable_rows_without_number`` even though it cannot be listed.
 """
 
 from __future__ import annotations
@@ -84,6 +89,10 @@ def _read_runs(runner, root: Path, sha: str) -> tuple[list | None, str | None]:
         return None, f"unparseable gh output: {str(exc)[:120]}"
     if not isinstance(data, list) or not all(isinstance(run, dict) for run in data):
         return None, "unparseable gh output: expected a list of objects"
+    if len(data) >= RUN_LIMIT:
+        # A full page proves neither completeness nor truncation: coverage is not
+        # proven, so the run list is as unusable as a failed read.
+        return None, f"run list reached the limit of {RUN_LIMIT}: coverage not proven"
     return data, None
 
 
@@ -121,7 +130,8 @@ def _measure(row: dict[str, Any], root: Path, runner) -> tuple[str, float | None
 
 def _unknown(reason: str, population: MergedPopulation | None = None, *,
              error: str | None = None, unreadable: list[int] | None = None,
-             no_run: list[int] | None = None) -> ScalarMetric:
+             no_run: list[int] | None = None,
+             unreadable_rows_without_number: int | None = None) -> ScalarMetric:
     details: dict[str, Any] = {}
     if population is not None:
         details["population"] = _population_details(population)
@@ -131,6 +141,8 @@ def _unknown(reason: str, population: MergedPopulation | None = None, *,
         details["error"] = error
     if unreadable is not None:
         details["unreadable_prs"] = unreadable
+    if unreadable_rows_without_number is not None:
+        details["unreadable_rows_without_number"] = unreadable_rows_without_number
     if no_run is not None:
         details["no_run_prs"] = no_run
     return ScalarMetric(value=None, source=SOURCE, unknown_reason=reason,
@@ -159,7 +171,9 @@ def collect(ctx: CollectContext) -> dict[str, ScalarMetric]:
         return {CI_DURATION: _unknown(NO_MERGES_ON_DAY, population)}
 
     durations: list[float] = []
-    unreadable: list[int] = []
+    unreadable: list[int] = []  # rows whose number is usable enough to list
+    unreadable_rows = 0  # every unreadable row, listed or not
+    unreadable_without_number = 0
     no_run: list[int] = []
     calls = 0
     for row in population.rows:
@@ -172,13 +186,17 @@ def collect(ctx: CollectContext) -> dict[str, ScalarMetric]:
             if number is not None:
                 no_run.append(number)
         else:
+            unreadable_rows += 1
             if number is not None:
                 unreadable.append(number)
+            else:
+                unreadable_without_number += 1
 
-    if unreadable:
-        reason = f"{UNREADABLE_PREFIX}{len(unreadable)}_prs"
-        return {CI_DURATION: _unknown(reason, population,
-                                      unreadable=sorted(unreadable), no_run=sorted(no_run))}
+    if unreadable_rows:
+        reason = f"{UNREADABLE_PREFIX}{unreadable_rows}_prs"
+        return {CI_DURATION: _unknown(
+            reason, population, unreadable=sorted(unreadable), no_run=sorted(no_run),
+            unreadable_rows_without_number=unreadable_without_number or None)}
     if not durations:
         return {CI_DURATION: _unknown(NO_RUNS_ON_ANY_HEAD, population,
                                       no_run=sorted(no_run))}

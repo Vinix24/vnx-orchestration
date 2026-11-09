@@ -149,6 +149,38 @@ def test_unparseable_gh_output_is_unreadable(source, ctx, monkeypatch):
     assert record.value is None
     assert record.unknown_reason == "ci_run_unreadable_for_1_prs"
 
+def test_a_full_run_page_is_unreadable_because_coverage_is_not_proven(source, ctx, monkeypatch):
+    runs = [_run("2026-11-09T10:00:00Z", "2026-11-09T10:05:00Z") for _ in range(source.RUN_LIMIT)]
+    record, _ = _measure(source, ctx, _population(_row(1, SHA_A)), monkeypatch,
+                         {SHA_A: (0, _json(runs), "")})
+    assert record.value is None
+    assert record.unknown_reason == "ci_run_unreadable_for_1_prs"
+    assert record.details["unreadable_prs"] == [1]
+
+def test_one_run_under_the_limit_is_still_measured(source, ctx, monkeypatch):
+    runs = [_run("2026-11-09T10:00:00Z", "2026-11-09T10:02:00Z") for _ in range(source.RUN_LIMIT - 1)]
+    record, _ = _measure(source, ctx, _population(_row(1, SHA_A)), monkeypatch,
+                         {SHA_A: (0, _json(runs), "")})
+    assert record.value == pytest.approx(120.0)
+    assert record.sample_size == 1
+
+def test_an_unreadable_row_without_a_number_is_still_counted(source, ctx, monkeypatch):
+    runs = [_run("2026-11-09T10:00:00Z", "2026-11-09T10:05:00Z", status="in_progress")]
+    record, _ = _measure(source, ctx, _population(_row(None, SHA_A)), monkeypatch,
+                         {SHA_A: (0, _json(runs), "")})
+    assert record.value is None
+    assert record.unknown_reason == "ci_run_unreadable_for_1_prs"
+    assert record.details["unreadable_prs"] == []
+    assert record.details["unreadable_rows_without_number"] == 1
+
+def test_a_row_without_a_number_is_still_measured_by_its_runs(source, ctx, monkeypatch):
+    runs = [_run("2026-11-09T10:00:00Z", "2026-11-09T10:03:00Z")]
+    record, _ = _measure(source, ctx, _population(_row(None, SHA_A)), monkeypatch,
+                         {SHA_A: (0, _json(runs), "")})
+    assert record.value == pytest.approx(180.0)
+    assert record.sample_size == 1
+    assert record.details["no_run_prs"] == []
+
 def _json(value):
     import json
 
