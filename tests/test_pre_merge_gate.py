@@ -973,6 +973,24 @@ class TestCheckPRSize:
         assert result["status"] == "HOLD"
         assert result["lines_changed"] == PR_SIZE_HOLD + 1
 
+    def test_warn_threshold_is_450_per_2026_11_09_decision(self, tmp_path):
+        """450 lines is GO without the warning, 451 is GO with the 'large but
+        not blocking' detail, and one above the hold threshold is HOLD."""
+        assert PR_SIZE_WARN == 450
+        merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
+        for lines, status, warned in (
+            (400, "GO", False),
+            (PR_SIZE_WARN, "GO", False),
+            (PR_SIZE_WARN + 1, "GO", True),
+            (PR_SIZE_HOLD + 1, "HOLD", False),
+        ):
+            diff = MagicMock(returncode=0, stdout=f"{lines}\t0\tfile.py\n")
+            with patch("pre_merge_gate.subprocess.run", side_effect=[merge_base_ok, diff]):
+                result = check_pr_size(tmp_path, base_ref="origin/main")
+            assert result["status"] == status, lines
+            assert result["lines_changed"] == lines
+            assert ("large but not blocking" in result["detail"]) is warned, lines
+
     def test_small_diff_is_go(self, tmp_path):
         merge_base_ok = MagicMock(returncode=0, stdout="abc1234\n")
         small_diff = MagicMock(returncode=0, stdout="5\t2\tfile.py\n")

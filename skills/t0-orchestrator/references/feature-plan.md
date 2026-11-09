@@ -25,7 +25,7 @@ Dependencies: []
 One- or two-sentence statement of what this PR delivers.
 
 ### Scope
-- Bullet the concrete changes (keep the PR 150-300 lines, independently deployable).
+- Bullet the concrete changes (keep the PR 300-450 lines, 300 or less on a security path, independently deployable).
 - Name the files or modules touched.
 
 ### Success Criteria

@@ -15,7 +15,7 @@ allowed-tools: [Read, Write, Edit, Bash, Grep, Glob]
 Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orchestration.
 
 ## Core Responsibilities
-- Break features into reviewable PRs (150-300 lines each)
+- Break features into reviewable PRs (300-450 lines each, 300 or less on a security, permission or auth path)
 - Define clear PR dependencies and execution order
 - Map skills to specific PRs
 - Validate PR size constraints
@@ -24,10 +24,10 @@ Generate structured FEATURE_PLAN.md documents with PR-based breakdown for T0 orc
 
 ## Planning Process
 1. **Analyze Requirements**: Break down into testable requirements
-2. **PR Decomposition**: Split into 150-300 line PRs with clear scope
+2. **PR Decomposition**: Split into 300-450 line PRs with clear scope; above 450 split, bundle serially dependent changes on the same files into one PR
 3. **Skill Assignment**: Map appropriate @skill to each PR
 4. **Dependency Mapping**: Define PR execution order (must be acyclic)
-5. **Size Validation**: Verify all PRs within 150-300 line constraint
+5. **Size Validation**: Verify all PRs within the 300-450 line constraint (hard cap 450, 300 on security paths)
 6. **Quality Gates**: Define verification criteria per PR using checklist format
 
 ## Governance Model: Quality Gates as Deliverables
@@ -116,7 +116,7 @@ Every FEATURE_PLAN.md MUST follow this structure:
 
 ## PR Size Guidelines
 
-**Target Range**: 150-300 lines per PR
+**Target Range**: 300-450 changed lines per PR (tests included), hard cap 450, 300 or less on security, permission and auth paths. Serially dependent changes on the same files are one PR; independent PRs stay separate. Measured on 67 merges of 2026-11-08: 150-300 lines took 0.8 h and 1.23 review rounds, 300-450 lines 0.6 h and 1.33 rounds, above 450 lines 1.5 h and 2.89 rounds.
 
 **How to estimate**:
 - Count modified/created files
@@ -146,7 +146,7 @@ Available skills (use with @ prefix in FEATURE_PLAN, without @ in dispatches):
 - `@monitoring-specialist` - Monitoring setup
 
 ## Key Principles
-1. **Small PRs**: 150-300 lines for fast review cycles
+1. **Right-sized PRs**: 300-450 lines (300 on security paths), never above 450
 2. **Clear Dependencies**: Explicit prerequisite mapping (acyclic)
 3. **Skill Alignment**: Right expertise for each PR
 4. **Size Validation**: Estimate and verify line counts

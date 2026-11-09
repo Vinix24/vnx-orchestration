@@ -26,7 +26,7 @@ VNX coordinates work across 4 terminals (T0-T3) with human gates at every step:
 
 ### Rules
 - Every change goes through a dispatch. No cowboy commits.
-- PRs are small (150-300 lines) and independently deployable.
+- PRs are 300-450 changed lines (tests included), hard cap 450, 300 or less on security paths, and independently deployable.
 - `.vnx-data/` is runtime state — never commit it.
 - Stay within assigned dispatch scope.
 

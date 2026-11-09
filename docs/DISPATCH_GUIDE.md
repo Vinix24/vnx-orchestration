@@ -48,7 +48,7 @@ Gate: implementation | Priority: P2 | Dependencies: PR-1
 Gate: planning | Priority: P3 | Dependencies: PR-2, PR-4
 ```
 
-Each PR is scoped to 150–300 lines — small enough to fit in a single context window. The dependency graph ensures nothing runs out of order:
+Each PR is scoped to 300–450 lines (hard cap 450) — small enough to fit in a single context window. The dependency graph ensures nothing runs out of order:
 
 ```
 PR-1 ──→ PR-2 ──→ PR-3

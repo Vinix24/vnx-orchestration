@@ -121,7 +121,7 @@ cd ../your-project-wt-my-feature
 ./bin/vnx finish-worktree my-feature --delete-branch
 ```
 
-All shell changes must pass `bash -n`. PRs should be 150-300 lines of diff.
+All shell changes must pass `bash -n`. PRs should be 300-450 changed lines (hard cap 450, 300 or less on security, permission and auth paths).
 
 ## Where to ask
 

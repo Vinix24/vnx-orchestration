@@ -57,8 +57,9 @@ from governance_receipts import dispatch_identity_fields, emit_governance_receip
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
 
-# Maximum diff size (lines added+removed) before triggering a size warning
-PR_SIZE_WARN = 300
+# Maximum diff size (lines added+removed) before triggering a size warning.
+# 450 per the 2026-11-09 operator decision (300-450 target, hard cap 450).
+PR_SIZE_WARN = 450
 PR_SIZE_HOLD = 600
 
 # Maximum files completely deleted before triggering net-deletion warning/hold

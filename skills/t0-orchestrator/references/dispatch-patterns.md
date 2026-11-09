@@ -49,7 +49,7 @@
 |-----------|---------------|--------|---------------|
 | Simple | < 50 lines, single file | implementation + reviewer | < 30 min |
 | Moderate | 50-150 lines, 2-3 files | architect + implementation + test + reviewer | 30-90 min |
-| Complex | 150-300 lines, multiple files | planner + architect + implementation + test + reviewer | 90-180 min |
+| Complex | 300-450 lines, multiple files | planner + architect + implementation + test + reviewer | 90-180 min |
 
 ## T0 Selection Logic
 

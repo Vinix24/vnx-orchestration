@@ -50,7 +50,7 @@ Create fault-tolerant, scalable server-side solutions with focus on reliability 
 - Background jobs for heavy tasks
 
 ## Quality Requirements
-- PR under 300 lines
+- PR of 300-450 lines, never above 450; 300 or less on a security path
 - Include unit and integration tests
 - Update API documentation
 - No breaking changes without versioning
