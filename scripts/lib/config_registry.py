@@ -571,13 +571,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "lifecycle line is written at all (the append layer refuses the three "
         "types). Purely deterministic: no model call sits in the write path.",
         subsystem="ledger-lifecycle", status="LIVE"),
-    # agents-als-map fase 1 (PR-1). Phase 1 knows `off` and `shadow` only; `on` and any unknown
-    # value read as `off` (scripts/lib/agent_layout.py logs one WARNING), so nobody can switch on
-    # the discovered copy before phase 2. Independent of VNX_AGENT_FOLDERS (agent_resolver).
+    # agent layout: `off` (default), `shadow` and `on`; any unknown value reads as `off` with one
+    # WARNING (scripts/lib/agent_layout.py). Independent of VNX_AGENT_FOLDERS (agent_resolver).
     "VNX_AGENT_LAYOUT": _e(
         "VNX_AGENT_LAYOUT", "string", "off", "dispatch",
-        "Agent-as-folder skill layout: off (default) or shadow (a non-discovered copy under "
-        ".vnx-agent-skills/). `on` is phase 2 and reads as off.",
+        "Agent-as-folder skill layout: off (default), shadow (a non-discovered copy under "
+        ".vnx-agent-skills/) or on (the skills at the provider's native, discovered destination, "
+        "set per project by the operator). An unknown value reads as off.",
         subsystem="agent-layout", status="SCOPE"),
 }
 
