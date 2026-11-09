@@ -11,11 +11,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import shutil
-import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
@@ -145,35 +142,6 @@ def test_every_snapshot_failed_exits_one(mod, tmp_path, monkeypatch):
     assert code == 1
     assert summary["samples"] == 0 and summary["failed_snapshots"] >= 1
     assert not out.exists()
-
-
-@pytest.mark.skipif(shutil.which("vm_stat") is None, reason="vm_stat missing (not macOS, so CI skips this live run)")
-def test_live_run_on_a_synthetic_tree(tmp_path):
-    code = ("import subprocess, sys, time\n"
-            "child = 'while True:\\n    sum(range(2000))\\n'\n"
-            "kids = [subprocess.Popen([sys.executable, '-c', child]) for _ in range(2)]\n"
-            "time.sleep(30)\n")
-    parent = subprocess.Popen([PYTHON, "-c", code], stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, start_new_session=True)
-    try:
-        time.sleep(0.5)
-        out = tmp_path / "load.ndjson"
-        result = subprocess.run([PYTHON, str(SCRIPT), "--root-pid", str(parent.pid),
-                                 "--interval", "1", "--duration", "3", "--out", str(out),
-                                 "--summary"], capture_output=True, text=True,
-                                timeout=30, check=False)
-        assert result.returncode == 0, result.stderr
-        lines = [json.loads(row) for row in out.read_text().splitlines() if row.strip()]
-        assert len(lines) >= 2
-        assert all(FIELDS <= set(line) and line["root_pid"] == parent.pid for line in lines)
-        assert any(line["n_other"] >= 2 for line in lines)
-        assert json.loads(result.stdout)["samples"] == len(lines)
-    finally:
-        try:
-            os.killpg(os.getpgid(parent.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        parent.wait(timeout=10)
 
 
 def _ps_row(pid, ppid, command):

@@ -74,7 +74,6 @@ tests/test_launchd_dashboard_fleet_drift_drivers.py::TestTemplatesAreWellFormed:
 tests/test_launchd_subsystem_probe_driver.py::TestTemplateIsWellFormed::test_plutil_lint_passes  # plutil is macOS only
 tests/test_launchd_interpreter_pin.py::test_without_a_venv_the_pinned_312_is_taken  # the pinned Homebrew 3.12 is not installed on this runner
 tests/test_learning_d3_proposal.py::test_real_history_produces_at_least_one_proposal  # real receipt trail not found at /tmp/vnx_conftest_q47sxiqe/state/t0_receipts.ndjson
-tests/test_measure_process_tree_load.py::test_live_run_on_a_synthetic_tree  # vm_stat is macOS-only; the live run skips on the Linux runner
 tests/test_oi1452_canonical_failure_reason.py::test_kimi_real_pr1677_record_and_lane_log_stamp_failure_reason_on_copy  # real PR #1677 kimi_gate report/lane-log not present under /home/runner/.vnx-data/vnx-dev — this verification only runs on the operator's own local central store
 tests/test_report_to_receipt_converter.py::TestFailClosedBranchNotOnOrigin::test_existing_branch_passes_check  # OI-2518: the precondition `git ls-remote --heads origin dispatch/*` timed out after 10 s under xdist — the listing is only the positive control, so the test skips instead of failing; a skip is not a pass
 tests/test_report_to_receipt_converter_staleness.py::TestConverterBeaconFreshnessLiveStore::test_converter_beacon_is_fresh_on_the_live_store  # no live VNX store resolvable — no store with a booked receipt (state/t0_receipts.ndjson) was found, so the tripwire has nothing to measure (CI runner / fresh machine)
