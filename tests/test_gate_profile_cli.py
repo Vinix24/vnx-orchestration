@@ -187,7 +187,7 @@ def test_show_json_equals_what_the_module_returns_field_by_field(home, monkeypat
     shown = json.loads(capsys.readouterr().out)
     resolution = gate_profile.resolve()
     names, provenance = gate_profile.required_stack()
-    assert set(shown) == {"profile", "source", "raw", "error", "request_stack", "required_stack", "values"}
+    assert set(shown) == {"project_id", "profile", "source", "raw", "error", "request_stack", "required_stack", "values"}
     assert (shown["profile"], shown["source"], shown["raw"], shown["error"]) == (
         resolution.profile, resolution.source, resolution.raw, None,
     )
@@ -261,3 +261,83 @@ def test_bin_vnx_routes_gate_profile_to_the_cli():
     text = (REPO_ROOT / "bin" / "vnx").read_text(encoding="utf-8")
     assert 'gate_profile_cli.py" "$@"' in text
     assert "    gate-profile)" in text
+
+
+# --- --project-id, project_id in the record, error records (OI-2676, OI-2674) ----------------
+
+def _two_projects(tmp_path: Path) -> dict:
+    """One store, two projects: proj-light sets the light profile in its project config, proj-plain does not."""
+    import sqlite3
+
+    import config_store_db
+
+    state = Path(os.environ["VNX_STATE_DIR"])
+    conn = sqlite3.connect(state / "runtime_coordination.db")
+    config_store_db.set_config(conn, "proj-light", gate_profile.PROFILE_KEY, "light", actor="test",
+                                approval_id="test-approval")
+    conn.close()
+    return {"VNX_STATE_DIR": str(state), "VNX_PROJECT_ID": "proj-plain"}
+
+
+def test_two_projects_two_profiles(home, tmp_path):
+    env = _two_projects(tmp_path)
+    records = {}
+    for pid in ("proj-light", "proj-plain"):
+        result = _run_cli("show", "--json", "--project-id", pid, extra=env)
+        assert result.returncode == 0, result.stderr
+        records[pid] = json.loads(result.stdout)
+        assert records[pid]["project_id"] == pid
+    assert records["proj-light"]["profile"] == "light"
+    assert records["proj-light"]["source"] == "project_config"
+    assert records["proj-plain"]["profile"] != records["proj-light"]["profile"]
+
+
+def test_show_names_the_process_project_without_the_flag_and_plain_leads_with_it(home, tmp_path):
+    env = _two_projects(tmp_path)
+    record = json.loads(_run_cli("show", "--json", extra=env).stdout)
+    assert record["project_id"] == "proj-plain"
+    plain = _run_cli("show", "--project-id", "proj-light", extra=env)
+    assert plain.stdout.splitlines()[0] == "project_id: proj-light"
+
+
+def test_value_reads_the_named_project(home, tmp_path):
+    env = _two_projects(tmp_path)
+    light = _run_cli("--value", "required_stack", "--project-id", "proj-light", extra=env)
+    plain = _run_cli("--value", "required_stack", "--project-id", "proj-plain", extra=env)
+    assert light.returncode == 0 and plain.returncode == 0
+    assert light.stdout != plain.stdout
+
+
+@pytest.mark.parametrize("bad", ["Proj", "x", "1abc", "has space", "a" * 33, ""])
+def test_a_malformed_project_id_exits_2_with_a_reason(home, bad):
+    result = _run_cli("show", "--project-id", bad)
+    assert result.returncode == 2 and "not a project id" in result.stderr and result.stdout == ""
+
+
+def test_json_config_error_is_a_record(home):
+    _dials(home, "checks:\n  codex_gate_required:\n    note: no level here\n")
+    result = _run_cli("show", "--json", "--project-id", "proj-plain", extra={
+        "VNX_HOME": str(home), "VNX_STATE_DIR": os.environ["VNX_STATE_DIR"]})
+    assert result.returncode == 2
+    record = json.loads(result.stdout)
+    assert record["profile"] is None and record["required_stack"] is None and record["project_id"] == "proj-plain"
+    assert "level" in record["error"] and "level" in result.stderr
+
+
+def test_plain_config_error_keeps_stderr_only(home):
+    _dials(home, "checks:\n  codex_gate_required:\n    note: no level here\n")
+    result = _run_cli("show", extra={"VNX_HOME": str(home), "VNX_STATE_DIR": os.environ["VNX_STATE_DIR"]})
+    assert result.returncode == 2 and result.stdout == "" and "level" in result.stderr
+
+
+def _tree_bytes(root: Path) -> dict:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_show_writes_nothing_to_the_state_dir(home, tmp_path):
+    env = _two_projects(tmp_path)
+    state = Path(env["VNX_STATE_DIR"])
+    before = _tree_bytes(state)
+    for args in (["show", "--json", "--project-id", "proj-light"], ["--value", "required_stack"], ["show"]):
+        assert _run_cli(*args, extra=env).returncode == 0
+    assert _tree_bytes(state) == before
