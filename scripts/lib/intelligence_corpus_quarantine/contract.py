@@ -1,8 +1,9 @@
 """One Q1 manifest schema shared by writing, loading and validation."""
 import json
-import os
 from datetime import datetime
 from pathlib import Path
+
+from .. import atomic_io
 
 TRACK = "intelligence-corpus-quarantine"
 SCHEMA = 1
@@ -52,17 +53,7 @@ def load_manifest(path):
 
 
 def write_manifest(path, manifest):
-    """Validate, fsync and atomically replace; never follow a preexisting temp file."""
+    """Validate, fsync and atomically replace using the shared atomic writer."""
     validate_manifest(manifest)
-    path = Path(path)
-    temporary = path.with_name(path.name + ".tmp")
-    with temporary.open("x", encoding="utf-8") as stream:
-        try:
-            json.dump(manifest, stream, sort_keys=True, indent=2, allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            os.replace(temporary, path)
-        except BaseException:
-            temporary.unlink()
-            raise
+    text = json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    atomic_io.atomic_write_text(Path(path), text)

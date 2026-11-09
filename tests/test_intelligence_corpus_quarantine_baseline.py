@@ -62,6 +62,18 @@ def test_baseline_matches_sqlite(database, tmp_path):
     assert hashlib.sha256(database.read_bytes()).hexdigest() == before
 
 
+def test_baseline_ignores_stale_manifest_scratch_file(database, tmp_path):
+    from lib.intelligence_corpus_quarantine.contract import load_manifest
+    stale = tmp_path / "manifest.json.tmp"
+    content = b"interrupted writer's bytes\n"
+    stale.write_bytes(content)
+    before = stale.stat()
+    result = run_baseline(database, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert load_manifest(tmp_path / "manifest.json")["db"]["path"] == str(database)
+    assert stale.stat() == before and stale.read_bytes() == content
+
+
 @pytest.mark.parametrize("kind,code,reason", [
     ("empty", 3, "0-byte"), ("no_snippets", 3, "code_snippets"),
     ("no_out", 2, "directory"), ("unreadable", 1, "regular file"),
@@ -92,6 +104,8 @@ def test_refusals(database, tmp_path, kind, code, reason):
     assert result.returncode == code, result.stderr
     assert reason in result.stderr and len(result.stderr.splitlines()) == 1
     assert not (out / "manifest.json").exists()
+    if kind == "no_out":
+        assert not out.exists()
 
 
 def test_digest_fixtures_and_affinity(database, tmp_path):
