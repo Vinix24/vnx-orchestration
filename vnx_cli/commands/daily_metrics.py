@@ -69,4 +69,9 @@ def vnx_daily_metrics(args: argparse.Namespace) -> int:
     # PYTHONPATH, so the script sees its lib dir already on the path, does not move
     # it in front of its own directory, and `from daily_metrics import collect`
     # resolves to scripts/daily_metrics.py itself (circular import; measured).
-    return subprocess.run([sys.executable, "-P", str(script), *argv]).returncode
+    try:
+        return subprocess.run([sys.executable, "-P", str(script), *argv]).returncode
+    except OSError as exc:
+        print(f"error: daily-metrics script could not be started: {exc}",
+              file=sys.stderr)
+        return 1

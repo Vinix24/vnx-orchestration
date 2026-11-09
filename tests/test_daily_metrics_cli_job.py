@@ -193,3 +193,33 @@ def test_install_without_project_id_exits_two():
     with pytest.raises(SystemExit) as excinfo:
         dm_cmd.vnx_daily_metrics(_args("install"))
     assert excinfo.value.code == 2
+
+
+# a launch failure of the pass-through script is a structured error, not a traceback
+def test_passthrough_start_failure_is_a_structured_error(monkeypatch, capsys):
+    def boom(*args, **kwargs):
+        raise OSError("boom")
+
+    monkeypatch.setattr(subprocess, "run", boom)
+
+    rc = dm_cmd.vnx_daily_metrics(_args("collect"))
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "could not be started" in captured.err
+    assert "boom" in captured.err
+    assert "Traceback" not in captured.err
+
+
+# the help and description name only `install`: `uninstall` returns in PR-13b
+def test_daily_metrics_help_and_description_name_only_install():
+    import vnx_cli.main as main_mod
+
+    parser = main_mod._SuggestionArgumentParser(prog="vnx")
+    subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
+    main_mod._register_daily_metrics_subparser(subparsers)
+    sub_help = subparsers._name_parser_map["daily-metrics"].format_help()
+    combined = (parser.format_help() + sub_help).lower()
+
+    assert "install" in combined
+    assert "uninstall" not in combined

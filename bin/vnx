@@ -328,7 +328,7 @@ Commands:
                        review --weekly  Aggregate last 7d suggestions by target file
   insights           Read-only dispatch parameter + behavioral intelligence signals
                        --json           Machine-readable JSON output
-  daily-metrics <verb> [args]  Daily metrics pass-through; install|uninstall manage the opt-in 04:10 job
+  daily-metrics <verb> [args]  Daily metrics pass-through; install manages the opt-in 04:10 job
 
 Intelligence commands (git-tracked project knowledge):
   intelligence-export  Export SQLite + state to canonical .vnx-intelligence/ (NDJSON)

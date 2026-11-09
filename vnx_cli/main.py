@@ -1629,7 +1629,10 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
 
 
 def _register_daily_metrics_subparser(subparsers: argparse.Action) -> None:
-    """``vnx daily-metrics``: install/uninstall the job, pass every other verb through.
+    """``vnx daily-metrics``: install the job, pass every other verb through.
+
+    Removal of the job follows as its own verb in a later change (PR-13b); this
+    text names no command that does not exist yet.
 
     The handler is bound with ``set_defaults(func=...)`` instead of growing the
     ``elif`` chain in ``_dispatch_command``: that function is already at the
@@ -1640,13 +1643,13 @@ def _register_daily_metrics_subparser(subparsers: argparse.Action) -> None:
     daily_metrics_parser = subparsers.add_parser(
         "daily-metrics",
         help=(
-            "daily metrics: install|uninstall the opt-in 04:10 job, every other "
+            "daily metrics: install the opt-in 04:10 job, every other "
             "verb passes through to scripts/daily_metrics.py"
         ),
         description=(
             "Daily metrics. `install --project-id ID` installs the opt-in "
-            "per-project launchd job (04:10 local); `uninstall --project-id ID` "
-            "removes exactly that one job. Every other verb (collect, daily, "
+            "per-project launchd job (04:10 local). Removal of that job follows "
+            "as a verb in a later change. Every other verb (collect, daily, "
             "propose, approve, verdict, report) is passed to "
             "scripts/daily_metrics.py unchanged."
         ),

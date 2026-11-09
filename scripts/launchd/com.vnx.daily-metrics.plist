@@ -9,8 +9,8 @@
     the Label carries the project id, so two projects never replace each other.
 
     Opt-in (decision 29): `vnx init` does NOT install this job. The operator installs
-    it per project with the `install` verb of `vnx daily-metrics` and removes exactly
-    that one job with `uninstall`. The family is absent from
+    it per project with the `install` verb of `vnx daily-metrics`; removal of exactly
+    that one job follows as a verb in a later change. The family is absent from
     REQUIRED_PER_PROJECT_FAMILIES, so no project is made to carry it.
 
     Cadence 04:10 local (decision 14). A day D (UTC) is settled only after
