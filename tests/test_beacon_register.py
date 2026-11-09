@@ -356,12 +356,23 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     (``expected_interval_seconds=2 * 86400``, every two days). Periodic, so a
     door audit that stopped running shows up as absent rather than as a clean
     door -- the same fail-closed reading it demands of the receipts it audits.
+
+    daily-metrics PR-3 adds the 15th: ``daily_metrics``, written by
+    ``scripts/lib/daily_metrics/collect.py::write_beacon`` on the daily
+    ``scripts/daily_metrics.py daily`` run. Event-driven
+    (``expected_interval_seconds=None``): it runs on a daily cadence rather
+    than an interval clock, so a day with no settled final data is a ``fail``
+    heartbeat, not an absence -- ``daily_metrics`` is therefore left out of
+    ``expected_component_names()``.
     """
     reg = br.read_beacon_register()
     names = {s.name for s in reg}
     (cost_ledger_spec,) = [s for s in reg if s.name == "cost-ledger"]
     assert (cost_ledger_spec.source_file, cost_ledger_spec.event_driven) == ("scripts/lib/cost_ledger.py", True)
     assert "cost-ledger" not in br.expected_component_names()
+    (daily_metrics_spec,) = [s for s in reg if s.name == "daily_metrics"]
+    assert (daily_metrics_spec.source_file, daily_metrics_spec.event_driven) == ("scripts/lib/daily_metrics/collect.py", True)
+    assert "daily_metrics" not in br.expected_component_names()
     assert names == {
         "t0_state_builder",
         "conversation_analyzer",
@@ -377,4 +388,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "fleet_pin_audit",
         "lifecycle_count",
         "door_audit",
+        "daily_metrics",
     }
