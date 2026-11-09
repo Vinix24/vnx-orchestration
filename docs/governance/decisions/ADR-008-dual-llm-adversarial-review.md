@@ -135,6 +135,29 @@ This amendment is written before the rule is active. The key `VNX_REVIEW_SEAT_RU
 - **Rollback criterion.** The key goes back to `first_seat_or_every_seat_by_risk` as soon as, on the sample of clean heads, 2 or more FAILs that the T0 judges real fall in the first 10, or more than 10 percent after at least 20. The sample runs about 1 in 5, so 20 heads asks about 100 clean heads. The repeat measurement after 50 merges also counts what codex-only merges received as fix-forward afterwards.
 - **Accepted cost.** The rule misses 3 of the 16 faults on the measurement set, and #2184 sat on a `gate-merge` path without a warning. The sample and the repeat measurement keep the miss ratio visible; a miss ratio above 10 percent of the sample sends the key back.
 
+### Activering 2026-11-09
+
+**Status:** uitgevoerd (dispatch dlv-375fc3998a77, track tweede-stoel-op-signaal, PR 5). Bron: `claudedocs/2026-11-07-naar-1-9/metingen/schaduwtoets-tweede-stoel-2026-11-09.md`.
+
+De schaduwtoets uit dit amendement is gehaald. De T0 zet vnx-dev daarna op de signaalregel met een `project_config`-rij (`VNX_REVIEW_SEAT_RULE` = `first_seat_or_every_seat_on_signal`) die hij met een approval-id schrijft; die rij is geen deel van PR 5. Elk ander project heeft geen rij en houdt `first_seat_or_every_seat_by_risk`.
+
+**De vier eisen en hun meting.**
+
+| Eis | Gemeten | Uitkomst |
+|---|---|---|
+| Minstens 20 merges in schaduw | 213 merges, van 03-11 12:22Z tot 09-11 15:24Z | gehaald |
+| Elk receipt draagt regelnaam en signalen | 0 van 213 zonder `rule` of `signals` | gehaald |
+| Nul keer minder stoelen bij `unknown` | 6 merges met een `unknown`-veld, alle 6 met de hele stapel | gehaald |
+| Elk verschil nagelezen | 77 verschillen, hieronder per soort | gehaald, met één bevinding |
+
+**De twee soorten verschil.** 136 merges kregen onder beide regels dezelfde stoelen. 40 keer vroeg de schaduw meer stoelen (stoel 2 bij een medium-PR), door de signalen `sample` en `real_warning`, soms samen. 37 keer vroeg de schaduw minder stoelen (alleen codex waar de risicoregel er twee eiste): 34 keer was de enige reden voor `high` een pad in de categorie `gate-merge`, 3 keer (#2433, #2497, #2554) hoogde de T0 zelf een afgeleide `medium` op met `--risk-class high`. Alle 37 hebben stoel-2-regels in `rounds.ndjson`, en geen enkele is een FAIL: op deze steekproef had de smallere regel geen blokkerende bevinding gemist.
+
+**De bevinding (OI-2697).** `seats_for_signals` kent een vrijwillige ophoging door de aanroeper niet als signaal, dus een plan dat bewust twee stoelen vraagt zonder dat de diff of de spec dat afdwingt krijgt na activering één stoel. Tijdelijke regel tot OI-2697 dicht is: een vrijwillig verhoogde levering draagt `irreversible: true` in haar spec, want dat is wel een signaal.
+
+**Verwachte belasting van stoel 2.** Onder de risicoregel vroegen 37 van de 213 merges stoel 2 (17 procent); onder de signaalregel zijn dat er 40 (19 procent), op andere PR's. De belasting blijft dus gelijk en verschuift van gate-merge-paden naar PR's met een echte waarschuwing of een steekproef.
+
+**Terugdraaien en criterium.** Zet de rij terug op `first_seat_or_every_seat_by_risk` (of gebruik `VNX_OVERRIDE_REVIEW_SEAT_RULE` als de onmiddellijke noodrem) zodra het terugdraaicriterium van dit amendement geldt: een misratio boven 10 procent van de steekproef; de herhaalmeting na 50 merges telt ook mee wat codex-alleen-merges daarna als fix-forward kregen.
+
 ## Amendement 4 (08-11-2026): poortprofiel en veiligheidsondergrens
 
 **Status:** Accepted (dispatch dlv-eec805d0fb3e, track gate-profiel-per-project, levering P0)
@@ -153,7 +176,7 @@ Eén sleutel, `VNX_GOVERNANCE_PROFILE`, zet in één beweging de zwaarte van de 
 | `takeover_chain` | `VNX_REVIEW_GATE_TAKEOVER_CHAIN` (`scripts/lib/config_registry.py:141-143`) | `codex_gate,kimi_gate,claude_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` |
 | `plan_gate_seats` (vanaf de start) | `configs/plan_gate_panel.yaml:47-48` | `1` | `1` | `2` |
 | `required_stack` (wat `vnx gate` verifieert) | enforcement-laag op `review_stack` | uit `review_stack` + enforcement | idem | idem |
-| zetelregel (`VNX_REVIEW_SEAT_RULE`) | `scripts/lib/review_seat_evaluation.py:112` | niet gezet | niet gezet | niet gezet |
+| zetelregel (`VNX_REVIEW_SEAT_RULE`) | `scripts/lib/review_seat_evaluation.py:112` | niet gezet | `first_seat_or_every_seat_by_risk` voor elk project zonder rij; vnx-dev: `first_seat_or_every_seat_on_signal` sinds 2026-11-09, een `project_config`-rij met een approval-id | niet gezet |
 
 `standard` draagt niets bij: elke lezer valt door naar de keten van vandaag. De gemeten "vandaag"-kolom is de registry-default — `codex_gate,kimi_gate` (`scripts/lib/config_registry.py:116-117`), cap `3` (`:190-191`), vier ketennamen (`:141-143`) — zodat "standaard is het gedrag van vandaag" een constructie-eigenschap is en geen belofte. `ci_gate` is orthogonaal: de bestaande keten voegt hem toe wanneer `VNX_CI_GATE_REQUIRED` waar is, nooit het profiel.
 
