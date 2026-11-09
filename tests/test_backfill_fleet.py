@@ -17,6 +17,16 @@ sys.path.insert(0, str(VNX_ROOT / "scripts"))
 sys.path.insert(0, str(VNX_ROOT / "scripts" / "lib"))
 
 import backfill_pr_merged_receipts as bf
+from forge_protection_drift import YamlFetchResult
+
+
+_REAL_YAML = (VNX_ROOT / "scripts" / "forge" / "branch_protection.yaml").read_text()
+DOOR_YAML = _REAL_YAML
+NO_DOOR_YAML = "\n".join(l for l in _REAL_YAML.splitlines() if '"vnx-gate/door"' not in l) + "\n"
+
+
+def _yaml(text=None, not_found=False, error=None):
+    return YamlFetchResult(text=text, not_found=not_found, error=error)
 
 
 class _Done:
@@ -53,6 +63,8 @@ def fleet(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bf, "_installed_ledger_health_ids", lambda: set(state["labels"]), raising=False)
     monkeypatch.setattr(bf.subprocess, "run", fake_run)
+    state["door"] = lambda root, ref: ("scripts/forge/branch_protection.yaml", _yaml(DOOR_YAML))
+    monkeypatch.setattr(bf, "fetch_project_yaml_from_ref", lambda root, ref, **kw: state["door"](root, ref))
     monkeypatch.setenv("VNX_DATA_HOME", str(tmp_path / "datahome"))
     state["setup"], state["registry"] = setup, registry
     return state
@@ -191,3 +203,62 @@ def test_plist_is_one_machine_wide_daily_job():
     assert "${VNX_PROJECT_ID}" not in path.read_text().replace("<!--", "").split("-->", 1)[1]
     assert "--all-projects" in " ".join(data["ProgramArguments"])
     assert data["StartCalendarInterval"] == {"Hour": 6, "Minute": 30}
+
+
+@pytest.mark.parametrize("fetched,reason", [
+    (lambda: ("", _yaml(not_found=True)), "geen branch_protection.yaml op main"),
+    (lambda: ("scripts/forge/branch_protection.yaml", _yaml(NO_DOOR_YAML)),
+     "bevat vnx-gate/door niet"),
+])
+def test_project_without_door_requirement_is_not_enrolled_and_untouched(fleet, capsys, tmp_path, fetched, reason):
+    fleet["setup"]([_project(tmp_path, "alpha")], {"alpha"})
+    fleet["door"] = lambda root, ref: fetched()
+    assert _run(fleet) == 0
+    row = _rows(capsys)["alpha"]
+    assert row["outcome"] == "not_enrolled" and row["exit_code"] == 0 and row["gaps"] == 0
+    assert reason in row["reason"]
+    assert fleet["calls"] == []
+    assert not (tmp_path / "datahome").exists() or not any((tmp_path / "datahome").rglob("*"))
+
+
+def test_project_requiring_the_door_runs_the_child(fleet, capsys, tmp_path):
+    fleet["setup"]([_project(tmp_path, "alpha")], {"alpha"})
+    assert _run(fleet) == 0
+    assert _rows(capsys)["alpha"]["outcome"] == "clean"
+    assert len(fleet["calls"]) == 1
+
+
+@pytest.mark.parametrize("fetched", [
+    lambda: ("scripts/forge/branch_protection.yaml", _yaml(error="gh: boom")),
+    lambda: ("scripts/forge/branch_protection.yaml", _yaml("checks: [unclosed")),
+    lambda: ("scripts/forge/branch_protection.yaml", _yaml(None)),
+])
+def test_unreadable_or_invalid_declaration_is_unmeasurable(fleet, capsys, tmp_path, fetched):
+    fleet["setup"]([_project(tmp_path, "alpha")], {"alpha"})
+    fleet["door"] = lambda root, ref: fetched()
+    assert _run(fleet) == 2
+    row = _rows(capsys)["alpha"]
+    assert row["outcome"] == "unmeasurable" and row["exit_code"] == 2
+    assert fleet["calls"] == []
+
+
+def test_reader_exception_is_unmeasurable(fleet, capsys, tmp_path):
+    fleet["setup"]([_project(tmp_path, "alpha")], {"alpha"})
+
+    def boom(root, ref):
+        raise OSError("gh missing")
+
+    fleet["door"] = boom
+    assert _run(fleet) == 2
+    assert _rows(capsys)["alpha"]["outcome"] == "unmeasurable"
+    assert fleet["calls"] == []
+
+
+def test_fleet_exit_is_zero_with_not_enrolled_and_clean_rows(fleet, capsys, tmp_path):
+    fleet["setup"]([_project(tmp_path, "alpha"), _project(tmp_path, "beta")], {"alpha", "beta"})
+    fleet["door"] = lambda root, ref: (
+        ("", _yaml(not_found=True)) if root.name == "beta" else ("p", _yaml(DOOR_YAML)))
+    assert _run(fleet) == 0
+    rows = _rows(capsys)
+    assert rows["alpha"]["outcome"] == "clean" and rows["beta"]["outcome"] == "not_enrolled"
+    assert len(fleet["calls"]) == 1
