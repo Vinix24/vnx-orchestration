@@ -1,30 +1,25 @@
-"""Collector and CLI tests for the daily-metrics track (PR-3).
+"""Collector tests for the daily-metrics track (PR-3a).
 
-Every clock in this file is fixed and injected through ``--now``; no test reads
-``datetime.now()``. The subprocess tests run ``scripts/daily_metrics.py`` with
-``--store``, ``--state-dir`` and ``VNX_DAILY_METRICS_SOURCES_DIR`` all pinned
-under ``tmp_path``, never the real central store.
+Everything here imports ``daily_metrics.collect`` directly and drives it in
+process: discovery of the source modules, the day document, the store run
+lock and the event-driven beacon. The CLI and its subprocess tests live in
+``daily_metrics`` PR-3b. Every clock is fixed and injected; no test reads
+``datetime.now()``, and the sources directory is always pinned under
+``tmp_path``, never the real package sources.
 """
 
 from __future__ import annotations
 
 import ast
-import fcntl
-import hashlib
 import importlib.util
 import json
-import os
-import subprocess
-import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from daily_metrics import metric
+from daily_metrics.store import DayStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CLI = REPO_ROOT / "scripts" / "daily_metrics.py"
 COLLECT_PATH = REPO_ROOT / "scripts" / "lib" / "daily_metrics" / "collect.py"
 
 HEALTHY_SOURCE = '''\
@@ -45,40 +40,6 @@ def collect(ctx):
 '''
 
 BROKEN_SOURCE = "raise RuntimeError('boom')\n"
-
-
-def _run_cli(sources_dir: Path, args: list[str]) -> subprocess.CompletedProcess:
-    env = dict(os.environ)
-    env.pop("VNX_PROJECT_ID", None)
-    env.pop("PYTEST_CURRENT_TEST", None)
-    env["VNX_DAILY_METRICS_SOURCES_DIR"] = str(sources_dir)
-    return subprocess.run(
-        [sys.executable, str(CLI), *args],
-        env=env, capture_output=True, text=True, cwd=str(REPO_ROOT),
-    )
-
-
-@pytest.fixture()
-def healthy_sources(tmp_path: Path) -> Path:
-    src = tmp_path / "healthy_sources"
-    src.mkdir()
-    (src / "healthy.py").write_text(HEALTHY_SOURCE, encoding="utf-8")
-    return src
-
-
-@pytest.fixture()
-def broken_sources(tmp_path: Path) -> Path:
-    src = tmp_path / "broken_sources"
-    src.mkdir()
-    (src / "broken.py").write_text(BROKEN_SOURCE, encoding="utf-8")
-    return src
-
-
-@pytest.fixture()
-def empty_sources(tmp_path: Path) -> Path:
-    src = tmp_path / "empty_sources"
-    src.mkdir()
-    return src
 
 
 def test_collect_module_is_importable():
@@ -133,7 +94,6 @@ def test_collect_day_missing_sources_is_incomplete_with_reason(tmp_path: Path, m
 
 def test_collect_day_drops_unexpected_ids(tmp_path: Path, monkeypatch):
     from daily_metrics import collect as collect_mod
-    from daily_metrics.metric import ScalarMetric
 
     src = tmp_path / "sources"
     src.mkdir()
@@ -154,156 +114,59 @@ def test_collect_day_drops_unexpected_ids(tmp_path: Path, monkeypatch):
     assert doc["metrics"]["merges"]["value"] == 1.0
 
 
-def test_collect_one_day_returns_all_required_ids(empty_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    proc = _run_cli(empty_sources, [
-        "collect", "--store", str(store), "--state-dir", str(state),
-        "--project-id", "p", "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 0, proc.stderr
-    doc = json.loads((store / "2026-11-06.json").read_text(encoding="utf-8"))
-    assert set(doc["metrics"]) == set(metric.REQUIRED)
+def test_source_whose_collect_raises_marks_its_ids(tmp_path: Path, monkeypatch):
+    from daily_metrics import collect as collect_mod
 
-
-def test_source_import_failure_makes_the_day_incomplete(broken_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    proc = _run_cli(broken_sources, [
-        "collect", "--store", str(store), "--state-dir", str(state),
-        "--project-id", "p", "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 0, proc.stderr
-    doc = json.loads((store / "2026-11-06.json").read_text(encoding="utf-8"))
-    assert doc["status"] == "incomplete"
-    assert all(
-        record["unknown_reason"].startswith("source_import_failed")
-        for record in doc["metrics"].values()
+    src = tmp_path / "sources"
+    src.mkdir()
+    (src / "exploding.py").write_text(
+        "def collect(ctx):\n    raise RuntimeError('boom')\n", encoding="utf-8"
     )
+    monkeypatch.setenv(collect_mod.SOURCES_DIR_ENV, str(src))
+    ctx = collect_mod.CollectContext(
+        "p", date(2026, 11, 6), datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
+    )
+    doc = collect_mod.collect_day(ctx)
+    assert doc["status"] == "incomplete"
+    for record in doc["metrics"].values():
+        assert record["unknown_reason"].startswith("source_import_failed")
+        assert record["details"]["failed_sources"] == {"exploding": "RuntimeError"}
 
 
-def test_second_healthy_run_replaces_incomplete_with_final(broken_sources, healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    args = ["collect", "--store", str(store), "--state-dir", str(state),
-            "--project-id", "p", "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z"]
-    first = _run_cli(broken_sources, args)
-    assert first.returncode == 0, first.stderr
-    second = _run_cli(healthy_sources, args)
-    assert second.returncode == 0, second.stderr
-    doc = json.loads((store / "2026-11-06.json").read_text(encoding="utf-8"))
-    assert doc["status"] == "final"
-    assert all(record.get("unknown_reason") is None for record in doc["metrics"].values())
+def test_run_lock_is_exclusive(tmp_path: Path):
+    from daily_metrics import collect as collect_mod
+
+    root = tmp_path / "store"
+    with collect_mod.run_lock(root) as first:
+        assert first is True
+        with collect_mod.run_lock(root) as second:
+            assert second is False
+    with collect_mod.run_lock(root) as third:
+        assert third is True
 
 
-def test_third_run_on_final_day_is_skipped_with_unchanged_bytes(broken_sources, healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    args = ["collect", "--store", str(store), "--state-dir", str(state),
-            "--project-id", "p", "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z"]
-    assert _run_cli(broken_sources, args).returncode == 0
-    assert _run_cli(healthy_sources, args).returncode == 0
-    day_file = store / "2026-11-06.json"
-    digest = hashlib.sha256(day_file.read_bytes()).hexdigest()
-    third = _run_cli(healthy_sources, args)
-    assert third.returncode == 0, third.stderr
-    assert '"skipped": "final"' in third.stdout
-    assert hashlib.sha256(day_file.read_bytes()).hexdigest() == digest
+def test_write_beacon_ok_and_fail(tmp_path: Path):
+    from daily_metrics import collect as collect_mod
 
+    now = datetime(2026, 11, 8, 3, 0, tzinfo=timezone.utc)
+    store = DayStore(tmp_path / "store", "p")
+    for day in ("2026-11-05", "2026-11-06", "2026-11-07"):
+        store.write_final(day, {"day": day})
 
-def test_missing_project_id_exits_two(empty_sources, tmp_path):
-    proc = _run_cli(empty_sources, [
-        "collect", "--store", str(tmp_path / "store"), "--state-dir", str(tmp_path / "state"),
-        "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 2
-
-
-def test_locked_run_prints_skipped_locked_and_writes_nothing(healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    store.mkdir(parents=True)
-    lock_path = store / ".lock"
-    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
-    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    try:
-        proc = _run_cli(healthy_sources, [
-            "collect", "--store", str(store), "--state-dir", str(state),
-            "--project-id", "p", "--day", "2026-11-06", "--now", "2026-11-08T03:00:00Z",
-        ])
-        assert proc.returncode == 0, proc.stderr
-        assert "skipped: locked" in proc.stdout
-        assert not (store / "2026-11-06.json").exists()
-    finally:
-        os.close(fd)
-
-
-def test_daily_writes_missing_settled_days_oldest_first_never_today(healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    proc = _run_cli(healthy_sources, [
-        "daily", "--store", str(store), "--state-dir", str(state),
-        "--project-id", "p", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 0, proc.stderr
-    days = sorted(p.stem for p in store.glob("*.json"))
-    assert days == sorted(days)
-    assert days[0] == "2026-10-25"
-    assert days[-1] == "2026-11-07"
-    assert "2026-11-08" not in days
-
-
-def test_collect_unsettled_day_exits_two_without_writing(healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    proc = _run_cli(healthy_sources, [
-        "collect", "--store", str(store), "--state-dir", str(state),
-        "--project-id", "p", "--day", "2026-11-08", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 2
-    assert not (store / "2026-11-08.json").exists()
-
-
-def test_recollect_writes_revision_and_rejects_invalid(broken_sources, healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    base = ["--store", str(store), "--state-dir", str(state),
-            "--project-id", "p", "--now", "2026-11-08T03:00:00Z"]
-    assert _run_cli(healthy_sources, ["collect", *base, "--day", "2026-11-06"]).returncode == 0
-
-    recollected = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-06", "--reason", "fix", *base])
-    assert recollected.returncode == 0, recollected.stderr
-    assert (store / "2026-11-06.r2.json").exists()
-
-    assert _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-06", "--reason", "   ", *base]).returncode == 2
-
-    # no file at all
-    missing = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-05", "--reason", "x", *base])
-    assert missing.returncode == 2
-    assert not (store / "2026-11-05.r2.json").exists()
-
-    # only an incomplete file
-    assert _run_cli(broken_sources, ["collect", *base, "--day", "2026-11-05"]).returncode == 0
-    incomplete = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-05", "--reason", "x", *base])
-    assert incomplete.returncode == 2
-    assert not (store / "2026-11-05.r2.json").exists()
-
-
-def test_beacon_file_exists_after_daily(healthy_sources, tmp_path):
-    store = tmp_path / "store"
-    state = tmp_path / "state"
-    proc = _run_cli(healthy_sources, [
-        "daily", "--store", str(store), "--state-dir", str(state),
-        "--project-id", "p", "--now", "2026-11-08T03:00:00Z",
-    ])
-    assert proc.returncode == 0, proc.stderr
-    beacon = state / "health" / "daily_metrics.json"
-    assert beacon.exists()
-    payload = json.loads(beacon.read_text(encoding="utf-8"))
+    state = tmp_path / "tmp_state"
+    collect_mod.write_beacon(state, store, now)
+    payload = json.loads((state / "health" / "daily_metrics.json").read_text(encoding="utf-8"))
     assert payload["component"] == "daily_metrics"
-    assert payload["expected_interval_seconds"] is None
     assert payload["status"] == "ok"
+    assert payload["expected_interval_seconds"] is None
     assert payload["details"]["final_count"] == 3
+
+    empty_state = tmp_path / "tmp_state_empty"
+    collect_mod.write_beacon(empty_state, DayStore(tmp_path / "empty_store", "p"), now)
+    payload = json.loads(
+        (empty_state / "health" / "daily_metrics.json").read_text(encoding="utf-8")
+    )
+    assert payload["status"] == "fail"
 
 
 def test_beacon_call_declares_a_literal_none_interval():
