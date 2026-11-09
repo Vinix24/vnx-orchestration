@@ -1,0 +1,1 @@
+- Intelligence corpus quarantine (Q7): daily hygiene logs 0 patterns at INFO for an empty corpus, preserving populated quality summaries; regression tests verify empty-corpus monitor, dashboard, documentation selection, and gather CLI behavior against the production schema.
