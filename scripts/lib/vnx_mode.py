@@ -55,6 +55,12 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     "roadmap", "insights", "objective", "horizon", "deliverable",
     "install-git-hooks", "uninstall-git-hooks", "install-shell-helper",
     "init-db", "providers", "guard", "preflight",
+    # `vnx daily-metrics` (doorloop PR-13): the read verbs (collect/daily/report)
+    # are safe in both modes, and it owns the opt-in per-project job's install /
+    # uninstall. It is the only tier that fits a single command with both halves;
+    # leaving it out of every tier made the fabric gate refuse it as an unknown
+    # name (measured, same defect OI-2456 fixed for `preflight`).
+    "daily-metrics",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
