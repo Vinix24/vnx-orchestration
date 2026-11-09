@@ -176,6 +176,49 @@ def test_live_run_on_a_synthetic_tree(tmp_path):
         parent.wait(timeout=10)
 
 
+def _ps_row(pid, ppid, command):
+    return f"{pid:5d} {ppid:5d} {pid:5d}   1.0   4096 {command}\n"
+
+
+def _match_run(mod, tmp_path, monkeypatch, ps_text, name, ps_error=None):
+    """Drive `--match` through the CLI with the `ps` and own-pid seams."""
+    outputs = {mod.PS_CMD: (ps_text, ps_error), mod.SWAP_CMD: (SWAP_TEXT, None),
+               mod.VM_STAT_CMD: (VM_STAT_TEXT, None)}
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=10: outputs.get(cmd, (None, "exit 1")))
+    monkeypatch.setattr(mod, "_own_pid", lambda: 4242, raising=False)
+    out = tmp_path / f"{name}.ndjson"
+    code = mod.main(["--match", "local_ci_gate", "--out", str(out), "--duration", "0"])
+    return code, out
+
+
+def test_match_never_selects_the_sampler_itself(mod, tmp_path, monkeypatch):
+    ps_text = _ps_row(4242, 1, "python3 measure_process_tree_load.py --match local_ci_gate")
+    code, out = _match_run(mod, tmp_path, monkeypatch, ps_text, "self")
+    assert code == 3 and not out.exists()
+
+
+def test_match_never_selects_the_sampler_ancestor_wrapper(mod, tmp_path, monkeypatch):
+    ps_text = (_ps_row(4300, 1, "zsh -c 'python3 measure_process_tree_load.py --match local_ci_gate'")
+               + _ps_row(4242, 4300, "python3 -c sampler"))
+    code, out = _match_run(mod, tmp_path, monkeypatch, ps_text, "wrapper")
+    assert code == 3 and not out.exists()
+
+
+def test_match_selects_a_real_target_beside_the_sampler(mod, tmp_path, monkeypatch):
+    ps_text = (_ps_row(4300, 1, "zsh -c 'python3 measure_process_tree_load.py --match local_ci_gate'")
+               + _ps_row(4242, 4300, "python3 measure_process_tree_load.py --match local_ci_gate")
+               + _ps_row(5100, 1, "/bin/bash scripts/local_ci_gate.sh --full"))
+    code, out = _match_run(mod, tmp_path, monkeypatch, ps_text, "target")
+    assert code == 0
+    assert json.loads(out.read_text().splitlines()[0])["root_pid"] == 5100
+
+
+@pytest.mark.parametrize("ps_text, ps_error", [("", "exit 1"), ("not a ps line\n", None)])
+def test_match_unreadable_snapshot_stays_blocking(mod, tmp_path, monkeypatch, ps_text, ps_error):
+    code, out = _match_run(mod, tmp_path, monkeypatch, ps_text, "unreadable", ps_error)
+    assert code == 3 and not out.exists()
+
+
 def test_exit_codes_for_bad_arguments_and_missing_root(tmp_path):
     out = tmp_path / "load.ndjson"
     def run(*extra):

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -136,6 +137,27 @@ def run_measurement(root_pid: int, interval: float, duration: float | None,
         time.sleep(min(interval, remaining))
 
 
+def _own_pid() -> int:
+    """This sampler's pid; a seam so tests inject it without starting a process."""
+    return os.getpid()
+
+
+def _excluded_pids(procs: list[dict], own_pid: int) -> set[int]:
+    """`own_pid` and every ancestor of it, walked from the same `ps` snapshot.
+
+    A chain cut at a pid absent from the snapshot cannot hide a match candidate.
+    """
+    parents = {p["pid"]: p["ppid"] for p in procs}
+    excluded: set[int] = set()
+    current = own_pid
+    while current not in excluded:
+        excluded.add(current)
+        current = parents.get(current)
+        if current is None:
+            break
+    return excluded
+
+
 def resolve_root_pid(args: argparse.Namespace) -> tuple[int | None, str | None]:
     if args.root_pid is not None:
         return args.root_pid, None
@@ -146,8 +168,10 @@ def resolve_root_pid(args: argparse.Namespace) -> tuple[int | None, str | None]:
     ps_text, ps_error = _run(PS_CMD)
     if ps_text is None:
         return None, f"ps snapshot unreadable: {ps_error}"
-    for proc in parse_ps(ps_text):
-        if pattern.search(proc["command"]):
+    procs = parse_ps(ps_text)
+    excluded = _excluded_pids(procs, _own_pid())
+    for proc in procs:
+        if proc["pid"] not in excluded and pattern.search(proc["command"]):
             return proc["pid"], None
     return None, f"no process matches --match {args.match!r}"
 
