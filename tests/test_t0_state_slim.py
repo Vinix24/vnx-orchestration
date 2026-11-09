@@ -94,7 +94,7 @@ def state(tmp_path, monkeypatch):
         (dispatch_dir / sub).mkdir(parents=True)
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     monkeypatch.setattr(pr_queue_state, "_get_open_prs", lambda project_root: ([], None))
-    monkeypatch.setattr(pr_queue_state, "_get_merged_today", lambda project_root: ([], None))
+    monkeypatch.setattr(pr_queue_state, "_get_merged_today", lambda project_root: ([], None, False))
     _seed_register(state_dir, 700)
     _seed_tracks(state_dir)
     return build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)

@@ -24,6 +24,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from daily_metrics.github_fetch import fetch_merged
 from forge_protection_drift import fetch_ci_workflow_from_main, fetch_yaml_from_ref
 from merge_preflight_ci_check import _resolve_override_reason, check_ci_run_for_head
 
@@ -104,21 +105,28 @@ def _get_open_prs(project_root: Path) -> Tuple[List[Dict[str, Any]], Optional[st
     return [_open_pr_row(pr) for pr in data], error
 
 
-def _get_merged_today(project_root: Path) -> Tuple[List[Dict[str, Any]], Optional[str]]:
-    """PRs merged today as ``(rows, error)``. ``rows`` is empty when the read failed."""
-    data, error = _list_prs(project_root, "merged", "number,title,headRefName,mergedAt", "30")
-    today = datetime.now(timezone.utc).date().isoformat()
-    results = []
-    for pr in data:
-        merged_at = pr.get("mergedAt", "")
-        if merged_at and merged_at[:10] == today:
-            results.append({
-                "number": pr.get("number"),
-                "title": pr.get("title", ""),
-                "branch": pr.get("headRefName", ""),
-                "merged_at": merged_at,
-            })
-    return results, error
+def _get_merged_today(
+    project_root: Path,
+) -> Tuple[List[Dict[str, Any]], Optional[str], bool]:
+    """PRs merged today as ``(rows, error, truncated)``; the read proves its coverage.
+
+    The old ``--limit 30`` is gone (decision 21): ``truncated`` says the count is
+    unknown rather than short, and ``rows`` is empty when the read failed or
+    could not be proven.
+    """
+    now = datetime.now(timezone.utc)
+    population = fetch_merged(now.date(), now.date(), project_root=project_root, now=now,
+                              extra_fields=("title", "headRefName"))
+    if population.error is not None:
+        detail = (population.error_detail if population.error == "gh_failed"
+                  else population.error)
+        return [], detail or "gh_failed", population.truncated
+    if population.truncated:
+        return [], None, True
+    results = [{"number": pr.get("number"), "title": pr.get("title", ""),
+                "branch": pr.get("headRefName", ""), "merged_at": pr.get("mergedAt", "")}
+               for pr in population.rows]
+    return results, None, False
 
 
 def _measure_order(row: Dict[str, Any]) -> Tuple[bool, bool, Any]:
@@ -298,7 +306,7 @@ def build_pr_queue_state(
         pr["gates_passed"] = gate_info["gates_passed"]
         pr["blocked_on"] = gate_info["blocked_on"]
 
-    merged_today, merged_error = _get_merged_today(project_root)
+    merged_today, merged_error, merged_truncated = _get_merged_today(project_root)
     section: Dict[str, Any] = {
         "schema": SCHEMA,
         "timestamp": _now_iso(),
@@ -306,6 +314,7 @@ def build_pr_queue_state(
         "reason": open_error,
         "open_prs": open_prs,
         "merged_today": merged_today,
+        "merged_truncated": merged_truncated,
         "register_error": register_error,
     }
     if merged_error:
