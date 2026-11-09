@@ -1,9 +1,9 @@
 """doorloop PR-13: ``vnx daily-metrics`` owns the job; ``vnx init`` never installs it.
 
 The command is a thin pass-through to ``scripts/daily_metrics.py`` (decision 28) plus
-``install`` / ``uninstall`` for one opt-in per-project job at 04:10 (decisions 14 and
-29). The real install path runs against a fake engine root and a temp ``HOME``;
-``launchctl`` is stubbed at ``subprocess.run`` and never reaches the real domain.
+``install`` for one opt-in per-project job at 04:10 (decisions 14 and 29). The real
+install path runs against a fake engine root and a temp ``HOME``; ``launchctl`` is
+stubbed at ``subprocess.run`` and never reaches the real domain.
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from vnx_cli.commands import init_cmd  # noqa: E402
 
 BIN_VNX = REPO / "bin" / "vnx"
 PROJECT = "proj-p"
-OTHER = "proj-q"
 LABEL = "com.vnx.daily-metrics"
 
 
@@ -50,18 +49,15 @@ def _central_engine(tmp_path: Path, home: Path, project_id: str) -> Path:
     return engine
 
 
-def _stub_launchctl(monkeypatch, label: str, bootout_rc: int = 0, bootout_stderr: str = "",
-                    raise_exc: BaseException | None = None) -> list[list[str]]:
+def _stub_launchctl(monkeypatch, label: str) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
-        if raise_exc is not None and cmd[:2] == ["launchctl", "bootout"]:
-            raise raise_exc
         result = MagicMock()
-        result.stderr = bootout_stderr if cmd[:2] == ["launchctl", "bootout"] else ""
+        result.stderr = ""
         result.stdout = f"-\t0\t{label}\n" if cmd[:2] == ["launchctl", "list"] else ""
-        result.returncode = bootout_rc if cmd[:2] == ["launchctl", "bootout"] else 0
+        result.returncode = 0
         return result
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -79,13 +75,12 @@ def _init_args(project_dir: Path) -> argparse.Namespace:
 
 
 # The entry: help works, and an existing verb on the same branch still works.
-def test_bin_vnx_daily_metrics_help_names_install_and_uninstall():
+def test_bin_vnx_daily_metrics_help_names_install():
     result = subprocess.run([str(BIN_VNX), "daily-metrics", "--help"],
                             capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     combined = result.stdout + result.stderr
     assert "install" in combined
-    assert "uninstall" in combined
 
 
 def test_bin_vnx_existing_readonly_verb_still_exits_zero():
@@ -153,86 +148,6 @@ def test_install_fails_with_one_stderr_line_when_the_template_is_missing(
     assert rc == 1
     assert len(capsys.readouterr().err.strip().splitlines()) == 1
     assert not list(_launch_agents(home).glob(f"{LABEL}.*"))
-
-
-# uninstall
-def test_uninstall_removes_only_that_project_job(tmp_path, monkeypatch):
-    home = _fake_home(tmp_path, monkeypatch)
-    engine = _central_engine(tmp_path, home, PROJECT)
-    monkeypatch.setattr(_engine, "engine_root", lambda: engine)
-    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}")
-    assert dm_cmd.vnx_daily_metrics(_args("install", "--project-id", PROJECT)) == 0
-
-    other = _launch_agents(home) / f"{LABEL}.{OTHER}.plist"
-    other.write_text("<!-- another project's job -->", encoding="utf-8")
-
-    calls = _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}")
-    rc = dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT))
-
-    assert rc == 0
-    assert not (_launch_agents(home) / f"{LABEL}.{PROJECT}.plist").exists()
-    assert other.is_file(), "uninstall must touch no other Label"
-    assert ["launchctl", "bootout", f"gui/{os.getuid()}/{LABEL}.{PROJECT}"] in calls
-
-
-def test_uninstall_is_zero_when_the_job_was_not_loaded(tmp_path, monkeypatch):
-    _fake_home(tmp_path, monkeypatch)
-    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", bootout_rc=113)
-
-    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 0
-
-
-@pytest.mark.parametrize("stub_kwargs", [
-    {"bootout_rc": 0},
-    {"bootout_rc": 3},
-    {"bootout_rc": 113},
-    {"bootout_rc": 1, "bootout_stderr": "Could not find service\n"},
-], ids=["booted-out", "rc3", "rc113", "stderr-only"])
-@pytest.mark.parametrize("present", [True, False], ids=["plist-present", "plist-absent"])
-def test_uninstall_removes_the_plist_when_the_job_is_gone(
-    tmp_path, monkeypatch, stub_kwargs, present
-):
-    home = _fake_home(tmp_path, monkeypatch)
-    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
-    if present:
-        plist.write_text("<!-- job -->", encoding="utf-8")
-    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", **stub_kwargs)
-
-    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 0
-    assert not plist.exists()
-
-
-@pytest.mark.parametrize("stub_kwargs", [
-    {"bootout_rc": 1, "bootout_stderr": "Operation not permitted"},
-    {"raise_exc": FileNotFoundError("launchctl")},
-], ids=["permission-denied", "launchctl-missing"])
-def test_uninstall_keeps_the_plist_on_a_bootout_failure(
-    tmp_path, monkeypatch, capsys, stub_kwargs
-):
-    """Only an ABSENT job is tolerated: any other bootout failure leaves the job
-    possibly loaded, so its plist must survive and the command must fail."""
-    home = _fake_home(tmp_path, monkeypatch)
-    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
-    plist.write_text("<!-- job -->", encoding="utf-8")
-    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", **stub_kwargs)
-
-    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 1
-    assert plist.is_file(), "a failed bootout must keep the plist"
-    assert len(capsys.readouterr().err.strip().splitlines()) == 1
-
-
-def test_uninstall_fails_when_the_plist_cannot_be_removed(tmp_path, monkeypatch, capsys):
-    home = _fake_home(tmp_path, monkeypatch)
-    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
-    plist.write_text("<!-- job -->", encoding="utf-8")
-    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}")
-
-    def refuse_unlink(self, *args, **kwargs):
-        raise PermissionError("read-only volume")
-
-    monkeypatch.setattr(Path, "unlink", refuse_unlink)
-    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 1
-    assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
 # opt-in: vnx init installs no daily-metrics job

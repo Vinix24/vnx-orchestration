@@ -1,25 +1,18 @@
 """``vnx daily-metrics`` — the owner command of ``scripts/daily_metrics.py`` (decision 28).
 
-``install`` / ``uninstall`` manage one opt-in per-project launchd job (decision 29);
-every other verb is passed through to the engine's script unchanged. The job's
-project checkout comes from the registry (``resolve_project_root``, decision 12).
+``install`` manages one opt-in per-project launchd job (decision 29); every other
+verb is passed through to the engine's script unchanged. The job's project
+checkout comes from the registry (``resolve_project_root``, decision 12).
 """
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
-from pathlib import Path
 
 from vnx_cli import _engine
 
 PLIST_NAME = "com.vnx.daily-metrics"
-
-# "service is not loaded" as ``launchctl bootout`` reports it: exit 3 on older
-# macOS releases, 113 on newer ones, and (some builds) only in stderr.
-_BOOTOUT_ABSENT_CODES = frozenset({3, 113})
-_BOOTOUT_ABSENT_STDERR = ("No such process", "Could not find")
 
 
 def _job_parser(verb: str) -> argparse.ArgumentParser:
@@ -54,46 +47,12 @@ def _install(project_id: str) -> int:
     return 0
 
 
-def _uninstall(project_id: str) -> int:
-    _engine.ensure_engine_on_path()
-    from vnx_paths import refuse_real_launchctl_under_test_runner
-
-    label = f"{PLIST_NAME}.{project_id}"
-    plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
-    # OI-1891: bootout is this command's first mutating verb — refuse before it.
-    refuse_real_launchctl_under_test_runner()
-    try:
-        result = subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
-                                capture_output=True, text=True)
-    except OSError as exc:
-        print(f"error: could not run launchctl bootout for {label}: {exc}", file=sys.stderr)
-        return 1
-    stderr = (result.stderr or "").strip()
-    # Only an ABSENT job is tolerated: any other failure may leave it running, so
-    # the plist stays (removing it would orphan the loaded job).
-    if result.returncode != 0 and not (
-        result.returncode in _BOOTOUT_ABSENT_CODES
-        or any(marker in stderr for marker in _BOOTOUT_ABSENT_STDERR)
-    ):
-        print(f"error: launchctl bootout failed for {label} "
-              f"(exit {result.returncode}): {stderr}", file=sys.stderr)
-        return 1
-    if plist.is_file():
-        try:
-            plist.unlink()
-        except OSError as exc:
-            print(f"error: could not remove {plist}: {exc}", file=sys.stderr)
-            return 1
-    return 0
-
-
 def vnx_daily_metrics(args: argparse.Namespace) -> int:
     """Run one ``vnx daily-metrics`` invocation and return its exit code."""
     argv = list(getattr(args, "daily_metrics_args", None) or [])
     if not argv:
         print("usage: vnx daily-metrics <verb> [args]\n"
               "  install --project-id ID    install the opt-in per-project 04:10 launchd job\n"
-              "  uninstall --project-id ID  remove exactly that one job\n"
               "  collect | daily | propose | approve | verdict | report  "
               "passed to scripts/daily_metrics.py unchanged", file=sys.stderr)
         return 2
@@ -101,8 +60,6 @@ def vnx_daily_metrics(args: argparse.Namespace) -> int:
     verb, rest = argv[0], argv[1:]
     if verb == "install":
         return _install(_job_parser("install").parse_args(rest).project_id)
-    if verb == "uninstall":
-        return _uninstall(_job_parser("uninstall").parse_args(rest).project_id)
 
     script = _engine.engine_root() / "scripts" / "daily_metrics.py"
     if not script.is_file():
