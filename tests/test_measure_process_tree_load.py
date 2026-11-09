@@ -53,7 +53,7 @@ def test_parse_ps_tree_and_sample(mod):
     sample = mod.sample_tree(procs, 500)
     assert (sample["n_xdist"], sample["n_other"]) == (2, 1)  # pid 900 is outside the tree
     assert sample["xdist_cpu"] == pytest.approx(195.5)
-    assert sample["other_cpu"] == pytest.approx(41.0)
+    assert sample["other_cpu"] == pytest.approx(46.0)  # chrome 41.0 + the root's own 5.0
     assert sample["rss"] == (20480 + 102400 + 101888 + 204800) * 1024
     assert len(mod.parse_ps("garbage\n" + PS_TEXT + "501 x y\n")) == 5
 
@@ -80,14 +80,87 @@ def test_swap_and_compressor_parsers(mod):
 
 
 def test_missing_compressor_line_is_null_with_reason(mod, monkeypatch):
-    texts = {mod.PS_CMD: PS_TEXT, mod.SWAP_CMD: SWAP_TEXT,
-             mod.VM_STAT_CMD: "Mach Virtual Memory Statistics: (page size of 16384 bytes)\n"}
+    texts = {mod.PS_CMD: (PS_TEXT, None), mod.SWAP_CMD: (SWAP_TEXT, None),
+             mod.VM_STAT_CMD: ("Mach Virtual Memory Statistics: (page size of 16384 bytes)\n", None)}
     monkeypatch.setattr(mod, "_run", lambda cmd, timeout=10: texts[cmd])
-    sample, root_seen = mod.take_sample(500)
-    assert root_seen is True
+    sample, outcome = mod.take_sample(500)
+    assert outcome == "sample"
     assert sample["compressor"] is None
     assert any(reason.startswith("compressor:") for reason in sample["reasons"])
     assert sample["swap_used"] == int(3813.62 * 1024 ** 2)
+
+
+def test_sample_tree_counts_the_root_own_cpu_as_other(mod):
+    procs = mod.parse_ps("  600     1   600  88.0  4096 /usr/bin/python3 -m pytest tests/test_root_only.py\n")
+    sample = mod.sample_tree(procs, 600)
+    assert sample["xdist_cpu"] == 0
+    assert sample["other_cpu"] == pytest.approx(88.0)
+    assert sample["rss"] == 4096 * 1024
+
+
+def test_run_reports_a_missing_binary(mod):
+    text, error = mod._run(("vnx-no-such-binary-7f3a",))
+    assert text is None and error
+
+
+def test_snapshot_without_the_root_is_root_gone(mod, monkeypatch):
+    texts = {mod.PS_CMD: (PS_TEXT, None), mod.SWAP_CMD: (SWAP_TEXT, None),
+             mod.VM_STAT_CMD: (VM_STAT_TEXT, None)}
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=10: texts[cmd])
+    _, outcome = mod.take_sample(777)
+    assert outcome == "root_gone"
+
+
+@pytest.mark.parametrize("ps_result", [
+    (None, "exit 1"), (None, "timed out"), (None, "empty output"),
+    ("not a ps line\n", None),
+])
+def test_snapshot_failure_is_not_a_vanished_root(mod, monkeypatch, ps_result):
+    texts = {mod.PS_CMD: ps_result, mod.SWAP_CMD: (SWAP_TEXT, None),
+             mod.VM_STAT_CMD: (VM_STAT_TEXT, None)}
+    monkeypatch.setattr(mod, "_run", lambda cmd, timeout=10: texts[cmd])
+    sample, outcome = mod.take_sample(500)
+    assert outcome == "snapshot_failed"
+    assert all(sample[f] is None for f in ("n_xdist", "n_other", "xdist_cpu",
+                                           "other_cpu", "rss"))
+    assert any(reason.startswith("ps_failed: ") for reason in sample["reasons"])
+    assert sample["swap_used"] == int(3813.62 * 1024 ** 2)
+    assert sample["compressor"] == 569832 * 16384
+
+
+def test_failed_snapshot_continues_and_summary_skips_it(mod, tmp_path, monkeypatch):
+    good = {"n_xdist": 2, "n_other": 1, "xdist_cpu": 190.0, "other_cpu": 40.0,
+            "rss": 100, "swap_used": 10, "compressor": 20}
+    failed = {**dict.fromkeys(mod.SAMPLE_FIELDS), "reasons": ["ps_failed: exit 1"]}
+    steps = [("sample", good), ("sample", good), ("snapshot_failed", failed),
+             ("sample", good), ("root_gone", {})]
+
+    def fake_take_sample(root_pid):
+        outcome, body = steps.pop(0)
+        return {"ts": "2026-01-01T00:00:00+00:00", "root_pid": root_pid, **body}, outcome
+
+    monkeypatch.setattr(mod, "take_sample", fake_take_sample)
+    out = tmp_path / "sequence.ndjson"
+    summary, code = mod.run_measurement(123, 0, None, out)
+    lines = [json.loads(row) for row in out.read_text().splitlines()]
+    assert code == 0 and len(lines) == 4
+    failed_lines = [ln for ln in lines if any(r.startswith("ps_failed:") for r in ln.get("reasons", []))]
+    assert len(failed_lines) == 1
+    assert all(failed_lines[0][f] is None for f in ("n_xdist", "n_other", "xdist_cpu",
+                                                    "other_cpu", "rss"))
+    assert summary["samples"] == 3 and summary["failed_snapshots"] == 1
+    assert summary["fields"]["xdist_cpu"]["n"] == 3
+    assert summary["fields"]["xdist_cpu"]["mean"] == pytest.approx(190.0)
+
+
+def test_every_snapshot_failed_exits_one(mod, tmp_path, monkeypatch):
+    failed = {**dict.fromkeys(mod.SAMPLE_FIELDS), "reasons": ["ps_failed: exit 1"]}
+    monkeypatch.setattr(mod, "take_sample", lambda pid: (dict(failed), "snapshot_failed"))
+    out = tmp_path / "never.ndjson"
+    summary, code = mod.run_measurement(123, 0.01, 0.05, out)
+    assert code == 1
+    assert summary["samples"] == 0 and summary["failed_snapshots"] >= 1
+    assert not out.exists()
 
 
 def test_summary_reports_cores_p95_and_note(mod):
@@ -141,3 +214,9 @@ def test_exit_codes_for_bad_arguments_and_missing_root(tmp_path):
                               capture_output=True, text=True, timeout=30, check=False)
     assert run().returncode == 2
     assert run("--root-pid", "999999", "--duration", "1").returncode == 3
+    assert not out.exists()
+    out.write_bytes(b"earlier measurement\n")
+    existing = run("--root-pid", str(os.getpid()), "--duration", "0")
+    assert existing.returncode == 2
+    assert str(out) in existing.stderr and len(existing.stderr.strip().splitlines()) == 1
+    assert out.read_bytes() == b"earlier measurement\n"
