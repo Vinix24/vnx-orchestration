@@ -245,3 +245,21 @@ def append_approval(path: Path, event: Mapping[str, Any]) -> None:
         if reason is not None:
             raise ApprovalRefused(reason)
         _write(path, [event])
+
+
+def append_verdict(path: Path, event: Mapping[str, Any]) -> None:
+    """Append one ``verdict`` event, or raise :class:`ApprovalRefused` and write nothing.
+
+    Only an approved proposal is judged, and only once. The approval is read
+    again under the ledger's lock; anything but a string id never matches one.
+    """
+    path = Path(path)
+    with slot_lock(path):
+        events = read_events(path)
+        proposal_id_value = event.get("proposal_id")
+        if not isinstance(proposal_id_value, str) or not _has_event(
+                events, APPROVED, proposal_id_value):
+            raise ApprovalRefused("not_approved")
+        if _has_event(events, VERDICT, proposal_id_value):
+            raise ApprovalRefused("already_judged")
+        _write(path, [event])
