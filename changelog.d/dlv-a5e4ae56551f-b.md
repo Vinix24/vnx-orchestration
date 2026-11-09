@@ -1,0 +1,1 @@
+- RS-1b adds `scripts/measure_process_tree_load.py` on top of the split-1 library: NDJSON samples of a process tree's xdist-worker CPU apart from other subprocesses (the root's own CPU included), plus RSS, swap and compressor, with an exclusively created `--out`, a `failed_snapshots` count and a `cores_p95` candidate slot number per run (track `rekenslot-per-machine`).
