@@ -385,6 +385,8 @@ def test_unlistable_agents_registry_exits_2_and_names_it(tmp_path, monkeypatch, 
     pytest.param(lambda s, r: _lock(_ghost(r), 0o600), marks=LOCK, id="role-dir-unenterable"),
     pytest.param(lambda s, r: (r / ".vnx" / "worker_permissions.yaml").write_text(
         PROFILE.replace("[Read, Write, Edit, Bash]", "Read")), id="profile-entry-malformed"),
+    pytest.param(lambda s, r: (r / ".vnx" / "worker_permissions.yaml").write_text(PROFILE + "  ghost: null\n"),
+                 id="role-in-no-register"),
     pytest.param(lambda s, r: (r / "agents" / "backend-developer" / "config.yaml").write_text("isolation: [x"),
                  id="isolation-broken"),
     pytest.param(lambda s, r: _lock(s / "t0_receipts.ndjson"), marks=LOCK, id="ledger-unreadable"),
