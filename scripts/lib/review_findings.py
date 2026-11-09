@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""review_findings.py — stable finding identity and fail-closed status transitions.
+"""review_findings.py — stable finding identity for the delta review.
 
 The delta review (plan ``deltareview-met-ouderketen``, Besluit 3) needs an id
-that survives a line shift and a status model in which a finding never closes
-because nobody answered. Pure: no file, git or logging; callers pass the source
-text. DR-3 writes these ids into the ledger, DR-4a puts them in the prompt.
+that survives a line shift. Pure: no file, git or logging; callers pass the
+source text. DR-3 writes these ids into the ledger, DR-4a puts them in the
+prompt.
 
 Identity is ``sha256(seat, path, symbolic context, normalised text)[:16]``, no
-line number in it (research question 4). Status is fail-closed: an unanswered
-id stays ``open``, a vanished anchor is ``unverifiable``, ``waived`` is only
-carried from a previous status, and ``open``/``regressed``/``unverifiable`` and
-unknown values block (see :func:`blocks`).
+line number in it (research question 4). The symbolic context is the dotted
+qualified name of the innermost ``def``/``async def``/``class`` around the
+line, found through compound statements as well, so two functions with the
+same finding text never share one id.
+
+The fail-closed status model (``open``/``fixed``/``waived``/``regressed``/
+``unverifiable`` with ``next_status`` and ``blocks``) follows in the second
+half of this split.
 """
 
 from __future__ import annotations
@@ -20,28 +24,6 @@ import hashlib
 import re
 import unicodedata
 from typing import Any, Mapping, Optional
-
-# Statuses (Besluit 3)
-
-STATUS_OPEN = "open"
-STATUS_FIXED = "fixed"
-STATUS_WAIVED = "waived"
-STATUS_REGRESSED = "regressed"
-STATUS_UNVERIFIABLE = "unverifiable"
-
-STATUSES = (
-    STATUS_OPEN,
-    STATUS_FIXED,
-    STATUS_WAIVED,
-    STATUS_REGRESSED,
-    STATUS_UNVERIFIABLE,
-)
-
-#: Answers that report the finding is still present (meaningful after ``fixed``).
-_STILL_PRESENT_ANSWERS = (STATUS_OPEN, STATUS_REGRESSED)
-
-#: Non-blocking statuses. Everything else (including ``None``) blocks.
-_NON_BLOCKING_STATUSES = (STATUS_FIXED, STATUS_WAIVED)
 
 # ---------------------------------------------------------------------------
 # Normalisation
@@ -71,6 +53,26 @@ _COLON_LINE_RE = re.compile(r"(?<=[\s(\[{]):\d+(?::\d+)?:")
 _FIELD_SEP = "\x1f"
 
 _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _statement_lists(node: ast.AST) -> list[list[ast.AST]]:
+    """Statement lists ``node`` may hold; expression attributes are skipped.
+
+    Covers ``body``/``orelse``/``finalbody``, every ``handlers[i].body`` of a
+    ``try`` (also ``except*``/``TryStar``) and every ``cases[i].body`` of a
+    ``match``. ``body`` attributes that are expressions (``IfExp``, ``Lambda``)
+    are not lists and are ignored: a lambda is not a scope here.
+    """
+    blocks: list[list[ast.AST]] = []
+    for name in ("body", "orelse", "finalbody"):
+        value = getattr(node, name, None)
+        if isinstance(value, list):
+            blocks.append(value)
+    for handler in getattr(node, "handlers", None) or []:
+        blocks.append(handler.body)
+    for case in getattr(node, "cases", None) or []:
+        blocks.append(case.body)
+    return blocks
 
 
 def normalize_text(text: str) -> str:
@@ -105,8 +107,11 @@ def symbolic_context(source: Optional[str], line: Optional[int]) -> str:
 
     Nesting is dotted (``Outer.method``); spans are read as
     ``gate_reanchor.changed_symbols`` reads them, ``lineno``..``end_lineno``.
-    Returns ``""`` for ``source=None``, unparseable or non-Python source,
-    ``line=None``, a non-integer line and module-level code. Pure: no IO.
+    Compound statements are descended through with the same prefix, so a scope
+    inside ``if``/``try``/``with``/``for``/``match`` is found (``if``/``elif``
+    chains arrive as nested ``If`` nodes in ``orelse``). Returns ``""`` for
+    ``source=None``, unparseable or non-Python source, ``line=None``, a
+    non-integer line and module-level code. Pure: no IO.
     """
     if source is None or line is None or isinstance(line, bool) or not isinstance(line, int):
         return ""
@@ -119,17 +124,19 @@ def symbolic_context(source: Optional[str], line: Optional[int]) -> str:
     while stack:
         nodes, prefix = stack.pop()
         for node in nodes:
-            if not isinstance(node, _SCOPE_NODES):
-                continue
-            lo = node.lineno
-            hi = getattr(node, "end_lineno", None) or lo
-            if not (lo <= line <= hi):
-                continue
-            qualified = prefix + node.name
-            span = hi - lo
-            if best is None or span < best[0]:
-                best = (span, qualified)
-            stack.append((getattr(node, "body", []), qualified + "."))
+            inner_prefix = prefix
+            if isinstance(node, _SCOPE_NODES):
+                lo = node.lineno
+                hi = getattr(node, "end_lineno", None) or lo
+                if not (lo <= line <= hi):
+                    continue
+                qualified = prefix + node.name
+                span = hi - lo
+                if best is None or span < best[0]:
+                    best = (span, qualified)
+                inner_prefix = qualified + "."
+            for block in _statement_lists(node):
+                stack.append((block, inner_prefix))
     return "" if best is None else best[1]
 
 
@@ -183,39 +190,3 @@ def id_for_finding(seat: str, finding: Mapping[str, Any], source: Optional[str])
     path = finding.get("file_path") or ""
     line = finding.get("line")
     return finding_id(seat, str(path), symbolic_context(source, line), message)
-
-
-# Transitions
-
-
-def next_status(
-    previous: Optional[str],
-    answer: Optional[str],
-    anchor_present: bool,
-) -> str:
-    """Status of an existing finding after a delta round.
-
-    In order: a missing anchor gives ``unverifiable`` (it wins over any
-    answer); no answer (``None``, ``""``, an unknown value) gives ``open``;
-    ``previous == "fixed"`` answered ``open``/``regressed`` gives
-    ``regressed``; ``waived`` is only carried from ``previous`` (an answer
-    ``waived`` elsewhere gives ``open``); otherwise the answer.
-    """
-    if not anchor_present:
-        return STATUS_UNVERIFIABLE
-    if answer not in STATUSES:
-        return STATUS_OPEN
-    if previous == STATUS_FIXED and answer in _STILL_PRESENT_ANSWERS:
-        return STATUS_REGRESSED
-    if answer == STATUS_WAIVED and previous != STATUS_WAIVED:
-        return STATUS_OPEN
-    return answer
-
-
-def blocks(status: Optional[str]) -> bool:
-    """Whether ``status`` blocks a PASS.
-
-    ``open``, ``regressed`` and ``unverifiable`` block; ``fixed`` and
-    ``waived`` do not. ``None`` and unknown values block (fail-closed).
-    """
-    return status not in _NON_BLOCKING_STATUSES

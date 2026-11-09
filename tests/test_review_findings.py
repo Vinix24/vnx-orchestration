@@ -1,9 +1,9 @@
-"""DR-1: a stable finding id and a status that never closes silently.
+"""DR-1: a stable finding id, including scopes inside compound statements.
 
 Pure tests, no tmp files and no git. Plan "Klaar per levering" item 2: the
 same finding on another line gives the same id, another function gives another
-id, a vanished anchor gives ``unverifiable`` and ``fixed`` -> ``regressed`` is
-recognised.
+id — also when the functions sit inside ``if``/``try``/``with``/``for``/
+``match``. The fail-closed status tests follow in the second half of the split.
 """
 
 from __future__ import annotations
@@ -33,6 +33,74 @@ class Outer:
 
 def module_function():
     return 1
+"""
+
+CONDITIONAL_SOURCE = """\
+if TYPE_CHECKING:
+    def first():
+        value = 1
+
+    def second():
+        value = 1
+"""
+
+FALLBACK_SOURCE = """\
+try:
+    def fast():
+        return 1
+except ImportError:
+    def slow():
+        return 2
+"""
+
+CLASS_CONDITIONAL_SOURCE = """\
+class Outer:
+    if True:
+        def method(self):
+            return 1
+"""
+
+WITH_SOURCE = """\
+with open("config.toml") as handle:
+    def inside_with():
+        return handle
+"""
+
+FOR_ELSE_SOURCE = """\
+for item in ():
+    def in_loop():
+        return 1
+else:
+    def in_else():
+        return 2
+"""
+
+FINALLY_SOURCE = """\
+try:
+    def in_try():
+        return 1
+finally:
+    def in_finally():
+        return 2
+"""
+
+MATCH_SOURCE = """\
+match command:
+    case "run":
+        def run():
+            return 1
+    case _:
+        def other():
+            return 2
+"""
+
+TRY_STAR_SOURCE = """\
+try:
+    def primary():
+        return 1
+except* ValueError:
+    def fallback():
+        return 2
 """
 
 LONG_SOURCE = """\
@@ -149,6 +217,47 @@ def test_symbolic_context_method_and_async_function():
     assert rf.symbolic_context("async def fetch():\n    return 1\n", 2) == "fetch"
 
 
+def test_symbolic_context_distinguishes_functions_inside_module_level_if():
+    first = {"file_path": "a.py", "line": 3, "message": "same text"}
+    second = {"file_path": "a.py", "line": 6, "message": "same text"}
+    assert rf.symbolic_context(CONDITIONAL_SOURCE, 3) == "first"
+    assert rf.symbolic_context(CONDITIONAL_SOURCE, 6) == "second"
+    assert rf.id_for_finding("codex", first, CONDITIONAL_SOURCE) != rf.id_for_finding(
+        "codex", second, CONDITIONAL_SOURCE
+    )
+
+
+def test_symbolic_context_distinguishes_try_and_except_fallback():
+    assert rf.symbolic_context(FALLBACK_SOURCE, 3) == "fast"
+    assert rf.symbolic_context(FALLBACK_SOURCE, 5) == "slow"
+
+
+def test_symbolic_context_method_inside_if_in_class_body():
+    assert rf.symbolic_context(CLASS_CONDITIONAL_SOURCE, 4) == "Outer.method"
+
+
+@pytest.mark.parametrize(
+    "source, line, expected",
+    [
+        (WITH_SOURCE, 3, "inside_with"),
+        (FOR_ELSE_SOURCE, 3, "in_loop"),
+        (FOR_ELSE_SOURCE, 6, "in_else"),
+        (FINALLY_SOURCE, 3, "in_try"),
+        (FINALLY_SOURCE, 6, "in_finally"),
+        (MATCH_SOURCE, 4, "run"),
+        (MATCH_SOURCE, 7, "other"),
+        (TRY_STAR_SOURCE, 3, "primary"),
+        (TRY_STAR_SOURCE, 6, "fallback"),
+    ],
+)
+def test_symbolic_context_inside_compound_statements(source, line, expected):
+    assert rf.symbolic_context(source, line) == expected
+
+
+def test_symbolic_context_module_level_code_inside_if_stays_empty():
+    assert rf.symbolic_context("if True:\n    value = 1\n", 2) == ""
+
+
 @pytest.mark.parametrize(
     "source, line",
     [
@@ -162,54 +271,6 @@ def test_symbolic_context_method_and_async_function():
 )
 def test_symbolic_context_empty_cases(source, line):
     assert rf.symbolic_context(source, line) == ""
-
-
-# --- transitions -----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "previous, answer, anchor, expected",
-    [
-        (None, None, True, rf.STATUS_OPEN),  # unanswered id stays open
-        ("open", "", True, rf.STATUS_OPEN),
-        (None, "not-a-status", True, rf.STATUS_OPEN),
-        (None, "open", True, rf.STATUS_OPEN),
-        ("open", "fixed", True, rf.STATUS_FIXED),
-        (None, "regressed", True, rf.STATUS_REGRESSED),
-        ("fixed", "open", True, rf.STATUS_REGRESSED),  # fixed -> there again
-        ("fixed", "regressed", True, rf.STATUS_REGRESSED),
-        ("fixed", "fixed", True, rf.STATUS_FIXED),
-        (None, "waived", True, rf.STATUS_OPEN),  # reviewer cannot waive
-        ("open", "waived", True, rf.STATUS_OPEN),
-        ("waived", "waived", True, rf.STATUS_WAIVED),  # carried from previous
-        ("waived", "fixed", True, rf.STATUS_FIXED),
-        (None, None, False, rf.STATUS_UNVERIFIABLE),  # anchor wins
-        ("open", "fixed", False, rf.STATUS_UNVERIFIABLE),
-        ("fixed", "fixed", False, rf.STATUS_UNVERIFIABLE),
-        ("waived", "waived", False, rf.STATUS_UNVERIFIABLE),
-    ],
-)
-def test_next_status(previous, answer, anchor, expected):
-    assert rf.next_status(previous, answer, anchor) == expected
-
-
-# --- blocking (the C2 rule for DR-4a) --------------------------------------
-
-
-@pytest.mark.parametrize(
-    "status, expected",
-    [
-        ("open", True),
-        ("regressed", True),
-        ("unverifiable", True),
-        ("fixed", False),
-        ("waived", False),
-        (None, True),  # fail-closed
-        ("something-else", True),
-    ],
-)
-def test_blocks(status, expected):
-    assert rf.blocks(status) is expected
 
 
 # --- id_for_finding contract ----------------------------------------------
