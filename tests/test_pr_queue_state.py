@@ -22,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 from pr_queue_state import (
     _build_gates_map,
+    _get_merged_today,
     build_pr_queue_state,
     write_pr_queue_state,
 )
@@ -50,14 +51,14 @@ class TestSchemaValidation:
     def test_schema_field_present(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert result["schema"] == "pr_queue/1.1"
 
     def test_required_keys_present(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         for key in ("schema", "timestamp", "open_prs", "merged_today"):
             assert key in result, f"Missing key: {key}"
@@ -65,7 +66,7 @@ class TestSchemaValidation:
     def test_open_prs_is_list(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert isinstance(result["open_prs"], list)
 
@@ -77,7 +78,7 @@ class TestSchemaValidation:
               "run_id": 7, "reason": None}
         with patch("pr_queue_state._get_open_prs", return_value=([row], None)), \
              patch("pr_queue_state._measure_ci", return_value={42: ci}), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert len(result["open_prs"]) == 1
         pr = result["open_prs"][0]
@@ -88,7 +89,7 @@ class TestSchemaValidation:
     def test_is_json_serializable(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         parsed = json.loads(json.dumps(result))
         assert parsed["schema"] == "pr_queue/1.1"
@@ -102,7 +103,7 @@ class TestEmptyState:
     def test_empty_register_empty_prs(self, tmp_path):
         state_dir, _ = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert result["open_prs"] == []
         assert result["merged_today"] == []
@@ -111,7 +112,7 @@ class TestEmptyState:
         state_dir, _ = _make_dirs(tmp_path)
         # No dispatch_register.ndjson present, gh also returns nothing
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, project_root=tmp_path)
         assert result["open_prs"] == []
         assert result["merged_today"] == []
@@ -120,7 +121,7 @@ class TestEmptyState:
         state_dir, _ = _make_dirs(tmp_path)
         # _get_open_prs already returns [] on gh failure; verify contract
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             result = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert result["open_prs"] == []
 
@@ -133,14 +134,14 @@ class TestBuildT0StateIntegration:
     def test_pr_queue_key_in_state(self, tmp_path):
         state_dir, dispatch_dir = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         assert "pr_queue" in state, "pr_queue key missing from build_t0_state output"
 
     def test_pr_queue_has_correct_schema(self, tmp_path):
         state_dir, dispatch_dir = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         pr_queue = state.get("pr_queue", {})
         assert pr_queue.get("schema") == "pr_queue/1.1"
@@ -148,7 +149,7 @@ class TestBuildT0StateIntegration:
     def test_pr_queue_is_dict(self, tmp_path):
         state_dir, dispatch_dir = _make_dirs(tmp_path)
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             state = build_t0_state(state_dir=state_dir, dispatch_dir=dispatch_dir)
         assert isinstance(state.get("pr_queue"), dict)
 
@@ -217,7 +218,7 @@ class TestAtomicWrite:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             out = write_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert out.exists()
         data = json.loads(out.read_text())
@@ -227,7 +228,7 @@ class TestAtomicWrite:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             write_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         tmp_files = list(state_dir.glob("*.tmp.*"))
         assert tmp_files == [], f"Temp files left: {tmp_files}"
@@ -236,7 +237,7 @@ class TestAtomicWrite:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             out = write_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         parsed = json.loads(out.read_text())
         assert isinstance(parsed, dict)
@@ -244,7 +245,7 @@ class TestAtomicWrite:
     def test_creates_state_dir_if_missing(self, tmp_path):
         state_dir = tmp_path / "state" / "nested"
         with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             out = write_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert out.exists()
 
@@ -564,7 +565,7 @@ class TestRegisterError:
         state_dir, _ = _make_dirs(tmp_path)
         with patch("dispatch_register.read_events", side_effect=OSError("disk gone")), \
              patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)), \
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)), \
              caplog.at_level("WARNING", logger="pr_queue_state"):
             state = build_pr_queue_state(state_dir, project_root=tmp_path)
         assert state.get("register_error") == "OSError: disk gone"
@@ -574,7 +575,7 @@ class TestRegisterError:
         state_dir, _ = _make_dirs(tmp_path)
         with patch("dispatch_register.read_events", return_value=[]), \
              patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             state = build_pr_queue_state(state_dir, project_root=tmp_path)
         assert "register_error" in state and state["register_error"] is None
 
@@ -582,7 +583,76 @@ class TestRegisterError:
         state_dir, _ = _make_dirs(tmp_path)
         with patch("dispatch_register.read_events", side_effect=OSError("must not run")) as rd, \
              patch("pr_queue_state._get_open_prs", return_value=([], None)), \
-             patch("pr_queue_state._get_merged_today", return_value=([], None)):
+             patch("pr_queue_state._get_merged_today", return_value=([], None, False)):
             state = build_pr_queue_state(state_dir, register_events=[], project_root=tmp_path)
         assert "register_error" in state and state["register_error"] is None
         rd.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Merged PRs are read with a proven coverage boundary (doorloop PR-4)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timezone
+from unittest.mock import Mock
+
+
+def _fixed_clock():
+    clock = Mock()
+    clock.now.return_value = datetime(2026, 11, 9, 12, 0, tzinfo=timezone.utc)
+    return clock
+
+
+class TestMergedTodayCoverage:
+    def test_forty_merged_today_are_forty_not_the_old_limit_of_thirty(self, tmp_path):
+        state_dir, _ = _make_dirs(tmp_path)
+        rows = [{"number": n, "title": f"PR {n}", "headRefName": f"feat/{n}",
+                 "mergedAt": f"2026-11-09T{n % 24:02d}:00:00Z"} for n in range(1, 41)]
+
+        def fake_run(argv, **kwargs):
+            limit = int(argv[argv.index("--limit") + 1])
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(rows[:limit]), stderr="")
+
+        with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
+             patch("pr_queue_state.datetime", _fixed_clock()), \
+             patch("subprocess.run", fake_run):
+            section = build_pr_queue_state(
+                state_dir, register_events=[], project_root=tmp_path)
+        assert len(section["merged_today"]) == 40
+        assert section["merged_truncated"] is False
+
+    def test_the_section_keeps_every_key_and_adds_merged_truncated(self, tmp_path):
+        state_dir, _ = _make_dirs(tmp_path)
+        with patch("pr_queue_state._get_open_prs", return_value=([], None)), \
+             patch("pr_queue_state._get_merged_today", return_value=([], None, True)):
+            section = build_pr_queue_state(
+                state_dir, register_events=[], project_root=tmp_path)
+        assert {"schema", "timestamp", "available", "reason", "open_prs",
+                "merged_today", "register_error"} <= set(section)
+        assert section["merged_truncated"] is True
+
+
+class TestMergedTodayIsReadFreshOnEveryCall:
+    def test_a_second_call_sees_a_merge_that_landed_after_the_first(self, tmp_path):
+        first = {"number": 1, "title": "PR 1", "headRefName": "feat/1",
+                 "mergedAt": "2026-11-09T01:00:00Z"}
+        second = {"number": 2, "title": "PR 2", "headRefName": "feat/2",
+                  "mergedAt": "2026-11-09T05:00:00Z"}
+        answers, calls = [[first], [first, second]], []
+
+        def fake_run(argv, **kwargs):
+            assert argv[1:3] == ["pr", "list"], argv
+            calls.append(list(argv))
+            rows = answers[len(calls) - 1]
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(rows), stderr="")
+
+        with patch("pr_queue_state.datetime", _fixed_clock()), \
+             patch("subprocess.run", fake_run):
+            first_rows, first_error, _ = _get_merged_today(tmp_path)
+            second_rows, second_error, _ = _get_merged_today(tmp_path)
+
+        assert len(calls) == 2, "the second call must read gh again, not replay the memo"
+        assert first_error is None and second_error is None
+        assert [row["number"] for row in first_rows] == [1]
+        assert [row["number"] for row in second_rows] == [1, 2]
