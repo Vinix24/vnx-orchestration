@@ -200,7 +200,7 @@ def test_failed_recollect_is_retried_and_a_revised_day_stays_final(
     daily = _run_cli(healthy_sources, ["daily", *base])
     assert daily.returncode == 0, daily.stderr
     lines = [json.loads(line) for line in daily.stdout.splitlines()]
-    day_lines = [item for item in lines if item["day"] == "2026-11-06"]
+    day_lines = [item for item in lines if item.get("day") == "2026-11-06"]
     assert all("skipped" in item for item in day_lines)
     assert not _day_file(tmp_path, "2026-11-06.r3").exists()
     b = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-06", "--reason", "b", *base])
