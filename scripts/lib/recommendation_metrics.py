@@ -138,7 +138,7 @@ def compute_dispatch_metrics(
     window_start: str,
     window_end: str,
     scope_tags: Optional[List[str]] = None,
-) -> Dict[str, float]:
+) -> Dict[str, Optional[float]]:
     """Compute aggregate metrics from dispatches within a time window.
 
     Queries the dispatches and dispatch_attempts tables to derive:
@@ -150,9 +150,11 @@ def compute_dispatch_metrics(
 
     open_item_carry_over requires external input and is not computed here.
 
-    Returns metric_name -> value dict.
+    Returns metric_name -> value dict. An empty window returns ``None`` for
+    every metric: missing is unknown, never 0. A non-empty window keeps real
+    values, including a genuine 0.0 rate (0 successes out of N).
     """
-    metrics: Dict[str, float] = {}
+    metrics: Dict[str, Optional[float]] = {}
 
     with get_connection(state_dir) as conn:
         # Total dispatches in window
@@ -164,7 +166,7 @@ def compute_dispatch_metrics(
         total = total_row["cnt"] if total_row else 0
 
         if total == 0:
-            return {m: 0.0 for m in METRIC_NAMES}
+            return {m: None for m in METRIC_NAMES}
 
         # First-pass success: completed on attempt_count <= 1
         first_pass = conn.execute(

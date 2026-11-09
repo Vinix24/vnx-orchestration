@@ -412,7 +412,8 @@ class TestDispatchMetrics(_DBTestCase):
         # open_item_carry_over defaults to 0
         self.assertEqual(metrics["open_item_carry_over"], 0.0)
 
-    def test_empty_window_returns_zeros(self):
+    def test_empty_window_returns_none_per_metric(self):
+        """An empty window is unknown: every metric is None, never 0.0."""
         future = (datetime.now(timezone.utc) + timedelta(days=30)).strftime(
             "%Y-%m-%dT%H:%M:%S.%f"
         ) + "Z"
@@ -423,7 +424,25 @@ class TestDispatchMetrics(_DBTestCase):
             window_start=future, window_end=far_future
         )
         for name in METRIC_NAMES:
-            self.assertEqual(metrics[name], 0.0)
+            self.assertIsNone(metrics[name])
+
+    def test_non_empty_window_zero_successes_is_zero(self):
+        """A real 0 successes out of N dispatches stays 0.0, not None."""
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+        end = (now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+        with get_connection(self.state_dir) as conn:
+            self._insert_dispatch(
+                conn, "zero-1", state="dead_letter",
+                attempt_count=3, created_at=start,
+            )
+            conn.commit()
+
+        metrics = self.tracker.compute_dispatch_metrics(
+            window_start=start, window_end=end
+        )
+        self.assertEqual(metrics["first_pass_success_rate"], 0.0)
 
     def test_metrics_include_headless_dispatches(self):
         """Gate check: metrics work across headless dispatches."""
@@ -530,6 +549,42 @@ class TestOutcomeComputation(_DBTestCase):
         self.assertAlmostEqual(fps.outcome_value, 1.0)
         self.assertAlmostEqual(fps.delta, 0.5)
         self.assertEqual(fps.direction, "improved")
+
+    def test_empty_baseline_window_is_insufficient_data(self):
+        """An empty baseline window yields insufficient_data, not a delta vs 0."""
+        rec = self._propose_default()
+        accepted = self.tracker.accept(rec.recommendation_id, outcome_window_days=7)
+
+        start_dt = datetime.fromisoformat(
+            accepted.outcome_window_start.rstrip("Z")
+        ).replace(tzinfo=timezone.utc)
+        end_dt = datetime.fromisoformat(
+            accepted.outcome_window_end.rstrip("Z")
+        ).replace(tzinfo=timezone.utc)
+        duration = end_dt - start_dt
+
+        # Only the outcome window has dispatches; the baseline window is empty.
+        outcome_ts = (start_dt + duration / 2).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        ) + "Z"
+        with get_connection(self.state_dir) as conn:
+            self._insert_dispatch(
+                conn, "outcome-only-1", state="completed",
+                attempt_count=1, created_at=outcome_ts,
+            )
+            conn.commit()
+
+        outcomes = self.tracker.compute_outcomes_for_recommendation(
+            rec.recommendation_id
+        )
+        self.assertEqual(len(outcomes), len(METRIC_NAMES))
+
+        fps = next(o for o in outcomes if o.metric_name == "first_pass_success_rate")
+        self.assertEqual(fps.comparison_status, COMPARISON_INSUFFICIENT)
+        self.assertIsNone(fps.baseline_value)
+        self.assertAlmostEqual(fps.outcome_value, 1.0)
+        self.assertIsNone(fps.delta)
+        self.assertIsNone(fps.direction)
 
     def test_compute_outcomes_not_accepted_raises(self):
         rec = self._propose_default()

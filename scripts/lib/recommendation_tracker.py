@@ -583,10 +583,15 @@ class RecommendationTracker:
         self,
         recommendation_id: str,
         metric_name: str,
-        value: float,
+        value: Optional[float],
         sample_size: int,
     ) -> None:
-        """Record the baseline (before) value for a metric."""
+        """Record the baseline (before) value for a metric.
+
+        ``value`` is ``None`` when the baseline window had no dispatches: the
+        baseline is unknown, and storing ``None`` keeps the comparison from
+        being computed against a fabricated 0.0.
+        """
         if metric_name not in METRIC_NAMES:
             raise RecommendationError(f"Unknown metric: {metric_name!r}")
 
@@ -622,12 +627,14 @@ class RecommendationTracker:
         self,
         recommendation_id: str,
         metric_name: str,
-        value: float,
+        value: Optional[float],
         sample_size: int,
     ) -> OutcomeMetric:
         """Record the outcome (after) value and compute delta.
 
-        Automatically computes delta and direction if baseline exists.
+        Automatically computes delta and direction if a real baseline exists.
+        When either the baseline or the outcome is ``None`` (an empty window),
+        the comparison is ``insufficient_data`` — never a delta against 0.0.
         """
         if metric_name not in METRIC_NAMES:
             raise RecommendationError(f"Unknown metric: {metric_name!r}")
@@ -655,7 +662,7 @@ class RecommendationTracker:
             direction = None
             status = COMPARISON_COMPUTED
 
-            if baseline_val is not None:
+            if baseline_val is not None and value is not None:
                 delta = value - baseline_val
                 if delta > 0:
                     direction = "improved"
@@ -712,8 +719,11 @@ class RecommendationTracker:
         window_start: str,
         window_end: str,
         scope_tags: Optional[List[str]] = None,
-    ) -> Dict[str, float]:
-        """Compute aggregate metrics from dispatches within a time window."""
+    ) -> Dict[str, Optional[float]]:
+        """Compute aggregate metrics from dispatches within a time window.
+
+        An empty window yields ``None`` per metric (unknown, not 0.0).
+        """
         return _compute_dispatch_metrics(
             self._state_dir,
             window_start=window_start,
@@ -777,10 +787,12 @@ class RecommendationTracker:
             window_end=window_end,
         )
 
-        # Record baselines and outcomes
+        # Record baselines and outcomes. A metric missing from either window is
+        # unknown (None) and must not be compared as if it were 0.0; record_*
+        # turn that into comparison_status=insufficient_data.
         for metric_name in sorted(METRIC_NAMES):
-            baseline_val = baseline_metrics.get(metric_name, 0.0)
-            outcome_val = outcome_metrics.get(metric_name, 0.0)
+            baseline_val = baseline_metrics.get(metric_name)
+            outcome_val = outcome_metrics.get(metric_name)
 
             self.record_baseline(recommendation_id, metric_name, baseline_val, 1)
             self.record_outcome(recommendation_id, metric_name, outcome_val, 1)
