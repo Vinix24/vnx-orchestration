@@ -20,8 +20,11 @@ brief is a half repair.
 """
 from __future__ import annotations
 
+import json
+import os
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -42,7 +45,22 @@ def _state_dir_with_terminal_marker(tmp_path: Path) -> Path:
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "terminal_state.json").write_text("{}", encoding="utf-8")
+    _write_heartbeat(state_dir)
     return state_dir
+
+
+def _write_heartbeat(state_dir: Path, *, pid: int | None = None, updated_at: str | None = None) -> None:
+    """A processor heartbeat fixture; the default is fresh and owned by this test process."""
+    now = datetime.now(timezone.utc).isoformat()
+    (state_dir / "receipt_processor_heartbeat.json").write_text(
+        json.dumps({
+            "schema": 1, "pid": pid if pid is not None else os.getpid(), "cycle": 1,
+            "started_at": now, "updated_at": updated_at or now, "last_progress_at": now,
+            "last_cycle_seconds": 0.1, "watermark_hash": "",
+            "converter": {"rejected": 0, "malformed": 0, "errors": 0},
+        }),
+        encoding="utf-8",
+    )
 
 
 class TestStatusCannotBeHealthierThanBeacon:
@@ -429,3 +447,87 @@ class TestBriefCarriesDaemonLiveness:
         assert brief["system_health"].get("producer_liveness") == {
             "overall": "fail", "daemon_overall": "ok", "launchd_overall": "fail",
         }
+
+
+class TestProcessorLivenessFeedsSystemHealth:
+    """Ledger PR 1: the processor heartbeat is its own component, worst of
+    fail > unknown > ok, and a non-ok component degrades system_health."""
+
+    @staticmethod
+    def _health(state_dir: Path) -> dict:
+        return bts._build_system_health(
+            state_dir, db_initialized=True,
+            daemon_liveness={"overall": "ok", "daemons": {}},
+            launchd_liveness={"overall": "ok", "jobs": {}},
+            expected_beacon_components=(),
+        )
+
+    def test_stalled_processor_heartbeat_degrades_system_health(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        old = "2020-01-01T00:00:00Z"
+        _write_heartbeat(state_dir, updated_at=old)
+        health = self._health(state_dir)
+        assert health["processor_liveness"]["state"] == "stalled"
+        assert health["producer_liveness"]["overall"] == "fail"
+        assert health["status"] == "degraded"
+
+    def test_dead_processor_pid_degrades_system_health(self, tmp_path: Path) -> None:
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        _write_heartbeat(state_dir, pid=proc.pid)
+        health = self._health(state_dir)
+        assert health["processor_liveness"]["state"] == "dead"
+        assert health["status"] == "degraded"
+
+    def test_absent_heartbeat_is_unknown_and_degrades_not_healthy(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        (state_dir / "receipt_processor_heartbeat.json").unlink()
+        health = self._health(state_dir)
+        assert health["processor_liveness"]["state"] == "absent"
+        assert health["producer_liveness"]["overall"] == "unknown"
+        assert health["status"] == "degraded"
+
+    def test_fresh_heartbeat_keeps_everything_ok(self, tmp_path: Path) -> None:
+        health = self._health(_state_dir_with_terminal_marker(tmp_path))
+        assert health["processor_liveness"]["state"] == "fresh"
+        assert health["producer_liveness"]["overall"] == "ok"
+        assert health["producer_liveness"]["processor_overall"] == "ok"
+        assert health["status"] == "healthy"
+
+    def test_injected_processor_value_other_than_ok_degrades(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        for bad in ({"overall": "unknown"}, {"overall": "fail"}, {"overall": None}, {}, {"overall": "weird"}):
+            health = bts._build_system_health(
+                state_dir, db_initialized=True, processor_liveness=bad,
+                daemon_liveness={"overall": "ok", "daemons": {}},
+                launchd_liveness={"overall": "ok", "jobs": {}},
+                expected_beacon_components=(),
+            )
+            assert health["status"] == "degraded", bad
+            assert health["producer_liveness"]["overall"] != "ok", bad
+
+    def test_raising_reader_reports_unknown_not_a_missing_key(self, tmp_path: Path) -> None:
+        state_dir = _state_dir_with_terminal_marker(tmp_path)
+        with pytest.MonkeyPatch.context() as mp:
+            import processor_liveness
+            mp.setattr(processor_liveness, "read_processor_liveness", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+            health = self._health(state_dir)
+        assert health["processor_liveness"]["overall"] == "unknown"
+        assert health["status"] == "degraded"
+
+
+class TestCombineLivenessOverallWithProcessor:
+    @pytest.mark.parametrize("others, strict, expected", [
+        (("ok", "ok"), "ok", "ok"),
+        (("ok", "ok"), "unknown", "unknown"),
+        (("ok", "ok"), "fail", "fail"),
+        (("fail", "ok"), "ok", "fail"),
+        (("fail", "ok"), "unknown", "fail"),
+        (("unknown", "unknown"), "ok", "unknown"),
+        (("ok", "ok"), "garbage", "unknown"),
+        (("ok", "ok"), None, "ok"),
+    ])
+    def test_order_is_fail_over_unknown_over_ok(self, others: tuple, strict, expected: str) -> None:
+        assert bts._combine_liveness_overall(*others, strict=strict) == expected

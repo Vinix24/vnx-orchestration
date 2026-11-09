@@ -21,7 +21,9 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 import beacon_register
+import build_t0_state
 import daemon_register
+import processor_liveness
 from build_t0_state import _state_to_brief, main
 
 # D2: real daemon liveness measurement finds every daemon absent in a bare
@@ -52,6 +54,38 @@ def _stub_beacon_register(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         beacon_register, "expected_component_names",
         lambda *_a, **_k: (),
+    )
+
+
+# Ledger PR 1: the receipt processor's heartbeat is a fail-closed component of
+# system_health. The tmp_path sandbox has no heartbeat file, so the real read
+# says "absent", system_health goes degraded and main() exits 1, the same
+# failure mode as the two sources above. Neutralize it the same way: inject a
+# fresh measurement (the name _processor_liveness_component imports at call
+# time) so these tests stay focused on output format/version.
+_NEUTRAL_PROCESSOR_LIVENESS = {"state": "fresh", "overall": "ok", "reason": "test sandbox"}
+
+
+def _stub_processor_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        processor_liveness, "read_processor_liveness",
+        lambda *_a, **_k: dict(_NEUTRAL_PROCESSOR_LIVENESS),
+    )
+
+
+# The launchd liveness is the fourth host-dependent source: it asks launchctl
+# whether this host's real com.vnx.* jobs are loaded, so the result depends on
+# the machine running the tests (red on a Mac with real jobs, green on CI).
+# Neutralize it the same way: inject a clean "ok" measurement in the shape
+# _measure_launchd_liveness returns (overall + jobs) so these tests stay
+# independent of the host's launchd state.
+_NEUTRAL_LAUNCHD_LIVENESS = {"overall": "ok", "jobs": {}}
+
+
+def _stub_launchd_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        build_t0_state, "_measure_launchd_liveness",
+        lambda *_a, **_k: dict(_NEUTRAL_LAUNCHD_LIVENESS),
     )
 
 
@@ -119,6 +153,8 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
+        _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
@@ -149,6 +185,8 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
+        _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "brief"]):
@@ -173,6 +211,8 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
+        _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
         with patch("sys.argv", ["build_t0_state.py", "--format", "state"]):

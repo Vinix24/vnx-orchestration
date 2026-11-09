@@ -76,6 +76,7 @@ def _store_with_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
         # Real process/launchd/beacon state of this machine is not under test.
         kwargs["daemon_liveness"] = {"overall": "ok"}
         kwargs["launchd_liveness"] = {"overall": "ok", "jobs": {}}
+        kwargs["processor_liveness"] = {"state": "fresh", "overall": "ok"}
         kwargs["expected_beacon_components"] = ()
         return real_health(sd, db_initialized, **kwargs)
 
