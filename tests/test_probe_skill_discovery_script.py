@@ -34,6 +34,7 @@ if mode != "noinit":
     source = {"key": "ANTHROPIC_API_KEY", "weird": "unknown-source", "nullsrc": None, "intsrc": 7, "emptysrc": ""}.get(mode, "none")
     print(json.dumps({"type": "system", "subtype": "init", "apiKeySource": source}))
 print(json.dumps({"type": "result", "is_error": False, "result": "OK"}))
+if mode == "badstream": print("oops, a stray line that is not json")
 if mode == "exit":
     raise SystemExit(3)
 room = Path.home() / ".claude" / "projects" / "-probe"; room.mkdir(parents=True, exist_ok=True)
@@ -43,7 +44,8 @@ attachment = ({"attachment": {"type": "instructions", "files": []}} if mode == "
               {"attachment": {"type": "skill_listing", "isInitial": True, "names": names,
                               "skillCount": len(names), "content": str(names)}})
 if mode != "notranscript":
-    (room / (sid + ".jsonl")).write_text(json.dumps(attachment) + "\n")
+    extra = "this transcript line is not json\n" if mode == "badtranscript" else ""
+    (room / (sid + ".jsonl")).write_text(json.dumps({"type": "user", "message": "hi"}) + "\n" + extra + json.dumps(attachment) + "\n")
 '''
 
 FAKE_CODEX = r'''#!/usr/bin/env python3
@@ -129,7 +131,7 @@ def test_c1_nee_when_the_listing_does_not_name_the_slug(tmp_path):
 
 
 def test_c1_stays_niet_gemeten_without_recorded_evidence(tmp_path):
-    cases = {"noinit": "auth_source_unproven", "garbage": "auth_source_unproven", "key": "auth_source_api_key",
+    cases = {"noinit": "auth_source_unproven", "garbage": "stream_malformed: line 1", "key": "auth_source_api_key",
              "nullsrc": "auth_source_unproven", "intsrc": "auth_source_unproven", "emptysrc": "auth_source_unproven",
              "weird": "auth_source_api_key", "notranscript": "no_transcript", "noskills": "skill_listing_missing",
              "badnames": "skill_listing_malformed", "exit": "cli_exit_3"}
@@ -243,3 +245,32 @@ def test_c1_without_a_transcript_hashes_the_stream_plus_the_none_separator(tmp_p
                                                 {"type": "result", "is_error": False, "result": "OK"})) + "\n"
     assert row["outcome"] == "niet_gemeten" and "no_transcript" in row["reason"]
     assert row["sha256"] == hashlib.sha256((stdout + "--- transcript <none> ---\n").encode()).hexdigest()
+
+
+def test_c1_malformed_stream_line_is_niet_gemeten_even_with_a_listing_that_names_the_slug(tmp_path):
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="badstream")
+    assert row["outcome"] == "niet_gemeten" and "stream_malformed: line 3 is not a JSON object" in row["reason"], row
+
+
+def test_c1_malformed_transcript_line_is_niet_gemeten_but_other_entry_types_are_skipped(tmp_path):
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="badtranscript")
+    assert row["outcome"] == "niet_gemeten" and "transcript_malformed: line 2" in row["reason"], row
+    (tmp_path / "ok").mkdir()
+    assert _cell(tmp_path / "ok", "C1")["outcome"] == "ja"  # the user entry in the transcript is valid and skipped
+
+
+def test_c1_judge_rejects_a_non_object_json_line_in_stream_and_transcript(tmp_path):
+    def judge(stream, transcript):
+        raw = tmp_path / "stream"; raw.write_text(stream, encoding="utf-8")
+        home = tmp_path / "home"; room = home / ".claude" / "projects" / "-p"; room.mkdir(parents=True, exist_ok=True)
+        (room / "sid.jsonl").write_text(transcript, encoding="utf-8")
+        env = dict(os.environ, HOME=str(home), TMPDIR=str(tmp_path))
+        env.pop("VNX_CLAUDE_PROJECTS_DIR", None)
+        return subprocess.run([BASH, "-c", 'source "%s"\npy judge_claude "%s" sid "%s" probe-skill "%s"' % (PROBE, raw, tmp_path, tmp_path / "ev")],
+                              capture_output=True, text=True, env=env, check=False).stdout.strip()
+
+    init = json.dumps({"type": "system", "subtype": "init", "apiKeySource": "none"})
+    for bad in ("[1]", '"probe-skill"', "7", "null"):
+        assert judge(init + "\n" + bad + "\n", "").startswith("niet_gemeten\tstream_malformed: line 2"), bad
+        assert judge(bad + "\n" + init + "\n", "").startswith("niet_gemeten\tstream_malformed: line 1"), bad
+        assert judge(init + "\n", bad + "\n").startswith("niet_gemeten\ttranscript_malformed: line 1"), bad

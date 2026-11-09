@@ -65,6 +65,16 @@ py() {
 import json, os, re, sys
 from pathlib import Path
 cmd, args = sys.argv[1], sys.argv[2:]
+def json_objects(data):
+    # Every non-empty line is evidence and must parse as a JSON object. Returns (objects, number of the first bad line or 0).
+    objects = []
+    for number, line in enumerate(data.splitlines(), 1):
+        if not line.strip(): continue
+        try: value = json.loads(line)
+        except ValueError: value = None
+        if not isinstance(value, dict): return objects, number
+        objects.append(value)
+    return objects, 0
 if cmd == "materialize":
     from agent_skill_materialize import materialize_skill_set
     result = materialize_skill_set(os.environ["PROBE_ROLE"], worktree=args[0], provider=args[1], mode="on",
@@ -82,11 +92,9 @@ elif cmd == "judge_claude":
     transcript_bytes = open(transcript, "rb").read() if transcript is not None else b""
     with open(evidence, "wb") as handle:
         handle.write(raw_bytes + b"--- transcript " + (str(transcript) if transcript is not None else "<none>").encode() + b" ---\n" + transcript_bytes)
-    events = []
-    for line in text.splitlines():
-        try: event = json.loads(line)
-        except ValueError: continue
-        if isinstance(event, dict): events.append(event)
+    events, bad = json_objects(text)
+    if bad:
+        print("niet_gemeten\tstream_malformed: line %d is not a JSON object" % bad); raise SystemExit
     inits = [e for e in events if e.get("type") == "system" and e.get("subtype") == "init"]
     source = inits[0].get("apiKeySource") if inits else None
     if not isinstance(source, str) or not source:
@@ -96,12 +104,13 @@ elif cmd == "judge_claude":
     from context_manifest import extract_skills
     if transcript is None:
         print("niet_gemeten\tno_transcript: session %s has no transcript" % session); raise SystemExit
+    entries, bad = json_objects(transcript_bytes)
+    if bad:
+        print("niet_gemeten\ttranscript_malformed: line %d is not a JSON object" % bad); raise SystemExit
     listings = []
-    for line in transcript_bytes.splitlines():
-        if b'"attachment"' not in line: continue
-        try: entry = json.loads(line)
-        except ValueError: continue
-        attachment = entry.get("attachment") if isinstance(entry, dict) else None
+    for entry in entries:
+        # Other entry types are valid transcript content; only skill_listing attachments are read.
+        attachment = entry.get("attachment")
         if isinstance(attachment, dict) and attachment.get("type") == "skill_listing": listings.append(attachment)
     initial = next((l for l in listings if l.get("isInitial") is True), None)
     if initial is None:
@@ -128,13 +137,8 @@ elif cmd == "judge_codex":
     def names(value, line): return re.search(r"(?<![A-Za-z0-9_.-])%s(?![A-Za-z0-9_.-])" % re.escape(value), line) is not None
     def verdict(outcome, reason): print("%s\t%s" % (outcome, reason)); raise SystemExit
     if not text.strip(): verdict("niet_gemeten", "empty_output: codex printed nothing to judge")
-    events = []
-    for number, line in enumerate(text.splitlines(), 1):
-        if not line.strip(): continue
-        try: event = json.loads(line)
-        except ValueError: event = None
-        if not isinstance(event, dict): verdict("niet_gemeten", "stream_malformed: line %d is not a JSON object" % number)
-        events.append(event)
+    events, bad = json_objects(text)
+    if bad: verdict("niet_gemeten", "stream_malformed: line %d is not a JSON object" % bad)
     if not any(e.get("type") == "turn.completed" for e in events): verdict("niet_gemeten", "turn_incomplete: the stream has no turn.completed event")
     answer = None
     for event in events:
