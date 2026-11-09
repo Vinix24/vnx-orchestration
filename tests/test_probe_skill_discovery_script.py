@@ -47,7 +47,9 @@ if mode == "transcriptmention": names = names + ["The skill %s is not available 
 attachment = ({"attachment": {"type": "instructions", "files": []}} if mode == "noskills" else
               {"attachment": {"type": "skill_listing", "isInitial": True, "names": names,
                               "skillCount": len(names), "content": str(names)}})
-if mode != "notranscript":
+if mode == "transcriptdir":
+    (room / (sid + ".jsonl")).mkdir()  # the locator finds it, the judge's open() raises IsADirectoryError
+elif mode != "notranscript":
     extra = "this transcript line is not json\n" if mode == "badtranscript" else ""
     later = "".join(json.dumps(e) + "\n" for e in ({"type": "user", "message": "Use the skill " + " ".join(found)},
                                                      {"attachment": {"type": "skill_listing", "isInitial": False, "names": found}})
@@ -82,8 +84,28 @@ elif mode != "noanswer":
 if mode != "noturn": emit({"type": "turn.completed"})
 '''
 
+# `py <subcommand>` runs `python3 - <subcommand> ...`: FAKE_PY replaces only the call FAKE_PY_SUB names, every
+# other python3 call runs the test's own interpreter (the judges import PyYAML).
+FAKE_PYTHON = r'''#!/bin/sh
+if [ "$1" = - ] && [ -n "${FAKE_PY_SUB:-}" ] && [ "$2" = "$FAKE_PY_SUB" ]; then
+  oc="${FAKE_PY_OUTCOME:-ja}"
+  case "${FAKE_PY:-}" in
+    crash) printf 'Traceback (most recent call last):\nRuntimeError: the stub raised\n' >&2; exit 1 ;;
+    printthenexit) printf '%s\tprinted a verdict, then exited 1\n' "$oc"; exit 1 ;;
+    verdict) printf '%s\tstub reason\n' "$oc" ;;
+    twolines) printf '%s\tfirst\nnee\tsecond\n' "$oc" ;;
+    blankafter) printf '%s\tone line, then a blank one\n\n' "$oc" ;;
+    unknown) printf 'maybe\tan outcome outside the allowed set\n' ;;
+    notab) printf '%s\n' "$oc" ;;
+    emptyreason) printf '%s\t\n' "$oc" ;;
+  esac
+  exit 0
+fi
+exec "@PYTHON@" "$@"
+'''
 
-def _run(tmp_path, *args, operator=True, fakes=True, extra=None):
+
+def _env(tmp_path, operator=True, fakes=True, extra=None):
     env = dict(os.environ, HOME=str(tmp_path), TMPDIR=str(tmp_path))
     env.pop("VNX_CLAUDE_PROJECTS_DIR", None); env.pop("VNX_PROBE_OPERATOR", None)
     if operator:
@@ -91,11 +113,16 @@ def _run(tmp_path, *args, operator=True, fakes=True, extra=None):
     if fakes:
         bins = tmp_path / "bin"
         bins.mkdir(exist_ok=True)
-        for name, text in (("claude", FAKE_CLAUDE), ("codex", FAKE_CODEX)):
+        for name, text in (("claude", FAKE_CLAUDE), ("codex", FAKE_CODEX), ("python3", FAKE_PYTHON.replace("@PYTHON@", sys.executable))):
+            (bins / name).unlink(missing_ok=True)  # never write through a symlink to the real interpreter
             (bins / name).write_text(text, encoding="utf-8"); (bins / name).chmod(0o755)
-        (bins / "python3").unlink(missing_ok=True); (bins / "python3").symlink_to(sys.executable)  # the judges import PyYAML here
         env["PATH"] = os.pathsep.join([str(bins), str(Path(sys.executable).parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
     env.update(extra or {})
+    return env
+
+
+def _run(tmp_path, *args, operator=True, fakes=True, extra=None):
+    env = _env(tmp_path, operator, fakes, extra)
     return subprocess.run([BASH, str(PROBE), *args], capture_output=True, text=True, env=env, check=False)
 
 
@@ -332,3 +359,98 @@ def test_c1_judge_rejects_a_non_object_json_line_in_stream_and_transcript(tmp_pa
         assert judge(init + "\n" + bad + "\n", "").startswith("niet_gemeten\tstream_malformed: line 2"), bad
         assert judge(bad + "\n" + init + "\n", "").startswith("niet_gemeten\tstream_malformed: line 1"), bad
         assert judge(init + "\n", bad + "\n").startswith("niet_gemeten\ttranscript_malformed: line 1"), bad
+
+
+# Round 5: a judge or materialiser that crashes or prints anything but one verdict line is niet_gemeten with a
+# reason that names the subcommand, and every run validates the rows it wrote.
+
+def test_c1_a_judge_that_raises_is_niet_gemeten_with_a_judge_failed_reason(tmp_path):
+    for cell in ("C1", "C2"):
+        row = _cell(tmp_path, cell, FAKE_CLAUDE="transcriptdir")
+        assert row["outcome"] == "niet_gemeten", (cell, row)
+        assert row["reason"].startswith("judge_failed: judge_claude exited 1: IsADirectoryError"), (cell, row)
+
+
+SHAPES = {"crash": "exited 1: RuntimeError: the stub raised", "printthenexit": "exited 1: no stderr",
+          "noline": "printed no line", "twolines": "printed more than one line", "blankafter": "printed more than one line",
+          "notab": "printed a line without a tab", "emptyreason": "printed an empty reason",
+          "unknown": "printed the outcome 'maybe', not one of: ja nee niet_gemeten"}
+
+
+def test_every_judge_call_is_niet_gemeten_when_the_judge_crashes_or_prints_no_single_verdict(tmp_path):
+    subs = {"C1": "judge_claude", "C2": "judge_claude", "C3a": "judge_listing", "C3b": "judge_codex"}
+    for cell, sub in subs.items():
+        modes = SHAPES if cell == "C3a" else {m: SHAPES[m] for m in ("crash", "printthenexit", "unknown")}
+        for mode, why in modes.items():
+            row = _cell(tmp_path, cell, FAKE_PY_SUB=sub, FAKE_PY=mode)
+            assert row["outcome"] == "niet_gemeten", (cell, mode, row)
+            assert row["reason"] == "judge_failed: %s %s" % (sub, why), (cell, mode, row)
+
+
+def test_a_single_verdict_line_from_the_judge_is_the_row(tmp_path):
+    for outcome in ("ja", "nee", "niet_gemeten"):
+        row = _cell(tmp_path, "C3a", FAKE_PY_SUB="judge_listing", FAKE_PY="verdict", FAKE_PY_OUTCOME=outcome)
+        assert (row["outcome"], row["reason"]) == (outcome, "stub reason"), row
+
+
+def test_a_crashed_or_odd_materialiser_is_niet_gemeten_with_the_status_named(tmp_path):
+    for cell in ("C1", "C3a", "C3b"):
+        for mode in ("crash", "printthenexit", "unknown"):
+            why = SHAPES[mode].replace("ja nee niet_gemeten", "ok skipped error")
+            row = _cell(tmp_path, cell, FAKE_PY_SUB="materialize", FAKE_PY=mode, FAKE_PY_OUTCOME="ok")
+            assert row["outcome"] == "niet_gemeten", (cell, mode, row)
+            assert row["reason"] == "materialisation failed: materialize_failed: materialize " + why, (cell, mode, row)
+        row = _cell(tmp_path, cell, FAKE_PY_SUB="materialize", FAKE_PY="verdict", FAKE_PY_OUTCOME="error")
+        assert (row["outcome"], row["reason"]) == ("niet_gemeten", "materialisation failed: stub reason"), (cell, row)
+
+
+def _validate(tmp_path, rows_text, *cells):
+    path = tmp_path / "check.ndjson"
+    path.write_text(rows_text, encoding="utf-8")
+    env = dict(os.environ, HOME=str(tmp_path), TMPDIR=str(tmp_path), PYTHONOPTIMIZE="1")  # -O drops an assert, not a check
+    script = 'source "%s"\npy validate "%s" %s' % (PROBE, path, " ".join(cells))
+    return subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, check=False)
+
+
+def test_validate_refuses_every_row_outside_the_schema(tmp_path):
+    out = tmp_path / "self.ndjson"
+    assert _run(tmp_path, "--self-check", "--out", str(out), fakes=False).returncode == 0
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    dump = lambda rs: "".join(json.dumps(r) + "\n" for r in rs)
+    assert _validate(tmp_path, dump(rows)).returncode == 0
+    for key, values in {"outcome": ("", None, 7, "maybe", "JA"), "reason": ("", "  ", None, 7),
+                        "decisive": (None, "true", 1), "sha256": (None, "abc", "")}.items():
+        for value in (*values, KeyError):
+            bad = [dict(r) for r in rows]
+            if value is KeyError: del bad[1][key]
+            else: bad[1][key] = value
+            proc = _validate(tmp_path, dump(bad))
+            assert proc.returncode == 1 and "validate:" in proc.stderr, (key, value, proc.stderr)
+    for text in (dump(rows) + "not json\n", dump(rows[:3]) + "[1]\n", dump(rows[:3]), dump(rows + rows[:1]),
+                 dump(rows[:1] * 4), dump([dict(rows[0], extra=1)] + rows[1:]), ""):
+        proc = _validate(tmp_path, text)
+        assert proc.returncode == 1 and "validate:" in proc.stderr, (text, proc.stderr)
+    assert _validate(tmp_path, dump(rows[2:3]), "C3a").returncode == 0
+    assert _validate(tmp_path, dump(rows[2:3]), "C3a", "C3b").returncode == 1
+
+
+def test_a_run_validates_its_rows_and_a_corrupted_row_fails_the_same_check(tmp_path):
+    out = tmp_path / "run.ndjson"
+    proc = _run(tmp_path, "--run", "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    assert [r["cell"] for r in rows] == ["C1", "C2", "C3a", "C3b"] and proc.stdout == out.read_text(encoding="utf-8")
+    rows[0]["outcome"] = ""
+    proc = _validate(tmp_path, "".join(json.dumps(r) + "\n" for r in rows))
+    assert proc.returncode == 1 and "outcome" in proc.stderr, proc.stderr
+    proc = _run(tmp_path, "--run", "--cell", "C3a", "--out", str(out))
+    assert proc.returncode == 0 and len(out.read_text(encoding="utf-8").splitlines()) == 1, proc.stderr
+
+
+def test_a_run_that_wrote_a_row_outside_the_schema_exits_non_zero(tmp_path):
+    for out in ("--out %s" % (tmp_path / "rows.ndjson"), ""):
+        script = ('source "%s"\nrun_cell() { emit_cell "$1" "" "a row with an empty outcome" "cmd" ""; }\n'
+                  'main --run --cell C3a %s' % (PROBE, out))
+        proc = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=_env(tmp_path), check=False)
+        assert proc.returncode == 1 and '"outcome":""' in proc.stdout, (out, proc.returncode, proc.stderr)
+        assert "validate: outcome" in proc.stderr, (out, proc.stderr)

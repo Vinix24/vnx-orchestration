@@ -6,7 +6,8 @@
 # the R2 ignore rule and a probe slug in no tracked catalog, removed at exit; the probe writes nothing
 # outside $TMPDIR and reads the CLI's own transcript back as evidence. ja/nee only on recorded evidence;
 # a timeout, a non-zero exit, a missing init/listing event, an auth failure or an unparseable stream is
-# niet_gemeten with that reason. One JSON line per cell with the sha256 of the raw output judged.
+# niet_gemeten with that reason, and so is a judge or materialiser that crashes or prints anything but one
+# verdict line. One JSON line per cell with the sha256 of the raw output judged; every run ends by validating its rows.
 # Usage: scripts/probe_agent_skill_discovery.sh --self-check  |  VNX_PROBE_OPERATOR=1 ... --run [--cell C1|C2|C3a|C3b|all] [--out <file>]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -14,6 +15,7 @@ CELLS="C1 C2 C3a C3b"; CELL="all"; OUT=""; MODE=""; PROBE_DIR=""; SLUG=""
 CLAUDE_BIN="${PROBE_CLAUDE_BIN:-claude}"; CODEX_BIN="${PROBE_CODEX_BIN:-codex}"
 TIMEOUT_SECONDS="${PROBE_TIMEOUT_SECONDS:-120}"; CLAUDE_VERSION=""; CODEX_VERSION=""
 ROLE="probe-skill-discovery"; NEGATIVE="vnx-probe-negative-control-not-in-tree"
+VERDICTS="ja nee niet_gemeten"; MATERIALIZED="ok skipped error"; PY_OC=""; PY_RC=""
 CRED_VARS="ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX"
 SCRUB_PREFIX="env -u ANTHROPIC_API_KEY -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u CLAUDE_CODE_USE_BEDROCK -u CLAUDE_CODE_USE_VERTEX"
 die() { echo "probe_agent_skill_discovery: $*" >&2; exit 2; }
@@ -163,17 +165,41 @@ elif cmd == "judge_codex":
     if slug in entries: verdict("ja", "the answer lists %s as an entry and not the negative control" % slug)
     verdict("nee", "the answer does not list %s (%d entries judged)" % (slug, len(entries)))
 elif cmd == "validate":
-    rows = [json.loads(line) for line in open(args[0], encoding="utf-8") if line.strip()]
-    expected = {"C1": True, "C2": False, "C3a": True, "C3b": True}
+    # One row per cell in args[1:] (all four when none is named). Explicit checks, not assert: python -O drops an assert.
+    path, expected = args[0], {"C1": True, "C2": False, "C3a": True, "C3b": True}
+    cells = args[1:] or sorted(expected)
     keys = {"cell", "decisive", "outcome", "reason", "command", "claude_version", "codex_version", "sha256"}
-    assert len(rows) == len(expected) and {row["cell"] for row in rows} == set(expected), rows
+    def refuse(why, value): raise SystemExit("validate: %s: %r" % (why, value))
+    rows, bad = json_objects(open(path, encoding="utf-8").read())
+    if bad: refuse("line %d is not a JSON object" % bad, path)
+    if len(rows) != len(cells) or sorted(str(row.get("cell")) for row in rows) != sorted(cells):
+        refuse("not one row per cell %s" % " ".join(cells), rows)
     for row in rows:
-        assert set(row) == keys, row
-        assert row["decisive"] is expected[row["cell"]], row
-        assert row["outcome"] in ("ja", "nee", "niet_gemeten"), row
-        assert row["reason"], row
-        assert row["sha256"] == "-" or re.fullmatch(r"[0-9a-f]{64}", row["sha256"]), row
+        if set(row) != keys: refuse("keys differ from the schema", row)
+        if row["decisive"] is not expected.get(row["cell"]): refuse("decisive is wrong for the cell", row)
+        if row["outcome"] not in ("ja", "nee", "niet_gemeten"): refuse("outcome is not ja, nee or niet_gemeten", row)
+        if not isinstance(row["reason"], str) or not row["reason"].strip(): refuse("reason is empty", row)
+        sha = row["sha256"]
+        if sha != "-" and not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)): refuse("sha256 is not - or a digest", row)
 PY
+}
+# py_line <outcomes> <subcommand> [args...]: one `py` call with stdout, stderr and exit status kept apart, because
+# `read <<<"$(py ...)"` returns 0 when py crashed. Sets PY_OC/PY_RC from its single `<outcome>\t<reason>` line. A
+# non-zero exit, no line, more than one, no tab, an outcome outside <outcomes> or an empty reason is PY_OC=niet_gemeten
+# with a PY_RC that names the subcommand and why, e.g. "judge_failed: judge_claude exited 1: <last stderr line>".
+py_line() {
+  local outcomes="$1" sub="$2" err="$PROBE_DIR/raw/py-$2.stderr" out status line known=no o why=""; shift
+  if out="$(code=0; py "$@" 2>"$err" || code=$?; printf .; exit "$code")"; then status=0; else status=$?; fi
+  out="${out%.}"; line="${out%$'\n'}"; PY_OC="${line%%$'\t'*}"; PY_RC="${line#*$'\t'}"
+  for o in $outcomes; do if [ "$PY_OC" = "$o" ]; then known=yes; fi; done
+  if [ "$status" != 0 ]; then
+    why="exited $status: $(awk 'NF { last = $0 } END { print (last == "" ? "no stderr" : last) }' "$err" 2>/dev/null || echo "stderr unreadable")"
+  elif [ -z "$line" ]; then why="printed no line"
+  elif [ "$line" != "${line%%$'\n'*}" ]; then why="printed more than one line"
+  elif [ "$PY_OC" = "$line" ]; then why="printed a line without a tab"
+  elif [ "$known" = no ]; then why="printed the outcome '$PY_OC', not one of: $outcomes"
+  elif [ -z "$PY_RC" ]; then why="printed an empty reason"; fi
+  if [ -n "$why" ]; then PY_OC=niet_gemeten; PY_RC="${sub%%_*}_failed: $sub $why"; fi
 }
 # A throwaway git worktree with the R2 ignore rule, one role and one probe skill that exists only as source.
 write_tree() {
@@ -203,47 +229,47 @@ failed_call() {
   else emit_cell "$cell" niet_gemeten "cli_exit_${status:-unknown}" "$command" "$raw"; fi
 }
 cell_claude() {
-  local cell="$1" extra="$2" root="$PROBE_DIR/$1" status oc rc sid raw="$PROBE_DIR/raw/$1.txt"
+  local cell="$1" extra="$2" root="$PROBE_DIR/$1" status sid raw="$PROBE_DIR/raw/$1.txt"
   local cmd="$CLAUDE_BIN -p ... (not run)"
   if ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
     emit_cell "$cell" niet_gemeten "claude not on PATH ($CLAUDE_BIN)" "$cmd" ""; return
   fi
   write_tree "$root"
-  IFS=$'\t' read -r oc rc <<<"$(py materialize "$root" claude)"
-  if [ "$oc" != ok ]; then emit_cell "$cell" niet_gemeten "materialisation failed: $rc" "$cmd" ""; return; fi
+  py_line "$MATERIALIZED" materialize "$root" claude
+  if [ "$PY_OC" != ok ]; then emit_cell "$cell" niet_gemeten "materialisation failed: $PY_RC" "$cmd" ""; return; fi
   sid="$(new_session)"
   # shellcheck disable=SC2086 # $extra is an intentional flag list ("" or "--bare")
   status="$(run_in_probe "$root" "$raw" yes "$CLAUDE_BIN" -p "Reply with the single word OK." --output-format stream-json --verbose --session-id "$sid" $extra)"
   cmd="cd $root && VNX_AGENT_LAYOUT=on $SCRUB_PREFIX $CLAUDE_BIN -p 'Reply with the single word OK.' --output-format stream-json --verbose --session-id $sid $extra"
   if [ "$status" != 0 ]; then failed_call "$cell" "$status" "$cmd" "$raw"; return; fi
-  IFS=$'\t' read -r oc rc <<<"$(py judge_claude "$raw" "$sid" "$root" "$SLUG" "$PROBE_DIR/raw/$cell.evidence")"
-  emit_cell "$cell" "$oc" "$rc" "$cmd" "$PROBE_DIR/raw/$cell.evidence"
+  py_line "$VERDICTS" judge_claude "$raw" "$sid" "$root" "$SLUG" "$PROBE_DIR/raw/$cell.evidence"
+  emit_cell "$cell" "$PY_OC" "$PY_RC" "$cmd" "$PROBE_DIR/raw/$cell.evidence"
 }
 cell_c3a() {
-  local root="$PROBE_DIR/C3a" raw="$PROBE_DIR/raw/C3a.txt" oc rc status
+  local root="$PROBE_DIR/C3a" raw="$PROBE_DIR/raw/C3a.txt" status
   local cmd="cd $root && PYTHONPATH=$REPO_ROOT/scripts/lib python3 -c \"from agent_skill_materialize import materialize_skill_set as m; m('$ROLE', worktree='$root', provider='codex', mode='on', dispatch_id='$PROBE_DISPATCH', state_dir='$PROBE_STATE', project_id='probe-skill-discovery')\" && ls -1 .agents/skills"
   write_tree "$root"
-  IFS=$'\t' read -r oc rc <<<"$(py materialize "$root" codex)"
-  if [ "$oc" != ok ]; then emit_cell C3a niet_gemeten "materialisation failed: $rc" "$cmd" ""; return; fi
-  status="$( ( cd "$root" && set +e; ls -1 .agents/skills >"$raw" 2>&1; echo $? ) )"
+  py_line "$MATERIALIZED" materialize "$root" codex
+  if [ "$PY_OC" != ok ]; then emit_cell C3a niet_gemeten "materialisation failed: $PY_RC" "$cmd" ""; return; fi
+  status="$( ( cd "$root" || exit 125; set +e; ls -1 .agents/skills >"$raw" 2>&1; echo $? ) )"
   if [ "$status" != 0 ]; then emit_cell C3a niet_gemeten "ls of .agents/skills failed (exit $status)" "$cmd" "$raw"; return; fi
-  IFS=$'\t' read -r oc rc <<<"$(py judge_listing "$raw" "$SLUG")"
-  emit_cell C3a "$oc" "$rc" "$cmd" "$raw"
+  py_line "$VERDICTS" judge_listing "$raw" "$SLUG"
+  emit_cell C3a "$PY_OC" "$PY_RC" "$cmd" "$raw"
 }
 cell_c3b() {
-  local root="$PROBE_DIR/C3b" raw="$PROBE_DIR/raw/C3b.txt" oc rc status
+  local root="$PROBE_DIR/C3b" raw="$PROBE_DIR/raw/C3b.txt" status
   local prompt="List the name of every skill available to you in this project, one per line, and nothing else."
   local cmd="cd $root && $CODEX_BIN exec --json --sandbox read-only '$prompt'"
   if ! command -v "$CODEX_BIN" >/dev/null 2>&1; then
     emit_cell C3b niet_gemeten "codex not on PATH ($CODEX_BIN)" "$cmd" ""; return
   fi
   write_tree "$root"
-  IFS=$'\t' read -r oc rc <<<"$(py materialize "$root" codex)"
-  if [ "$oc" != ok ]; then emit_cell C3b niet_gemeten "materialisation failed: $rc" "$cmd" ""; return; fi
+  py_line "$MATERIALIZED" materialize "$root" codex
+  if [ "$PY_OC" != ok ]; then emit_cell C3b niet_gemeten "materialisation failed: $PY_RC" "$cmd" ""; return; fi
   status="$(run_in_probe "$root" "$raw" no "$CODEX_BIN" exec --json --sandbox read-only "$prompt")"
   if [ "$status" != 0 ]; then failed_call C3b "$status" "$cmd" "$raw"; return; fi
-  IFS=$'\t' read -r oc rc <<<"$(py judge_codex "$raw" "$SLUG" "$NEGATIVE")"
-  emit_cell C3b "$oc" "$rc" "$cmd" "$raw"
+  py_line "$VERDICTS" judge_codex "$raw" "$SLUG" "$NEGATIVE"
+  emit_cell C3b "$PY_OC" "$PY_RC" "$cmd" "$raw"
 }
 run_cell() { case "$1" in C1) cell_claude C1 "" ;; C2) cell_claude C2 "--bare" ;; C3a) cell_c3a ;; C3b) cell_c3b ;; esac; }
 main() {
@@ -252,14 +278,16 @@ main() {
   if [ "$MODE" = run ]; then operator_gate; fi
   ensure_probe
   local cell cells="$CELLS"
-  if [ -n "$OUT" ]; then : >"$OUT"; fi
+  [ -n "$OUT" ] || OUT="$PROBE_DIR/$MODE.ndjson"; : >"$OUT"
   if [ "$MODE" = self-check ]; then
-    [ -n "$OUT" ] || OUT="$PROBE_DIR/self-check.ndjson"; : >"$OUT"
     for cell in $CELLS; do emit_cell "$cell" niet_gemeten "--self-check does not start a CLI" "$CLAUDE_BIN/$CODEX_BIN (not run)" ""; done
-    py validate "$OUT"; return 0
+  else
+    if [ "$CELL" != all ]; then cells="$CELL"; fi
+    CLAUDE_VERSION="$(read_version "$CLAUDE_BIN")"; CODEX_VERSION="$(read_version "$CODEX_BIN")"
+    for cell in $cells; do run_cell "$cell"; done
   fi
-  if [ "$CELL" != all ]; then cells="$CELL"; fi
-  CLAUDE_VERSION="$(read_version "$CLAUDE_BIN")"; CODEX_VERSION="$(read_version "$CODEX_BIN")"
-  for cell in $cells; do run_cell "$cell"; done
+  # A row outside the schema makes the run exit non-zero instead of leaving a file that looks like a measurement.
+  # shellcheck disable=SC2086 # $cells is the intended word list of cells that ran
+  py validate "$OUT" $cells
 }
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then main "$@"; fi
