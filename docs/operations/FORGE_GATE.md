@@ -259,7 +259,7 @@ Een stoel die zijn eigen reviewer niet kan draaien, wordt gevuld door de volgend
 
 ### Het signaalregime (`VNX_REVIEW_SEAT_RULE`)
 
-`VNX_REVIEW_SEAT_RULE` kiest de stoelregel (`review_seat_evaluation.SEAT_RULE_KEY`, `active_seat_rule`, #2365, eerste tag `v1.8.0`). Standaard is de sleutel leeg en geldt `first_seat_or_every_seat_by_risk`, de regel van R3b hierboven. Met de waarde `first_seat_or_every_seat_on_signal` vraagt de regel na een zuivere PASS van stoel 1 alleen dan een tweede stoel als een signaal afgaat (`seats_for_signals`). Een onbekende waarde valt terug op de risicoregel en logt een waarschuwing.
+`VNX_REVIEW_SEAT_RULE` kiest de stoelregel (`review_seat_evaluation.SEAT_RULE_KEY`, `active_seat_rule`, #2365, eerste tag `v1.8.0`). Voor elk project zonder rij is de sleutel leeg en geldt `first_seat_or_every_seat_by_risk`, de regel van R3b hierboven. vnx-dev beslist sinds 2026-11-09 met `first_seat_or_every_seat_on_signal`, gezet als een `project_config`-rij met een approval-id. Met die waarde vraagt de regel na een zuivere PASS van stoel 1 alleen dan een tweede stoel als een signaal afgaat (`seats_for_signals`). Een onbekende waarde valt terug op de risicoregel en logt een waarschuwing. Terugdraaien: zet de rij terug op `first_seat_or_every_seat_by_risk`, of gebruik `VNX_OVERRIDE_REVIEW_SEAT_RULE` als de onmiddellijke noodrem; meet opnieuw na 50 merges en draai terug zodra de misratio boven 10 procent van de steekproef komt.
 
 `review_verdict` leest de sleutel via dezelfde `active_seat_rule` als de merge-deur. De gepubliceerde check en de deur beslissen dus met dezelfde regel op dezelfde invoer. Staat de sleutel uit, dan krijgt `evaluate_review_seats` geen regelargument en is de aanroep dezelfde als zonder de sleutel.
 

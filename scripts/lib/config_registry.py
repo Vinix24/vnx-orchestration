@@ -213,6 +213,27 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "GateProfileConfigError naming the raw value and its source; there is no fallback to "
         "standard.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # Track tweede-stoel-op-signaal, PR 5. The key review_seat_evaluation.active_seat_rule
+    # reads through config_runtime.get (the merge door and vnx-gate/review share that one
+    # reader). Registered so a project can carry the value in project_config: that row is
+    # written through config_store_db.set_config with an approval id. The default is the
+    # EMPTY string on purpose -- with no row and no env var the read-site used to return
+    # None, so active_seat_rule() answered ActiveSeatRule("first_seat_or_every_seat_by_risk",
+    # "", True) and that empty value is what the merge record carries. A non-empty default
+    # would change the recorded value on every merge of every project (pinned by
+    # tests/test_config_registry_seat_rule.py).
+    "VNX_REVIEW_SEAT_RULE": _e(
+        "VNX_REVIEW_SEAT_RULE", "string", "", "gate",
+        "Review seat rule. first_seat_or_every_seat_by_risk (the behaviour while the key "
+        "is unset) narrows the stack by the risk class of the head; "
+        "first_seat_or_every_seat_on_signal asks the second seat only after a clean PASS "
+        "of seat 1 and a fired signal. An unset key keeps the risk rule; any other value "
+        "fails closed to the risk rule and is recorded by name "
+        "(review_seat_evaluation.active_seat_rule). The emergency brake is "
+        "VNX_OVERRIDE_REVIEW_SEAT_RULE. vnx-dev sets the signal rule as a project_config "
+        "row with an approval id since 2026-11-09; every other project has no row and "
+        "keeps the risk rule.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
