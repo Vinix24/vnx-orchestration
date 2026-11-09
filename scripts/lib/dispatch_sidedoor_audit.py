@@ -115,6 +115,12 @@ KNOWN_RAW_CLAUDE_CALLERS = frozenset({
     # blocks it for builders. Delivers no work and writes no receipt-obligated output, only its
     # NDJSON cells.
     "scripts/probe_agent_layout.sh",
+    # read-only measurement probe of agent-skill-discovery-binding (cells C1, C2, C3a, C3b of R7):
+    # spawns claude -p and codex exec in a throwaway git tree to measure whether a materialised
+    # skill is discovered. Only the operator runs it (VNX_PROBE_OPERATOR=1, the probe's own
+    # operator_gate) and the pretooluse_block_raw_claude_spawn.sh hook blocks a raw spawn for
+    # builders. Delivers no work and writes no receipt-obligated output, only its NDJSON cells.
+    "scripts/probe_agent_skill_discovery.sh",
     "scripts/conversation_analyzer/deep_analyzer.py",
     "scripts/f39/replay_harness/single_replay.py",
     "scripts/headless_trigger.py",
