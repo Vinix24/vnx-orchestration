@@ -44,6 +44,7 @@
 | Receipt Operations | `docs/operations/RECEIPT_PIPELINE.md` | Receipt generation, processing, and delivery |
 | Event Streams | `docs/operations/EVENT_STREAMS.md` | Per-terminal NDJSON ring-buffer lifecycle and archive layout |
 | Runtime Rollback | `docs/operations/RUNTIME_CORE_ROLLBACK.md` | Rollback path for runtime-core cutovers |
+| Permission Policy Flip | `docs/operations/PERMISSION_POLICY_FLIP.md` | Operator runbook: read the permission posture report, the five flip conditions, and the manual steps to enable and revert enforcement |
 | Forge Gate | `docs/operations/FORGE_GATE.md` | Operator runbook for gate-enforcement-to-forge: GitHub refuses any merge to `main` without a published gate verdict on the PR head |
 | T0 Runbooks | `docs/operations/T0_RUNBOOKS.md` | Operational recipes for the `t0-orchestrator` role |
 | T0 Context Rotation | `docs/operations/T0_CONTEXT_ROTATION.md` | The 500K rotation contract: the guard hook, `vnx guard install/check`, the handoff, and the rotation spawner |
