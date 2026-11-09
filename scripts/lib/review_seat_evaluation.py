@@ -326,6 +326,17 @@ class RequiredSeats:
     #: The raw :data:`SEAT_RULE_KEY` value this decision was made under; empty
     #: when the key was unset (the default, and every merge before PR 4).
     rule_value: str = ""
+    #: ``stack_source`` of the recorded request (``""`` for a record written before it existed
+    #: and for any stack that is not a recorded one).
+    stack_source: str = ""
+    #: The gate profile (``gate_profile``, not the glob governance profile) the stack was decided
+    #: under: from the recorded request for a recorded stack, from the fresh resolution otherwise.
+    #: ``None`` is "unknown" (a named list, a record from before P6), never ``standard``. On a
+    #: refused profile value ``profile`` stays ``None`` and ``profile_raw``/``profile_error`` say why (B13).
+    profile: Optional[str] = None
+    profile_source: Optional[str] = None
+    profile_error: Optional[str] = None
+    profile_raw: Optional[str] = None
 
     def risk_text(self) -> str:
         """The class, why, and the seats it requires; ``""`` when no class decided the seats."""
@@ -660,15 +671,47 @@ def recorded_config_seats(requests_dir: Path, pr_id: str, head_sha: Optional[str
     return best
 
 
-def fresh_config_seats() -> Tuple[Optional[Tuple[str, ...]], str, str]:
-    """``(seats, value, refusal)`` from a fresh ``resolve_review_seats()`` for this process's project."""
-    from review_seats import ReviewSeatError, resolve_review_seats
+def _fresh_resolution() -> Tuple[Any, Optional[Exception]]:
+    """``(ReviewSeats, None)`` from a fresh ``resolve_review_seats()``, or ``(None, the refusal)``."""
+    from dispatch_spec import ReviewGateConfigError
+    from review_seats import resolve_review_seats
 
     try:
-        resolved = resolve_review_seats()
-    except ReviewSeatError as exc:
-        return None, "", str(exc)
+        return resolve_review_seats(), None
+    except ReviewGateConfigError as exc:  # the shared base: a bad stack and a bad governance profile both refuse by name
+        return None, exc
+
+
+def fresh_config_seats() -> Tuple[Optional[Tuple[str, ...]], str, str]:
+    """``(seats, value, refusal)`` from a fresh ``resolve_review_seats()`` for this process's project."""
+    resolved, refusal = _fresh_resolution()
+    if resolved is None:
+        return None, "", str(refusal)
     return resolved.seats, resolved.value, ""
+
+
+def _fresh_profile_fields(resolved: Any, refusal: Optional[Exception]) -> Dict[str, Any]:
+    """The gate profile fields of a fresh resolution; a refused profile value never reads as ``standard`` (B13)."""
+    from gate_profile import GateProfileConfigError
+
+    if resolved is not None:
+        return {"profile": resolved.profile, "profile_source": resolved.profile_source, "profile_error": resolved.profile_error}
+    if isinstance(refusal, GateProfileConfigError):
+        return {
+            "profile": None, "profile_source": refusal.source, "profile_error": str(refusal),
+            "profile_raw": refusal.raw if isinstance(refusal.raw, str) else repr(refusal.raw),
+        }
+    return {}  # a refusal about the stack, not the profile: the profile of this moment is not known
+
+
+def _recorded_profile_fields(recorded: Dict[str, Any]) -> Dict[str, Any]:
+    """The gate profile fields the recorded request carries; absent keys stay unknown (``None``)."""
+    fields: Dict[str, Any] = {}
+    for key in ("profile", "profile_source", "profile_error", "profile_raw"):
+        value = recorded.get(key)
+        if isinstance(value, str) and value:
+            fields[key] = value
+    return fields
 
 
 def required_seats(
@@ -693,21 +736,108 @@ def required_seats(
             return RequiredSeats((), seats_source, error=f"de opgegeven seat-lijst ({seats_source}) is leeg")
         return RequiredSeats(named, seats_source, value=",".join(named), stack=named)
     recorded = recorded_config_seats(Path(requests_dir), pr_id, head_sha)
-    fresh, value, refusal = fresh_config_seats()
+    fresh_rs, fresh_error = _fresh_resolution()
+    fresh = fresh_rs.seats if fresh_rs is not None else None
+    value = fresh_rs.value if fresh_rs is not None else ""
+    refusal = "" if fresh_error is None else str(fresh_error)
     if recorded is None:
+        fields = _fresh_profile_fields(fresh_rs, fresh_error)
         if fresh is None:
-            return RequiredSeats((), SOURCE_FRESH, error=refusal)
-        resolved = RequiredSeats(fresh, SOURCE_FRESH, value=value, stack=fresh)
+            return RequiredSeats((), SOURCE_FRESH, error=refusal, **fields)
+        resolved = RequiredSeats(fresh, SOURCE_FRESH, value=value, stack=fresh, stack_source=fresh_rs.stack_source, **fields)
     else:
         kept = tuple(recorded["seats"])
         resolved = RequiredSeats(
             kept, SOURCE_RECORDED, value=str(recorded.get("value") or ""), fresh=fresh,
             note=_recorded_note(kept, fresh, refusal), stack=kept,
+            stack_source=str(recorded.get("stack_source") or ""), **_recorded_profile_fields(recorded),
         )
     if not by_risk:
         return resolved
+    return _narrow_by_risk(resolved, risk)
+
+
+def _narrow_by_risk(resolved: RequiredSeats, risk: Any) -> RequiredSeats:
+    """``resolved`` narrowed by the class of the head, or refused by the ``light`` floor."""
     record = risk.to_record() if hasattr(risk, "to_record") else None
+    recorded = resolved.source == SOURCE_RECORDED
+    refusal = light_floor_refusal(resolved.stack, risk, recorded=recorded) or _recorded_below_current(resolved, risk)
+    if refusal:
+        return replace(resolved, seats=(), risk=record, rule=RISK_SEAT_RULE, error=refusal)
     return replace(resolved, seats=seats_for_risk(resolved.stack, risk), risk=record, rule=RISK_SEAT_RULE)
+
+
+def _signal_risk(risk: Any) -> bool:
+    """Whether a head's risk is a safety-floor signal: anything but a known low/medium class, or a gate-merge-only head.
+
+    Fail-closed: ``None``, an unknown class, an unreadable class and a ``critical`` head are
+    signals. A head is exempt only when its class is ``high``, every deciding path is
+    ``gate-merge`` and the spec does not say irreversible (ADR-008 amendment, 2026-10-30).
+    """
+    import smart_router
+
+    value = getattr(risk, "risk_class", risk)
+    known = value.strip().lower() if isinstance(value, str) else ""
+    if known in _FIRST_SEAT_CLASSES:
+        return False
+    deciding = getattr(risk, "deciding", None) or ()
+    gate_merge_only = (
+        known == "high" and bool(deciding) and getattr(risk, "irreversible", None) is False
+        and all(category == smart_router.PLAN_SCOPE_GATE_MERGE for _path, category in deciding)
+    )
+    return not gate_merge_only
+
+
+def light_floor_refusal(stack: Sequence[str], risk: Any, *, recorded: bool = False) -> str:
+    """The refusal text when profile ``light`` governs a one-seat stack on a signal path, else ``""``.
+
+    The safety floor under every profile (ADR-008 amendment, gate-profiel P0/P5): a security,
+    schema, irreversible, outside-repo or store-resolution head keeps two seats. ``light`` on
+    such a head is refused and says so; it is never quietly raised to two seats. The signal
+    set is the risk class's own (``review_risk_class``, from ``smart_router``), not a second
+    list. An explicit or operator-set stack with two seats does not refuse: the stack wins.
+    On a ``recorded`` stack the text drops "set the profile to standard": that switch only
+    moves the refusal to :func:`_recorded_below_current`.
+    """
+    if len(_seat_names(list(stack))) >= 2 or not _signal_risk(risk):
+        return ""
+    from gate_profile import GateProfileConfigError
+    from review_seats import light_profile_governs_stack
+
+    try:
+        light = light_profile_governs_stack()
+    except GateProfileConfigError as exc:
+        return str(exc)
+    if light is None:
+        return ""
+    why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
+    fix = "Name a two-seat stack in the request." if recorded else "Name a two-seat stack in the request, or set the profile to standard."
+    return (
+        f"gate profile light (source: {light.source}) refuses this head: {why}. A security, schema, "
+        f"irreversible, outside-repo or store-resolution head keeps two review seats under every profile (ADR-008 floor). {fix}"
+    )
+
+
+def _recorded_below_current(resolved: RequiredSeats, risk: Any) -> str:
+    """The refusal text when a recorded one-seat stack is below a two-seat current configuration on a signal head, else ``""``.
+
+    Only a recorded stack whose record says ``stack_source == "profile"`` is not trusted: an
+    operator's one-seat stack is not refused fresh, so recorded it is not refused either, and a
+    record without the key wins (plan acceptance (b)). A fresh resolution that itself refused
+    (``None``) is left to :func:`light_floor_refusal`, as in round 1.
+    """
+    fresh = resolved.fresh
+    if resolved.source != SOURCE_RECORDED or fresh is None or len(fresh) < 2:
+        return ""
+    if resolved.stack_source != "profile":
+        return ""
+    if len(_seat_names(list(resolved.stack))) >= 2 or not _signal_risk(risk):
+        return ""
+    why = getattr(risk, "reason", "") or "no risk class was established (fail-closed)"
+    return (
+        f"the recorded stack ({', '.join(resolved.stack)}) is below the current configuration "
+        f"({', '.join(fresh)}) on this head and its record says stack_source=profile, so it is not trusted: {why}. A new review request on this head records the current stack."
+    )
 
 
 def _recorded_note(kept: Tuple[str, ...], fresh: Optional[Tuple[str, ...]], refusal: str) -> str:
@@ -1551,6 +1681,26 @@ class SeatEvaluation:
                 f"operator en een geboekte nasleep; alleen de codex-seat wordt hierdoor geheven")
         return "; ".join(parts)
 
+    def _profile_trail(self) -> Dict[str, Any]:
+        """The gate profile the seats were decided under (gate-profiel P6, B8/B13/B14).
+
+        Not ``profile_stack`` (the glob governance profile's stack) and not the governance
+        profile: this is ``VNX_GOVERNANCE_PROFILE``. ``None`` is "unknown", never ``standard``.
+        ``profile_raw`` is written only for a refused value. ``required_error`` is the text of
+        ``RequiredSeats.error`` (a ``light`` refusal on a signal path, an unreadable stack).
+        """
+        required = self.required
+        trail: Dict[str, Any] = {
+            "profile": required.profile,
+            "profile_source": required.profile_source,
+            "profile_error": required.profile_error,
+            "stack_source": required.stack_source or None,
+            "required_error": required.error or None,
+        }
+        if required.profile_raw is not None:
+            trail["profile_raw"] = required.profile_raw
+        return trail
+
     def to_record(self) -> Dict[str, Any]:
         """The shape the merge record carries (``review_seats`` on the ``pr_merged`` receipt)."""
         record = {
@@ -1570,6 +1720,7 @@ class SeatEvaluation:
         }
         if self.required.rule_value:
             record["rule_value"] = self.required.rule_value
+        record.update(self._profile_trail())
         if self.required.rule == RISK_SEAT_RULE:
             risk = self.required.risk or {}
             record.update({

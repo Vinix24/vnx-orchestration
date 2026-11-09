@@ -81,7 +81,7 @@ class TestParseProtectionConfig:
         assert config.checks[0].app_id == 15368
         assert config.enforce_admins is True
 
-    def test_the_real_shipped_yaml_parses_and_has_fifteen_checks(self):
+    def test_the_real_shipped_yaml_parses_and_has_sixteen_checks(self):
         """The actual scripts/forge/branch_protection.yaml this dispatch ships.
 
         Fourteen until OP-B3, fifteen after it: that step moved
@@ -97,8 +97,9 @@ class TestParseProtectionConfig:
         app_id = yaml.safe_load(path.read_text(encoding="utf-8"))["app"]["app_id"]
 
         by_context = {c.context: c.app_id for c in config.checks}
-        assert len(config.checks) == 15
+        assert len(config.checks) == 16
         assert by_context["vnx-gate/review"] == app_id
+        assert by_context["vnx-gate/door"] == app_id
         assert all(
             c.app_id == 15368 for c in config.checks if not c.context.startswith("vnx-gate/")
         )
@@ -545,6 +546,10 @@ _PROTECTION_PAYLOAD = {
 }
 
 
+_QUEUE_NONE = {"data": {"repository": {"mergeQueue": None}}}
+_QUEUE_ENABLED = {"data": {"repository": {"mergeQueue": {"id": "MQ_1"}}}}
+
+
 def _ok(stdout: Any) -> "subprocess.CompletedProcess[str]":
     text = stdout if isinstance(stdout, str) else json.dumps(stdout)
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=text, stderr="")
@@ -561,6 +566,8 @@ class TestFetchLiveProtection:
         # on an exact final argv element.
         def fake_run(argv, **kwargs):
             joined = " ".join(argv)
+            if "graphql" in argv:
+                return _ok(_QUEUE_NONE)
             if "branches/main/protection" in joined:
                 return _ok(_PROTECTION_PAYLOAD)
             if "rulesets" in joined:
@@ -754,9 +761,14 @@ class TestNotFoundRequiresAConfirmedRef:
 # An ABSENT required_pull_request_reviews block (fix-forward punt 1)
 # ---------------------------------------------------------------------------
 
-def _gh_live_stub(protection_payload: Dict[str, Any], *, allow_auto_merge: bool = False):
+def _gh_live_stub(
+    protection_payload: Dict[str, Any], *, allow_auto_merge: bool = False, queue: Any = None,
+):
+    queue = _QUEUE_NONE if queue is None else queue
     def fake_run(argv, **kwargs):
         joined = " ".join(argv)
+        if "graphql" in argv:
+            return _ok(queue)
         if "branches/main/protection" in joined:
             return _ok(protection_payload)
         if "rulesets" in joined:
@@ -905,3 +917,61 @@ class TestBypassPullRequestAllowances:
         doc["required_pull_request_reviews"]["bypass_pull_request_allowances"] = ["vincent"]
         with pytest.raises(fpd.ProtectionConfigError, match="bypass_pull_request_allowances"):
             fpd.parse_protection_config(yaml.safe_dump(doc))
+
+
+# ---------------------------------------------------------------------------
+# merge queue (deur D2): read from the live state, an enabled queue is drift
+# ---------------------------------------------------------------------------
+
+class TestMergeQueue:
+    def _live(self, monkeypatch, tmp_path, queue: Any) -> Dict[str, Any]:
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(_PROTECTION_PAYLOAD, queue=queue))
+        return fpd.fetch_live_protection(tmp_path, branch="main")
+
+    def test_enabled_queue_is_drift(self, monkeypatch, tmp_path):
+        live = self._live(monkeypatch, tmp_path, _QUEUE_ENABLED)
+        assert live["merge_queue"] == {"enabled": True}
+        diffs = fpd.compare(live, _single_check_yaml_norm())
+        assert [d["field"] for d in diffs] == ["merge_queue"]
+
+    def test_null_queue_is_no_drift(self, monkeypatch, tmp_path):
+        live = self._live(monkeypatch, tmp_path, _QUEUE_NONE)
+        assert live["merge_queue"] is None
+        assert fpd.compare(live, _single_check_yaml_norm()) == []
+
+    def test_yaml_normalization_carries_a_null_queue(self):
+        assert _single_check_yaml_norm()["merge_queue"] is None
+
+    @pytest.mark.parametrize("payload", [
+        {"errors": [{"message": "boom"}], "data": None},
+        {"data": None},
+        {"data": {"repository": None}},
+        {"data": {"repository": {}}},
+        {"data": {"repository": {"mergeQueue": "yes"}}},
+        [],
+    ])
+    def test_malformed_graphql_answer_fails_the_fetch(self, monkeypatch, tmp_path, payload):
+        monkeypatch.setattr(fpd.subprocess, "run", _gh_live_stub(_PROTECTION_PAYLOAD, queue=payload))
+        with pytest.raises(fpd.ProtectionDriftError):
+            fpd.fetch_live_protection(tmp_path, branch="main")
+
+    def test_graphql_failure_fails_the_fetch_and_is_not_null(self, monkeypatch, tmp_path):
+        def fake_run(argv, **kwargs):
+            if "graphql" in argv:
+                return _err("graphql down", 1)
+            return _gh_live_stub(_PROTECTION_PAYLOAD)(argv, **kwargs)
+
+        monkeypatch.setattr(fpd.subprocess, "run", fake_run)
+        with pytest.raises(fpd.ProtectionDriftError, match="faalde"):
+            fpd.fetch_live_protection(tmp_path, branch="main")
+
+    def test_is_weakening_unchanged_on_a_check_list(self):
+        old = _single_check_yaml_norm()
+        new = _single_check_yaml_norm()
+        new["required_status_checks"]["checks"] = []
+        assert fpd.is_weakening(old, new) == (True, ["required_status_checks.checks[Profile A]"])
+        assert fpd.is_weakening(old, dict(old)) == (False, [])
+
+    def test_a_queue_alone_is_no_weakening(self):
+        queued = dict(_single_check_yaml_norm(), merge_queue={"enabled": True})
+        assert fpd.is_weakening(_single_check_yaml_norm(), queued) == (False, [])

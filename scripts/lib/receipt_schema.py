@@ -88,7 +88,7 @@ _STAMPED_WHEN_SET = (
     "skill_applied", "skill_source_path", "skill_unapplied_reason",
     "parent_dispatch", "task_class", "tier_from", "tier_to",
     "permission_posture", "permission_profile", "permission_allow_pattern_count",
-    "model_resolved", "cost_ledger_run_ids",
+    "model_resolved", "cost_ledger_run_ids", "context_manifest",
 )
 
 
@@ -223,6 +223,13 @@ class ReceiptV2:
     # one per attempt. The receipt's cost_usd/cost_source come from those lines.
     # None omits the field: the lane does not write the ledger yet.
     cost_ledger_run_ids: Optional[List[str]] = None
+    # agents-als-map PR-4b (ADR-050 contract 6): a reference to the session's
+    # context manifest, never the manifest itself. {"schema": 1, "status":
+    # "ok"|"partial", "sha256": <hash of the sidecar line>} when the sidecar
+    # line landed; {"schema": 1, "status": <status>, "reason": <reason>} with no
+    # hash otherwise. None omits the field (VNX_AGENT_LAYOUT=off). Never part of
+    # IDEMPOTENCY_FIELDS.
+    context_manifest: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now

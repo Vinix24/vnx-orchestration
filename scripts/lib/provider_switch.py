@@ -152,12 +152,19 @@ class UnknownProviderError(ValueError):
 def family_of(identifier: str) -> str:
     """Return the family (or non-switchable class) of a provider identifier.
 
-    Explicit table plus prefix rules, case-insensitive. Raises :class:`UnknownProviderError`
+    A gate name registered in ``gate_lane_rows.GATE_LANE_ROWS`` answers with the family column
+    of its row. Any other identifier: explicit table plus prefix rules, case-insensitive. Raises :class:`UnknownProviderError`
     for an identifier nothing maps: the caller decides, and :func:`decide` refuses it.
     """
     if not isinstance(identifier, str) or not identifier.strip():
         raise UnknownProviderError(f"provider identifier {identifier!r} is empty or not a string")
     key = identifier.strip().lower()
+    # Imported here: gate_lane_rows reads SWITCHABLE_FAMILIES from this module while its rows build.
+    import gate_lane_rows
+
+    row_family = gate_lane_rows.family_of_gate(identifier.strip(), gate_lane_rows.GATE_LANE_ROWS)
+    if row_family is not None:
+        return row_family
     if key in _EXACT:
         return _EXACT[key]
     for openrouter_prefix in ("litellm:openrouter/", "openrouter/"):

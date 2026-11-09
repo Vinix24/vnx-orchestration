@@ -72,7 +72,7 @@ class TestRegistration:
         assert {timeout_key, diff_key} <= set(config_registry.CONFIG_REGISTRY)
 
     def test_the_merge_door_has_a_handler_and_it_is_a_review_peer(self):
-        assert GATE in closure_verifier._GATE_HANDLERS
+        assert closure_verifier._generic_handler_for_kind(GATE) is not None
         assert GATE in closure_verifier._KNOWN_GATES
 
     def test_the_readers_know_it(self):

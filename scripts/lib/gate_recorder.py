@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from atomic_io import atomic_write_json, slot_lock
 from failure_classification import GATE_QUOTA_REFUSAL_REASON
@@ -34,6 +34,7 @@ from gate_billing_table import (
 from governance_emit import _classify_lane_log_text  # the fabric's single quota-marker list — never a second scan
 from governance_receipts import emit_governance_receipt, utc_now_iso
 import gate_depth
+import gate_lane_rows
 import gate_status
 import provider_reachability
 import provider_switch
@@ -49,15 +50,11 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
     "wiring_gate": "VNX_WIRING_GATE_REQUIRED",
 }
 
-# How each gate's provider is actually reached. Four KINDS, kept apart because
+# How each gate's provider is actually reached. Three KINDS, kept apart because
 # their failure modes are different and collapsing them is OI-1490.
 #
 # PATH_BINARY   the gate drives a CLI that must be on PATH, with a prompt on
 #               stdin (gate_runner._build_gate_cmd builds `[binary] + args`).
-# SCRIPT_RUNNER the gate IS a repo script with its own lifecycle — it builds
-#               its own contract, dispatches, parses the verdict and writes
-#               its own result record. There is no PATH binary to look for,
-#               and there never will be.
 # HARNESS_LANE  the gate routes through the governed dispatcher
 #               (plan_gate_panel._make_default_dispatcher ->
 #               provider_dispatch), the SAME lane glm_gate.py/kimi_gate.py
@@ -90,33 +87,39 @@ _GATE_ENV_FLAGS: Dict[str, str] = {
 # obligation burns bounded retries waiting for an environment change that
 # cannot happen.
 GATE_PROVIDER_PATH_BINARY = "path_binary"
-GATE_PROVIDER_SCRIPT_RUNNER = "script_runner"
 GATE_PROVIDER_HARNESS_LANE = "harness_lane"
 GATE_PROVIDER_DETERMINISTIC = "deterministic"
 
-GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
+# The gates that are not harness lanes: PATH binaries and the deterministic
+# adapter. They have no model, billing or lane columns, so they are no rows in
+# gate_lane_rows.GATE_LANE_ROWS. The harness-lane gates are not listed here.
+#
+# GE-6: the local half of ci_gate and wiring_gate is the deterministic adapter
+# kind. The gate's `gh` READ stays (gate_executor._execute_ci_gate /
+# wiring_gate._get_pr_diff); what these rows say is that the checks themselves
+# need no subprocess on the network.
+_NON_ROW_PROVIDERS: Dict[str, Tuple[str, str]] = {
     "gemini_review": (GATE_PROVIDER_PATH_BINARY, "gemini"),
     "codex_gate": (GATE_PROVIDER_PATH_BINARY, "codex"),
     "claude_github_optional": (GATE_PROVIDER_PATH_BINARY, "gh"),
-    # GE-6: the local half of both gates is the deterministic adapter kind. The
-    # gate's `gh` READ stays (gate_executor._execute_ci_gate / wiring_gate.
-    # _get_pr_diff); what these rows say is that the checks themselves need no
-    # subprocess on the network.
     "ci_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
     "wiring_gate": (GATE_PROVIDER_DETERMINISTIC, "local"),
-    "kimi_gate": (GATE_PROVIDER_HARNESS_LANE, "kimi"),
-    "glm_gate": (GATE_PROVIDER_HARNESS_LANE, "glm-harness"),
-    # OI-1714: deepseek_gate was registered as a script runner pointing at
-    # scripts/deepseek_gate.py, which has never existed. Every deepseek request
-    # therefore booked `gate_runner_missing` — a dead link for the ONE provider
-    # that was actually working. It is a config-based harness lane
-    # ("deepseek-harness"), not a repo script, so it needs no file at all.
-    "deepseek_gate": (GATE_PROVIDER_HARNESS_LANE, "deepseek-harness"),
-    # R7 (operator decision 2026-10-22): the claude review seat, `claude -p` on
-    # the operator's subscription. Same harness-lane path in gate_runner as
-    # deepseek_gate; its dispatcher is claude_gate_lane, never provider_dispatch,
-    # which refuses claude.
-    "claude_gate": (GATE_PROVIDER_HARNESS_LANE, "claude"),
+}
+
+
+def harness_providers(rows: Iterable[gate_lane_rows.GateLaneRow]) -> Dict[str, Tuple[str, str]]:
+    """gate -> (harness_lane, lane), one entry per row.
+
+    OI-1714: a harness lane is a config-based lane, not a repo script, so it needs
+    no file. R7: claude_gate is a harness lane too; its dispatcher column is
+    claude_gate_lane, never provider_dispatch, which refuses claude.
+    """
+    return {row.gate: (GATE_PROVIDER_HARNESS_LANE, row.lane) for row in rows}
+
+
+GATE_PROVIDERS: Dict[str, Tuple[str, str]] = {
+    **_NON_ROW_PROVIDERS,
+    **harness_providers(gate_lane_rows.GATE_LANE_ROWS),
 }
 
 # Backward-compatible view: only the gates that really do resolve to a PATH
@@ -250,9 +253,7 @@ def gate_dispatch_identity_error(gate: str, dispatch_id: Optional[str]) -> Optio
     )
 
 
-def gate_is_available(
-    gate: str, *, repo_root: Optional[Path] = None, state_dir: Optional[Path] = None,
-) -> bool:
+def gate_is_available(gate: str, *, state_dir: Optional[Path] = None) -> bool:
     """Availability by REGISTRATION plus lane executability, never path existence.
 
     dispatch 20260911-c6 step 2. The previous rule — ``<runner_path>.exists()``
@@ -272,8 +273,6 @@ def gate_is_available(
       PATH (``shutil.which``). Note this answers "route present", NOT "enabled
       by its env flag" — the env-flag question is a separate concern owned by
       the gate's own availability helper.
-    - ``script_runner`` the gate IS a repo script: available when the script
-      file is on disk. A gate that still needs a file keeps that check.
     - ``harness_lane``  the gate is config-based: available by registration
       and the operator's provider switch. There is no file to look for, and
       none is expected. A harness-lane gate whose family is switched off is
@@ -301,8 +300,6 @@ def gate_is_available(
     kind, name = provider
     if kind == GATE_PROVIDER_PATH_BINARY:
         return shutil.which(name) is not None
-    if kind == GATE_PROVIDER_SCRIPT_RUNNER:
-        return ((repo_root or _repo_root()) / name).exists()
     if kind == GATE_PROVIDER_HARNESS_LANE:
         return gate_switch_refusal(
             gate, consumer="gate_recorder.gate_is_available", state_dir=state_dir,
@@ -323,8 +320,8 @@ def gate_provider_reachability(
     now: Optional[float] = None,
 ) -> Optional[provider_reachability.Reachability]:
     """Measured reachability of the provider behind ``gate``, or ``None`` when
-    the gate has no provider key to measure (unregistered, or a script runner
-    whose registered name is a path, not a provider).
+    the gate has no provider key to measure (unregistered, or a registered name that
+    is not a provider key).
 
     Reads recorded outcomes only, so an unasked provider is ``unmeasured`` and
     never ``reachable``. ``state_dir`` is explicit: the caller says whose
@@ -644,11 +641,6 @@ def persist_request(
     return None
 
 
-def _repo_root() -> Path:
-    """Repo root for resolving a script-runner path (scripts/lib -> repo)."""
-    return Path(__file__).resolve().parent.parent.parent
-
-
 def write_skip_rationale(
     state_dir: Path,
     gate: str,
@@ -660,11 +652,10 @@ def write_skip_rationale(
     """Append skip-rationale record to NDJSON audit trail (GATE-9).
 
     ``provider_check`` reports what was actually checked, per gate KIND
-    (OI-1490). A script-runner gate gets an existence check on its runner
-    file and never a PATH lookup: ``shutil.which("kimi_gate")`` answers a
-    question nobody asked and its ``False`` was read for two days as "the
-    provider is missing" while scripts/kimi_gate.py sat on disk. A
-    harness-lane gate has nothing to find either — it is config-based, its
+    (OI-1490). A lane-routed gate never gets a PATH lookup:
+    ``shutil.which("kimi_gate")`` answers a question nobody asked and its
+    ``False`` was read for two days as "the provider is missing" while
+    scripts/kimi_gate.py sat on disk. A harness-lane gate has nothing to find: it is config-based, its
     route is wired by construction, so ``binary_found`` is True without
     touching the filesystem and ``binary_name`` carries the provider string
     the dispatcher routes on. An unregistered gate says so in
@@ -688,9 +679,6 @@ def write_skip_rationale(
     provider = resolve_gate_provider(gate)
     if provider is None:
         kind, name, found = "unregistered", "", False
-    elif provider[0] == GATE_PROVIDER_SCRIPT_RUNNER:
-        kind, name = provider
-        found = (_repo_root() / name).exists()
     elif provider[0] == GATE_PROVIDER_HARNESS_LANE:
         kind, name = provider
         found = True
@@ -898,6 +886,15 @@ def stamp_request_identity(
     Every request that legitimately carries ``takeover: true`` sets all five
     fields together (see ``_stamp_takeover_annotations``), so a plain
     ``.get()`` with no additional per-field presence check is enough.
+
+    Gate profile (gate-profiel P6, B15): also copies ``profile``, ``profile_source`` and
+    ``profile_error`` from the request onto the result, so the ``review_gate_result``
+    receipt, which reads them off the result payload, names the profile the request
+    resolved. ``gate_request_handler`` writes them inside the request's ``review_seats``
+    record (``ReviewSeats.to_record``); a top-level key on the request wins over that
+    record. Only a non-empty text is copied, so a request from before P6 leaves the keys
+    ABSENT and the receipt reads as unknown, never as ``standard``. A value the result
+    already carries is never overwritten.
     """
     branch = (request_payload.get("branch") or "").strip()
     if not branch:
@@ -936,6 +933,8 @@ def stamp_request_identity(
     execution_id = request_payload.get(gate_status.EXECUTION_ID_FIELD)
     if gate_status.is_execution_id(execution_id):
         result_payload[gate_status.EXECUTION_ID_FIELD] = execution_id
+    for key, value in _profile_receipt_fields(request_payload).items():
+        result_payload.setdefault(key, value)
     return result_payload
 
 
@@ -1102,8 +1101,8 @@ def is_routing_announcement(result: Dict[str, Any]) -> bool:
 # ``provider_disabled``, ``provider_not_configured``, a quota/auth refusal),
 # which is the reader being asked and unable to answer, i.e. a statement about
 # the head. The runner reasons are the executor describing itself: the gate is
-# not registered (``unsupported_gate_type``), the script runner has not shipped
-# (``gate_runner_missing``), or it ships but is not a CLI this runner can drive
+# not registered (``unsupported_gate_type``), the runner file is not on disk
+# (``gate_runner_missing``), or the gate is not a CLI this runner can drive
 # with a prompt (``gate_not_subprocess_routable``).
 #
 # WIDER than :data:`NON_VERDICT_NOT_EXECUTABLE_REASONS` on purpose, because the
@@ -1938,6 +1937,29 @@ _OUTCOME_RECEIPT_EVENT = "review_gate_result"
 _OUTCOME_RECEIPT_ENVELOPE: Dict[str, str] = {"receipt_kind": "review_gate", "terminal": "T0", "source": "vnx_governance"}
 
 
+_PROFILE_RECEIPT_KEYS = ("profile", "profile_source", "profile_error")
+
+
+def _profile_receipt_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The gate profile of the request, stamped on the result receipt (gate-profiel P6, B8/B15).
+
+    Read from the payload top level, else from its ``review_seats`` record (the request's
+    seat record carries them). Only a non-empty text is stamped: a payload from before P6
+    writes no key, so the receipt reads as unknown, never as ``standard``. Additive, outside
+    the envelope and the hash path.
+    """
+    seat_record = payload.get("review_seats")
+    sources = (payload, seat_record if isinstance(seat_record, dict) else {})
+    stamped: Dict[str, Any] = {}
+    for key in _PROFILE_RECEIPT_KEYS:
+        for source in sources:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                stamped[key] = value
+                break
+    return stamped
+
+
 def _outcome_receipt_fields(
     payload: Dict[str, Any], *, gate: str, pr_ref: str, extra_fields: Optional[Mapping[str, Any]],
     book_undecided: bool = False,
@@ -1976,6 +1998,7 @@ def _outcome_receipt_fields(
         value = str(payload.get(key) or "").strip()
         if value:
             fields[key] = value
+    fields.update(_profile_receipt_fields(payload))
     # R1: the head the verdict is about, and an applied --override-b3 with its
     # reason, so the audit copy carries both. The head is stamped under both
     # names: ``commit_sha`` is the field ADR-045 point 4 names and the one the

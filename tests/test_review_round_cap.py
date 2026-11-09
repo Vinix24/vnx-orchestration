@@ -329,3 +329,15 @@ def test_a_malformed_cap_in_the_ledgers_store_raises_even_when_the_process_proje
     with pytest.raises(review_rounds.RoundCapError):
         review_rounds.round_cap(project_id=PROJECT_B, state_dir=store_b)
 
+
+
+def test_the_cap_follows_the_gate_profile_and_standard_is_the_default(monkeypatch):
+    import review_rounds
+
+    assert review_rounds.round_cap() == 3
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "standard")
+    assert review_rounds.round_cap() == 3
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "heavy")
+    assert review_rounds.round_cap() == 5
+    monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
+    assert review_rounds.round_cap() == 2

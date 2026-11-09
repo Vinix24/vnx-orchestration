@@ -25,8 +25,10 @@ gate-shaped result, but both share this one truth.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
+from enum import Enum
 from pathlib import Path
 
 PLAN_OI_PREFIX = "OI-PLAN-"
@@ -310,3 +312,65 @@ def plan_gate_review_state(db_path: "str | Path", track_id: str, project_id: str
         )
     finally:
         conn.close()
+
+
+class PromotionGrant(str, Enum):
+    """Strict outcome of ``verify_promotion_grant`` (ADR-056 D6).
+
+    Only ``VERIFIED`` is enough for delegated autonomy. The other three are all
+    refusals, kept apart so the audit trail can say why.
+    """
+
+    VERIFIED = "verified"                    # valid signature AND exact project_id
+    PRESENT_UNSIGNED = "present_unsigned"    # record exists, carries no verifiable signature
+    SIGNATURE_INVALID = "signature_invalid"  # record is signed but the signature fails
+    ABSENT = "absent"                        # nothing for this (track, project)
+
+
+def _classify_grant(state: str, record: "dict | None", project_id: str, signers_given: bool) -> PromotionGrant:
+    """Translate ``verify_plan_gate_pass`` output into the strict enum.
+
+    Fail-closed: only the exact string ``verified`` with an exact ``project_id``
+    match yields VERIFIED. A record with no project (``None``), another project,
+    or an unknown state is ABSENT for this project.
+    """
+    import plan_gate_evidence as pge
+
+    if not isinstance(record, dict) or state not in (pge.VERIFIED, pge.PRESENT_UNSIGNED):
+        return PromotionGrant.ABSENT
+    if record.get("project_id") != project_id:
+        return PromotionGrant.ABSENT
+    if state == pge.VERIFIED:
+        return PromotionGrant.VERIFIED
+    if signers_given and record.get("signature"):
+        return PromotionGrant.SIGNATURE_INVALID
+    return PromotionGrant.PRESENT_UNSIGNED
+
+
+def verify_promotion_grant(
+    track_id: str,
+    project_id: str,
+    repo_root: "str | Path",
+    allowed_signers: "str | Path | None" = None,
+) -> PromotionGrant:
+    """Read the plan-gate pass of a track as a promotion grant. Read-only; never raises.
+
+    Calls ``plan_gate_evidence.verify_plan_gate_pass`` and tightens it: a failed
+    signature is ``SIGNATURE_INVALID`` (not folded into ``PRESENT_UNSIGNED``), and the
+    record's ``project_id`` must equal ``project_id`` exactly. An empty or non-string
+    ``track_id``/``project_id``, an unreadable ledger or any exception is ``ABSENT``,
+    never ``VERIFIED``.
+    """
+    if not (isinstance(track_id, str) and track_id and isinstance(project_id, str) and project_id):
+        return PromotionGrant.ABSENT
+    try:
+        import plan_gate_evidence as pge
+
+        state, record = pge.verify_plan_gate_pass(repo_root, track_id, project_id, allowed_signers)
+        return _classify_grant(state, record, project_id, allowed_signers is not None)
+    except Exception as exc:  # broad on purpose: a read-only verifier whose every failure reads as ABSENT, never VERIFIED; logged below
+        logging.getLogger(__name__).warning(
+            "promotion grant verification failed for track=%s project=%s: %s: %s",
+            track_id, project_id, type(exc).__name__, exc,
+        )
+        return PromotionGrant.ABSENT

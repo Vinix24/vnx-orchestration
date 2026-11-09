@@ -178,6 +178,16 @@ def _map_harness_spawn_result(result: Any, provider_str: str, model: Optional[st
     )
 
 
+def _codex_state_dir() -> Optional[Path]:
+    """The state dir the codex lane's skill record goes to; the plan has none (ADR-059 decision 13)."""
+    try:
+        from provider_dispatch import _resolve_state_dir  # noqa: PLC0415
+
+        return _resolve_state_dir()
+    except Exception:  # vnx-silent-except: an unresolved state dir is reported as no_state_dir
+        return None
+
+
 def _plan_worker_env(plan: "ExecutionPlan", role: Optional[str]) -> Optional[Dict[str, str]]:
     """``provider_dispatch._worker_role_env`` for a plan: its role, its dispatch paths in the
     raw wire form, and (provider-schakelaar B) its dispatch id and project, so every spawn
@@ -243,6 +253,7 @@ class ProviderAdapter:
                 event_writer=event_writer,
                 extra_env=role_env,
                 cwd=cwd,
+                role=plan.role, state_dir=_codex_state_dir(), project_id=getattr(plan, "project_id", None),
             )
         except BrokenPipeError as exc:
             return _AdapterResult(

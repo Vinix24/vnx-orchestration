@@ -26,10 +26,12 @@ silently.
 
 CLI::
 
-    python3 pinned_engine.py [--source] <project_id> <declared_home> [relative_script]
+    python3 pinned_engine.py [--source] [--with-checkout] <project_id> <declared_home> [relative_script]
     python3 pinned_engine.py [--source] --checkout <checkout> <declared_home> [relative_script]
 
-prints the engine root, or exits 78 with one line. ``--source`` adds a second stdout line
+prints the engine root, or exits 78 with one line. ``--with-checkout`` adds a
+``checkout=<path>`` line (project mode only), so a launcher learns the project checkout
+from the same resolution that picked the engine. ``--source`` adds a ``pin=`` stdout line
 ``pin=<pin>`` when a pin decided the tree (and nothing when it did not), so a caller can
 say WHY it renders from there without re-reading the pin itself. ``relative_script`` is
 the caller's check on the chosen tree: a pin older than the script is refused naming pin
@@ -40,7 +42,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -81,6 +83,7 @@ class EngineChoice:
     engine_root: Path
     source: str  # SOURCE_PIN | SOURCE_DECLARED
     pin: Optional[str] = None
+    checkout: Optional[Path] = None  # the project checkout; set by resolve_engine only
 
 
 @contextmanager
@@ -134,9 +137,9 @@ def resolve_engine(project_id: str, declared_home) -> EngineChoice:
         checkout = resolve_project_root(project_id)
     except ProjectRootRefused as exc:
         raise PinnedEngineRefused(f"project {project_id!r}: {exc}") from exc
-    return _resolve_pinned(
-        Path(checkout).expanduser().resolve(), declared, f"project {project_id!r}"
-    )
+    resolved = Path(checkout).expanduser().resolve()
+    choice = _resolve_pinned(resolved, declared, f"project {project_id!r}")
+    return replace(choice, checkout=resolved)
 
 
 def resolve_engine_for_checkout(checkout, declared_home) -> EngineChoice:
@@ -163,7 +166,7 @@ def _require_script(choice: EngineChoice, subject: str, relative_script: str) ->
 
 
 USAGE = (
-    "usage: pinned_engine.py [--source] <project_id> <declared_home> [relative_script]\n"
+    "usage: pinned_engine.py [--source] [--with-checkout] <project_id> <declared_home> [relative_script]\n"
     "       pinned_engine.py [--source] --checkout <checkout> <declared_home> [relative_script]"
 )
 
@@ -205,7 +208,9 @@ def _parse_args(args: list) -> Optional[tuple]:
 
 
 def main(argv: Optional[list] = None) -> int:
-    parsed = _parse_args(list(sys.argv[1:] if argv is None else argv))
+    args = list(sys.argv[1:] if argv is None else argv)
+    with_checkout = "--with-checkout" in args
+    parsed = _parse_args([arg for arg in args if arg != "--with-checkout"])
     if parsed is None:
         print(USAGE, file=sys.stderr)
         return EX_USAGE
@@ -225,6 +230,8 @@ def main(argv: Optional[list] = None) -> int:
     print(choice.engine_root)
     if with_source and choice.pin is not None:
         print(f"pin={choice.pin}")
+    if with_checkout and choice.checkout is not None:
+        print(f"checkout={choice.checkout}")
     return 0
 
 

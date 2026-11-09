@@ -1,0 +1,1 @@
+- The live protection state reads the merge queue of `main` through GraphQL (`merge_queue`: `null` or `{"enabled": true}`); an enabled queue is drift in `compare()` and a failed read fails the fetch (track `deur-afgedwongen`, D2).

@@ -319,10 +319,10 @@ def test_deepseek_gate_availability_is_wired_to_the_harness_lane_kind(monkeypatc
 
     Confirmed red by reverting the registration to the pre-#1714 shape this
     test guards against: ``GATE_PROVIDERS["deepseek_gate"] =
-    (GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py")`` -- a file that
-    has never existed -- flips ``gate_is_available("deepseek_gate")`` to
-    False, because the SCRIPT_RUNNER branch of ``gate_is_available`` checks
-    the file on disk. That is the exact OI-1714 regression: a real, working
+    (GATE_PROVIDER_PATH_BINARY, "scripts/deepseek_gate.py")`` -- a name that
+    is no binary on PATH -- flips ``gate_is_available("deepseek_gate")`` to
+    False, because the PATH_BINARY branch of ``gate_is_available`` looks the
+    name up on PATH (the script-runner kind this once was is retired). That is the exact OI-1714 regression: a real, working
     provider (the deepseek-harness lane) booked ``gate_runner_missing`` for
     every request because its registration pointed at a script that was never
     built.
@@ -334,7 +334,7 @@ def test_deepseek_gate_availability_is_wired_to_the_harness_lane_kind(monkeypatc
 
     monkeypatch.setitem(
         _rec.GATE_PROVIDERS, "deepseek_gate",
-        (_rec.GATE_PROVIDER_SCRIPT_RUNNER, "scripts/deepseek_gate.py"),
+        (_rec.GATE_PROVIDER_PATH_BINARY, "scripts/deepseek_gate.py"),
     )
     assert not (VNX_ROOT / "scripts" / "deepseek_gate.py").exists(), (
         "this regression check depends on the script genuinely not existing "

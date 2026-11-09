@@ -594,6 +594,21 @@ class PanelComposition:
     chosen_by: str        # "default" | "operator"
     default_label: str    # the configured default seat, named in an override's trace
     second_seat: Optional[str] = None
+    profile: Optional[str] = None
+
+
+def _profile_seat_count(profile_seats: Optional[int]) -> int:
+    """The seat count a gate profile asks for; ``None`` means the profile asks for none.
+
+    Fail-closed: anything but a positive int (a bool is not one) raises, so a malformed
+    profile value cannot quietly become one seat. Only two roles exist (default and
+    escalation), so a count above 2 is the same as 2.
+    """
+    if profile_seats is None:
+        return 1
+    if isinstance(profile_seats, bool) or not isinstance(profile_seats, int) or profile_seats < 1:
+        raise ValueError(f"plan-gate panel: profile_seats must be a positive int, got {profile_seats!r}")
+    return min(profile_seats, 2)
 
 
 def load_seat_roles(config_path: Optional[Path] = None) -> Dict[str, str]:
@@ -634,17 +649,22 @@ def compose_panel(
     *,
     config_path: Optional[Path] = None,
     dispatch_paths: Optional[List[str]] = None,
+    profile_seats: Optional[int] = None,
+    profile: Optional[str] = None,
 ) -> PanelComposition:
     """The composition of one plan-gate run.
 
     Without ``requested_labels`` (no ``--panel-seats``): the default seat, the
     escalation seat for a BLOCK, quorum 1. When ``dispatch_paths`` fall in the
     schema, security or an irreversible class (``second_seat_from_start``), both seats sit from
-    the start, quorum 2. With ``requested_labels``: exactly those seats in
+    the start, quorum 2. ``profile_seats`` (gate profile) raises the count to
+    ``max(profile_seats, 1 or 2 by path)``: the path class is a floor a profile can raise,
+    never lower. ``profile`` is the label recorded on the result. With ``requested_labels``: exactly those seats in
     configured order, no escalation, quorum ``panel_floor(n)``. Both roles must name
     a configured seat whichever way the run goes, so a broken config surfaces on
     the next run, not on the first BLOCK.
     """
+    wanted = _profile_seat_count(profile_seats)
     seats = load_panel_seats(config_path)
     roles = load_seat_roles(config_path)
     configured = [s["label"] for s in seats]
@@ -658,19 +678,20 @@ def compose_panel(
         chosen = filter_panel_seats(seats, requested_labels)
         return PanelComposition(
             seats=chosen, escalation=None, quorum=panel_floor(len(chosen)),
-            chosen_by="operator", default_label=roles["default"],
+            chosen_by="operator", default_label=roles["default"], profile=profile,
         )
     default = filter_panel_seats(seats, [roles["default"]])[0]
     escalation = filter_panel_seats(seats, [roles["escalation"]])[0]
     reason = second_seat_from_start(dispatch_paths)
-    if reason:
+    if reason or wanted >= 2:
         return PanelComposition(
             seats=[default, escalation], escalation=None, quorum=2,
             chosen_by="default", default_label=roles["default"], second_seat=reason,
+            profile=profile,
         )
     return PanelComposition(
         seats=[default], escalation=escalation,
-        quorum=1, chosen_by="default", default_label=roles["default"],
+        quorum=1, chosen_by="default", default_label=roles["default"], profile=profile,
     )
 
 

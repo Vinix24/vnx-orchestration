@@ -250,6 +250,12 @@ def _cmd_set_goal(args: Any) -> int:
     return pc.cmd_objective_set_goal(args)
 
 
+def _cmd_set_autonomous_promotion(args: Any) -> int:
+    pc = _require_planning_cli()
+    _prep(args)
+    return pc.cmd_objective_set_autonomous_promotion(args)
+
+
 _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "add": _cmd_add,
     "list": _cmd_list,
@@ -269,6 +275,7 @@ _VERB_DISPATCH: dict[str, Callable[[Any], int]] = {
     "set-lane-hint": _cmd_set_lane_hint,
     "set-plan-scope": _cmd_set_plan_scope,
     "set-goal": _cmd_set_goal,
+    "set-autonomous-promotion": _cmd_set_autonomous_promotion,
 }
 
 

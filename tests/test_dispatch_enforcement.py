@@ -306,7 +306,7 @@ class TestD13Backstops:
         rc = dispatch_bridge.bridge_dispatch(
             instruction_text="test instruction",
             dispatch_id="test-bridge-open-d13",
-            role="T1",
+            role="backend-developer",
             target_slot="T1",
             project_id="p1",
             data_dir=tmp_path,

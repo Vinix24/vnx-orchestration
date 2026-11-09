@@ -42,7 +42,7 @@ def _stage(tmp_path, **over):
     base = dict(
         instruction_text="fix forward",
         dispatch_id=_GOOD_ID,
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         provider="claude",
@@ -182,7 +182,7 @@ def test_escalation_route_still_stages_its_own_parent_dispatch(tmp_path, monkeyp
         failure_class="model_error",
         instruction_text="escalate: the cheap attempt was rejected",
         dispatch_id="20260815-100000-escalated-followup",
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         data_dir=tmp_path,

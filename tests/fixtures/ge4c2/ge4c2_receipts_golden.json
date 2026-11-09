@@ -135,17 +135,21 @@
           "note": "",
           "reason": "fail-closed: the PR's base branch is not known ('' given); no base is assumed; the caller's --risk-class medium does not lower it",
           "risk_class": "high",
-          "rule_version": "67591075cb2c59b7",
+          "rule_version": "71754c023adb457d",
           "source": "derived"
         },
         "review_seats": {
           "extra_gates": [],
           "key": "",
+          "profile": "standard",
+          "profile_error": null,
+          "profile_source": "default",
           "profile_stack": null,
           "seats": [
             "codex_gate"
           ],
           "source": "explicit",
+          "stack_source": "override",
           "value": "codex_gate"
         },
         "risk_class": "high",

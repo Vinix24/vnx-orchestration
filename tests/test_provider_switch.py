@@ -470,10 +470,16 @@ def _dispatch_spec_providers() -> Set[str]:
 
 
 def _gate_providers() -> Set[str]:
-    value = _assigned(_parse("scripts/lib/gate_recorder.py"), "GATE_PROVIDERS")
+    # GATE_PROVIDERS is the non-row table plus one entry per gate row (review-lane P9b).
+    value = _assigned(_parse("scripts/lib/gate_recorder.py"), "_NON_ROW_PROVIDERS")
     names = {k.value for k in value.keys}
     binaries = {v.elts[1].value for v in value.values}
-    return names | binaries
+    rows = _assigned(_parse("scripts/lib/gate_lane_rows.py"), "GATE_LANE_ROWS")
+    row_names = {
+        kw.value.value for call in ast.walk(rows) if isinstance(call, ast.Call)
+        for kw in call.keywords if kw.arg in ("gate", "lane") and isinstance(kw.value, ast.Constant)
+    }
+    return names | binaries | row_names
 
 
 def _classifier_keys() -> Set[str]:

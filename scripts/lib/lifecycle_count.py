@@ -22,10 +22,11 @@ from dispatch_lifecycle import (  # its table, its grace, its parser: never a co
     ABANDON_GRACE_SECONDS, END_INTENT_DIRNAME, END_STATE_TARGET, PROJECTION_ROUTES,
     SWEEP_HEARTBEAT_FILENAME, _as_utc, deadline_for,
 )
-from coordination_db import DISPATCH_TRANSITIONS  # the legal hops, never a copy
+from coordination_db import DISPATCH_TRANSITIONS, TERMINAL_DISPATCH_STATES  # never a copy
 from ledger_end_line import end_line
 from ndjson_io import NdjsonCorruptionError, read_ndjson_strict
 from receipt_schema import DISPATCH_FINISHED_EVENT_TYPE, DISPATCH_STARTED_EVENT_TYPE
+from actor_class import ACTOR_CLASSES
 from vnx_paths import project_id_from_state_dir
 
 LEDGER_FILENAME = "t0_receipts.ndjson"
@@ -35,6 +36,16 @@ DEFECTS = ("start_without_end", "end_without_start", "double_end", "projection_c
 KEY_FIELDS = ("project_id", "dispatch_id", "attempt")
 GIT_TIMEOUT_SECONDS = 10.0  # a git that hangs must never hang the count
 DEFAULT_REPO = Path(__file__).resolve().parent  # the checkout that writes the lines
+DELIVERABLE_PREFIX = "dlv-"  # ADR-056: only these rows are deliverables
+MERGE_EVENT_TYPE, MERGE_CONCLUSION = "pr_merged", "merged"  # pr_merge.py's receipt
+MEMBER_DELIVERED, MEMBER_NOT_DELIVERED = "delivered", "not_delivered"
+MEMBER_UNKNOWN, MEMBER_OUT = "unknown", "out_of_cohort"
+COVERED, UNCOVERED, NO_DATA = "covered", "uncovered", "no_data"  # D13: per source and per project
+COVERAGE_SOURCES = ("promote", "close", "decide", "merge", "override", "prompt")
+PROMOTE_EVENT, CLOSE_EVENT = "deliverable_promoted", "deliverable_completed"  # planning_cli's events
+DECISION_LOG_FILENAME = "t0_decision_log.jsonl"
+PROMPT_LOG_FILENAME = "prompt_attribution.ndjson"  # the prompt hook's store (PR-8b); absent until then
+PROJECT_UNKNOWN = "unknown"  # ADR-056: a source that cannot name its project writes this
 
 
 class Unmeasured(Exception):
@@ -196,6 +207,280 @@ def _defects(state_dir: Path, starts: dict, ends: dict, records: dict, evaluated
     return found
 
 
+class Member(dict):
+    """One deliverable's cohort membership; a dict (JSON-safe) that also reads as attributes."""
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name) from None
+
+
+def _parse_period_start(value):
+    """The period start as an aware datetime; ``None`` stays ``None``, junk is ``Unmeasured``."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    try:
+        stamp = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise Unmeasured(f"period start {value!r} is not an ISO timestamp") from exc
+    return stamp if stamp.tzinfo is not None else stamp.replace(tzinfo=timezone.utc)
+
+
+def _has_merge_receipt(lines, project: str) -> bool:
+    """A ``pr_merged`` receipt with conclusion exactly ``merged`` for this project (positive match)."""
+    for line in lines:
+        pid = line.get("project_id")
+        if isinstance(pid, str) and pid.strip() and pid.strip() != project:
+            continue
+        if line.get("event_type") == MERGE_EVENT_TYPE and line.get("conclusion") == MERGE_CONCLUSION:
+            return True
+    return False
+
+
+def _member(row: dict, project: str, period_start, records: dict) -> Member:
+    """Decide one terminal row (D9, D10); anything unreadable is ``unknown``, never delivered."""
+    did, state = str(row["dispatch_id"]), str(row.get("state") or "").strip()
+
+    def make(status: str, reason: str) -> Member:
+        return Member(project_id=project, dispatch_id=did, state=state, status=status, reason=reason,
+                      created_at=row.get("created_at"), pr_ref=row.get("pr_ref"))
+
+    if period_start is not None:
+        try:
+            created = _parse_period_start(row.get("created_at"))
+        except Unmeasured:
+            return make(MEMBER_UNKNOWN, "created_at_unreadable")
+        if created is None:
+            return make(MEMBER_UNKNOWN, "created_at_unreadable")
+        if created < period_start:
+            return make(MEMBER_OUT, "created_before_period")
+    if state != "completed":
+        return make(MEMBER_NOT_DELIVERED, state)
+    pr_ref = row.get("pr_ref")
+    if isinstance(pr_ref, str) and pr_ref.strip() and not _has_merge_receipt(records.get(did, ()), project):
+        return make(MEMBER_UNKNOWN, "receipt_missing")
+    return make(MEMBER_DELIVERED, "completed")
+
+
+def _membership(state_dir: Path, project: str, period_start, records: dict) -> list:
+    """Every terminal ``dlv-`` row of this project with its membership, sorted by dispatch id."""
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_UNREADABLE:
+        raise Unmeasured(f"{db_path} exists but is not a regular file; membership is not measurable")
+    if store != STORE_PRESENT:
+        return []
+    marks = ",".join("?" for _ in TERMINAL_DISPATCH_STATES)
+    try:
+        with get_connection(state_dir) as conn:
+            rows = [dict(r) for r in conn.execute(
+                "SELECT dispatch_id, state, pr_ref, created_at FROM dispatches "
+                f"WHERE project_id = ? AND dispatch_id LIKE ? AND state IN ({marks}) "
+                "ORDER BY dispatch_id", (project, DELIVERABLE_PREFIX + "%",
+                                         *sorted(TERMINAL_DISPATCH_STATES)))]
+    except Exception as exc:  # vnx-silent-except: an unreadable store is a refusal, never "no rows"
+        raise Unmeasured(f"cannot read {db_path}: {exc}") from exc
+    return [_member(row, project, period_start, records) for row in rows]
+
+
+def _membership_summary(members: list) -> dict:
+    """Counts per status, so a reader sees the cohort without walking the list."""
+    summary = dict.fromkeys((MEMBER_DELIVERED, MEMBER_NOT_DELIVERED, MEMBER_UNKNOWN, MEMBER_OUT), 0)
+    for member in members:
+        summary[member["status"]] += 1
+    return summary
+
+
+class Coverage(Member):
+    """A project's coverage: ``state`` overall, ``sources`` per counted source (D13)."""
+
+    __slots__ = ()
+
+
+def _text(value) -> str:
+    """A stripped string, or "" for anything that is not one (a malformed field names nothing)."""
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _meta(raw) -> dict:
+    """``metadata_json`` as a dict; unparseable or not an object is an empty one, never a guess."""
+    try:
+        meta = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _sql_rows(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """The rows of a coordination-store table as dicts, read-only.
+
+    An absent store or table holds no rows; an unreadable one is a refusal.
+    """
+    db_path = db_path_from_state_dir(state_dir)
+    store = store_state(db_path)
+    if store == STORE_UNREADABLE:
+        raise Unmeasured(f"{db_path} exists but is not a regular file; coverage is not measurable")
+    if store != STORE_PRESENT:
+        return []
+    try:
+        with get_connection(state_dir) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                            (table,)).fetchone() is None:
+                return []
+            return [dict(r) for r in conn.execute(f"SELECT * FROM {table} {where}", params)]
+    except Exception as exc:  # vnx-silent-except: an unreadable store is a refusal, never "no rows"
+        raise Unmeasured(f"cannot read {db_path}: {exc}") from exc
+
+
+def _sql_entries(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """``(scope, project_id, delivery_id)`` per row of a coordination-store table, read-only.
+
+    Scope is the column when the table has one, else the metadata; the identity reads the
+    metadata first. An absent store or table holds no rows; an unreadable one is a refusal.
+    """
+    entries = []
+    for row in _sql_rows(state_dir, table, where, params):
+        meta = _meta(row.get("metadata_json"))
+        entries.append((row.get("project_id") or meta.get("project_id"),
+                        meta.get("project_id") or row.get("project_id"),
+                        meta.get("delivery_id") or row.get("delivery_id")))
+    return entries
+
+
+def _ndjson_lines(path: Path, event_type=None) -> list:
+    """The object lines of an NDJSON store (optionally of one event type); an absent file has none."""
+    if not path.exists():
+        return []
+    try:
+        lines = read_ndjson_strict(path)
+    except (NdjsonCorruptionError, OSError) as exc:
+        raise Unmeasured(f"cannot read {path}: {exc}; coverage is not measurable") from exc
+    return [ln for ln in lines if isinstance(ln, dict)
+            and (event_type is None or ln.get("event_type") == event_type)]
+
+
+def _ndjson_entries(path: Path, event_type=None) -> list:
+    """``(scope, project_id, delivery_id)`` per line of an NDJSON store; an absent file has none."""
+    return [(ln.get("project_id"), ln.get("project_id"), ln.get("delivery_id"))
+            for ln in _ndjson_lines(path, event_type)]
+
+
+def _row_class(value) -> str:
+    """A recorded actor class, or ``unknown`` for a missing, malformed or foreign value."""
+    text = _text(value)
+    return text if text in ACTOR_CLASSES else PROJECT_UNKNOWN
+
+
+def _sql_source_rows(state_dir: Path, table: str, where: str = "", params: tuple = ()) -> list:
+    """``(project_id, delivery_id, actor_class)`` per row; the class is read from the metadata."""
+    out = []
+    for row in _sql_rows(state_dir, table, where, params):
+        meta = _meta(row.get("metadata_json"))
+        out.append((_text(meta.get("project_id") or row.get("project_id")),
+                    _text(meta.get("delivery_id") or row.get("delivery_id")),
+                    _row_class(meta.get("actor_class"))))
+    return out
+
+
+def _ndjson_source_rows(path: Path, event_type=None) -> list:
+    """``(project_id, delivery_id, actor_class)`` per line; the class is the top-level field."""
+    return [(_text(ln.get("project_id")), _text(ln.get("delivery_id")), _row_class(ln.get("actor_class")))
+            for ln in _ndjson_lines(path, event_type)]
+
+
+def source_rows(state_dir) -> dict:
+    """Per counted source the rows as ``(project_id, delivery_id, actor_class)``, read-only.
+
+    The same stores as ``_coverage_entries``. A row without a readable class reads as
+    ``unknown``; the project is the row's own identity, never inferred. A store that cannot
+    be read raises ``Unmeasured``.
+    """
+    state_path, events = Path(state_dir), "WHERE event_type = ?"
+    return {
+        "promote": _sql_source_rows(state_path, "coordination_events", events, (PROMOTE_EVENT,)),
+        "close": _sql_source_rows(state_path, "coordination_events", events, (CLOSE_EVENT,)),
+        "decide": _ndjson_source_rows(state_path / DECISION_LOG_FILENAME),
+        "merge": _ndjson_source_rows(state_path / LEDGER_FILENAME, MERGE_EVENT_TYPE),
+        "override": _sql_source_rows(state_path, "governance_overrides"),
+        "prompt": _ndjson_source_rows(state_path / PROMPT_LOG_FILENAME),
+    }
+
+
+def terminal_moments(state_dir, project: str) -> dict:
+    """``{dispatch_id: occurred_at}`` of each ``dlv-`` dispatch's transition into its current terminal state.
+
+    The writer is ``runtime_state_machine.transition_dispatch``: it appends a
+    ``coordination_events`` row with ``entity_type='dispatch'``, ``event_type='dispatch_<state>'``
+    and ``to_state='<state>'``, stamped ``occurred_at``. Only that event of this project, matching
+    the dispatch's current terminal state, counts (``dispatches.updated_at`` moves on later writes).
+    A dispatch without such an event, or with an unparseable stamp, is absent: the reader never guesses.
+    """
+    state_path = Path(state_dir)
+    states = {_text(r.get("dispatch_id")): _text(r.get("state")) for r in _sql_rows(
+        state_path, "dispatches", "WHERE project_id = ? AND dispatch_id LIKE ?",
+        (project, DELIVERABLE_PREFIX + "%"))}
+    moments = {}
+    for event in _sql_rows(state_path, "coordination_events",
+                           "WHERE entity_type = ? AND project_id = ?", ("dispatch", project)):
+        did, to_state = _text(event.get("entity_id")), _text(event.get("to_state"))
+        if (to_state in TERMINAL_DISPATCH_STATES and states.get(did) == to_state
+                and event.get("event_type") == f"dispatch_{to_state}"):
+            try:
+                _parse_period_start(event.get("occurred_at"))
+            except Unmeasured:
+                continue
+            moments[did] = _text(event.get("occurred_at"))
+    return moments
+
+
+def _classify(entries: list, project: str) -> dict:
+    """One source: another project's rows never count; no rows is ``no_data``, never covered."""
+    kept = [(_text(scope), _text(pid), _text(did)) for scope, pid, did in entries
+            if _text(scope) in ("", PROJECT_UNKNOWN, project)]
+    # a row whose own project column says "unknown" is uncovered whatever its metadata claims
+    with_identity = sum(1 for scope, pid, did in kept
+                        if scope != PROJECT_UNKNOWN and pid == project and did)
+    state = NO_DATA if not kept else COVERED if with_identity else UNCOVERED
+    return {"state": state, "rows": len(kept), "with_identity": with_identity}
+
+
+def _coverage_entries(state_dir: Path) -> dict:
+    """Each counted source read from the store ADR-056 names for it, through its resolver."""
+    events = "WHERE event_type = ?"
+    return {
+        "promote": _sql_entries(state_dir, "coordination_events", events, (PROMOTE_EVENT,)),
+        "close": _sql_entries(state_dir, "coordination_events", events, (CLOSE_EVENT,)),
+        "decide": _ndjson_entries(state_dir / DECISION_LOG_FILENAME),
+        "merge": _ndjson_entries(state_dir / LEDGER_FILENAME, MERGE_EVENT_TYPE),
+        "override": _sql_entries(state_dir, "governance_overrides"),
+        "prompt": _ndjson_entries(state_dir / PROMPT_LOG_FILENAME),
+    }
+
+
+def measure_coverage(state_dir, *, project_id=None) -> Coverage:
+    """Per counted source: does its store hold rows of this project with ``(project_id, delivery_id)``?
+
+    Read-only. Overall ``state`` is ``no_data`` when no source has a row, ``covered`` when every
+    source is covered, else ``uncovered`` (D13). A store that cannot be read raises ``Unmeasured``.
+    """
+    state_path = Path(state_dir)
+    project = _text(project_id) or project_id_from_state_dir(state_path) or _text(
+        os.environ.get("VNX_PROJECT_ID"))
+    if not project:
+        raise Unmeasured(f"no project id for {state_path}: coverage is read per project")
+    entries = _coverage_entries(state_path)
+    sources = {name: _classify(entries[name], project) for name in COVERAGE_SOURCES}
+    states = {src["state"] for src in sources.values()}
+    overall = NO_DATA if states == {NO_DATA} else COVERED if states == {COVERED} else UNCOVERED
+    return Coverage(project_id=project, state=overall, sources=sources)
+
+
 def _sweep_age(state_dir: Path, evaluated: datetime):
     """The heartbeat K-6 writes: ``(age_seconds, None)``, or ``(None, reason)`` when absent."""
     path = state_dir / END_INTENT_DIRNAME / SWEEP_HEARTBEAT_FILENAME
@@ -214,6 +499,7 @@ def _unmeasured(reason: str, problems=None) -> dict:
     return {"status": STATUS_UNMEASURED, "reason": reason, "cohort": None,
             "counts": dict.fromkeys(DEFECTS), "findings": {name: [] for name in DEFECTS},
             "sweep_heartbeat_age_seconds": None, "sweep_heartbeat_reason": reason,
+            "membership": None, "membership_summary": None, "period_start": None,
             "problems": list(problems) if problems else [reason]}
 
 
@@ -266,12 +552,14 @@ def briefing_line(count: dict, now=None) -> str:
 
 
 def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=None, repo=None,
-                            now=None) -> dict:
+                            now=None, period_start=None) -> dict:
     """Count the five defects over this project's ``v3`` lines. Read-only.
 
     ``activation_commit`` narrows the cohort (without it every ``v3`` line is in
     and ``cohort`` says ``all_v3``), ``repo`` is the checkout the provenance is
     read against, ``now`` the evaluation instant (absent: the real clock).
+    ``period_start`` bounds the deliverable cohort (D9): a ``dlv-`` row created
+    before it is ``out_of_cohort``; absent, no row is excluded by age.
     """
     state_path = Path(state_dir)
     evaluated = _as_utc(now) or datetime.now(timezone.utc)
@@ -290,6 +578,8 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
         starts, ends, unknown, problems, records = _records(
             state_path, repo, activation, project)
         found = _defects(state_path, starts, ends, records, evaluated, problems)
+        start = _parse_period_start(period_start)
+        members = _membership(state_path, project, start, records)
         if problems:  # a problem is not a measurement: no zero may stand for it
             return _unmeasured("; ".join(problems), problems)
     except Unmeasured as exc:
@@ -301,4 +591,6 @@ def compute_lifecycle_count(state_dir, *, project_id=None, activation_commit=Non
             "evaluated_at": evaluated.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "counts": dict(counts, total=sum(counts.values())), "findings": found,
             "sweep_heartbeat_age_seconds": age, "sweep_heartbeat_reason": age_reason,
+            "membership": members, "membership_summary": _membership_summary(members),
+            "period_start": start.strftime("%Y-%m-%dT%H:%M:%SZ") if start else None,
             "problems": problems}

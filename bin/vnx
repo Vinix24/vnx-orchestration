@@ -370,6 +370,8 @@ Gate commands (pre-merge verification):
   pr-ready <N> [<N>..]  Merge readiness: required contexts + gate evidence on the
                         current head, and what closing each gap costs
                         (exit 0 ready, 1 not ready, 2 unmeasurable)
+  gate-profile show [--json]   The gate profile in force plus the stack the door asks and the stack vnx gate verifies
+  gate-profile --value <field> [--csv]   One field (review_stack, round_cap, takeover_chain, plan_gate_seats, required_stack)
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
@@ -378,6 +380,8 @@ Gate commands (pre-merge verification):
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
+  context-manifest    Read the context-manifest sidecar per provider (read-only)
+                        Options: --json, --by provider, --state-dir <dir>
 
 Planning commands (strategic-layer read surface):
   horizon <verb>     Planning layer: objectives, deliverables, plan-gate
@@ -1382,80 +1386,141 @@ cmd_bootstrap_skills() {
 # and a dry-run preview is the DEFAULT — --apply is required to write.
 cmd_skills_sync() {
   _guard_not_vnx_home "$PROJECT_ROOT" || return 1
-  local apply=0
+  local apply=0 target=""
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --apply)   apply=1; shift ;;
       --dry-run) apply=0; shift ;;
-      -h|--help) echo "Usage: vnx skills sync [--apply|--dry-run]"; return 0 ;;
+      --for)     target="${2:-}"; shift; [ "$#" -gt 0 ] && shift
+                 case "$target" in codex|gemini) ;; *) err "[skills-sync] --for needs codex or gemini (got '${target}')"; return 1 ;; esac ;;
+      -h|--help) echo "Usage: vnx skills sync [--for codex|gemini] [--apply|--dry-run]"; return 0 ;;
       *) err "[skills-sync] unknown argument: $1"; return 1 ;;
     esac
   done
 
+  _skills_sync_preflight || return 1
   local shipped_skills_dir="$VNX_HOME/skills"
   local project_skills_dir="$PROJECT_ROOT/.claude/skills"
+  _skills_sync_excludes "$shipped_skills_dir"
 
-  if [ ! -d "$shipped_skills_dir" ]; then
-    err "[skills-sync] missing shipped skills dir: $shipped_skills_dir"; return 1
+  # Itemized dry-run: lines NOT starting with '.' are real changes (transfers/creates).
+  local changes do_mirror=0 refreshed=0
+  changes="$(rsync -ai --dry-run "${SKILLS_SYNC_EXCLUDES[@]}" "$shipped_skills_dir/" "$project_skills_dir/" 2>/dev/null \
+    | grep -vE '^(\.| *$|sending|sent |total )' || true)"
+
+  if [ -z "$changes" ]; then
+    log "[skills-sync] project skills already current with $VNX_HOME (no changes)"
+  else
+    log "[skills-sync] shipped skills differ from project — these would update:"
+    printf '%s\n' "$changes"
+    if [ "$apply" -eq 0 ]; then
+      log "[skills-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
+    else
+      _skills_sync_refresh "$shipped_skills_dir" "$project_skills_dir" || return 1
+      do_mirror=1; refreshed=1
+    fi
   fi
-  if [ ! -d "$project_skills_dir" ]; then
-    err "[skills-sync] no project skills dir — run 'vnx bootstrap-skills' first: $project_skills_dir"
+  # An explicit --for is the operator's intent: mirror whether or not .claude/skills changed.
+  [ -n "$target" ] && do_mirror=1
+  if [ "$do_mirror" -eq 1 ]; then
+    _skills_sync_mirrors "$apply" "$target" "$shipped_skills_dir" || return 1
+  fi
+  [ "$refreshed" -eq 1 ] && log "[skills-sync] done. Had local skill edits? Diff against $PROJECT_ROOT/.claude/skills.bak.* and re-apply them."
+  return 0
+}
+
+_skills_sync_preflight() {
+  if [ ! -d "$VNX_HOME/skills" ]; then
+    err "[skills-sync] missing shipped skills dir: $VNX_HOME/skills"; return 1
+  fi
+  if [ ! -d "$PROJECT_ROOT/.claude/skills" ]; then
+    err "[skills-sync] no project skills dir — run 'vnx bootstrap-skills' first: $PROJECT_ROOT/.claude/skills"
     return 1
   fi
   if ! command -v rsync >/dev/null 2>&1; then
     err "[skills-sync] rsync required for sync (and its dry-run preview)"; return 1
   fi
+}
 
-  # Directory-based sync: every directory containing a SKILL.md propagates.
-  # Opt-out marker (.vnx-skip-sync) lets project-local-only skills live under
-  # skills/ without leaking to consumer projects.
-  local -a rsync_excludes=("--exclude=.vnx-skip-sync")
+# Directory-based sync: every directory containing a SKILL.md propagates.
+# Opt-out marker (.vnx-skip-sync) lets project-local-only skills live under
+# skills/ without leaking to consumer projects. Result: global SKILLS_SYNC_EXCLUDES.
+_skills_sync_excludes() {
+  SKILLS_SYNC_EXCLUDES=("--exclude=.vnx-skip-sync")
   local skill_dir
-  for skill_dir in "$shipped_skills_dir"/*; do
+  for skill_dir in "$1"/*; do
     [ -d "$skill_dir" ] || continue
-    [ -f "$skill_dir/.vnx-skip-sync" ] && rsync_excludes+=("--exclude=$(basename "$skill_dir")/")
+    [ -f "$skill_dir/.vnx-skip-sync" ] && SKILLS_SYNC_EXCLUDES+=("--exclude=$(basename "$skill_dir")/")
   done
+  return 0
+}
 
-  # Itemized dry-run: lines NOT starting with '.' are real changes (transfers/creates).
-  local changes
-  changes="$(rsync -ai --dry-run "${rsync_excludes[@]}" "$shipped_skills_dir/" "$project_skills_dir/" 2>/dev/null \
-    | grep -vE '^(\.| *$|sending|sent |total )' || true)"
-
-  if [ -z "$changes" ]; then
-    log "[skills-sync] project skills already current with $VNX_HOME (no changes)"
-    return 0
-  fi
-
-  log "[skills-sync] shipped skills differ from project — these would update:"
-  printf '%s\n' "$changes"
-
-  if [ "$apply" -eq 0 ]; then
-    log "[skills-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
-    return 0
-  fi
-
+_skills_sync_refresh() {
   local ts backup
   ts="$(date +%Y%m%d-%H%M%S)"
   backup="$PROJECT_ROOT/.claude/skills.bak.$ts"
-  if ! cp -R "$project_skills_dir" "$backup"; then
+  if ! cp -R "$2" "$backup"; then
     err "[skills-sync] backup failed; aborting (no changes made)"; return 1
   fi
   log "[skills-sync] backed up current skills -> $backup"
-
-  rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$project_skills_dir/"
+  rsync -a "${SKILLS_SYNC_EXCLUDES[@]}" "$1/" "$2/"
   log "[skills-sync] refreshed .claude/skills/ from $VNX_HOME (project-only skills preserved)"
+}
 
-  # Mirror to the provider skill paths if those tools + dirs are present (matches bootstrap-skills).
-  if command -v codex >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.agents/skills" ]; then
-    rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$PROJECT_ROOT/.agents/skills/"
-    log "[skills-sync] mirrored to Codex (.agents/skills/)"
-  fi
-  if command -v gemini >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/.gemini/skills" ]; then
-    rsync -a "${rsync_excludes[@]}" "$shipped_skills_dir/" "$PROJECT_ROOT/.gemini/skills/"
-    log "[skills-sync] mirrored to Gemini (.gemini/skills/)"
-  fi
+# Mirror to the provider skill paths. With an explicit --for only that provider is
+# mirrored, installed CLI or not; without it the CLI probe and an existing dir gate
+# each mirror, exactly as bootstrap-skills does.
+_skills_sync_mirrors() {
+  local apply="$1" target="$2" provider dir
+  for provider in codex gemini; do
+    if [ "$provider" = "codex" ]; then dir=".agents/skills"; else dir=".gemini/skills"; fi
+    if [ -n "$target" ]; then
+      [ "$target" = "$provider" ] || continue
+    else
+      command -v "$provider" >/dev/null 2>&1 && [ -d "$PROJECT_ROOT/$dir" ] || continue
+    fi
+    _skills_sync_mirror_one "$provider" "$PROJECT_ROOT/$dir" "$apply" "$3" || return 1
+  done
+}
 
-  log "[skills-sync] done. Had local skill edits? Diff against $backup and re-apply them."
+_skills_sync_mirror_one() {
+  local provider="$1" dest="$2" apply="$3" shipped="$4" label
+  if [ "$provider" = "codex" ]; then label="Codex"; else label="Gemini"; fi
+  _skills_sync_lint "$provider" "$shipped"
+  if [ "$apply" -eq 0 ]; then
+    if [ -d "$dest" ]; then
+      log "[skills-sync] dry-run: $label mirror would update:"
+      rsync -ai --dry-run "${SKILLS_SYNC_EXCLUDES[@]}" "$shipped/" "$dest/" 2>/dev/null \
+        | grep -vE '^(\.| *$|sending|sent |total )' || true
+    else
+      log "[skills-sync] dry-run: $label mirror would create $dest"
+    fi
+    return 0
+  fi
+  mkdir -p "$dest"
+  rsync -a "${SKILLS_SYNC_EXCLUDES[@]}" "$shipped/" "$dest/"
+  log "[skills-sync] mirrored to $label (${dest#"$PROJECT_ROOT"/}/)"
+}
+
+# Portability lint: the one rule lives in scripts/lib/skill_portability.py (SP-1). A
+# skill the detector flags is reported by name and still mirrored (a warning, not a gate).
+# A detector that cannot run is reported too: no result is never read as "all portable".
+_skills_sync_lint() {
+  local provider="$1" names rc=0 name
+  names="$(PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" "$VNX_PYTHON" -c '
+import sys
+from pathlib import Path
+import skill_portability
+print("\n".join(skill_portability.provider_unsafe_skills(Path(sys.argv[1]))))
+' "$2" 2>&1)" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "[skills-sync] WARN: portability check for $provider could not run (exit $rc): ${names##*$'\n'}"
+    return 0
+  fi
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    log "[skills-sync] WARN: skill '$name' is not portable to $provider (uses a ~/.claude path); mirrored anyway"
+  done <<< "$names"
 }
 
 # cmd_skills — 'vnx skills <sub>' dispatcher. Subcommands inherit the 'skills' mode tier
@@ -1471,8 +1536,10 @@ cmd_skills() {
 Usage: vnx skills <command>
 
 Commands:
-  sync [--apply|--dry-run]   Refresh .claude/skills/ from the installed VNX (canonical),
-                             with a timestamped backup. Default is --dry-run (preview).
+  sync [--for codex|gemini] [--apply|--dry-run]
+                             Refresh .claude/skills/ from the installed VNX (canonical),
+                             with a timestamped backup. --for also mirrors to that provider's
+                             skill dir, installed CLI or not. Default is --dry-run (preview).
 HELP
   else
     err "[skills] unknown subcommand: $sub (try 'vnx skills --help')"
@@ -1501,6 +1568,49 @@ _role_sync_block_current() {
   fi
   rm -f "$scratch"
   [ "$probe_result" -eq 0 ]
+}
+
+# _role_sync_upsert_block FILE SNIPPET BEGIN END LABEL APPLY — one marked block
+# in one provider file. Dry-run reports; --apply backs the file up once per run
+# (the caller's $touched_files) before the first real change, then upserts.
+# Appends to the caller's $changed_files and $touched_files (dynamic scope).
+_role_sync_upsert_block() {
+  local provider_file="$1" snippet_file="$2" marker_begin="$3" marker_end="$4" label="$5" apply="$6"
+  local base result
+  base="$(basename "$provider_file")"
+
+  if _role_sync_block_current "$provider_file" "$snippet_file" "$marker_begin" "$marker_end"; then
+    log "[role-sync] $base $label already current (no changes)"
+    return 0
+  fi
+
+  if [ "$apply" -eq 0 ]; then
+    log "[role-sync] would sync $label -> $provider_file"
+    return 0
+  fi
+
+  if [ -f "$provider_file" ] && [[ "$touched_files" != *"|$provider_file|"* ]]; then
+    local ts backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup="$provider_file.bak.$ts"
+    if ! cp "$provider_file" "$backup"; then
+      err "[role-sync] backup failed for $provider_file; aborting"; return 1
+    fi
+    log "[role-sync] backed up $base -> $backup"
+  fi
+  touched_files="$touched_files|$provider_file|"
+
+  if vnx_upsert_marked_block "$provider_file" "$snippet_file" "$marker_begin" "$marker_end"; then
+    result=0
+  else
+    result=$?
+  fi
+  case "$result" in
+    0) log "[role-sync] $base $label already current (no changes)" ;;
+    1) log "[role-sync] created $provider_file"; [[ " ${changed_files[*]-} " == *" $base "* ]] || changed_files+=("$base") ;;
+    2) log "[role-sync] updated $provider_file ($label)"; [[ " ${changed_files[*]-} " == *" $base "* ]] || changed_files+=("$base") ;;
+    *) err "[role-sync] failed to update $provider_file"; return 1 ;;
+  esac
 }
 
 # cmd_role_sync — idempotent refresh of a project's CANONICAL orchestrator role
@@ -1686,45 +1796,33 @@ cmd_role_sync() {
   # block those commands manage.
   local role_marker_begin="<!-- VNX:BEGIN T0-ROLE -->"
   local role_marker_end="<!-- VNX:END T0-ROLE -->"
+  local playbook_marker_begin="<!-- VNX:BEGIN T0-PLAYBOOK -->"
+  local playbook_marker_end="<!-- VNX:END T0-PLAYBOOK -->"
   local changed_files=()
-  local provider_file base
+  local touched_files=""
+  local provider_file
+
+  # T0-PLAYBOOK pointer block (ADR-058): resolved by scripts/lib/t0_playbook.py,
+  # the one resolver. Exit 3 = no playbook source anywhere: say so, write no
+  # block, keep syncing the role.
+  local playbook_snippet playbook_rc=0
+  playbook_snippet="$(mktemp)"
+  "$VNX_PYTHON" "$VNX_HOME/scripts/lib/t0_playbook.py" body \
+    --project-root "$target_root" --vnx-home "$VNX_HOME" --out "$playbook_snippet" >/dev/null || playbook_rc=$?
+  if [ "$playbook_rc" -ne 0 ] && [ "$playbook_rc" -ne 3 ]; then
+    rm -f "$playbook_snippet"
+    err "[role-sync] playbook source resolution failed (rc=$playbook_rc); aborting (no changes made)"; return 1
+  fi
 
   for provider_file in "$project_t0_dir/AGENTS.md" "$project_t0_dir/GEMINI.md"; do
-    base="$(basename "$provider_file")"
-
-    if _role_sync_block_current "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
-      log "[role-sync] $base already current (no changes)"
-      continue
+    _role_sync_upsert_block "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end" \
+      "role block" "$apply" || { rm -f "$playbook_snippet"; return 1; }
+    if [ "$playbook_rc" -eq 0 ]; then
+      _role_sync_upsert_block "$provider_file" "$playbook_snippet" "$playbook_marker_begin" "$playbook_marker_end" \
+        "T0-PLAYBOOK block" "$apply" || { rm -f "$playbook_snippet"; return 1; }
     fi
-
-    if [ "$apply" -eq 0 ]; then
-      log "[role-sync] would sync canonical role block -> $provider_file"
-      continue
-    fi
-
-    if [ -f "$provider_file" ]; then
-      local ts backup
-      ts="$(date +%Y%m%d-%H%M%S)"
-      backup="$provider_file.bak.$ts"
-      if ! cp "$provider_file" "$backup"; then
-        err "[role-sync] backup failed for $provider_file; aborting"; return 1
-      fi
-      log "[role-sync] backed up $base -> $backup"
-    fi
-
-    local result
-    if vnx_upsert_marked_block "$provider_file" "$shipped_role" "$role_marker_begin" "$role_marker_end"; then
-      result=0
-    else
-      result=$?
-    fi
-    case "$result" in
-      0) log "[role-sync] $base already current (no changes)" ;;
-      1) log "[role-sync] created $provider_file"; changed_files+=("$base") ;;
-      2) log "[role-sync] updated $provider_file"; changed_files+=("$base") ;;
-      *) err "[role-sync] failed to update $provider_file"; return 1 ;;
-    esac
   done
+  rm -f "$playbook_snippet"
 
   if [ "$apply" -eq 0 ]; then
     log "[role-sync] dry-run (default). Re-run with --apply to update (a backup is made first)."
@@ -2607,6 +2705,9 @@ main() {
     providers)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/providers_cli.py" "$@"
       ;;
+    gate-profile)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/gate_profile_cli.py" "$@"
+      ;;
     gate-reanchor)
       "$VNX_PYTHON" "$VNX_HOME/scripts/gate_reanchor_cli.py" "$@"
       ;;
@@ -2675,6 +2776,9 @@ main() {
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
+      ;;
+    context-manifest)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/context_manifest_report.py" "$@"
       ;;
     help|-h|--help)
       usage

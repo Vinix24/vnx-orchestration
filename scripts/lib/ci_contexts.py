@@ -36,6 +36,9 @@ So this module distinguishes the states that actually differ:
                         applies (no workflow file produces the context, the
                         graph failed to parse, a gh call failed)
 
+``vnx-gate/door``, the permit only the door publishes at merge time, has three
+more states of its own (ADR-061 §6); see :func:`_classify_door`.
+
 ``unverified`` is never collapsed into a pass and never into a fail. A guard
 that cannot see must say so — the same fail-loud contract
 ``pre_merge_gate.check_ci_workflow`` already holds for SKIPPED_UNVERIFIED.
@@ -69,10 +72,21 @@ STATE_WAITING_UPSTREAM = "waiting_upstream"
 STATE_NEVER_CREATED = "never_created"
 STATE_NO_RUN = "no_run"
 STATE_UNVERIFIED = "unverified"
+STATE_PUBLISHED_AT_MERGE = "published_at_merge"
+STATE_PERMIT_REVOKED = "permit_revoked"
+STATE_DOOR_RUNS_AMBIGUOUS = "door_runs_ambiguous"
 
 #: An allowlist, not a blocklist of failures: a state added later blocks until
 #: someone decides otherwise, never silently mergeable.
-NON_BLOCKING_STATES = frozenset({STATE_PASSED})
+NON_BLOCKING_STATES = frozenset({STATE_PASSED, STATE_PUBLISHED_AT_MERGE})
+
+#: The door's permit (ADR-061 §6): a closed set of one exact name, signed by one
+#: App (``app.app_id`` in ``scripts/forge/branch_protection.yaml``). Both are
+#: pinned in ``tests/test_ci_contexts_door.py``; ``{pr}`` is the PR number.
+DOOR_CONTEXT = "vnx-gate/door"
+DOOR_APP_ID = 4869217
+DOOR_RECOVERY_REPERMIT = "python3 scripts/pr_merge.py --pr {pr}"
+DOOR_RECOVERY_NEW_COMMIT = "push een nieuwe commit"
 
 #: "This commit can still produce the context if you wait." Distinct from
 #: blocking-ness: a waiting context blocks now, but the fix is time, not a re-run.
@@ -146,6 +160,8 @@ class ContextState:
     conclusion: Optional[str] = None
     workflow_name: Optional[str] = None
     job_key: Optional[str] = None
+    #: What lifts the block; set only by the door states, ``{pr}`` is the PR number.
+    recovery: Optional[str] = None
 
     @property
     def blocking(self) -> bool:
@@ -154,6 +170,12 @@ class ContextState:
     @property
     def transient(self) -> bool:
         return self.state in TRANSIENT_STATES
+
+    def recovery_for(self, pr_number: Optional[int] = None) -> Optional[str]:
+        """The recovery text, with ``N`` for a PR number the caller does not know."""
+        if self.recovery is None:
+            return None
+        return self.recovery.replace("{pr}", "N" if pr_number is None else str(pr_number))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -165,6 +187,7 @@ class ContextState:
             "job_key": self.job_key,
             "blocking": self.blocking,
             "transient": self.transient,
+            "recovery": self.recovery_for(),
         }
 
 
@@ -488,6 +511,46 @@ def _classify_absent(
     )
 
 
+def _classify_door(check: RequiredCheck, named: Sequence[Mapping[str, Any]]) -> Optional[ContextState]:
+    """The door states of ADR-061 §6, or None for today's reading.
+
+    Only for exactly :data:`DOOR_CONTEXT` bound to :data:`DOOR_APP_ID` (any other
+    binding is drift), and only while no foreign run carries the name: such a run
+    goes on to the ``wrong_app`` reading and never becomes "published at merge".
+    """
+    if check.context != DOOR_CONTEXT or check.app_id != DOOR_APP_ID:
+        return None
+    door_runs, foreign = _split_by_app(named, DOOR_APP_ID)
+    if foreign:
+        return None
+    if not door_runs:
+        return ContextState(
+            context=check.context, state=STATE_PUBLISHED_AT_MERGE,
+            detail="geen check-run op deze kop: de deur publiceert deze bij de merge",
+        )
+    if len(door_runs) > 1:
+        return ContextState(
+            context=check.context, state=STATE_DOOR_RUNS_AMBIGUOUS,
+            detail=(
+                f"{len(door_runs)} runs van de deur-App op deze kop; de deur houdt er één per kop "
+                "en kiest niet welke hij bijwerkt, dus een nieuwe commit is nodig"
+            ),
+            recovery=DOOR_RECOVERY_NEW_COMMIT,
+        )
+    run = door_runs[0]
+    # Exact match on both: a run in flight or with any other conclusion keeps today's reading.
+    if run.get("status") == COMPLETED_STATUS and run.get("conclusion") == "failure":
+        return ContextState(
+            context=check.context, state=STATE_PERMIT_REVOKED, conclusion="failure",
+            detail=(
+                f"de deur heeft de toestemming ingetrokken na een mislukte merge (run {run.get('id')}); "
+                "de deur draait elke preflight opnieuw en zet deze run alleen bij een GO terug op success"
+            ),
+            recovery=DOOR_RECOVERY_REPERMIT,
+        )
+    return None
+
+
 def classify_contexts(
     required_contexts: Iterable[Any],
     check_runs: Iterable[Mapping[str, Any]],
@@ -514,6 +577,10 @@ def classify_contexts(
         context = check.context
         node = graph.by_context.get(context)
         named = indexed.get(context) or []
+        door = _classify_door(check, named)
+        if door is not None:
+            states.append(door)
+            continue
         present, wrong_app = _split_by_app(named, check.app_id)
         if wrong_app and not present:
             states.append(
@@ -566,6 +633,7 @@ def summarise(states: Sequence[ContextState]) -> Dict[str, Any]:
         "never_created": len([s for s in states if s.state == STATE_NEVER_CREATED]),
         "no_run": len([s for s in states if s.state == STATE_NO_RUN]),
         "unverified": len([s for s in states if s.state == STATE_UNVERIFIED]),
+        "published_at_merge": len([s for s in states if s.state == STATE_PUBLISHED_AT_MERGE]),
         "by_state": {s.context: s.state for s in states},
         "blocking_contexts": [s.to_dict() for s in blocking],
     }

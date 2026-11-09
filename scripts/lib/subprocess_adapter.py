@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 # skip-permissions).
 try:
     from worker_permissions import (
+        PermissionPolicyRefused,
         UnknownRoleError,
         build_claude_scope_args,
         resolve_worker_profile,
@@ -68,12 +69,16 @@ except Exception:  # pragma: no cover - sibling import is available in-tree
     worker_scoped_enabled = None
     worker_permission_enforcement_enabled = None
 
-    class UnknownRoleError(Exception):  # pragma: no cover - placeholder, unreachable:
+    class PermissionPolicyRefused(Exception):  # pragma: no cover - placeholder, unreachable
+        reason = "refused"
+
+    class UnknownRoleError(PermissionPolicyRefused):  # pragma: no cover - placeholder, unreachable:
         # resolve_worker_profile is None above, so _build_worker_scope_args never
         # calls it and this class is never actually raised in this branch.
         pass
 
 _LEGACY_SKIP_FLAG = "--dangerously-skip-permissions"
+_POLICY_DIGEST_ENV = "VNX_PERMISSION_POLICY_DIGEST"
 
 # The import-failure fallback, mirrored from worker_permissions (which may be
 # exactly the import that failed). Each value matches the scoped default a code
@@ -110,7 +115,16 @@ _FALLBACK_SCOPE_ARGS = _fallback_scope_args()
 
 
 def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) -> List[str]:
-    """Return the capability-scoping argv head for a headless ``claude`` spawn.
+    """The capability-scoping argv head of :func:`_scope_args_and_profile`, the argv alone."""
+    return _scope_args_and_profile(role, requires_mcp)[0]
+
+
+def _scope_args_and_profile(role: Optional[str], requires_mcp: bool = False) -> tuple:
+    """Return ``(argv, profile)``: the scoping argv head for a headless ``claude`` spawn.
+
+    ``profile`` is the resolved role profile (it carries ``policy_digest``), or
+    None on the paths that never resolve one: the import-failure fallback and
+    the legacy skip-permissions opt-out.
 
     Scoped is the default: acceptEdits, an empty ambient ``--mcp-config`` plus
     ``--strict-mcp-config`` and the ``mcp__*`` deny, and the role's allow/deny
@@ -134,26 +148,35 @@ def _build_worker_scope_args(role: Optional[str], requires_mcp: bool = False) ->
         # VNX_WORKER_BLANKET_SKIP / VNX_WORKER_SCOPED here: the module that
         # owns their semantics is the one that failed, so interpreting them
         # locally is how the fallback drifted open before. Fail closed.
-        return _fallback_scope_args(requires_mcp)
+        return _fallback_scope_args(requires_mcp), None
     # New enforcement flag OR legacy scoped flag opts into scoped args.
     scoped = worker_scoped_enabled() or worker_permission_enforcement_enabled()
     if not scoped:
-        return [_LEGACY_SKIP_FLAG]
+        return [_LEGACY_SKIP_FLAG], None
+    profile = _refuse_unproven("policy resolution", "policy-resolution-error",
+                               resolve_worker_profile, role)
+    argv = _refuse_unproven("scope args build", "scope-args-build-error",
+                            build_claude_scope_args, profile, requires_mcp=requires_mcp)
+    return argv, profile
+
+
+def _refuse_unproven(step: str, slug: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one policy step. A refusal propagates as is (deliver() turns it into a clean
+    pre-flight rejection, including a role in no register, OI-1069 pt.5); any other
+    failure is an unproven policy and refuses under its own *slug*, never a fallback scope.
+    The two steps carry distinct slugs so an MCP config error is not read as a resolution error.
+    """
     try:
-        return build_claude_scope_args(resolve_worker_profile(role), requires_mcp=requires_mcp)
-    except UnknownRoleError:
-        # A role absent from every register (OI-1069 pt.5) must refuse the
-        # dispatch, not degrade into a fallback scope — re-raise so
-        # deliver() converts it into a proper DeliveryResult(success=False)
-        # before any subprocess spawns, instead of the generic handler
-        # below silently continuing with _FALLBACK_SCOPE_ARGS.
+        return fn(*args, **kwargs)
+    except PermissionPolicyRefused:
         raise
-    except Exception as exc:  # logged below; the fallback stays scoped, never skip-permissions
-        logger.warning(
-            "subprocess_adapter: scope-arg build failed (%s); using scoped code-worker default",
-            exc,
-        )
-        return _fallback_scope_args(requires_mcp)
+    except Exception as exc:
+        raise PermissionPolicyRefused(f"{step} failed: {type(exc).__name__}", slug) from exc
+
+
+def _refusal_slug(exc: "PermissionPolicyRefused") -> str:
+    """The slug a refused delivery names: the legacy ``unknown_role`` or the refusal's own reason."""
+    return "unknown_role" if isinstance(exc, UnknownRoleError) else exc.reason
 
 
 def _resolve_scope_args(
@@ -170,6 +193,54 @@ def _resolve_scope_args(
     if scope_args is not None:
         return list(scope_args)
     return _build_worker_scope_args(role, requires_mcp=requires_mcp)
+
+
+def _scope_with_record(
+    role: Optional[str], requires_mcp: bool, scope_args: Optional[List[str]],
+    terminal_id: str, dispatch_id: str, lane: Optional[str],
+) -> "tuple[List[str], Dict[str, str]]":
+    """``(scope argv, policy env)`` for one delivery, and the material record written.
+
+    The env carries ``VNX_PERMISSION_POLICY_DIGEST`` only when a policy was resolved;
+    a caller-stated scope or the legacy skip path never claims a digest. The argv is
+    exactly what :func:`_resolve_scope_args` returns: nothing here changes a flag.
+    """
+    profile = None
+    if scope_args is not None:
+        args = list(scope_args)
+    else:
+        args, profile = _scope_args_and_profile(role, requires_mcp)
+    digest = getattr(profile, "policy_digest", None)
+    _write_policy_record(terminal_id, dispatch_id, lane, digest, args)
+    return args, ({_POLICY_DIGEST_ENV: digest} if digest else {})
+
+
+def _write_policy_record(
+    terminal_id: str, dispatch_id: str, lane: Optional[str], digest: Optional[str],
+    flags: List[str],
+) -> None:
+    """Write the material record atomically; a failed write is logged, never a delivery failure.
+
+    The record is evidence about the spawn, not a gate on it (enforcement is OFF by default);
+    the failure is a WARNING with the dispatch id so the gap is visible.
+    """
+    try:
+        import permission_harness_map
+        from atomic_io import atomic_write_json
+        data_dir = os.environ.get("VNX_DATA_DIR", "")
+        if not data_dir:
+            from vnx_paths import resolve_paths
+            data_dir = resolve_paths()["VNX_DATA_DIR"]
+        record = permission_harness_map.material_record(lane, digest, flags, dispatch_id)
+        record["terminal_id"] = terminal_id
+        atomic_write_json(
+            Path(data_dir) / "state" / "permission_records" / f"{terminal_id}_{dispatch_id}.json",
+            record,
+        )
+    except Exception as exc:  # vnx-silent-except: evidence write must not fail the spawn; WARNING below names it
+        logger.warning(
+            "subprocess_adapter: policy material record not written for %s: %s", dispatch_id, exc,
+        )
 
 
 def _refused_delivery(terminal_id: str, dispatch_id: str, failure_reason: str) -> DeliveryResult:
@@ -501,11 +572,10 @@ class SubprocessAdapter:
         # the instruction before the scope args keeps it as the -p prompt positional.
         cmd.append(effective_instruction)
         try:
-            cmd.extend(_resolve_scope_args(effective_role, requires_mcp, scope_args))
-        except UnknownRoleError as exc:
-            # Refuse before any subprocess spawns (OI-1069 pt.5) — no cmd has
-            # been Popen'd yet, so this is a clean pre-flight rejection.
-            return _refused_delivery(terminal_id, dispatch_id, f"unknown_role: {exc}")
+            cmd.extend((policy_env := _scope_with_record(effective_role, requires_mcp, scope_args, terminal_id, dispatch_id, kwargs.get("lane")))[0])
+        except PermissionPolicyRefused as exc:
+            # Refuse before any subprocess spawns (OI-1069 pt.5): a clean pre-flight rejection.
+            return _refused_delivery(terminal_id, dispatch_id, f"{_refusal_slug(exc)}: {exc}")
 
         # Resolve stderr logfile path.  Writing stderr to an append-mode file
         # rather than subprocess.PIPE prevents pipe-buffer-deadlock when the
@@ -538,8 +608,8 @@ class SubprocessAdapter:
             popen_kwargs["cwd"] = str(cwd)
         # Always export the dispatch id so worker commits carry a provenance trace token
         # (prepare-commit-msg hook -> trace_token_validator), closing the dispatch->commit link.
-        if extra_env or scrub_env_keys or dispatch_id:
-            popen_kwargs["env"] = _child_env(dispatch_id, extra_env, scrub_env_keys)
+        if extra_env or scrub_env_keys or dispatch_id or policy_env[1]:
+            popen_kwargs["env"] = _child_env(dispatch_id, {**(extra_env or {}), **policy_env[1]}, scrub_env_keys)
 
         # Clear stale session_id before spawning; updated when the init event arrives.
         self._session_ids.pop(terminal_id, None)

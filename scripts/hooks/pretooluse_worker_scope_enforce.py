@@ -72,9 +72,15 @@ Audit: every block decision appends one ``worker_scope_block`` event to
 $VNX_DATA_DIR/events/worker_scope_block.ndjson via atomic_io.audit_event_append
 (same audit channel as the rest of the fabric).
 
-Fail-open by construction: any missing dependency, malformed payload, or
-unexpected exception results in an "allow" decision. This hook must never be
-the reason a legitimate tool call is refused.
+Fail-open outside the policy, fail-closed inside it. Fail-open: a missing
+dependency at import, a malformed hook payload, an unreadable dispatch-paths
+variable and an audit-write failure result in an "allow" decision; the hook must
+never be the reason a legitimate tool call is refused for those. Fail-closed:
+the one call that resolves the role's permission policy. A refusal
+(``PermissionPolicyRefused``) and any other exception there (reason slug
+``policy-resolution-error``, exception type name only) block every Bash and
+write-like tool call, because an unproven policy is not a permission. Only
+``UnknownRoleError`` keeps the code-worker fallback.
 """
 
 from __future__ import annotations
@@ -101,6 +107,7 @@ if str(_SCRIPTS_LIB) not in sys.path:
 
 try:
     from worker_permissions import (  # noqa: E402
+        PermissionPolicyRefused,
         UnknownRoleError,
         default_code_worker_profile,
         match_bash_deny,
@@ -127,14 +134,31 @@ def _relative_to_cwd(file_path: str, cwd: str) -> str:
     root for tmux/subprocess-spawned workers). A path that resolves outside
     cwd (relpath starting with "..") is left absolute — match_file_write_scope
     will then correctly fail to match any project-relative scope glob.
+
+    Both sides are compared on their real paths (OI-2666): Claude Code reports
+    the cwd as its real path (``/private/var/...``) while the model writes to
+    the path it was handed (``/var/...``, a symlink on macOS). The target's
+    PARENT directory is resolved, the final component is not: the file may not
+    exist yet, and a final-component symlink must stay visible to the scope
+    check. A directory symlink inside the worktree that points outside
+    (``docs -> /etc``) resolves outside the cwd, so the target stays absolute
+    and no project-relative glob matches it.
     """
     if not file_path or not os.path.isabs(file_path) or not cwd:
         return file_path
     try:
-        rel = os.path.relpath(file_path, cwd)
-    except ValueError:
+        real_cwd = os.path.realpath(cwd)
+        parent, base = os.path.split(file_path)
+        if base in ("", ".", ".."):
+            resolved = os.path.realpath(file_path)
+        else:
+            resolved = os.path.join(os.path.realpath(parent), base)
+        rel = os.path.relpath(resolved, real_cwd)
+    except (ValueError, OSError):
         return file_path
-    return file_path if rel.startswith("..") else rel
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        return file_path
+    return rel
 
 
 def _is_within_report_dir(file_path: str) -> bool:
@@ -188,6 +212,21 @@ def _resolve_dispatch_write_scope_from_env() -> "list[str] | None":
     return resolve_dispatch_write_scope(paths)
 
 
+def _refused_decision(tool_name: str, reason: str, role: "str | None") -> "tuple[str, str | None]":
+    """Decision for a tool call when the role's permission policy was refused.
+
+    Bash and every write-like tool block, with the reason slug only (never any
+    policy content); every other tool is read-only for this hook and stays allowed.
+    """
+    if tool_name == "Bash" or tool_name in _WRITE_LIKE_TOOLS:
+        return (
+            "block",
+            f"worker-scope: permission policy refused ({reason}) for role "
+            f"'{role or '(unset)'}'; tool call blocked",
+        )
+    return "allow", None
+
+
 def evaluate(payload: dict) -> "tuple[str, str | None]":
     """Return (decision, reason) for one PreToolUse payload. decision is 'allow' or 'block'."""
     if not _DEPS_AVAILABLE:
@@ -203,15 +242,23 @@ def evaluate(payload: dict) -> "tuple[str, str | None]":
     role = os.environ.get("VNX_WORKER_ROLE") or None
     try:
         profile = resolve_worker_profile(role)
-    except UnknownRoleError:
-        # This hook enforces tool calls for an ALREADY-RUNNING worker — there
-        # is no "refuse the dispatch" available at this point, only allow/block
-        # for one tool call. A role absent from every register (OI-1069 pt.5)
-        # still gets the restrictive code-worker fallback here, exactly as
-        # before that change; letting the exception reach main()'s fail-open
-        # catch would silently DROP enforcement for this call (implicit
-        # allow), the opposite of what an unknown role should get.
+    except UnknownRoleError as exc:
+        # A role in no register keeps the code-worker fallback exactly as on
+        # main (OI-1069 contract). Only the slug goes to stderr.
+        print(f"worker-scope: permission policy refused ({exc.reason}); using code-worker fallback", file=sys.stderr)
         profile = default_code_worker_profile()
+    except PermissionPolicyRefused as exc:
+        # The policy of a known or named role could not be proven. The
+        # code-worker fallback can write, so it would widen a read-only role:
+        # block every Bash call and write-like tool instead. Letting this reach
+        # main()'s fail-open catch would be an implicit allow. Read-only tools
+        # (everything but Bash/Write/Edit/MultiEdit) stay allowed.
+        return _refused_decision(tool_name, exc.reason, role)
+    except Exception as exc:  # fail CLOSED on policy resolution only
+        # Any other failure while resolving the policy is an unproven policy,
+        # the same as a refusal: block. Only the exception type name goes out.
+        return _refused_decision(
+            tool_name, f"policy-resolution-error: {type(exc).__name__}", role)
 
     if tool_name == "Bash":
         command = tool_input.get("command")

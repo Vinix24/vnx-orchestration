@@ -104,15 +104,12 @@ def test_init_creates_directories(tmp_path):
     assert (tmp_path / ".vnx-data").is_dir()
 
 
-def test_init_writes_governance_profiles(tmp_path):
-    """vnx init creates .vnx/governance_profiles.yaml."""
+def test_init_writes_no_governance_profiles(tmp_path, capsys):
+    """P8: vnx init writes no inert profile file; it prints how to select one."""
     vnx_init(_init_args(tmp_path))
 
-    profiles = tmp_path / ".vnx" / "governance_profiles.yaml"
-    assert profiles.exists()
-    content = profiles.read_text()
-    assert "profiles:" in content
-    assert "default" in content
+    assert not (tmp_path / ".vnx" / "governance_profiles.yaml").exists()
+    assert "VNX_GOVERNANCE_PROFILE" in capsys.readouterr().out
 
 
 def test_init_creates_vnx_data_subdirs(tmp_path):
@@ -134,16 +131,20 @@ def test_init_refuses_reinit_without_force(tmp_path):
 
     init is no longer silently idempotent: once .vnx-version exists it requires
     --force to reinitialise, protecting an existing project from accidental
-    overwrite. The existing governance profile must be left untouched.
+    overwrite. A governance profile file an operator already keeps is left
+    untouched (P8: init neither writes, deletes nor rewrites one).
     """
-    vnx_init(_init_args(tmp_path))
-    profiles_before = (tmp_path / ".vnx" / "governance_profiles.yaml").read_text()
+    vnx_dir = tmp_path / ".vnx"
+    vnx_dir.mkdir()
+    profiles = vnx_dir / "governance_profiles.yaml"
+    profiles.write_text("profiles:\n  default:\n    review_mode: full\n", encoding="utf-8")
+    profiles_before = profiles.read_bytes()
 
+    vnx_init(_init_args(tmp_path))
     rc = vnx_init(_init_args(tmp_path))
 
     assert rc == 1
-    profiles_after = (tmp_path / ".vnx" / "governance_profiles.yaml").read_text()
-    assert profiles_before == profiles_after
+    assert profiles.read_bytes() == profiles_before
 
 
 # ---------------------------------------------------------------------------

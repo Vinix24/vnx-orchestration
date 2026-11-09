@@ -13,6 +13,10 @@
 # vnx_python.sh picks for the engine root (inside requires-python), *.sh runs
 # bash, anything else exits 78 with one line naming the script.
 #
+# The script runs as "$ENGINE_ROOT/<relative-script>" with cwd = the project checkout and
+# PROJECT_ROOT / VNX_PROJECT_ROOT = that checkout; VNX_HOME stays the engine. A checkout
+# that is not a directory exits 78 with one line.
+#
 # No pin or a resolvable pin -> that tree. A dead pin, an unreadable/malformed/escaping
 # pin, an unregistered project or a pinned tree without <relative-script> -> exit 78
 # (EX_CONFIG) with one stderr line from the resolver. There is no fallback to another
@@ -57,15 +61,28 @@ DECLARED_HOME="${VNX_HOME:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 if ! RESOLVER_PYTHON="$(bash "$SCRIPT_DIR/vnx_python.sh" "$(cd "$SCRIPT_DIR/../.." && pwd)")"; then
     exit 78
 fi
-if ! ENGINE_ROOT="$("$RESOLVER_PYTHON" "$RESOLVER" "$PROJECT_ID" "$DECLARED_HOME" "$RELATIVE_SCRIPT")"; then
+if ! RESOLVED="$("$RESOLVER_PYTHON" "$RESOLVER" --with-checkout "$PROJECT_ID" "$DECLARED_HOME" "$RELATIVE_SCRIPT")"; then
     exit 78
 fi
+ENGINE_ROOT="$(printf '%s\n' "$RESOLVED" | sed -n '1p')"
+PROJECT_CHECKOUT="$(printf '%s\n' "$RESOLVED" | sed -n 's/^checkout=//p')"
 
-cd "$ENGINE_ROOT" || {
-    echo "ERROR: cannot enter the resolved engine root $ENGINE_ROOT" >&2
+# A project-bound daemon runs in its project checkout, never in the engine tree: that tree
+# is a read-only release, so a root resolved from it makes vnx_paths refuse and a git call
+# there cannot write .git/FETCH_HEAD (OI-2653, OI-2616). No fallback to the engine tree.
+if [ -z "$PROJECT_CHECKOUT" ] || [ ! -d "$PROJECT_CHECKOUT" ]; then
+    echo "ERROR: project '$PROJECT_ID' checkout '${PROJECT_CHECKOUT:-<unresolved>}' is not a directory; refusing to start $RELATIVE_SCRIPT" >&2
+    exit 78
+fi
+cd "$PROJECT_CHECKOUT" || {
+    echo "ERROR: project '$PROJECT_ID' checkout '$PROJECT_CHECKOUT' cannot be entered; refusing to start $RELATIVE_SCRIPT" >&2
     exit 78
 }
 export VNX_HOME="$ENGINE_ROOT"
+# PROJECT_ROOT is what the shell and python path helpers read; VNX_PROJECT_ROOT is the
+# explicit override vnx_paths honours before any heuristic.
+export PROJECT_ROOT="$PROJECT_CHECKOUT"
+export VNX_PROJECT_ROOT="$PROJECT_CHECKOUT"
 # Appended, never prepended (OI-1663): a ~/.local/bin/python3 must not shadow the system
 # python3 this job depends on.
 export PATH="$PATH:${HOME:?HOME is not set}/.local/bin"
@@ -76,4 +93,4 @@ if [ "$INTERPRETER" = resolve ]; then
     fi
 fi
 
-exec "$INTERPRETER" "$RELATIVE_SCRIPT" "$@"
+exec "$INTERPRETER" "$ENGINE_ROOT/$RELATIVE_SCRIPT" "$@"

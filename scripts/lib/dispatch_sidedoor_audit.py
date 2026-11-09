@@ -109,6 +109,12 @@ KNOWN_RAW_CLAUDE_CALLERS = frozenset({
     # stored config and demonstrably ignores the scoping flags, so it measures configuration, not
     # the session. Delivers no work and produces no receipt-obligated output.
     "scripts/analysis/mcp_namespace_probe.py",
+    # read-only measurement probe of agents-als-map fase 1 (cells A to H of ADR-050): spawns
+    # claude -p to measure the parent CLAUDE.md, the projects memory, the write-scope hook and the
+    # bare lanes. Only the operator or T0 runs it; the pretooluse_block_raw_claude_spawn.sh hook
+    # blocks it for builders. Delivers no work and writes no receipt-obligated output, only its
+    # NDJSON cells.
+    "scripts/probe_agent_layout.sh",
     "scripts/conversation_analyzer/deep_analyzer.py",
     "scripts/f39/replay_harness/single_replay.py",
     "scripts/headless_trigger.py",

@@ -218,6 +218,14 @@ def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[st
     return decisions
 
 
+def _decision_identity(dispatch_id: str) -> Dict[str, str]:
+    """``delivery_id`` (round suffix stripped) and the derived ``actor_class`` of a decision (ADR-056)."""
+    import actor_class
+    from governance_receipts import base_delivery_id
+
+    return {"delivery_id": base_delivery_id(dispatch_id), "actor_class": actor_class.derive()}
+
+
 def record_outcome_decision(
     log_path: Path,
     *,
@@ -253,6 +261,7 @@ def record_outcome_decision(
     record["decision_type"] = OUTCOME_DECISION_TYPE
     record["decision"] = decision
     record["project_id"] = pid
+    record.update(_decision_identity(did))
     # settled at write time: nothing for t0_decision_reconcile to resolve
     record["outcome_pending"] = False
     write_decision(record, Path(log_path))

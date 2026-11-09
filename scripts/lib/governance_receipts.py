@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib
+import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import actor_class
 from dispatch_identity import validate_receipt_kind
+
+logger = logging.getLogger(__name__)
 
 
 def _load_append_receipt():
@@ -76,4 +81,60 @@ def emit_governance_receipt(
     return receipt
 
 
-__all__ = ["emit_governance_receipt", "utc_now_iso", "AppendReceiptError"]
+#: Value of an identity key whose source could not be resolved (ADR-056): never a default project.
+UNKNOWN_IDENTITY = "unknown"
+
+# Same shape ``schema_manifest.is_round_of`` accepts: ``-r`` plus a positive integer without a leading zero.
+_ROUND_SUFFIX_RE = re.compile(r"^(?P<base>.+)-r[1-9][0-9]*$", re.ASCII)
+
+
+def base_delivery_id(dispatch_id: Any) -> str:
+    """The base delivery id of a dispatch: ``dlv-abc`` for ``dlv-abc`` and for its round ``dlv-abc-r3``.
+
+    One round suffix is stripped. A missing, non-string or blank id gives ``unknown``.
+    """
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        return UNKNOWN_IDENTITY
+    dispatch_id = dispatch_id.strip()
+    match = _ROUND_SUFFIX_RE.match(dispatch_id)
+    return match.group("base") if match else dispatch_id
+
+
+def _resolve_receipt_project_id(receipts_file: Optional[str]) -> str:
+    """``project_id`` of the store a receipt goes to; ``unknown`` when the resolver fails (ADR-056)."""
+    try:
+        from project_scope import resolve_stamp_project_id
+
+        target = _append_receipt._resolve_receipts_file(receipts_file)
+        project_id = resolve_stamp_project_id(db_path=target)
+    except Exception as exc:
+        logger.warning("governance_receipts: project_id unresolved, writing %r: %s: %s",
+                       UNKNOWN_IDENTITY, type(exc).__name__, exc)
+        return UNKNOWN_IDENTITY
+    return project_id if isinstance(project_id, str) and project_id.strip() else UNKNOWN_IDENTITY
+
+
+def dispatch_identity_fields(dispatch_id: Any, receipts_file: Optional[str] = None) -> Dict[str, str]:
+    """The delivery identity ``(project_id, delivery_id)`` of ADR-056, the derived ``actor_class``, plus ``dispatch_id`` when one is known.
+
+    Both identity keys are always present: a source that cannot resolve one writes ``unknown``
+    and is never booked silently as ``vnx-dev``.
+    """
+    fields: Dict[str, str] = {
+        "project_id": _resolve_receipt_project_id(receipts_file),
+        "delivery_id": base_delivery_id(dispatch_id),
+        "actor_class": actor_class.derive(),
+    }
+    if isinstance(dispatch_id, str) and dispatch_id:
+        fields["dispatch_id"] = dispatch_id
+    return fields
+
+
+__all__ = [
+    "emit_governance_receipt",
+    "utc_now_iso",
+    "AppendReceiptError",
+    "UNKNOWN_IDENTITY",
+    "base_delivery_id",
+    "dispatch_identity_fields",
+]

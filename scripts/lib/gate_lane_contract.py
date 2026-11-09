@@ -24,29 +24,14 @@ if _LIB not in sys.path:
 
 import config_runtime  # noqa: E402  (after the scripts/lib path guard above)
 from unified_report_schema import SchemaViolation, parse_frontmatter  # after the same path guard
+import gate_lane_rows  # stdlib-only; the one registration the four views below derive from
 
 logger = logging.getLogger(__name__)
 
-# gate name -> (model env var, default model).
-#
-# glm_gate runs glm-5.2 (deprecated-glm-models allowlist, operator directive
-# 2026-08-03) via the glm-harness lane; kimi_gate runs kimi-k3 via the kimi
-# CLI; deepseek_gate runs deepseek-flash (DeepSeek V4.1-Flash, registry
-# wave7_models.yaml `deepseek_harness.deepseek-flash`, operator decision
-# 2026-09-30, OI-1939) via the deepseek-harness lane. That default deliberately
-# differs from the build lane's DEFAULT_DEEPSEEK_HARNESS_MODEL
-# (provider_spawns/deepseek_harness_spawn.py, deepseek-v4-pro). The name
-# `deepseek-v4-flash` is a phased-out alias the vendor reroutes to V4.1-Flash
-# and must not be used as the default. claude_gate runs sonnet on the operator's
-# subscription (R7, operator decision 2026-10-22) through claude_gate_lane. The
-# env var is the per-gate override an operator sets before the run; the default
-# is what the governed lane dispatches when it is unset.
-MODEL_DEFAULTS: Dict[str, tuple] = {
-    "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
-    "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
-    "claude_gate": ("VNX_CLAUDE_GATE_MODEL", "sonnet"),
-}
+# gate name -> (model env var, default model), derived from
+# gate_lane_rows.GATE_LANE_ROWS (the model and env columns). The defaults and
+# why each gate runs the model it does are documented on the rows.
+MODEL_DEFAULTS: Dict[str, tuple] = gate_lane_rows.model_defaults(gate_lane_rows.GATE_LANE_ROWS)
 
 def gate_model(gate: str) -> Optional[str]:
     """The model review gate *gate* runs at this moment, or None when it cannot be named.
@@ -73,12 +58,13 @@ def gate_model(gate: str) -> Optional[str]:
     return None
 
 
-# R12: the review gates measured as one shot. glm_gate.py and kimi_gate.py
+# R12: the review gates measured as one shot (the `single_shot` column of the
+# rows). glm_gate.py and kimi_gate.py
 # book their depth with gate_depth.single_shot_depth: the diff in the prompt is
 # what the run is held to, and there is no working directory it is asked to
 # check. Every other gate on gate_runner's harness lane (deepseek_gate today)
 # reviews with tools in an isolated checkout of the PR head (OI-1887).
-SINGLE_SHOT_GATES = frozenset({"glm_gate", "kimi_gate"})
+SINGLE_SHOT_GATES = gate_lane_rows.single_shot_gates(gate_lane_rows.GATE_LANE_ROWS)
 
 
 def reviews_with_tools(gate: str) -> bool:
@@ -99,7 +85,7 @@ def reviews_with_tools(gate: str) -> bool:
 # (gate_runner's harness lane, glm_gate, kimi_gate) resolves the deadline
 # through harness_timeout_seconds() below, which starts from this base and
 # extends it with the size of the diff the lane has to read.
-TIMEOUT_SECONDS = 900
+TIMEOUT_SECONDS = gate_lane_rows.DEFAULT_TIMEOUT_SECONDS
 
 # OI-2066, measured 2026-10-15: one fixed 900 s did not fit a large PR. On PR
 # #2058 (head ae1e193e, +2288/-207, 19 files) kimi_gate and deepseek_gate both
@@ -121,14 +107,10 @@ TIMEOUT_CEILING_SECONDS = 3600
 # the lane still writes its own report before anything kills it from outside.
 TIMEOUT_OUTER_MARGIN_SECONDS = 60
 
-# gate name -> (config key, default base seconds). config_registry carries the
-# same defaults, exactly as it does for DIFF_CHAR_CONFIG below.
-TIMEOUT_CONFIG: Dict[str, tuple] = {
-    "kimi_gate": ("VNX_KIMI_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
-    "glm_gate": ("VNX_GLM_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
-    "claude_gate": ("VNX_CLAUDE_GATE_TIMEOUT_SECONDS", TIMEOUT_SECONDS),
-}
+# gate name -> (config key, default base seconds), derived from the `timeout`
+# column of the rows. config_registry carries the same defaults, exactly as it
+# does for DIFF_CHAR_CONFIG below.
+TIMEOUT_CONFIG: Dict[str, tuple] = gate_lane_rows.timeout_config(gate_lane_rows.GATE_LANE_ROWS)
 
 # Diff cap applied by gate_prompt.build_review_prompt: the diff is delimited,
 # untrusted DATA, and this bounds how much of it enters the prompt.
@@ -144,12 +126,12 @@ TIMEOUT_CONFIG: Dict[str, tuple] = {
 # the same defaults.
 
 # Operator decision 2026-10-03: the reading budget per review, in tokens.
-REVIEW_READ_TOKENS_TARGET = 500_000
+REVIEW_READ_TOKENS_TARGET = gate_lane_rows.REVIEW_READ_TOKENS_TARGET
 
 # Characters per token on this repo's diffs, measured 2026-10-03 with tiktoken
 # (cl100k_base and o200k_base) on four real diffs (#2030, #2029, #2025, #2032):
 # 322,709 chars = 84,989 and 85,400 tokens, 3.78 to 3.80.
-DIFF_CHARS_PER_TOKEN = 3.8
+DIFF_CHARS_PER_TOKEN = gate_lane_rows.DIFF_CHARS_PER_TOKEN
 
 # The ceiling of the current delivery route (OI-1961). The harness-lane prompt,
 # diff included, travels as ONE command-line argument at three places:
@@ -160,20 +142,13 @@ DIFF_CHARS_PER_TOKEN = 3.8
 # scaffold plus 4.7 KB of environment around the diff. 800,000 chars leaves
 # about 23% of ARG_MAX for multi-byte text, that scaffold and the environment.
 # OI-1961 (deliver the prompt by stdin or file) lifts this ceiling.
-ARGV_SAFE_MAX_DIFF_CHARS = 800_000
+ARGV_SAFE_MAX_DIFF_CHARS = gate_lane_rows.ARGV_SAFE_MAX_DIFF_CHARS
 
 # 800,000 today; 1,900,000 the day OI-1961 removes the argv ceiling.
-DEFAULT_MAX_DIFF_CHARS = min(
-    int(REVIEW_READ_TOKENS_TARGET * DIFF_CHARS_PER_TOKEN),
-    ARGV_SAFE_MAX_DIFF_CHARS,
-)
+DEFAULT_MAX_DIFF_CHARS = gate_lane_rows.DEFAULT_MAX_DIFF_CHARS
 
-DIFF_CHAR_CONFIG: Dict[str, tuple] = {
-    "kimi_gate": ("VNX_KIMI_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
-    "glm_gate": ("VNX_GLM_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
-    "claude_gate": ("VNX_CLAUDE_GATE_MAX_DIFF_CHARS", DEFAULT_MAX_DIFF_CHARS),
-}
+# Derived from the `diff_chars` column of the rows.
+DIFF_CHAR_CONFIG: Dict[str, tuple] = gate_lane_rows.diff_char_config(gate_lane_rows.GATE_LANE_ROWS)
 
 # A gate name this table does not know at all gets the same default: never
 # unlimited, never a crash.

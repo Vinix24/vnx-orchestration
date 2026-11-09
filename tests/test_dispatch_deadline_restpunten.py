@@ -57,7 +57,7 @@ def _stage(tmp_path: Path, **over) -> Path:
     base = dict(
         instruction_text="do the thing",
         dispatch_id=_GOOD_ID,
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         provider="claude",
@@ -97,7 +97,7 @@ class TestBridgeDispatchDeadlineRange:
         rc = dispatch_bridge.bridge_dispatch(
             instruction_text="x",
             dispatch_id=_GOOD_ID,
-            role="dev",
+            role="backend-developer",
             target_slot="T1",
             project_id="p1",
             data_dir=tmp_path,

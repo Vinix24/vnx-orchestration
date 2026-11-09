@@ -390,66 +390,49 @@ def main() -> int:
         return 0
 
     template = load_template(vnx_home)
-
     if args.full:
-        existing = load_yaml(target_path) if os.path.isfile(target_path) else None
-        result = generate_full_permissions(template)
+        return _run_full(args, template, target_path)
+    return _run_merge(args, template, target_path)
 
-        issues = validate_permissions(result)
-        if issues:
-            print("ERROR: generated permissions failed validation:", file=sys.stderr)
-            for i in issues:
-                print(f"  {i}", file=sys.stderr)
-            return 1
 
-        if args.dry_run:
-            if args.json:
-                import json
-                print(json.dumps(result, indent=2))
-            else:
-                print("[regen-worker-permissions] --full --dry-run: would create worker_permissions.yaml")
-                if existing:
-                    print("[regen-worker-permissions] WARNING: would overwrite existing file")
-            return 0
+def _report_validation_failure(label: str, issues: list[str]) -> int:
+    print(f"ERROR: {label} permissions failed validation:", file=sys.stderr)
+    for i in issues:
+        print(f"  {i}", file=sys.stderr)
+    return 1
 
-        if existing and not args.no_backup:
-            bak = backup_file(target_path)
-            print(f"[regen-worker-permissions] Backup: {bak}")
 
-        os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        write_yaml(target_path, result)
-        print(f"[regen-worker-permissions] Created: {target_path} (full)")
-        return 0
+def _print_dry_run(args: argparse.Namespace, mode: str, target_path: str,
+                   existing: dict | None, result: dict, summary: list[str]) -> None:
+    """Dry-run output: name every write, or say that nothing is written."""
+    if args.json:
+        import json
+        print(json.dumps(result, indent=2))
+        return
+    print(f"[regen-worker-permissions] {mode} --dry-run:")
+    if existing is not None and existing == result:
+        print("  (no changes)")
+        return
+    verb = "create" if existing is None else "update"
+    print(f"  would {verb} {target_path}")
+    for line in summary:
+        print(line)
+    if mode == "--full" and existing:
+        print("[regen-worker-permissions] WARNING: would overwrite existing file")
 
-    # --merge mode
+
+def _run_full(args: argparse.Namespace, template: dict, target_path: str) -> int:
+    """--full: the explicit generate mode; creates or overwrites the project file."""
     existing = load_yaml(target_path) if os.path.isfile(target_path) else None
-
-    if existing is None:
-        print("[regen-worker-permissions] No existing file; generating full from template")
-        result = generate_full_permissions(template)
-    else:
-        result = merge_permissions(existing, template)
+    result = generate_full_permissions(template)
 
     issues = validate_permissions(result)
     if issues:
-        print("ERROR: merged permissions failed validation:", file=sys.stderr)
-        for i in issues:
-            print(f"  {i}", file=sys.stderr)
-        return 1
-
-    summary = diff_summary(existing, result)
+        return _report_validation_failure("generated", issues)
 
     if args.dry_run:
-        if args.json:
-            import json
-            print(json.dumps(result, indent=2))
-        else:
-            print("[regen-worker-permissions] --merge --dry-run:")
-            if summary:
-                for line in summary:
-                    print(line)
-            else:
-                print("  (no changes)")
+        _print_dry_run(args, "--full", target_path, existing, result,
+                       diff_summary(existing, result) if existing is not None else [])
         return 0
 
     if existing and not args.no_backup:
@@ -458,10 +441,42 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(target_path), exist_ok=True)
     write_yaml(target_path, result)
+    print(f"[regen-worker-permissions] Created: {target_path} (full)")
+    return 0
 
-    if summary:
-        for line in summary:
-            print(line)
+
+def _run_merge(args: argparse.Namespace, template: dict, target_path: str) -> int:
+    """--merge: overlay the template onto an existing project override.
+
+    A project without the file has no override (the runtime falls back to the
+    shipped template), so there is nothing to merge and nothing is written.
+    """
+    if not os.path.isfile(target_path):
+        print(f"[regen-worker-permissions] no project override at {target_path}; "
+              "nothing to merge (runtime uses the shipped template)")
+        return 0
+
+    existing = load_yaml(target_path)
+    result = merge_permissions(existing, template)
+
+    issues = validate_permissions(result)
+    if issues:
+        return _report_validation_failure("merged", issues)
+
+    summary = diff_summary(existing, result)
+
+    if args.dry_run:
+        _print_dry_run(args, "--merge", target_path, existing, result, summary)
+        return 0
+
+    if not args.no_backup:
+        bak = backup_file(target_path)
+        print(f"[regen-worker-permissions] Backup: {bak}")
+
+    write_yaml(target_path, result)
+
+    for line in summary:
+        print(line)
     print(f"[regen-worker-permissions] Updated: {target_path} (merge)")
     return 0
 

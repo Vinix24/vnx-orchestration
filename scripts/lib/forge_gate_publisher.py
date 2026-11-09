@@ -30,14 +30,17 @@ BILLING SAFETY: No Anthropic SDK. No direct API calls to api.anthropic.com.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -61,10 +64,17 @@ from forge_check_run import (  # noqa: E402
     ForgeCheckRunError,
     ForgeKeychainError,
     ForgePublishRefused,
+    list_check_runs,
     load_app_config,
+    patch_check_run,
     publish_check_run,
 )
 from forge_project_target import ForgeTarget, resolve_forge_target
+from governance_receipts import emit_governance_receipt
+# The door splits its own runs from foreign ones with the reader's rule itself
+# (ADR-061 §3), imported and not copied: a copy could drift from the reader and
+# turn a state the reader blocks on into a permit again.
+from ci_contexts import _split_by_app
 from gate_status import (  # noqa: E402
     ALL_KNOWN_STATES,
     FAIL_STATES,
@@ -142,6 +152,12 @@ CHECK_RUN_NAME_PREFIX = "vnx-gate"
 REVIEW_SUMMARY_SLUG = "review"
 REVIEW_SUMMARY_CHECK_NAME = f"{CHECK_RUN_NAME_PREFIX}/{REVIEW_SUMMARY_SLUG}"
 
+#: The slug of the door permit (ADR-061, deur D3). Reserved like ``review``:
+#: ``vnx-gate/door`` is the one check only the door's permit path may publish,
+#: so :func:`check_run_name` refuses it for every gate.
+DOOR_SLUG = "door"
+DOOR_CHECK_NAME = f"{CHECK_RUN_NAME_PREFIX}/{DOOR_SLUG}"
+
 #: The command that republishes a check-run from the record already on disk.
 #: Carried in every failure log, so a publication the recorder swallowed is
 #: always one copy-paste away from repair.
@@ -195,6 +211,11 @@ def check_run_name(gate: str) -> str:
             f"{REVIEW_SUMMARY_CHECK_NAME} is de naam van de samenvattende check en niet "
             f"van een poort: een poort die onder deze naam publiceert zou de "
             "samenvattende eis met één poortoordeel vervullen"
+        )
+    if resolved == DOOR_SLUG:
+        raise ForgeCheckRunError(
+            f"{DOOR_CHECK_NAME} is de naam van de toestemming van de deur en niet van een "
+            "poort: een poort die onder deze naam publiceert zou de toestemming vervangen"
         )
     return f"{CHECK_RUN_NAME_PREFIX}/{resolved}"
 
@@ -1584,6 +1605,476 @@ def _run_pending_preview(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------------
+# The door permit (ADR-061, deur D3): one run per head, moved with PATCH
+# ---------------------------------------------------------------------------
+
+
+class ForgeDoorRefused(ForgePublishRefused):
+    """The door permit is refused: bad evidence, or a head whose door runs cannot be trusted."""
+
+
+DOOR_EVIDENCE_SCHEMA = 1
+DOOR_EVIDENCE_SOURCE = "pr_merge._run_door"
+DOOR_REVOKE_ATTEMPTS = 3
+_DOOR_REVOKE_BACKOFF_SECONDS = (1.0, 3.0)
+REVOKED = "revoked"
+REVOKE_FAILED = "revoke_failed"
+
+
+def door_evidence_gates() -> List[str]:
+    """The gates the evidence must carry: ``PREFLIGHT_ORDER`` without ``door``, in order.
+
+    ``pr_merge`` imports without side effects (it only defines and imports), so
+    the names are read from the one constant the door itself runs by.
+    """
+    from pr_merge import PREFLIGHT_ORDER
+
+    return [name for name in PREFLIGHT_ORDER if name != DOOR_SLUG]
+
+
+def read_door_evidence(path: Path) -> Dict[str, Any]:
+    """Parse the evidence file, or refuse with the reason (missing, unreadable, not an object)."""
+    try:
+        raw = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ForgeDoorRefused(f"evidence ontbreekt of is onleesbaar ({path}): {exc}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ForgeDoorRefused(f"evidence is niet te parsen ({path}): {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ForgeDoorRefused(f"evidence is geen object ({path}): {type(parsed).__name__}")
+    return parsed
+
+
+def _door_header_reason(evidence: Dict[str, Any], sha: str, pr: int) -> Optional[str]:
+    if evidence.get("schema") != DOOR_EVIDENCE_SCHEMA or isinstance(evidence.get("schema"), bool):
+        return f"evidence schema {evidence.get('schema')!r} wordt niet gelezen (verwacht {DOOR_EVIDENCE_SCHEMA})"
+    if evidence.get("source") != DOOR_EVIDENCE_SOURCE:
+        return f"evidence source {evidence.get('source')!r} is niet {DOOR_EVIDENCE_SOURCE!r}"
+    if evidence.get("head_sha") != sha:
+        return f"evidence head_sha {evidence.get('head_sha')!r} is niet de gevraagde kop {sha!r}"
+    number = evidence.get("pr_number")
+    if isinstance(number, bool) or number != pr:
+        return f"evidence pr_number {number!r} is niet PR #{pr}"
+    return None
+
+
+def _door_gates_reason(records: Any, expected: List[str]) -> Optional[str]:
+    if not isinstance(records, list) or not all(isinstance(r, dict) for r in records):
+        return "evidence preflight_gates is geen lijst van records"
+    names = [r.get("gate") for r in records]
+    missing = [n for n in expected if n not in names]
+    if missing:
+        return f"evidence mist de poort(en) {missing}: verwacht {expected}, kreeg {names}"
+    extra = [n for n in names if n not in expected or names.count(n) > 1]
+    if extra:
+        return (
+            f"evidence heeft een extra of dubbele poort {extra}: de deur zelf hoort er niet bij "
+            f"(verwacht {expected}, kreeg {names})"
+        )
+    if names != expected:
+        return f"evidence heeft de poorten in de verkeerde volgorde: verwacht {expected}, kreeg {names}"
+    for record in records:
+        if record.get("verdict") != "GO":
+            return f"evidence poort {record.get('gate')!r} heeft verdict {record.get('verdict')!r}, geen GO"
+    return None
+
+
+def validate_door_evidence(
+    evidence: Dict[str, Any], *, sha: str, pr: int, expected_gates: Optional[List[str]] = None
+) -> None:
+    """Raise :class:`ForgeDoorRefused` unless the evidence is GO for exactly this head and PR.
+
+    Contract 16(a). Only a record with ``verdict == "GO"`` counts; missing, ``None``
+    and unknown values refuse. ``expected_gates`` defaults to :func:`door_evidence_gates`.
+    """
+    if not isinstance(evidence, dict):
+        raise ForgeDoorRefused("evidence is geen object")
+    gates = door_evidence_gates() if expected_gates is None else list(expected_gates)
+    reason = _door_header_reason(evidence, sha, pr) or _door_gates_reason(
+        evidence.get("preflight_gates"), gates
+    )
+    if reason:
+        raise ForgeDoorRefused(reason)
+
+
+class ForgeLedgerError(ForgeCheckRunError):
+    """A door-permit receipt could not be written: the action does not happen (or is reported)."""
+
+
+DOOR_RECEIPT_SOURCE = "forge_gate_publisher"
+RECEIPT_WRITTEN = "appended"
+
+
+def _evidence_digest(evidence: Any) -> str:
+    try:
+        raw = json.dumps(evidence, sort_keys=True, default=str, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raw = repr(evidence)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _evidence_gate_names(evidence: Any) -> List[str]:
+    records = evidence.get("preflight_gates") if isinstance(evidence, dict) else None
+    if not isinstance(records, list):
+        return []
+    return [str(r.get("gate")) for r in records if isinstance(r, dict)]
+
+
+def _new_operation_id() -> str:
+    """A fresh identity for one permit operation: its intent and outcome receipts share it."""
+    return uuid.uuid4().hex
+
+
+def _write_door_receipt(
+    event: str, *, status: str, receipts_file: Optional[str], op_id: str, action: str,
+    phase: str, pr_number: int, head_sha: str, **fields: Any,
+) -> str:
+    """One receipt in the canonical ledger; returns the ``append_status``.
+
+    A failed write raises :class:`ForgeLedgerError`. ``trigger`` is the field the
+    canonical dedup key honours (``IDEMPOTENCY_FIELDS``) that is free for an event
+    without a dispatch: ``task_id`` would demand a ``dispatch_id`` and ``report_path``
+    names a report. It carries PR, full head, action, phase and the per-operation uuid, so two operations never
+    share a key and the second-resolution timestamp no longer decides identity.
+    No field called ``verdict``: ``append_receipt`` overwrites it with its own.
+    """
+    identity = f"door-permit:pr{pr_number}:{head_sha}:{action}:{phase}:{op_id}"
+    try:
+        receipt = emit_governance_receipt(
+            event, receipt_kind="state_mutation", status=status, terminal="T0",
+            source=DOOR_RECEIPT_SOURCE, receipts_file=receipts_file, trigger=identity,
+            operation_id=op_id, action=action, phase=phase, pr_number=pr_number,
+            head_sha=head_sha, **fields,
+        )
+    # vnx-broad-except: any way the ledger write can end is the same fail-closed answer.
+    except Exception as exc:  # noqa: BLE001
+        raise ForgeLedgerError(
+            f"{event} ({status}) niet in het grootboek geschreven: {exc}"
+        ) from exc
+    return receipt.get("append_status")
+
+
+def _write_intent_receipt(event: str, **kwargs: Any) -> None:
+    """The intent receipt must be written as its own line: anything else refuses the action."""
+    got = _write_door_receipt(event, phase="intent", **kwargs)
+    if got != RECEIPT_WRITTEN:
+        raise ForgeLedgerError(
+            f"{event} (intent) niet als eigen regel in het grootboek gekomen "
+            f"(append_status={got!r}): er gaat niets naar GitHub"
+        )
+
+
+def _write_outcome_receipt(event: str, **kwargs: Any) -> str:
+    """The outcome receipt after the GitHub call: a non-written status is logged, never undone."""
+    got = _write_door_receipt(event, phase="outcome", **kwargs)
+    if got != RECEIPT_WRITTEN:
+        logger.error(
+            "%s (outcome) niet als eigen regel vastgelegd, ledger: %s (operatie %s)",
+            event, got, kwargs.get("op_id"),
+        )
+    return got
+
+
+class DoorRuns(NamedTuple):
+    """Every ``vnx-gate/door`` run on one head, split into the own App's and foreign ones."""
+
+    own: List[Dict[str, Any]]
+    foreign: List[Dict[str, Any]]
+    app_id: int
+
+    def foreign_trail(self) -> List[Dict[str, Any]]:
+        """Each foreign run as its id and the ``app.id`` GitHub showed (``None``: no ``app`` object)."""
+        trail = []
+        for run in self.foreign:
+            app = run.get("app")
+            trail.append(
+                {"check_run_id": run.get("id"), "app_id": app.get("id") if isinstance(app, dict) else None}
+            )
+        return trail
+
+
+def door_runs_on_head(sha: str, *, project_root: Path) -> DoorRuns:
+    """Every door run on ``sha``, split on ``app.id`` by the reader's own rule.
+
+    ``ci_contexts._split_by_app``: a run whose ``app`` is not an object, or whose
+    ``app.id`` is not the own App, is foreign. Nothing is dropped, so a decision
+    sees the foreign runs too. ``load_app_config`` refuses a missing or
+    non-integer ``app_id``, so the helper's unbound branch (every run counts as
+    own) is never taken from here.
+    """
+    app_id = load_app_config().app_id
+    runs = list_check_runs(sha, DOOR_CHECK_NAME, project_root=project_root)
+    own, foreign = _split_by_app(runs, app_id)
+    return DoorRuns(own=list(own), foreign=list(foreign), app_id=app_id)
+
+
+def _foreign_only_reason(head: DoorRuns, sha: str) -> str:
+    observed = [entry["app_id"] for entry in head.foreign_trail()]
+    return (
+        f"{len(head.foreign)} deurrun(s) van een andere App op {sha[:12]} en geen van de eigen "
+        f"App (app_id {head.app_id}): waargenomen app.id {observed}. De lezer houdt die kop "
+        "blokkerend (wrong_app); de deur adopteert die run niet en zet er geen eigen run naast "
+        "(ADR-061 §3, geval 4)"
+    )
+
+
+def _apply_door_permit(head: DoorRuns, sha: str, pr: int, project_root: Path) -> Tuple[int, str]:
+    """The GitHub step of ADR-061 §3: ``(check_run_id, action)``, ``create`` or ``re_permit``.
+
+    The case split is the reader's (``ci_contexts.classify_contexts``). Foreign
+    runs and no own run is its blocking ``wrong_app`` state, so the door refuses
+    (case 4) and makes no call: an own success next to it would turn that state
+    into a permit. With an own run present the reader classifies the own runs
+    only, so the own count decides (case 2 or 3) on a mixed head as well; the
+    foreign runs go into the receipt.
+    """
+    if head.foreign and not head.own:
+        raise ForgeDoorRefused(_foreign_only_reason(head, sha))
+    title, summary = DOOR_CHECK_NAME, f"permit for PR #{pr} on {sha}"
+    if len(head.own) > 1:
+        raise ForgeDoorRefused(
+            f"{len(head.own)} deurruns van de eigen App op {sha[:12]}: een tweede run houdt de "
+            "context rood; herstel is een nieuwe commit"
+        )
+    if head.own:
+        run_id = head.own[0].get("id")
+        patch_check_run(
+            run_id, CONCLUSION_SUCCESS, title, summary, name=DOOR_CHECK_NAME, head_sha=sha,
+            project_root=project_root,
+        )
+        return run_id, "re_permit"
+    created = publish_check_run(
+        sha, DOOR_CHECK_NAME, CONCLUSION_SUCCESS, summary, project_root=project_root
+    )
+    run_id = created.get("id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int):
+        raise ForgeDoorRefused(f"POST gaf geen check_run_id terug: {created!r}")
+    return run_id, "create"
+
+
+def publish_door_permit(
+    evidence: Dict[str, Any], *, sha: str, pr: int, project_root: Path,
+    receipts_file: Optional[str] = None,
+) -> int:
+    """Create or re-permit the single ``vnx-gate/door`` run on ``sha``; return its id.
+
+    The ledger comes first (ADR-005): bad evidence writes a ``blocked`` receipt;
+    otherwise an intent receipt is written BEFORE the first GitHub call, and a
+    failed write stops everything. The four cases of ADR-061 §3, split as the
+    reader splits (:func:`door_runs_on_head`): no door run at all, ``POST``;
+    exactly one own run, ``PATCH`` it back to ``success`` (the re-permit on the
+    same head); two or more own runs, refused, recovery is a new commit; only
+    foreign runs, refused with no call. After the call the run is read back and
+    the outcome receipt carries the id, the conclusion read and every foreign
+    door run either list showed (``foreign_door_runs``).
+    """
+    op_id = _new_operation_id()
+    base = {
+        "head_sha": sha, "pr_number": pr, "receipts_file": receipts_file, "op_id": op_id,
+        "evidence_digest": _evidence_digest(evidence),
+        "evidence_gates": _evidence_gate_names(evidence),
+    }
+    try:
+        validate_door_evidence(evidence, sha=sha, pr=pr)
+    except ForgeDoorRefused as exc:
+        _write_outcome_receipt(
+            "door_permit_published", status="blocked", action="publish",
+            reason=str(exc), **base,
+        )
+        raise
+    _write_intent_receipt(
+        "door_permit_published", status="info", action="publish",
+        reason="permit aangevraagd uit GO-evidence", **base,
+    )
+    run_id: Optional[int] = None
+    heads: List[DoorRuns] = []
+    try:
+        heads.append(door_runs_on_head(sha, project_root=project_root))
+        run_id, action = _apply_door_permit(heads[0], sha, pr, project_root)
+        heads.append(door_runs_on_head(sha, project_root=project_root))
+        run = read_back_door(sha, run_id, project_root=project_root, listed=heads[1])
+    except ForgeCheckRunError as exc:
+        _write_outcome_receipt(
+            "door_permit_published",
+            status="blocked" if isinstance(exc, ForgeDoorRefused) else "failure",
+            action="publish", reason=str(exc),
+            **({"check_run_id": run_id} if run_id is not None else {}),
+            **_foreign_field(heads), **base,
+        )
+        raise
+    _write_outcome_receipt(
+        "door_permit_published", status="success", action=action, check_run_id=run_id,
+        conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen",
+        **_foreign_field(heads), **base,
+    )
+    return run_id
+
+
+def _foreign_field(heads: List[DoorRuns]) -> Dict[str, Any]:
+    """``foreign_door_runs`` over every list this operation read, each foreign run once.
+
+    Absent, not ``[]``, when no list was read: a head that could not be listed
+    is not a head without foreign runs.
+    """
+    if not heads:
+        return {}
+    seen: List[Dict[str, Any]] = []
+    for head in heads:
+        for entry in head.foreign_trail():
+            if entry not in seen:
+                seen.append(entry)
+    return {"foreign_door_runs": seen}
+
+
+def read_back_door(
+    sha: str, check_run_id: int, *, project_root: Path, listed: Optional[DoorRuns] = None
+) -> Dict[str, Any]:
+    """The door run on ``sha`` with this id, own App and ``success``, or a named refusal.
+
+    ``listed`` is the list read AFTER the call, when the caller already holds it
+    (:func:`publish_door_permit` does, so its receipt names what this verdict
+    saw); without it the runs are read here. Split as the reader splits: more
+    than one own run refuses; the id must be one of the own runs, and an id that
+    is a foreign run (another App, or no ``app`` object) refuses. A foreign run
+    NEXT TO the own success run does not refuse: with an own run present the
+    reader classifies the own runs only (``classify_contexts``), so the context
+    reads green on that run and the permit is the run this call made or patched.
+    """
+    head = listed if listed is not None else door_runs_on_head(sha, project_root=project_root)
+    if len(head.own) > 1:
+        raise ForgeDoorRefused(f"teruglezing: {len(head.own)} deurruns van de eigen App op {sha[:12]}")
+    run = next((r for r in head.own if r.get("id") == check_run_id), None)
+    if run is None:
+        if any(r.get("id") == check_run_id for r in head.foreign):
+            raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} is van een andere App")
+        raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} staat niet op {sha[:12]}")
+    if run.get("conclusion") != CONCLUSION_SUCCESS:
+        raise ForgeDoorRefused(
+            f"teruglezing: deurrun {check_run_id} heeft conclusion {run.get('conclusion')!r}"
+        )
+    return run
+
+
+def _patch_door_failure(
+    check_run_id: int, title: str, sha: str, project_root: Path
+) -> str:
+    for attempt in range(DOOR_REVOKE_ATTEMPTS):
+        try:
+            answer = patch_check_run(
+                check_run_id, CONCLUSION_FAILURE, title, title,
+                name=DOOR_CHECK_NAME, head_sha=sha, project_root=project_root,
+            )
+            if answer.get("id") == check_run_id and answer.get("conclusion") == CONCLUSION_FAILURE:
+                return REVOKED
+        except ForgeCheckRunError as exc:
+            logger.warning("deurrun %s intrekken, poging %d: %s", check_run_id, attempt + 1, exc)
+        if attempt < DOOR_REVOKE_ATTEMPTS - 1:
+            time.sleep(_DOOR_REVOKE_BACKOFF_SECONDS[attempt])
+    return REVOKE_FAILED
+
+
+def revoke_door(
+    check_run_id: int, reason: str, *, sha: str, pr: int, project_root: Path,
+    receipts_file: Optional[str] = None,
+) -> str:
+    """``PATCH`` the door run to ``failure`` (title ``permit revoked: <reason>``).
+
+    The intent receipt is written first; if that write fails nothing is sent to
+    GitHub and :class:`ForgeLedgerError` is raised. Three attempts with backoff.
+    ``revoked`` only when GitHub's answer shows this id on ``failure``; anything
+    else is ``revoke_failed``. There is no DELETE. The outcome receipt is
+    best-effort on its own failure: the revoke result is what the caller needs,
+    and the intent receipt already holds the attempt.
+    """
+    if not sha or not sha.strip():
+        raise ForgeCheckRunError("sha is leeg: een intrekking hoort bij een kop")
+    base = {
+        "head_sha": sha, "pr_number": pr, "check_run_id": check_run_id, "action": "revoke",
+        "receipts_file": receipts_file, "op_id": _new_operation_id(),
+    }
+    _write_intent_receipt("door_permit_revoked", status="info", reason=reason, **base)
+    result = _patch_door_failure(check_run_id, f"permit revoked: {reason}", sha, project_root)
+    try:
+        _write_outcome_receipt(
+            "door_permit_revoked", status="success" if result == REVOKED else "failure",
+            reason=reason, revoke_result=result, **base,
+        )
+    except ForgeLedgerError as exc:
+        logger.error("uitkomst van intrekking %s niet vastgelegd: %s", check_run_id, exc)
+    return result
+
+
+def _add_door_parser(sub: Any) -> None:
+    door = sub.add_parser(
+        "door",
+        help=f"herstel- en testpad: zet {DOOR_CHECK_NAME} uit GO-evidence (geen tweede schrijver)",
+        description=(
+            "Herstel- en testpad voor de toestemming van de deur (ADR-061 contract 16(b)). De "
+            "enige schrijver is pr_merge._run_door. Dit pad eist hetzelfde GO-evidence-bestand "
+            "en kan geen GO verzinnen. De echte autoriteit is de App-sleutel in de keychain; "
+            "het evidence-bestand is een tweede slot tegen vergissingen, geen beveiligingsgrens."
+        ),
+    )
+    door.add_argument("--evidence", required=True, help="GO-evidence-bestand van de deur")
+    door.add_argument("--sha", required=True, help="kop waarop de toestemming komt")
+    door.add_argument("--pr", type=int, required=True, help="PR-nummer")
+    door.add_argument(
+        "--project-root", default=None,
+        help="checkout van het doelproject (standaard afgeleid uit de resultatenmap)",
+    )
+    door.add_argument("--receipts-file", default=None, help="grootboekbestand (standaard het canonieke)")
+
+
+def _door_project_root(args: argparse.Namespace) -> Path:
+    if args.project_root:
+        return Path(args.project_root)
+    return resolve_forge_target(_default_results_dir()).project_root
+
+
+def _run_door(args: argparse.Namespace) -> int:
+    """``door`` — validate, publish or re-permit, read back. Exit 1 with the reason on refusal."""
+    try:
+        project_root = _door_project_root(args)
+        try:
+            evidence = read_door_evidence(Path(args.evidence))
+        except ForgeDoorRefused as exc:
+            _write_outcome_receipt(
+                "door_permit_published", status="blocked", receipts_file=args.receipts_file,
+                op_id=_new_operation_id(), action="publish", head_sha=args.sha,
+                pr_number=args.pr, reason=str(exc),
+            )
+            raise
+        run_id = publish_door_permit(
+            evidence, sha=args.sha, pr=args.pr, project_root=project_root,
+            receipts_file=args.receipts_file,
+        )
+    except ForgeCheckRunError as exc:
+        print(f"{DOOR_CHECK_NAME}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    print(f"check_run_id={run_id}")
+    return EXIT_OK
+
+
+def _run_offline_command(args: argparse.Namespace) -> Optional[int]:
+    """Commands that need no results dir and no PR lookup; ``None`` for the rest."""
+    if args.command == "door":
+        return _run_door(args)
+    if args.command != "pending-preview":
+        return None
+    try:
+        return _run_pending_preview(args)
+    except ForgeCheckRunError as exc:
+        # Named after the COMMAND, not after vnx-gate/review: a refusal
+        # here is usually about some other pending entry, and prefixing it
+        # with the review check's name would point the operator at the one
+        # entry that is fine.
+        print(f"pending-preview: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="forge_gate_publisher.py",
@@ -1640,20 +2131,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="pad naar branch_protection.yaml (standaard die van deze checkout)",
     )
 
+    _add_door_parser(sub)
     args = parser.parse_args(argv)
 
     # Reads a file, talks to nobody, and must therefore never be gated on a
     # PR lookup or a results dir.
-    if args.command == "pending-preview":
-        try:
-            return _run_pending_preview(args)
-        except ForgeCheckRunError as exc:
-            # Named after the COMMAND, not after vnx-gate/review: a refusal
-            # here is usually about some other pending entry, and prefixing it
-            # with the review check's name would point the operator at the one
-            # entry that is fine.
-            print(f"pending-preview: {exc}", file=sys.stderr)
-            return EXIT_ERROR
+    offline = _run_offline_command(args)
+    if offline is not None:
+        return offline
 
     results_dir = Path(args.results_dir) if args.results_dir else _default_results_dir()
 

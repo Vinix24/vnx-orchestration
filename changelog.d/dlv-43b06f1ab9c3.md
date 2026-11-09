@@ -1,0 +1,1 @@
+- The merge gate checks the spec's permission policy digest against a fresh composition at the merge base, found by Dispatch-ID, and records the outcome (`match`, `mismatch`, `policy_absent`, `spec_missing`, `evidence_refused`); it blocks only under worker-permission enforcement (permissions P7).

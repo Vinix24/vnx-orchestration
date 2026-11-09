@@ -544,6 +544,8 @@ def to_normalized_dict(config: ProtectionConfig) -> Dict[str, Any]:
         "restrictions": None,
         "repo": {"allow_auto_merge": config.allow_auto_merge},
         "rulesets": sorted(config.rulesets),
+        # The YAML never declares a merge queue; it must not exist live.
+        "merge_queue": None,
         # Not protection fields: live state has neither key, and compare()
         # never reads them. They ride here only so is_weakening() can judge a
         # PR that lowers the enforcement or moves the CI workflow.
@@ -580,7 +582,53 @@ def _gh_json(argv: List[str], project_root: Path, timeout: int) -> Any:
 _BRANCH_NOT_PROTECTED_MARKER = "Branch not protected"
 
 
+_MERGE_QUEUE_QUERY = (
+    "query($owner:String!,$name:String!,$branch:String!)"
+    "{repository(owner:$owner,name:$name){mergeQueue(branch:$branch){id}}}"
+)
+
+
+def fetch_merge_queue(
+    project_root: Path, *, branch: str = "main", gh_bin: str = "gh", timeout: int = 20,
+) -> Optional[Dict[str, Any]]:
+    """The merge queue of ``branch`` through the GraphQL API: ``None`` when
+    the branch has no queue, ``{"enabled": True}`` when it has one.
+
+    A queue runs the required checks on the merge-group SHA instead of the PR
+    head, so the door check would be missing there. A failed or malformed read
+    raises :class:`ProtectionDriftError`; it is never read as "no queue".
+    """
+    payload = _gh_json(
+        [gh_bin, "api", "graphql", "-F", "owner={owner}", "-F", "name={repo}",
+         "-f", f"branch={branch}", "-f", f"query={_MERGE_QUEUE_QUERY}"],
+        project_root, timeout,
+    )
+    if not isinstance(payload, dict) or payload.get("errors"):
+        raise ProtectionDriftError(f"mergeQueue-antwoord is onbruikbaar: {str(payload)[:200]}")
+    data = payload.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    if not isinstance(repository, dict) or "mergeQueue" not in repository:
+        raise ProtectionDriftError(f"mergeQueue-antwoord mist data.repository.mergeQueue: {str(payload)[:200]}")
+    queue = repository["mergeQueue"]
+    if queue is None:
+        return None
+    if not isinstance(queue, dict):
+        raise ProtectionDriftError(f"mergeQueue is {type(queue).__name__}, verwacht null of een object")
+    return {"enabled": True}
+
+
 def fetch_live_protection(
+    project_root: Path, *, branch: str = "main", gh_bin: str = "gh", timeout: int = 20,
+) -> Dict[str, Any]:
+    """The live protection state of :func:`_fetch_rest_protection` plus the
+    ``merge_queue`` field (see :func:`fetch_merge_queue`). Raises
+    :class:`ProtectionDriftError` when either read fails."""
+    live = _fetch_rest_protection(project_root, branch=branch, gh_bin=gh_bin, timeout=timeout)
+    live["merge_queue"] = fetch_merge_queue(project_root, branch=branch, gh_bin=gh_bin, timeout=timeout)
+    return live
+
+
+def _fetch_rest_protection(
     project_root: Path, *, branch: str = "main", gh_bin: str = "gh", timeout: int = 20,
 ) -> Dict[str, Any]:
     """The live branch-protection + repo + rulesets state, normalized to the
@@ -888,6 +936,18 @@ _FALSE_IS_STRONGER = frozenset({
 })
 
 
+def _compare_plain_fields(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Diffs of the single-value fields: ``restrictions``, ``repo.allow_auto_merge``
+    and ``merge_queue`` (an enabled queue against none is drift)."""
+    pairs = (
+        ("restrictions", a.get("restrictions"), b.get("restrictions")),
+        ("repo.allow_auto_merge", (a.get("repo") or {}).get("allow_auto_merge"),
+         (b.get("repo") or {}).get("allow_auto_merge")),
+        ("merge_queue", a.get("merge_queue"), b.get("merge_queue")),
+    )
+    return [{"field": field, "a": av, "b": bv} for field, av, bv in pairs if av != bv]
+
+
 def compare(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]]:
     """List every field where normalized states ``a`` and ``b`` disagree.
 
@@ -954,13 +1014,7 @@ def compare(a: Dict[str, Any], b: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     for f in _BOOL_TOP_LEVEL_FIELDS:
         scalar(f, a.get(f), b.get(f))
-    scalar("restrictions", a.get("restrictions"), b.get("restrictions"))
-
-    scalar(
-        "repo.allow_auto_merge",
-        (a.get("repo") or {}).get("allow_auto_merge"),
-        (b.get("repo") or {}).get("allow_auto_merge"),
-    )
+    diffs.extend(_compare_plain_fields(a, b))
 
     a_rulesets = sorted(a.get("rulesets") or [])
     b_rulesets = sorted(b.get("rulesets") or [])

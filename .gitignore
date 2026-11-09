@@ -127,14 +127,23 @@ scripts/benchmark/field-tests/tasks/t6_real_review/
 scripts/benchmark/field-tests/tasks.local.yaml
 
 # Install-artifacts: gegenereerd door `vnx init` / `vnx role sync` / bootstrap_hooks.
-# Alleen de authored bron hoort in git (.claude/skills/*/SKILL.md,
-# .claude/terminals/*/CLAUDE.md, role-orchestrator.md). De scaffolding eromheen
-# wordt per machine opnieuw uitgerold en gaf vijf dagen lang git-status-ruis.
+# De authored bron van een skill is `skills/<slug>/SKILL.md`. `.claude/skills/<slug>/`
+# is gegenereerd (door `vnx skills sync`, `vnx role sync` en de fase-2-materialiser)
+# en hoort niet in een commit. De 27 al getrackte `.claude/skills/*/SKILL.md` blijven
+# getrackt: een ignore-regel untrackt nooit een getrackt bestand. Een nieuwe slug die
+# alleen onder `.claude/skills/` bestaat vraagt `git add -f` en is de uitzondering.
+# Authored bron blijft verder `.claude/terminals/*/CLAUDE.md` en role-orchestrator.md.
+# De scaffolding eromheen wordt per machine opnieuw uitgerold en gaf vijf dagen
+# lang git-status-ruis.
+.claude/skills/*/SKILL.md
 .claude/skills/*/references/
 .claude/skills/*/scripts/
 .claude/skills/*/template.md
 .claude/skills/*/@*.md
 .claude/skills/skills.yaml
+# De materialiser schrijft elk skillbestand eerst naar `.<naam>.vnx-partial-<hex>` en
+# linkt het pas daarna naar zijn eindnaam. Een gekilde run kan die privénaam laten staan.
+.claude/skills/**/.*.vnx-partial-*
 .claude/hooks/
 .claude/terminals/*/.claude
 .claude/terminals/*/.mcp.json
@@ -164,3 +173,6 @@ scripts/benchmark/field-tests/tasks.local.yaml
 # Deze repo is publiek, dus die gaan er niet in. Backup staat buiten git in de
 # centrale per-project store: ~/.vnx-data/<project>/daily-log/
 daily-log/
+
+# Schaduwkopie van de skills per rol (ADR-050): nooit in git
+.vnx-agent-skills/

@@ -1,0 +1,1 @@
+- Context manifest (track `agents-als-map-fase-1`, PR-4a1): `token_harvest.locate_session_transcript` is the one transcript locator and `context_manifest.capture` reports instruction files, skills and auto-memory of a session as paths, types, lengths and hashes, never content.

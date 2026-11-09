@@ -1,0 +1,1 @@
+- fleet_role_drift reports the AGENTS.md chain per file and as an aggregate against the 32,768-byte Kimi cap in a new `budget` section (`status` is `ok`, `exceeded` or `unmeasured`, `claim: reference_metric_only`), and the exit code does not change (skills-port SP-7).

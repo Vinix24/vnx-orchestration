@@ -1,0 +1,1 @@
+- Hooks (track `agents-als-map-fase-1`): `.claude/settings.json` registers the worker scope hook for Write, Edit, MultiEdit and Bash (timeout 5 s); it stays a no-op while `VNX_ENFORCE_WORKER_PERMISSIONS` is off.

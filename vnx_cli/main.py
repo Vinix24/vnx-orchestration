@@ -1000,6 +1000,14 @@ def _register_objective_set_verbs(subs: argparse.Action) -> None:
         help="what 'done' looks like (>= goal_min_chars meaningful chars)",
     )
 
+    p_autonomous = subs.add_parser(
+        "set-autonomous-promotion",
+        help="set the track opt-in autonomous_promotion_eligible (true|false); default false",
+    )
+    _common_horizon_args(p_autonomous)
+    p_autonomous.add_argument("track_id", metavar="TRACK_ID")
+    p_autonomous.add_argument("eligible", choices=("true", "false"), metavar="ELIGIBLE")
+
 
 def _register_deliverable_verbs(subs: argparse.Action) -> None:
     """Register the deliverable-domain verbs shared by `vnx horizon deliverable`

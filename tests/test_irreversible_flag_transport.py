@@ -125,7 +125,7 @@ def test_stage_spec_bundle_writes_irreversible_true(tmp_path):
     spec_path = dispatch_bridge.stage_spec_bundle(
         instruction_text="delete the legacy shim (irreversible)",
         dispatch_id="20260817-oi1274-stage-true",
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         provider="claude",
@@ -143,7 +143,7 @@ def test_stage_spec_bundle_defaults_irreversible_false(tmp_path):
     spec_path = dispatch_bridge.stage_spec_bundle(
         instruction_text="ordinary reversible change",
         dispatch_id="20260817-oi1274-stage-default",
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         provider="claude",

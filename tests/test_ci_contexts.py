@@ -329,8 +329,12 @@ def test_missing_context_without_dependencies_on_a_live_run_still_waits(graph):
 
 
 def test_only_passed_is_non_blocking():
-    """An allowlist, so a state added later blocks until someone decides."""
-    assert cc.NON_BLOCKING_STATES == frozenset({cc.STATE_PASSED})
+    """An allowlist, so a state added later blocks until someone decides.
+
+    ``published_at_merge`` is that decision for the one door context (ADR-061 §6);
+    tests/test_ci_contexts_door.py pins how narrow it is.
+    """
+    assert cc.NON_BLOCKING_STATES == frozenset({cc.STATE_PASSED, cc.STATE_PUBLISHED_AT_MERGE})
 
 
 def test_summarise_counts_each_state_separately(graph):

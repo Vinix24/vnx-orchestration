@@ -1,0 +1,1 @@
+- pr-ready: a second seat the door requested (request record with origin: door) is no longer marked off the door; a loose request record still is.

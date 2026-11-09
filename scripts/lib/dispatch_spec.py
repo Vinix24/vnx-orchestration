@@ -14,7 +14,9 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Dict, Iterable, Optional
+
+import gate_lane_rows  # stdlib-only; the Gate members of the harness-lane gates come from its rows
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -35,35 +37,56 @@ class Provider(str, Enum):
     LOCAL_GEMMA       = "local-gemma"
 
 
-class Gate(str, Enum):
-    """CLOSED set of the review-gate names the closure verifier reasons about (OI-845).
+# Gates that are enum members without a harness-lane row. They run through
+# another provider kind, so no row in ``gate_lane_rows.GATE_LANE_ROWS`` names them.
+# Order is the member order of ``Gate``; the lane-row gates follow.
+_NON_LANE_GATES = (
+    ("CODEX_GATE", "codex_gate"),
+    ("CLAUDE_GITHUB_OPTIONAL", "claude_github_optional"),
+    ("CI_GATE", "ci_gate"),
+    ("WIRING_GATE", "wiring_gate"),
+)
+
+
+def gate_members(rows: Iterable[gate_lane_rows.GateLaneRow]) -> Dict[str, str]:
+    """Member name -> value of ``Gate``: the non-lane gates, then one per lane row.
+
+    The member name is the upper-cased gate (``kimi_gate`` -> ``KIMI_GATE``).
+    A row whose gate is already a non-lane member is refused.
+    """
+    members = dict(_NON_LANE_GATES)
+    for row in rows:
+        name = row.gate.upper()
+        if name in members:
+            raise ValueError(
+                f"gate lane row {row.gate!r} collides with the existing Gate member {name}"
+            )
+        members[name] = row.gate
+    return members
+
+
+# Built with the functional API so a gate lane row is a member without a second
+# hand-written line. Attribute access (``Gate.KIMI_GATE``), ``Gate("kimi_gate")``
+# and ``Gate("")`` failing like any unknown value behave as the class form did.
+Gate = Enum("Gate", gate_members(gate_lane_rows.GATE_LANE_ROWS), type=str, module=__name__)
+Gate.__doc__ = """CLOSED set of the review-gate names the closure verifier reasons about (OI-845).
 
     The full set of LEGAL gate names is ``REGISTERED_GATE_NAMES`` below: this
     enum plus ``GATES_OUTSIDE_ENUM``. Read that, not this enum, to decide
     whether a name may be declared.
 
-    Mirrors the gate names ``gate_recorder.py``/``gate_request_handler.py`` already
-    dispatch on; this is the canonical enum they lacked. An empty string means
-    "no gate assigned" and is handled separately by callers — it is not a member
-    here so ``Gate("")`` fails the same as any other unknown value.
+    Members: the gates without a harness-lane row (``_NON_LANE_GATES``) and one
+    member per row of ``gate_lane_rows.GATE_LANE_ROWS`` (review-lane P2b), so a new
+    row is a member with no second line here. An empty string means "no gate
+    assigned" and is handled separately by callers: it is not a member, so
+    ``Gate("")`` fails the same as any other unknown value.
 
-    KIMI_GATE and GLM_GATE (dlv45), DEEPSEEK_GATE (OI-1984) and CLAUDE_GATE (R7,
-    2026-10-22) extend the closed set with the same discipline as every other
-    member: each has a
-    ``gate_request_handler`` dispatch branch and a
+    Every member needs a ``gate_request_handler`` dispatch branch and a
     ``closure_verifier._GATE_HANDLERS`` entry, pinned by
     ``test_closure_verifier_gate_enum_drift.py``. Extending the enum without
-    both is what OI-1094 exists to catch — see that test module before adding
+    both is what OI-1094 exists to catch: see that test module before adding
     another member.
     """
-    CODEX_GATE              = "codex_gate"
-    CLAUDE_GITHUB_OPTIONAL  = "claude_github_optional"
-    CI_GATE                 = "ci_gate"
-    WIRING_GATE             = "wiring_gate"
-    KIMI_GATE               = "kimi_gate"
-    GLM_GATE                = "glm_gate"
-    DEEPSEEK_GATE           = "deepseek_gate"
-    CLAUDE_GATE             = "claude_gate"
 
 
 # Review gates that are registered and runnable but deliberately NOT members of
@@ -290,6 +313,11 @@ class DispatchSpec:
     # lag would be worse than the problem it fixes. Like `irreversible`, it is a
     # caller declaration, never derived from instruction text or role.
     post_merge_verification: bool = False
+    # Permissions P4: sha256 of the composed PermissionPolicy this dispatch runs under
+    # (permission_policy.policy_digest). Optional: a spec staged before P5 carries none and
+    # keeps today's plan digest. When present it IS part of the plan digest, so the permit
+    # binds the policy. Filled at stage time (P5), format-checked here (Rule 18).
+    permission_policy_digest: Optional[str] = None
     # DERIVED-not-declared (deliberately absent): lane, billing, serialization_class
     # — compile_plan owns them. Do not add here.
 
@@ -338,6 +366,46 @@ def _validate_branch_ref(raw: str) -> "str | None":
         return "may not start with '/', end with '/', or end with '.'"
     if _GIT_REF_INVALID.search(raw):
         return "contains a character git forbids in a branch name"
+    return None
+
+
+_POLICY_DIGEST_RE = re.compile(r"[0-9a-f]{64}")  # fullmatch: permission_policy.policy_digest is a sha256 hexdigest
+
+
+def _policy_digest_reject(value: object) -> "Reject | None":
+    """Rule 18 — reject a present-but-malformed ``permission_policy_digest``.
+
+    ``None`` (absent) is valid: a spec staged before permissions P5 carries none.
+    A present value fails closed: an empty string, a non-string, uppercase or a wrong
+    length is refused, never read as "no policy".
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not _POLICY_DIGEST_RE.fullmatch(value):
+        return Reject(
+            "bad-permission-policy-digest",
+            "permission_policy_digest must be a 64-char lowercase sha256 hex string "
+            f"(the format of permission_policy.policy_digest), got {value!r}",
+        )
+    return None
+
+
+def _gate_reject(spec: DispatchSpec) -> "Reject | None":
+    """Rule 16 — review gate must be a registered gate name (OI-845 / fix-1588 advisory).
+
+    Empty means "no gate assigned" (the smart router derives one later); any non-empty
+    value outside REGISTERED_GATE_NAMES is a typo (e.g. "codex_gat") and is refused at the
+    door, not discovered later as a silently-unknown gate that passes on file presence
+    alone. Legacy lifecycle phase names (LEGACY_GATE_SENTINELS) are admitted as the
+    no-gate sentinel, mirroring dispatch_bridge._canonical_gate.
+    """
+    name = (spec.gate or "").strip()
+    if name and name not in REGISTERED_GATE_NAMES and name.lower() not in LEGACY_GATE_SENTINELS:
+        return Reject(
+            "bad-gate",
+            f"gate {spec.gate!r} is not a known review gate{retired_gate_hint(name)}; "
+            f"valid gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}",
+        )
     return None
 
 
@@ -575,24 +643,10 @@ def validate(
                 f"work_ref {spec.work_ref!r} is not a valid branch name ({_err})",
             )
 
-    # Rule 16 — review gate must be a registered gate name (OI-845 / fix-1588
-    # advisory). Empty means "no gate assigned" (the smart router derives one
-    # later); any non-empty value outside REGISTERED_GATE_NAMES is a typo (e.g.
-    # "codex_gat") and must be refused at the door, not discovered later as a
-    # silently-unknown gate that passes on file presence alone. Legacy lifecycle
-    # phase names (LEGACY_GATE_SENTINELS) are admitted as the no-gate sentinel,
-    # mirroring dispatch_bridge._canonical_gate.
-    _gate_name = (spec.gate or "").strip()
-    if (
-        _gate_name
-        and _gate_name not in REGISTERED_GATE_NAMES
-        and _gate_name.lower() not in LEGACY_GATE_SENTINELS
-    ):
-        return Reject(
-            "bad-gate",
-            f"gate {spec.gate!r} is not a known review gate{retired_gate_hint(_gate_name)}; "
-            f"valid gates: {', '.join(sorted(REGISTERED_GATE_NAMES))}",
-        )
+    # Rule 16 — review gate must be a registered gate name (see _gate_reject).
+    _gate_err = _gate_reject(spec)
+    if _gate_err is not None:
+        return _gate_err
 
     # Rule 17 — skill slug format (RS-1). A staged skill names ONE folder under
     # ``skills/`` or ``.claude/skills/``, so the slug is the id convention plus a
@@ -604,6 +658,11 @@ def validate(
         _skill_err = _validate_skill_slug(spec.skill.strip())
         if _skill_err is not None:
             return Reject("bad-skill", f"skill {spec.skill!r} is not a valid skill slug ({_skill_err})")
+
+    # Rule 18 — permission policy digest (permissions P4): absent is fine, present must be a digest.
+    _digest_err = _policy_digest_reject(spec.permission_policy_digest)
+    if _digest_err is not None:
+        return _digest_err
 
     return ValidatedSpec(
         spec=spec,

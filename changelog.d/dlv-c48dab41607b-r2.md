@@ -1,0 +1,1 @@
+- The skill materializer claims the slug folder with one atomic `mkdir` before it publishes the ownership marker and never adopts an existing folder, so a folder created by another process after the check is no longer marked and reclaimed (skilldisc R4 round 2).

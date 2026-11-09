@@ -330,6 +330,15 @@ def test_a_record_with_another_merge_base_or_rule_version_is_recomputed(tmp_path
     assert "made under merge base" in risk.note
 
 
+def test_a_record_under_the_rule_version_before_configs_and_vnx_became_gate_merge_is_recomputed(tmp_path):
+    reading = _reading("configs/plan_gate_panel.yaml")
+    stale = replace(rrc.derive_risk_class(_reading("docs/x.md"), head_sha="b" * 40), rule_version="67591075cb2c59b7")
+    _record(tmp_path, "codex_gate", stale, head="b" * 40)
+    risk = rrc.head_risk_class(tmp_path, str(PR), "b" * 40, reading)
+    assert (risk.risk_class, risk.source) == ("high", rrc.SOURCE_RECOMPUTED)
+    assert ("configs/plan_gate_panel.yaml", "gate-merge") in risk.deciding
+
+
 _MISSING = object()
 
 

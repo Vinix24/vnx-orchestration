@@ -357,6 +357,83 @@ def _resolve_codex_model(model: Optional[str]) -> str:
     )
 
 
+_CODEX_SANDBOX_MODES = ("workspace-write", "read-only", "danger-full-access")
+_POLICY_ABSENT = "policy_absent"
+
+
+def _codex_sandbox_mode() -> Optional[str]:
+    """The ``--sandbox`` mode from ``VNX_CODEX_SANDBOX``, or None when unset or unknown (bypass route)."""
+    sandbox = (os.environ.get("VNX_CODEX_SANDBOX", "") or "").strip()
+    return sandbox if sandbox in _CODEX_SANDBOX_MODES else None
+
+
+def _codex_policy_record(
+    cmd: list, cwd: Optional[Any], digest: str, dispatch_id: str, terminal_id: str,
+) -> Dict[str, Any]:
+    """The codex layer-0/layer-1 record, shaped like the P3 material record plus the two layers.
+
+    ``fs`` is the sandbox mode only when the argv carries ``--sandbox <mode>``; the bypass
+    route (unset or unknown value) is ``unsupported``. An unknown lane raises ``ValueError``.
+    """
+    import permission_harness_map as phm
+
+    record = phm.material_record(
+        "codex", None if digest == _POLICY_ABSENT else digest, cmd[2:], dispatch_id,
+    )
+    if not record["lane_known"]:
+        raise ValueError("codex lane is not in the capability matrix")
+    record["terminal_id"] = terminal_id
+    if digest == _POLICY_ABSENT:
+        record["policy_state"] = _POLICY_ABSENT
+    mode = cmd[cmd.index("--sandbox") + 1] if "--sandbox" in cmd else None
+    record["layer0"] = {
+        "git_boundary": "worktree" if cwd else "none",
+        "sandbox": mode or "bypass",
+        "cwd": str(cwd) if cwd else None,
+    }
+    record["layer1"] = {
+        "fs": mode or phm.UNSUPPORTED,
+        "tools": {d: phm.capability_for("codex", d)["level"] for d in ("tools_allow", "tools_deny")},
+        "mcp": phm.capability_for("codex", "mcp")["level"],
+    }
+    return record
+
+
+def _write_codex_policy_record(
+    cwd: Optional[Any], extra_env: Optional[Dict[str, str]], model: Optional[str],
+    dispatch_id: str, terminal_id: str,
+) -> None:
+    """Write the record next to the P3 records, atomically. A failed write is a WARNING, never a refusal."""
+    try:
+        from atomic_io import atomic_write_json
+
+        data_dir = os.environ.get("VNX_DATA_DIR", "")
+        if not data_dir:
+            from vnx_paths import resolve_paths
+            data_dir = resolve_paths()["VNX_DATA_DIR"]
+        from provider_spawns.kimi_spawn import _policy_digest
+
+        digest = _policy_digest(extra_env)
+        record = _codex_policy_record(_build_cmd(model), cwd, digest, dispatch_id, terminal_id)
+        atomic_write_json(
+            Path(data_dir) / "state" / "permission_records" / f"{terminal_id}_{dispatch_id}.json",
+            record,
+        )
+    except Exception as exc:  # vnx-silent-except: recording evidence never refuses the spawn; WARNING names it
+        logger.warning("spawn_codex: policy record not written for %s: %s", dispatch_id, exc)
+
+
+def _launch_recorded_codex_proc(
+    prompt: str, model: Optional[str], extra_env: Optional[Dict[str, str]], cwd: Optional[Any],
+    dispatch_id: str, terminal_id: str,
+) -> Tuple[Optional[subprocess.Popen], Optional[CodexSpawnResult]]:
+    """:func:`_launch_codex_proc` unchanged, plus the layer-0 policy record once codex started."""
+    proc, early_result = _launch_codex_proc(prompt, model, extra_env, cwd)
+    if proc is not None:
+        _write_codex_policy_record(cwd, extra_env, model, dispatch_id, terminal_id)
+    return proc, early_result
+
+
 def _build_cmd(model: Optional[str]) -> list:
     """Build the codex exec argv.
 
@@ -372,8 +449,8 @@ def _build_cmd(model: Optional[str]) -> list:
     command exec; "read-only"/"danger-full-access" also accepted).
     """
     cmd = ["codex", "exec", "--json"]
-    sandbox = (os.environ.get("VNX_CODEX_SANDBOX", "") or "").strip()
-    if sandbox in ("workspace-write", "read-only", "danger-full-access"):
+    sandbox = _codex_sandbox_mode()
+    if sandbox is not None:
         cmd += ["--sandbox", sandbox]
     else:
         cmd += ["--dangerously-bypass-approvals-and-sandbox"]
@@ -706,6 +783,28 @@ def _drain_stream(
 # Main spawn function
 # ---------------------------------------------------------------------------
 
+def _materialize_skills(role, cwd, dispatch_id, state_dir, project_id) -> None:
+    """Agent-layout step before the launch: the role's skill set into ``<cwd>/.agents/skills``.
+
+    ``off`` does nothing. Fail-open: any miss or exception logs one WARNING and codex
+    starts as it would without it.
+    """
+    try:
+        import agent_layout
+        from agent_skill_materialize import materialize_skill_set
+        from dispatch_identity import normalize_role
+
+        mode = agent_layout.layout_mode()
+        if mode == "off":
+            return
+        materialize_skill_set(
+            normalize_role(role), worktree=cwd, provider="codex", mode=mode,
+            dispatch_id=dispatch_id, state_dir=state_dir, project_id=project_id,
+        )
+    except Exception as exc:  # fail-open: the materialisation never stops a dispatch
+        logger.warning("agent skill materialisation for codex role %r: %s", role, type(exc).__name__)
+
+
 def spawn_codex(
     prompt: str,
     model: Optional[str],
@@ -721,9 +820,13 @@ def spawn_codex(
     event_store: Optional[Any] = None,
     chunk_timeout: float = 60.0,
     total_deadline: float = 600.0,
+    role: Optional[str] = None, state_dir: Optional[Any] = None, project_id: Optional[str] = None,
     **kwargs: Any,
 ) -> CodexSpawnResult:
     """Spawn `codex exec --json` and consume the NDJSON event stream.
+
+    ``role``, ``state_dir`` and ``project_id`` are the skill-materialisation inputs every
+    caller passes (ADR-059 decision 13); the spawner reads no ambient env for them.
 
     Returns CodexSpawnResult on completion (success OR controlled failure).
     Returns CodexSpawnResult(returncode=127, spawn_refused="codex binary not found: ...")
@@ -760,7 +863,8 @@ def spawn_codex(
     if early_result is not None:
         return early_result
 
-    proc, early_result = _launch_codex_proc(prompt, launch_model, extra_env, cwd)
+    _materialize_skills(role, cwd, dispatch_id, state_dir, project_id)
+    proc, early_result = _launch_recorded_codex_proc(prompt, launch_model, extra_env, cwd, dispatch_id, terminal_id)
     if early_result is not None:
         return early_result
 

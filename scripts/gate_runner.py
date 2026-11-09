@@ -39,7 +39,7 @@ import gate_artifacts as _art
 import provider_costs
 import provider_switch
 import vertex_ai_runner as _vtx
-from claude_gate_lane import CLAUDE_LANE_PROVIDER
+import gate_dispatch_table
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -89,8 +89,8 @@ _REVIEWER_VERDICT_TEMPLATE = (
 # Derived from the single registry in gate_recorder (OI-1490) so this can no
 # longer drift from it: this copy carried 3 gates while gate_recorder's carried
 # 5, and neither carried kimi_gate or glm_gate. Only PATH-binary gates appear
-# here — a script-runner gate has no binary and must not be looked up as if it
-# did. Kept as a module-level name because tests and readers expect it.
+# here — a harness-lane or deterministic gate has no binary and must not be
+# looked up as if it did. Kept as a module-level name because tests and readers expect it.
 GATE_BINARIES: Dict[str, str] = dict(_rec._GATE_BINARIES)
 
 # Gate type → CLI args for review execution
@@ -398,31 +398,20 @@ def _build_harness_lane_dispatcher(
     success writer (``gate_artifacts.materialize_artifacts``) and the failure
     writer (``gate_recorder.record_failure``) both carry it onto the result.
 
-    A gate registered on the ``claude`` lane (``claude_gate``, R7) gets
-    ``claude_gate_lane``'s dispatcher, on the subscription, in a worktree
-    allocated in ``project_root`` (``None``: the consumer project root).
+    The dispatcher comes from ``gate_dispatch_table`` (ADR-046 Amendment 1, A2):
+    the lane is the one the gate's registry row names, the table maps it to
+    a dispatcher key and builds it. This engine holds no lane or provider name.
+    ``project_root`` (``None``: the consumer project root) is handed to the
+    factory for lanes that allocate a worktree.
     """
     timeouts = _harness_lane_dispatcher_timeouts(
         gate, _harness_lane_prompt_diff_chars(request_payload, prompt),
     )
     request_payload["timeout_seconds"] = timeouts["total_deadline_seconds"]
-    if _rec.resolve_gate_provider(gate) == (_rec.GATE_PROVIDER_HARNESS_LANE, CLAUDE_LANE_PROVIDER):
-        # R7: the claude seat never goes through provider_dispatch, which refuses
-        # claude. Same call shape, the lane's own deadline; no outer process.
-        # Looked up on the module at call time, like plan_gate_panel's below.
-        import claude_gate_lane
-
-        return claude_gate_lane.make_claude_gate_dispatcher(
-            data_dir, base_ref=base_ref,
-            total_deadline_seconds=timeouts["total_deadline_seconds"], project_root=project_root,
-        )
-    # Lazy import: plan_gate_panel pulls in the whole governed dispatch
-    # graph, and only the harness-lane path needs it.
-    from plan_gate_panel import _make_default_dispatcher
-
-    return _make_default_dispatcher(
-        str(data_dir), timeouts["timeout_seconds"], role="review-gate", base_ref=base_ref,
-        total_deadline_seconds=timeouts["total_deadline_seconds"],
+    registered = _rec.resolve_gate_provider(gate)
+    lane = registered[1] if registered is not None else None
+    return gate_dispatch_table.build_dispatcher(
+        gate, lane, data_dir, base_ref, timeouts, project_root,
     )
 
 
@@ -816,7 +805,7 @@ class GateRunner:
 
         if not using_vertex:
             # OI-1490: three outcomes, not one. Before this, an unregistered
-            # gate and a script-runner gate both collapsed into "binary not
+            # gate and a lane-routed gate both collapsed into "binary not
             # found in PATH" — a name this runner had just invented from the
             # gate's own name. Each now says what is actually true, and the
             # two new reasons are PERMANENT: neither is in
@@ -841,33 +830,6 @@ class GateRunner:
                 # a binary named after the kind.
                 return self._refuse_deterministic(
                     gate, pr_number, pr_id, request_payload, kind, provider_name,
-                )
-            elif kind == _rec.GATE_PROVIDER_SCRIPT_RUNNER:
-                pr_ref = pr_id or (str(pr_number) if pr_number is not None else "<pr>")
-                # Not-shipped and not-routable are different answers and the
-                # reader acts differently on each. Availability is kind-based
-                # (gate_recorder.gate_is_available): a script-runner gate is
-                # available only while its runner file is on disk. Reuse
-                # `gate_runner_missing` here rather than mint a second name
-                # for the fact gate_request_handler already books.
-                if not _rec.gate_is_available(gate):
-                    return self._not_executable(
-                        gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                        reason="gate_runner_missing",
-                        reason_detail=(
-                            f"{provider_name} is not on disk — {gate} is registered "
-                            f"as a script runner and its runner is unavailable"
-                        ),
-                    )
-                return self._not_executable(
-                    gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
-                    reason="gate_not_subprocess_routable",
-                    reason_detail=(
-                        f"{gate} is a script runner ({provider_name}) with its own "
-                        f"contract, dispatch and result-writing lifecycle; it is not a "
-                        f"CLI this runner can drive with a prompt. Run it directly: "
-                        f"python3 {provider_name} --pr {pr_ref}"
-                    ),
                 )
             else:
                 binary = provider_name
@@ -913,7 +875,7 @@ class GateRunner:
             reason="unsupported_gate_type",
             reason_detail=(
                 f"{gate} is not in gate_recorder.GATE_PROVIDERS — register it as a "
-                f"PATH binary, a script runner, or a harness lane; this runner "
+                f"PATH binary, a harness lane, or a deterministic row; this runner "
                 f"will not guess a binary name from the gate name"
             ),
         )
@@ -940,6 +902,12 @@ class GateRunner:
                 f"outcome at request time; neither is driven by this runner"
             ),
         )
+
+    @staticmethod
+    def _is_harness_lane_gate(gate: str) -> bool:
+        """Whether the registry row of ``gate`` is a harness lane (the kind, not a name)."""
+        registered = _rec.resolve_gate_provider(gate)
+        return registered is not None and registered[0] == _rec.GATE_PROVIDER_HARNESS_LANE
 
     def _not_executable(
         self, *, gate: str, pr_number: Optional[int], pr_id: str,
@@ -1010,7 +978,7 @@ class GateRunner:
             prompt = self._build_gemini_prompt(request_payload)
         elif not prompt and gate == "codex_gate":
             prompt = self._build_codex_prompt(request_payload)
-        elif not prompt and gate in ("glm_gate", "kimi_gate", "deepseek_gate", "claude_gate"):
+        elif not prompt and self._is_harness_lane_gate(gate):
             prompt = self._build_harness_lane_prompt(gate, request_payload)
         if (
             using_vertex
@@ -1170,6 +1138,23 @@ class GateRunner:
             reports_dir=self._reports_dir,
         )
 
+    def _refuse_unresolved_lane(
+        self, gate: str, provider: str, pr_number: Optional[int], pr_id: str,
+        request_payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """ADR-046 A2: a lane the dispatch table cannot build is not executable.
+
+        There is no default dispatcher to fall back on. Returns the booked
+        ``not_executable`` record, or None when the table can build the lane.
+        """
+        unresolved = gate_dispatch_table.unresolved_detail(gate, provider)
+        if unresolved is None:
+            return None
+        return self._not_executable(
+            gate=gate, pr_number=pr_number, pr_id=pr_id, request_payload=request_payload,
+            reason="gate_runner_missing", reason_detail=unresolved,
+        )
+
     def _run_harness_lane_path(
         self,
         *,
@@ -1226,16 +1211,15 @@ class GateRunner:
             fetch_branch(branch, gate=gate, identifier=identifier, project_root=self._project_root)
         except GateWorktreeError as exc:
             return _rec.record_failure_simple(
-                gate=gate, pr_number=pr_number, pr_id=pr_id,
-                reason="harness_lane_branch_unavailable",
-                reason_detail=str(exc),
-                request_payload=request_payload,
+                gate=gate, pr_number=pr_number, pr_id=pr_id, reason="harness_lane_branch_unavailable",
+                reason_detail=str(exc), request_payload=request_payload,
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
             )
         base_ref = f"origin/{branch}"
-
-        # reports_dir is <data_dir>/unified_reports, so its parent is the data
-        # dir the dispatcher resolves and the lane writes its report into.
+        refused = self._refuse_unresolved_lane(gate, provider, pr_number, pr_id, request_payload)
+        if refused is not None:
+            return refused
+        # reports_dir is <data_dir>/unified_reports: its parent is the data dir the lane writes into.
         data_dir = self._reports_dir.parent
         # OI-1725: mint the gate's OWN identity up front, BEFORE the dispatcher
         # runs — so both the success and the failure path carry it, and the
@@ -1244,9 +1228,7 @@ class GateRunner:
         dispatch_id = _harness_lane_dispatch_id(gate, pr_number, pr_id)
         model_env, default_model = _HARNESS_LANE_MODEL.get(gate, ("", ""))
         model = os.environ.get(model_env, default_model) if model_env else default_model
-        request_payload["dispatch_id"] = dispatch_id
-        request_payload["provider"] = provider
-        request_payload["model"] = model
+        request_payload.update(dispatch_id=dispatch_id, provider=provider, model=model)
 
         main_checkout_before = _capture_main_checkout_state(self._project_root)
 

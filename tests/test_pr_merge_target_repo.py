@@ -123,6 +123,7 @@ def _rules(
     rules += [
         {"match": "branches/main/protection", "repo": repo, "stdout": live},
         {"match": "/rulesets", "repo": repo, "stdout": "[]"},
+        {"match": "api graphql", "repo": repo, "stdout": '{"data":{"repository":{"mergeQueue":null}}}'},
         {"exact": f"api repos/{repo} --jq .allow_auto_merge", "stdout": "false\n"},
         {"exact": f"api repos/{repo}", "repo": repo, "stdout": json.dumps({"allow_auto_merge": False})},
     ]

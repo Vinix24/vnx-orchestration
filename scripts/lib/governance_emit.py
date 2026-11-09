@@ -21,7 +21,10 @@ Hard rules (PRD provider-governance-unification):
 
 from __future__ import annotations
 
+import fcntl
 import functools
+import hashlib
+import json
 import logging
 import os
 import re
@@ -73,6 +76,177 @@ def _validate_provider(provider: str) -> None:
             f"Invalid provider {provider!r}. "
             "Must match ^(claude|codex|gemini|kimi|deepseek-harness|glm-harness|litellm(:[a-z][a-z0-9_-]*(:[a-z][a-z0-9_./-]*)?)?|local-gemma)$"
         )
+
+
+CONTEXT_MANIFEST_LEDGER = "context_manifests.ndjson"
+_MANIFEST_SCHEMA = 1
+_MANIFEST_LAYOUT_MODES = ("shadow", "on")  # the modes that stamp; "on" reads as "off" until R6 (ADR-059 decision 4)
+
+
+def _manifest_stamp(status: str, reason: Optional[str] = None, sha256: Optional[str] = None) -> Dict[str, Any]:
+    stamp: Dict[str, Any] = {"schema": _MANIFEST_SCHEMA, "status": status}
+    if reason is not None:
+        stamp["reason"] = reason
+    if sha256 is not None:
+        stamp["sha256"] = sha256
+    return stamp
+
+
+def _manifest_line(dispatch_id: str, session_id: str, project_id: str, manifest: Dict[str, Any]) -> str:
+    """The sidecar line, without its newline. No timestamp: an identical
+    measurement of one session hashes the same, which is what dedup keys on."""
+    return json.dumps(
+        {"dispatch_id": dispatch_id, "session_id": session_id, "project_id": project_id, "manifest": manifest},
+        sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+    )
+
+
+def _read_whole_ledger(fd: int, size: int) -> bytes:
+    """Exactly ``size`` bytes from offset 0, or ``OSError``. A short read is legal, so loop.
+
+    An early EOF (0 bytes before ``size``) raises: the caller must not decide
+    to truncate from content it only partly saw.
+    """
+    chunks: list = []
+    got = 0
+    while got < size:
+        chunk = os.pread(fd, size - got, got)
+        if not chunk:
+            raise OSError(f"context manifest ledger read ended at {got} of {size} bytes")
+        chunks.append(chunk)
+        got += len(chunk)
+    return b"".join(chunks)
+
+
+def _recover_ledger_tail(fd: int) -> bytes:
+    """The ledger content with any unterminated tail cut off under the held lock.
+
+    A tail after the last newline is a fragment no caller ever got a hash for:
+    truncate to the last complete line and fsync, so neither the duplicate scan
+    can match it nor the next append join it. The cut point comes only from the
+    complete content: a read that cannot finish raises before any truncate.
+    Logs the byte count, never content.
+    """
+    size = os.fstat(fd).st_size
+    content = _read_whole_ledger(fd, size)
+    if not content or content.endswith(b"\n"):
+        return content
+    keep = content.rfind(b"\n") + 1
+    os.ftruncate(fd, keep)
+    os.fsync(fd)
+    logger.warning("governance_emit: context manifest ledger had an unterminated tail, dropped %d bytes",
+                   len(content) - keep)
+    return content[:keep]
+
+
+def _write_all_or_roll_back(fd: int, data: bytes, size_before: int) -> None:
+    """Write every byte (a short write is legal); on failure restore ``size_before``."""
+    try:
+        view = memoryview(data)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("zero-byte write to the context manifest ledger")
+            view = view[written:]
+    except BaseException as exc:
+        os.ftruncate(fd, size_before)
+        os.fsync(fd)
+        if isinstance(exc, OSError):
+            raise
+        raise OSError("write to the context manifest ledger failed") from exc
+
+
+def _append_manifest_line(path: Path, line: str) -> None:
+    """Append ``line`` to the ledger, complete and durable, or raise (ADR-050 contract 6).
+
+    The line carries dispatch_id, session_id and the manifest, and its sha256 is
+    the receipt reference, so a line byte-equal to an existing one is exactly the
+    same ``(dispatch_id, session_id, sha256)``: it writes nothing, but is still
+    fsynced before success is reported. The flock spans tail recovery, check and
+    write, so two emits of one dispatch cannot both append and no fragment survives.
+    """
+    data = (line + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_RDWR | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        content = _recover_ledger_tail(fd)
+        if any(raw == data[:-1] for raw in content.split(b"\n")):
+            os.fsync(fd)
+            return
+        _write_all_or_roll_back(fd, data, len(content))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _context_manifest_stamp(
+    dispatch_id: str, provider: str, session_id: Optional[str], state_dir: Path,
+) -> Optional[Dict[str, Any]]:
+    """The receipt's ``context_manifest`` reference, or ``None`` under ``VNX_AGENT_LAYOUT=off``.
+
+    A session capture ``ok``/``partial`` wins, else the record decides (:func:`_materialized_stamp`).
+    Sidecar first: the hash goes on the receipt only after the line is durably
+    in ``context_manifests.ndjson``. Never raises: the receipt emit must not fail
+    because of the manifest.
+    """
+    try:
+        import agent_layout
+        if agent_layout.layout_mode() not in _MANIFEST_LAYOUT_MODES:
+            return None
+        import context_manifest
+        manifest = context_manifest.capture(session_id, provider=provider)
+        status = manifest.get("status")
+        if status not in ("ok", "partial"):
+            session_stamp = _manifest_stamp(str(status), manifest.get("reason"))
+            return _materialized_stamp(dispatch_id, provider, session_id, state_dir, session_stamp)
+        return _write_manifest_sidecar(dispatch_id, session_id or "", state_dir, manifest)
+    except Exception as exc:  # the manifest never fails the receipt
+        logger.warning("governance_emit: context manifest failed dispatch=%s: %s: %s",
+                       dispatch_id, type(exc).__name__, exc)
+        return _manifest_stamp("error", f"extract_failed:{type(exc).__name__}")
+
+
+def _materialized_stamp(dispatch_id: str, provider: str, session_id: Optional[str], state_dir: Path,
+                        session_stamp: Dict[str, Any]) -> Dict[str, Any]:
+    """The reference from this dispatch's materialisation record, when the session capture is not usable.
+
+    ``no_record`` keeps *session_stamp*: a dispatch without a record stamps what it stamps
+    today. A valid ``ok``/``partial`` record takes the same sidecar-first write with
+    ``source: materialized``; any other outcome is its non-``ok`` status and reason, no hash.
+    """
+    import agent_skill_evidence
+    try:
+        from project_scope import resolve_stamp_project_id
+        project_id: Optional[str] = resolve_stamp_project_id(db_path=Path(state_dir) / "t0_receipts.ndjson")
+    except Exception as exc:  # fail-closed: no project means project_mismatch, never ok
+        logger.warning("governance_emit: materialisation record project unresolved dispatch=%s: %s",
+                       dispatch_id, type(exc).__name__)
+        project_id = None
+    evidence = agent_skill_evidence.read_materialization(
+        state_dir, dispatch_id, provider, project_id=project_id, session_id=session_id)
+    manifest = evidence.get("manifest")
+    if manifest is None:
+        if evidence["reason"] == agent_skill_evidence.NO_RECORD:
+            return session_stamp
+        return _manifest_stamp(evidence["status"], evidence["reason"])
+    return _write_manifest_sidecar(dispatch_id, session_id or "", state_dir,
+                                   {"schema": _MANIFEST_SCHEMA, **manifest})
+
+
+def _write_manifest_sidecar(
+    dispatch_id: str, session_id: str, state_dir: Path, manifest: Dict[str, Any],
+) -> Dict[str, Any]:
+    try:
+        from project_scope import resolve_stamp_project_id
+        project_id = resolve_stamp_project_id(db_path=Path(state_dir) / "t0_receipts.ndjson")
+        line = _manifest_line(dispatch_id, session_id, project_id, manifest)
+        _append_manifest_line(Path(state_dir) / CONTEXT_MANIFEST_LEDGER, line)
+    except Exception as exc:  # no line landed, so the receipt must carry no hash
+        logger.warning("governance_emit: context manifest ledger write failed dispatch=%s: %s: %s",
+                       dispatch_id, type(exc).__name__, exc)
+        return _manifest_stamp("error", f"ledger_write_failed:{type(exc).__name__}")
+    return _manifest_stamp(manifest["status"], sha256=hashlib.sha256(line.encode("utf-8")).hexdigest())
 
 
 def emit_dispatch_receipt(
@@ -343,7 +517,7 @@ def emit_dispatch_receipt(
         permission_posture=permission_posture,
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
-        model_resolved=model_resolved or None,
+        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir),
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"
@@ -509,6 +683,11 @@ _LANE_EXHAUSTED_MARKERS = (
     # widths. It contains no "usage limit" at all, so prose about usage limits
     # does not match it; only kimi's own sentence, or a verbatim quote of it.
     "your quota will reset when the current 7-day window ends",  # GEMETEN: kimi 403 weekly prose, pr-2074-kimi_gate.json 16-10 — "You've reached your weekly (7-day) usage limit. Your quota will reset when the current 7-day window ends"
+    # Third wrap width (OI-2623): the 429 body breaks the reset sentence before
+    # "ends", the error type in three, and the first sentence reads "weekly
+    # (7-day) usage limit". Both markers below stay whole at this width.
+    "reached your weekly (7-day) usage limit",  # GEMETEN: kimi 429 weekly prose, pr-2477-kimi_gate.json 07-11 — "You've reached your weekly (7-day) usage limit."
+    "your quota will reset when the current 7-day window",  # GEMETEN: kimi 429 weekly prose, pr-2477-kimi_gate.json 07-11 — the OI-2114 sentence cut before " ends" ("...current 7-day window'" | "raw='ends."); a prefix of the old marker, so it also matches the 80- and 145-column records
     "insufficient_quota",                  # AANGENOMEN: codex/openai 429 quota (error `type`/`code`), OpenAI API JSON-vorm — geen live codex-record bestond op 26-08 ochtend (61ebb567)
     "exceeded your current quota",          # AANGENOMEN: codex/openai quota prose, idem
     "hit your usage limit",                 # GEMETEN: codex CLI-prose, pr-1696-codex_gate.json (ook pr-1691/1692-codex_gate.json, identieke tekst) 26-08 — "Subprocess exited with code 1: You've hit your usage limit..."

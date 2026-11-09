@@ -426,15 +426,44 @@ ${_ROLE_REASON:+$_ROLE_REASON
     # an absent SKILL.md just means an unchanged (shorter) context, not a
     # hook error — and each hook run recomputes this fresh from disk, so
     # nothing accumulates across repeated SessionStart fires (/clear, etc).
+    # The playbook path comes from t0_playbook.resolve() (ADR-058) and from
+    # nowhere else: the hook keeps no source list of its own. The resolver runs
+    # from the scripts root picked above, so its fabric step is this hook's own
+    # fabric. Missing is loud but not fatal: no body, one MISSING line that names
+    # every probed step, exit 0 (a failing SessionStart hook blocks the session).
     T0_SKILL_BODY=""
     T0_PLAYBOOK_LINE=""
     if [ -n "$PROJECT_ROOT" ]; then
-      _T0_SKILL_MD="$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md"
-      if [ -f "$_T0_SKILL_MD" ]; then
-        T0_SKILL_BODY="$(cat "$_T0_SKILL_MD" 2>/dev/null || true)"
-        T0_PLAYBOOK_LINE="Playbook file (Read it when the '# T0 Orchestrator' heading is not in your context): $_T0_SKILL_MD"
+      _T0_PB_OUT=""
+      if [ -n "$_VNX_SCRIPTS_ROOT" ] && [ -n "$_VNX_PY" ]; then
+        _T0_PB_OUT="$("$_VNX_PY" -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+import t0_playbook as tp
+r = tp.resolve(sys.argv[2])
+print(r.state)
+print(r.path or '')
+print(r.source_id or '')
+print('true' if r.degraded else 'false')
+print('; '.join(r.probed))
+" "$_VNX_SCRIPTS_ROOT/lib" "$PROJECT_ROOT" 2>/dev/null)" || _T0_PB_OUT=""
+      fi
+      _T0_PB_STATE="$(printf '%s\n' "$_T0_PB_OUT" | sed -n 1p)"
+      _T0_PB_PATH="$(printf '%s\n' "$_T0_PB_OUT" | sed -n 2p)"
+      _T0_PB_SOURCE="$(printf '%s\n' "$_T0_PB_OUT" | sed -n 3p)"
+      _T0_PB_DEGRADED="$(printf '%s\n' "$_T0_PB_OUT" | sed -n 4p)"
+      _T0_PB_PROBED="$(printf '%s\n' "$_T0_PB_OUT" | sed -n 5p)"
+      if [ "$_T0_PB_STATE" = "ok" ] && [ -n "$_T0_PB_PATH" ] && [ -f "$_T0_PB_PATH" ]; then
+        T0_SKILL_BODY="$(cat "$_T0_PB_PATH" 2>/dev/null || true)"
+        T0_PLAYBOOK_LINE="Playbook file (Read it when the '# T0 Orchestrator' heading is not in your context): $_T0_PB_PATH (source: $_T0_PB_SOURCE)"
+        if [ "$_T0_PB_DEGRADED" = "true" ]; then
+          T0_PLAYBOOK_LINE="$T0_PLAYBOOK_LINE DEGRADED: a project copy, not the fabric source"
+        fi
       else
-        T0_PLAYBOOK_LINE="Playbook file NOT FOUND: $_T0_SKILL_MD does not exist. Do not orchestrate from memory."
+        if [ -z "$_T0_PB_OUT" ]; then
+          _T0_PB_PROBED="resolver not run (${_VNX_RESOLVE_WHY:-no scripts root})"
+        fi
+        T0_PLAYBOOK_LINE="T0 PLAYBOOK SOURCE MISSING: no playbook resolved. Probed: $_T0_PB_PROBED. Do not orchestrate from memory."
       fi
     fi
 

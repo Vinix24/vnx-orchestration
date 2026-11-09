@@ -131,6 +131,8 @@ class CodexAdapter(StreamingDrainerMixin, ProviderAdapter):
             event_store=event_store,
             chunk_timeout=chunk_timeout,
             total_deadline=total_deadline,
+            # no worktree on this route: the materialiser answers skipped + no_cwd (ADR-059 decision 13)
+            role=role, state_dir=None, project_id=None,
         )
 
         duration = time.monotonic() - t0

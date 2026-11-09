@@ -33,8 +33,9 @@ from gate_recorder import (
     write_result_guarded,
 )
 from gate_executor import _classify_sha_binding
+from gate_lane_rows import GATE_LANE_ROWS
 from gate_result_parser import evidence_error
-from gate_status import decided_verdict, has_complete_evidence
+from gate_status import REQUEST_ORIGIN_DOOR, decided_verdict, has_complete_evidence
 from governance_emit import _classify_lane_log_text
 from provider_switch import SwitchDecision
 from review_vendor import (
@@ -55,6 +56,20 @@ from claude_github_receipt import (
 
 logger = logging.getLogger(__name__)
 
+
+
+def request_provider(gate: str) -> str:
+    """The ``provider`` label on a request payload of harness-lane ``gate``.
+
+    Read from the gate's row (``GateLaneRow.request_provider``), never from a
+    literal per gate: ``stop_conditions`` and ``provider_costs`` match on the
+    label byte for byte. A gate without a row has no label to give, so it
+    refuses by name instead of guessing one.
+    """
+    for row in GATE_LANE_ROWS:
+        if row.gate == gate:
+            return row.request_provider
+    raise ValueError(f"no gate lane row for gate {gate!r}: no request provider label")
 
 
 class ReviewGateTakeoverConfigError(ValueError):
@@ -138,31 +153,45 @@ def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
     return {names[i]: names[i + 1] for i in range(len(names) - 1)}
 
 
+def review_gate_takeover_chain_raw(project_id: Optional[str] = None) -> "tuple[str, str]":
+    """``(raw chain, source)`` of the takeover chain in force, fresh.
+
+    ``source`` is ``override`` / ``project_config`` (an operator chain, outranks the
+    profile), ``profile`` (``light`` or ``heavy`` contributed it), ``env`` or ``default``.
+    Precedence: ``VNX_OVERRIDE_*`` > ``project_config`` row > gate profile >
+    ``VNX_REVIEW_GATE_TAKEOVER_CHAIN`` env > registry default. A malformed profile raises
+    ``GateProfileConfigError``; there is no fallback to the default chain. ``project_id``
+    resolves the chain for that project; omitted, the process's project.
+    """
+    import config_registry
+    import config_runtime
+    import gate_profile
+
+    contributed = gate_profile.value("takeover_chain", project_id)
+    if contributed is not None:
+        return str(contributed), "profile"
+    config_runtime.autowire()
+    raw, source = config_registry.resolve_with_source("VNX_REVIEW_GATE_TAKEOVER_CHAIN", project_id)
+    return raw or "", source
+
+
 def _build_review_gate_takeover_chain() -> Dict[str, str]:
     """Resolve the operator's review-gate takeover chain from config
-    (BETA3-E1, 26-08), never a hardcoded dict. Reads through
-    ``config_runtime.get`` -- the SAME canonical-resolver + DB-override
-    precedence ``review_gate_manager._build_default_review_stack`` already
-    uses for ``VNX_DEFAULT_REVIEW_STACK``, and the one the OI-1462
-    cross-process contract test (PR #1694) pins -- never a raw
-    ``os.environ`` read that could silently disagree with what this same
-    module's ``_ci_gate_available`` resolves two lines away.
+    (BETA3-E1, 26-08), never a hardcoded dict. Reads through the same
+    canonical resolver + DB-override precedence ``config_runtime.get`` uses
+    (see :func:`review_gate_takeover_chain_raw`), with the gate profile between
+    the operator's ``project_config`` row and the env value.
 
     Resolved FRESH on every call (unlike ``DEFAULT_REVIEW_STACK``, which
     caches at module-import time): a takeover decision is made per gate per
     review request, so a config edit takes effect on the very next request
     instead of needing a process restart.
 
-    Logs, at each resolution, whether the active chain came from an operator
-    override or the built-in default -- comparing the resolved string
-    against ``_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`` verbatim, the same
-    provenance technique ``config_registry.all_effective`` already uses
-    (``is_default = value == entry.default``).
+    Logs, at each resolution, where the active chain came from (``profile``,
+    ``project_config``, ``override``, ``env`` or ``default``).
     """
-    import config_runtime
-    raw = config_runtime.get("VNX_REVIEW_GATE_TAKEOVER_CHAIN") or ""
+    raw, source = review_gate_takeover_chain_raw()
     chain = _parse_review_gate_takeover_chain(raw)
-    source = "standaard (registry default)" if raw == _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN else "operator-configuratie"
     logger.info(
         "gate_request_handler: review-gate takeover chain actief -- bron=%s waarde=%r keten=%r",
         source, raw, chain,
@@ -1056,9 +1085,18 @@ class GateRequestHandlerMixin:
         module writes it, and an executor reads the request it just wrote to
         decide whether to run. ``path`` is the caller's, because this module
         names a request two ways (``_request_path``, ``_contract_request_path``).
+
+        Every request written here carries ``origin: "door"`` (ADR-046 A6, P4):
+        it is what lets ``vnx pr-ready`` tell a request the door asked for from
+        a record a shim wrote by hand. One place, set on the caller's payload so
+        the stamp goes on the record at ``path`` only. The caller's dict is left alone, because
+        the same dict is booked as the ``review_gate_request`` receipt and mirrored to the result
+        slot, and neither of those is a request. A later rewrite reads the record back from disk
+        (executor, ``commit_gate_outcome``) and so keeps the field.
         """
+        stamped = {**payload, "origin": REQUEST_ORIGIN_DOOR}
         with slot_lock(path):
-            atomic_write_json(path, payload)
+            atomic_write_json(path, stamped)
 
     def _stamp_takeover_annotations(
         self,
@@ -2610,37 +2648,11 @@ class GateRequestHandlerMixin:
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
         dispatch_id: str = "",
     ) -> Dict[str, Any]:
-        from review_gate_manager import _utc_now
-
-        available = self._kimi_gate_available()
-        requested_at = _utc_now()
-        payload = {
-            "gate": "kimi_gate",
-            "status": "requested" if available else "not_executable",
-            "provider": "kimi",
-            "branch": branch,
-            "pr_number": pr_number,
-            "review_mode": mode,
-            "risk_class": risk_class,
-            "changed_files": changed_files,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "report_path": self._build_report_path(
-                gate="kimi_gate",
-                requested_at=requested_at,
-                pr_number=pr_number,
-            ),
-        }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        if not available:
-            self._mark_gate_unavailable(
-                payload, gate="kimi_gate",
-                pr_number=pr_number, pr_id="",
-                dispatch_id=dispatch_id,
-            )
-        self._write_request_record(self._request_path("kimi_gate", pr_number), payload)
-        return payload
+        return self._request_harness_seat(
+            "kimi_gate", self._kimi_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
 
     def _request_glm(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
@@ -2659,65 +2671,11 @@ class GateRequestHandlerMixin:
         reaches here) so an operator can tell "not a real gate" apart from
         "real gate, route missing".
         """
-        from review_gate_manager import _utc_now
-
-        available = self._glm_gate_available()
-        requested_at = _utc_now()
-        payload: Dict[str, Any] = {
-            "gate": "glm_gate",
-            "status": "requested" if available else "not_executable",
-            "provider": "glm",
-            "branch": branch,
-            "pr_number": pr_number,
-            "review_mode": mode,
-            "risk_class": risk_class,
-            "changed_files": changed_files,
-            "requested_at": requested_at,
-            "commit_sha": get_pr_head_sha(pr_number),
-            "report_path": self._build_report_path(
-                gate="glm_gate",
-                requested_at=requested_at,
-                pr_number=pr_number,
-            ) if available else "",
-        }
-        if dispatch_id:
-            payload["dispatch_id"] = dispatch_id
-        if not available:
-            # Classified by name (gate_result_parser._classify_unavailable): a
-            # switched-off glm is provider_switched_off, never gate_runner_missing.
-            reason, reason_detail = self._classify_unavailable("glm_gate")
-            payload["reason"] = reason
-            payload["reason_detail"] = reason_detail
-            payload["resolved_at"] = payload["requested_at"]
-            # audit_refusal=False (OI-1750 second finding): this branch
-            # already calls _write_skip_rationale below unconditionally, so
-            # the default audit-on-refusal would double-log the same
-            # refused write -- same reasoning as _mark_gate_unavailable and
-            # gate_recorder.record_not_executable (OI-1707). The head moves
-            # to the skip-rationale call's commit_sha= instead.
-            _result_payload, written = self._write_not_executable_result(
-                gate="glm_gate", pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=reason_detail,
-                dispatch_id=dispatch_id,
-                branch=branch,
-                commit_sha=payload.get("commit_sha") or "",
-                audit_refusal=False,
-            )
-            if not written:
-                logger.warning(
-                    "gate_request_handler: not_executable write REFUSED for "
-                    "gate=glm_gate pr=%s -- an existing terminal, evidenced "
-                    "result stands; this refusal (reason=%s) was request-time "
-                    "only and never reached results/",
-                    pr_number, reason,
-                )
-            self._write_skip_rationale(
-                gate="glm_gate", pr_id=str(pr_number),
-                reason=reason, reason_detail=reason_detail,
-                commit_sha=payload.get("commit_sha") or "",
-            )
-        self._write_request_record(self._request_path("glm_gate", pr_number), payload)
-        return payload
+        return self._request_harness_seat(
+            "glm_gate", self._glm_gate_available(),
+            pr_number=pr_number, branch=branch, risk_class=risk_class,
+            changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
+        )
 
     def _request_deepseek(
         self, pr_number: int, branch: str, risk_class: str, changed_files: List[str], mode: str,
@@ -2734,7 +2692,7 @@ class GateRequestHandlerMixin:
         legal ``VNX_DEFAULT_REVIEW_STACK`` entry.
         """
         return self._request_harness_seat(
-            "deepseek_gate", "deepseek", self._deepseek_gate_available(),
+            "deepseek_gate", self._deepseek_gate_available(),
             pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
         )
@@ -2750,20 +2708,31 @@ class GateRequestHandlerMixin:
         provider switch never refuses it (claude is not switchable, ADR-044 v1).
         """
         return self._request_harness_seat(
-            "claude_gate", "claude", self._claude_gate_available(),
+            "claude_gate", self._claude_gate_available(),
             pr_number=pr_number, branch=branch, risk_class=risk_class,
             changed_files=changed_files, mode=mode, dispatch_id=dispatch_id,
         )
 
     def _request_harness_seat(
-        self, gate: str, provider: str, available: bool, *, pr_number: int, branch: str,
+        self, gate: str, available: bool, *, pr_number: int, branch: str,
         risk_class: str, changed_files: List[str], mode: str, dispatch_id: str,
     ) -> Dict[str, Any]:
         """Request a harness-lane review ``gate`` whose availability the caller decided.
 
-        An unavailable gate is classified by name (gate_result_parser
-        ``_classify_unavailable``, same as ``_request_glm``) and booked
-        ``not_executable`` in the result record and the skip rationale.
+        The one request path of kimi_gate, glm_gate, deepseek_gate and
+        claude_gate (review-lane P3b): one payload shape, the ``provider`` label
+        from the gate's row (``request_provider``), nothing per provider.
+
+        ``report_path`` rule, the same for every seat: the path of the report
+        the seat will write when it is ``requested``, and ``""`` when the seat
+        is ``not_executable``. A seat that never runs has no report, and
+        ``gate_status.has_evidence_fields`` reads a populated ``report_path`` as
+        evidence that a review happened.
+
+        An unavailable gate is booked ``not_executable`` through
+        ``_mark_gate_unavailable``: classified by name (``_classify_unavailable``),
+        stamped ``reason``/``reason_detail``/``failure_reason``/``resolved_at`` on
+        the request, written to the result record and the skip rationale.
         """
         from review_gate_manager import _utc_now
 
@@ -2771,7 +2740,7 @@ class GateRequestHandlerMixin:
         payload: Dict[str, Any] = {
             "gate": gate,
             "status": "requested" if available else "not_executable",
-            "provider": provider,
+            "provider": request_provider(gate),
             "branch": branch,
             "pr_number": pr_number,
             "review_mode": mode,
@@ -2788,27 +2757,9 @@ class GateRequestHandlerMixin:
         if dispatch_id:
             payload["dispatch_id"] = dispatch_id
         if not available:
-            reason, reason_detail = self._classify_unavailable(gate)
-            payload["reason"] = reason
-            payload["reason_detail"] = reason_detail
-            payload["resolved_at"] = payload["requested_at"]
-            # audit_refusal=False (OI-1750 second finding): same shape as
-            # _mark_gate_unavailable/_request_glm above -- _write_skip_rationale
-            # below already writes an unconditional line, so the default
-            # audit-on-refusal would double-log the same refused write. The
-            # head moves to the skip-rationale call's commit_sha= instead.
-            self._write_not_executable_result(
-                gate=gate, pr_number=pr_number, pr_id="",
-                reason=reason, reason_detail=reason_detail,
+            self._mark_gate_unavailable(
+                payload, gate=gate, pr_number=pr_number, pr_id="",
                 dispatch_id=dispatch_id,
-                branch=branch,
-                commit_sha=payload.get("commit_sha") or "",
-                audit_refusal=False,
-            )
-            self._write_skip_rationale(
-                gate=gate, pr_id=str(pr_number),
-                reason=reason, reason_detail=reason_detail,
-                commit_sha=payload.get("commit_sha") or "",
             )
         self._write_request_record(self._request_path(gate, pr_number), payload)
         return payload

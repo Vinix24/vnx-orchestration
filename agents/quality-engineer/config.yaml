@@ -6,3 +6,9 @@ isolation:
   allowed_paths:
     - "."
     - ".vnx-data/unified_reports/"
+skills:
+  - quality-engineer
+  - test-engineer
+  - debugger
+  - performance-profiler
+  - fabric-reference

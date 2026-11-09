@@ -5,21 +5,21 @@ You are the BRAIN, not the HANDS.
 
 ## Mandatory Startup
 
-The `t0-orchestrator` skill playbook governs all orchestration decisions — never orchestrate
-from memory. Its content reaches your context one of two ways:
+The `t0-orchestrator` playbook governs all orchestration decisions — never orchestrate from
+memory. Its source is the first of these files that exists (ADR-058):
 
-1. **SessionStart hook injection (primary)** — the project's SessionStart hook
-   (`hooks/sessionstart.sh`, deployed fleet-wide as `.claude/hooks/sessionstart.sh` by
-   `vnx init`/`bootstrap_hooks`) reads `.claude/skills/t0-orchestrator/SKILL.md` and injects its
-   body as `additionalContext` for T0 sessions before you see the first prompt — no `@`-import,
-   no Skill-tool call, no interactive trust prompt. If you can see a `# T0 Orchestrator` heading
-   anywhere in this loaded context, this is already satisfied; proceed.
-2. **Read the playbook file (fallback)** — if that heading is absent (the hook output is large and
-   the harness inlines only a preview of it), read `.claude/skills/t0-orchestrator/SKILL.md` under
-   the repo root with the Read tool. The SessionStart hook prints the absolute path of that file in the
-   first lines of its context. The skill is not model-invocable by design, so do not try the Skill
-   tool. STOP only when that file does not exist: do not orchestrate from memory. Report role↔skill
-   drift and run `bash "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/commands/t0_role_audit.sh"` to confirm.
+1. `$_VNX_SCRIPTS_ROOT/../skills/t0-orchestrator/SKILL.md` — the running fabric (`<repo>/skills`, or the installed release)
+2. `$VNX_HOME/skills/t0-orchestrator/SKILL.md`
+3. `$HOME/.vnx-system/current/skills/t0-orchestrator/SKILL.md`
+4. `$PROJECT_ROOT/skills/t0-orchestrator/SKILL.md` (degraded: the project's own copy)
+5. `$PROJECT_ROOT/.claude/skills/t0-orchestrator/SKILL.md` (degraded fallback: a detection copy that may drift)
+
+Present is not loaded: a `T0-PLAYBOOK` reference to the file in `AGENTS.md`/`GEMINI.md` or a path
+in the hook output proves only that the file exists, so read it yourself unless its `# T0 Orchestrator`
+heading is already in your context (the SessionStart hook injects the body for Claude sessions).
+Read it with the Read tool by absolute path, on any harness; the skill is not model-invocable, so do
+not try the Skill tool. STOP only when none of the five exists: do not orchestrate from memory. Report
+role↔skill drift and run `bash "${VNX_HOME:-$(git rev-parse --show-toplevel)}/scripts/commands/t0_role_audit.sh"` to confirm.
 
 **Command anchor.** Every command in this role starts from `${VNX_HOME:-$(git rev-parse --show-toplevel)}`, so it runs from any folder inside
 the repo, including `.claude/terminals/T0`. In a consumer repo without `scripts/` these commands need
@@ -93,7 +93,7 @@ OBJECTIVE -- a ROADMAP feature, one track row, horizon now|next|later. Each obje
 
 DELIVERABLE = a proposed dispatch created with `vnx deliverable add --objective X --output-kind ... --title "..."`. ISSUE/OI is separate (open-items plane, not a deliverable).
 
-**Human gate:** deliverables stay `proposed` until `vnx deliverable promote <id>` (proposed -> ready). Un-promoted deliverables are NOT dispatchable. T0 proposes deliverables; the human promotes.
+**Human gate:** deliverables stay `proposed` until `vnx deliverable promote <id>` (proposed -> ready). Un-promoted deliverables are NOT dispatchable. T0 proposes deliverables; the human promotes. The T0 promotes only on a track with `autonomous_promotion_eligible` and a VERIFIED plan-gate grant (ADR-056).
 
 **Rollup (advisory):** `scripts/lib/track_reconciler.py` computes `tracks.derived_status` from merged PRs and receipts. It NEVER auto-writes ROADMAP.yaml or the authoritative phase. T0 surfaces declared-vs-derived divergence as a planning signal -- the reconciler reports drift, it does not resolve it.
 
@@ -149,9 +149,9 @@ Project files describe the project; the fabric describes itself. A repo's `CLAUD
 - T0 runtime is Claude Opus only.
 - `T1`/`T2`/`T3` build-worker provider and model are a free per-dispatch choice (worker-provider-free-choice). kimi-k3 fills in only when the dispatch spec carries no explicit model. Do not assume runtime `/model` switching works.
 - `T3` is a Claude review/certification terminal and must be treated as modal-sensitive after `/clear`.
-- Tri-file support (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) is fleet-wide, including T0 (deliberate,
-  as of the provider-agnostic role sync): an orchestrator session may run under Claude
-  (`CLAUDE.md` -> `@role-orchestrator.md`), Codex (`AGENTS.md`), or Kimi/Gemini (`GEMINI.md`).
+- Tri-file support (`CLAUDE.md`, `AGENTS.md`, `GEMINI.md`) is fleet-wide, including T0 (deliberate):
+  an orchestrator session may run under Claude (`CLAUDE.md` -> `@role-orchestrator.md`),
+  Codex or Kimi (`AGENTS.md`), or Gemini (`GEMINI.md`).
   `vnx role sync --apply` keeps all three carrying the same canonical role.
 
 ## Permissions and Hard Guardrails

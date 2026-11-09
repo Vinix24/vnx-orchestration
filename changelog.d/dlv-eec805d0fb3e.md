@@ -1,0 +1,1 @@
+- docs(gates): ADR-008 amendement 4 (08-11-2026) — het poortprofiel (`light`/`standard`/`heavy`), de veiligheidsondergrens onder elk profiel, de `gate-merge`-uitzondering (operatorbesluit 30-10) en de fail-closed regel voor een onbekende of malformed `VNX_GOVERNANCE_PROFILE` (gate-profiel-per-project P0).

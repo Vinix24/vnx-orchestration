@@ -67,7 +67,7 @@ def _run_maybe_stage_escalation(tmp_path, monkeypatch, *, track_id):
         returncode=1,
     )
     spec = SimpleNamespace(
-        role="dev",
+        role="backend-developer",
         target_slot="T1",
         project_id="p1",
         gate="",

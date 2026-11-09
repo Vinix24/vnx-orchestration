@@ -336,6 +336,102 @@ class TestEvaluateUnit(HookTestCase):
         self.assertEqual(hook._relative_to_cwd("/wt/a.py", ""), "/wt/a.py")
 
 
+class TestSymlinkedPaths(HookTestCase):
+    """OI-2666: cwd and target are compared on their real paths.
+
+    ROLE (quality-engineer) file_write_scope: tests/**, scripts/check_*.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.real = (self.tmp / "real").resolve()
+        (self.real / "tests").mkdir(parents=True)
+        (self.real / "scripts").mkdir()
+        self.link = self.tmp / "link"
+        self.link.symlink_to(self.real)
+
+    def _decide(self, target: str, cwd: str, dispatch_paths=None):
+        payload = json.loads(make_payload("Write", {"file_path": target}, cwd=cwd))
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": ROLE,
+            "PROJECT_ROOT": "",
+            "VNX_PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        if dispatch_paths is not None:
+            env["VNX_DISPATCH_PATHS"] = json.dumps(dispatch_paths)
+        with patch.dict(os.environ, env, clear=False):
+            if dispatch_paths is None:
+                os.environ.pop("VNX_DISPATCH_PATHS", None)
+            return hook.evaluate(payload)
+
+    def test_symlinked_target_with_real_cwd_in_scope_allowed(self):
+        target = str(self.link / "tests" / "test_x.py")
+        self.assertEqual(self._decide(target, str(self.real)), ("allow", None))
+
+    def test_symlinked_target_in_scope_allowed_under_dispatch_paths(self):
+        target = str(self.link / "tests" / "test_x.py")
+        self.assertEqual(
+            self._decide(target, str(self.real), ["tests/"]), ("allow", None)
+        )
+
+    def test_symlinked_target_outside_scope_still_blocked(self):
+        target = str(self.link / "docs" / "x.md")
+        (self.real / "docs").mkdir()
+        decision, reason = self._decide(target, str(self.real))
+        self.assertEqual(decision, "block")
+        self.assertIn("docs/x.md", reason)
+        decision, _ = self._decide(
+            str(self.link / "scripts" / "x.py"), str(self.real), ["tests/"]
+        )
+        self.assertEqual(decision, "block")
+
+    def test_directory_symlink_pointing_outside_is_blocked(self):
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        (self.real / "tests").rmdir()
+        (self.real / "tests").symlink_to(outside)
+        decision, reason = self._decide(
+            str(self.real / "tests" / "test_x.py"), str(self.real)
+        )
+        self.assertEqual(decision, "block")
+        self.assertIn("outside", reason)
+        decision, _ = self._decide(
+            str(self.link / "tests" / "test_x.py"), str(self.link)
+        )
+        self.assertEqual(decision, "block")
+
+    def test_target_outside_cwd_keeps_the_existing_reason(self):
+        decision, reason = self._decide(str(self.tmp / "elsewhere.py"), str(self.real))
+        self.assertEqual(decision, "block")
+        self.assertIn(
+            f"worker-scope: write target '{self.tmp / 'elsewhere.py'}' is outside "
+            f"file_write_scope for role '{ROLE}'",
+            reason,
+        )
+
+    def test_final_component_symlink_stays_visible(self):
+        """A symlink as the last component is not resolved: the name is what the scope sees."""
+        (self.real / "scripts" / "evil.py").symlink_to(self.real / "tests")
+        rel = hook._relative_to_cwd(
+            str(self.link / "scripts" / "evil.py"), str(self.real)
+        )
+        self.assertEqual(rel, "scripts/evil.py")
+
+    def test_relative_to_cwd_resolves_both_sides(self):
+        self.assertEqual(
+            hook._relative_to_cwd(str(self.link / "tests" / "a.py"), str(self.real)),
+            "tests/a.py",
+        )
+        self.assertEqual(
+            hook._relative_to_cwd(str(self.real / "tests" / "a.py"), str(self.link)),
+            "tests/a.py",
+        )
+        outside = str(self.tmp / "nope" / "a.py")
+        self.assertEqual(hook._relative_to_cwd(outside, str(self.real)), outside)
+
+
 class TestDefaultEnforcement(HookTestCase):
     """15-08 flip REVERTED: enforcement is OFF by default — no env flag means a
     pure no-op. A truthy VNX_ENFORCE_WORKER_PERMISSIONS opts back in and
@@ -562,6 +658,160 @@ class TestUnknownRoleFallback(HookTestCase):
         )
         self.assertEqual(res.returncode, 0, res.stderr)
         self.assertEqual(res.stdout.strip(), "", res.stdout)
+
+
+class TestRefusedPolicyFailsClosed(HookTestCase):
+    """A refused policy of a known role blocks the tool call (permissions P2 r3).
+
+    The code-worker fallback can write, so a read-only role with a broken policy
+    source must not receive it: Bash and every write-like tool block with the
+    reason slug. Only ``UnknownRoleError`` keeps the code-worker fallback.
+    """
+
+    REASONS = ("source-empty", "source-broken-yaml", "yaml-unavailable",
+               "source-malformed", "unknown-source-key")
+    WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
+
+    def _decide(self, tool, tool_input, role, *, raises=None, yaml_text=None,
+                no_yaml_module=False):
+        root = self.tmp / "proj"
+        (root / ".vnx").mkdir(parents=True, exist_ok=True)
+        if yaml_text is not None:
+            (root / ".vnx" / "worker_permissions.yaml").write_text(yaml_text)
+        payload = {"tool_name": tool, "tool_input": tool_input, "cwd": str(self.wt)}
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": role,
+            "VNX_PROJECT_ROOT": str(root),
+            "PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        mods = {"yaml": None} if no_yaml_module else {}
+        with patch.dict(os.environ, env, clear=False), patch.dict(sys.modules, mods):
+            if raises is None:
+                return hook.evaluate(payload)
+            exc = hook.PermissionPolicyRefused("refused", raises)
+            with patch.object(hook, "resolve_worker_profile", side_effect=exc):
+                return hook.evaluate(payload)
+
+    def _all_blocked(self, role, **kw):
+        in_scope = str(self.wt / "src" / "app.py")
+        calls = [("Bash", {"command": "pytest -q"})] + [
+            (t, {"file_path": in_scope}) for t in self.WRITE_TOOLS]
+        for tool, tool_input in calls:
+            decision, reason = self._decide(tool, tool_input, role, **kw)
+            self.assertEqual(decision, "block", (tool, reason))
+            self.assertIn(f"for role '{role}'; tool call blocked", reason)
+            self.assertNotIn("code-worker", reason)
+            yield reason
+
+    def test_every_reason_blocks_bash_and_writes_for_read_only_and_code_roles(self):
+        for role in ("code-reviewer", "backend-developer"):
+            for slug in self.REASONS:
+                for reason in self._all_blocked(role, raises=slug):
+                    self.assertIn(f"permission policy refused ({slug})", reason)
+
+    def test_real_sources_block_with_their_slug(self):
+        cases = (
+            ("source-empty", dict(yaml_text="")),
+            ("source-broken-yaml", dict(yaml_text="profiles: [unclosed")),
+            ("yaml-unavailable", dict(yaml_text="profiles: {}\n", no_yaml_module=True)),
+        )
+        for slug, kw in cases:
+            for reason in self._all_blocked("code-reviewer", **kw):
+                self.assertIn(f"({slug})", reason)
+
+    def test_write_with_no_path_still_blocks(self):
+        decision, _ = self._decide("Write", {}, "code-reviewer", raises="source-empty")
+        self.assertEqual(decision, "block")
+
+    def test_read_only_tools_stay_allowed(self):
+        for tool in ("Read", "Grep", "Glob", "WebFetch", "TodoWrite"):
+            decision, reason = self._decide(
+                tool, {"file_path": "x"}, "code-reviewer", raises="source-empty")
+            self.assertEqual((decision, reason), ("allow", None), tool)
+
+    def test_message_carries_no_policy_content(self):
+        _, reason = self._decide("Bash", {"command": "ls"}, "code-reviewer",
+                                 raises="source-empty")
+        self.assertNotIn("allowed_tools", reason)
+
+    def test_end_to_end_empty_source_blocks_through_the_launcher(self):
+        root = self.tmp / "proj-e2e"
+        (root / ".vnx").mkdir(parents=True)
+        (root / ".vnx" / "worker_permissions.yaml").write_text("")
+        target = self.wt / "src" / "out.md"
+        res = run_hook(
+            make_payload("Write", {"file_path": str(target)}, cwd=str(self.wt)),
+            enforce=True,
+            role="backend-developer",
+            data_dir=self.data_dir,
+            extra_env={"VNX_PROJECT_ROOT": str(root)},
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn("permission policy refused (source-empty)", parse_block(res.stdout)["reason"])
+
+    def _resolve_decide(self, tool, tool_input, role):
+        env = {"VNX_ENFORCE_WORKER_PERMISSIONS": "1", "VNX_WORKER_ROLE": role}
+        payload = {"tool_name": tool, "tool_input": tool_input, "cwd": str(self.wt)}
+        with patch.dict(os.environ, env, clear=False):
+            return hook.evaluate(payload)
+
+    def test_any_other_resolution_exception_blocks_with_policy_resolution_error(self):
+        for tool, tool_input in (("Bash", {"command": "ls"}),
+                                 ("Write", {"file_path": str(self.wt / "src" / "a.py")})):
+            for role in ("code-reviewer", "backend-developer"):
+                with patch.object(hook, "resolve_worker_profile",
+                                  side_effect=RuntimeError("secret policy text")):
+                    decision, reason = self._resolve_decide(tool, tool_input, role)
+                self.assertEqual(decision, "block", (tool, role))
+                self.assertIn("policy-resolution-error: RuntimeError", reason)
+                self.assertNotIn("secret policy text", reason)
+
+    def test_resolution_exception_keeps_read_only_tools_allowed(self):
+        with patch.object(hook, "resolve_worker_profile", side_effect=RuntimeError("x")):
+            decision, _ = self._resolve_decide("Read", {"file_path": "x"}, "code-reviewer")
+        self.assertEqual(decision, "allow")
+
+    def test_non_string_key_source_blocks_the_in_scope_write(self):
+        decision, reason = self._decide(
+            "Write", {"file_path": str(self.wt / "src" / "app.py")}, "code-reviewer",
+            yaml_text="profiles:\n  code-reviewer:\n    1: []\n    unexpected: []\n")
+        self.assertEqual(decision, "block")
+        self.assertIn("(source-malformed)", reason)
+
+    def test_unknown_role_error_keeps_the_fallback_when_patched(self):
+        exc = hook.UnknownRoleError("absent")
+        with patch.object(hook, "resolve_worker_profile", side_effect=exc):
+            decision, _ = self._resolve_decide(
+                "Write", {"file_path": str(self.wt / "src" / "app.py")}, "ghost-role")
+        self.assertEqual(decision, "allow")
+
+    def test_malformed_payload_stays_fail_open(self):
+        with patch.object(hook, "resolve_worker_profile", side_effect=RuntimeError("x")):
+            decision, _ = self._resolve_decide(None, "not-a-dict", "code-reviewer")
+        self.assertEqual(decision, "allow")
+
+    def test_unknown_role_still_falls_back_to_the_code_worker(self):
+        root = self.tmp / "proj2"
+        (root / ".vnx").mkdir(parents=True)
+        (root / ".vnx" / "worker_permissions.yaml").write_text("profiles: {}\n")
+        far = self.wt / "a" / "b" / "c" / "d" / "e" / "f" / "out.md"
+        env = {
+            "VNX_ENFORCE_WORKER_PERMISSIONS": "1",
+            "VNX_WORKER_ROLE": "nonexistent-role-fallback-test",
+            "VNX_PROJECT_ROOT": str(root),
+            "PROJECT_ROOT": "",
+            "VNX_HOME": "",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            near = hook.evaluate({"tool_name": "Write", "cwd": str(self.wt),
+                                  "tool_input": {"file_path": str(self.wt / "src" / "a.py")}})
+            out = hook.evaluate({"tool_name": "Write", "cwd": str(self.wt),
+                                 "tool_input": {"file_path": str(far)}})
+        self.assertEqual(near, ("allow", None))
+        self.assertEqual(out[0], "block")
+        self.assertIn("code-worker", out[1])
 
 
 class TestDispatchPathsNarrowing(HookTestCase):

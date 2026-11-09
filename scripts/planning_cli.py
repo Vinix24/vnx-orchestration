@@ -71,6 +71,8 @@ import seed_tracks_from_roadmap as seeder  # noqa: E402
 import track_reconciler  # noqa: E402
 import objective_reconcile  # noqa: E402
 import plan_gate_enforcement  # noqa: E402
+import actor_class  # noqa: E402
+from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
 import schema_manifest
@@ -2253,6 +2255,15 @@ def _format_decision_ref(decision_ref: Optional[str]) -> str:
     return f"{decision} ({n_reports} report(s), {n_rejected} rejected alternative(s))"
 
 
+def _derived_actor(name: str, metadata: Optional[dict] = None) -> dict:
+    """``actor`` and ``metadata`` kwargs for an event: *name* stays in the legacy column and
+    ``metadata.actor_class`` carries the class derived from the signals (ADR-056)."""
+    return {
+        "actor": name,
+        "metadata": {**(metadata or {}), "actor_class": actor_class.derive()},
+    }
+
+
 def _append_coordination_event(
     conn: sqlite3.Connection,
     *,
@@ -2561,6 +2572,25 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_objective_set_autonomous_promotion(args: argparse.Namespace) -> int:
+    """Set the track opt-in ``autonomous_promotion_eligible`` (true|false); audited with the actor class."""
+    state_dir = _resolve_state_dir(args.state_dir)
+    try:
+        tracks_lib.set_autonomous_promotion_eligible(
+            state_dir, args.track_id, args.project_id, args.eligible == "true",
+            actor="operator", actor_class=actor_class.derive(),
+        )
+    except tracks_lib.TrackNotFoundError:
+        print(
+            f"objective set-autonomous-promotion: track not found: {args.track_id!r} "
+            f"(project {args.project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+    print(f"Set autonomous_promotion_eligible={args.eligible} on {args.track_id}")
+    return 0
+
+
 def cmd_objective_set_plan_scope(args: argparse.Namespace) -> int:
     """Set a track's plan_scope by hand (architecture|light), always with ``--reason``.
 
@@ -2799,9 +2829,9 @@ def cmd_deliverable_add(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state=None,
             to_state="proposed",
-            actor="operator",
             reason=f"deliverable add: {title!r}",
             project_id=project_id,
+            **_derived_actor("operator", metadata=delivery_identity_fields(dispatch_id, project_id)),
         )
         conn.commit()
     finally:
@@ -3192,6 +3222,50 @@ def _track_blocks_promotion(
     return True
 
 
+def _promotion_refusal(
+    state_dir: Path, project_id: str, row: Any, track_id: Optional[str],
+) -> tuple[Optional[str], dict]:
+    """``(refusal, extra_metadata)`` for a promote by this actor (ADR-056, "Wie mag promoveren").
+
+    The operator promotes as before. Any other class is refused unless the track
+    carries the opt-in AND the plan-gate grant reads VERIFIED for this track and
+    project; then the grant travels in the event metadata. Learning and dreaming
+    outcomes are never promoted by an agent. Anything unreadable refuses.
+    """
+    cls = actor_class.derive()
+    if cls == actor_class.OPERATOR:
+        return None, {}
+    kind = row["output_kind"] if "output_kind" in row.keys() else None
+    if kind in tracks_lib.OPERATOR_ONLY_OUTPUT_KINDS:
+        return f"output_kind {kind!r} is never promoted by an agent (actor class {cls!r})", {}
+    if not track_id or not tracks_lib.track_autonomous_promotion_eligible(
+        state_dir, track_id, project_id,
+    ):
+        return (
+            f"actor class {cls!r} may not promote: track {track_id!r} has no "
+            "autonomous_promotion_eligible opt-in; the operator promotes", {},
+        )
+    if cls != actor_class.T0:
+        return f"actor class {cls!r} may not promote, only the operator or the T0 on an opted-in track", {}
+    grant = _promotion_grant(project_id, track_id)
+    if grant != plan_gate_enforcement.PromotionGrant.VERIFIED:
+        return f"plan-gate grant for track {track_id!r} is {grant.value}, not verified", {}
+    return None, {"grant": {"track_id": track_id, "project_id": project_id, "state": grant.value}}
+
+
+def _promotion_grant(project_id: str, track_id: str) -> "plan_gate_enforcement.PromotionGrant":
+    """The grant state of a track; a failing verifier or missing trust anchor is never VERIFIED."""
+    absent = plan_gate_enforcement.PromotionGrant.ABSENT
+    try:
+        import delegation_mandate  # noqa: PLC0415
+        repo_root = Path(os.environ.get("VNX_PROJECT_ROOT", os.getcwd()))
+        signers = delegation_mandate.resolve_allowed_signers_for_runtime(repo_root)
+        return plan_gate_enforcement.verify_promotion_grant(track_id, project_id, repo_root, signers)
+    except Exception as exc:  # vnx-silent-except: a failing verifier refuses the promote (ABSENT), reason printed by the caller
+        logging.getLogger(__name__).warning("promotion grant lookup failed: %s: %s", type(exc).__name__, exc)
+        return absent
+
+
 def cmd_deliverable_promote(args: argparse.Namespace) -> int:
     state_dir = _resolve_state_dir(args.state_dir)
     project_id = args.project_id
@@ -3227,6 +3301,11 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
         if track_id and _track_blocks_promotion(state_dir, project_id, dispatch_id, track_id):
             return 1
 
+        refusal, grant_meta = _promotion_refusal(state_dir, project_id, row, track_id)
+        if refusal:
+            print(f"Cannot promote {dispatch_id!r}: {refusal}", file=sys.stderr)
+            return 1
+
         now = _now_utc()
         has_oaa = _has_col(conn, "dispatches", "operator_approved_at")
         if has_oaa:
@@ -3254,7 +3333,7 @@ def cmd_deliverable_promote(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state="proposed",
             to_state="ready",
-            actor="operator",
+            **_derived_actor("operator", grant_meta),
             reason="operator gate: proposed -> ready",
             project_id=project_id,
         )
@@ -3370,14 +3449,13 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
             dispatch_id=dispatch_id,
             from_state="ready",
             to_state="completed",
-            actor="operator",
             reason=f"deliverable close: PR {pr_ref} (operator attestation)",
             project_id=project_id,
-            metadata={
+            **_derived_actor("operator", {
                 "evidence_pr": evidence_number,
                 "pr_ref": pr_ref,
                 "attestation": "operator",
-            },
+            }),
         )
         conn.commit()
     finally:
@@ -3492,11 +3570,10 @@ def _book_superseded_attempt(
         dispatch_id=dispatch_id,
         from_state=from_state,
         to_state="expired",
-        actor="operator",
         reason=f"deliverable close: PR {pr_ref} delivered by round {round_id} (operator attestation)",
         project_id=project_id,
-        metadata={"evidence_pr": evidence_number, "pr_ref": pr_ref,
-                  "superseded_by": round_id, "attestation": "operator"},
+        **_derived_actor("operator", {"evidence_pr": evidence_number, "pr_ref": pr_ref,
+                                      "superseded_by": round_id, "attestation": "operator"}),
     )
     return {"action": "superseded", "round": round_id}
 
@@ -4771,6 +4848,42 @@ def _deliverable_dispatch_paths(state_dir, project_id: str, track_id: str) -> li
     return paths
 
 
+def _profile_panel_inputs(project_id):
+    """``(plan_gate_seats, "<profile> (<source>)")`` from the gate profile (gate-profiel P4).
+
+    ``plan_gate_seats`` is None when the profile contributes nothing (``standard``, unset,
+    or an operator value on the field's own key). The label is None while the key is not set
+    at all, so the trace of an unconfigured project stays what it was. A malformed profile raises
+    ``GateProfileConfigError``: the plan-gate refuses rather than run on a default.
+    """
+    import gate_profile
+
+    resolution = gate_profile.resolve(project_id)
+    seats = gate_profile.value("plan_gate_seats", project_id, resolution=resolution)
+    if resolution.source in ("default", "unset"):
+        return seats, None
+    return seats, f"{resolution.profile} ({resolution.source})"
+
+
+def _panel_gov_trace(variant, composition, switched) -> str:
+    """The ``gov_trace`` of one composition: weight, seats, why, profile, left-out seats."""
+    labels = ", ".join(s["label"] for s in composition.seats)
+    trace = f"weight={variant} -> {len(composition.seats)} seat(s) by {composition.chosen_by} ({labels})"
+    if composition.chosen_by == "operator":
+        trace += f"; OVERRIDES the default seat {composition.default_label}"
+    elif composition.second_seat:
+        trace += f"; both seats from the start ({composition.second_seat})"
+    elif composition.escalation is not None:
+        trace += f"; {composition.escalation['label']} reads on BLOCK"
+    elif len(composition.seats) > 1:
+        trace += "; both seats from the start (gate profile)"
+    if composition.profile:
+        trace += f"; profile={composition.profile}"
+    if switched.left_out:
+        trace += f"; {switched.note()}"
+    return trace
+
+
 def _derive_panel_weight(
     *, panel_seats, dispatch_paths, task_class, irreversible, deliverable_paths=None,
     project_id=None,
@@ -4813,24 +4926,16 @@ def _derive_panel_weight(
         second_seat_paths = list(deliverable_paths())
     else:
         second_seat_paths = paths or []
+    profile_seats, profile_label = _profile_panel_inputs(project_id)
     switched = plan_gate_panel.apply_provider_switch(
-        plan_gate_panel.compose_panel(requested or None, dispatch_paths=second_seat_paths),
+        plan_gate_panel.compose_panel(
+            requested or None, dispatch_paths=second_seat_paths,
+            profile_seats=profile_seats, profile=profile_label,
+        ),
         project_id=project_id,
     )
     composition = switched.composition
-    labels = ", ".join(s["label"] for s in composition.seats)
-    gov_trace = (
-        f"weight={gov.variant} -> {len(composition.seats)} seat(s) by "
-        f"{composition.chosen_by} ({labels})"
-    )
-    if composition.chosen_by == "operator":
-        gov_trace += f"; OVERRIDES the default seat {composition.default_label}"
-    elif composition.second_seat:
-        gov_trace += f"; both seats from the start ({composition.second_seat})"
-    elif composition.escalation is not None:
-        gov_trace += f"; {composition.escalation['label']} reads on BLOCK"
-    if switched.left_out:
-        gov_trace += f"; {switched.note()}"
+    gov_trace = _panel_gov_trace(gov.variant, composition, switched)
     return {
         "panel": composition.seats,
         "escalation": composition.escalation,
@@ -6737,6 +6842,17 @@ def _add_objective_set_goal_parser(obj_sub: Any, common: Callable[[Any], None]) 
     p_set_goal.set_defaults(func=cmd_objective_set_goal)
 
 
+def _add_objective_set_autonomous_promotion_parser(obj_sub: Any, common: Callable[[Any], None]) -> None:
+    p = obj_sub.add_parser(
+        "set-autonomous-promotion",
+        help="set the track opt-in autonomous_promotion_eligible (true|false); default false",
+    )
+    common(p)
+    p.add_argument("track_id")
+    p.add_argument("eligible", choices=("true", "false"))
+    p.set_defaults(func=cmd_objective_set_autonomous_promotion)
+
+
 def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) -> None:
     """The eight `objective` write actions, one builder each.
 
@@ -6750,6 +6866,7 @@ def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) ->
     _add_objective_remove_dependency_parser(obj_sub, common)
     _add_objective_unmark_delivery_parser(obj_sub, common)
     _add_objective_reopen_parser(obj_sub, common)
+    _add_objective_set_autonomous_promotion_parser(obj_sub, common)
     _add_objective_add_parser(obj_sub, common)
     _add_objective_set_goal_parser(obj_sub, common)
 
