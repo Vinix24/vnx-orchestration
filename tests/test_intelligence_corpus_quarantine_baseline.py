@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "scripts/lib"))
 CLI = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py"
 
 
@@ -30,6 +30,24 @@ def database(tmp_path):
 def run_baseline(db, out):
     return subprocess.run([sys.executable, str(CLI), "baseline", "--db", str(db),
                            "--out", str(out)], cwd=out.parent, capture_output=True, text=True)
+
+
+def test_contract_imports_from_scripts_lib_in_fresh_interpreter(database, tmp_path):
+    target = tmp_path / "manifest.json"
+    script = "\n".join([
+        "import sys",
+        "sys.path.insert(0, sys.argv[1])",
+        "from intelligence_corpus_quarantine import contract",
+        "from intelligence_corpus_quarantine.baseline import measure_baseline",
+        "contract.write_manifest(sys.argv[3], measure_baseline(sys.argv[2]))",
+    ])
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(ROOT / "scripts/lib"), str(database), str(target)],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert target.is_file()
+    assert json.loads(target.read_text())["db"]["path"] == str(database)
 
 
 def test_baseline_matches_sqlite(database, tmp_path):
@@ -55,7 +73,7 @@ def test_baseline_matches_sqlite(database, tmp_path):
             assert entry["rows"] == conn.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
             size = conn.execute("SELECT sum(pgsize) FROM dbstat WHERE name=?", (name,)).fetchone()[0]
             assert entry["dbstat_bytes"] == (0 if size is None else size)
-    from lib.intelligence_corpus_quarantine.contract import load_manifest, validate_manifest
+    from intelligence_corpus_quarantine.contract import load_manifest, validate_manifest
     assert validate_manifest(manifest) == manifest == load_manifest(manifest_path)
     assert manifest["track"] == "intelligence-corpus-quarantine"
     assert set(manifest) == {"schema", "track", "generated_at", "db", "tables"}
@@ -63,7 +81,7 @@ def test_baseline_matches_sqlite(database, tmp_path):
 
 
 def test_baseline_ignores_stale_manifest_scratch_file(database, tmp_path):
-    from lib.intelligence_corpus_quarantine.contract import load_manifest
+    from intelligence_corpus_quarantine.contract import load_manifest
     stale = tmp_path / "manifest.json.tmp"
     content = b"interrupted writer's bytes\n"
     stale.write_bytes(content)
@@ -109,7 +127,7 @@ def test_refusals(database, tmp_path, kind, code, reason):
 
 
 def test_digest_fixtures_and_affinity(database, tmp_path):
-    from lib.intelligence_corpus_quarantine.digest import table_digest
+    from intelligence_corpus_quarantine.digest import table_digest
     twin = tmp_path / "twin.db"
     twin.write_bytes(database.read_bytes())
     with closing(sqlite3.connect(database)) as left, closing(sqlite3.connect(twin)) as right:
@@ -126,7 +144,7 @@ def test_digest_fixtures_and_affinity(database, tmp_path):
 
 
 def test_digest_byte_stream_and_invalid_inputs():
-    from lib.intelligence_corpus_quarantine.digest import table_digest
+    from intelligence_corpus_quarantine.digest import table_digest
     with closing(sqlite3.connect(":memory:")) as conn:
         conn.execute('CREATE TABLE sample(id INTEGER, n, i, f, "t""x", b)')
         conn.execute("INSERT INTO sample VALUES (?, ?, ?, ?, ?, ?)", (-2, None, -42, 1.25, "é", b"\x00\xff"))
@@ -159,8 +177,8 @@ def test_digest_byte_stream_and_invalid_inputs():
     "db.user_version", "db.journal_mode", "db.integrity_check", "table.name", "table.rows", "table.dbstat_bytes"])
 @pytest.mark.parametrize("bad", ["missing", "null", "malformed", "unknown"])
 def test_contract_rejects_bad_evidence(database, tmp_path, field, bad):
-    from lib.intelligence_corpus_quarantine.baseline import measure_baseline
-    from lib.intelligence_corpus_quarantine.contract import load_manifest, validate_manifest, write_manifest
+    from intelligence_corpus_quarantine.baseline import measure_baseline
+    from intelligence_corpus_quarantine.contract import load_manifest, validate_manifest, write_manifest
     manifest = copy.deepcopy(measure_baseline(database))
     table = next(entry for entry in manifest["tables"] if entry["name"] == "code_snippets")
     owner = manifest["db"] if field.startswith("db.") else table if field.startswith("table.") else manifest
@@ -182,8 +200,8 @@ def test_contract_rejects_bad_evidence(database, tmp_path, field, bad):
 
 
 def test_atomic_replacement_and_failure(database, tmp_path):
-    from lib.intelligence_corpus_quarantine.baseline import measure_baseline
-    from lib.intelligence_corpus_quarantine.contract import load_manifest, write_manifest
+    from intelligence_corpus_quarantine.baseline import measure_baseline
+    from intelligence_corpus_quarantine.contract import load_manifest, write_manifest
     manifest = measure_baseline(database)
     target = tmp_path / "manifest.json"
     write_manifest(target, manifest)

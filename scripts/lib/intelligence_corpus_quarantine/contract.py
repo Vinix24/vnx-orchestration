@@ -3,7 +3,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .. import atomic_io
+from atomic_io import atomic_write_text
 
 TRACK = "intelligence-corpus-quarantine"
 SCHEMA = 1
@@ -56,4 +56,4 @@ def write_manifest(path, manifest):
     """Validate, fsync and atomically replace using the shared atomic writer."""
     validate_manifest(manifest)
     text = json.dumps(manifest, sort_keys=True, indent=2, allow_nan=False) + "\n"
-    atomic_io.atomic_write_text(Path(path), text)
+    atomic_write_text(Path(path), text)

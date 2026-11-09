@@ -5,9 +5,13 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from lib.project_root import resolve_project_root
-from lib.intelligence_corpus_quarantine.baseline import measure_baseline
-from lib.intelligence_corpus_quarantine.contract import write_manifest
+_LIB_DIR = Path(__file__).resolve().parent / "lib"
+if str(_LIB_DIR) not in sys.path:
+    sys.path.insert(0, str(_LIB_DIR))
+
+from project_root import resolve_project_root
+from intelligence_corpus_quarantine.baseline import measure_baseline
+from intelligence_corpus_quarantine.contract import write_manifest
 
 
 class Parser(argparse.ArgumentParser):
