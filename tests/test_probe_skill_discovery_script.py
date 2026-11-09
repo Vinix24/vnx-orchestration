@@ -64,6 +64,10 @@ argv = sys.argv[1:]
 if "--version" in argv:
     print("codex-cli 0.164.0"); raise SystemExit
 mode = os.environ.get("FAKE_CODEX", "ja"); answer = os.environ.get("FAKE_CODEX_ANSWER")
+noise = os.environ.get("FAKE_CODEX_NOISE"); line = "Reading additional input from stdin..."
+if noise == "stderr": print(line, file=sys.stderr)
+if noise == "stdout": print(line)
+if mode == "exit": print("first stderr line\ncodex: not logged in\n\n", file=sys.stderr)
 if mode in ("exit", "empty"): raise SystemExit(4 if mode == "exit" else 0)
 found = sorted(p.name for p in Path(".agents/skills").iterdir()) if Path(".agents/skills").is_dir() else []
 names = {"neg": found + ["vnx-probe-negative-control-not-in-tree"], "noslug": ["unrelated-skill"]}.get(mode, found)
@@ -454,3 +458,57 @@ def test_a_run_that_wrote_a_row_outside_the_schema_exits_non_zero(tmp_path):
         proc = subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=_env(tmp_path), check=False)
         assert proc.returncode == 1 and '"outcome":""' in proc.stdout, (out, proc.returncode, proc.stderr)
         assert "validate: outcome" in proc.stderr, (out, proc.stderr)
+
+
+def test_c3b_a_stderr_line_stays_out_of_the_evidence_stream(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX_NOISE="stderr")
+    assert row["outcome"] == "ja", row
+
+
+def test_c3b_the_same_line_on_stdout_stays_stream_malformed(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX_NOISE="stdout")
+    assert row["outcome"] == "niet_gemeten" and "stream_malformed: line 1" in row["reason"], row
+
+
+def test_a_failing_cli_names_its_last_stderr_line_or_no_stderr(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="exit")
+    assert row["outcome"] == "niet_gemeten" and row["reason"] == "cli_exit_4: codex: not logged in", row
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="exit")
+    assert row["reason"] == "cli_exit_3: no stderr", row
+
+
+def test_a_timeout_names_the_last_stderr_line(tmp_path):
+    slow = tmp_path / "slow"
+    slow.mkdir()
+    (slow / "codex").write_text("#!/bin/sh\n[ \"$1\" = --version ] && exit 0\necho 'waiting on login' >&2\nsleep 30\n", encoding="utf-8")
+    (slow / "codex").chmod(0o755)
+    row = _cell(tmp_path, "C3b", PROBE_CODEX_BIN=str(slow / "codex"), PROBE_TIMEOUT_SECONDS="1")
+    assert row["outcome"] == "niet_gemeten" and row["reason"] == "timeout after 1s: waiting on login", row
+
+
+def test_cli_stdin_is_dev_null(tmp_path):
+    reader = tmp_path / "reader"
+    reader.mkdir()
+    (reader / "codex").write_text("#!/bin/sh\n[ \"$1\" = --version ] && exit 0\nif read -r x; then echo 'stdin had data' >&2; fi\nexit 5\n", encoding="utf-8")
+    (reader / "codex").chmod(0o755)
+    row = _cell(tmp_path, "C3b", PROBE_CODEX_BIN=str(reader / "codex"))
+    assert row["reason"] == "cli_exit_5: no stderr", row
+
+
+def test_evidence_dir_keeps_the_stream_that_the_row_sha256_covers(tmp_path):
+    keep = tmp_path / "keep"
+    proc = _run(tmp_path, "--run", "--cell", "all", "--evidence-dir", str(keep), extra={"FAKE_CODEX_NOISE": "stderr"})
+    assert proc.returncode == 0, proc.stderr
+    rows = {r["cell"]: r for r in (json.loads(line) for line in proc.stdout.splitlines() if line.strip())}
+    for cell in ("C1", "C2", "C3a", "C3b"):
+        digest = hashlib.sha256((keep / (cell + ".stream")).read_bytes()).hexdigest()
+        assert rows[cell]["sha256"] == digest, cell
+    assert (keep / "C3b.stderr").read_text() == "Reading additional input from stdin...\n"
+    assert "Reading additional" not in (keep / "C3b.stream").read_text()
+
+
+def test_without_the_flag_nothing_is_kept_and_a_missing_value_is_refused(tmp_path):
+    assert _cell(tmp_path, "C3b")["outcome"] == "ja"
+    assert not (tmp_path / "keep").exists()
+    proc = _run(tmp_path, "--run", "--evidence-dir")
+    assert proc.returncode == 2 and "--evidence-dir needs a path" in proc.stderr
