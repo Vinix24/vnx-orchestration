@@ -134,7 +134,6 @@ elif cmd == "judge_listing":
 elif cmd == "judge_codex":
     raw, slug, negative = args
     text = open(raw, encoding="utf-8", errors="replace").read()
-    def names(value, line): return re.search(r"(?<![A-Za-z0-9_.-])%s(?![A-Za-z0-9_.-])" % re.escape(value), line) is not None
     def verdict(outcome, reason): print("%s\t%s" % (outcome, reason)); raise SystemExit
     if not text.strip(): verdict("niet_gemeten", "empty_output: codex printed nothing to judge")
     events, bad = json_objects(text)
@@ -151,10 +150,18 @@ elif cmd == "judge_codex":
                     value = "\n".join(b["text"] for b in value if isinstance(b, dict) and isinstance(b.get("text"), str))
             answer = value if isinstance(value, str) else ""
     if answer is None or not answer.strip(): verdict("niet_gemeten", "no_agent_answer: no agent_message with text in the stream")
-    lines = [l for l in (re.sub(r"^[\s\-*`]+|[\s`]+$", "", raw_line) for raw_line in answer.splitlines()) if l]
-    if any(names(negative, l) for l in lines): verdict("nee", "the answer names the negative control %s, which is not in the tree" % negative)
-    if any(names(slug, l) for l in lines): verdict("ja", "the answer names %s and not the negative control" % slug)
-    verdict("nee", "the answer does not name %s (%d answer lines judged)" % (slug, len(lines)))
+    # The prompt asks for bare names, one per line: the answer counts only as that list. A line that is anything
+    # else (a denial, a header, a sentence that mentions the slug) means there is no listing to judge.
+    entries = []
+    for number, answer_line in enumerate(answer.splitlines(), 1):
+        entry = re.sub(r"^[\s\-*`]+|[\s`]+$", "", answer_line)
+        if not entry: continue
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]*", entry):
+            verdict("niet_gemeten", "answer_not_a_list: line %d is not a bare skill name" % number)
+        entries.append(entry)
+    if negative in entries: verdict("nee", "the answer lists the negative control %s, which is not in the tree" % negative)
+    if slug in entries: verdict("ja", "the answer lists %s as an entry and not the negative control" % slug)
+    verdict("nee", "the answer does not list %s (%d entries judged)" % (slug, len(entries)))
 elif cmd == "validate":
     rows = [json.loads(line) for line in open(args[0], encoding="utf-8") if line.strip()]
     expected = {"C1": True, "C2": False, "C3a": True, "C3b": True}

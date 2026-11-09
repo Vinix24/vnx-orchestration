@@ -30,22 +30,29 @@ if "--version" in argv:
 sid = argv[argv.index("--session-id") + 1]
 mode = os.environ.get("FAKE_CLAUDE", "ja")
 if mode == "garbage": print("not json at all"); raise SystemExit
+found = sorted(p.name for p in Path(".claude/skills").iterdir()) if Path(".claude/skills").is_dir() else []
 if mode != "noinit":
     source = {"key": "ANTHROPIC_API_KEY", "weird": "unknown-source", "nullsrc": None, "intsrc": 7, "emptysrc": ""}.get(mode, "none")
-    print(json.dumps({"type": "system", "subtype": "init", "apiKeySource": source}))
-print(json.dumps({"type": "result", "is_error": False, "result": "OK"}))
+    init = {"type": "system", "subtype": "init", "apiKeySource": source}
+    if mode == "initmention": init.update(skills=found, slash_commands=found)
+    print(json.dumps(init))
+print(json.dumps({"type": "result", "is_error": False, "result": " ".join(["OK"] + found) if mode == "initmention" else "OK"}))
 if mode == "badstream": print("oops, a stray line that is not json")
 if mode == "exit":
     raise SystemExit(3)
 room = Path.home() / ".claude" / "projects" / "-probe"; room.mkdir(parents=True, exist_ok=True)
-found = sorted(p.name for p in Path(".claude/skills").iterdir()) if Path(".claude/skills").is_dir() else []
-names = "not-a-list" if mode == "badnames" else found if mode not in ("nee", "noskills") else ["unrelated-skill"]
+names = ("not-a-list" if mode == "badnames" else
+         ["unrelated-skill"] if mode in ("nee", "noskills", "initmention", "transcriptmention") else found)
+if mode == "transcriptmention": names = names + ["The skill %s is not available to me." % " ".join(found)]
 attachment = ({"attachment": {"type": "instructions", "files": []}} if mode == "noskills" else
               {"attachment": {"type": "skill_listing", "isInitial": True, "names": names,
                               "skillCount": len(names), "content": str(names)}})
 if mode != "notranscript":
     extra = "this transcript line is not json\n" if mode == "badtranscript" else ""
-    (room / (sid + ".jsonl")).write_text(json.dumps({"type": "user", "message": "hi"}) + "\n" + extra + json.dumps(attachment) + "\n")
+    later = "".join(json.dumps(e) + "\n" for e in ({"type": "user", "message": "Use the skill " + " ".join(found)},
+                                                     {"attachment": {"type": "skill_listing", "isInitial": False, "names": found}})
+                    ) if mode == "transcriptmention" else ""
+    (room / (sid + ".jsonl")).write_text(json.dumps({"type": "user", "message": "hi"}) + "\n" + extra + json.dumps(attachment) + "\n" + later)
 '''
 
 FAKE_CODEX = r'''#!/usr/bin/env python3
@@ -54,7 +61,7 @@ from pathlib import Path
 argv = sys.argv[1:]
 if "--version" in argv:
     print("codex-cli 0.164.0"); raise SystemExit
-mode = os.environ.get("FAKE_CODEX", "ja")
+mode = os.environ.get("FAKE_CODEX", "ja"); answer = os.environ.get("FAKE_CODEX_ANSWER")
 if mode in ("exit", "empty"): raise SystemExit(4 if mode == "exit" else 0)
 found = sorted(p.name for p in Path(".agents/skills").iterdir()) if Path(".agents/skills").is_dir() else []
 names = {"neg": found + ["vnx-probe-negative-control-not-in-tree"], "noslug": ["unrelated-skill"]}.get(mode, found)
@@ -63,14 +70,15 @@ if mode == "malformed":
     emit({"type": "thread.started"}); print("oops not json " + ", ".join(found)); emit({"type": "turn.completed"}); raise SystemExit
 emit({"type": "thread.started"}); emit({"type": "turn.started"})
 if mode == "cmdonly":
-    emit({"type": "item.completed", "item": {"type": "command_execution", "command": "ls .agents/skills", "aggregated_output": "\\n".join(found)}})
+    emit({"type": "item.completed", "item": {"type": "command_execution", "command": "ls .agents/skills", "aggregated_output": "\n".join(found)}})
     emit({"type": "item.completed", "item": {"type": "agent_message", "text": "I could not tell."}})
 elif mode != "noanswer":
-    emit({"type": "item.completed", "item": {"type": "reasoning", "text": "\\n".join(found)}})
+    emit({"type": "item.completed", "item": {"type": "reasoning", "text": "\n".join(found)}})
     if mode == "blocks":
         emit({"type": "item.completed", "item": {"type": "agent_message", "content": [{"text": "- `" + n + "`"} for n in names]}})
     else:
-        emit({"type": "item.completed", "item": {"type": "agent_message", "text": "\\n".join("- " + n for n in names)}})
+        text = "\n".join("- " + n for n in names) if answer is None else answer.replace("{slug}", found[0]).replace("{neg}", "vnx-probe-negative-control-not-in-tree")
+        emit({"type": "item.completed", "item": {"type": "agent_message", "text": text}})
 if mode != "noturn": emit({"type": "turn.completed"})
 '''
 
@@ -193,8 +201,58 @@ def test_c3b_malformed_stream_is_niet_gemeten_even_when_the_slug_is_in_it(tmp_pa
 
 
 def test_c3b_slug_only_in_a_command_execution_item_is_not_a_ja(tmp_path):
-    row = _cell(tmp_path, "C3b", FAKE_CODEX="cmdonly")
-    assert row["outcome"] == "nee", row
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="cmdonly")  # the answer "I could not tell." is prose, not a list
+    assert row["outcome"] == "niet_gemeten" and "answer_not_a_list: line 1" in row["reason"], row
+
+
+def test_c3b_counts_an_answer_only_as_a_list_of_bare_names(tmp_path):
+    cases = {"The skill {slug} is not available to me.": ("niet_gemeten", "answer_not_a_list: line 1 is not a bare skill name"),
+             "- {slug}\nThese are all the skills I can see.": ("niet_gemeten", "answer_not_a_list: line 2 is not a bare skill name"),
+             "- {slug}-old\n- other-skill": ("nee", "does not list"),
+             "- `{slug}`\n\n- other-skill": ("ja", "lists vnx-probe-skill-disc-"),
+             "{slug}\n{neg}": ("nee", NEGATIVE)}
+    for answer, (outcome, reason) in cases.items():
+        row = _cell(tmp_path, "C3b", FAKE_CODEX_ANSWER=answer)
+        assert row["outcome"] == outcome and reason in row["reason"], (answer, row)
+
+
+def test_c3b_a_mention_of_the_slug_outside_a_list_is_never_a_ja(tmp_path):
+    for answer in ("{slug} is available", "Skills: {slug}", "I can see `{slug}` in .agents/skills.", "- {slug} (from .agents/skills)"):
+        row = _cell(tmp_path, "C3b", FAKE_CODEX_ANSWER=answer)
+        assert row["outcome"] == "niet_gemeten" and "answer_not_a_list: line 1" in row["reason"], (answer, row)
+
+
+def _judge(tmp_path, *args):
+    env = dict(os.environ, HOME=str(tmp_path), TMPDIR=str(tmp_path))
+    script = 'source "%s"\npy %s' % (PROBE, " ".join('"%s"' % arg for arg in args))
+    return subprocess.run([BASH, "-c", script], capture_output=True, text=True, env=env, check=False).stdout.strip()
+
+
+def test_c3a_a_mention_of_the_slug_in_the_listing_output_is_not_a_ja(tmp_path):
+    raw = tmp_path / "listing"
+    for text in ("The skill probe-skill is not available to me.\n", "probe-skill is here\n", "probe-skill-old\n"):
+        raw.write_text(text, encoding="utf-8")
+        assert _judge(tmp_path, "judge_listing", raw, "probe-skill").startswith("nee\t"), text
+
+
+def test_c1_the_init_event_naming_the_slug_is_not_a_listing(tmp_path):
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="initmention")
+    assert row["outcome"] == "nee" and "does not name" in row["reason"], row
+    slug = re.search(r"does not name (\S+);", row["reason"]).group(1)
+    transcript = next((tmp_path / ".claude" / "projects" / "-probe").glob("*.jsonl"))
+    stream = "\n".join(json.dumps(e) for e in (
+        {"type": "system", "subtype": "init", "apiKeySource": "none", "skills": [slug], "slash_commands": [slug]},
+        {"type": "result", "is_error": False, "result": "OK " + slug})) + "\n"
+    judged = stream.encode() + ("--- transcript %s ---\n" % transcript).encode() + transcript.read_bytes()
+    assert row["sha256"] == hashlib.sha256(judged).hexdigest()  # the judged stream named the slug in the init event
+
+
+def test_c1_a_transcript_mention_outside_the_initial_listing_names_is_not_a_ja(tmp_path):
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="transcriptmention")
+    assert row["outcome"] == "nee" and "does not name" in row["reason"], row
+    slug = re.search(r"does not name (\S+);", row["reason"]).group(1)
+    transcript = next((tmp_path / ".claude" / "projects" / "-probe").glob("*.jsonl")).read_text(encoding="utf-8")
+    assert transcript.count(slug) == 4  # a user message, a prose name and the content of the initial listing, a later listing
 
 
 def test_c3b_needs_an_agent_answer_and_a_completed_turn(tmp_path):
