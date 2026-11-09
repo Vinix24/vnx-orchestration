@@ -24,6 +24,7 @@ TRANSIENT_REASON_PREFIXES: tuple[str, ...] = ("source_import_failed", "ci_run_un
 # Every other reason is permanent by decision 20's rule (it keeps a day final).
 PERMANENT_REASONS: frozenset[str] = frozenset({
     "no_request_timestamp_in_approval_ledger", "ledger-is-falsifiable not merged",
+    "ledger_reader_not_wired",
     "owner_track_kosten-per-gemergede-pr_not_landed", "no_results_for_seat_on_day",
     "no_historical_readiness_snapshot", "no_ci_runs_on_any_head",
 })
