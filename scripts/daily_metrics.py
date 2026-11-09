@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-"""The daily-metrics CLI: collect, daily and recollect.
+"""The daily-metrics CLI: collect, daily, recollect and discovered commands.
 
 ``collect`` writes one day document through ``DayStore``; ``daily`` catches up the
-window then writes the beacon; ``--recollect`` writes a new revision of a final day.
-One JSON line per day; a locked run prints ``skipped: locked``.
+window, runs the discovered ``DAILY_STEP`` commands, then writes the beacon;
+``--recollect`` writes a new revision of a final day. One JSON line per day; a
+locked run prints ``skipped: locked``.
+
+Commands are discovered, not registered (decision 4): every ``*.py`` in
+``commands_dir()`` that exposes a callable ``register(subparsers)`` and a callable
+``run(args)`` becomes a subcommand, and ``daily`` runs each of those that declares
+an integer ``DAILY_STEP``, ordered by ``(DAILY_STEP, module __name__)``. A module
+that raises on import is reported on stderr as one
+``{"command_import_failed": ..., "exception": ...}`` line and makes ``daily`` exit
+1 -- it is never skipped silently. Each daily step receives
+``argparse.Namespace(project_id, now, store, state_dir)``, where ``store`` is the
+run's ``DayStore`` and ``state_dir`` a ``Path``.
 """
 
 from __future__ import annotations
@@ -14,6 +25,8 @@ import os
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
 if str(_LIB_DIR) not in sys.path:
@@ -25,7 +38,84 @@ from daily_metrics import store as store_mod  # noqa: E402
 from project_root import resolve_central_data_dir  # noqa: E402
 
 EXIT_OK = 0
+EXIT_IMPORT_FAILURE = 1
 EXIT_USAGE = 2
+
+COMMANDS_DIR = Path(__file__).resolve().parent / "lib" / "daily_metrics" / "commands"
+COMMANDS_DIR_ENV = "VNX_DAILY_METRICS_COMMANDS_DIR"
+
+
+def commands_dir() -> Path:
+    """The commands directory: default under this package, or the env override (decision 18)."""
+    override = os.environ.get(COMMANDS_DIR_ENV)
+    if override:
+        return Path(override)
+    return COMMANDS_DIR
+
+
+def _load_command(path: Path) -> tuple[str, ModuleType | None, str | None]:
+    """Load one command module; ``(stem, module|None, exception_class|None)``.
+
+    A module without a callable ``register`` and ``run`` is not a command and is
+    not a failure (``module`` and ``exception`` are both ``None``).
+    """
+    stem = path.stem
+    try:
+        module = collect_mod.load_module(f"daily_metrics.commands.{stem}", path)
+    except ImportError:
+        return stem, None, "ImportError"
+    except Exception as exc:  # vnx-silent-except: an unimportable command is reported and makes daily exit 1, never skipped
+        return stem, None, type(exc).__name__
+    if not callable(getattr(module, "register", None)) or not callable(getattr(module, "run", None)):
+        return stem, None, None
+    return stem, module, None
+
+
+def discover_commands(path: Path) -> tuple[list[ModuleType], list[tuple[str, str]]]:
+    """Import every ``*.py`` in ``path`` except ``__init__`` (decision 4).
+
+    Returns ``(modules, failures)``: the modules with a callable ``register`` and
+    ``run``, and the failures as ``(stem, exception class name)`` pairs. A failure
+    is never skipped -- ``daily`` reports it and exits 1.
+    """
+    path = Path(path)
+    modules: list[ModuleType] = []
+    failures: list[tuple[str, str]] = []
+    if not path.is_dir():
+        return modules, failures
+    for file in sorted(path.glob("*.py")):
+        if file.name == "__init__.py":
+            continue
+        stem, module, exception = _load_command(file)
+        if exception is not None:
+            failures.append((stem, exception))
+        elif module is not None:
+            modules.append(module)
+    return modules, failures
+
+
+class _RecordingSubparsers:
+    """Wraps the top-level subparsers and records the parsers a ``register`` adds."""
+
+    def __init__(self, subparsers: Any) -> None:
+        self._subparsers = subparsers
+        self.parsers: list[argparse.ArgumentParser] = []
+
+    def add_parser(self, *args: object, **kwargs: object) -> argparse.ArgumentParser:
+        parser = self._subparsers.add_parser(*args, **kwargs)
+        self.parsers.append(parser)
+        return parser
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._subparsers, name)
+
+
+def _register_command(subparsers: Any, module: ModuleType) -> None:
+    """Add one command module's subcommand(s); ``args.func`` is its ``run``."""
+    recorder = _RecordingSubparsers(subparsers)
+    module.register(recorder)
+    for parser in recorder.parsers:
+        parser.set_defaults(func=module.run)
 
 
 def _shared_parser() -> argparse.ArgumentParser:
@@ -50,9 +140,12 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--reason", dest="reason", default=None)
     collect_parser.set_defaults(func=_run_collect)
     daily_parser = subparsers.add_parser(
-        "daily", parents=[shared], help="collect the catch-up window, then write the beacon"
+        "daily", parents=[shared],
+        help="collect the catch-up window, run the daily steps, then write the beacon",
     )
     daily_parser.set_defaults(func=_run_daily)
+    for module in discover_commands(commands_dir())[0]:
+        _register_command(subparsers, module)
     return parser
 
 
@@ -170,6 +263,31 @@ def _run_collect(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _daily_step(module: ModuleType) -> int | None:
+    """The module's ``DAILY_STEP`` when it is a real integer, else ``None``."""
+    step = getattr(module, "DAILY_STEP", None)
+    return step if isinstance(step, int) and not isinstance(step, bool) else None
+
+
+def _run_daily_commands(args: argparse.Namespace, project_id: str, now: datetime,
+                        store: store_mod.DayStore) -> list[tuple[str, str]]:
+    """Run every command module with an integer ``DAILY_STEP`` (decision 14).
+
+    Ordered by ``(DAILY_STEP, module __name__)``. Returns the import failures as
+    ``(stem, exception class name)`` pairs, so ``daily`` can report them and exit 1.
+    """
+    modules, failures = discover_commands(commands_dir())
+    stepped = [module for module in modules if _daily_step(module) is not None]
+    stepped.sort(key=lambda module: (_daily_step(module), module.__name__))
+    context = argparse.Namespace(
+        project_id=project_id, now=now, store=store,
+        state_dir=_state_dir(args, project_id),
+    )
+    for module in stepped:
+        module.run(context)
+    return failures
+
+
 def _run_daily(args: argparse.Namespace) -> int:
     project_id = _resolve_project_id(args)
     if project_id is None:
@@ -183,8 +301,12 @@ def _run_daily(args: argparse.Namespace) -> int:
             print("skipped: locked")
             return EXIT_OK
         _collect_window(store, project_id, now)
+        failures = _run_daily_commands(args, project_id, now, store)
+        for stem, exception in failures:
+            print(json.dumps({"command_import_failed": stem, "exception": exception}),
+                  file=sys.stderr)
         collect_mod.write_beacon(_state_dir(args, project_id), store, now)
-    return EXIT_OK
+    return EXIT_IMPORT_FAILURE if failures else EXIT_OK
 
 
 def main(argv: list[str] | None = None) -> int:
