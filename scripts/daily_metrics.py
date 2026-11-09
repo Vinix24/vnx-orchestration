@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""The daily-metrics CLI: collect, daily, recollect and discovered commands.
+"""The daily-metrics CLI: collect, daily and recollect.
 
 ``collect`` writes one day document through ``DayStore``; ``daily`` catches up the
-window then runs the discovered ``DAILY_STEP`` commands; ``--recollect`` writes a new
-revision of a final day. One JSON line per day; a locked run prints ``skipped: locked``.
+window then writes the beacon; ``--recollect`` writes a new revision of a final day.
+One JSON line per day; a locked run prints ``skipped: locked``.
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -28,37 +27,12 @@ from project_root import resolve_central_data_dir  # noqa: E402
 EXIT_OK = 0
 EXIT_USAGE = 2
 
-COMMANDS_DIR = Path(__file__).resolve().parent / "lib" / "daily_metrics" / "commands"
-
 
 def _shared_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     for option in ("--project-id", "--now", "--store", "--state-dir"):
         parser.add_argument(option, dest=option[2:].replace("-", "_"), default=None)
     return parser
-
-
-def discover_commands(path: Path) -> list:
-    """Import every ``*.py`` in ``path`` except ``__init__`` (decision 4). A module
-    that fails to import, or lacks ``register``/``run``, is not a subcommand."""
-    modules = []
-    path = Path(path)
-    if not path.is_dir():
-        return modules
-    for file in sorted(path.glob("*.py")):
-        if file.name == "__init__.py":
-            continue
-        spec = importlib.util.spec_from_file_location(f"daily_metrics.commands.{file.stem}", file)
-        if spec is None or spec.loader is None:
-            continue
-        module = importlib.util.module_from_spec(spec)
-        try:
-            spec.loader.exec_module(module)
-        except Exception:
-            continue
-        if callable(getattr(module, "register", None)) and callable(getattr(module, "run", None)):
-            modules.append(module)
-    return modules
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -76,11 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     collect_parser.add_argument("--reason", dest="reason", default=None)
     collect_parser.set_defaults(func=_run_collect)
     daily_parser = subparsers.add_parser(
-        "daily", parents=[shared], help="collect the catch-up window, then run daily commands"
+        "daily", parents=[shared], help="collect the catch-up window, then write the beacon"
     )
     daily_parser.set_defaults(func=_run_daily)
-    for module in discover_commands(COMMANDS_DIR):
-        module.register(subparsers)
     return parser
 
 
@@ -198,16 +170,6 @@ def _run_collect(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _run_daily_commands(args: argparse.Namespace, project_id: str,
-                        now: datetime, store_root: Path) -> None:
-    stepped = sorted((getattr(m, "DAILY_STEP", None), m) for m in discover_commands(COMMANDS_DIR)
-                     if isinstance(getattr(m, "DAILY_STEP", None), int))
-    state_dir = _state_dir(args, project_id)
-    for _step, module in stepped:
-        module.run(argparse.Namespace(project_id=project_id, now=now, store=str(store_root),
-                                      state_dir=str(state_dir)))
-
-
 def _run_daily(args: argparse.Namespace) -> int:
     project_id = _resolve_project_id(args)
     if project_id is None:
@@ -221,7 +183,6 @@ def _run_daily(args: argparse.Namespace) -> int:
             print("skipped: locked")
             return EXIT_OK
         _collect_window(store, project_id, now)
-        _run_daily_commands(args, project_id, now, store_root)
         collect_mod.write_beacon(_state_dir(args, project_id), store, now)
     return EXIT_OK
 

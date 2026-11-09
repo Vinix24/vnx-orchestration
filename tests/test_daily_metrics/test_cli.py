@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -86,6 +87,19 @@ def empty_sources(tmp_path: Path) -> Path:
 def test_cli_script_exists():
     """Red run: fails on the merge base before ``scripts/daily_metrics.py`` exists."""
     assert CLI.is_file()
+
+
+def test_daily_has_no_command_discovery():
+    """Red run: fails on afee541e, where ``discover_commands`` is still exported.
+
+    The command-discovery round is deferred to its own PR: the CLI only catches up
+    the window and writes the beacon, so no command module is imported or skipped.
+    """
+    spec = importlib.util.spec_from_file_location("daily_metrics_cli_under_test", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert not hasattr(module, "discover_commands")
+    assert not (REPO_ROOT / "scripts" / "lib" / "daily_metrics" / "commands").exists()
 
 
 def test_collect_one_day_returns_all_required_ids(empty_sources, tmp_path):
