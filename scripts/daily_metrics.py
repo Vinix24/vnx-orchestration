@@ -20,7 +20,6 @@ run's ``DayStore`` and ``state_dir`` a ``Path``.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -61,12 +60,10 @@ def _load_command(path: Path) -> tuple[str, ModuleType | None, str | None]:
     not a failure (``module`` and ``exception`` are both ``None``).
     """
     stem = path.stem
-    spec = importlib.util.spec_from_file_location(f"daily_metrics.commands.{stem}", path)
-    if spec is None or spec.loader is None:
-        return stem, None, "ImportError"
-    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        module = collect_mod.load_module(f"daily_metrics.commands.{stem}", path)
+    except ImportError:
+        return stem, None, "ImportError"
     except Exception as exc:  # vnx-silent-except: an unimportable command is reported and makes daily exit 1, never skipped
         return stem, None, type(exc).__name__
     if not callable(getattr(module, "register", None)) or not callable(getattr(module, "run", None)):
