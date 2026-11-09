@@ -2673,6 +2673,110 @@
             "prog": "vnx objective set-goal",
             "subcommands": {}
           },
+          "set-horizon": {
+            "actions": [
+              {
+                "choices": null,
+                "class": "_HelpAction",
+                "const": null,
+                "default": "==SUPPRESS==",
+                "dest": "help",
+                "help": "show this help message and exit",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "-h",
+                  "--help"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "vnx-dev",
+                "dest": "project_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--project-id"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": "",
+                "dest": "state_dir",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [
+                  "--state-dir"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreTrueAction",
+                "const": true,
+                "default": false,
+                "dest": "json",
+                "help": "emit JSON instead of a table",
+                "metavar": null,
+                "nargs": 0,
+                "option_strings": [
+                  "--json"
+                ],
+                "required": false,
+                "type": null
+              },
+              {
+                "choices": null,
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "track_id",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              },
+              {
+                "choices": [
+                  "now",
+                  "next",
+                  "later"
+                ],
+                "class": "_StoreAction",
+                "const": null,
+                "default": null,
+                "dest": "horizon",
+                "help": null,
+                "metavar": null,
+                "nargs": null,
+                "option_strings": [],
+                "required": true,
+                "type": null
+              }
+            ],
+            "aliases": [],
+            "description": null,
+            "handler": "cmd_objective_set_horizon",
+            "path": [
+              "objective",
+              "set-horizon"
+            ],
+            "prog": "vnx objective set-horizon",
+            "subcommands": {}
+          },
           "set-lane-hint": {
             "actions": [
               {

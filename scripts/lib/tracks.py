@@ -787,6 +787,69 @@ def set_lane_hint(
         conn.close()
 
 
+def set_horizon(
+    state_dir: str | Path,
+    track_id: str,
+    project_id: str,
+    horizon: str,
+    *,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Move a track to another horizon (now|next|later); audited with old and new.
+
+    OI-2272: before this only ``objective add --horizon`` could set one, so an
+    existing track could only be moved by editing the DB. Read, write and the
+    one ``track_horizon_set`` event run in one ``BEGIN IMMEDIATE`` transaction;
+    a track already at the requested horizon writes and emits nothing, and a
+    pre-0027 store refuses (HorizonColumnMissingError) before that event.
+
+    Raises InvalidHorizonError (a ValueError) on an unknown horizon and
+    TrackNotFoundError when the track does not exist in ``project_id``.
+    """
+    if horizon not in VALID_HORIZONS:
+        raise InvalidHorizonError(
+            f"Invalid horizon: {horizon!r}. Must be one of {sorted(VALID_HORIZONS)}"
+        )
+
+    conn = _get_conn(state_dir)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        if not row:
+            raise TrackNotFoundError(f"Track not found: ({track_id!r}, {project_id!r})")
+        # Fail-closed before the horizon is read or an event is emitted (pre-0027).
+        _ensure_horizon_column(conn, horizon, track_id)
+
+        old_horizon = row["horizon"]
+        if old_horizon == horizon:
+            conn.commit()
+            return dict(row)
+
+        conn.execute(
+            "UPDATE tracks SET horizon = ? WHERE track_id = ? AND project_id = ?",
+            (horizon, track_id, project_id),
+        )
+        _emit_track_event(
+            state_dir, "track_horizon_set", track_id, project_id, actor,
+            {"old_horizon": old_horizon, "new_horizon": horizon},
+        )
+        conn.commit()
+
+        updated = conn.execute(
+            "SELECT * FROM tracks WHERE track_id = ? AND project_id = ?",
+            (track_id, project_id),
+        ).fetchone()
+        return dict(updated)
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def set_decision_ref(
     state_dir: str | Path,
     track_id: str,

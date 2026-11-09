@@ -2572,6 +2572,41 @@ def cmd_objective_set_lane_hint(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_objective_set_horizon(args: argparse.Namespace) -> int:
+    """Move an existing track to now|next|later; audited with old and new.
+
+    Writes via tracks_lib.set_horizon (one IMMEDIATE transaction, one
+    ``track_horizon_set`` event). Already at the requested horizon is a no-op:
+    exit 0, "unchanged", no event.
+    """
+    state_dir = _resolve_state_dir(args.state_dir)
+    project_id = args.project_id
+    track_id = args.track_id
+
+    track = tracks_lib.get_track(state_dir, track_id, project_id)
+    if track is None:
+        print(
+            f"objective set-horizon: track not found: {track_id!r} "
+            f"(project {project_id!r}). No change made.",
+            file=sys.stderr,
+        )
+        return 2
+
+    old_horizon = track.get("horizon")
+    if old_horizon == args.horizon:
+        print(f"{track_id}: horizon unchanged ({args.horizon}); no event written")
+        return 0
+
+    try:
+        tracks_lib.set_horizon(state_dir, track_id, project_id, args.horizon)
+    except Exception as exc:
+        print(f"objective set-horizon failed: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Set horizon={args.horizon} on {track_id} (was {old_horizon or 'unset'})")
+    return 0
+
+
 def cmd_objective_set_autonomous_promotion(args: argparse.Namespace) -> int:
     """Set the track opt-in ``autonomous_promotion_eligible`` (true|false); audited with the actor class."""
     state_dir = _resolve_state_dir(args.state_dir)
@@ -6854,11 +6889,12 @@ def _add_objective_set_autonomous_promotion_parser(obj_sub: Any, common: Callabl
 
 
 def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) -> None:
-    """The eight `objective` write actions, one builder each.
+    """The `objective` write actions, one builder each.
 
     Extracted from ``_build_parser`` (the functies-onder-200 track): that function
     is far past the 70-executable-line ratchet, so the domain moves out in the
-    order the actions were originally added.
+    order the actions were originally added. ``set-horizon`` (OI-2272) lives here
+    inline: it is the newest write action and has no separate builder yet.
     """
     _add_objective_close_parser(obj_sub, common)
     _add_objective_link_pr_parser(obj_sub, common)
@@ -6869,6 +6905,13 @@ def _add_objective_write_parsers(obj_sub: Any, common: Callable[[Any], None]) ->
     _add_objective_set_autonomous_promotion_parser(obj_sub, common)
     _add_objective_add_parser(obj_sub, common)
     _add_objective_set_goal_parser(obj_sub, common)
+
+    p_set_horizon = obj_sub.add_parser(
+        "set-horizon", help="move an existing track to now|next|later (audited)")
+    common(p_set_horizon)
+    p_set_horizon.add_argument("track_id")
+    p_set_horizon.add_argument("horizon", choices=_HORIZON_ORDER)
+    p_set_horizon.set_defaults(func=cmd_objective_set_horizon)
 
 
 def _build_parser() -> argparse.ArgumentParser:
