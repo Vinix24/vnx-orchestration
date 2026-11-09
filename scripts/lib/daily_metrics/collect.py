@@ -23,6 +23,7 @@ from __future__ import annotations
 import fcntl
 import importlib.util
 import os
+import sys
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -76,6 +77,29 @@ def sources_dir() -> Path:
     return Path(__file__).resolve().parent / "sources"
 
 
+def load_module(qualified_name: str, path: Path) -> ModuleType:
+    """Run ``path`` as ``qualified_name``, registered before it executes.
+
+    ``dataclasses`` resolves string annotations through ``sys.modules``, so a
+    module with ``from __future__ import annotations`` and a dataclass fails if
+    it is not registered first. A failed import drops that entry (only if it
+    still points here) and re-raises. A missing spec or loader raises
+    ``ImportError``.
+    """
+    spec = importlib.util.spec_from_file_location(qualified_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"no import spec or loader for {qualified_name} at {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[qualified_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if sys.modules.get(qualified_name) is module:
+            del sys.modules[qualified_name]
+        raise
+    return module
+
+
 def _load_source(path: Path) -> tuple[str, ModuleType | None, str | None]:
     """Load one source module; ``(name, module|None, exception_class|None)``.
 
@@ -83,12 +107,10 @@ def _load_source(path: Path) -> tuple[str, ModuleType | None, str | None]:
     failure (``module`` and ``exception`` are both ``None``).
     """
     name = path.stem
-    spec = importlib.util.spec_from_file_location(f"daily_metrics.sources.{name}", path)
-    if spec is None or spec.loader is None:
-        return name, None, "ImportError"
-    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        module = load_module(f"daily_metrics.sources.{name}", path)
+    except ImportError:
+        return name, None, "ImportError"
     except Exception as exc:  # noqa: BLE001 - an unimportable source is data, not a crash
         return name, None, type(exc).__name__
     if not callable(getattr(module, "collect", None)):
