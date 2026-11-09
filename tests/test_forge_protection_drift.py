@@ -81,7 +81,7 @@ class TestParseProtectionConfig:
         assert config.checks[0].app_id == 15368
         assert config.enforce_admins is True
 
-    def test_the_real_shipped_yaml_parses_and_has_fifteen_checks(self):
+    def test_the_real_shipped_yaml_parses_and_has_sixteen_checks(self):
         """The actual scripts/forge/branch_protection.yaml this dispatch ships.
 
         Fourteen until OP-B3, fifteen after it: that step moved
@@ -97,8 +97,9 @@ class TestParseProtectionConfig:
         app_id = yaml.safe_load(path.read_text(encoding="utf-8"))["app"]["app_id"]
 
         by_context = {c.context: c.app_id for c in config.checks}
-        assert len(config.checks) == 15
+        assert len(config.checks) == 16
         assert by_context["vnx-gate/review"] == app_id
+        assert by_context["vnx-gate/door"] == app_id
         assert all(
             c.app_id == 15368 for c in config.checks if not c.context.startswith("vnx-gate/")
         )
