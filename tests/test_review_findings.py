@@ -35,73 +35,11 @@ def module_function():
     return 1
 """
 
-CONDITIONAL_SOURCE = """\
-if TYPE_CHECKING:
-    def first():
-        value = 1
-
-    def second():
-        value = 1
-"""
-
-FALLBACK_SOURCE = """\
-try:
-    def fast():
-        return 1
-except ImportError:
-    def slow():
-        return 2
-"""
-
-CLASS_CONDITIONAL_SOURCE = """\
-class Outer:
-    if True:
-        def method(self):
-            return 1
-"""
-
-WITH_SOURCE = """\
-with open("config.toml") as handle:
-    def inside_with():
-        return handle
-"""
-
-FOR_ELSE_SOURCE = """\
-for item in ():
-    def in_loop():
-        return 1
-else:
-    def in_else():
-        return 2
-"""
-
-FINALLY_SOURCE = """\
-try:
-    def in_try():
-        return 1
-finally:
-    def in_finally():
-        return 2
-"""
-
-MATCH_SOURCE = """\
-match command:
-    case "run":
-        def run():
-            return 1
-    case _:
-        def other():
-            return 2
-"""
-
-TRY_STAR_SOURCE = """\
-try:
-    def primary():
-        return 1
-except* ValueError:
-    def fallback():
-        return 2
-"""
+_COMPOUND_SOURCES = {
+    "for": "for item in ():\n    def in_loop():\n        return 1\nelse:\n    def in_else():\n        return 2\n",
+    "fallback": "try:\n    def fast():\n        return 1\nexcept ImportError:\n    def slow():\n        return 2\n",
+    "try_star": "try:\n    def primary():\n        return 1\nexcept* ValueError:\n    def fallback():\n        return 2\n",
+}
 
 LONG_SOURCE = """\
 def handler():
@@ -218,44 +156,29 @@ def test_symbolic_context_method_and_async_function():
 
 
 def test_symbolic_context_distinguishes_functions_inside_module_level_if():
+    source = "if TYPE_CHECKING:\n    def first():\n        value = 1\n\n    def second():\n        value = 1\n"
+    assert [rf.symbolic_context(source, n) for n in (3, 6)] == ["first", "second"]
     first = {"file_path": "a.py", "line": 3, "message": "same text"}
-    second = {"file_path": "a.py", "line": 6, "message": "same text"}
-    assert rf.symbolic_context(CONDITIONAL_SOURCE, 3) == "first"
-    assert rf.symbolic_context(CONDITIONAL_SOURCE, 6) == "second"
-    assert rf.id_for_finding("codex", first, CONDITIONAL_SOURCE) != rf.id_for_finding(
-        "codex", second, CONDITIONAL_SOURCE
-    )
-
-
-def test_symbolic_context_distinguishes_try_and_except_fallback():
-    assert rf.symbolic_context(FALLBACK_SOURCE, 3) == "fast"
-    assert rf.symbolic_context(FALLBACK_SOURCE, 5) == "slow"
-
-
-def test_symbolic_context_method_inside_if_in_class_body():
-    assert rf.symbolic_context(CLASS_CONDITIONAL_SOURCE, 4) == "Outer.method"
+    assert rf.id_for_finding("codex", first, source) != rf.id_for_finding("codex", {**first, "line": 6}, source)
 
 
 @pytest.mark.parametrize(
     "source, line, expected",
     [
-        (WITH_SOURCE, 3, "inside_with"),
-        (FOR_ELSE_SOURCE, 3, "in_loop"),
-        (FOR_ELSE_SOURCE, 6, "in_else"),
-        (FINALLY_SOURCE, 3, "in_try"),
-        (FINALLY_SOURCE, 6, "in_finally"),
-        (MATCH_SOURCE, 4, "run"),
-        (MATCH_SOURCE, 7, "other"),
-        (TRY_STAR_SOURCE, 3, "primary"),
-        (TRY_STAR_SOURCE, 6, "fallback"),
+        ('with open("config.toml") as handle:\n    def inside_with():\n        return handle\n', 3, "inside_with"),
+        (_COMPOUND_SOURCES["for"], 3, "in_loop"),
+        (_COMPOUND_SOURCES["for"], 6, "in_else"),
+        (_COMPOUND_SOURCES["fallback"], 3, "fast"),
+        (_COMPOUND_SOURCES["fallback"], 5, "slow"),
+        ("try:\n    def in_try():\n        return 1\nfinally:\n    def in_finally():\n        return 2\n", 6, "in_finally"),
+        ('match command:\n    case "run":\n        def run():\n            return 1\n', 4, "run"),
+        (_COMPOUND_SOURCES["try_star"], 3, "primary"),
+        (_COMPOUND_SOURCES["try_star"], 6, "fallback"),
+        ("class Outer:\n    if True:\n        def method(self):\n            return 1\n", 4, "Outer.method"),
     ],
 )
 def test_symbolic_context_inside_compound_statements(source, line, expected):
     assert rf.symbolic_context(source, line) == expected
-
-
-def test_symbolic_context_module_level_code_inside_if_stays_empty():
-    assert rf.symbolic_context("if True:\n    value = 1\n", 2) == ""
 
 
 @pytest.mark.parametrize(
@@ -264,6 +187,7 @@ def test_symbolic_context_module_level_code_inside_if_stays_empty():
         ("x = 1\ny = 2\n", 2),  # module level
         ("def broken(:\n    pass\n", 1),  # unparseable
         ("const x = 1;\nfunction f() {}\n", 2),  # non-Python
+        ("if True:\n    value = 1\n", 2),  # module level inside if
         (SOURCE, 999),  # outside every scope
         (SOURCE, None),
         (None, 3),

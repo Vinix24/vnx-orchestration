@@ -3,18 +3,15 @@
 
 The delta review (plan ``deltareview-met-ouderketen``, Besluit 3) needs an id
 that survives a line shift. Pure: no file, git or logging; callers pass the
-source text. DR-3 writes these ids into the ledger, DR-4a puts them in the
+source text; DR-3 writes these ids into the ledger, DR-4a puts them in the
 prompt.
 
 Identity is ``sha256(seat, path, symbolic context, normalised text)[:16]``, no
 line number in it (research question 4). The symbolic context is the dotted
 qualified name of the innermost ``def``/``async def``/``class`` around the
 line, found through compound statements as well, so two functions with the
-same finding text never share one id.
-
-The fail-closed status model (``open``/``fixed``/``waived``/``regressed``/
-``unverifiable`` with ``next_status`` and ``blocks``) follows in the second
-half of this split.
+same finding text never share one id. The fail-closed status model
+(``next_status``, ``blocks``) follows in the second half of this split.
 """
 
 from __future__ import annotations
@@ -58,10 +55,9 @@ _SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 def _statement_lists(node: ast.AST) -> list[list[ast.AST]]:
     """Statement lists ``node`` may hold; expression attributes are skipped.
 
-    Covers ``body``/``orelse``/``finalbody``, every ``handlers[i].body`` of a
-    ``try`` (also ``except*``/``TryStar``) and every ``cases[i].body`` of a
-    ``match``. ``body`` attributes that are expressions (``IfExp``, ``Lambda``)
-    are not lists and are ignored: a lambda is not a scope here.
+    Covers ``body``/``orelse``/``finalbody``, every ``handlers[i].body`` (also
+    ``TryStar``) and every ``cases[i].body`` of a ``match``; lambda bodies are
+    expressions and are not returned.
     """
     blocks: list[list[ast.AST]] = []
     for name in ("body", "orelse", "finalbody"):
@@ -107,10 +103,10 @@ def symbolic_context(source: Optional[str], line: Optional[int]) -> str:
 
     Nesting is dotted (``Outer.method``); spans are read as
     ``gate_reanchor.changed_symbols`` reads them, ``lineno``..``end_lineno``.
-    Compound statements are descended through with the same prefix, so a scope
-    inside ``if``/``try``/``with``/``for``/``match`` is found (``if``/``elif``
-    chains arrive as nested ``If`` nodes in ``orelse``). Returns ``""`` for
-    ``source=None``, unparseable or non-Python source, ``line=None``, a
+    Compound statements are descended through with the same prefix (``if``/
+    ``elif`` chains arrive as nested ``If`` nodes in ``orelse``), so a scope
+    inside ``if``/``try``/``with``/``for``/``match`` is found. Returns ``""``
+    for ``source=None``, unparseable or non-Python source, ``line=None``, a
     non-integer line and module-level code. Pure: no IO.
     """
     if source is None or line is None or isinstance(line, bool) or not isinstance(line, int):
