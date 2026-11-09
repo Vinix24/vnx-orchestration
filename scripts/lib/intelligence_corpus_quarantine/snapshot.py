@@ -5,7 +5,8 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from .contract import load_manifest
+from .contract import CORPUS_TABLES, load_manifest
+from .digest import table_digest
 
 
 def file_sha256(path):
@@ -41,6 +42,21 @@ def create_snapshot(conn, target):
     except BaseException:
         path.unlink()  # Remove only the failed copy exclusively created by this invocation.
         raise
+
+
+def verify_reused_corpus(conn, target):
+    """Raise ValueError on corpus drift; caller holds the live read transaction."""
+    path = Path(target).expanduser().resolve()
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as copy:
+        copy.execute("BEGIN")
+        for name in CORPUS_TABLES:
+            evidence = []
+            for source in (conn, copy):
+                columns = [row[1] for row in source.execute(f"PRAGMA table_info({name})")]
+                evidence.append(table_digest(source, name, columns, "rowid"))
+            for field, label in (("rows", "rows"), ("digest_sha256", "digest")):
+                if evidence[0][field] != evidence[1][field]:
+                    raise ValueError(f"live corpus differs from the reused snapshot: {name} {label}")
 
 
 def reuse_snapshot(target, manifest_path):

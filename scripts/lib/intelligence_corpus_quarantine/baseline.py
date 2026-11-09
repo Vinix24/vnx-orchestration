@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .contract import CORPUS_TABLES, SCHEMA, TRACK, validate_corpus, validate_manifest, validate_session
 from .digest import table_digest
-from .snapshot import create_snapshot
+from .snapshot import create_snapshot, verify_reused_corpus
 
 
 def measure_baseline(db_path, *, snapshot=None, reused_snapshot=None):
@@ -41,6 +41,8 @@ def measure_baseline(db_path, *, snapshot=None, reused_snapshot=None):
             generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), db=db, tables=tables)
         if snapshot is not None or reused_snapshot is not None:
             manifest.update(corpus=_corpus(conn, tables), invariants=dict(session_analytics=_session(conn)))
+            if reused_snapshot is not None:
+                verify_reused_corpus(conn, reused_snapshot["path"])
             conn.rollback()  # VACUUM cannot run inside the measurement transaction.
             manifest["snapshot"] = create_snapshot(conn, snapshot) if snapshot is not None else reused_snapshot
     return validate_manifest(manifest)

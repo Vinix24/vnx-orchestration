@@ -103,6 +103,36 @@ def test_reuse_and_all_column_digest(database, tmp_path, extra_column):
         assert conn.execute(f"SELECT {column} FROM session_analytics WHERE id=1").fetchone() == (None,)
 
 
+@pytest.mark.parametrize("sql,reason", [
+    ("INSERT INTO code_snippets(file_path,language) VALUES ('/new','python')", "code_snippets rows"),
+    ("UPDATE code_snippets SET code='changed' WHERE rowid=2", "code_snippets digest"),
+    ("UPDATE snippet_metadata SET file_path='/changed' WHERE snippet_rowid=2", "snippet_metadata digest"),
+    ("UPDATE session_analytics SET deep_analysis_json='changed' WHERE id=1", None),
+], ids=["snippet-insert", "snippet-update", "metadata-update", "session-only"])
+def test_reuse_requires_unchanged_corpus(database, tmp_path, sql, reason):
+    snapshot_dir = tmp_path / "snapshots"
+    snapshot_dir.mkdir()
+    snapshot = snapshot_dir / "copy ?#.db"
+    assert run(database, tmp_path, "--snapshot", snapshot).returncode == 0
+    target = tmp_path / "manifest.json"
+    before = target.read_bytes()
+    files = list(snapshot_dir.iterdir())
+    with closing(sqlite3.connect(database)) as conn:
+        conn.execute(sql)
+        conn.commit()
+    result = run(database, tmp_path, "--reuse-snapshot", snapshot)
+    if reason is not None:
+        assert result.returncode == 3, f"{result.stderr}; manifest changed={target.read_bytes() != before}"
+        assert reason in result.stderr
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == hashlib.sha256(before).hexdigest()
+    else:
+        assert result.returncode == 0, result.stderr
+        after, original = json.loads(target.read_bytes()), json.loads(before)
+        assert after["snapshot"] == original["snapshot"]
+        assert after["invariants"]["session_analytics"]["digest_sha256"] != original["invariants"]["session_analytics"]["digest_sha256"]
+    assert list(snapshot_dir.iterdir()) == files
+
+
 @pytest.mark.parametrize("case,code,reason", [("existing", 3, "already exists"), ("both", 2, "not allowed"),
     ("hash", 3, "mismatch"), ("other", 3, "path differs"), ("missing", 3, "No such file"),
     ("absent_snapshot", 3, "No such file"), ("alias", 3, "overwrite")])
