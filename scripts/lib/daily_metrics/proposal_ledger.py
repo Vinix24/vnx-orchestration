@@ -59,13 +59,25 @@ def proposal_id(project_id: str, key: str, metric_day: date, rule_version: str) 
 
 
 def read_events(path: Path) -> list[dict[str, Any]]:
-    """Every event in file order; a missing file is empty, a bad line raises."""
+    """Every event in file order; a missing or empty file is empty, a bad line raises.
+
+    A non-empty file whose last record has no line end is a torn write: a later
+    append would glue two objects onto one line, so it is refused here and the
+    file is left byte-identical.
+    """
     try:
         text = Path(path).read_text(encoding="utf-8")
     except FileNotFoundError:
         return []
+    if not text:
+        return []
+    if not text.endswith("\n"):
+        last_line = text.count("\n") + 1
+        raise LedgerUnreadable(f"{path}: line {last_line} has no line end (torn write)")
+    # Split on "\n" only: str.splitlines() also splits on U+0085, U+2028 and
+    # U+2029, which _write emits raw inside a string (ensure_ascii=False).
     events: list[dict[str, Any]] = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in enumerate(text.split("\n")[:-1], start=1):
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:

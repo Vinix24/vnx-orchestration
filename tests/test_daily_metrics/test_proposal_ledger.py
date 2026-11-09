@@ -175,6 +175,38 @@ def test_a_damaged_ledger_blocks_proposing_and_stays_unchanged(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_a_ledger_without_a_final_line_end_is_unreadable_and_untouched(tmp_path):
+    ledger = _ledger()
+    path = ledger.ledger_path(tmp_path)
+    event = {"event": "proposed", "proposal_id": "a" * 12, "project_id": "p",
+             "key": CANDIDATES[0].key, "metric_day": DAY.isoformat()}
+    path.write_text(json.dumps(event, sort_keys=True), encoding="utf-8")
+    before = path.read_bytes()
+
+    with pytest.raises(ledger.LedgerUnreadable) as excinfo:
+        ledger.read_events(path)
+    assert "line 1" in str(excinfo.value)
+    assert "no line end" in str(excinfo.value)
+
+    with pytest.raises(ledger.LedgerUnreadable):
+        _append(path, CANDIDATES)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("character", ["\x85", " ", " "])
+def test_a_key_with_a_splitlines_character_survives_a_round_trip(tmp_path, character):
+    ledger = _ledger()
+    path = ledger.ledger_path(tmp_path)
+    key = f"merges:{character}x"
+
+    written = _append(path, [_candidate(key)])
+
+    assert len(written) == 1
+    events = ledger.read_events(path)
+    assert [(event["key"], event["proposal_id"]) for event in events] == [(key, written[0])]
+    assert _append(path, [_candidate(key)]) == []
+
+
 def _append_in_child(path, barrier, candidates):
     from daily_metrics.proposal_ledger import append_proposals
 
