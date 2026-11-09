@@ -306,6 +306,7 @@ def test_fleet_child_runs_both_modes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(bf.subprocess, "run", fake_run)
     monkeypatch.setattr(bf, "_project_data_dir", lambda pid, r: tmp_path / "d")
+    monkeypatch.setattr(bf, "_door_required", lambda root: (True, "stub: door check is required on main"))
     project = {"project_id": "p", "path": str(root), "finding": "", "registry_ok": True}
     assert bf._run_child(project, None, 12, True)[1] == 0
     cmd = seen[0]
@@ -363,6 +364,7 @@ def test_fleet_row_carries_publication_errors(tmp_path, monkeypatch):
               "reason": "publication failed: 2 write error(s): a; b"}
     monkeypatch.setattr(bf.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 2, json.dumps(report), ""))
     monkeypatch.setattr(bf, "_project_data_dir", lambda pid, r: tmp_path / "d")
+    monkeypatch.setattr(bf, "_door_required", lambda root: (True, "stub: door check is required on main"))
     monkeypatch.setattr(bf, "enumerate_projects", lambda reg: [
         {"project_id": "p", "path": str(root), "finding": "", "registry_ok": True}])
     result = bf.run_fleet([], tmp_path / "reg.json", None)
