@@ -39,12 +39,21 @@ SLOTS_PER_DAY = 3
 BLOCK_DAYS = 14
 
 PROPOSED = "proposed"
+APPROVED = "approved"
 VERDICT = "verdict"
 UNDETERMINED = "undetermined"
 
 
 class LedgerUnreadable(Exception):
     """A ledger line is not a JSON object; the ledger may not be read around."""
+
+
+class ApprovalRefused(Exception):
+    """An approval may not be written; ``reason`` names why."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def ledger_path(store_root: Path) -> Path:
@@ -203,3 +212,36 @@ def append_proposals(path: Path, *, project_id: str, metric_day: date,
         if fresh:
             _write(path, fresh)
         return written
+
+
+def _has_event(events: Sequence[Mapping[str, Any]], kind: str, proposal_id_value: Any) -> bool:
+    return any(event.get("event") == kind and event.get("proposal_id") == proposal_id_value
+               for event in events)
+
+
+def approval_refusal(events: Sequence[Mapping[str, Any]], proposal_id_value: Any) -> str | None:
+    """The reason an approval is refused, or ``None`` when the proposal is open.
+
+    Anything but a string id is unknown: a missing id never matches a proposal.
+    """
+    if not isinstance(proposal_id_value, str) or not _has_event(events, PROPOSED, proposal_id_value):
+        return "unknown_proposal"
+    if _has_event(events, VERDICT, proposal_id_value):
+        return "already_judged"
+    if _has_event(events, APPROVED, proposal_id_value):
+        return "already_approved"
+    return None
+
+
+def append_approval(path: Path, event: Mapping[str, Any]) -> None:
+    """Append one ``approved`` event, or raise :class:`ApprovalRefused` and write nothing.
+
+    The proposal checks are read again under the ledger's lock, so two approvals
+    racing for the same id cannot both land.
+    """
+    path = Path(path)
+    with slot_lock(path):
+        reason = approval_refusal(read_events(path), event.get("proposal_id"))
+        if reason is not None:
+            raise ApprovalRefused(reason)
+        _write(path, [event])
