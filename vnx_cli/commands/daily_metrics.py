@@ -16,6 +16,11 @@ from vnx_cli import _engine
 
 PLIST_NAME = "com.vnx.daily-metrics"
 
+# "service is not loaded" as ``launchctl bootout`` reports it: exit 3 on older
+# macOS releases, 113 on newer ones, and (some builds) only in stderr.
+_BOOTOUT_ABSENT_CODES = frozenset({3, 113})
+_BOOTOUT_ABSENT_STDERR = ("No such process", "Could not find")
+
 
 def _job_parser(verb: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=f"vnx daily-metrics {verb}")
@@ -50,14 +55,35 @@ def _install(project_id: str) -> int:
 
 
 def _uninstall(project_id: str) -> int:
+    _engine.ensure_engine_on_path()
+    from vnx_paths import refuse_real_launchctl_under_test_runner
+
     label = f"{PLIST_NAME}.{project_id}"
-    # A non-zero exit because the job was not loaded is expected and fine: the file
-    # removal below is what makes the command idempotent.
-    subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
-                   capture_output=True, text=True)
     plist = Path.home() / "Library" / "LaunchAgents" / f"{label}.plist"
+    # OI-1891: bootout is this command's first mutating verb — refuse before it.
+    refuse_real_launchctl_under_test_runner()
+    try:
+        result = subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+                                capture_output=True, text=True)
+    except OSError as exc:
+        print(f"error: could not run launchctl bootout for {label}: {exc}", file=sys.stderr)
+        return 1
+    stderr = (result.stderr or "").strip()
+    # Only an ABSENT job is tolerated: any other failure may leave it running, so
+    # the plist stays (removing it would orphan the loaded job).
+    if result.returncode != 0 and not (
+        result.returncode in _BOOTOUT_ABSENT_CODES
+        or any(marker in stderr for marker in _BOOTOUT_ABSENT_STDERR)
+    ):
+        print(f"error: launchctl bootout failed for {label} "
+              f"(exit {result.returncode}): {stderr}", file=sys.stderr)
+        return 1
     if plist.is_file():
-        plist.unlink()
+        try:
+            plist.unlink()
+        except OSError as exc:
+            print(f"error: could not remove {plist}: {exc}", file=sys.stderr)
+            return 1
     return 0
 
 

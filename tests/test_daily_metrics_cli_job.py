@@ -50,13 +50,16 @@ def _central_engine(tmp_path: Path, home: Path, project_id: str) -> Path:
     return engine
 
 
-def _stub_launchctl(monkeypatch, label: str, bootout_rc: int = 0) -> list[list[str]]:
+def _stub_launchctl(monkeypatch, label: str, bootout_rc: int = 0, bootout_stderr: str = "",
+                    raise_exc: BaseException | None = None) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
+        if raise_exc is not None and cmd[:2] == ["launchctl", "bootout"]:
+            raise raise_exc
         result = MagicMock()
-        result.stderr = ""
+        result.stderr = bootout_stderr if cmd[:2] == ["launchctl", "bootout"] else ""
         result.stdout = f"-\t0\t{label}\n" if cmd[:2] == ["launchctl", "list"] else ""
         result.returncode = bootout_rc if cmd[:2] == ["launchctl", "bootout"] else 0
         return result
@@ -177,6 +180,59 @@ def test_uninstall_is_zero_when_the_job_was_not_loaded(tmp_path, monkeypatch):
     _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", bootout_rc=113)
 
     assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 0
+
+
+@pytest.mark.parametrize("stub_kwargs", [
+    {"bootout_rc": 0},
+    {"bootout_rc": 3},
+    {"bootout_rc": 113},
+    {"bootout_rc": 1, "bootout_stderr": "Could not find service\n"},
+], ids=["booted-out", "rc3", "rc113", "stderr-only"])
+@pytest.mark.parametrize("present", [True, False], ids=["plist-present", "plist-absent"])
+def test_uninstall_removes_the_plist_when_the_job_is_gone(
+    tmp_path, monkeypatch, stub_kwargs, present
+):
+    home = _fake_home(tmp_path, monkeypatch)
+    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
+    if present:
+        plist.write_text("<!-- job -->", encoding="utf-8")
+    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", **stub_kwargs)
+
+    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 0
+    assert not plist.exists()
+
+
+@pytest.mark.parametrize("stub_kwargs", [
+    {"bootout_rc": 1, "bootout_stderr": "Operation not permitted"},
+    {"raise_exc": FileNotFoundError("launchctl")},
+], ids=["permission-denied", "launchctl-missing"])
+def test_uninstall_keeps_the_plist_on_a_bootout_failure(
+    tmp_path, monkeypatch, capsys, stub_kwargs
+):
+    """Only an ABSENT job is tolerated: any other bootout failure leaves the job
+    possibly loaded, so its plist must survive and the command must fail."""
+    home = _fake_home(tmp_path, monkeypatch)
+    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
+    plist.write_text("<!-- job -->", encoding="utf-8")
+    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}", **stub_kwargs)
+
+    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 1
+    assert plist.is_file(), "a failed bootout must keep the plist"
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
+
+
+def test_uninstall_fails_when_the_plist_cannot_be_removed(tmp_path, monkeypatch, capsys):
+    home = _fake_home(tmp_path, monkeypatch)
+    plist = _launch_agents(home) / f"{LABEL}.{PROJECT}.plist"
+    plist.write_text("<!-- job -->", encoding="utf-8")
+    _stub_launchctl(monkeypatch, f"{LABEL}.{PROJECT}")
+
+    def refuse_unlink(self, *args, **kwargs):
+        raise PermissionError("read-only volume")
+
+    monkeypatch.setattr(Path, "unlink", refuse_unlink)
+    assert dm_cmd.vnx_daily_metrics(_args("uninstall", "--project-id", PROJECT)) == 1
+    assert len(capsys.readouterr().err.strip().splitlines()) == 1
 
 
 # opt-in: vnx init installs no daily-metrics job
