@@ -324,6 +324,7 @@ _OBJECTIVE_ARGV = {
     "unmark-delivery": ["delegate-track", "#1234", "#1235", "--reason", "back to unmarked"],
     "remove-dependency": ["delegate-track", "other-track", "--reason", "overlap, not a dependency"],
     "set-lane-hint": ["delegate-track", "governed"],
+    "set-horizon": ["delegate-track", "now"],
     "set-plan-scope": ["delegate-track", "light", "--reason", "parity check"],
     "set-goal": ["delegate-track", "Delegate goal state"],
     "set-autonomous-promotion": ["delegate-track", "true"],

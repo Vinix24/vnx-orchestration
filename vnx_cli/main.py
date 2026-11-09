@@ -976,6 +976,13 @@ def _register_objective_set_verbs(subs: argparse.Action) -> None:
         help="descriptive dispatch-routing hint (governed|direct|unset)",
     )
 
+    p_set_horizon = subs.add_parser(
+        "set-horizon", help="move an existing track to now|next|later (audited)")
+    _common_horizon_args(p_set_horizon)
+    p_set_horizon.add_argument("track_id", metavar="TRACK_ID")
+    p_set_horizon.add_argument("horizon", choices=_HORIZON_CHOICES, metavar="HORIZON",
+                               help="now, next or later")
+
     p_plan_scope = subs.add_parser(
         "set-plan-scope",
         help="set a track's plan_scope by hand (the only way down to light); --reason required",
