@@ -3,21 +3,31 @@
 Layout: ``<root>/<YYYY-MM-DD>.json`` (revision 1) and
 ``<root>/<YYYY-MM-DD>.r<N>.json`` (N >= 2). The highest revision wins and
 nothing is ever deleted (decision 20).
+
+Every write takes an exclusive cross-process ``fcntl.flock`` on
+``<root>/<YYYY-MM-DD>.lock`` and holds it from the status check through
+publication, so two writers can never both see a free name. Final files and
+revisions are published by writing a fsynced temp file and ``os.link``-ing it
+into place: a link never replaces an existing name, so a ``final`` file is never
+overwritten and a revision never loses an earlier one.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
 from project_root import resolve_central_data_dir
 
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_LOCK_SUFFIX = ".lock"
 
 
 class AlreadyFinal(Exception):
@@ -60,22 +70,58 @@ class DayStore:
         if status is not None and status != "incomplete":
             raise AlreadyFinal(f"{path.name} is already final")
 
-    def _atomic_write(self, path: Path, payload: Mapping[str, Any]) -> None:
+    @contextmanager
+    def _day_lock(self, day: str) -> Iterator[None]:
+        """Exclusive cross-process lock for *day*, held across check and publication.
+
+        The lock file is created once and never unlinked while in use: a second
+        process must always open the same inode to wait behind the first one.
+        """
         self.root.mkdir(parents=True, exist_ok=True)
+        lock_path = self.root / f"{day}{_LOCK_SUFFIX}"
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _remove(path: str | Path) -> None:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+    def _stage(self, path: Path, payload: Mapping[str, Any]) -> str:
+        """Write *payload* to a private fsynced temp file beside *path*; caller publishes it."""
         fd, tmp_name = tempfile.mkstemp(dir=self.root, prefix=f".{path.name}.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:  # vnx-atomic-write: private temp, published by os.link/os.replace
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_name, path)
         except BaseException:
-            try:
-                os.unlink(tmp_name)
-            except FileNotFoundError:
-                pass
+            self._remove(tmp_name)
             raise
+        return tmp_name
+
+    def _publish_no_overwrite(self, path: Path, payload: Mapping[str, Any]) -> None:
+        """Link a fully written temp file to *path*; raises ``FileExistsError`` if taken."""
+        tmp_name = self._stage(path, payload)
+        try:
+            os.link(tmp_name, path)
+        finally:
+            self._remove(tmp_name)
+
+    def _replace(self, path: Path, payload: Mapping[str, Any]) -> None:
+        """Replace *path* after a fsynced temp write; only for replaceable (incomplete) days."""
+        tmp_name = self._stage(path, payload)
+        try:
+            os.replace(tmp_name, path)
+        finally:
+            self._remove(tmp_name)
 
     @staticmethod
     def _payload(
@@ -91,15 +137,26 @@ class DayStore:
     def write_final(self, day: str, doc: Mapping[str, Any]) -> Path:
         self._validate_day(day)
         path = self.root / f"{day}.json"
-        self._ensure_replaceable(path)
-        self._atomic_write(path, self._payload(doc, 1, "final"))
+        with self._day_lock(day):
+            status = self._existing_status(path)
+            if status == "incomplete":
+                # An incomplete day is replaceable by contract; drop it under the lock so the
+                # final file itself is still created by the no-overwrite link.
+                self._remove(path)
+            elif status is not None:
+                raise AlreadyFinal(f"{path.name} is already final")
+            try:
+                self._publish_no_overwrite(path, self._payload(doc, 1, "final"))
+            except FileExistsError:
+                raise AlreadyFinal(f"{path.name} is already final") from None
         return path
 
     def write_incomplete(self, day: str, doc: Mapping[str, Any]) -> Path:
         self._validate_day(day)
         path = self.root / f"{day}.json"
-        self._ensure_replaceable(path)
-        self._atomic_write(path, self._payload(doc, 1, "incomplete"))
+        with self._day_lock(day):
+            self._ensure_replaceable(path)
+            self._replace(path, self._payload(doc, 1, "incomplete"))
         return path
 
     def _next_revision(self, day: str) -> int:
@@ -114,11 +171,17 @@ class DayStore:
         self._validate_day(day)
         if not (reason or "").strip():
             raise ValueError("a revision requires a non-empty reason")
-        revision = self._next_revision(day)
-        path = self.root / f"{day}.r{revision}.json"
         status = doc.get("status") if isinstance(doc.get("status"), str) else "incomplete"
-        self._atomic_write(path, self._payload(doc, revision, status, reason=reason))
-        return path
+        with self._day_lock(day):
+            revision = self._next_revision(day)
+            while True:
+                path = self.root / f"{day}.r{revision}.json"
+                try:
+                    self._publish_no_overwrite(
+                        path, self._payload(doc, revision, status, reason=reason))
+                    return path
+                except FileExistsError:
+                    revision += 1
 
     def load(self, day: str) -> dict[str, Any] | None:
         """The highest revision (the original counts as revision 1), or ``None``."""
