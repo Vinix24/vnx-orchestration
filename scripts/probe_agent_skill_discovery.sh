@@ -8,10 +8,13 @@
 # a timeout, a non-zero exit, a missing init/listing event, an auth failure or an unparseable stream is
 # niet_gemeten with that reason, and so is a judge or materialiser that crashes or prints anything but one
 # verdict line. One JSON line per cell with the sha256 of the raw output judged; every run ends by validating its rows.
-# Usage: scripts/probe_agent_skill_discovery.sh --self-check  |  VNX_PROBE_OPERATOR=1 ... --run [--cell C1|C2|C3a|C3b|all] [--out <file>]
+# The CLI's stdout is the evidence stream; its stderr goes to a separate file and never into the stream, and its
+# stdin is /dev/null. --evidence-dir DIR keeps, per cell, the file the row's sha256 covers as <cell>.stream and the
+# CLI's stderr as <cell>.stderr, because the probe directory is removed at exit.
+# Usage: scripts/probe_agent_skill_discovery.sh --self-check  |  VNX_PROBE_OPERATOR=1 ... --run [--cell C1|C2|C3a|C3b|all] [--out <file>] [--evidence-dir <dir>]
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CELLS="C1 C2 C3a C3b"; CELL="all"; OUT=""; MODE=""; PROBE_DIR=""; SLUG=""
+CELLS="C1 C2 C3a C3b"; CELL="all"; OUT=""; MODE=""; EVIDENCE_DIR=""; PROBE_DIR=""; SLUG=""
 CLAUDE_BIN="${PROBE_CLAUDE_BIN:-claude}"; CODEX_BIN="${PROBE_CODEX_BIN:-codex}"
 TIMEOUT_SECONDS="${PROBE_TIMEOUT_SECONDS:-120}"; CLAUDE_VERSION=""; CODEX_VERSION=""
 ROLE="probe-skill-discovery"; NEGATIVE="vnx-probe-negative-control-not-in-tree"
@@ -24,9 +27,14 @@ parse_args() {
       --self-check) MODE="self-check" ;; --run) MODE="run" ;;
       --cell) [ "$#" -ge 2 ] || die "--cell needs a value"; CELL="$2"; shift ;;
       --out) [ "$#" -ge 2 ] || die "--out needs a path"; OUT="$2"; shift ;;
+      --evidence-dir) [ "$#" -ge 2 ] || die "--evidence-dir needs a path"; EVIDENCE_DIR="$2"; shift ;;
       *) die "unknown argument: $1" ;;
     esac; shift; done
   [ -n "$MODE" ] || die "one of --self-check or --run is required"
+  if [ -n "$EVIDENCE_DIR" ]; then
+    mkdir -p -- "$EVIDENCE_DIR" || die "cannot create --evidence-dir $EVIDENCE_DIR"
+    EVIDENCE_DIR="$(cd "$EVIDENCE_DIR" && pwd -P)"
+  fi
 }
 operator_gate() {
   if [ "${VNX_PROBE_OPERATOR:-}" != "1" ]; then
@@ -55,9 +63,19 @@ sha256_of() { if command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cu
 new_session() { python3 -c 'import uuid; print(uuid.uuid4())'; }
 read_version() { "$1" --version 2>/dev/null | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true; }
 decisive_of() { if [ "$1" = C2 ]; then printf false; else printf true; fi; }
+# keep_evidence <cell> <stream> <stderr>: copies what the row's sha256 covers (and the CLI's stderr) into --evidence-dir.
+keep_evidence() {
+  [ -n "$EVIDENCE_DIR" ] || return 0
+  if [ -n "$2" ] && [ -f "$2" ]; then cp -- "$2" "$EVIDENCE_DIR/$1.stream"; fi
+  if [ -n "${3:-}" ] && [ -f "$3" ]; then cp -- "$3" "$EVIDENCE_DIR/$1.stderr"; fi
+  return 0
+}
+# The last non-empty line of a stderr file, or "no stderr".
+last_stderr() { awk 'NF { last = $0 } END { print (last == "" ? "no stderr" : last) }' "$1" 2>/dev/null || echo "no stderr"; }
 emit_cell() {
-  local cell="$1" outcome="$2" reason="$3" command="$4" raw="${5:-}" sha="-" line
+  local cell="$1" outcome="$2" reason="$3" command="$4" raw="${5:-}" stderr_file="${6:-}" sha="-" line
   if [ -n "$raw" ] && [ -s "$raw" ]; then sha="$(sha256_of "$raw")"; fi
+  keep_evidence "$cell" "$raw" "$stderr_file"
   line="$(python3 -c 'import json,sys; print(json.dumps({"cell":sys.argv[1],"decisive":sys.argv[2]=="true","outcome":sys.argv[3],"reason":sys.argv[4],"command":sys.argv[5],"claude_version":sys.argv[6],"codex_version":sys.argv[7],"sha256":sys.argv[8]},separators=(",",":")))' \
     "$cell" "$(decisive_of "$cell")" "$outcome" "$reason" "$command" "$CLAUDE_VERSION" "$CODEX_VERSION" "$sha")"
   printf '%s\n' "$line"; [ -z "$OUT" ] || printf '%s\n' "$line" >>"$OUT"
@@ -220,13 +238,14 @@ run_in_probe() {
     if [ "$scrub" = yes ]; then
       launch=(env); for var in $CRED_VARS; do launch+=(-u "$var"); done; launch+=("$@")
     fi
-    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT_SECONDS" "${launch[@]}" >"$raw" 2>&1
+    perl -e 'alarm shift; exec @ARGV' "$TIMEOUT_SECONDS" "${launch[@]}" >"$raw" 2>"$raw.stderr" </dev/null
     echo "$?" )
 }
 failed_call() {
-  local cell="$1" status="$2" command="$3" raw="$4"
-  if [ "$status" = 142 ]; then emit_cell "$cell" niet_gemeten "timeout after ${TIMEOUT_SECONDS}s" "$command" "$raw"
-  else emit_cell "$cell" niet_gemeten "cli_exit_${status:-unknown}" "$command" "$raw"; fi
+  local cell="$1" status="$2" command="$3" raw="$4" last
+  last="$(last_stderr "$raw.stderr")"
+  if [ "$status" = 142 ]; then emit_cell "$cell" niet_gemeten "timeout after ${TIMEOUT_SECONDS}s: $last" "$command" "$raw" "$raw.stderr"
+  else emit_cell "$cell" niet_gemeten "cli_exit_${status:-unknown}: $last" "$command" "$raw" "$raw.stderr"; fi
 }
 cell_claude() {
   local cell="$1" extra="$2" root="$PROBE_DIR/$1" status sid raw="$PROBE_DIR/raw/$1.txt"
@@ -243,7 +262,7 @@ cell_claude() {
   cmd="cd $root && VNX_AGENT_LAYOUT=on $SCRUB_PREFIX $CLAUDE_BIN -p 'Reply with the single word OK.' --output-format stream-json --verbose --session-id $sid $extra"
   if [ "$status" != 0 ]; then failed_call "$cell" "$status" "$cmd" "$raw"; return; fi
   py_line "$VERDICTS" judge_claude "$raw" "$sid" "$root" "$SLUG" "$PROBE_DIR/raw/$cell.evidence"
-  emit_cell "$cell" "$PY_OC" "$PY_RC" "$cmd" "$PROBE_DIR/raw/$cell.evidence"
+  emit_cell "$cell" "$PY_OC" "$PY_RC" "$cmd" "$PROBE_DIR/raw/$cell.evidence" "$raw.stderr"
 }
 cell_c3a() {
   local root="$PROBE_DIR/C3a" raw="$PROBE_DIR/raw/C3a.txt" status
@@ -269,7 +288,7 @@ cell_c3b() {
   status="$(run_in_probe "$root" "$raw" no "$CODEX_BIN" exec --json --sandbox read-only "$prompt")"
   if [ "$status" != 0 ]; then failed_call C3b "$status" "$cmd" "$raw"; return; fi
   py_line "$VERDICTS" judge_codex "$raw" "$SLUG" "$NEGATIVE"
-  emit_cell C3b "$PY_OC" "$PY_RC" "$cmd" "$raw"
+  emit_cell C3b "$PY_OC" "$PY_RC" "$cmd" "$raw" "$raw.stderr"
 }
 run_cell() { case "$1" in C1) cell_claude C1 "" ;; C2) cell_claude C2 "--bare" ;; C3a) cell_c3a ;; C3b) cell_c3b ;; esac; }
 main() {
