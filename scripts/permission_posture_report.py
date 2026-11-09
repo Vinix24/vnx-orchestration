@@ -17,8 +17,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +34,8 @@ import worker_permissions as wp
 TRACK_ID = "provider-agnostic-permissions"
 DECISION_KEY = "flip_decision"  # track metadata_json: {"decision": "flip-approved", "decided_by", "decided_at"}
 DECISION_VALUE = "flip-approved"
+DECISION_MAKER = "Vincent"  # the only decided_by that satisfies (e); the runbook step 2 writes this value
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")  # the form PermissionPolicy.policy_digest produces (sha256 hexdigest)
 RECEIPT_EVENT = "permission_policy_checked"
 PASS, FAIL, UNMEASURED = "pass", "fail", "unmeasured"
 ALLOWED, BLOCKED, UNREADABLE = 0, 1, 2
@@ -71,6 +75,12 @@ def _record_matches(lane: str, record: Dict[str, Any]) -> bool:
     )
 
 
+def _record_resolved(record: Dict[str, Any]) -> bool:
+    """Resolved policy evidence: state exactly ``resolved`` and a 64-char lowercase hex digest."""
+    digest = record.get("policy_digest")
+    return record.get("policy_state") == "resolved" and isinstance(digest, str) and bool(_DIGEST_RE.fullmatch(digest))
+
+
 def lane_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """One row per lane of the matrix: capability levels, records seen, the last record's state."""
     rows = []
@@ -84,6 +94,7 @@ def lane_rows(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "last_policy_state": last.get("policy_state") if last else None,
             "last_policy_digest": last.get("policy_digest") if last else None,
             "matches_matrix": _record_matches(lane, last) if last else None,
+            "qualified": (_record_matches(lane, last) and _record_resolved(last)) if last else None,
         })
     return rows
 
@@ -92,9 +103,11 @@ def cond_qualification(rows: List[Dict[str, Any]], records: List[Dict[str, Any]]
     label = "(a) every lane has a green qualification record that matches the matrix"
     stray = sum(1 for r in records if r.get("lane") not in phm.LANES)
     bad = [r["lane"] for r in rows if r["matches_matrix"] is False]
+    unresolved = [r["lane"] for r in rows if r["matches_matrix"] is True and r["qualified"] is False]
     empty = [r["lane"] for r in rows if r["records"] == 0]
-    if bad or stray:
-        return _cond("a", label, FAIL, f"mismatch with the matrix: {bad}; records of an unknown lane: {stray}")
+    if bad or stray or unresolved:
+        return _cond("a", label, FAIL, f"mismatch with the matrix: {bad}; unresolved policy or invalid digest: "
+                     f"{unresolved}; records of an unknown lane: {stray}")
     if empty:
         return _cond("a", label, UNMEASURED, f"no record yet for: {empty}")
     return _cond("a", label, PASS, f"{len(rows)} lanes, last record matches the matrix")
@@ -223,6 +236,31 @@ def read_decision(db_path: Path, project_id: str) -> Optional[Dict[str, Any]]:
     return meta
 
 
+def _utc_time_ok(value: Any) -> bool:
+    """An ISO-8601 timestamp with an explicit UTC offset (Z or +00:00) that is not in the future."""
+    if not isinstance(value, str) or not (value.endswith("Z") or value.endswith("+00:00")):
+        return False
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return moment.utcoffset() == timedelta(0) and moment <= datetime.now(timezone.utc)
+
+
+def _decision_faults(decision: Any) -> List[str]:
+    """Names of the decision fields that do not satisfy (e); an empty list means the decision is valid."""
+    if not isinstance(decision, dict):
+        return ["flip_decision"]
+    faults = []
+    if decision.get("decision") != DECISION_VALUE:
+        faults.append("decision")
+    if decision.get("decided_by") != DECISION_MAKER:
+        faults.append("decided_by")
+    if not _utc_time_ok(decision.get("decided_at")):
+        faults.append("decided_at")
+    return faults
+
+
 def cond_operator(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
     label = f"(e) an explicit operator decision in track metadata key {DECISION_KEY!r}"
     if meta is None:
@@ -230,10 +268,10 @@ def cond_operator(meta: Optional[Dict[str, Any]]) -> Dict[str, str]:
     decision = meta.get(DECISION_KEY)
     if decision is None:
         return _cond("e", label, FAIL, "no decision recorded")
-    ok = (isinstance(decision, dict) and decision.get("decision") == DECISION_VALUE
-          and all(isinstance(decision.get(k), str) and decision[k].strip() for k in ("decided_by", "decided_at")))
-    if not ok:
-        return _cond("e", label, FAIL, f"decision malformed (needs decision={DECISION_VALUE!r}, decided_by, decided_at)")
+    wrong = _decision_faults(decision)
+    if wrong:
+        return _cond("e", label, FAIL, f"decision refused, wrong field: {wrong} (needs decision={DECISION_VALUE!r}, "
+                     f"decided_by={DECISION_MAKER!r}, decided_at an ISO-8601 UTC time, not in the future)")
     return _cond("e", label, PASS, f"decided by {decision['decided_by']} at {decision['decided_at']}")
 
 
@@ -253,10 +291,10 @@ def build_report(state_dir: Path, project_root: Path, project_id: str, minimum: 
 
 
 def render_text(report: Dict[str, Any]) -> str:
-    lines = ["lane | records | last state | " + " ".join(phm.DIMENSIONS)]
+    lines = ["lane | records | last state | qualified | " + " ".join(phm.DIMENSIONS)]
     for row in report["lanes"]:
         levels = " ".join(row["capabilities"][d] for d in phm.DIMENSIONS)
-        lines.append(f"{row['lane']} | {row['records']} | {row['last_policy_state']} | {levels}")
+        lines.append(f"{row['lane']} | {row['records']} | {row['last_policy_state']} | qualified={row['qualified']} | {levels}")
     lines += [f"{c['status']:<10} {c['condition']}: {c['evidence']}" for c in report["conditions"]]
     return "\n".join(lines + [f"verdict: {report['verdict']}"])
 

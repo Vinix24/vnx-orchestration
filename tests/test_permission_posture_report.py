@@ -11,6 +11,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,7 @@ PROFILE = (
     "    allowed_tools: [Read, Write, Edit, Bash]\n    denied_tools: [WebSearch]\n"
     "    file_write_scope: ['scripts/**']\n"
 )
-DECISION = {"decision": "flip-approved", "decided_by": "Vincent", "decided_at": "2026-11-10T09:00:00Z"}
+DECISION = {"decision": "flip-approved", "decided_by": "Vincent", "decided_at": "2026-11-09T07:00:00Z"}
 ENV_FLAG = "VNX_ENFORCE_WORKER_PERMISSIONS"
 TRACK_ID = "provider-agnostic-permissions"
 DECISION_KEY = "flip_decision"
@@ -260,3 +261,75 @@ def test_out_file_gets_the_report_and_text_mode_names_the_verdict(tmp_path, monk
                      "--project-id", "vnx-dev", "--out", str(out)])
     printed = capsys.readouterr().out
     assert code == 0 and out.read_text() == printed and "verdict: flip-allowed" in printed
+
+
+def _rewrite_records(state, **fields):
+    for path in (state / "permission_records").glob("*.json"):
+        rec = json.loads(path.read_text())
+        rec.update(fields)
+        path.write_text(json.dumps(rec))
+
+
+def test_unresolved_records_on_all_lanes_do_not_qualify(tmp_path, monkeypatch, capsys):
+    state, root = build(tmp_path, monkeypatch)
+    _rewrite_records(state, policy_digest=None, policy_state="unresolved")
+    code, report = run(state, root, capsys)
+    assert code == 1 and status(report, "a") == "fail" and report["verdict"] == "blocked"
+    assert all(r["matches_matrix"] is True and r["qualified"] is False for r in report["lanes"])
+
+
+def test_one_unresolved_lane_fails_a_and_is_named_apart_from_mismatches(tmp_path, monkeypatch, capsys):
+    state, root = build(tmp_path, monkeypatch)
+    path = state / "permission_records" / "T1_d-kimi.json"
+    rec = json.loads(path.read_text())
+    rec.update(policy_digest=None, policy_state="unresolved")
+    path.write_text(json.dumps(rec))
+    code, report = run(state, root, capsys)
+    evidence = next(c["evidence"] for c in report["conditions"] if c["key"] == "a")
+    assert code == 1 and status(report, "a") == "fail"
+    assert "mismatch with the matrix: []" in evidence and "invalid digest: ['kimi']" in evidence
+
+
+@pytest.mark.parametrize("fields", [
+    {"policy_digest": "abc"}, {"policy_digest": "AB" * 32}, {"policy_digest": 7}, {"policy_digest": "ab" * 32 + "\n"},
+    {"policy_state": "pending"}, {"policy_state": None},
+])
+def test_resolved_without_a_valid_digest_or_state_fails_a(tmp_path, monkeypatch, capsys, fields):
+    state, root = build(tmp_path, monkeypatch)
+    _rewrite_records(state, **fields)
+    assert status(run(state, root, capsys)[1], "a") == "fail"
+
+
+def test_resolved_with_valid_digest_on_all_lanes_passes_a(tmp_path, monkeypatch, capsys):
+    state, root = build(tmp_path, monkeypatch)
+    report = run(state, root, capsys)[1]
+    assert status(report, "a") == "pass" and all(r["qualified"] is True for r in report["lanes"])
+
+
+@pytest.mark.parametrize("who", ["automation", "vincent", " Vincent ", "", None, 7])
+def test_decided_by_must_be_exactly_vincent(tmp_path, monkeypatch, capsys, who):
+    state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_by": who})
+    code, report = run(state, root, capsys)
+    assert code == 1 and status(report, "e") == "fail"
+    assert "decided_by" in next(c["evidence"] for c in report["conditions"] if c["key"] == "e")
+
+
+def _utc(delta):
+    return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+@pytest.mark.parametrize("when", [
+    "not-a-date", "2026-11-09T07:00:00", "2026-11-09T07:00:00+01:00", "", None, 7, _utc(timedelta(days=1)),
+])
+def test_decided_at_must_be_a_past_utc_time(tmp_path, monkeypatch, capsys, when):
+    state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_at": when})
+    code, report = run(state, root, capsys)
+    assert code == 1 and status(report, "e") == "fail"
+    assert "decided_at" in next(c["evidence"] for c in report["conditions"] if c["key"] == "e")
+
+
+@pytest.mark.parametrize("when", ["2026-11-09T07:00:00Z", "2026-11-09T07:00:00+00:00", _utc(timedelta(minutes=-1))])
+def test_vincent_with_past_utc_time_passes_e_and_all_five_allow(tmp_path, monkeypatch, capsys, when):
+    state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_at": when})
+    code, report = run(state, root, capsys)
+    assert code == 0 and [status(report, k) for k in "abcde"] == ["pass"] * 5 and report["verdict"] == "flip-allowed"

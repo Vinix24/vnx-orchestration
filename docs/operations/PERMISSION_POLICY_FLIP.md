@@ -25,11 +25,11 @@ Elke voorwaarde is `pass`, `fail` of `unmeasured`. Alleen vijf keer `pass` geeft
 
 | | Voorwaarde | Bewijs |
 |---|---|---|
-| a | Per rijstrook een groene kwalificatie | Het laatste record in `state/permission_records/` van P3 en P6 bestaat en is gelijk aan de matrix. Een record van een onbekende rijstrook is `fail`. |
+| a | Per rijstrook een groene kwalificatie | Het laatste record in `state/permission_records/` van P3 en P6 bestaat, is gelijk aan de matrix en is `resolved` met een sha256-digest (64 kleine hexadecimale tekens). Een record dat de matrix volgt maar `unresolved` is, of een andere digest draagt, is `fail`. Een record van een onbekende rijstrook is `fail`. |
 | b | Nul fallback-rollen | Elke rol uit `.vnx/worker_permissions.yaml` en `agents/` wordt door `compose_policy` gehaald. Eén `is_fallback=True` is `fail`. |
 | c | Nul `unsupported` restricties die een actieve policy eist | Per rol en rijstrook: eist de policy een dimensie (fs lezen/schrijven/deny, tools allow/deny, mcp, netwerk) die de rijstrook niet kan uitdrukken. Met de matrix van vandaag blijft dit `fail` voor kimi en codex: handhaving zou die bouwen weigeren (B3). |
 | d | N opeenvolgende dispatches met `permission_policy: match` | De staart van `permission_policy_checked` in `state/t0_receipts.ndjson` (P7). Telt alleen `outcome == match` met `check_status == GO` en een dispatch-id. Elk ander of ontbrekend veld breekt de reeks. |
-| e | Expliciet besluit van Vincent | Sleutel `flip_decision` in `metadata_json` van de track, zie hieronder. Het script schrijft die sleutel nooit. |
+| e | Expliciet besluit van Vincent | Sleutel `flip_decision` in `metadata_json` van de track, zie hieronder. `decided_by` is exact `Vincent` (hoofdletter, geen spaties) en `decided_at` is een ISO-8601-tijdstip met expliciete UTC-offset (`Z` of `+00:00`) dat niet in de toekomst ligt. Elke andere waarde is `fail`. Het script schrijft die sleutel nooit. |
 
 ## Aanzetten
 
