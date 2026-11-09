@@ -21,6 +21,7 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
 import beacon_register
+import build_t0_state
 import daemon_register
 import processor_liveness
 from build_t0_state import _state_to_brief, main
@@ -69,6 +70,22 @@ def _stub_processor_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         processor_liveness, "read_processor_liveness",
         lambda *_a, **_k: dict(_NEUTRAL_PROCESSOR_LIVENESS),
+    )
+
+
+# The launchd liveness is the fourth host-dependent source: it asks launchctl
+# whether this host's real com.vnx.* jobs are loaded, so the result depends on
+# the machine running the tests (red on a Mac with real jobs, green on CI).
+# Neutralize it the same way: inject a clean "ok" measurement in the shape
+# _measure_launchd_liveness returns (overall + jobs) so these tests stay
+# independent of the host's launchd state.
+_NEUTRAL_LAUNCHD_LIVENESS = {"overall": "ok", "jobs": {}}
+
+
+def _stub_launchd_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        build_t0_state, "_measure_launchd_liveness",
+        lambda *_a, **_k: dict(_NEUTRAL_LAUNCHD_LIVENESS),
     )
 
 
@@ -136,6 +153,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
         _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
@@ -167,6 +185,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
         _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
@@ -192,6 +211,7 @@ class TestFormatBriefOutputPath:
         monkeypatch.setattr(_bts, "_DISPATCH_DIR", dispatch_dir)
         monkeypatch.setattr(_bts, "_DATA_DIR", tmp_path / "data")
         _stub_daemon_liveness(monkeypatch)
+        _stub_launchd_liveness(monkeypatch)
         _stub_processor_liveness(monkeypatch)
         _stub_beacon_register(monkeypatch)
 
