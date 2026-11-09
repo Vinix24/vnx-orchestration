@@ -193,6 +193,11 @@ class DayStore:
             data = json.load(handle)
         return data if isinstance(data, dict) else None
 
+    def base_status(self, day: str) -> str | None:
+        """The status of ``<day>.json`` only; revisions do not count."""
+        self._validate_day(day)
+        return self._existing_status(self.root / f"{day}.json")
+
     def is_final(self, day: str) -> bool:
         doc = self.load(day)
         return isinstance(doc, dict) and doc.get("status") == "final"

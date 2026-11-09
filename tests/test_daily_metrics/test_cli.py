@@ -202,6 +202,27 @@ def test_recollect_writes_revision_and_rejects_invalid(broken_sources, healthy_s
     assert not _day_file(tmp_path, "2026-11-05.r2").exists()
 
 
+def test_failed_recollect_is_retried_and_a_revised_day_stays_final(
+        broken_sources, healthy_sources, tmp_path):
+    """Finality is the base file's: a failed revision neither locks out nor re-collects the day."""
+    base = _args(tmp_path, [])
+    assert _run_cli(healthy_sources, ["collect", *base, "--day", "2026-11-06"]).returncode == 0
+    a = _run_cli(broken_sources, ["collect", "--recollect", "2026-11-06", "--reason", "a", *base])
+    assert a.returncode == 0, a.stderr
+    r2 = json.loads(_day_file(tmp_path, "2026-11-06.r2").read_text(encoding="utf-8"))
+    assert r2["status"] == "incomplete"
+    daily = _run_cli(healthy_sources, ["daily", *base])
+    assert daily.returncode == 0, daily.stderr
+    lines = [json.loads(line) for line in daily.stdout.splitlines()]
+    day_lines = [item for item in lines if item["day"] == "2026-11-06"]
+    assert all("skipped" in item for item in day_lines)
+    assert not _day_file(tmp_path, "2026-11-06.r3").exists()
+    b = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-06", "--reason", "b", *base])
+    assert b.returncode == 0, b.stderr
+    r3 = json.loads(_day_file(tmp_path, "2026-11-06.r3").read_text(encoding="utf-8"))
+    assert r3["status"] == "final"
+
+
 def test_beacon_file_exists_after_daily(healthy_sources, tmp_path):
     proc = _run_cli(healthy_sources, ["daily", *_args(tmp_path, [])])
     assert proc.returncode == 0, proc.stderr

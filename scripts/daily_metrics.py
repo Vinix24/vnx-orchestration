@@ -100,7 +100,7 @@ def _emit_skipped(day: date, reason: str) -> None:
 
 
 def _write_day(store: store_mod.DayStore, project_id: str, day: date, now: datetime) -> Path | None:
-    if store.is_final(day.isoformat()):
+    if store.base_status(day.isoformat()) == "final":
         _emit_skipped(day, "final")
         return None
     doc = collect_mod.collect_day(collect_mod.CollectContext(project_id, day, now))
@@ -117,9 +117,9 @@ def _write_day(store: store_mod.DayStore, project_id: str, day: date, now: datet
 def _collect_window(store: store_mod.DayStore, project_id: str, now: datetime) -> None:
     existing: dict[date, str] = {}
     for day in days.completed_days(now):
-        doc = store.load(day.isoformat())
-        if isinstance(doc, dict) and isinstance(doc.get("status"), str):
-            existing[day] = doc["status"]
+        status = store.base_status(day.isoformat())
+        if status is not None:
+            existing[day] = status
     for day in days.plan_catchup(now, existing):
         _write_day(store, project_id, day, now)
 
@@ -141,7 +141,7 @@ def _recollect_day(args: argparse.Namespace, store: store_mod.DayStore,
     if not reason:
         print("error: --recollect requires a non-empty --reason", file=sys.stderr)
         return EXIT_USAGE
-    if not store.is_final(day.isoformat()):
+    if store.base_status(day.isoformat()) != "final":
         print(f"error: {day.isoformat()} has no final file to revise", file=sys.stderr)
         return EXIT_USAGE
     doc = collect_mod.collect_day(collect_mod.CollectContext(project_id, day, now))
