@@ -1928,6 +1928,117 @@ def _do_merge(pr_number: int, method: str, head_sha: str = "") -> tuple[bool, st
     return _pr_actually_merged(pr_number)
 
 
+#: ``pr_merged`` field naming a merge whose trees could not be read (DR-7,
+#: requirement 9). Beside whatever the read did establish; an absent sha is
+#: never written as an empty string or a zero sha.
+MERGE_TREE_UNAVAILABLE = "merge_tree_unavailable"
+
+#: Seconds one git read may take, so a wedged checkout degrades to
+#: ``merge_tree_unavailable`` instead of hanging a merge that already happened.
+_MERGE_TREE_GIT_TIMEOUT = 60
+
+
+def _git_in_target(args: List[str]) -> subprocess.CompletedProcess[str]:
+    """Run one git command in the active merge target's checkout."""
+    return subprocess.run(
+        ["git", "-C", str(_target_root()), *args],
+        capture_output=True, text=True, timeout=_MERGE_TREE_GIT_TIMEOUT, check=False,
+    )
+
+
+def _read_merge_commit(
+    pr_number: int, gh: Callable[[List[str]], subprocess.CompletedProcess[str]],
+) -> Tuple[str, str]:
+    """The commit GitHub reports for the merge, as ``(sha, error)``.
+
+    Fail-closed: a non-zero exit, unparseable JSON, a missing ``mergeCommit``
+    or an empty ``oid`` each return a reason; only a non-empty oid is an answer.
+    """
+    result = gh(["pr", "view", str(pr_number), "--json", "mergeCommit"])
+    if result.returncode != 0:
+        raw = (result.stderr or result.stdout or "gh pr view failed").strip()
+        return "", f"gh_error: {raw}"
+    try:
+        data = json.loads(result.stdout or "null")
+    except json.JSONDecodeError:
+        return "", "gh_error: mergeCommit-antwoord is geen JSON"
+    merge_commit = data.get("mergeCommit") if isinstance(data, dict) else None
+    sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        return "", "gh_error: mergeCommit ontbreekt"
+    return sha, ""
+
+
+def _tree_of(
+    sha: str, git: Callable[[List[str]], subprocess.CompletedProcess[str]],
+) -> Tuple[str, str]:
+    """The tree of ``sha`` as ``(tree, error)``, fetching once when it is not local.
+
+    A squash commit lands on main, which the clone may not have fetched yet; one
+    ``git fetch origin`` covers that. An unreadable tree is an error, never empty.
+    """
+    if git(["cat-file", "-e", f"{sha}^{{commit}}"]).returncode != 0:
+        git(["fetch", "--quiet", "origin"])
+    result = git(["rev-parse", f"{sha}^{{tree}}"])
+    if result.returncode != 0:
+        raw = (result.stderr or result.stdout or "git rev-parse failed").strip()
+        return "", f"git_error: {raw}"
+    tree = (result.stdout or "").strip()
+    if not tree:
+        return "", "git_error: rev-parse gaf geen boom"
+    return tree, ""
+
+
+def _merge_tree_record(
+    pr_number: int,
+    tested_head: str,
+    *,
+    gh: Optional[Callable[[List[str]], subprocess.CompletedProcess[str]]] = None,
+    git: Optional[Callable[[List[str]], subprocess.CompletedProcess[str]]] = None,
+) -> Dict[str, Any]:
+    """What landed on main versus what the gates tested (DR-7, requirement 9).
+
+    ``tree_equal`` is written only when both trees were actually read, so
+    "unknown" never reads as "equal". The merge already happened and cannot be
+    undone: nothing here refuses or changes an exit code — what could be read is
+    booked and ``merge_tree_unavailable`` names the reason for what could not.
+    ``tested_head`` is the head ``gh pr merge`` was pinned to; without it there
+    is no tested tree, recorded explicitly rather than silently omitted.
+
+    ``gh``/``git`` are the narrow seam the tests drive; the defaults are this
+    module's ``_gh`` (active target) and ``_git_in_target``.
+    """
+    gh_runner = _gh if gh is None else gh
+    git_runner = _git_in_target if git is None else git
+    if not tested_head:
+        return {MERGE_TREE_UNAVAILABLE: "no_tested_head"}
+    record: Dict[str, Any] = {"tested_head": tested_head}
+    reasons: List[str] = []
+    try:
+        merge_sha, error = _read_merge_commit(pr_number, gh_runner)
+        if error:
+            reasons.append(error)
+        else:
+            record["merge_sha"] = merge_sha
+            merged_tree, error = _tree_of(merge_sha, git_runner)
+            if error:
+                reasons.append(error)
+            else:
+                record["merged_tree"] = merged_tree
+        tested_tree, error = _tree_of(tested_head, git_runner)
+        if error:
+            reasons.append(error)
+        else:
+            record["tested_tree"] = tested_tree
+    except Exception as exc:  # vnx-silent-except: the merge is irreversible; this record is evidence only and must never refuse it (DR-7)
+        reasons.append(f"lookup_error: {exc}")
+    if "merged_tree" in record and "tested_tree" in record:
+        record["tree_equal"] = record["merged_tree"] == record["tested_tree"]
+    if reasons:
+        record[MERGE_TREE_UNAVAILABLE] = "; ".join(reasons)
+    return record
+
+
 def _emit_receipt(
     *,
     pr_number: int,
@@ -1943,6 +2054,7 @@ def _emit_receipt(
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
     door_check: Optional[Dict[str, Any]] = None,
+    merge_tree: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -1982,6 +2094,14 @@ def _emit_receipt(
     ``door_check`` (deur D4, ADR-061 contract (c)) is written always, like
     ``preflight_gates``: a caller without the door records ``not_evaluated``.
     This receipt follows a confirmed merge only, so ``merge_outcome`` is ``merged``.
+
+    ``merge_tree`` (DR-7, requirement 9) is the merge-tree record
+    ``_merge_tree_record`` computed after the merge: ``merge_sha``,
+    ``merged_tree``, ``tested_head``, ``tested_tree``, ``tree_equal`` and, when
+    something could not be read, ``merge_tree_unavailable``. The five are
+    optional fields on this same receipt — no new ``event_type``, no new
+    receipt kind — and a caller that passes nothing (backfill, a direct
+    ``_emit_receipt``) writes exactly the keys it wrote before.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -2003,6 +2123,8 @@ def _emit_receipt(
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
+    if merge_tree:
+        kwargs.update(merge_tree)
     door = door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, "")
     kwargs["door_check"] = dict(door, merge_outcome=MERGE_MERGED)
     return emit_governance_receipt(
@@ -2312,7 +2434,9 @@ def merge_pr(
     callers that never ran a gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
-    pr_title, branch, receipt_status, receipt_ok, register_ok, error.
+    pr_title, branch, receipt_status, receipt_ok, register_ok, error, and —
+    after a confirmed merge — ``merge_tree`` (DR-7: what landed on main versus
+    what the gates tested; never a refusal, see ``_merge_tree_record``).
 
     ``success`` means "the merge happened on GitHub" — it is NOT the CLI
     verdict. A merge whose receipt could not be written has ``success=True``
@@ -2338,19 +2462,16 @@ def merge_pr(
     # PR metadata for the receipt (title/branch). Reuse what the caller
     # already fetched when given; otherwise fetch it here (pre-pinning
     # behavior for callers that never ran a gate).
-    if pr_data is None:
-        pr_data = _query_pr(pr_number)
+    pr_data = _query_pr(pr_number) if pr_data is None else pr_data
     if pr_data:
-        result["pr_title"] = pr_data.get("title", "")
-        result["branch"] = pr_data.get("headRefName", "")
+        result["pr_title"], result["branch"] = pr_data.get("title", ""), pr_data.get("headRefName", "")
 
     # OI-1091: warn (never block) when another OPEN dispatch branch touches the same files as
     # the branch being merged. Best-effort; a git/network failure degrades to no warning.
     # OI-1641: the scan itself is now bounded (one bulk fetch + one bulk gh lookup instead of a
     # fetch/gh-call per branch, plus a per-command timeout and a wall-clock scan ceiling) so it
     # can no longer turn into minutes of serial network round-trips on every merge.
-    if result["branch"]:
-        result["overlaps"] = _branch_overlaps(pr_number, result["branch"])
+    result["overlaps"] = _branch_overlaps(pr_number, result["branch"]) if result["branch"] else []
 
     if dry_run:
         result.update(success=True, error="dry_run: no merge executed")
@@ -2370,6 +2491,11 @@ def merge_pr(
     if on_merged is not None:
         on_merged()  # deur D4: confirmed before any bookkeeping, so nothing below can revoke the permit
 
+    # DR-7 (requirement 9): which commit and which tree landed on main, next to
+    # the head the gates tested. Evidence only — it can never refuse a merge
+    # that already happened, and every unreadable part is named on the record.
+    result["merge_tree"] = _merge_tree_record(pr_number, head_sha)
+
     # Derive internal PR-N label from title for dual-scheme receipt
     pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
     if not dispatch_id:
@@ -2387,6 +2513,7 @@ def merge_pr(
         preflight_gates=preflight_gates,
         review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
         shadow_seat_rule=shadow_seat_rule, door_check=door_check,
+        merge_tree=result["merge_tree"],
     )
 
     # Emit event to dispatch_register.ndjson (best-effort)
