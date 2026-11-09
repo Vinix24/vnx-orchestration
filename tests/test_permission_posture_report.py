@@ -315,22 +315,46 @@ def test_decided_by_must_be_exactly_vincent(tmp_path, monkeypatch, capsys, who):
     assert "decided_by" in next(c["evidence"] for c in report["conditions"] if c["key"] == "e")
 
 
+# Parametrize values and ids are fixed at import (xdist workers must collect identical tests): a
+# clock-relative case is a sentinel that the test body turns into a time at run time.
+RELATIVE_TIMES = {
+    "one-day-ahead": timedelta(days=1),
+    "one-minute-ago": timedelta(minutes=-1),
+}
+
+
 def _utc(delta):
     return (datetime.now(timezone.utc) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _resolve_when(when):
+    return _utc(RELATIVE_TIMES[when]) if isinstance(when, str) and when in RELATIVE_TIMES else when
+
+
 @pytest.mark.parametrize("when", [
-    "not-a-date", "2026-11-09T07:00:00", "2026-11-09T07:00:00+01:00", "", None, 7, _utc(timedelta(days=1)),
+    pytest.param("not-a-date", id="not-a-date"),
+    pytest.param("2026-11-09T07:00:00", id="naive"),
+    pytest.param("2026-11-09T07:00:00+01:00", id="non-utc-offset"),
+    pytest.param("", id="empty"),
+    pytest.param(None, id="none"),
+    pytest.param(7, id="int"),
+    pytest.param("one-day-ahead", id="future"),
 ])
 def test_decided_at_must_be_a_past_utc_time(tmp_path, monkeypatch, capsys, when):
+    when = _resolve_when(when)
     state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_at": when})
     code, report = run(state, root, capsys)
     assert code == 1 and status(report, "e") == "fail"
     assert "decided_at" in next(c["evidence"] for c in report["conditions"] if c["key"] == "e")
 
 
-@pytest.mark.parametrize("when", ["2026-11-09T07:00:00Z", "2026-11-09T07:00:00+00:00", _utc(timedelta(minutes=-1))])
+@pytest.mark.parametrize("when", [
+    pytest.param("2026-11-09T07:00:00Z", id="z-suffix"),
+    pytest.param("2026-11-09T07:00:00+00:00", id="utc-offset"),
+    pytest.param("one-minute-ago", id="just-past"),
+])
 def test_vincent_with_past_utc_time_passes_e_and_all_five_allow(tmp_path, monkeypatch, capsys, when):
+    when = _resolve_when(when)
     state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_at": when})
     code, report = run(state, root, capsys)
     assert code == 0 and [status(report, k) for k in "abcde"] == ["pass"] * 5 and report["verdict"] == "flip-allowed"
