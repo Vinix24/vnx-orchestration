@@ -1,0 +1,1 @@
+- `daily_metrics.baseline` computes the 7-day baseline over pooled raw samples for the five quantile metrics and the mean of day values for the five counts: only `final` days count, fewer than four usable days is `insufficient_baseline_days`, never 0, and keyed seats get their own baseline (doorloop PR-9).
