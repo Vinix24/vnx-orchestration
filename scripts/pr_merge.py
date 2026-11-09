@@ -241,6 +241,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -1933,28 +1934,91 @@ def _do_merge(pr_number: int, method: str, head_sha: str = "") -> tuple[bool, st
 #: never written as an empty string or a zero sha.
 MERGE_TREE_UNAVAILABLE = "merge_tree_unavailable"
 
-#: Seconds one git read may take, so a wedged checkout degrades to
-#: ``merge_tree_unavailable`` instead of hanging a merge that already happened.
-_MERGE_TREE_GIT_TIMEOUT = 60
+#: Seconds the whole ``_merge_tree_record`` may take (DR-7, round 2). The
+#: record sits between the confirmed merge and the binding ``pr_merged``
+#: receipt, so evidence that may delay the receipt by minutes weakens the thing
+#: it is meant to strengthen: one short deadline for every read it makes.
+_MERGE_TREE_BUDGET_S = 20.0
+
+#: Reason booked when the record's budget is spent before every read happened.
+_MERGE_TREE_BUDGET_EXHAUSTED = "budget_exhausted"
+
+#: The smallest timeout one read may still get. Below this the read is skipped
+#: (the budget counts as spent) rather than started with less than a second.
+_MERGE_TREE_MIN_TIMEOUT_S = 1.0
 
 
-def _git_in_target(args: List[str]) -> subprocess.CompletedProcess[str]:
+class _MergeTreeBudget:
+    """One ``time.monotonic()`` deadline shared by every read of the record.
+
+    ``next_timeout`` hands out the remaining time, never more; at most
+    ``_MERGE_TREE_BUDGET_S`` and never below ``_MERGE_TREE_MIN_TIMEOUT_S`` —
+    below that it returns ``None`` and spends the budget, so the remaining
+    reads are skipped. ``run`` turns a ``subprocess.TimeoutExpired`` into a
+    reason and spends the budget: the record is evidence about a merge that
+    already happened, so a timeout can never escape as an exception.
+    """
+
+    def __init__(self, seconds: float = _MERGE_TREE_BUDGET_S) -> None:
+        self._deadline = time.monotonic() + seconds
+        self.exhausted = False
+
+    def remaining(self) -> float:
+        return self._deadline - time.monotonic()
+
+    def next_timeout(self) -> Optional[float]:
+        """The timeout for the next read, or ``None`` when the budget is spent."""
+        if self.exhausted:
+            return None
+        remaining = self.remaining()
+        if remaining < _MERGE_TREE_MIN_TIMEOUT_S:
+            self.exhausted = True
+            return None
+        return remaining
+
+    def run(
+        self,
+        call: Callable[..., subprocess.CompletedProcess[str]],
+        args: List[str],
+        label: str,
+    ) -> Tuple[Optional[subprocess.CompletedProcess[str]], str]:
+        """``(CompletedProcess, "")``, or ``(None, reason)`` when nothing may run."""
+        timeout = self.next_timeout()
+        if timeout is None:
+            return None, f"{_MERGE_TREE_BUDGET_EXHAUSTED}: geen tijd meer voor {label}"
+        try:
+            return call(args, timeout=timeout), ""
+        except subprocess.TimeoutExpired:
+            self.exhausted = True
+            return None, f"{_MERGE_TREE_BUDGET_EXHAUSTED}: {label} liep over zijn tijd"
+
+
+def _git_in_target(
+    args: List[str], timeout: Optional[float] = None,
+) -> subprocess.CompletedProcess[str]:
     """Run one git command in the active merge target's checkout."""
     return subprocess.run(
         ["git", "-C", str(_target_root()), *args],
-        capture_output=True, text=True, timeout=_MERGE_TREE_GIT_TIMEOUT, check=False,
+        capture_output=True, text=True, timeout=timeout, check=False,
     )
 
 
 def _read_merge_commit(
-    pr_number: int, gh: Callable[[List[str]], subprocess.CompletedProcess[str]],
+    pr_number: int,
+    gh: Callable[..., subprocess.CompletedProcess[str]],
+    budget: _MergeTreeBudget,
 ) -> Tuple[str, str]:
     """The commit GitHub reports for the merge, as ``(sha, error)``.
 
     Fail-closed: a non-zero exit, unparseable JSON, a missing ``mergeCommit``
     or an empty ``oid`` each return a reason; only a non-empty oid is an answer.
+    The read draws its timeout from the record's budget.
     """
-    result = gh(["pr", "view", str(pr_number), "--json", "mergeCommit"])
+    result, error = budget.run(
+        gh, ["pr", "view", str(pr_number), "--json", "mergeCommit"], "gh pr view",
+    )
+    if error:
+        return "", error
     if result.returncode != 0:
         raw = (result.stderr or result.stdout or "gh pr view failed").strip()
         return "", f"gh_error: {raw}"
@@ -1970,16 +2034,33 @@ def _read_merge_commit(
 
 
 def _tree_of(
-    sha: str, git: Callable[[List[str]], subprocess.CompletedProcess[str]],
+    sha: str,
+    git: Callable[..., subprocess.CompletedProcess[str]],
+    budget: _MergeTreeBudget,
+    fetched: List[bool],
 ) -> Tuple[str, str]:
-    """The tree of ``sha`` as ``(tree, error)``, fetching once when it is not local.
+    """The tree of ``sha`` as ``(tree, error)``, fetching once per record.
 
     A squash commit lands on main, which the clone may not have fetched yet; one
-    ``git fetch origin`` covers that. An unreadable tree is an error, never empty.
+    ``git fetch origin`` covers that. ``fetched`` is shared by both lookups of a
+    record, so a record fetches at most once even when both shas are new. An
+    unreadable tree is an error, never empty.
     """
-    if git(["cat-file", "-e", f"{sha}^{{commit}}"]).returncode != 0:
-        git(["fetch", "--quiet", "origin"])
-    result = git(["rev-parse", f"{sha}^{{tree}}"])
+    exists, error = budget.run(
+        git, ["cat-file", "-e", f"{sha}^{{commit}}"], f"git cat-file {sha[:12]}",
+    )
+    if error:
+        return "", error
+    if exists.returncode != 0 and not fetched[0]:
+        fetched[0] = True  # one fetch per record, whatever it finds
+        _, error = budget.run(git, ["fetch", "--quiet", "origin"], "git fetch origin")
+        if error:
+            return "", error
+    result, error = budget.run(
+        git, ["rev-parse", f"{sha}^{{tree}}"], f"git rev-parse {sha[:12]}",
+    )
+    if error:
+        return "", error
     if result.returncode != 0:
         raw = (result.stderr or result.stdout or "git rev-parse failed").strip()
         return "", f"git_error: {raw}"
@@ -1993,8 +2074,8 @@ def _merge_tree_record(
     pr_number: int,
     tested_head: str,
     *,
-    gh: Optional[Callable[[List[str]], subprocess.CompletedProcess[str]]] = None,
-    git: Optional[Callable[[List[str]], subprocess.CompletedProcess[str]]] = None,
+    gh: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
+    git: Optional[Callable[..., subprocess.CompletedProcess[str]]] = None,
 ) -> Dict[str, Any]:
     """What landed on main versus what the gates tested (DR-7, requirement 9).
 
@@ -2005,6 +2086,12 @@ def _merge_tree_record(
     ``tested_head`` is the head ``gh pr merge`` was pinned to; without it there
     is no tested tree, recorded explicitly rather than silently omitted.
 
+    The whole record has one short budget (``_MERGE_TREE_BUDGET_S``), shared by
+    every ``gh``/``git`` call: each gets the remaining time as its timeout, and
+    once it is spent the remaining reads are skipped and named
+    ``budget_exhausted``. A ``subprocess.TimeoutExpired`` is a reason, never an
+    exception that escapes.
+
     ``gh``/``git`` are the narrow seam the tests drive; the defaults are this
     module's ``_gh`` (active target) and ``_git_in_target``.
     """
@@ -2014,18 +2101,20 @@ def _merge_tree_record(
         return {MERGE_TREE_UNAVAILABLE: "no_tested_head"}
     record: Dict[str, Any] = {"tested_head": tested_head}
     reasons: List[str] = []
+    budget = _MergeTreeBudget()
+    fetched = [False]  # shared by both lookups: at most one fetch per record
     try:
-        merge_sha, error = _read_merge_commit(pr_number, gh_runner)
+        merge_sha, error = _read_merge_commit(pr_number, gh_runner, budget)
         if error:
             reasons.append(error)
         else:
             record["merge_sha"] = merge_sha
-            merged_tree, error = _tree_of(merge_sha, git_runner)
+            merged_tree, error = _tree_of(merge_sha, git_runner, budget, fetched)
             if error:
                 reasons.append(error)
             else:
                 record["merged_tree"] = merged_tree
-        tested_tree, error = _tree_of(tested_head, git_runner)
+        tested_tree, error = _tree_of(tested_head, git_runner, budget, fetched)
         if error:
             reasons.append(error)
         else:
@@ -2054,7 +2143,6 @@ def _emit_receipt(
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
     door_check: Optional[Dict[str, Any]] = None,
-    merge_tree: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -2094,14 +2182,6 @@ def _emit_receipt(
     ``door_check`` (deur D4, ADR-061 contract (c)) is written always, like
     ``preflight_gates``: a caller without the door records ``not_evaluated``.
     This receipt follows a confirmed merge only, so ``merge_outcome`` is ``merged``.
-
-    ``merge_tree`` (DR-7, requirement 9) is the merge-tree record
-    ``_merge_tree_record`` computed after the merge: ``merge_sha``,
-    ``merged_tree``, ``tested_head``, ``tested_tree``, ``tree_equal`` and, when
-    something could not be read, ``merge_tree_unavailable``. The five are
-    optional fields on this same receipt — no new ``event_type``, no new
-    receipt kind — and a caller that passes nothing (backfill, a direct
-    ``_emit_receipt``) writes exactly the keys it wrote before.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -2123,8 +2203,6 @@ def _emit_receipt(
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
-    if merge_tree:
-        kwargs.update(merge_tree)
     door = door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, "")
     kwargs["door_check"] = dict(door, merge_outcome=MERGE_MERGED)
     return emit_governance_receipt(
@@ -2434,9 +2512,7 @@ def merge_pr(
     callers that never ran a gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
-    pr_title, branch, receipt_status, receipt_ok, register_ok, error, and —
-    after a confirmed merge — ``merge_tree`` (DR-7: what landed on main versus
-    what the gates tested; never a refusal, see ``_merge_tree_record``).
+    pr_title, branch, receipt_status, receipt_ok, register_ok, error.
 
     ``success`` means "the merge happened on GitHub" — it is NOT the CLI
     verdict. A merge whose receipt could not be written has ``success=True``
@@ -2462,16 +2538,19 @@ def merge_pr(
     # PR metadata for the receipt (title/branch). Reuse what the caller
     # already fetched when given; otherwise fetch it here (pre-pinning
     # behavior for callers that never ran a gate).
-    pr_data = _query_pr(pr_number) if pr_data is None else pr_data
+    if pr_data is None:
+        pr_data = _query_pr(pr_number)
     if pr_data:
-        result["pr_title"], result["branch"] = pr_data.get("title", ""), pr_data.get("headRefName", "")
+        result["pr_title"] = pr_data.get("title", "")
+        result["branch"] = pr_data.get("headRefName", "")
 
     # OI-1091: warn (never block) when another OPEN dispatch branch touches the same files as
     # the branch being merged. Best-effort; a git/network failure degrades to no warning.
     # OI-1641: the scan itself is now bounded (one bulk fetch + one bulk gh lookup instead of a
     # fetch/gh-call per branch, plus a per-command timeout and a wall-clock scan ceiling) so it
     # can no longer turn into minutes of serial network round-trips on every merge.
-    result["overlaps"] = _branch_overlaps(pr_number, result["branch"]) if result["branch"] else []
+    if result["branch"]:
+        result["overlaps"] = _branch_overlaps(pr_number, result["branch"])
 
     if dry_run:
         result.update(success=True, error="dry_run: no merge executed")
@@ -2491,11 +2570,6 @@ def merge_pr(
     if on_merged is not None:
         on_merged()  # deur D4: confirmed before any bookkeeping, so nothing below can revoke the permit
 
-    # DR-7 (requirement 9): which commit and which tree landed on main, next to
-    # the head the gates tested. Evidence only — it can never refuse a merge
-    # that already happened, and every unreadable part is named on the record.
-    result["merge_tree"] = _merge_tree_record(pr_number, head_sha)
-
     # Derive internal PR-N label from title for dual-scheme receipt
     pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
     if not dispatch_id:
@@ -2513,7 +2587,6 @@ def merge_pr(
         preflight_gates=preflight_gates,
         review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
         shadow_seat_rule=shadow_seat_rule, door_check=door_check,
-        merge_tree=result["merge_tree"],
     )
 
     # Emit event to dispatch_register.ndjson (best-effort)
