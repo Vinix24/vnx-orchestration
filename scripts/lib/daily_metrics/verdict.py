@@ -6,9 +6,11 @@ so a quantile pools the raw samples and a count averages the day values.
 
 ``unknown`` never reads as ``not_helped``: a ``None`` frozen baseline or post
 value, fewer than five ``final`` post days, a pooled ``n`` below the rule's
-minimum or a changed ``schema`` all yield ``undetermined`` with a reason; only
-enough data on the same metric version yields ``helped`` or ``not_helped`` -- a
-worsening included.
+minimum, a ``schema`` missing on either side (absent or ``None``) or a changed
+``schema`` all yield ``undetermined`` with a reason; only enough data on the same
+recorded metric version yields ``helped`` or ``not_helped`` -- a worsening
+included. A schema nobody recorded is not evidence that the schema stayed the
+same, so it can never produce a definitive verdict.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ BASELINE_UNKNOWN = "baseline_unknown"
 POST_VALUE_UNKNOWN = "post_value_unknown"
 TOO_FEW_FINAL_DAYS = "too_few_final_days"
 SAMPLE_TOO_SMALL = "sample_too_small"
+SCHEMA_MISSING = "schema_missing"
 SCHEMA_CHANGED = "schema_changed"
 
 LOWER = "lower"
@@ -73,6 +76,18 @@ def _final_days(approved: Mapping[str, Any], post_days: Mapping[date, Mapping]) 
             and post_days[day].get("status") == "final"]
 
 
+def _schema_known(document: Mapping[str, Any]) -> bool:
+    """A schema is evidence only when the document recorded one; absent or ``None`` is not."""
+    return document.get("schema") is not None
+
+
+def _schema_unknown(approved: Mapping[str, Any], finals: list[date],
+                    post_days: Mapping[date, Mapping]) -> bool:
+    """True when either the approval or any final post day has no recorded schema."""
+    return not _schema_known(approved) or any(
+        not _schema_known(post_days[day]) for day in finals)
+
+
 def judge(approved: Mapping[str, Any], post_days: Mapping[date, Mapping]) -> dict[str, Any]:
     """Judge one approved event over ``a+1`` to ``a+7``; see the module doc."""
     rule = RULES.get(approved.get("metric_id"))
@@ -98,6 +113,8 @@ def judge(approved: Mapping[str, Any], post_days: Mapping[date, Mapping]) -> dic
         reason = TOO_FEW_FINAL_DAYS
     elif minimum is not None and post.sample_size < minimum:
         reason = SAMPLE_TOO_SMALL
+    elif _schema_unknown(approved, finals, post_days):
+        reason = SCHEMA_MISSING
     elif any(post_days[day].get("schema") != approved.get("schema") for day in finals):
         reason = SCHEMA_CHANGED
     else:

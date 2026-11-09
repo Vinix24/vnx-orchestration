@@ -24,21 +24,28 @@ A = date(2026, 11, 1)
 #: A metric day a verdict can be stamped with; derived from ``A``, never guessed.
 D = A + timedelta(days=8)
 WINDOW = [A + timedelta(days=offset) for offset in range(1, 8)]
+#: Sentinel: the field is left out of the document entirely, not set to ``None``.
+OMIT = object()
 
 
 def _doc(value, *, metric=METRIC, n=8, schema=1, status="final"):
     record = {"kind": "scalar", "value": value, "source": "t", "sample_size": n,
               "details": {"samples": [value] * n}}
-    return {"schema": schema, "status": status, "metrics": {metric: record}}
+    document = {"status": status, "metrics": {metric: record}}
+    if schema is not OMIT:
+        document["schema"] = schema
+    return document
 
 
 def _approved(frozen=50.0, *, metric=METRIC, schema=1, proposal_id=PID, day=A):
-    return {"event": "approved", "proposal_id": proposal_id, "project_id": "p",
-            "key": metric, "metric_id": metric, "seat": None,
-            "approval_day": day.isoformat(), "approved_at": f"{day.isoformat()}T09:00:00Z",
-            "approved_by": "operator", "evidence": {"tty": True},
-            "frozen_baseline": {"value": frozen, "sample_size": 40, "unknown_reason": None},
-            "schema": schema}
+    event = {"event": "approved", "proposal_id": proposal_id, "project_id": "p",
+             "key": metric, "metric_id": metric, "seat": None,
+             "approval_day": day.isoformat(), "approved_at": f"{day.isoformat()}T09:00:00Z",
+             "approved_by": "operator", "evidence": {"tty": True},
+             "frozen_baseline": {"value": frozen, "sample_size": 40, "unknown_reason": None}}
+    if schema is not OMIT:
+        event["schema"] = schema
+    return event
 
 
 def _post(value=45.0, **kwargs):
@@ -81,6 +88,32 @@ def test_no_undetermined_case_reads_as_not_helped(frozen, post, reason):
     result = verdict.judge(_approved(frozen), post)
     assert result["verdict"] == "undetermined"
     assert result["reason"] == reason
+    assert result["improvement"] is None
+
+
+@pytest.mark.parametrize(("approved_schema", "post_schema"), [
+    (OMIT, OMIT),  # neither side recorded one: 50 -> 45 would otherwise be helped
+    (None, None),  # neither side recorded one, explicitly null
+    (1, OMIT),     # the post days lost it while the approval kept 1
+    (OMIT, 1),     # the approval lost it while the post days kept 1
+    (None, 1),
+    (1, None),
+])
+def test_a_missing_schema_is_undetermined_and_never_compares_absent_to_absent(
+        approved_schema, post_schema):
+    """Decision 26: no recorded schema is not evidence the schema stayed the same."""
+    result = verdict.judge(_approved(schema=approved_schema), _post(45.0, schema=post_schema))
+    assert result["verdict"] == "undetermined"
+    assert result["reason"] == "schema_missing"
+    assert result["improvement"] is None
+
+
+def test_one_final_post_day_without_schema_already_leaves_the_verdict_undetermined():
+    post = _post(45.0)
+    post[WINDOW[3]] = _doc(45.0, schema=OMIT)
+    result = verdict.judge(_approved(), post)
+    assert result["verdict"] == "undetermined"
+    assert result["reason"] == "schema_missing"
     assert result["improvement"] is None
 
 
