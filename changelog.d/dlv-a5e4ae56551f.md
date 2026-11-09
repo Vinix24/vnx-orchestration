@@ -1,0 +1,1 @@
+- RS-1 adds `scripts/lib/process_tree_load.py`, the pure parsers and summaries behind the process-tree load sampler: `ps` tree walking with xdist-worker CPU apart from other subprocesses, plus RSS, swap and compressor, and a `cores_p95` candidate slot number per run. The sampler and its CLI land in RS-1b (track `rekenslot-per-machine`).
