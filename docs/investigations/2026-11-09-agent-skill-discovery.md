@@ -23,7 +23,7 @@ Decisive cell: C1. Its outcome is `ja` and its sha256 is `022a14b0ee9a6d2f3fdd7e
 
 The line also counts the rest per origin: `repo=1`, `user=23`, `synced=23`, `namespaced=44`, `other=14`. The plan row names `repo 27, user 25`. Those numbers do not match. This document records the difference and does not explain it.
 
-Uncertain: the plan row writes 27 and 25 from the repository measurement in ADR-059 section 8; the probe runs in a throwaway worktree with one probe skill. The line itself gives only the counts above.
+Uncertain: the line does not say why the counts differ from the plan row, and this document does not fill that in.
 
 ## The DONE point for codex (C3a and C3b)
 
