@@ -17,6 +17,8 @@ python3 scripts/permission_posture_report.py --json --out /tmp/posture.json
 
 Opties: `--state-dir` (standaard de opgeloste `VNX_STATE_DIR`), `--project-root`, `--project-id`, `--min-consecutive` (N, standaard 20). Het script leest en schrijft niets in de store. Exitcode 0 is `flip-allowed`, 1 is `blocked`, 2 is een bron die niet te lezen was (kapotte record, YAML of receipt-regel, ontbrekende trackdatabase). Exit 2 is geen pass.
 
+Ontbreekt een bron, dan is de voorwaarde die erop leunt `unmeasured`: geen `state/permission_records/` (a), geen `agents/` (b en c), geen `t0_receipts.ndjson` (d) of geen trackrij (e). Is de bron er wel maar niet te lezen of kapot, dan is het exit 2. Dat geldt ook voor een map die geen map is, een rolmap onder `agents/` die niet te openen is en elke regel in `t0_receipts.ndjson` die geen JSON-object is, van welk event ook. Alleen de trackdatabase en `.vnx/worker_permissions.yaml` geven ook bij ontbreken exit 2: zonder die twee is er geen store en geen policy.
+
 Per rijstrook (zes, uit de capaciteitsmatrix) staat per capability `supported`, `degraded` of `unsupported`, het aantal records en de digest-status van het laatste record.
 
 ## De vijf voorwaarden

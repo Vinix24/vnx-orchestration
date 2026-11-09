@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import sqlite3
 import sys
@@ -49,13 +50,26 @@ def _cond(key: str, label: str, status: str, evidence: str) -> Dict[str, str]:
     return {"key": key, "condition": label, "status": status, "evidence": evidence}
 
 
+def _exists(path: Path, follow: bool = False) -> bool:
+    """False only when nothing is at *path*; any other stat error raises (``glob``/``is_*`` hide it)."""
+    try:
+        (path.stat if follow else path.lstat)()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def _load_records(state_dir: Path) -> List[Dict[str, Any]]:
-    """Per-lane records of P3/P6 in write order (mtime, then name). A broken file is an InputError."""
+    """Per-lane records of P3/P6 in write order (mtime, then name). Unlistable or broken is an InputError."""
     directory = state_dir / "permission_records"
-    if not directory.is_dir():
-        return []
+    try:
+        if not _exists(directory):
+            return []
+        paths = [p for p in directory.iterdir() if p.name.endswith(".json")]
+    except OSError as exc:
+        raise InputError(f"record directory {directory} cannot be listed: {exc}") from exc
     found = []
-    for path in directory.glob("*.json"):
+    for path in paths:
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
             mtime = path.stat().st_mtime
@@ -113,13 +127,36 @@ def cond_qualification(rows: List[Dict[str, Any]], records: List[Dict[str, Any]]
     return _cond("a", label, PASS, f"{len(rows)} lanes, last record matches the matrix")
 
 
-def composed_policies(project_root: Path) -> Dict[str, Any]:
-    """``{role: (policy, is_fallback)}`` for every role of the profile and agent registers."""
+def registry_roles(agents_dir: Path) -> Optional[frozenset]:
+    """Roles of ``agents/``; None only when it does not exist, InputError when anything is unreadable.
+
+    Each ``CLAUDE.md`` is stat'ed first: on Python 3.14+ wp drops a role it cannot enter instead of None.
+    """
+    try:
+        if not _exists(agents_dir):
+            return None
+        with os.scandir(agents_dir) as entries:
+            for entry in entries:
+                if entry.is_dir():
+                    _exists(Path(entry.path) / "CLAUDE.md", follow=True)  # raises when the entry cannot be read
+        roles = wp._agents_registry_roles(agents_dir)
+    except OSError as exc:
+        raise InputError(f"agents registry {agents_dir} cannot be read: {exc}") from exc
+    if roles is None:
+        raise InputError(f"agents registry {agents_dir} cannot be read")
+    return roles
+
+
+def composed_policies(project_root: Path) -> Optional[Dict[str, Any]]:
+    """``{role: (policy, is_fallback)}`` for every role of both registers; None when ``agents/`` is absent."""
     yaml_path = project_root / ".vnx" / "worker_permissions.yaml"
     agents_dir = project_root / "agents"
     try:
         profiles = pp.load_role_profiles(yaml_path)
-        roles = set(profiles) | set(wp._agents_registry_roles(agents_dir) or ())
+        registry = registry_roles(agents_dir)
+        if registry is None:
+            return None
+        roles = set(profiles) | set(registry)
         if not all(isinstance(r, str) for r in roles):
             raise InputError("a role name in the registers is not a string")
         result = {}
@@ -132,8 +169,10 @@ def composed_policies(project_root: Path) -> Dict[str, Any]:
         raise InputError(f"role policy cannot be composed ({exc.reason}): {exc}") from exc
 
 
-def cond_fallback(policies: Dict[str, Any]) -> Dict[str, str]:
+def cond_fallback(policies: Optional[Dict[str, Any]]) -> Dict[str, str]:
     label = "(b) zero fallback roles"
+    if policies is None:
+        return _cond("b", label, UNMEASURED, "agents registry absent")
     if not policies:
         return _cond("b", label, UNMEASURED, "no role found in the registers")
     fallback = sorted(r for r, (_, fb) in policies.items() if fb)
@@ -152,8 +191,10 @@ def _demanded(policy: pp.PermissionPolicy) -> List[str]:
     return [dim for dim, values in wanted.items() if values]
 
 
-def cond_unsupported(policies: Dict[str, Any]) -> Dict[str, str]:
+def cond_unsupported(policies: Optional[Dict[str, Any]]) -> Dict[str, str]:
     label = "(c) zero unsupported restrictions that an active policy demands"
+    if policies is None:
+        return _cond("c", label, UNMEASURED, "agents registry absent")
     if not policies:
         return _cond("c", label, UNMEASURED, "no role found in the registers")
     gaps: Dict[str, set] = {}
@@ -170,15 +211,16 @@ def cond_unsupported(policies: Dict[str, Any]) -> Dict[str, str]:
 def read_policy_receipts(path: Path) -> Optional[List[Dict[str, Any]]]:
     """P7's ``permission_policy_checked`` rows in ledger order; None when the ledger does not exist.
 
-    Only a line that names the event is parsed. If it does not parse as an object it is an InputError.
+    Every non-blank line is parsed, whatever event it names: one that is not a JSON object is an
+    InputError, so a torn or escaped row cannot drop out of the streak.
     """
-    if not path.is_file():
-        return None
     rows = []
     try:
+        if not _exists(path):
+            return None
         with path.open(encoding="utf-8") as handle:
             for number, line in enumerate(handle, 1):
-                if RECEIPT_EVENT not in line:
+                if not line.strip():
                     continue
                 try:
                     row = json.loads(line)
@@ -217,7 +259,7 @@ def cond_digest_streak(rows: Optional[List[Dict[str, Any]]], minimum: int) -> Di
 
 def read_decision(db_path: Path, project_id: str) -> Optional[Dict[str, Any]]:
     """The track's ``metadata_json`` as a dict, None when the track row does not exist."""
-    if not db_path.is_file():
+    if not _exists(db_path):
         raise InputError(f"track database {db_path} does not exist")
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -228,7 +270,7 @@ def read_decision(db_path: Path, project_id: str) -> Optional[Dict[str, Any]]:
             con.close()
         if row is None:
             return None
-        meta = json.loads(row[0] or "{}")
+        meta = json.loads(row[0] or "{}")  # NULL metadata holds no decision, so (e) is fail: the fail-closed answer
     except (sqlite3.Error, ValueError) as exc:
         raise InputError(f"track metadata cannot be read: {exc}") from exc
     if not isinstance(meta, dict):

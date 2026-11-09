@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -333,3 +334,93 @@ def test_vincent_with_past_utc_time_passes_e_and_all_five_allow(tmp_path, monkey
     state, root = build(tmp_path, monkeypatch, decision={**DECISION, "decided_at": when})
     code, report = run(state, root, capsys)
     assert code == 0 and [status(report, k) for k in "abcde"] == ["pass"] * 5 and report["verdict"] == "flip-allowed"
+
+
+# Round 3: every source is absent (a named unmeasured), unreadable or malformed (exit 2), never empty.
+LOCK = pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the permission bits")
+
+
+def _lock(path, mode=0o000):
+    os.chmod(path, mode)
+    return path
+
+
+def _replace(path, kind):
+    shutil.rmtree(path) if path.is_dir() else path.unlink()
+    path.mkdir() if kind == "dir" else path.write_text("not a directory\n")
+
+
+def _ghost(root):
+    (root / "agents" / "ghost-role").mkdir()
+    (root / "agents" / "ghost-role" / "CLAUDE.md").write_text("# role\n")
+    return root / "agents" / "ghost-role"
+
+
+def _append(state, text):
+    with (state / "t0_receipts.ndjson").open("a") as fh:
+        fh.write(text)
+
+
+def test_unlistable_agents_registry_exits_2_and_names_it(tmp_path, monkeypatch, capsys):
+    state, root = build(tmp_path, monkeypatch, fallback=True)
+    agents, real = root / "agents", Path.iterdir
+
+    def iterdir(self):
+        if self == agents:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    code, report = run(state, root, capsys)
+    assert code == 2 and report["verdict"] == "unreadable" and str(agents) in report["error"]
+
+
+@pytest.mark.parametrize("break_source", [
+    pytest.param(lambda s, r: _lock(s / "permission_records", 0o300), marks=LOCK, id="records-unlistable"),
+    pytest.param(lambda s, r: _replace(s / "permission_records", "file"), id="records-not-a-dir"),
+    pytest.param(lambda s, r: (r / ".vnx" / "worker_permissions.yaml").unlink(), id="yaml-absent"),
+    pytest.param(lambda s, r: _lock(r / ".vnx" / "worker_permissions.yaml"), marks=LOCK, id="yaml-unreadable"),
+    pytest.param(lambda s, r: _replace(r / "agents", "file"), id="agents-not-a-dir"),
+    pytest.param(lambda s, r: _lock(r / "agents", 0o300), marks=LOCK, id="agents-unlistable"),
+    pytest.param(lambda s, r: _lock(_ghost(r), 0o600), marks=LOCK, id="role-dir-unenterable"),
+    pytest.param(lambda s, r: (r / ".vnx" / "worker_permissions.yaml").write_text(
+        PROFILE.replace("[Read, Write, Edit, Bash]", "Read")), id="profile-entry-malformed"),
+    pytest.param(lambda s, r: (r / "agents" / "backend-developer" / "config.yaml").write_text("isolation: [x"),
+                 id="isolation-broken"),
+    pytest.param(lambda s, r: _lock(s / "t0_receipts.ndjson"), marks=LOCK, id="ledger-unreadable"),
+    pytest.param(lambda s, r: _replace(s / "t0_receipts.ndjson", "dir"), id="ledger-is-a-dir"),
+    pytest.param(lambda s, r: _append(s, '{"event_type": "permission_pol'), id="ledger-torn-line"),
+    pytest.param(lambda s, r: _lock(s / "runtime_coordination.db"), marks=LOCK, id="db-unreadable"),
+    pytest.param(lambda s, r: (s / "runtime_coordination.db").write_bytes(b"not a database" * 100), id="db-not-sqlite"),
+])
+def test_unreadable_or_malformed_source_exits_2(tmp_path, monkeypatch, capsys, break_source):
+    state, root = build(tmp_path, monkeypatch)
+    locked = break_source(state, root)
+    try:
+        code, report = run(state, root, capsys)
+    finally:
+        if isinstance(locked, Path):
+            os.chmod(locked, 0o700)
+    assert code == 2 and report["verdict"] == "unreadable" and report["error"]
+
+
+@pytest.mark.parametrize("remove,keys,evidence", [
+    (lambda s, r: shutil.rmtree(s / "permission_records"), "a", "no record yet"),
+    (lambda s, r: shutil.rmtree(r / "agents"), "bc", "agents registry absent"),
+])
+def test_absent_source_is_a_named_unmeasured(tmp_path, monkeypatch, capsys, remove, keys, evidence):
+    state, root = build(tmp_path, monkeypatch)
+    remove(state, root)
+    code, report = run(state, root, capsys)
+    assert code == 1 and report["verdict"] == "blocked"
+    for key in keys:
+        assert status(report, key) == "unmeasured"
+        assert evidence in next(c["evidence"] for c in report["conditions"] if c["key"] == key)
+
+
+def test_receipt_with_an_escaped_event_name_still_breaks_the_run(tmp_path, monkeypatch, capsys):
+    state, root = build(tmp_path, monkeypatch)
+    _append(state, '{"event_type": "permission\\u005fpolicy_checked", "dispatch_id": "d-x", '
+                   '"outcome": "mismatch", "check_status": "GO"}\n')
+    code, report = run(state, root, capsys)
+    assert code == 1 and status(report, "d") == "fail"
