@@ -8,6 +8,11 @@ The count is the fabric's own (decision 6, section "Punt 6"): a round is a
 codex-seat verdict on its own head, so ``review_rounds.codex_rounds`` gives it.
 Two verdicts on the same head are one round and a re-anchored line is none; a
 non-codex seat adds nothing. ``opened`` proves coverage, it never counts.
+
+A PR the ledger cannot be read for is never counted: :func:`review_rounds.unreadable_text`
+is the fabric's one rule for that state, and it takes precedence over the
+coverage gap -- ``round_ledger_unreadable_for_<n>_prs``, never a count from
+partial history.
 """
 
 from __future__ import annotations
@@ -19,7 +24,9 @@ from daily_metrics.collect import CollectContext
 from daily_metrics.github_fetch import GH_FAILED, MergedPopulation, fetch_merged
 from daily_metrics.metric import ScalarMetric
 from project_root import resolve_central_data_dir
-from review_rounds import RoundLedgerError, codex_rounds, ledger_path, read_ledger
+from review_rounds import (
+    RoundLedgerError, codex_rounds, ledger_path, read_ledger, unreadable_text,
+)
 
 SOURCE = "daily_metrics.sources.rounds"
 METRIC_ID = "rounds_per_pr"
@@ -66,27 +73,39 @@ def _number(row: dict[str, Any]) -> int | None:
     return None
 
 
-def _counts(rows: tuple[dict[str, Any], ...], project_id: str, ledger: Any) -> tuple[list[int], list[int], int]:
-    """``(covered round counts, missing PR numbers, rows with no number)``.
+def _counts(rows: tuple[dict[str, Any], ...], project_id: str,
+            ledger: Any) -> tuple[list[int], list[int], int, list[int], str]:
+    """``(covered round counts, missing PR numbers, rows with no number, unreadable PR numbers, first unreadable text)``.
 
     Covered means opened AND at least one codex round. Every other PR is a
     coverage gap; a row that carries no usable number cannot be looked up and
-    is a gap too, never silently dropped.
+    is a gap too, never silently dropped. A PR the ledger cannot be read for
+    (:func:`review_rounds.unreadable_text`, the fabric's one rule) is never
+    counted at all: :meth:`Ledger.for_pr` leaves the bad line out, so counting
+    there would measure partial history as if it were the whole of it.
     """
     covered: list[int] = []
     missing: list[int] = []
+    unreadable: list[int] = []
+    unreadable_first = ""
     unnumbered = 0
     for row in rows:
         number = _number(row)
         if number is None:
             unnumbered += 1
             continue
+        text = unreadable_text(ledger, number)
+        if text:
+            unreadable.append(number)
+            if not unreadable_first:
+                unreadable_first = text
+            continue
         rounds = codex_rounds(ledger.for_pr(project_id, number)) if ledger.is_opened(project_id, number) else ()
         if rounds:
             covered.append(len(rounds))
         else:
             missing.append(number)
-    return covered, missing, unnumbered
+    return covered, missing, unnumbered, unreadable, unreadable_first
 
 
 def _uncovered(population: MergedPopulation, covered: list[int], missing: list[int],
@@ -102,6 +121,29 @@ def _uncovered(population: MergedPopulation, covered: list[int], missing: list[i
         details["unnumbered_rows"] = unnumbered
     return ScalarMetric(value=None, source=SOURCE, sample_size=len(population.rows),
                         unknown_reason=f"rounds_missing_for_{len(missing) + unnumbered}_prs",
+                        details=details)
+
+
+def _unreadable(population: MergedPopulation, covered: list[int], missing: list[int],
+                unnumbered: int, unreadable: list[int], text: str) -> ScalarMetric:
+    """The unreadable record: no value, the bad PRs named; a rewrite cannot heal an append-only line.
+
+    This reason is permanent (decision 20): a ledger line is never rewritten, so
+    retrying the day would measure the same partial history again.
+    """
+    details: dict[str, Any] = {
+        "population": _population_details(population),
+        "unreadable_prs": sorted(unreadable),
+        "unreadable_text": text,
+        "partial_median": baseline.quantile(covered, 0.5) if covered else None,
+        "partial_n": len(covered),
+    }
+    if missing:
+        details["missing_prs"] = sorted(missing)
+    if unnumbered:
+        details["unnumbered_rows"] = unnumbered
+    return ScalarMetric(value=None, source=SOURCE, sample_size=len(population.rows),
+                        unknown_reason=f"round_ledger_unreadable_for_{len(unreadable)}_prs",
                         details=details)
 
 
@@ -123,7 +165,10 @@ def collect(ctx: CollectContext) -> dict[str, ScalarMetric]:
         ledger = read_ledger(_ledger_for(ctx.project_id))
     except RoundLedgerError as exc:
         return {METRIC_ID: _unknown(ROUND_LEDGER_UNREADABLE, population, error=str(exc))}
-    covered, missing, unnumbered = _counts(population.rows, ctx.project_id, ledger)
+    covered, missing, unnumbered, unreadable, text = _counts(population.rows, ctx.project_id, ledger)
+    if unreadable:
+        return {METRIC_ID: _unreadable(
+            population, covered, missing, unnumbered, unreadable, text)}
     if missing or unnumbered:
         return {METRIC_ID: _uncovered(population, covered, missing, unnumbered)}
     details: dict[str, Any] = {"population": _population_details(population),

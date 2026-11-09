@@ -86,7 +86,11 @@ def _opened(pr):
 
 
 def _write(path, lines):
-    path.write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+    """Write ledger lines; a ``str`` line goes in raw (a malformed line as the file holds it)."""
+    path.write_text(
+        "".join((line if isinstance(line, str) else json.dumps(line)) + "\n" for line in lines),
+        encoding="utf-8",
+    )
 
 
 def _collect(source, ctx, population, monkeypatch):
@@ -172,6 +176,70 @@ def test_an_unreadable_ledger_is_a_named_unknown(source, ctx, tmp_path, monkeypa
     record = _collect(source, ctx, _population([_row(601)]), monkeypatch)
     assert record.value is None and record.unknown_reason == "round_ledger_unreadable"
     assert record.details["error"]
+
+
+def test_an_opened_pr_with_a_bad_line_naming_it_is_unreadable(source, ctx, ledger, monkeypatch):
+    """Two valid rounds plus a malformed line for the PR: no count from partial history."""
+    _write(ledger, [
+        _opened(801), _verdict(801, "h1", at=1), _verdict(801, "h2", at=2),
+        '{"pr_number": 801, "seat": "codex_gate"',
+    ])
+    record = _collect(source, ctx, _population([_row(801)]), monkeypatch)
+    assert record.value is None
+    assert record.unknown_reason == "round_ledger_unreadable_for_1_prs"
+    assert record.details["unreadable_prs"] == [801]
+    assert record.details["unreadable_text"]
+
+
+def test_a_bad_line_naming_no_pr_makes_every_merged_pr_unreadable(source, ctx, ledger, monkeypatch):
+    """A line that names no PR refuses every PR (the fabric's rule)."""
+    _write(ledger, [
+        _opened(811), _verdict(811, "h1", at=1),
+        _opened(812), _verdict(812, "g1", at=2),
+        "this is not a ledger line",
+    ])
+    record = _collect(source, ctx, _population([_row(811), _row(812)]), monkeypatch)
+    assert record.value is None
+    assert record.unknown_reason == "round_ledger_unreadable_for_2_prs"
+    assert record.details["unreadable_prs"] == [811, 812]
+
+
+def test_a_bad_line_naming_another_pr_leaves_this_days_count(source, ctx, ledger, monkeypatch):
+    """A bad line for PR 999 does not touch PR 821's count."""
+    _write(ledger, [
+        _opened(821), _verdict(821, "h1", at=1), _verdict(821, "h2", at=2),
+        '{"pr_number": 999, "seat": "codex_gate"',
+    ])
+    record = _collect(source, ctx, _population([_row(821)]), monkeypatch)
+    assert record.value == 2 and record.sample_size == 1
+    assert record.unknown_reason is None
+
+
+def test_unreadable_takes_precedence_and_still_names_uncovered_prs(source, ctx, ledger, monkeypatch):
+    """Unreadable wins over the coverage gap; the uncovered PRs are still named."""
+    _write(ledger, [
+        _opened(831), _verdict(831, "h1", at=1),
+        _opened(832), _verdict(832, "h2", at=2),
+        '{"pr_number": 831, "seat": "codex_gate"',
+    ])
+    record = _collect(source, ctx, _population([_row(831), _row(832), _row(833)]), monkeypatch)
+    assert record.value is None
+    assert record.unknown_reason == "round_ledger_unreadable_for_1_prs"
+    assert record.details["unreadable_prs"] == [831]
+    assert record.details["missing_prs"] == [833]
+
+
+def test_an_unreadable_pr_stays_final(source, ctx, ledger, monkeypatch):
+    """A bad ledger line is never rewritten, so the day is not retried as incomplete."""
+    from daily_metrics import metric
+
+    _write(ledger, [
+        _opened(841), _verdict(841, "h1", at=1),
+        '{"pr_number": 841, "seat": "codex_gate"',
+    ])
+    record = _collect(source, ctx, _population([_row(841)]), monkeypatch)
+    assert record.unknown_reason == "round_ledger_unreadable_for_1_prs"
+    assert metric.day_status({METRIC_ID: record.to_dict()}) == "final"
 
 
 def test_an_uncovered_day_stays_final(source, ctx, ledger, monkeypatch):
