@@ -132,7 +132,7 @@ def memory_verdict(state: dict, policy: dict, profile: str, now: float) -> tuple
     reason, and never touches ``memory_recovery``.
 
     A blocked heavy request goes through only after two consecutive clean
-    samples from two different buckets (``state["memory_recovery"]``:
+    recorded samples from two different buckets (``state["memory_recovery"]``:
     ``blocked`` and ``clean_buckets``); a bucket counts once.
     """
     if not policy["profiles"][profile].get("heavy"):
@@ -151,9 +151,13 @@ def memory_verdict(state: dict, policy: dict, profile: str, now: float) -> tuple
     if not recovery.get("blocked"):
         recovery["clean_buckets"] = []
         return ADMIT, []
-    clean = recovery.get("clean_buckets")
-    clean = [b for b in clean if b != latest["bucket_start"]] if isinstance(clean, list) else []
-    clean = (clean + [latest["bucket_start"]])[-RECOVERY_BUCKETS:]
+    clean: list[int] = []
+    for recorded in reversed(samples):
+        if (_measurement_reason(recorded, now) is not None
+                or _memory_reasons(samples, recorded, policy["memory"], now)):
+            break
+        clean.insert(0, recorded["bucket_start"])
+    clean = clean[-RECOVERY_BUCKETS:]
     if len(clean) < RECOVERY_BUCKETS:
         recovery["clean_buckets"] = clean
         return WAIT, [MEMORY_GUARD]

@@ -122,6 +122,44 @@ def test_recovery_needs_two_clean_samples_from_two_buckets(mod):
     assert state["memory_recovery"] == {"blocked": False, "clean_buckets": []}
 
 
+@pytest.mark.parametrize("between", ["hot", "unavailable"])
+def test_a_recorded_hot_or_unavailable_sample_restarts_recovery(mod, between):
+    """Recovery counts recorded samples, not the moments someone evaluated."""
+    now = 1_000_020.0
+    state = {}
+    mod.record_sample(state, sample(int(now), 3500, 8.5), now)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", now) == (mod.WAIT, [mod.MEMORY_GUARD])
+    first = now + mod.BUCKET_SECONDS
+    mod.record_sample(state, sample(int(first), 100, 1.0), first)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", first) == (mod.WAIT, [mod.MEMORY_GUARD])
+    middle = first + mod.BUCKET_SECONDS
+    bad = (sample(int(middle), 3500, 8.5) if between == "hot"
+           else sample(int(middle), None, None, status="unavailable"))
+    mod.record_sample(state, bad, middle)               # another writer, never evaluated
+    latest = middle + mod.BUCKET_SECONDS
+    mod.record_sample(state, sample(int(latest), 100, 1.0), latest)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", latest) == (
+        mod.WAIT, [mod.MEMORY_GUARD])
+    assert state["memory_recovery"] == {"blocked": True,
+                                        "clean_buckets": [mod.bucket_start(latest)]}
+
+
+@pytest.mark.parametrize("evaluate_each", [True, False])
+def test_two_consecutive_clean_recorded_samples_recover(mod, evaluate_each):
+    """Evaluated one by one, or recorded by another writer and then evaluated once."""
+    now = 1_000_020.0
+    state = {}
+    mod.record_sample(state, sample(int(now), 3500, 8.5), now)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", now) == (mod.WAIT, [mod.MEMORY_GUARD])
+    for offset in (mod.BUCKET_SECONDS, 2 * mod.BUCKET_SECONDS):
+        at = now + offset
+        mod.record_sample(state, sample(int(at), 100, 1.0), at)
+        if evaluate_each or offset == 2 * mod.BUCKET_SECONDS:
+            verdict = mod.memory_verdict(state, POLICY, "seo-gate", at)
+    assert verdict == (mod.ADMIT, [])
+    assert state["memory_recovery"] == {"blocked": False, "clean_buckets": []}
+
+
 def test_a_heavy_nested_lease_under_a_light_parent_is_checked(mod):
     """Heavy belongs to the request: the function only knows its profile."""
     now = 1_000_020.0
