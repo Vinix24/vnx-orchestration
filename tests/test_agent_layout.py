@@ -1,4 +1,4 @@
-"""VNX_AGENT_LAYOUT flag: registry default, off/shadow, `on` and unknown read as off."""
+"""VNX_AGENT_LAYOUT flag: registry default, off/shadow/on, an unknown value reads as off."""
 
 from __future__ import annotations
 
@@ -49,15 +49,15 @@ def test_shadow_is_case_and_space_tolerant(monkeypatch):
     assert agent_layout.layout_mode() == "shadow"
 
 
-def test_on_reads_as_off_with_exactly_one_warning(monkeypatch, caplog):
+def test_on_is_read_without_a_warning(monkeypatch, caplog):
     import agent_layout
 
-    monkeypatch.setenv("VNX_AGENT_LAYOUT", "on")
+    monkeypatch.setenv("VNX_AGENT_LAYOUT", " On ")
     with caplog.at_level(logging.WARNING, logger=agent_layout.logger.name):
-        assert agent_layout.layout_mode() == "off"
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert warnings[0].getMessage() == "VNX_AGENT_LAYOUT=on is fase 2; nu off"
+        assert agent_layout.layout_mode() == "on"
+        assert agent_layout.is_on() is True
+        assert agent_layout.is_shadow() is False
+    assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
 
 
 @pytest.mark.parametrize("value", ["banana", "1", "true", "shadow2"])

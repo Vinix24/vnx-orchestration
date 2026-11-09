@@ -1,6 +1,20 @@
 {
   "couplings": [
     {
+      "file": "tests/test_agent_layout_on.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_agent_layout_on.py",
+      "line": 86,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
       "file": "tests/test_agent_skill_materialize_wiring.py",
       "line": 18,
       "mechanism": "direct-call",
