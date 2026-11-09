@@ -21,6 +21,9 @@
 # exists" for such a context, so a head without a published verdict reads as
 # SKIPPED_UNVERIFIED rather than as "run the publisher". Blocking is correct,
 # the wording points the wrong way — see FORGE_GATE.md §5.
+# vnx-gate/door is the same kind of context: the door itself publishes the
+# permit right before the merge (ADR-061), so a head without it reads as "not
+# yet through the door", and that is the point.
 branch: main
 
 required_status_checks:
@@ -63,6 +66,7 @@ required_status_checks:
     #
     # Terugweg (branch-breed, met verplichte reden): FORGE_GATE.md §7.
     - {context: "vnx-gate/review", app_id: 4869217}
+    - {context: "vnx-gate/door", app_id: 4869217}
 
 # Leeg sinds OP-B3. Het slot zelf blijft bestaan: een entry hier is een
 # toekomstige verplichting en geen huidige eis — apply_branch_protection.py
