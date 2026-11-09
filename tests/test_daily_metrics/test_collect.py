@@ -44,20 +44,17 @@ BROKEN_SOURCE = "raise RuntimeError('boom')\n"
 
 DATACLASS_SOURCE = '''\
 from __future__ import annotations
-
 from dataclasses import dataclass
 
 from daily_metrics.metric import ScalarMetric
-
 
 @dataclass
 class Sample:
     metric_id: str
     value: float
 
-
 def collect(ctx):
-    sample = Sample(metric_id="merges", value=3.0)
+    sample = Sample("merges", 3.0)
     return {sample.metric_id: ScalarMetric(value=sample.value, source="dataclass")}
 '''
 
@@ -77,10 +74,10 @@ def test_discover_sources_reports_import_failures(tmp_path: Path):
     assert modules == []
     assert [f.module for f in failures] == ["broken"]
     assert failures[0].exception == "RuntimeError"
+    assert "daily_metrics.sources.broken" not in sys.modules
 
 
 def test_source_module_with_future_annotations_and_dataclass_is_discovered(tmp_path: Path):
-    """Red run: the module is imported before it is in ``sys.modules`` on the base."""
     from daily_metrics import collect as collect_mod
 
     src = tmp_path / "sources"
@@ -89,18 +86,6 @@ def test_source_module_with_future_annotations_and_dataclass_is_discovered(tmp_p
     modules, failures = collect_mod.discover_sources(src)
     assert [m.__name__.rsplit(".", 1)[-1] for m in modules] == ["dataclass_source"]
     assert failures == []
-
-
-def test_failed_source_import_leaves_no_sys_modules_entry(tmp_path: Path):
-    from daily_metrics import collect as collect_mod
-
-    src = tmp_path / "sources"
-    src.mkdir()
-    (src / "broken.py").write_text(BROKEN_SOURCE, encoding="utf-8")
-    modules, failures = collect_mod.discover_sources(src)
-    assert modules == []
-    assert [f.module for f in failures] == ["broken"]
-    assert "daily_metrics.sources.broken" not in sys.modules
 
 
 def test_discover_sources_keeps_modules_with_collect(tmp_path: Path):

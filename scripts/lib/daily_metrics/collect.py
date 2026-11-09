@@ -78,15 +78,13 @@ def sources_dir() -> Path:
 
 
 def load_module(qualified_name: str, path: Path) -> ModuleType:
-    """Create a module from ``path`` and run it with ``qualified_name`` registered.
+    """Run ``path`` as ``qualified_name``, registered before it executes.
 
-    The module goes into ``sys.modules`` *before* ``exec_module``: a module that
-    uses ``from __future__ import annotations`` and defines a ``dataclass`` makes
-    ``dataclasses`` look its own module up in ``sys.modules`` to resolve the
-    string annotations, so importing it first and registering it afterwards
-    raises ``AttributeError``. A failed import removes the entry again -- only
-    when it still points at this module -- and re-raises, so no half-imported
-    module is left behind. A missing spec or loader raises ``ImportError``.
+    ``dataclasses`` resolves string annotations through ``sys.modules``, so a
+    module with ``from __future__ import annotations`` and a dataclass fails if
+    it is not registered first. A failed import drops that entry (only if it
+    still points here) and re-raises. A missing spec or loader raises
+    ``ImportError``.
     """
     spec = importlib.util.spec_from_file_location(qualified_name, path)
     if spec is None or spec.loader is None:

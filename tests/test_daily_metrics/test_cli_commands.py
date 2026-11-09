@@ -58,27 +58,22 @@ def run(args):
 
 DATACLASS_COMMAND_MODULE = '''\
 from __future__ import annotations
-
 import json
 import os
 from dataclasses import dataclass
-
 
 @dataclass
 class Step:
     name: str
     order: int
 
-
 DAILY_STEP = 3
 
-
 def register(subparsers):
-    subparsers.add_parser("dataclass_cmd", help="a command whose module defines a dataclass")
-
+    subparsers.add_parser("dataclass_cmd")
 
 def run(args):
-    step = Step(name="dataclass_cmd", order=1)
+    step = Step("dataclass_cmd", 1)
     with open(os.environ["ORDER_FILE"], "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"step": step.name, "order": step.order}) + "\\n")
 '''
@@ -160,10 +155,10 @@ def test_discover_commands_returns_commands_and_failures(tmp_path):
     modules, failures = _cli_module().discover_commands(commands)
     assert [module.__name__.rsplit(".", 1)[-1] for module in modules] == ["stepped"]
     assert failures == [("broken", "RuntimeError")]
+    assert "daily_metrics.commands.broken" not in sys.modules
 
 
 def test_command_module_with_future_annotations_and_dataclass_is_discovered(tmp_path):
-    """Red run: the module is imported before it is in ``sys.modules`` on the base."""
     commands = _commands(tmp_path, {"dataclass_cmd": DATACLASS_COMMAND_MODULE})
     modules, failures = _cli_module().discover_commands(commands)
     assert [module.__name__.rsplit(".", 1)[-1] for module in modules] == ["dataclass_cmd"]
@@ -171,14 +166,6 @@ def test_command_module_with_future_annotations_and_dataclass_is_discovered(tmp_
     proc = _run_cli(tmp_path, commands, ["daily", *_args(tmp_path)])
     assert proc.returncode == 0, proc.stderr
     assert proc.stderr == ""
-
-
-def test_failed_command_import_leaves_no_sys_modules_entry(tmp_path):
-    commands = _commands(tmp_path, {"broken_step": BROKEN_MODULE})
-    modules, failures = _cli_module().discover_commands(commands)
-    assert modules == []
-    assert failures == [("broken_step", "RuntimeError")]
-    assert "daily_metrics.commands.broken_step" not in sys.modules
 
 
 def test_broken_command_exits_one_reports_it_and_keeps_the_days(tmp_path):
