@@ -56,7 +56,20 @@ mode = os.environ.get("FAKE_CODEX", "ja")
 if mode in ("exit", "empty"): raise SystemExit(4 if mode == "exit" else 0)
 found = sorted(p.name for p in Path(".agents/skills").iterdir()) if Path(".agents/skills").is_dir() else []
 names = {"neg": found + ["vnx-probe-negative-control-not-in-tree"], "noslug": ["unrelated-skill"]}.get(mode, found)
-print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Skills: " + ", ".join(names)}}))
+def emit(event): print(json.dumps(event))
+if mode == "malformed":
+    emit({"type": "thread.started"}); print("oops not json " + ", ".join(found)); emit({"type": "turn.completed"}); raise SystemExit
+emit({"type": "thread.started"}); emit({"type": "turn.started"})
+if mode == "cmdonly":
+    emit({"type": "item.completed", "item": {"type": "command_execution", "command": "ls .agents/skills", "aggregated_output": "\\n".join(found)}})
+    emit({"type": "item.completed", "item": {"type": "agent_message", "text": "I could not tell."}})
+elif mode != "noanswer":
+    emit({"type": "item.completed", "item": {"type": "reasoning", "text": "\\n".join(found)}})
+    if mode == "blocks":
+        emit({"type": "item.completed", "item": {"type": "agent_message", "content": [{"text": "- `" + n + "`"} for n in names]}})
+    else:
+        emit({"type": "item.completed", "item": {"type": "agent_message", "text": "\\n".join("- " + n for n in names)}})
+if mode != "noturn": emit({"type": "turn.completed"})
 '''
 
 
@@ -107,7 +120,7 @@ def test_c1_ja_on_a_listing_with_the_probe_slug_and_sha_of_the_raw_output(tmp_pa
     assert (row["outcome"], row["decisive"]) == ("ja", True), row
     assert "env -u ANTHROPIC_API_KEY" in row["command"] and "--bare" not in row["command"]
     raw = "\n".join(json.dumps(e) for e in ({"type": "system", "subtype": "init", "apiKeySource": "none"}, {"type": "result", "is_error": False, "result": "OK"})) + "\n"
-    assert row["sha256"] == hashlib.sha256(raw.encode()).hexdigest()
+    assert re.fullmatch(r"[0-9a-f]{64}", row["sha256"]) and row["sha256"] != hashlib.sha256(raw.encode()).hexdigest()
 
 
 def test_c1_nee_when_the_listing_does_not_name_the_slug(tmp_path):
@@ -167,3 +180,66 @@ def test_c3b_stays_niet_gemeten_when_the_call_gave_no_evidence(tmp_path):
         row = _cell(tmp_path, "C3b", FAKE_CODEX=mode)
         assert row["outcome"] == "niet_gemeten" and reason in row["reason"], (mode, row)
 
+
+def test_c3b_ja_on_a_content_block_answer_and_the_last_message_wins(tmp_path):
+    assert _cell(tmp_path, "C3b", FAKE_CODEX="blocks")["outcome"] == "ja"
+
+
+def test_c3b_malformed_stream_is_niet_gemeten_even_when_the_slug_is_in_it(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="malformed")
+    assert row["outcome"] == "niet_gemeten" and "stream_malformed: line 2" in row["reason"], row
+
+
+def test_c3b_slug_only_in_a_command_execution_item_is_not_a_ja(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="cmdonly")
+    assert row["outcome"] == "nee", row
+
+
+def test_c3b_needs_an_agent_answer_and_a_completed_turn(tmp_path):
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="noanswer")
+    assert row["outcome"] == "niet_gemeten" and "no_agent_answer" in row["reason"], row
+    row = _cell(tmp_path, "C3b", FAKE_CODEX="noturn")
+    assert row["outcome"] == "niet_gemeten" and "turn_incomplete" in row["reason"], row
+
+
+def test_c3b_judge_stays_niet_gemeten_on_odd_evidence(tmp_path):
+    raw = tmp_path / "stream"
+
+    def judge(text):
+        raw.write_text(text, encoding="utf-8")
+        env = dict(os.environ, HOME=str(tmp_path), TMPDIR=str(tmp_path))
+        return subprocess.run([BASH, "-c", 'source "%s"\npy judge_codex "%s" probe-skill %s' % (PROBE, raw, NEGATIVE)],
+                              capture_output=True, text=True, env=env, check=False).stdout.strip()
+
+    done = json.dumps({"type": "turn.completed"})
+    msg = lambda item: json.dumps({"type": "item.completed", "item": item})
+    assert judge('[1]\n' + done).startswith("niet_gemeten\tstream_malformed")
+    assert judge('"probe-skill"\n' + done).startswith("niet_gemeten\tstream_malformed")
+    for item in ({"type": "agent_message"}, {"type": "agent_message", "text": None}, {"type": "agent_message", "text": 7},
+                 {"type": "agent_message", "text": "  "}, {"type": "agent_message", "content": [{"x": 1}]}, "agent_message"):
+        assert judge(msg(item) + "\n" + done).startswith("niet_gemeten\tno_agent_answer"), item
+    assert judge(json.dumps({"type": "turn.completed", "item": 1}).replace("turn.completed", "turn.failed") + "\n"
+                 + msg({"type": "agent_message", "text": "probe-skill"})).startswith("niet_gemeten\tturn_incomplete")
+
+
+def test_c1_sha256_covers_the_cli_stream_and_the_transcript_that_was_judged(tmp_path):
+    rows = {}
+    for mode in ("ja", "nee"):
+        home = tmp_path / mode
+        home.mkdir()
+        rows[mode] = _cell(home, "C1", FAKE_CLAUDE=mode)
+        transcript = next((home / ".claude" / "projects" / "-probe").glob("*.jsonl"))
+        stdout = "\n".join(json.dumps(e) for e in ({"type": "system", "subtype": "init", "apiKeySource": "none"},
+                                                    {"type": "result", "is_error": False, "result": "OK"})) + "\n"
+        evidence = stdout.encode() + ("--- transcript %s ---\n" % transcript).encode() + transcript.read_bytes()
+        assert rows[mode]["sha256"] == hashlib.sha256(evidence).hexdigest(), mode
+    assert (rows["ja"]["outcome"], rows["nee"]["outcome"]) == ("ja", "nee")
+    assert rows["ja"]["sha256"] != rows["nee"]["sha256"]
+
+
+def test_c1_without_a_transcript_hashes_the_stream_plus_the_none_separator(tmp_path):
+    row = _cell(tmp_path, "C1", FAKE_CLAUDE="notranscript")
+    stdout = "\n".join(json.dumps(e) for e in ({"type": "system", "subtype": "init", "apiKeySource": "none"},
+                                                {"type": "result", "is_error": False, "result": "OK"})) + "\n"
+    assert row["outcome"] == "niet_gemeten" and "no_transcript" in row["reason"]
+    assert row["sha256"] == hashlib.sha256((stdout + "--- transcript <none> ---\n").encode()).hexdigest()

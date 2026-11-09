@@ -72,9 +72,16 @@ if cmd == "materialize":
                                    project_id="probe-skill-discovery")
     print("%s\t%s" % (result.get("status"), result.get("reason") or "ok"))
 elif cmd == "judge_claude":
-    raw, session, root, slug = args
-    try: text = open(raw, encoding="utf-8", errors="replace").read()
-    except OSError: text = ""
+    raw, session, root, slug, evidence = args
+    try: raw_bytes = open(raw, "rb").read()
+    except OSError: raw_bytes = b""
+    text = raw_bytes.decode("utf-8", errors="replace")
+    from token_harvest import locate_session_transcript
+    transcript = locate_session_transcript(session)
+    # The sha256 of the row covers everything judged: the CLI stream, then the transcript exactly as read.
+    transcript_bytes = open(transcript, "rb").read() if transcript is not None else b""
+    with open(evidence, "wb") as handle:
+        handle.write(raw_bytes + b"--- transcript " + (str(transcript) if transcript is not None else "<none>").encode() + b" ---\n" + transcript_bytes)
     events = []
     for line in text.splitlines():
         try: event = json.loads(line)
@@ -87,12 +94,10 @@ elif cmd == "judge_claude":
     if source != "none":
         print("niet_gemeten\tauth_source_api_key: the init event names an API key source"); raise SystemExit
     from context_manifest import extract_skills
-    from token_harvest import locate_session_transcript
-    transcript = locate_session_transcript(session)
     if transcript is None:
         print("niet_gemeten\tno_transcript: session %s has no transcript" % session); raise SystemExit
     listings = []
-    for line in open(transcript, "rb"):
+    for line in transcript_bytes.splitlines():
         if b'"attachment"' not in line: continue
         try: entry = json.loads(line)
         except ValueError: continue
@@ -120,11 +125,32 @@ elif cmd == "judge_listing":
 elif cmd == "judge_codex":
     raw, slug, negative = args
     text = open(raw, encoding="utf-8", errors="replace").read()
-    def names(value): return re.search(r"(?<![A-Za-z0-9_.-])%s(?![A-Za-z0-9_.-])" % re.escape(value), text) is not None
-    if not text.strip(): print("niet_gemeten\tempty_output: codex printed nothing to judge")
-    elif names(negative): print("nee\tthe output names the negative control %s, which is not in the tree" % negative)
-    elif names(slug): print("ja\tthe output names %s and not the negative control" % slug)
-    else: print("nee\tthe output does not name %s (%d bytes judged)" % (slug, len(text)))
+    def names(value, line): return re.search(r"(?<![A-Za-z0-9_.-])%s(?![A-Za-z0-9_.-])" % re.escape(value), line) is not None
+    def verdict(outcome, reason): print("%s\t%s" % (outcome, reason)); raise SystemExit
+    if not text.strip(): verdict("niet_gemeten", "empty_output: codex printed nothing to judge")
+    events = []
+    for number, line in enumerate(text.splitlines(), 1):
+        if not line.strip(): continue
+        try: event = json.loads(line)
+        except ValueError: event = None
+        if not isinstance(event, dict): verdict("niet_gemeten", "stream_malformed: line %d is not a JSON object" % number)
+        events.append(event)
+    if not any(e.get("type") == "turn.completed" for e in events): verdict("niet_gemeten", "turn_incomplete: the stream has no turn.completed event")
+    answer = None
+    for event in events:
+        item = event.get("item")
+        if event.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+            value = item.get("text")
+            if not isinstance(value, str):
+                value = item.get("content")
+                if isinstance(value, list):
+                    value = "\n".join(b["text"] for b in value if isinstance(b, dict) and isinstance(b.get("text"), str))
+            answer = value if isinstance(value, str) else ""
+    if answer is None or not answer.strip(): verdict("niet_gemeten", "no_agent_answer: no agent_message with text in the stream")
+    lines = [l for l in (re.sub(r"^[\s\-*`]+|[\s`]+$", "", raw_line) for raw_line in answer.splitlines()) if l]
+    if any(names(negative, l) for l in lines): verdict("nee", "the answer names the negative control %s, which is not in the tree" % negative)
+    if any(names(slug, l) for l in lines): verdict("ja", "the answer names %s and not the negative control" % slug)
+    verdict("nee", "the answer does not name %s (%d answer lines judged)" % (slug, len(lines)))
 elif cmd == "validate":
     rows = [json.loads(line) for line in open(args[0], encoding="utf-8") if line.strip()]
     expected = {"C1": True, "C2": False, "C3a": True, "C3b": True}
@@ -179,8 +205,8 @@ cell_claude() {
   status="$(run_in_probe "$root" "$raw" yes "$CLAUDE_BIN" -p "Reply with the single word OK." --output-format stream-json --verbose --session-id "$sid" $extra)"
   cmd="cd $root && VNX_AGENT_LAYOUT=on $SCRUB_PREFIX $CLAUDE_BIN -p 'Reply with the single word OK.' --output-format stream-json --verbose --session-id $sid $extra"
   if [ "$status" != 0 ]; then failed_call "$cell" "$status" "$cmd" "$raw"; return; fi
-  IFS=$'\t' read -r oc rc <<<"$(py judge_claude "$raw" "$sid" "$root" "$SLUG")"
-  emit_cell "$cell" "$oc" "$rc" "$cmd" "$raw"
+  IFS=$'\t' read -r oc rc <<<"$(py judge_claude "$raw" "$sid" "$root" "$SLUG" "$PROBE_DIR/raw/$cell.evidence")"
+  emit_cell "$cell" "$oc" "$rc" "$cmd" "$PROBE_DIR/raw/$cell.evidence"
 }
 cell_c3a() {
   local root="$PROBE_DIR/C3a" raw="$PROBE_DIR/raw/C3a.txt" oc rc status
