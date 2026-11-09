@@ -29,6 +29,15 @@ installed com.vnx.ledger-health.* labels, one `--report-only --json` subprocess 
 path or repo or with a failing child is `unmeasurable`. `--project <id>` narrows; an unknown
 id is exit 2 (`onbekend project: <id>`). Exit = maximum severity; an empty enumeration is 2.
 
+--reconcile-open-permits (deur D7c): reads every OPEN PR (not the merged ones) and the
+`vnx-gate/door` runs on its head. A run of the door App that is older than --permit-ttl
+(default 30 minutes) or whose permit_id (`<app_id>:<head>:<run id>`) is in no pr_merged and no
+pr_merge_refused line of either ledger is revoked with D3's revoke_door (PATCH to failure, three
+attempts, no DELETE) and gets one open item (warn when revoked, blocker when not). A run of
+another App is reported (`foreign_door_check`) and never touched. Exit 0 = nothing found or all
+revoked; 1 = a revocation failed or a foreign door check exists; 2 = unreadable. --dry-run patches
+nothing. The --all-projects child runs it after --report-only in the same process.
+
 BILLING SAFETY: No Anthropic SDK. No direct API calls.
 """
 
@@ -559,6 +568,26 @@ def _file_open_item(pr: Dict[str, Any], project_id: str) -> Tuple[str, bool]:
     )
 
 
+def _heartbeat_audit(state_dir: Path, status: str, details: Dict[str, Any]) -> None:
+    from health_beacon import HealthBeacon
+    HealthBeacon(state_dir.parent, AUDIT_BEACON, expected_interval_seconds=2 * 86400).heartbeat_strict(
+        status=status, details=details)
+
+
+def _beacon_guard(doc: Dict[str, Any], state_dir: Path, details: Dict[str, Any], errors: List[str]) -> None:
+    """Write the beacon. A failure is a publication error: clean becomes unknown (exit 2), a finding keeps its exit."""
+    try:
+        _heartbeat_audit(state_dir, "ok" if doc["outcome"] == "clean" else "fail", details)
+    except Exception as exc:
+        errors.append(f"beacon: {exc}")
+        print(f"WRITE ERROR: beacon: {exc}", file=sys.stderr)
+        doc["publication_errors"] = int(doc.get("publication_errors") or 0) + 1
+        if doc["outcome"] == "clean":
+            doc.update(outcome="unknown", exit_code=EXIT_UNKNOWN, reason="beacon not written: control invisible")
+        else:
+            doc["reason"] = f"{doc.get('reason') or ''}; beacon not written".lstrip("; ")
+
+
 def publish_report(report: Dict[str, Any]) -> None:
     """File one open item per missing PR and write the beacon. Failures are recorded on the report.
 
@@ -576,18 +605,12 @@ def publish_report(report: Dict[str, Any]) -> None:
             report["open_items"].append({"pr_number": pr["pr_number"], "item_id": item_id, "created": created})
         except Exception as exc:
             errors.append(f"open item for PR #{pr['pr_number']}: {exc}")
-    try:
-        from health_beacon import HealthBeacon
-        HealthBeacon(state_dir.parent, AUDIT_BEACON, expected_interval_seconds=2 * 86400).heartbeat_strict(
-            status="ok" if report["outcome"] == "clean" else "fail",
-            details={"outcome": report["outcome"], "since": report["since"], "total": report["total"],
-                     "door": len(report["door"]), "backfilled": len(report["backfilled"]),
-                     "missing": [p["pr_number"] for p in report["missing"]], "reason": report["reason"]},
-        )
-    except Exception as exc:
-        errors.append(f"beacon: {exc}")
-        if report["outcome"] == "clean":
-            report.update(outcome="unknown", exit_code=EXIT_UNKNOWN, reason="beacon not written: control invisible")
+    details = {"outcome": report["outcome"], "since": report["since"], "total": report["total"],
+               "door": len(report["door"]), "backfilled": len(report["backfilled"]),
+               "missing": [p["pr_number"] for p in report["missing"]], "reason": report["reason"]}
+    if "reconcile" in report:
+        details["reconcile"] = report["reconcile"]["counts"]
+    _beacon_guard(report, state_dir, details, errors)
     report["write_errors"] = errors
 
 
@@ -604,14 +627,261 @@ def _print_report(report: Dict[str, Any]) -> None:
         print(f"  WRITE ERROR: {err}", file=sys.stderr)
 
 
+# ---------------------------------------------------------------------------
+# --reconcile-open-permits: revoke a stale or orphaned door permit (deur D7c)
+# ---------------------------------------------------------------------------
+
+PERMIT_TTL_MINUTES = 30
+_PERMIT_EVENTS = ("pr_merged", "pr_merge_refused")
+_COUNT_KEYS = ("checked", "stale", "orphaned", "revoked", "revoke_failed", "foreign")
+
+
+def _gh_api_json(endpoint: str, what: str) -> Any:
+    """One `gh api` read. Raises AuditUnmeasurable on any failure."""
+    try:
+        result = subprocess.run(["gh", "api", endpoint], capture_output=True, text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise AuditUnmeasurable(f"{what} could not run: {exc}") from None
+    if result.returncode != 0:
+        raise AuditUnmeasurable(f"{what} failed (rc={result.returncode}): {result.stderr.strip()}")
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        raise AuditUnmeasurable(f"{what} returned unparseable JSON") from None
+
+
+def _open_pr_row(raw: Any, page: int) -> Dict[str, Any]:
+    if not isinstance(raw, dict) or isinstance(raw.get("number"), bool) or not isinstance(raw.get("number"), int):
+        raise AuditUnmeasurable(f"open pulls page {page} has a row without an integer number")
+    head = raw.get("head")
+    sha = head.get("sha") if isinstance(head, dict) else None
+    if not isinstance(sha, str) or not sha.strip():
+        raise AuditUnmeasurable(f"open PR #{raw['number']} has no head sha")
+    return {"number": raw["number"], "sha": sha.strip()}
+
+
+def list_open_prs() -> List[Dict[str, Any]]:
+    """Every open PR with its head sha, read until a short page. A failed or unbounded read is unmeasurable."""
+    prs: List[Dict[str, Any]] = []
+    for page in range(1, AUDIT_PAGE_LIMIT + 1):
+        raw_page = _gh_api_json(
+            f"repos/{{owner}}/{{repo}}/pulls?state=open&per_page={AUDIT_PAGE_SIZE}&page={page}",
+            f"gh api open pulls page {page}",
+        )
+        if not isinstance(raw_page, list):
+            raise AuditUnmeasurable(f"gh api open pulls page {page} is not a JSON list")
+        prs.extend(_open_pr_row(r, page) for r in raw_page)
+        if len(raw_page) < AUDIT_PAGE_SIZE:
+            return prs
+    raise AuditUnmeasurable(f"page limit {AUDIT_PAGE_LIMIT} reached before the last open PR page")
+
+
+def _read_ledger_text(path: Path, required: bool) -> str:
+    if not path.exists():
+        if required:
+            raise AuditUnmeasurable(f"ledger not found: {path}")
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AuditUnmeasurable(f"ledger unreadable: {path}: {exc}") from None
+
+
+def read_vouched_permits(paths: List[Path]) -> Set[str]:
+    """The `permit_id` of every `door_check` block on a pr_merged or pr_merge_refused line of either ledger.
+
+    A line that cannot be parsed vouches for nothing: skipping it keeps its permit orphaned (blocking side).
+    """
+    ids: Set[str] = set()
+    for index, path in enumerate(paths):
+        for line in _read_ledger_text(path, required=index == 0).splitlines():
+            try:
+                rec = json.loads(line) if line.strip() else None
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or (rec.get("event_type") or rec.get("event")) not in _PERMIT_EVENTS:
+                continue
+            block = rec.get("door_check")
+            permit_id = block.get("permit_id") if isinstance(block, dict) else None
+            if isinstance(permit_id, str) and permit_id:
+                ids.add(permit_id)
+    return ids
+
+
+def _reconcile_root() -> Path:
+    return Path(os.environ.get("VNX_PROJECT_ROOT") or os.getcwd())
+
+
+def _permit_kind(run: Dict[str, Any], permit_id: str, now: datetime.datetime,
+                 ttl: datetime.timedelta, vouched: Set[str]) -> Optional[str]:
+    """`stale`, `orphaned` or None. Only a run exactly on `failure` is no finding."""
+    from forge_gate_publisher import CONCLUSION_FAILURE
+    if run.get("conclusion") == CONCLUSION_FAILURE:
+        return None
+    try:
+        stamped = _parse_ts(run.get("completed_at") or run.get("started_at"), "door run timestamp")
+    except AuditUnmeasurable:
+        return "stale"  # an age that cannot be read cannot be shown to be inside the TTL
+    if now - stamped > ttl:
+        return "stale"
+    return None if permit_id in vouched else "orphaned"
+
+
+def _head_findings(pr: Dict[str, Any], root: Path, now: datetime.datetime, ttl: datetime.timedelta,
+                   vouched: Set[str], counts: Dict[str, int]) -> List[Dict[str, Any]]:
+    import forge_gate_publisher
+    head = forge_gate_publisher.door_runs_on_head(pr["sha"], project_root=root)
+    findings: List[Dict[str, Any]] = []
+    base = {"pr_number": pr["number"], "head_sha": pr["sha"]}
+    for run in head.foreign:
+        counts["foreign"] += 1
+        findings.append(dict(base, kind="foreign_door_check", check_run_id=run.get("id"), permit_id=None))
+    for run in head.own:
+        counts["checked"] += 1
+        permit_id = f"{head.app_id}:{pr['sha']}:{run.get('id')}"
+        kind = _permit_kind(run, permit_id, now, ttl, vouched)
+        if kind:
+            counts[kind] += 1
+            findings.append(dict(base, kind=kind, check_run_id=run.get("id"), permit_id=permit_id))
+    return findings
+
+
+def _revoke_finding(finding: Dict[str, Any], root: Path, receipts_file: str) -> bool:
+    """D3's `revoke_door` (three attempts, PATCH to failure, no DELETE). True only when GitHub shows `failure`."""
+    import forge_gate_publisher as fgp
+    reason = f"{finding['kind']} {finding['permit_id']}"[:200]
+    try:
+        result = fgp.revoke_door(finding["check_run_id"], reason, sha=finding["head_sha"],
+                                 pr=finding["pr_number"], project_root=root, receipts_file=receipts_file)
+    except fgp.ForgeCheckRunError as exc:
+        log.warning("revoking door run %s failed: %s", finding["check_run_id"], exc)
+        return False
+    return result == fgp.REVOKED
+
+
+def _reconcile_exit(rec: Dict[str, Any]) -> None:
+    counts = rec["counts"]
+    stuck = counts["revoke_failed"] or counts["foreign"] or (rec["dry_run"] and (counts["stale"] or counts["orphaned"]))
+    rec.update(outcome="findings" if stuck else "clean", exit_code=EXIT_ERROR if stuck else EXIT_OK)
+    rec["reason"] = ("door permit findings: " + ", ".join(f"{k}={counts[k]}" for k in _COUNT_KEYS)) if stuck else ""
+
+
+def run_reconcile(ttl_minutes: int, dry_run: bool = False,
+                  now: Optional[datetime.datetime] = None) -> Dict[str, Any]:
+    """Read every open PR, revoke each stale or orphaned `vnx-gate/door` run. A failed read is `unknown`."""
+    from forge_gate_publisher import ForgeCheckRunError
+    rec: Dict[str, Any] = {"mode": "reconcile-open-permits", "outcome": "unknown", "exit_code": EXIT_UNKNOWN,
+                           "reason": "", "dry_run": dry_run, "permit_ttl_minutes": ttl_minutes,
+                           "counts": {k: 0 for k in _COUNT_KEYS}, "findings": []}
+    moment = now or datetime.datetime.now(datetime.timezone.utc)
+    ttl = datetime.timedelta(minutes=ttl_minutes)
+    try:
+        root, ledgers = _reconcile_root(), _audit_ledger_paths()
+        prs, vouched = list_open_prs(), read_vouched_permits(ledgers)
+        for pr in prs:
+            rec["findings"] += _head_findings(pr, root, moment, ttl, vouched, rec["counts"])
+    except (AuditUnmeasurable, ForgeCheckRunError) as exc:
+        rec["reason"] = str(exc)
+        return rec
+    for finding in rec["findings"]:
+        if finding["kind"] != "foreign_door_check" and not dry_run:
+            finding["revoked"] = _revoke_finding(finding, root, str(ledgers[0]))
+            rec["counts"]["revoked" if finding["revoked"] else "revoke_failed"] += 1
+    _reconcile_exit(rec)
+    return rec
+
+
+def _file_permit_item(finding: Dict[str, Any], project_id: str) -> Tuple[str, bool]:
+    from open_items_manager import add_item_programmatic
+    number, run_id, kind = finding["pr_number"], finding["check_run_id"], finding["kind"]
+    revoked = finding.get("revoked") is True
+    details = f"vnx-gate/door run {run_id} on PR #{number} (head {finding['head_sha']}): {kind}"
+    if kind == "foreign_door_check":
+        details += "; a door check from another App, reported and not touched"
+    elif revoked:
+        details += "; revoked with a PATCH to failure by backfill_pr_merged_receipts --reconcile-open-permits"
+    else:
+        details += f"; NOT revoked and may still read success. Recovery: python3 scripts/pr_merge.py --pr {number}"
+    return add_item_programmatic(
+        title=f"vnx-gate/door {kind} on PR #{number} ({'revoked' if revoked else 'open'})",
+        severity="warn" if revoked or kind == "foreign_door_check" else "blocker",
+        dispatch_id="door-permit", details=details,
+        dedup_key=f"door-permit:{project_id}:{number}:{run_id}", source="door_reconcile",
+    )
+
+
+def publish_reconcile(rec: Dict[str, Any]) -> None:
+    """One open item per finding (deduped on project, PR and run). A failed write is recorded, never hidden."""
+    project_id = _audit_project_id(_audit_ledger_paths()[0].parent)
+    rec["project_id"], rec["open_items"], rec["write_errors"] = project_id, [], []
+    if rec["dry_run"]:
+        return
+    for finding in rec["findings"]:
+        try:
+            item_id, created = _file_permit_item(finding, project_id)
+            rec["open_items"].append({"pr_number": finding["pr_number"], "item_id": item_id, "created": created})
+        except Exception as exc:
+            rec["write_errors"].append(f"open item for PR #{finding['pr_number']}: {exc}")
+
+
+def _fold_publication(doc: Dict[str, Any], errors: List[str]) -> None:
+    """A failed open-item write makes the doc unclean (exit 2), before its beacon is written. Each error goes to stderr."""
+    if not errors:
+        return
+    for err in errors:
+        print(f"WRITE ERROR: {err}", file=sys.stderr)
+    doc.update(outcome="unknown", exit_code=EXIT_UNKNOWN, publication_errors=len(errors),
+               reason=f"publication failed: {len(errors)} write error(s): " + "; ".join(errors))
+
+
+def _merge_reconcile(report: Dict[str, Any], rec: Dict[str, Any]) -> None:
+    """Fold the reconcile result into the audit report: exit = maximum, outcome follows the worse side."""
+    report["reconcile"] = rec
+    if rec["exit_code"] > report["exit_code"]:
+        report.update(outcome="unknown" if rec["exit_code"] == EXIT_UNKNOWN else "gaps",
+                      exit_code=rec["exit_code"], reason=rec["reason"])
+
+
+def _print_reconcile(rec: Dict[str, Any]) -> None:
+    if rec["outcome"] == "unknown":
+        print(f"Door permits (reconcile): UNMEASURABLE: {rec['reason']}")
+        return
+    print("Door permits (reconcile): " + "  ".join(f"{k}={rec['counts'][k]}" for k in _COUNT_KEYS)
+          + (" [dry-run]" if rec["dry_run"] else ""))
+    for f in rec["findings"]:
+        print(f"  {f['kind'].upper()} PR #{f['pr_number']} run {f['check_run_id']} revoked={f.get('revoked', False)}")
+
+
+def _main_reconcile(args: argparse.Namespace) -> int:
+    rec = run_reconcile(args.permit_ttl, dry_run=args.dry_run)
+    if not args.no_write:
+        publish_reconcile(rec)
+        _fold_publication(rec, rec["write_errors"])
+        _beacon_guard(rec, _audit_ledger_paths()[0].parent,
+                      {"outcome": rec["outcome"], "reconcile": rec["counts"], "reason": rec["reason"]},
+                      rec["write_errors"])
+    if args.json:
+        print(json.dumps(rec, indent=2, default=str))
+    else:
+        _print_reconcile(rec)
+    return int(rec["exit_code"])
+
+
 def _main_report_only(args: argparse.Namespace) -> int:
     report = run_report_only(since=args.since)
+    if args.reconcile_open_permits:
+        _merge_reconcile(report, run_reconcile(args.permit_ttl, dry_run=args.dry_run))
     if not args.no_write:
+        if args.reconcile_open_permits:
+            publish_reconcile(report["reconcile"])
+            _fold_publication(report, report["reconcile"]["write_errors"])
         publish_report(report)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
         _print_report(report)
+        if args.reconcile_open_permits:
+            _print_reconcile(report["reconcile"])
     return int(report["exit_code"])
 
 
@@ -687,8 +957,9 @@ def _project_row(project: Dict[str, Any], outcome: str, exit_code: int, gaps: in
             "exit_code": exit_code, "finding": finding, "reason": reason}
 
 
-def _run_child(project: Dict[str, Any], since: Optional[str]) -> Tuple[str, int, int, str]:
-    """Run `--report-only --json` for one project. Returns (outcome, exit, gaps, reason); never raises."""
+def _run_child(project: Dict[str, Any], since: Optional[str], permit_ttl: int = PERMIT_TTL_MINUTES,
+               dry_run: bool = False) -> Tuple[str, int, int, str]:
+    """Run `--report-only --reconcile-open-permits --json` for one project. Returns (outcome, exit, gaps, reason); never raises."""
     pid, raw_path = project["project_id"], project["path"]
     if not project["registry_ok"]:
         return "unmeasurable", EXIT_UNKNOWN, 0, "registry entry has no project_id"
@@ -699,8 +970,10 @@ def _run_child(project: Dict[str, Any], since: Optional[str]) -> Tuple[str, int,
         return "unmeasurable", EXIT_UNKNOWN, 0, f"no git repo at {root}"
     try:
         data_dir = _project_data_dir(pid, root)
-        cmd = [sys.executable, str(Path(__file__).resolve()), "--report-only", "--json"]
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--report-only", "--reconcile-open-permits",
+               "--permit-ttl", str(permit_ttl), "--json"]
         cmd += ["--since", since] if since else []
+        cmd += ["--dry-run"] if dry_run else []
         proc = subprocess.run(cmd, cwd=str(root), env=_child_env(pid, root.resolve(), data_dir),
                               capture_output=True, text=True, timeout=FLEET_CHILD_TIMEOUT_SECONDS)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -719,6 +992,8 @@ def _read_child_report(proc: Any) -> Tuple[str, int, int, str]:
     except (ValueError, KeyError, TypeError, AttributeError) as exc:
         tail = (proc.stderr or "").strip()[-200:]
         return "unmeasurable", EXIT_UNKNOWN, 0, f"child output unusable: {exc} {tail}".strip()
+    if rc == EXIT_UNKNOWN and report.get("publication_errors"):
+        return "publication_failed", rc, gaps, str(report.get("reason") or "")
     if rc == EXIT_UNKNOWN:
         return "unmeasurable", EXIT_UNKNOWN, 0, str(report.get("reason") or "child reported unknown")
     return wanted[rc], rc, gaps, str(report.get("reason") or "")
@@ -728,7 +1003,8 @@ class UnknownProject(Exception):
     pass
 
 
-def run_fleet(selected: List[str], registry_path: Path, since: Optional[str]) -> Dict[str, Any]:
+def run_fleet(selected: List[str], registry_path: Path, since: Optional[str],
+              permit_ttl: int = PERMIT_TTL_MINUTES, dry_run: bool = False) -> Dict[str, Any]:
     """Run the audit per project. Raises AuditUnmeasurable on an empty enumeration or an unknown id."""
     projects = enumerate_projects(registry_path)
     if not projects:
@@ -737,7 +1013,7 @@ def run_fleet(selected: List[str], registry_path: Path, since: Optional[str]) ->
     for pid in selected:
         if pid not in known:
             raise UnknownProject(pid)
-    rows = [_project_row(p, *_run_child(p, since)) for p in projects if not selected or p["project_id"] in selected]
+    rows = [_project_row(p, *_run_child(p, since, permit_ttl, dry_run)) for p in projects if not selected or p["project_id"] in selected]
     exit_code = max(r["exit_code"] for r in rows)
     return {"mode": "all-projects", "rows": rows, "exit_code": exit_code}
 
@@ -753,7 +1029,7 @@ def _print_fleet(result: Dict[str, Any]) -> None:
 def _main_fleet(args: argparse.Namespace) -> int:
     registry = Path(args.registry).expanduser() if args.registry else Path.home() / ".vnx" / "projects.json"
     try:
-        result = run_fleet(args.project or [], registry, args.since)
+        result = run_fleet(args.project or [], registry, args.since, args.permit_ttl, args.dry_run)
     except UnknownProject as exc:
         print(f"onbekend project: {exc}", file=sys.stderr)
         return EXIT_UNKNOWN
@@ -784,14 +1060,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--project", action="append", metavar="ID",
                         help="With --all-projects: only this project id (repeatable); unknown id is exit 2")
     parser.add_argument("--registry", default=None, help="With --all-projects: project registry (default ~/.vnx/projects.json)")
+    parser.add_argument("--reconcile-open-permits", action="store_true",
+                        help="Door permits: read every open PR, revoke a stale or orphaned vnx-gate/door run (PATCH to "
+                             "failure; --dry-run patches nothing; --no-write skips the open items, not the revocation)")
+    parser.add_argument("--permit-ttl", type=int, default=PERMIT_TTL_MINUTES, metavar="MINUTES",
+                        help="Door permit lifetime in minutes (default 30)")
     args = parser.parse_args(argv)
 
     if args.project and not args.all_projects:
         parser.error("--project needs --all-projects")
+    if args.permit_ttl <= 0:
+        parser.error("--permit-ttl must be a positive number of minutes")
     if args.all_projects:
         return _main_fleet(args)
     if args.report_only:
         return _main_report_only(args)
+    if args.reconcile_open_permits:
+        return _main_reconcile(args)
 
     summary = backfill(
         limit=args.limit,
