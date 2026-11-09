@@ -1893,6 +1893,50 @@ def _producer_liveness_summary(
     return summary
 
 
+def _processor_liveness_component(
+    state_dir: Path,
+    processor_liveness: Optional[Dict[str, Any]],
+) -> Tuple[Dict[str, Any], str]:
+    """Ledger PR 1: the receipt processor's heartbeat is its own component.
+
+    A supplied dict is used as is. A read that raises is "unknown", never a
+    skipped signal. An overall outside ok/fail/unknown is "unknown".
+    """
+    if processor_liveness is None:
+        try:
+            from processor_liveness import read_processor_liveness
+            processor_liveness = read_processor_liveness(state_dir)
+        except Exception as exc:  # vnx-silent-except: logged and surfaced as an explicit unknown state, never dropped
+            log.debug("read_processor_liveness failed (non-critical): %s", exc)
+            processor_liveness = {"state": "unknown", "overall": "unknown", "reason": f"measurement raised: {exc}"}
+    processor_overall = processor_liveness.get("overall")
+    if processor_overall not in ("ok", "fail", "unknown"):
+        # Missing or unrecognised evidence is unknown, never "not supplied".
+        processor_overall = "unknown"
+    return processor_liveness, processor_overall
+
+
+def _attach_processor_and_producer_liveness(
+    result: Dict[str, Any],
+    state_dir: Path,
+    processor_liveness: Optional[Dict[str, Any]],
+) -> None:
+    """Add the processor heartbeat and the producer summary to ``result``.
+
+    The heartbeat is folded into ``result["status"]`` fail-closed: only a
+    measured "ok" keeps it healthy, absent/unknown/fail degrade. The producer
+    summary reads the daemon and launchd dicts back from ``result``, so a
+    missing daemon_liveness is still ``None`` there, as before.
+    """
+    processor_liveness, processor_overall = _processor_liveness_component(state_dir, processor_liveness)
+    result["status"] = worst_status(result["status"], None if processor_overall == "ok" else "degraded")
+    # Derived copy (dict literal): the caller's dict is never aliased into the state.
+    result["processor_liveness"] = dict(processor_liveness)
+    result["producer_liveness"] = _producer_liveness_summary(
+        result.get("daemon_liveness"), result.get("launchd_liveness"), processor_overall,
+    )
+
+
 def _build_system_health(
     state_dir: Path,
     db_initialized: bool,
@@ -1900,8 +1944,7 @@ def _build_system_health(
     db_health: str = "healthy",
     daemon_liveness: Optional[Dict[str, Any]] = None,
     expected_beacon_components: Optional[Sequence[str]] = None,
-    launchd_liveness: Optional[Dict[str, Any]] = None,
-    processor_liveness: Optional[Dict[str, Any]] = None,
+    launchd_liveness: Optional[Dict[str, Any]] = None, processor_liveness: Optional[Dict[str, Any]] = None,
     degraded_reasons: Optional[Sequence[str]] = None,
     db_reason: Optional[str] = None,
     migration_skip: Optional[Dict[str, str]] = None,
@@ -1992,20 +2035,6 @@ def _build_system_health(
             log.debug("measure_launchd_liveness failed (non-critical): %s", exc)
             launchd_liveness = {"overall": "unknown", "jobs": {}, "reason": f"measurement raised: {exc}"}
 
-    # Ledger PR 1: the receipt processor's heartbeat is its own component. A
-    # read that raises is "unknown", never a skipped signal.
-    if processor_liveness is None:
-        try:
-            from processor_liveness import read_processor_liveness
-            processor_liveness = read_processor_liveness(state_dir)
-        except Exception as exc:  # vnx-silent-except: logged and surfaced as an explicit unknown state, never dropped
-            log.debug("read_processor_liveness failed (non-critical): %s", exc)
-            processor_liveness = {"state": "unknown", "overall": "unknown", "reason": f"measurement raised: {exc}"}
-    processor_overall = processor_liveness.get("overall")
-    if processor_overall not in ("ok", "fail", "unknown"):
-        # Missing or unrecognised evidence is unknown, never "not supplied".
-        processor_overall = "unknown"
-
     # R6.4 (D2): a summary can never report healthier than the worst thing it
     # summarizes. Before this, `status` was computed once above (from
     # db_health/artifact-presence) and never revisited, so
@@ -2023,8 +2052,6 @@ def _build_system_health(
         daemon_liveness.get("overall") if daemon_liveness else None,
         launchd_liveness.get("overall") if launchd_liveness else None,
         "degraded" if reasons else None,
-        # Fail-closed: only a measured "ok" keeps status healthy; absent/unknown/fail degrade.
-        None if processor_overall == "ok" else "degraded",
     )
 
     result: Dict[str, Any] = {
@@ -2043,8 +2070,6 @@ def _build_system_health(
     # launchd_liveness is unconditional -- see the "never silently omitted"
     # note above; it is always a dict by this point, never None.
     result["launchd_liveness"] = launchd_liveness
-    # Derived copy (dict literal), folded into status above via processor_overall.
-    result["processor_liveness"] = dict(processor_liveness)
     # producer_liveness: the single first-class liveness field a caller can
     # check without knowing daemon_liveness and launchd_liveness are two
     # separate producer classes that need combining by hand. Folds both via
@@ -2058,7 +2083,7 @@ def _build_system_health(
     # pushed a real t0_index.json from 3559 to 8024 bytes). Per-daemon and
     # per-job detail is one field away (daemon_liveness/launchd_liveness
     # above) for a caller that wants it.
-    result["producer_liveness"] = _producer_liveness_summary(daemon_liveness, launchd_liveness, processor_overall)
+    _attach_processor_and_producer_liveness(result, state_dir, processor_liveness)
     return result
 
 
