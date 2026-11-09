@@ -1,31 +1,42 @@
-"""Contract and day-store tests for the daily-metrics track (PR-1)."""
+"""Contract and day-store tests for the daily-metrics track (PR-1).
+
+The test package ``test_daily_metrics`` never shadows the library ``daily_metrics``.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import importlib.util
+from pathlib import Path
 
 import pytest
 
 
+def test_library_package_owns_the_daily_metrics_name():
+    """`import daily_metrics` must reach the library, not a shadowing test package."""
+    import daily_metrics
+
+    library = Path(__file__).resolve().parents[2] / "scripts" / "lib" / "daily_metrics"
+    imported = Path(daily_metrics.__file__).resolve().parent
+    assert imported == library, f"daily_metrics resolved to {imported}, not {library}"
+
+
 def test_package_is_importable():
-    # Through ``scripts.lib``: pytest imports this test package as a top-level
-    # ``daily_metrics``, which would otherwise shadow the library package.
-    assert importlib.util.find_spec("scripts.lib.daily_metrics") is not None
-    assert importlib.util.find_spec("scripts.lib.daily_metrics.metric") is not None
-    assert importlib.util.find_spec("scripts.lib.daily_metrics.store") is not None
+    assert importlib.util.find_spec("daily_metrics") is not None
+    assert importlib.util.find_spec("daily_metrics.metric") is not None
+    assert importlib.util.find_spec("daily_metrics.store") is not None
 
 
 @pytest.fixture()
 def metric():
-    import scripts.lib.daily_metrics.metric as module
+    from daily_metrics import metric as module
 
     return module
 
 
 @pytest.fixture()
 def store_mod():
-    import scripts.lib.daily_metrics.store as module
+    from daily_metrics import store as module
 
     return module
 
