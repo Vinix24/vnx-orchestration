@@ -1,7 +1,4 @@
-"""Day-store tests for the daily-metrics track (PR-1b).
-
-The test package ``test_daily_metrics`` never shadows the library ``daily_metrics``.
-"""
+"""Day-store tests for the daily-metrics track (PR-1b); ``daily_metrics`` stays importable."""
 
 from __future__ import annotations
 
@@ -93,27 +90,21 @@ def test_malformed_day_is_refused(store_mod, tmp_path):
 
 
 # --- the store keeps its immutability promise under real concurrency ---------
-#
-# The workers are real OS processes (not threads) that all call the real store
-# method, released together by a start file so the calls really overlap. A
-# check-then-replace store lets two of them see "free" and lose a revision.
+# Real OS processes (not threads) all call the real store method, released by a
+# start file; a check-then-replace store loses a revision when two see "free".
 
 _WORKER_SCRIPT = r'''
 import json, sys, time
 from pathlib import Path
-
 root, day, idx, lib, start, kind = sys.argv[1:7]
 sys.path.insert(0, lib)
-
 from daily_metrics.store import AlreadyFinal, DayStore
-
 root = Path(root)
 worker = int(idx)
 (root / f"ready-{worker}").write_text("", encoding="utf-8")
 start = Path(start)
 while not start.exists():
     time.sleep(0.001)
-
 store = DayStore(root, "proj")
 doc = {"worker": worker, "status": "incomplete" if kind == "incomplete" else "final",
        "marker": f"w{worker}" * 512}
@@ -134,13 +125,11 @@ def _race(store_mod, root: Path, day: str, kinds: list[str]) -> list[dict]:
     """One process per kind, all released by a start file; return their JSON results."""
     lib_dir = str(Path(store_mod.__file__).resolve().parent.parent)
     start = root / "start-race"
-    procs = [
-        subprocess.Popen(
-            [sys.executable, "-c", _WORKER_SCRIPT, str(root), day, str(index), lib_dir,
-             str(start), kind],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        for index, kind in enumerate(kinds)
-    ]
+    procs = [subprocess.Popen(
+        [sys.executable, "-c", _WORKER_SCRIPT, str(root), day, str(index), lib_dir,
+         str(start), kind],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for index, kind in enumerate(kinds)]
     deadline = time.monotonic() + 10
     for index in range(len(kinds)):
         ready = root / f"ready-{index}"
@@ -197,33 +186,52 @@ def test_final_and_incomplete_never_end_incomplete(store_mod, tmp_path, round_in
     assert store_mod.DayStore(tmp_path, "proj").load(day)["status"] == "final"
 
 
-def test_failed_publish_leaves_no_temp_file(store_mod, tmp_path, monkeypatch):
+@pytest.mark.parametrize("publish", ["link", "replace"])
+def test_failed_publish_leaves_no_temp_file(store_mod, tmp_path, monkeypatch, publish):
     store = store_mod.DayStore(tmp_path, "proj")
 
     def refuse(*args, **kwargs):
-        raise OSError("link refused")
+        raise OSError(f"{publish} refused")
 
-    monkeypatch.setattr(store_mod.os, "link", refuse)
-    with pytest.raises(OSError):
-        store.write_final("2026-11-06", _day_doc())
-    with pytest.raises(OSError):
-        store.write_revision("2026-11-06", _day_doc(), reason="boom")
-    assert not (tmp_path / "2026-11-06.json").exists()
+    if publish == "link":
+        monkeypatch.setattr(store_mod.os, "link", refuse)
+        with pytest.raises(OSError):
+            store.write_final("2026-11-06", _day_doc())
+        with pytest.raises(OSError):
+            store.write_revision("2026-11-06", _day_doc(), reason="boom")
+        assert not (tmp_path / "2026-11-06.json").exists()
+    else:
+        store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
+        monkeypatch.setattr(store_mod.os, "replace", refuse)
+        with pytest.raises(OSError):
+            store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
+        assert store.load("2026-11-06")["status"] == "incomplete"
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")] == []
 
 
-def test_failed_incomplete_publish_leaves_no_temp_file(store_mod, tmp_path, monkeypatch):
+def test_failed_finalization_keeps_incomplete_day(store_mod, tmp_path):
     store = store_mod.DayStore(tmp_path, "proj")
     store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
-
-    def refuse(*args, **kwargs):
-        raise OSError("replace refused")
-
-    monkeypatch.setattr(store_mod.os, "replace", refuse)
-    with pytest.raises(OSError):
-        store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
-    assert store.load("2026-11-06")["status"] == "incomplete"
+    with pytest.raises(TypeError):
+        store.write_final("2026-11-06", {**_day_doc(), "bad": object()})
+    loaded = store.load("2026-11-06")
+    assert loaded is not None and loaded["status"] == "incomplete"
     assert [entry.name for entry in tmp_path.iterdir() if entry.name.endswith(".tmp")] == []
+
+
+def test_finalize_replaces_incomplete_in_one_rename(store_mod, tmp_path, monkeypatch):
+    store = store_mod.DayStore(tmp_path, "proj")
+    store.write_incomplete("2026-11-06", _day_doc(status="incomplete"))
+    calls, real_replace = [], store_mod.os.replace
+
+    def spy(src, dst):
+        calls.append((src, dst))
+        assert Path(dst).exists()
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(store_mod.os, "replace", spy)
+    store.write_final("2026-11-06", _day_doc())
+    assert len(calls) == 1 and store.load("2026-11-06")["status"] == "final"
 
 
 def test_readers_ignore_lock_files(store_mod, tmp_path):

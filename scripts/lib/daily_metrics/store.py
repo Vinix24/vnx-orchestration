@@ -1,15 +1,13 @@
-"""The per-project, per-day store: immutable final files and numbered revisions.
+"""Per-project, per-day store: immutable final files and numbered revisions.
 
-Layout: ``<root>/<YYYY-MM-DD>.json`` (revision 1) and
-``<root>/<YYYY-MM-DD>.r<N>.json`` (N >= 2). The highest revision wins and
-nothing is ever deleted (decision 20).
-
-Every write takes an exclusive cross-process ``fcntl.flock`` on
-``<root>/<YYYY-MM-DD>.lock`` and holds it from the status check through
-publication, so two writers can never both see a free name. Final files and
-revisions are published by writing a fsynced temp file and ``os.link``-ing it
-into place: a link never replaces an existing name, so a ``final`` file is never
-overwritten and a revision never loses an earlier one.
+Layout: ``<YYYY-MM-DD>.json`` (revision 1) and ``<YYYY-MM-DD>.r<N>.json``
+(N >= 2); the highest revision wins and nothing is ever deleted (decision 20).
+Every write holds an exclusive cross-process lock on ``<YYYY-MM-DD>.lock`` from
+the status check through publication. A first final is published with
+``os.link``, which never replaces an existing name. An incomplete day is
+finalized by staging the payload to a fsynced temp file and ``os.replace``-ing
+it into place under the same lock, so the name never disappears and a failed
+finalization leaves the incomplete day intact.
 """
 
 from __future__ import annotations
@@ -72,11 +70,7 @@ class DayStore:
 
     @contextmanager
     def _day_lock(self, day: str) -> Iterator[None]:
-        """Exclusive cross-process lock for *day*, held across check and publication.
-
-        The lock file is created once and never unlinked while in use: a second
-        process must always open the same inode to wait behind the first one.
-        """
+        """Lock file created once, never unlinked: every writer waits on one inode."""
         self.root.mkdir(parents=True, exist_ok=True)
         lock_path = self.root / f"{day}{_LOCK_SUFFIX}"
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
@@ -94,7 +88,6 @@ class DayStore:
             pass
 
     def _stage(self, path: Path, payload: Mapping[str, Any]) -> str:
-        """Write *payload* to a private fsynced temp file beside *path*; caller publishes it."""
         fd, tmp_name = tempfile.mkstemp(dir=self.root, prefix=f".{path.name}.", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:  # vnx-atomic-write: private temp, published by os.link/os.replace
@@ -108,7 +101,6 @@ class DayStore:
         return tmp_name
 
     def _publish_no_overwrite(self, path: Path, payload: Mapping[str, Any]) -> None:
-        """Link a fully written temp file to *path*; raises ``FileExistsError`` if taken."""
         tmp_name = self._stage(path, payload)
         try:
             os.link(tmp_name, path)
@@ -124,9 +116,8 @@ class DayStore:
             self._remove(tmp_name)
 
     @staticmethod
-    def _payload(
-        doc: Mapping[str, Any], revision: int, status: str, reason: str | None = None
-    ) -> dict[str, Any]:
+    def _payload(doc: Mapping[str, Any], revision: int, status: str,
+                 reason: str | None = None) -> dict[str, Any]:
         payload = dict(doc)
         payload["revision"] = revision
         payload["status"] = status
@@ -140,15 +131,16 @@ class DayStore:
         with self._day_lock(day):
             status = self._existing_status(path)
             if status == "incomplete":
-                # An incomplete day is replaceable by contract; drop it under the lock so the
-                # final file itself is still created by the no-overwrite link.
-                self._remove(path)
-            elif status is not None:
-                raise AlreadyFinal(f"{path.name} is already final")
-            try:
-                self._publish_no_overwrite(path, self._payload(doc, 1, "final"))
-            except FileExistsError:
-                raise AlreadyFinal(f"{path.name} is already final") from None
+                # Staged and fsynced before os.replace touches the day, under the lock:
+                # a failed finalization leaves the incomplete day and its name intact.
+                self._replace(path, self._payload(doc, 1, "final"))
+            else:
+                if status is not None:
+                    raise AlreadyFinal(f"{path.name} is already final")
+                try:
+                    self._publish_no_overwrite(path, self._payload(doc, 1, "final"))
+                except FileExistsError:
+                    raise AlreadyFinal(f"{path.name} is already final") from None
         return path
 
     def write_incomplete(self, day: str, doc: Mapping[str, Any]) -> Path:
