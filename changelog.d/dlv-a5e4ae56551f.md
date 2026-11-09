@@ -1,0 +1,1 @@
+- RS-1 adds `scripts/measure_process_tree_load.py` and its runbook: NDJSON samples of a process tree's xdist-worker CPU apart from other subprocesses, plus RSS, swap and compressor, with a `cores_p95` candidate slot number per run (track `rekenslot-per-machine`).
