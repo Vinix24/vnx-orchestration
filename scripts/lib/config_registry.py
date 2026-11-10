@@ -35,6 +35,7 @@ dedicated flag (e.g. ``phantom_guard``, ``dispatch-plan``) are not represented h
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
@@ -316,6 +317,29 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+    # intelligence-effect-measurable PR-1: the A/B window as registered, audited configuration
+    # (project_config rows) instead of a plist edit. Every default is off or empty: registering
+    # these keys opens no window. They sit BEFORE VNX_INJECTION_WHY_ENABLED on purpose: the
+    # SUBSYSTEMS.md ledger generator takes the last-inserted entry of a subsystem, and that
+    # must stay VNX_INJECTION_WHY_ENABLED (also the cockpit_canonical flag).
+    "VNX_INTEL_AB_TEST": _e(
+        "VNX_INTEL_AB_TEST", "bool", "0", "intelligence",
+        "Open the intelligence-injection A/B window: dispatches are assigned a treatment or "
+        "control arm. Off = no assignment, every dispatch injects as before.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_PLACEBO_ARM": _e(
+        "VNX_INTEL_PLACEBO_ARM", "bool", "0", "intelligence",
+        "Give the control arm of the A/B window a placebo section instead of nothing. "
+        "Off = the control arm receives no intelligence section.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_AB_WINDOW": _e(
+        "VNX_INTEL_AB_WINDOW", "string", "", "intelligence",
+        "The frozen A/B window configuration (window id, salt, bounds) as one JSON document. "
+        "Empty = no window is open.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
     "VNX_INJECTION_WHY_ENABLED": _e(
         "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
         "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
@@ -325,7 +349,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "activate the learning loop.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
-        # this subsystem's 2 flags. Not re-audited by this dispatch — out of scope.
+        # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
@@ -694,7 +718,7 @@ def _bare(key: str) -> str:
 
 def resolve_with_source(
     key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
-    *, use_default_resolver: bool = True,
+    *, use_default_resolver: bool = True, strict_resolver: bool = False,
 ) -> "tuple[Optional[str], str]":
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
@@ -703,6 +727,12 @@ def resolve_with_source(
     ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
+
+    ``strict_resolver`` (default ``False``) changes what a raising DB resolver means. Off, it is
+    treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
+    On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
+    unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
+    override is still read first, before the DB is consulted.
     """
     entry = CONFIG_REGISTRY.get(key)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
@@ -714,7 +744,12 @@ def resolve_with_source(
     if resolver is not None:
         try:
             db_val = resolver(project_id, key)
-        except Exception:
+        except Exception as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning(
+                    "config_registry: project_config resolver failed for %s (%s: %s)",
+                    key, type(exc).__name__, exc)
+                return None, "project_config_error"
             db_val = None
         if db_val is not None:
             return db_val, "project_config"
