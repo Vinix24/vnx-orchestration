@@ -484,7 +484,7 @@ gather_dispatch_intelligence() {
     terminal=$(track_to_terminal "$track")
     local intel_rc=0
     set +e
-    _PD_INTEL_RESULT=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather "$task_description" "$terminal" "$agent_role" "$gate" 2>&1)
+    _PD_INTEL_RESULT=$(python3 "$VNX_DIR/scripts/gather_intelligence.py" gather "$task_description" "$terminal" "$agent_role" "$gate" "$dispatch_id" 2>&1)
     intel_rc=$?
     set -e
 
