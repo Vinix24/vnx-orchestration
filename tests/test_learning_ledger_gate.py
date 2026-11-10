@@ -29,7 +29,6 @@ from test_k9_lifecycle_count import (  # noqa: E402,F401  (fixtures and real-wri
 NOW = _at(600)  # ten minutes after the START every start line carries
 REAL_SHA = append_lifecycle.writer_sha()
 DELETE = object()  # marks a key the wrapped building block drops
-VERDICT_FILE = "learning_ledger_verdict.json"
 
 def _verdict(state_dir, now=NOW, sweep=60, **kwargs) -> dict:
     if sweep is not None:
@@ -196,36 +195,37 @@ def test_the_activation_commit_defaults_to_the_environment(state_dir, lifecycle_
 
     assert (_verdict(state_dir)["cohort"], _verdict(state_dir)["status"]) == (REAL_SHA, "ok")
 
-def _good(state_dir) -> dict:
+def _append_once_after(real, state_dir, times):
+    """compute_lifecycle_count, then (``times`` calls only) a completed v3 line of unknown
+    provenance lands: the ledger changes between the defect count and the attempt read."""
+    calls = []
+
+    def run(*args, **kwargs):
+        count = real(*args, **kwargs)
+        if len(calls) < times:
+            _append_raw(state_dir, _line(f"d-race{len(calls)}", writer_sha="f" * 40))
+        calls.append(1)
+        return count
+    return run
+
+def test_a_ledger_that_keeps_changing_between_the_two_reads_is_refused(state_dir, lifecycle_on):
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 9)):
+        verdict = _verdict(state_dir)
+
+    _refused(verdict, "evaluation_failed")
+    assert "changed between the defect count and the attempt read" in verdict["reason"]
+
+def test_a_ledger_that_changes_once_and_then_holds_gives_the_normal_verdict(state_dir, lifecycle_on):
     _ended(state_dir)
-    return _verdict(state_dir)
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 1)):
+        verdict = _verdict(state_dir)
 
-def test_write_then_read_round_trips(state_dir, lifecycle_on):
-    verdict = _good(state_dir)
+    _refused(verdict, "end_without_start")  # the retry sees the appended line in both reads
 
-    assert gate.write_verdict(state_dir, verdict) == state_dir / VERDICT_FILE
-    assert gate.read_verdict(state_dir, now=NOW + timedelta(hours=1)) == verdict
-    assert [p.name for p in state_dir.glob(VERDICT_FILE + "*")] == [VERDICT_FILE]  # no temp left
-
-@pytest.mark.parametrize("text", [None, "{not json", "[]", "", '"ok"'])  # None: no file at all
-def test_read_verdict_of_a_missing_or_corrupt_file_is_refused(state_dir, text):
-    if text is not None:
-        (state_dir / VERDICT_FILE).write_text(text, encoding="utf-8")
-
-    _refused(gate.read_verdict(state_dir, now=NOW), "verdict_unreadable")
-
-def test_read_verdict_of_a_stale_file_is_refused(state_dir, lifecycle_on):
-    gate.write_verdict(state_dir, _good(state_dir))
-    _refused(gate.read_verdict(state_dir, now=NOW + timedelta(hours=37)), "verdict_stale")
-    assert gate.read_verdict(state_dir, now=NOW + timedelta(hours=35))["status"] == "ok"
-
-@pytest.mark.parametrize("change", [
-    {"schema": "ledger_verdict/2"}, {"status": "fine"}, {"evaluated_at": "yesterday"},
-    {"counts": "none"}, {"reason_code": ""}, {"project_id": None}, {"extra": 1},
-    {"reason": DELETE}, {"status": []}, {"status": {}}, {"schema": []}, {"counts": "x"},
-])
-def test_read_verdict_of_a_wrong_shape_is_refused(state_dir, lifecycle_on, change):
-    verdict = {k: v for k, v in {**_good(state_dir), **change}.items() if v is not DELETE}
-    (state_dir / VERDICT_FILE).write_text(json.dumps(verdict), encoding="utf-8")
-
-    _refused(gate.read_verdict(state_dir, now=NOW), "verdict_unreadable")
+def test_an_initially_empty_ledger_with_an_append_is_never_ok(state_dir, lifecycle_on):
+    _ledger(state_dir).write_text("", encoding="utf-8")
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 1)):
+        assert _verdict(state_dir)["status"] != "ok"
