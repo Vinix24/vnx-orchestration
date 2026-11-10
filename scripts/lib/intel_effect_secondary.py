@@ -92,14 +92,24 @@ def _rule() -> str:
             "coverage (offers with outcome / all offers)")
 
 
-def f1(weeks: List[dict], verdict: Optional[str], no_verdict: str) -> Measure:
+def _adoption(weeks: List[dict]) -> tuple:
+    """(first week, last week, rise) of the first and last evaluable week, or (None, reason). Evaluable means
+    >= MIN_WEEK_OFFERS offers with an outcome (week_stats): both denominators below are > 0."""
     good = [w for w in weeks if w["evaluable"]]
-    data = {"weeks": weeks, "rule": _rule()}
     if len(good) < 2:
-        return Measure("F1", NOT_EVALUABLE, f"fewer than 2 evaluable weeks ({len(good)} of {len(weeks)})", data)
+        return None, f"fewer than 2 evaluable weeks ({len(good)} of {len(weeks)})"
     first, last = good[0], good[-1]
     rise = Fraction(last["used"], last["with_outcome"]) - Fraction(first["used"], first["with_outcome"])
-    data.update(first_week=first["week"], last_week=last["week"], rise_pp=_pct(rise))
+    return (first["week"], last["week"], rise), None
+
+
+def f1(weeks: List[dict], verdict: Optional[str], no_verdict: str) -> Measure:
+    data = {"weeks": weeks, "rule": _rule()}
+    found, why = _adoption(weeks)
+    if found is None:
+        return Measure("F1", NOT_EVALUABLE, why, data)
+    first, last, rise = found
+    data.update(first_week=first, last_week=last, rise_pp=_pct(rise))
     if verdict is None:
         return Measure("F1", NOT_EVALUABLE, no_verdict, data)
     fired = rise >= ADOPTION_RISE and verdict != "treatment_better"
@@ -118,20 +128,21 @@ def _chars_per_item(rows: List[tuple], weeks: List[str]) -> Optional[Dict[str, O
     return {week: Fraction(c, i) if i else None for week, (c, i) in sums.items()}
 
 
-def f2(f1_line: Measure, rows: List[tuple]) -> Measure:
-    if f1_line.status == NOT_EVALUABLE:
-        return Measure("F2", NOT_EVALUABLE, f"F1 is not evaluable: {f1_line.reason}", {})
-    first, last = f1_line.data["first_week"], f1_line.data["last_week"]
+def f2(adoption: tuple, rows: List[tuple]) -> Measure:
+    """Dilution stands on the adoption rise alone: no verdict, F1's or any other, is read here."""
+    first, last, rise = adoption
     per_week = _chars_per_item(rows, [first, last])
     if per_week is None:
         return Measure("F2", NOT_EVALUABLE, "an injection row has an unreadable payload_chars or items_injected", {})
     start, end = per_week[first], per_week[last]
     if start is None or end is None:
         return Measure("F2", NOT_EVALUABLE, "no injected items in the first or the last evaluable week", {})
+    if start == 0:  # guards the division below
+        return Measure("F2", NOT_EVALUABLE, "zero characters per item in the first evaluable week", {})
     drop = (start - end) / start
     data = {"first_week": first, "last_week": last, "chars_per_item_first": round(float(start), 2),
             "chars_per_item_last": round(float(end), 2), "drop_pct": _pct(drop)}
-    return Measure("F2", FIRED if f1_line.status == FIRED and drop >= DILUTION_DROP else CLEAR, None, data)
+    return Measure("F2", FIRED if rise >= ADOPTION_RISE and drop >= DILUTION_DROP else CLEAR, None, data)
 
 
 def f3(effect: es.Effect) -> Measure:
@@ -179,11 +190,14 @@ def build_secondary(qi_db: Path, rc_db: Path, project_id: str, as_of: datetime) 
     refused = "cohort refused: " + ", ".join(other)
     with closing(co.open_read_only(qi_db)) as qi, closing(co.open_read_only(rc_db)) as rc:
         weeks, weeks_err = _guard(lambda: week_stats(qi, project_id, week_of))
-        line1 = (Measure("F1", NOT_EVALUABLE, refused if other else weeks_err) if other or weeks is None
-                 else f1(weeks, verdict, no_verdict))
-        rows, rows_err = ([], None) if line1.status == NOT_EVALUABLE else _guard(
-            lambda: _payload_rows(rc, project_id, week_of))
-    line2 = Measure("F2", NOT_EVALUABLE, rows_err, {}) if rows_err else f2(line1, rows)
+        if other or weeks is None:
+            why = refused if other else weeks_err
+            line1, adoption = Measure("F1", NOT_EVALUABLE, why), None
+        else:
+            line1 = f1(weeks, verdict, no_verdict)
+            adoption, why = _adoption(weeks)
+        rows, rows_err = ([], None) if adoption is None else _guard(lambda: _payload_rows(rc, project_id, week_of))
+    line2 = Measure("F2", NOT_EVALUABLE, why or rows_err, {}) if adoption is None or rows_err else f2(adoption, rows)
     return Secondary(effect, [line1, line2, f3(effect)])
 
 

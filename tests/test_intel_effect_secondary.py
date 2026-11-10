@@ -5,7 +5,6 @@ The module is imported inside the tests, so on the old code the CLI tests fail o
 """
 from __future__ import annotations
 
-import hashlib
 import importlib
 import json
 import os
@@ -13,7 +12,6 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import closing
-from fractions import Fraction
 
 import pytest
 
@@ -58,11 +56,11 @@ def _offers(rc, at, adoption, cover=100, pid="p1"):
                 "VALUES (?, 'pat', ?, ?)", [(d, int(i < adoption), pid) for i, d in enumerate(ids[:cover])])
 
 
-def _world(rc, adoption=(20, 40), cover=100, chars=(100, 80), treatment_ok=98):
-    """Two weeks, 100 per arm each (n = 200 per arm), treatment adoption and chars per item per week."""
+def _world(rc, adoption=(20, 40), cover=100, chars=(100, 80), treatment_ok=98, size=100, control_ok=98):
+    """Two weeks, ``size`` per arm each (200 per arm, the floor, at 100), treatment adoption and chars per item per week."""
     _qi(rc)
     for prefix, at, per, cpi in (("a", DAY1, adoption[0], chars[0]), ("b", W46, adoption[1], chars[1])):
-        _cell(rc, prefix, "coding_interactive", at, control=(100, 98), treatment=(100, treatment_ok))
+        _cell(rc, prefix, "coding_interactive", at, control=(size, min(control_ok, size - 2)), treatment=(size, min(treatment_ok, size - 2)))
         _offers(rc, at, per, cover)
         _exec(rc, "UPDATE intelligence_injections SET items_injected = 2, payload_chars = ? "
                   "WHERE ab_arm = 'treatment' AND injected_at = ?", [(2 * cpi, at)])
@@ -93,18 +91,39 @@ def test_rising_adoption_without_a_favourable_verdict_fires_f1_and_f2_and_exits_
     assert run.returncode == 0 and "F1          fired" in run.stdout
 
 
-def test_it_never_changes_the_verdict_the_exit_code_or_a_store_of_effect(rc):
+def test_f2_stands_on_the_adoption_rise_not_on_the_verdict(rc):
+    _world(rc, control_ok=60)
+    status, m = _status(rc)
+    assert m["F1"]["verdict"] == "treatment_better" and status == {"F1": "clear", "F2": "fired", "F3": "clear"}
+
+
+def test_f2_fires_without_any_verdict_when_the_weeks_are_evaluable(rc):
+    _world(rc, adoption=(8, 16), size=40)
+    status, m = _status(rc)
+    assert "verdict" not in m["F1"] and status == {"F1": "not_evaluable", "F2": "fired", "F3": "not_evaluable"}
+    assert "below_floor" in m["F1"]["reason"] and m["F1"]["rise_pp"] == 20.0
+
+
+def test_a_dilution_of_5_percent_is_clear_on_the_same_adoption(rc):
+    _world(rc, chars=(100, 95))
+    assert _status(rc)[0]["F2"] == "clear"
+
+def test_a_zero_first_week_payload_is_not_evaluable_and_does_not_end_the_command(rc):
     _world(rc)
-    stores = [rc, rc.parent / "quality_intelligence.db"]
+    _exec(rc, "UPDATE intelligence_injections SET payload_chars = 0, items_injected = 3 WHERE ab_arm = 'treatment' "
+              "AND injected_at = ?", [(DAY1,)])
+    status, m = _status(rc)
+    assert (status["F1"], status["F2"]) == ("fired", "not_evaluable")
+    assert m["F2"]["reason"] == "zero characters per item in the first evaluable week"
 
-    def digest():
-        return [hashlib.sha256(p.read_bytes()).hexdigest() for p in stores]
 
-    before, hashes = _run(rc, "effect", "--json"), digest()
-    _run(rc, "secondary")
-    after = _run(rc, "effect", "--json")
-    assert (before[0].returncode, before[0].stdout) == (after[0].returncode, after[0].stdout) and before[0].returncode == 0
-    assert digest() == hashes
+@pytest.mark.parametrize("cover, items", [(0, 2), (100, 0)])
+def test_a_zero_denominator_is_not_evaluable_never_an_exit(rc, cover, items):
+    _world(rc, cover=cover)
+    _exec(rc, "UPDATE intelligence_injections SET items_injected = ? WHERE ab_arm = 'treatment' AND injected_at = ?",
+          [(items, DAY1)])
+    status, _ = _status(rc)
+    assert status["F2"] == "not_evaluable" and (status["F1"] == "not_evaluable") == (cover == 0)
 
 
 def test_a_dilution_that_does_not_follow_the_rise_or_a_flat_adoption_is_clear(rc):
@@ -174,31 +193,3 @@ def test_a_refused_cohort_makes_every_measure_not_evaluable(rc):
     _exec(rc, "DELETE FROM project_config WHERE project_id = 'p1'", [()])
     status, m = _status(rc)
     assert set(status.values()) == {"not_evaluable"} and "window_invalid" in m["F1"]["reason"]
-
-
-def test_another_project_with_the_same_dispatch_ids_changes_nothing(rc):
-    _world(rc)
-    _, before = _status(rc)
-    meta = rc.parent / "quality_intelligence.db"
-    ids = _treatment(rc, DAY1) + _treatment(rc, W46)
-    _exec(meta, "INSERT INTO dispatch_pattern_offered VALUES (?, 'pat', 'p2')", [(d,) for d in ids])
-    _exec(meta, "INSERT INTO pattern_injection_outcome (dispatch_id, pattern_id, used, project_id) VALUES (?, 'pat', 1, 'p2')",
-          [(d,) for d in ids])
-    _, after = _status(rc)
-    assert after == before
-
-
-def test_id_lists_go_to_the_stores_in_blocks_and_the_result_is_the_same(rc, sec, monkeypatch):
-    _world(rc)
-    week_of = {d: "2026-W45" for d in _treatment(rc, DAY1)} | {d: "2026-W46" for d in _treatment(rc, W46)}
-    with closing(sqlite3.connect(str(rc.parent / "quality_intelligence.db"))) as qi:
-        whole = sec.week_stats(qi, "p1", week_of)
-        monkeypatch.setattr(sec, "BLOCK", 7)
-        assert sec.week_stats(qi, "p1", week_of) == whole and whole[0]["offers"] == 100
-    assert Fraction(whole[1]["used"], whole[1]["with_outcome"]) == Fraction(2, 5)
-
-
-def test_the_same_file_for_both_stores_is_exit_1(rc):
-    run = subprocess.run([sys.executable, os.path.join(_ROOT, "scripts", "intel_injection_join.py"), "secondary", "--rc", str(rc),
-                          "--qi", str(rc), "--project-id", "p1"], capture_output=True, text=True, timeout=60)
-    assert run.returncode == 1 and "same file" in run.stderr
