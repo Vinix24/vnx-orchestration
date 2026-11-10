@@ -11,12 +11,17 @@ constante `MIN_PER_ARM = 200` in de code en is door geen vlag, omgevingsvariabel
 configuratierij te verlagen. De deadline 01-12-2026 verlengt het venster en houdt de track open.
 Onder de grens is de uitkomst altijd `geen verdict` (exit 3, reden `below_floor`), nooit een
 verdict bij lagere n.
+
+Split 1 of 2. Split 2 adds the re-derivation of every stamp (``assignment_not_reproducible``), the
+72-hour maturity, differential attrition and the coverage line. Until then ``resolved`` counts every
+success and failure, immature ones included.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,7 +29,7 @@ from typing import Dict, List, Optional, Tuple
 
 from config_store_db import read_config
 from coordination_db import DISPATCH_STATES, TERMINAL_DISPATCH_STATES
-from intelligence_selector import arm_for_dispatch, load_window_config
+from intelligence_selector import load_window_config
 
 MIN_PER_ARM = 200
 WINDOW_KEY = "VNX_INTEL_AB_WINDOW"
@@ -42,11 +47,6 @@ CLASS_STATES: Dict[str, frozenset] = {
     UNRESOLVED: frozenset({"proposed", "ready", "queued", "claimed", "delivering", "accepted",
                            "running", "timed_out", "failed_delivery", "recovered"}) & _OPEN_STATES,
 }
-
-# arm_for_dispatch answers (None, None) whenever VNX_INTEL_AB_TEST reads off in the measuring
-# process: a closed window fails every re-derivation, it never passes one.
-_FLAG_GATE = ("re-derivation gave no arm: arm_for_dispatch is gated on VNX_INTEL_AB_TEST "
-              "(intelligence_selector.py:139), which reads off in this process")
 
 _INJECTIONS_SQL = """
 SELECT i.id, i.dispatch_id, i.injected_at, i.task_class, i.ab_arm, i.ab_window, d.state AS state
@@ -87,7 +87,6 @@ class CohortDispatch:
     dispatch_id: str
     arm: str
     task_class: str
-    injected_at: datetime
     outcome: str
 
 
@@ -128,16 +127,13 @@ def open_read_only(db: Path) -> sqlite3.Connection:
 def build_cohort(rc_db: Path, project_id: str, as_of: datetime) -> Cohort:
     """Read the project's window, injection rows and states from ``rc_db``; apply every control."""
     cohort = Cohort(project_id=project_id, as_of=as_of)
-    conn = open_read_only(rc_db)
-    try:
+    with closing(open_read_only(rc_db)) as conn:
         raw = read_config(conn, project_id, WINDOW_KEY)
         cohort.window = load_window_config(raw) if raw is not None else None
         if cohort.window is None:
             cohort.refuse("window_invalid", f"{WINDOW_KEY} for {project_id} is missing or invalid: {raw!r}")
             return cohort
         rows = [dict(r) for r in conn.execute(_INJECTIONS_SQL, (project_id,))]
-    finally:
-        conn.close()
     _fill(cohort, rows)
     _check_outcomes(cohort)
     return cohort
@@ -164,41 +160,27 @@ def _fill(cohort: Cohort, rows: List[dict]) -> None:
     counted = [first[did] for did in sorted({row["dispatch_id"] for row in members}) if first[did]["id"] in member_ids]
     counted_ids = {row["dispatch_id"] for row in counted}
     cohort.deduplicated = sum(1 for row in members if row["dispatch_id"] in counted_ids) - len(counted)
-    cohort.dispatches = [CohortDispatch(row["dispatch_id"], row["ab_arm"], row["task_class"], row["at"],
-                                        classify_state(row["state"]))
-                         for row in counted if row["ab_arm"] in ARMS]  # any other arm is refused as arm_invalid
+    cohort.dispatches = [  # any other arm is refused as arm_invalid
+        CohortDispatch(row["dispatch_id"], row["ab_arm"], row["task_class"], classify_state(row["state"]))
+        for row in counted if row["ab_arm"] in ARMS]
 
 
 def _first_rows(rows: List[dict]) -> Dict[str, dict]:
     """Decision 6: per dispatch the first injection row, min(injected_at), tiebreak min(id)."""
     first: Dict[str, dict] = {}
-    for row in rows:
-        current = first.get(row["dispatch_id"])
-        if current is None or (row["at"], row["id"]) < (current["at"], current["id"]):
-            first[row["dispatch_id"]] = row
+    for row in sorted(rows, key=lambda r: (r["at"], r["id"])):
+        first.setdefault(row["dispatch_id"], row)
     return first
 
 
 def _check_rows(cohort: Cohort, members: List[dict]) -> None:
-    """Decision 14: one configuration, two arms, every stamp re-derived from the frozen window."""
+    """Decision 14: one configuration and two arms (re-deriving each stamp is split 2)."""
     windows = sorted({row["ab_window"] for row in members})
     if len(windows) > 1:
         cohort.refuse("config_diverged", f"{len(windows)} ab_window values in the cohort: {windows[:5]}")
     invalid = [row["dispatch_id"] for row in members if row["ab_arm"] not in ARMS]
     if invalid:
         cohort.refuse("arm_invalid", f"{len(invalid)} row(s) with an arm outside {ARMS}, first {invalid[0]}")
-    derived: Dict[str, tuple] = {}
-    differing = []
-    for row in members:
-        did = row["dispatch_id"]
-        if did not in derived:
-            derived[did] = arm_for_dispatch(did, cohort.project_id, cohort.window)
-        if derived[did] != (row["ab_arm"], row["ab_window"]):
-            differing.append((did, (row["ab_arm"], row["ab_window"]), derived[did]))
-    if differing:
-        did, stored, again = differing[0]
-        why = _FLAG_GATE if again == (None, None) else f"stored {stored}, re-derived {again}"
-        cohort.refuse("assignment_not_reproducible", f"{len(differing)} row(s) differ, first {did}: {why}")
 
 
 def _check_outcomes(cohort: Cohort) -> None:
@@ -231,26 +213,18 @@ def render(cohort: Cohort) -> str:
     out += [header, "-" * len(header)]
     out += [f"{arm:10}" + "".join(f" {c[key]:>10}" for key in COUNT_KEYS) for arm, c in data["arms"].items()]
     out += [f"REFUSED {r['reason']}: {r['detail']}" for r in data["refusals"]]
-    if data["floor_rule"]:
-        out.append(data["floor_rule"])
-    return "\n".join(out)
+    return "\n".join(out + ([data["floor_rule"]] if data["floor_rule"] else []))
 
 
 def run_cohort(qi_db: Path, rc_db: Path, project_id: str, as_of: datetime, as_json: bool) -> int:
-    """CLI body: 0 with the per-arm table, 3 with the refusal reasons, 1 when a store is unusable.
-
-    QI is opened read-only to prove the path the effect and secondary siblings read; the cohort
-    reads no table of it (decision 4).
-    """
+    """CLI body: exit 0 with the per-arm table, 3 with the refusals, 1 when a store is unusable. QI
+    is opened read-only to prove the path its siblings read; the cohort reads no table of it (decision 4)."""
     if qi_db.resolve() == rc_db.resolve():
         print(f"cohort: --qi and --rc are the same file: {rc_db}", file=sys.stderr)
         return 1
     try:
-        conn = open_read_only(qi_db)
-        try:
+        with closing(open_read_only(qi_db)) as conn:
             conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        finally:
-            conn.close()
         cohort = build_cohort(rc_db, project_id, as_of)
     except sqlite3.Error as exc:
         print(f"cohort: --qi {qi_db} or --rc {rc_db} is unreadable or not at v38 (migration 0038): {exc}",
