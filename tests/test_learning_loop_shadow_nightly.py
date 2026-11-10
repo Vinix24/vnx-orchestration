@@ -369,3 +369,81 @@ def test_nightly_job_warns_loudly_but_completes_when_the_phase_fails(tmp_path):
     assert "Phase 2.6 WARNING" in log
     assert "status=failed" in log
     assert "Nightly analysis pipeline complete" in log
+
+
+# (f) capture audit in the nightly beacon (capture PR-4)
+def _bind_capture(tmp_path: Path, state_dir: Path, monkeypatch, *, note: bool = True) -> Path:
+    home = tmp_path / "home"
+    memory = home / ".claude" / "projects" / "-vnx-dev" / "memory"
+    bucket = tmp_path / "bucket"
+    memory.mkdir(parents=True)
+    bucket.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (state_dir.parent / ".vnx-project-id").write_text("vnx-dev\n")  # the id of this tmp store
+    (state_dir / "capture_sources.json").write_text(json.dumps({
+        "schema": "capture_sources/1", "project_id": "vnx-dev", "memory_dir": str(memory),
+        "bucket_dir": str(bucket), "bucket_slug": "mine", "bound_at": NOW.isoformat()}))
+    old = NOW - timedelta(days=30)
+    (bucket / f"{NOW:%Y-%m}.md").write_text(f"### {old:%Y-%m-%d} · mine · koffie-zetten-ochtend\n- x\n\n")
+    created = (NOW - timedelta(days=30)).replace(tzinfo=None).isoformat()
+    (state_dir / "open_items.json").write_text(json.dumps({"items": [
+        {"id": "OI-7", "status": "open", "title": "merge lock blijft achter na afgebroken lus", "created_at": created}]}))
+    if note:
+        (memory / "merge-lock-note.md").write_text(
+            f"---\nname: merge-lock-note\ndescription: afgebroken merge lus laat lock achter\nmodified: {NOW.isoformat()}\n---\ntekst\n")
+    return memory
+
+
+def test_capture_audit_counts_in_beacon(env, tmp_path, monkeypatch):
+    state_dir, _ = env
+    _bind_capture(tmp_path, state_dir, monkeypatch)
+    assert _run_phase(state_dir) == 0
+    beacon = json.loads((state_dir / BEACON).read_text())
+    assert beacon["counts"].get("duplicate_capture_open") == 1
+    assert beacon["counts"]["capture_audit_bins"] == {"open_items": "ok", "memory": "ok", "bucket": "ok"}
+    assert "capture_audit_error" not in beacon
+    assert beacon["status"] == "ok"
+    assert beacon["counts"]["receipts_read"] == 3
+
+
+def test_capture_audit_without_binding_is_null_not_zero(env):
+    state_dir, _ = env
+    assert _run_phase(state_dir) == 0
+    beacon = json.loads((state_dir / BEACON).read_text())
+    assert beacon["counts"]["duplicate_capture_open"] is None
+    assert set(beacon["counts"]["capture_audit_bins"].values()) == {"unbound"}
+
+
+def test_capture_audit_runs_when_the_loop_failed(env, tmp_path, monkeypatch):
+    state_dir, _ = env
+    _bind_capture(tmp_path, state_dir, monkeypatch)
+    with patch.object(_live_learning_loop().LearningLoop, "daily_learning_cycle", side_effect=RuntimeError("kapot")):
+        assert _run_phase(state_dir) == 1
+    beacon = json.loads((state_dir / BEACON).read_text())
+    assert beacon["status"] == "failed" and "kapot" in beacon["error"]
+    assert beacon["counts"]["duplicate_capture_open"] == 1
+
+
+@pytest.mark.parametrize("content", ["{niet json", json.dumps({"schema": "x/9", "window": {}})])
+def test_unreadable_previous_audit_is_reported_not_raised(env, tmp_path, monkeypatch, content):
+    state_dir, _ = env
+    _bind_capture(tmp_path, state_dir, monkeypatch)
+    (state_dir / "capture_audit.json").write_text(content)
+    assert _run_phase(state_dir) == 0
+    beacon = json.loads((state_dir / BEACON).read_text())
+    assert beacon["status"] == "ok"
+    assert beacon["counts"]["duplicate_capture_open"] is None
+    assert beacon["counts"]["capture_audit_bins"] == {}
+    assert "ValueError" in beacon["capture_audit_error"] and "capture_audit.json" in beacon["capture_audit_error"]
+    assert (state_dir / "capture_audit.json").read_text() == content
+
+
+def test_unexpected_audit_exception_is_reported_not_raised(env):
+    state_dir, _ = env
+    import learning_loop_nightly
+
+    with patch.object(learning_loop_nightly, "_capture_audit_lib", side_effect=OSError("schijf weg")):
+        assert _run_phase(state_dir) == 0
+    beacon = json.loads((state_dir / BEACON).read_text())
+    assert beacon["counts"]["duplicate_capture_open"] is None
+    assert beacon["capture_audit_error"] == "OSError: schijf weg"
