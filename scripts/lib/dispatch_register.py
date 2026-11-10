@@ -103,6 +103,11 @@ VALID_EVENTS = {
                                           # waiting on a later success receipt. Carries
                                           # `extra.provider`/`extra.reason`. See
                                           # dispatch_cli._lane_reopened_after.
+    "intelligence_arm_assigned",         # effect PR-5 r2: the A/B arm decision of one dispatch
+                                          # (control|treatment) with its window, written before
+                                          # the injection event and row derived from it. Carries
+                                          # `extra.ab_arm`/`extra.ab_window`. See
+                                          # intelligence_injection.fetch_intelligence_section.
 }
 
 

@@ -33,7 +33,9 @@ PROJECT = "proj-a"
 
 
 @pytest.fixture
-def env(monkeypatch):
+def env(monkeypatch, tmp_path):
+    import dispatch_register
+    monkeypatch.setattr(dispatch_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
@@ -151,16 +153,71 @@ def test_a_store_without_the_arm_columns_writes_the_row_without_the_arm(env, sta
     assert meta["ab_arm"] == "control" and meta["has_ab_arm_column"] is False
 
 
-def test_the_event_write_failing_does_not_fail_the_row(env, state):
-    conn = sqlite3.connect(str(state / "runtime_coordination.db"))
-    conn.execute("DROP INDEX IF EXISTS idx_injection_window_arm")
-    conn.execute("ALTER TABLE intelligence_injections DROP COLUMN ab_window")
-    conn.execute("ALTER TABLE intelligence_injections DROP COLUMN ab_arm")
-    conn.execute("DROP TABLE coordination_events")
-    conn.commit()
-    conn.close()
+def _events(state: Path, dispatch_id: str):
+    rows = _rows(state, "SELECT event_id, event_type, metadata_json FROM coordination_events "
+                        "WHERE entity_id = ? AND event_type LIKE 'intelligence_%' ORDER BY rowid", (dispatch_id,))
+    return [(r[0], r[1], json.loads(r[2])) for r in rows]
+
+
+def _ledger(state: Path, dispatch_id: str):
+    path = state / "dispatch_register.ndjson"
+    lines = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+    return [x for x in lines if x.get("dispatch_id") == dispatch_id]
+
+
+@pytest.mark.parametrize("arm", ["control", "treatment"])
+def test_the_arm_decision_is_in_the_event_and_the_ledger_before_the_row(env, state, monkeypatch, arm):
+    order = []
+    real_record = sel.IntelligenceSelector.record_injection
+    real_emit = sel.IntelligenceSelector.emit_event
+
+    def emit(self, result, coord_state_dir=None):
+        order.append(("event", [x["event"] for x in _ledger(state, result.dispatch_id)]))
+        return real_emit(self, result, coord_state_dir=coord_state_dir)
+
+    def record(self, result, coord_state_dir=None):
+        order.append(("row", _events(state, result.dispatch_id)))
+        return real_record(self, result, coord_state_dir=coord_state_dir)
+
+    monkeypatch.setattr(sel.IntelligenceSelector, "emit_event", emit)
+    monkeypatch.setattr(sel.IntelligenceSelector, "record_injection", record)
+    dispatch_id = _id_for(arm)
+    _fetch(state, dispatch_id)
+    ab_window = sel.arm_for_dispatch(dispatch_id, PROJECT, dict(WINDOW))[1]
+    assert [o[0] for o in order] == ["event", "row"]
+    [(_, _, meta)] = order[1][1]  # the event exists when the row is written
+    assert (meta["ab_arm"], meta["ab_window"], meta["dispatch_id"], meta["project_id"]) == (
+        arm, ab_window, dispatch_id, PROJECT)
+    assert order[0][1] == ["intelligence_arm_assigned"]  # ledger line precedes the SQLite event
+    [line] = _ledger(state, dispatch_id)
+    assert line["project_id"] == PROJECT and line["extra"] == {"ab_arm": arm, "ab_window": ab_window}
+
+
+def test_no_window_event_carries_no_arm_and_writes_no_ledger_line(env, state, monkeypatch):
+    monkeypatch.delenv("VNX_INTEL_AB_TEST")
+    dispatch_id = "dlv-path-nowindow"
+    assert _fetch(state, dispatch_id) != ""
+    [(_, _, meta)] = _events(state, dispatch_id)
+    assert "ab_arm" not in meta and "ab_window" not in meta
+    assert _ledger(state, dispatch_id) == []
+
+
+@pytest.mark.parametrize("arm,expect_section", [("control", False), ("treatment", True)])
+def test_emit_event_raising_writes_no_row_but_the_dispatch_proceeds(env, state, monkeypatch, arm, expect_section):
+    def boom(self, result, coord_state_dir=None):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sel.IntelligenceSelector, "emit_event", boom)
+    dispatch_id = _id_for(arm)
+    assert (_fetch(state, dispatch_id) != "") is expect_section
+    assert _injections_columnless(state) == []
+
+
+def test_the_ledger_write_failing_writes_no_row(env, state, monkeypatch):
+    import dispatch_register
+    monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
     assert _fetch(state, _id_for("treatment")) != ""
-    assert len(_injections_columnless(state)) == 1
+    assert _injections_columnless(state) == []
 
 
 def _injections_columnless(state: Path):

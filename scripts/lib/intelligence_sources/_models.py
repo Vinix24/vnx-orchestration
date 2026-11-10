@@ -68,6 +68,7 @@ class InjectionResult:
     # None = "not assigned": a row without an arm must never read as treatment.
     ab_arm: Optional[str] = None
     ab_window: Optional[str] = None
+    project_id: Optional[str] = None
 
     @property
     def items_injected(self) -> int:
@@ -90,7 +91,7 @@ class InjectionResult:
         }
 
     def to_event_metadata(self) -> Dict[str, Any]:
-        return {
+        meta: Dict[str, Any] = {
             "injection_point": self.injection_point,
             "task_class": self.task_class,
             "items_injected": self.items_injected,
@@ -99,6 +100,14 @@ class InjectionResult:
             "payload_chars": self.payload_chars,
             "item_ids": [item.item_id for item in self.items],
         }
+        if self.ab_arm is not None:
+            meta.update(
+                ab_arm=self.ab_arm,
+                ab_window=self.ab_window,
+                dispatch_id=self.dispatch_id,
+                project_id=self.project_id,
+            )
+        return meta
 
 
 @dataclass
