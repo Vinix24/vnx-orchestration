@@ -28,9 +28,16 @@ class AdmissionInvalid(ValueError):
         self.exit_code = EXIT_INVALID
 
 
+class StateCorrupt(AdmissionInvalid):
+    """A defect of the state (a held lease, a counter), not of the record decided: never a refusal."""
+    def __init__(self):
+        super().__init__("state_corrupt")
+
+
 def _int(value, reason: str = "policy_invalid") -> int:
+    """``state_corrupt`` marks a read of the state here, so that reason raises ``StateCorrupt``."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise AdmissionInvalid(reason)
+        raise StateCorrupt() if reason == "state_corrupt" else AdmissionInvalid(reason)
     return value
 
 
@@ -42,14 +49,17 @@ def _children(holders: dict, lease_id: str) -> list[dict]:
     return [h for h in holders.values() if h["parent_lease"] == lease_id]
 
 
-def _children_granted(holders: dict, lease_id: str) -> int:
-    return sum(_int(c["slots_granted"], "state_corrupt") for c in _children(holders, lease_id))
+def _overflow(holders: dict, lease_id: str, extra: int) -> int:
+    """What ``extra`` more child slots do not fit in the grant of ``lease_id``."""
+    used = sum(_int(c["slots_granted"], "state_corrupt") for c in _children(holders, lease_id))
+    return max(0, used + extra - _int(holders[lease_id]["slots_granted"], "state_corrupt"))
 
 
-def _profile(policy: dict, name: str) -> dict:
-    profile = policy["profiles"].get(name)
+def _profile(policy: dict, name: str, held: bool = False) -> dict:
+    """The policy profile ``name``; unknown is ``policy_invalid``, or ``StateCorrupt`` for a ``held`` lease's."""
+    profile = policy["profiles"].get(name) if isinstance(name, str) else None
     if not isinstance(profile, dict):
-        raise AdmissionInvalid("policy_invalid")
+        raise StateCorrupt() if held else AdmissionInvalid("policy_invalid")
     return profile
 
 
@@ -99,7 +109,7 @@ def growth_plan(state: dict, lease_id: str, delta: int) -> list[tuple[str, int]]
     holders, plan, seen = state["holders"], [], set()
     while delta > 0:
         if lease_id in seen or lease_id not in holders:
-            raise AdmissionInvalid("state_corrupt")
+            raise StateCorrupt()
         seen.add(lease_id)
         lease = holders[lease_id]
         if _int(lease["slots_granted"], "state_corrupt") + delta > _int(lease["max_slots"], "state_corrupt"):
@@ -108,8 +118,7 @@ def growth_plan(state: dict, lease_id: str, delta: int) -> list[tuple[str, int]]
         parent = lease["parent_lease"]
         if parent is None:
             break
-        used = _children_granted(holders, parent)
-        delta, lease_id = max(0, used + delta - holders[parent]["slots_granted"]), parent
+        delta, lease_id = _overflow(holders, parent, delta), parent
     return plan
 
 
@@ -118,12 +127,11 @@ def nested_plan(state: dict, policy: dict, parent_lease: str, profile: str, slot
     parent = state["holders"].get(parent_lease)
     if parent is None:
         raise AdmissionInvalid("stale_token")
-    if profile not in _profile(policy, parent["profile"])["children"]:
+    if profile not in _profile(policy, parent["profile"], held=True)["children"]:
         raise AdmissionInvalid("profile_not_allowed_under_parent")
     if _int(slots, "over_profile_ceiling") > _int(_profile(policy, profile)["max_slots"]):
         raise AdmissionInvalid("over_profile_ceiling")
-    used = _children_granted(state["holders"], parent_lease)
-    shortfall = max(0, used + slots - parent["slots_granted"])
+    shortfall = _overflow(state["holders"], parent_lease, slots)
     return {"mode": "top_up" if shortfall else "nested", "shortfall": shortfall,
             "plan": growth_plan(state, parent_lease, shortfall)}
 
@@ -149,12 +157,12 @@ def _host_need(holders: dict, plan: list[tuple[str, int]]) -> int:
     return sum(d for lease_id, d in plan if holders[lease_id]["parent_lease"] is None)
 
 
-def _memory_reasons(policy: dict, rec: dict, memory: dict) -> list[str]:
-    """Heavy work needs a positive ``admit``; a missing or unknown verdict waits."""
-    if _profile(policy, rec["profile"]).get("heavy") is not True:
+def _memory_reasons(profile: dict, verdict) -> list[str]:
+    """Heavy work needs ``admit``. A verdict that is not a ``(str, list or tuple of str)`` pair counts as missing."""
+    if profile.get("heavy") is not True:
         return []
-    verdict = memory.get(rec["request_id"])
-    if verdict is None:
+    if not (isinstance(verdict, (tuple, list)) and len(verdict) == 2 and isinstance(verdict[0], str)
+            and isinstance(verdict[1], (tuple, list)) and all(isinstance(r, str) for r in verdict[1])):
         return ["memory_metric_unavailable"]
     return [] if verdict[0] == "admit" else list(verdict[1]) or ["memory_guard"]
 
@@ -205,6 +213,8 @@ def _front_harmed(work: dict, policy: dict, grown: dict) -> bool:
     front = min(news, key=lambda r: r["requested_at"])
     try:
         return _can_admit(work, policy, front, work["holders"]) and not _can_admit(work, policy, front, grown)
+    except StateCorrupt:
+        raise
     except AdmissionInvalid:
         return False  # unevaluable front is not harmed; _admit_new refuses it with its own reason
 
@@ -217,24 +227,36 @@ def _can_admit(work: dict, policy: dict, rec: dict, holders: dict) -> bool:
 
 
 def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
-    """Grant, refuse or hold one ``top_up`` or ``nested`` record. True once it leaves the queue."""
+    """Grant, refuse or hold one ``top_up`` or ``nested`` record. True once it leaves the queue.
+
+    1. A ``top_up`` grows a held lease with only a slot count: profile, memory class and ceiling are the
+       holder's, another ``profile`` is ``policy_invalid``; a ``nested`` record checks its own ``profile``.
+    2. A defect of the record (token, slots, profile, lease id) is a ``refused`` event; a defect of a
+       held lease is ``StateCorrupt`` and raises out of ``decide_round``, never a refusal.
+    3. A malformed memory verdict counts as missing: it waits, it never crashes."""
     now, out, liveness = ctx["now"], ctx["events"], ctx["liveness"]
     try:
         if rec["kind"] == "top_up":
-            _profile(policy, rec["profile"])
             if not check_token(work, rec["lease_id"], rec.get("token"))["ok"]:
                 raise AdmissionInvalid("stale_token")
+            name = work["holders"][rec["lease_id"]]["profile"]
+            profile = _profile(policy, name, held=True)
+            if rec.get("profile") not in (None, name):
+                raise AdmissionInvalid("policy_invalid")
             target, plan = rec["lease_id"], growth_plan(work, rec["lease_id"], _int(rec["slots"], "over_profile_ceiling"))
         else:
             _claim_lease_id(work, rec)
             target = rec["parent_lease"]
             plan = nested_plan(work, policy, target, rec["profile"], rec["slots"])["plan"]
+            profile = _profile(policy, rec["profile"])
+    except StateCorrupt:
+        raise
     except AdmissionInvalid as exc:
         _refuse(work, rec, exc.reason, now, out)
         return True
     grown = _grown(work["holders"], plan)
     need = _host_need(work["holders"], plan)
-    reasons = _memory_reasons(policy, rec, ctx["memory"])
+    reasons = _memory_reasons(profile, ctx["memory"].get(rec["request_id"]))
     if liveness.get(target) == GONE:
         reasons.append("owner_gone_tree_alive")
     if need > free_slots(work, policy):
@@ -281,8 +303,11 @@ def _top_up_order(work: dict, policy: dict, recs: list[dict]) -> list[dict]:
     sequence = safe_sequence(work, policy) or []
 
     def position(rec: dict) -> int:
-        lease_id = rec["lease_id"] if rec["kind"] == "top_up" else rec["parent_lease"]
+        lease_id, seen = rec["lease_id"] if rec["kind"] == "top_up" else rec["parent_lease"], set()
         while lease_id in work["holders"] and work["holders"][lease_id]["parent_lease"] is not None:
+            if lease_id in seen:
+                raise StateCorrupt()  # a parent cycle among held leases would never end this walk
+            seen.add(lease_id)
             lease_id = work["holders"][lease_id]["parent_lease"]
         return sequence.index(lease_id) if lease_id in sequence else len(sequence)
 
@@ -296,14 +321,14 @@ def _admit_new(work: dict, policy: dict, ctx: dict) -> list[dict]:
     for index, rec in enumerate(news):
         try:
             _claim_lease_id(work, rec)
-            ceiling = _int(_profile(policy, rec["profile"])["max_slots"])
-            if _int(rec["slots"], "over_profile_ceiling") > ceiling:
+            profile = _profile(policy, rec["profile"])
+            if _int(rec["slots"], "over_profile_ceiling") > _int(profile["max_slots"]):
                 raise AdmissionInvalid("over_profile_ceiling")
-        except AdmissionInvalid as exc:
+        except AdmissionInvalid as exc:  # every read above is of the record or the policy
             _refuse(work, rec, exc.reason, now, out)
             gone.append(rec)
             continue
-        reasons = _memory_reasons(policy, rec, ctx["memory"])
+        reasons = _memory_reasons(profile, ctx["memory"].get(rec["request_id"]))
         if free_slots(work, policy) < rec["slots"]:
             reasons.append("budget_full")
         elif not is_safe(work, policy) or not _can_admit(work, policy, rec, work["holders"]):
