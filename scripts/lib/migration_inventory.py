@@ -89,6 +89,9 @@ _MANUAL_TABLE_OVERRIDES: Dict[str, Tuple[str, ...]] = {
     # 0037's SQL file is comments only; apply_0037.py replaces the deliverables view over
     # dispatches again (a superseded base joined to its completed round), touching no row.
     "0037_deliverable_superseded.sql": ("dispatches",),
+    # 0038's down file is comments only; apply_0038.revert_migration drops the ab_arm and
+    # ab_window columns of intelligence_injections that apply_0038 added.
+    "0038_intelligence_injections_ab_arm_down.sql": ("intelligence_injections",),
 }
 
 _COMMENT_RE = re.compile(r"--.*?$", re.MULTILINE)

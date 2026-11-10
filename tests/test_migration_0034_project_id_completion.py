@@ -392,7 +392,8 @@ def test_execution_targets_rows_survive_with_the_store_id(make_store):
 def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
     """The ux_<table>_pid indexes and the upsert's per-project key are the only
     new objects of 0034 (0035 adds review_cap_verdicts and its two indexes, 0036
-    replaces the deliverables view); the table SQL and the rows stay as they were."""
+    replaces the deliverables view, 0038 adds two columns to intelligence_injections and
+    idx_injection_window_arm); the other table SQL and the rows stay as they were."""
     db = make_store("sales-copilot", "sales-copilot")
     schema_before = _schema(db)
     rows_before = {t: _rows_hash(db, t, ["*"]) for t in SEVEN}
@@ -406,10 +407,11 @@ def test_sales_copilot_shape_gains_only_ux_indexes(make_store):
     } | {
         ("table", "review_cap_verdicts"), ("index", "sqlite_autoindex_review_cap_verdicts_1"),
         ("index", "ux_review_cap_verdicts_one_verkleinen"),
+        ("index", "idx_injection_window_arm"),
     }
     assert set(schema_before) <= set(schema_after)
     for key, value in schema_before.items():
-        if key != ("view", "deliverables"):
+        if key not in {("view", "deliverables"), ("table", "intelligence_injections")}:
             assert schema_after[key] == value, key
     for table in SEVEN:
         assert schema_after[("table", table)][1] == schema_before[("table", table)][1]
