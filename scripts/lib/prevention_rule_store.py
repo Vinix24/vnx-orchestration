@@ -293,7 +293,7 @@ def decisions(state_dir: Path) -> List[Dict[str, Any]]:
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError) as exc:
         raise DecisionsUnreadable(f"{path}: unreadable ({exc})") from exc
-    return [_parse_record(path, n, ln) for n, ln in enumerate(text.splitlines(), 1) if ln.strip()]
+    return [_parse_record(path, n, ln) for n, ln in enumerate(text.split("\n"), 1) if ln.strip()]
 
 
 def _latest(records: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:

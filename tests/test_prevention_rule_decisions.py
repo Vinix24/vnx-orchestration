@@ -36,8 +36,8 @@ def _reject(state, ids, now=NOW):
 
 
 def _approve(state, ids, now=NOW, **kw):
-    kw = {"effect_criterion": CRITERION, "stop_condition": STOP, **kw}
-    return store.decide(state, ids, "approved", reason="r", decided_by="v", project_id=PID, now=now, **kw)
+    kw = {"effect_criterion": CRITERION, "stop_condition": STOP, "reason": "r", **kw}
+    return store.decide(state, ids, "approved", decided_by="v", project_id=PID, now=now, **kw)
 
 
 def _status(state, rid):
@@ -89,12 +89,9 @@ def test_approve_without_both_criteria_raises_and_writes_nothing(tmp_path, kw):
 def test_decide_validates_its_arguments(tmp_path):
     (rid,) = _queue(tmp_path, "p1")
     kw = dict(reason="r", decided_by="v", project_id=PID, now=NOW)
-    with pytest.raises(ValueError):
-        store.decide(tmp_path, [rid], "deactivated", **kw)
-    with pytest.raises(ValueError):
-        store.decide(tmp_path, [], "rejected", **kw)
-    with pytest.raises(ValueError):
-        store.decide(tmp_path, [rid], "rejected", **{**kw, "decided_by": None})
+    for ids, decision, over in (([rid], "deactivated", {}), ([], "rejected", {}), ([rid], "rejected", {"decided_by": None})):
+        with pytest.raises(ValueError):
+            store.decide(tmp_path, ids, decision, **{**kw, **over})
     assert store.decisions(tmp_path) == []
 
 
@@ -195,3 +192,11 @@ def test_only_the_store_forms_an_approval_or_bundle_string():
     offenders = [n for n in tracked if n.endswith(".py") and n not in skip
                  and pattern.search((REPO_ROOT / n).read_text(encoding="utf-8", errors="replace"))]
     assert offenders == []
+
+
+@pytest.mark.parametrize("sep", ["\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c"])
+def test_a_reason_with_a_unicode_line_separator_reads_back_byte_equal(tmp_path, sep):
+    (rid,) = _queue(tmp_path, "p1")
+    (record,) = _approve(tmp_path, [rid], reason=f"before{sep}after")
+    assert [r["reason"] for r in store.decisions(tmp_path)] == [f"before{sep}after"]
+    assert store.approved_decision(tmp_path, rid) == record
