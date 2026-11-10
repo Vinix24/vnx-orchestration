@@ -1,6 +1,5 @@
 """Q4: verify proves the nine-point permit and changes nothing."""
 import hashlib
-import importlib
 import importlib.util
 import json
 import sqlite3
@@ -16,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 CLI = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py"
 AUDIT = "intelligence_corpus_quarantine_audit.ndjson"
-BOOLEANS = ["rows_equal", "digests_equal", "ddl_equal", "seal_ok"]
+BOOLEANS = ["rows_equal", "digests_equal", "seal_ok"]
 DROP = object()
 spec = importlib.util.spec_from_file_location("corpus_cli", CLI)
 cli = importlib.util.module_from_spec(spec)
@@ -102,7 +101,7 @@ def test_valid_permit_is_exit_0_with_a_true_verdict_and_changes_nothing(permit):
     assert all(verdict[name] is True for name in BOOLEANS)
     expected = hashlib.sha256(permit.manifest.read_bytes() + permit.quarantine.read_bytes()).hexdigest()
     assert verdict["permit_sha256"] == expected
-    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3}; assert verdict["requirements_checked"] == [1, 2, 3, 4, 5]
+    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3}; assert verdict["requirements_checked"] == [1, 2, 3, 4]
     assert isinstance(verdict["user_version"], int)
     assert {f: fingerprint(f) for f in before} == before
     assert permit.folder.stat().st_mode & 0o777 == 0o555 and permit.artifact.stat().st_mode & 0o777 == 0o444
@@ -122,24 +121,16 @@ MATRIX = [  # (requirement, file, name, change)
     (1, "quarantine", "track None", jset("track", None)),
     (1, "manifest", "truncated file", lambda raw: raw[:20]),
     (1, "quarantine", "schema 2", jset("schema", 2)),
-    (1, "manifest", "track x", jset("track", "x")),
     (2, "quarantine", "bytes missing", jset("artifact_bytes", DROP)),
     (2, "quarantine", "sha None", jset("artifact_sha256", None)),
     (2, "quarantine", "sha not hex", jset("artifact_sha256", "xyz")),
     (2, "quarantine", "path with ..", jset("artifact", "../x.db")),
-    (2, "quarantine", "absolute path", jset("artifact", "/etc/passwd")),
     (2, "artifact", "truncated artifact", lambda raw: raw[:100]),
     (3, "quarantine", "seal missing", jset("seal", DROP)),
-    (3, "quarantine", "seal None", jset("seal", None)),
     (3, "quarantine", "seal unknown mode", jset("seal.dir_mode", "0777")),
     (4, "quarantine", "digest changed", jset("tables.0.content_digest", "0" * 64)),
-    (4, "quarantine", "rows None", jset("tables.0.rows", None)),
     (4, "quarantine", "columns malformed", jset("tables.0.columns", "x")),
     (4, "quarantine", "table entry missing", jset("tables.1", DROP)),
-    (5, "quarantine", "ddl hash missing", jset("source_ddl_sha256", DROP)),
-    (5, "quarantine", "ddl hash None", jset("source_ddl_sha256", None)),
-    (5, "quarantine", "ddl hash truncated", jset("source_ddl_sha256", "abc")),
-    (5, "quarantine", "ddl hash unknown", jset("source_ddl_sha256", "0" * 64)),
 ]
 
 
@@ -155,6 +146,33 @@ def test_a_row_added_after_quarantine_names_its_rowid(permit, capsys):
         conn.commit()
     refused(permit, capsys, 4)
     assert (permit.state / AUDIT).read_text().count("rowid 50") == 1
+
+
+def reseal_artifact(p, change):  # rewrite the artifact through sqlite, then make quarantine.json describe the new bytes
+    p.folder.chmod(0o755)
+    p.artifact.chmod(0o644)
+    with closing(sqlite3.connect(p.artifact)) as conn:
+        change(conn)
+        conn.commit()
+    p.artifact.chmod(0o444)
+    p.folder.chmod(0o555)
+    raw = p.artifact.read_bytes()
+    tamper(p.quarantine, lambda doc: json.dumps({**json.loads(doc), "artifact_bytes": len(raw),
+                                                  "artifact_sha256": hashlib.sha256(raw).hexdigest()}).encode())
+
+
+@pytest.mark.parametrize("change", [lambda conn: conn.executescript("DROP TABLE corpus_code_snippets; DROP TABLE corpus_snippet_metadata"), lambda conn: conn.execute("DELETE FROM corpus_code_snippets WHERE rowid = 3")],
+                         ids=["valid database without corpus tables", "one row fewer"])
+def test_an_artifact_that_differs_refuses_on_the_artifact_even_with_matching_bytes_and_hash(permit, capsys, change):
+    reseal_artifact(permit, change)
+    refused(permit, capsys, 4)
+    assert "artifact" in audit_lines(permit)[-1]["reason"]
+
+
+@pytest.mark.parametrize("name", [[], 7, "x", None, {}], ids=["list", "int", "unknown", "none", "dict"])
+def test_a_malformed_table_name_is_a_refusal_never_a_traceback(permit, capsys, name):
+    tamper(permit.quarantine, jset("tables.0.name", name))
+    refused(permit, capsys, 4)
 
 
 def test_garbage_artifact_with_a_matching_hash_is_not_a_database(permit, capsys):

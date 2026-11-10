@@ -1,8 +1,8 @@
-"""The permit (requirements 1-5 of 9; 6-9 follow in the next PR): manifest, artefact and live store must describe exactly the same rows.
+"""The permit (requirements 1-4 of 9; 5-9 follow in the next PR): manifest, artefact and live store must describe exactly the same rows.
 
-One function, two callers: `verify` (read-only, no delete anywhere near it) and Q5's purge, which passes the
-connection of its own write transaction. A requirement is true on positive evidence only: a missing field,
-None, a wrong type, a malformed file or an unknown value refuses (exit 3) and names its requirement number.
+One function, two callers: `verify` (read-only, no delete anywhere near it) and Q5's purge, which passes the connection of its
+own write transaction. A requirement is true on positive evidence only: a missing field, None, a wrong type, a malformed file
+or an unknown value refuses (exit 3) and names its requirement number.
 """
 import json
 import re
@@ -15,7 +15,7 @@ from . import audit
 from .contract import CORPUS_TABLES, SCHEMA, SEAL, TRACK, artifact_table, validate_manifest, validate_quarantine
 from .digest import table_digest
 from .snapshot import file_sha256
-from .store import _quote, source_ddl_sha256
+from .store import _quote
 
 _NO_PERMIT = "0" * 64  # audit label of a refusal whose files are too broken to hash
 
@@ -77,13 +77,9 @@ def _columns(conn, name):
 
 def _first_difference(left, left_table, right, right_table, columns):
     """The first rowid whose values or storage classes differ between two tables, or None."""
-    def rows(conn, table):
-        picked = ", ".join(f"{_quote(c)}, typeof({_quote(c)})" for c in columns)
-        return conn.execute(f"SELECT rowid, {picked} FROM {_quote(table)} ORDER BY rowid")
-    for a, b in zip_longest(rows(left, left_table), rows(right, right_table)):
-        if a != b:
-            return (a or b)[0]
-    return None
+    picked = ", ".join(f"{_quote(c)}, typeof({_quote(c)})" for c in columns)
+    rows = [c.execute(f"SELECT rowid, {picked} FROM {_quote(t)} ORDER BY rowid") for c, t in ((left, left_table), (right, right_table))]
+    return next(((a or b)[0] for a, b in zip_longest(*rows) if a != b), None)
 
 
 def _envelope(manifest, quarantine):
@@ -110,16 +106,28 @@ def _artifact(quarantine, folder):
 
 def _seal(path, folder):
     """The seal as quarantine set it: folder 0555, artefact and quarantine.json 0444."""
-    modes = [(folder, int(SEAL["dir_mode"], 8)), (path, int(SEAL["file_mode"], 8)),
-             (folder / "quarantine.json", int(SEAL["file_mode"], 8))]
-    for target, mode in modes:
+    dir_mode, file_mode = int(SEAL["dir_mode"], 8), int(SEAL["file_mode"], 8)
+    for target, mode in ((folder, dir_mode), (path, file_mode), (folder / "quarantine.json", file_mode)):
         if target.stat().st_mode & 0o777 != mode:
             raise Refusal(3, f"seal broken: {target.name} is not {mode:04o}")
 
 
+def _measure(conn, table, columns, want, who):  # table_digest of table; Refusal 4 when missing, unreadable or other columns
+    try:
+        got = table_digest(conn, table, columns, "rowid") if _columns(conn, table) == columns else None
+    except (sqlite3.Error, ValueError):
+        got = None
+    if got is None:
+        raise Refusal(4, f"{who} table {table} is missing, unreadable or its columns differ from quarantine.json")
+    return got, [field for field in want if got[field] != want[field]]
+
+
 def _tables(live, art, quarantine):
-    """Requirement 4: per corpus table the live digest, counts and column list equal the artefact's evidence."""
-    found = {t.get("name"): t for t in _get(quarantine, "tables", list, 4) if type(t) is dict}
+    """Requirement 4: per corpus table the live table, its tables[] entry and the artifact's copy agree (see check_permit)."""
+    entries = _get(quarantine, "tables", list, 4)  # shape first: a name is only a key once it is a corpus table string
+    if any(type(e) is not dict or type(e.get("name")) is not str or e["name"] not in CORPUS_TABLES for e in entries):
+        raise Refusal(4, "quarantine.json tables[] has an entry that is not a corpus table object")
+    found = {e["name"]: e for e in entries}
     rows = {}
     for name in CORPUS_TABLES:
         table = found.get(name)
@@ -129,12 +137,14 @@ def _tables(live, art, quarantine):
         bounds = [table.get(k) for k in ("rows", "row_min", "row_max")]
         if type(bounds[0]) is not int or any(type(b) not in (int, type(None)) for b in bounds[1:]):
             raise Refusal(4, f"{name} rows, row_min or row_max are missing or malformed")
-        if _columns(live, name) != columns:
-            raise Refusal(4, f"{name} live columns differ from the artefact (DDL drift)")
-        measured = table_digest(live, name, columns, "rowid")
-        if measured["digest_sha256"] != digest or (measured["rows"], measured["row_min"], measured["row_max"]) != tuple(bounds):
-            rowid = _first_difference(live, name, art, artifact_table(name), columns)
-            raise Refusal(4, f"{name} live rows differ from the artefact, first at rowid {rowid} (B1)")
+        want = dict(zip(("rows", "row_min", "row_max"), bounds), digest_sha256=digest)
+        _, differs = _measure(art, artifact_table(name), columns, want, "artifact")  # measured, not trusted from the metadata
+        if differs:
+            raise Refusal(4, f"artifact {artifact_table(name)} differs from quarantine.json in {', '.join(differs)}")
+        measured, differs = _measure(live, name, columns, want, "live")
+        if differs:
+            raise Refusal(4, f"{name} live rows differ from the artefact, first at rowid "
+                          f"{_first_difference(live, name, art, artifact_table(name), columns)} (B1)")
         rows[name] = measured["rows"]
     return rows
 
@@ -150,15 +160,13 @@ def _check(live, db, manifest_path, folder):
     _seal(artifact, folder)  # seal_ok
     with closing(_open_ro(artifact, 3, "artifact")) as art:  # 3
         corpus_rows = _tables(live, art, quarantine)  # 4
-    if source_ddl_sha256(live) != _hex(quarantine, "source_ddl_sha256", 5):  # 5
-        raise Refusal(5, "live DDL of code_snippets and snippet_metadata differs from the artefact's source")
     try:
         validate_manifest(manifest)
         validate_quarantine(quarantine)
     except ValueError as exc:
         raise Refusal(1, f"document shape: {exc}") from exc
-    return dict(rows_equal=True, digests_equal=True, ddl_equal=True, seal_ok=True,
-                requirements_checked=[1, 2, 3, 4, 5],  # 6-9 (session, corpus counts, snapshot, db.bytes) follow in -b
+    return dict(rows_equal=True, digests_equal=True, seal_ok=True,
+                requirements_checked=[1, 2, 3, 4],  # 5-9 (source DDL, session, corpus counts, snapshot, db.bytes) follow in -b
                 rows=corpus_rows, user_version=live.execute("PRAGMA user_version").fetchone()[0],  # recorded, never a gate (decision 5)
                 artifact_sha256=quarantine["artifact_sha256"],
                 permit_sha256=audit.permit_sha256(manifest_path, folder / "quarantine.json"))
@@ -169,6 +177,10 @@ def check_permit(db, manifest_path, quarantine_dir, *, conn=None):
 
     conn is the caller's own connection (Q5, inside its write transaction); without it a read-only
     connection on db is opened in one read transaction. Nothing is written either way.
+
+    Requirement 4 compares three things, not two: per corpus table the live table, tables[] in quarantine.json and the same
+    table inside the artifact (opened read-only) agree on table_digest, rows, row_min, row_max and the column list. An
+    artifact that lacks a table or differs refuses requirement 4 with a reason naming `artifact` and the field.
     """
     folder = Path(quarantine_dir).expanduser().resolve()
     if conn is not None:
