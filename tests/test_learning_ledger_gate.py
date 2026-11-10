@@ -28,6 +28,7 @@ from test_k9_lifecycle_count import (  # noqa: E402,F401  (fixtures and real-wri
 
 NOW = _at(600)  # ten minutes after the START every start line carries
 REAL_SHA = append_lifecycle.writer_sha()
+VERDICT_FILE = "learning_ledger_verdict.json"
 DELETE = object()  # marks a key the wrapped building block drops
 
 def _verdict(state_dir, now=NOW, sweep=60, **kwargs) -> dict:
@@ -229,3 +230,45 @@ def test_an_initially_empty_ledger_with_an_append_is_never_ok(state_dir, lifecyc
     with patch.object(gate, "compute_lifecycle_count",
                       _append_once_after(gate.compute_lifecycle_count, state_dir, 1)):
         assert _verdict(state_dir)["status"] != "ok"
+
+def _good(state_dir) -> dict:
+    _ended(state_dir)
+    return _verdict(state_dir)
+
+def test_write_then_read_round_trips(state_dir, lifecycle_on):
+    verdict = _good(state_dir)
+
+    assert gate.write_verdict(state_dir, verdict) == state_dir / VERDICT_FILE
+    assert gate.read_verdict(state_dir, now=NOW + timedelta(hours=1)) == verdict
+    assert [p.name for p in state_dir.glob(VERDICT_FILE + "*")] == [VERDICT_FILE]  # no temp left
+
+@pytest.mark.parametrize("text", [None, "{not json", "[]", "", '"ok"'])  # None: no file at all
+def test_read_verdict_of_a_missing_or_corrupt_file_is_refused(state_dir, text):
+    if text is not None:
+        (state_dir / VERDICT_FILE).write_text(text, encoding="utf-8")
+
+    _refused(gate.read_verdict(state_dir, now=NOW), "verdict_unreadable")
+
+def test_read_verdict_of_a_stale_file_is_refused(state_dir, lifecycle_on):
+    gate.write_verdict(state_dir, _good(state_dir))
+    _refused(gate.read_verdict(state_dir, now=NOW + timedelta(hours=37)), "verdict_stale")
+    assert gate.read_verdict(state_dir, now=NOW + timedelta(hours=35))["status"] == "ok"
+
+@pytest.mark.parametrize("change", [
+    {"schema": "ledger_verdict/2"}, {"status": "fine"}, {"evaluated_at": "yesterday"},
+    {"counts": "none"}, {"reason_code": ""}, {"project_id": None}, {"extra": 1},
+    {"reason": DELETE}, {"status": []}, {"status": {}}, {"schema": []}, {"counts": "x"},
+])
+def test_read_verdict_of_a_wrong_shape_is_refused(state_dir, lifecycle_on, change):
+    verdict = {k: v for k, v in {**_good(state_dir), **change}.items() if v is not DELETE}
+    (state_dir / VERDICT_FILE).write_text(json.dumps(verdict), encoding="utf-8")
+
+    _refused(gate.read_verdict(state_dir, now=NOW), "verdict_unreadable")
+
+def test_read_verdict_of_a_future_dated_file_is_refused(state_dir, lifecycle_on):
+    gate.write_verdict(state_dir, _good(state_dir))
+    ahead = gate.read_verdict(state_dir, now=NOW - timedelta(hours=1))
+
+    _refused(ahead, "verdict_unreadable")
+    assert "evaluated_at lies in the future" in ahead["reason"]
+    assert gate.read_verdict(state_dir, now=NOW + timedelta(seconds=1))["status"] == "ok"

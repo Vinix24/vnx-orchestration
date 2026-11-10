@@ -4,15 +4,20 @@ A thin projection of ``compute_lifecycle_count`` and ``attempt_verdict`` (no sec
 Seven rules, top first, first hit wins; see ``_evaluate``. Fail closed: an unknown value, a
 missing field, an ``OSError`` or any exception from a building block gives ``refused`` with
 the reason, never ``ok`` and never a raise. A ``legacy`` dispatch is no evidence and never a
-reason to refuse. Storing and re-reading the verdict file is added in split 2.
+reason to refuse. The verdict file ``state/learning_ledger_verdict.json`` is part of the module:
+``write_verdict`` stores it atomically, ``read_verdict`` returns it or a ``refused`` dict
+(``verdict_unreadable`` for any defect incl. a future ``evaluated_at``, ``verdict_stale`` when
+older than 36h) and never raises.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from atomic_io import atomic_write_json
 from dispatch_lifecycle import _as_utc
 from ledger_attempt_state import (ATTEMPT_KINDS, KIND_DEAD_NO_END, KIND_ENDED, KIND_LEGACY,
                                   LEDGER_FILENAME, MODE_V3, attempt_verdict, read_ledger)
@@ -22,10 +27,13 @@ from receipt_outcome import noise_reason
 from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
 
 SCHEMA = "ledger_verdict/1"
+VERDICT_FILENAME = "learning_ledger_verdict.json"
 ACTIVATION_ENV = "VNX_LEDGER_ACTIVATION_COMMIT"
 STATUS_OK, STATUS_PENDING, STATUS_REFUSED = "ok", "pending", "refused"
+STATUSES = frozenset({STATUS_OK, STATUS_PENDING, STATUS_REFUSED})
 SWEEP_MAX_AGE_SECONDS = 600  # the sweep ticks every cycle: older means the processor stalled
 PENDING_MAX_AGE = timedelta(hours=24)
+VERDICT_MAX_AGE_HOURS = 36
 DEFECT_RULES = ("end_without_start", "double_end", "projection_conflict", "provenance_unknown")
 
 REASON_OK, REASON_PENDING = STATUS_OK, STATUS_PENDING
@@ -33,6 +41,7 @@ REASON_UNMEASURED, REASON_PROCESSOR_STALLED = "unmeasured", "processor_stalled"
 REASON_NOISE_IN_COHORT, REASON_EMPTY_COHORT = "noise_in_cohort", "empty_cohort"
 REASON_STALE_IN_FLIGHT, REASON_LEDGER_UNREADABLE = "stale_in_flight", "ledger_unreadable"
 REASON_INVALID_INPUT, REASON_EVALUATION_FAILED = "invalid_input", "evaluation_failed"
+REASON_VERDICT_UNREADABLE, REASON_VERDICT_STALE = "verdict_unreadable", "verdict_stale"
 
 _FIELDS = frozenset({"schema", "evaluated_at", "project_id", "cohort", "status", "reason_code",
                      "reason", "counts"})
@@ -189,3 +198,49 @@ def ledger_verdict(state_dir, project_id, *, activation_commit=None, now=None) -
     except Exception as exc:  # fail closed: a raising building block is a refusal with its reason
         return _verdict(evaluated, project, activation_commit or None, STATUS_REFUSED,
                         REASON_EVALUATION_FAILED, f"{type(exc).__name__}: {exc}")
+
+def _is_verdict(verdict: Any) -> bool:
+    """True only for an object with exactly the ``ledger_verdict/1`` fields and usable values."""
+    try:
+        return (isinstance(verdict, dict) and set(verdict) == _FIELDS
+                and isinstance(verdict["schema"], str) and verdict["schema"] == SCHEMA
+                and isinstance(verdict["status"], str) and verdict["status"] in STATUSES
+                and all(isinstance(verdict[n], str) and verdict[n].strip() for n in (
+                    "evaluated_at", "project_id", "cohort", "reason_code", "reason"))
+                and isinstance(verdict["counts"], dict) and _as_utc(verdict["evaluated_at"]))
+    except (ValueError, TypeError):  # a bad evaluated_at; the type checks above come first
+        return False
+
+def write_verdict(state_dir, verdict: Dict[str, Any]) -> Path:
+    """Write ``state/learning_ledger_verdict.json`` atomically; a write failure raises ``OSError``."""
+    path = Path(state_dir) / VERDICT_FILENAME
+    atomic_write_json(path, verdict)
+    return path
+
+def read_verdict(state_dir, *, now=None, max_age_hours=VERDICT_MAX_AGE_HOURS) -> Dict[str, Any]:
+    """The stored verdict, or a ``refused`` dict: ``verdict_unreadable`` for a missing, corrupt,
+    malformed or future-dated file, ``verdict_stale`` for one older than ``max_age_hours``.
+    Never raises."""
+    path = Path(state_dir) / VERDICT_FILENAME
+    try:
+        evaluated = _as_utc(now) or datetime.now(timezone.utc)
+        limit = timedelta(hours=max_age_hours)  # a non-number or NaN raises here, not later
+    except (ValueError, TypeError, OverflowError) as exc:
+        return _verdict(datetime.now(timezone.utc), None, None, STATUS_REFUSED,
+                        REASON_VERDICT_UNREADABLE, f"unusable read arguments: {exc}")
+
+    def refuse(code: str, reason: str) -> Dict[str, Any]:
+        return _verdict(evaluated, None, None, STATUS_REFUSED, code, f"{reason} ({path})")
+
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:  # decode and JSON errors are ValueErrors
+        return refuse(REASON_VERDICT_UNREADABLE, f"cannot read the verdict: {exc}")
+    if not _is_verdict(stored):
+        return refuse(REASON_VERDICT_UNREADABLE, "malformed verdict")
+    age = evaluated - _as_utc(stored["evaluated_at"])
+    if age < timedelta(0):  # producer and reader share a machine: no clock-skew allowance
+        return refuse(REASON_VERDICT_UNREADABLE, "evaluated_at lies in the future")
+    if age > limit:
+        return refuse(REASON_VERDICT_STALE, f"verdict is {age} old (limit {max_age_hours}h)")
+    return stored
