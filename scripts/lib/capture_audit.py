@@ -149,9 +149,12 @@ def _stamp(bin_name: str, rec: dict):
 
 
 def _is_new(stamp, window: Window) -> bool:
+    """A time is new when ``since <= stamp < until``, a date (a nugget) when ``since.date() <= day <
+    until.date()``: half-open on days too, so a chain counts every day in exactly one window. The cost:
+    a nugget dated today is counted by the first window whose ``until`` is a later day, not one ending today."""
     if isinstance(stamp, datetime):
         return window.since <= stamp < window.until
-    return window.since.date() <= stamp <= window.until.date()
+    return window.since.date() <= stamp < window.until.date()
 
 
 def _classify(raw: dict, window: Window):
@@ -182,11 +185,12 @@ def _pair_entry(pair: Pair, project_id: str, new_keys: dict, dismissed: FrozenSe
 
 def audit_model(raw: Dict[str, tuple], window: Window, *, project_id: str,
                 dismissed_ids: FrozenSet[str]) -> dict:
-    """The read model of one window. ``raw`` maps a bin to ``(records, state, extra)``
-    as the readers return it; a missing bin is ``absent``. A pair counts for the
-    window when one of its records is new in it (``open_pairs``); open pairs
-    without a new record are ``backlog_open_pairs``. ``anchors_total == 0`` makes
-    ``open_pairs`` null, and a bin that is not ``ok`` makes all three null."""
+    """The read model of one window. ``raw`` maps a bin to ``(records, state, extra_dict)``, already
+    normalized and not the reader output (``read_memory_notes`` is a 2-tuple, ``read_open_items`` and
+    ``read_bucket_entries`` a 3-tuple ending in an int foreign count); ``build_audit`` (split 2)
+    normalizes them. A missing bin is ``absent``. A pair counts for the window when one of its records
+    is new in it (``open_pairs``); open pairs without a new record are ``backlog_open_pairs``.
+    ``anchors_total == 0`` makes ``open_pairs`` null, and a bin that is not ``ok`` makes all three null."""
     bins, records, new_keys = _classify(raw, window)
     pairs = find_pairs(records[OI], records[MEM], records[NUG], project_id=project_id)
     entries = [_pair_entry(p, project_id, new_keys, dismissed_ids) for p in pairs]

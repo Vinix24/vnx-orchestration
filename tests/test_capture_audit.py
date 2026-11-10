@@ -23,6 +23,7 @@ import capture_sources as cs
 
 SINCE, UNTIL = "2026-11-09T12:00:00Z", "2026-11-10T12:00:00Z"
 NOW = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
+WINDOW = ca.parse_window(SINCE, UNTIL, chain_until=None, now=NOW)
 NEW, OLD = "2026-11-10T08:00:00+00:00", "2026-10-01T08:00:00+00:00"
 OI_TITLE = "merge lock blijft achter na afgebroken lus"
 NOTE_DESC = "afgebroken merge lus laat lock achter"
@@ -80,8 +81,7 @@ def _raw(d):
             ca.NUG: (entries, cs.state_of(nug_state), {})}
 
 
-def _model(d, dismissed=frozenset(), project="proj-a"):
-    window = ca.parse_window(SINCE, UNTIL, chain_until=None, now=NOW)
+def _model(d, dismissed=frozenset(), project="proj-a", window=WINDOW):
     return ca.audit_model(_raw(d), window, project_id=project, dismissed_ids=dismissed)
 
 
@@ -164,12 +164,16 @@ def test_no_new_record_is_an_empty_measurement_not_zero(env):
     assert (model["anchors_total"], model["open_pairs"], model["backlog_open_pairs"]) == (0, None, 1)
 
 
-@pytest.mark.parametrize("oi_at,day,anchors", [  # since is inside, until outside; nugget days both inside
-    (SINCE, "2026-11-09", 2), (UNTIL, "2026-11-10", 1), (OLD, "2026-11-08", 0), (OLD, "2026-11-11", 0)])
-def test_window_borders(env, oi_at, day, anchors):
+@pytest.mark.parametrize("oi_at,day,new", [  # chain [SINCE, UNTIL) [UNTIL, UNTIL+1d); (oi, nugget) new per window
+    (SINCE, "2026-11-09", ((1, 1), (0, 0))),  # the first window's since day
+    (UNTIL, "2026-11-10", ((0, 0), (1, 1))),  # the boundary falls mid-day on D: one window, never both
+    ("2026-11-11T12:00:00Z", "2026-11-11", ((0, 0), (0, 0))),  # the last window's until day: a later window
+    (OLD, "2026-11-08", ((0, 0), (0, 0)))])
+def test_window_borders_count_once_in_a_chain(env, oi_at, day, new):
     _items(env, ("OI-1", "los", oi_at))
     _nugget(env, day, "los")
-    assert _model(env)["anchors_total"] == anchors
+    chain = (WINDOW, ca.parse_window(None, None, chain_until=NOW, now=NOW + timedelta(days=1)))
+    assert tuple(tuple(_model(env, window=w)["bins"][b]["new"] for b in (ca.OI, ca.NUG)) for w in chain) == new
 
 
 @pytest.mark.parametrize("oi_extra,note_body,nug_body,expected", [
@@ -218,8 +222,7 @@ def test_one_bin_not_ok_makes_the_counts_null(env, breakage):
         del raw[ca.NUG]
     elif breakage == "unknown_state":
         raw[ca.NUG] = (raw[ca.NUG][0], "OK", {})
-    window = ca.parse_window(SINCE, UNTIL, chain_until=None, now=NOW)
-    model = ca.audit_model(raw, window, project_id="proj-a", dismissed_ids=frozenset())
+    model = ca.audit_model(raw, WINDOW, project_id="proj-a", dismissed_ids=frozenset())
     assert (model["anchors_total"], model["open_pairs"], model["backlog_open_pairs"]) == (None, None, None)
     assert any(row["state"] != "ok" and row["new"] is None for row in model["bins"].values())
 
