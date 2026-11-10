@@ -51,14 +51,12 @@ def _session_digest(conn, session):
 def _session_whole(conn, session):
     """Digest over every session_analytics row (no id bound), with count and sum(id): inside the purge's own lock any change is its own doing."""
     found = table_digest(conn, "session_analytics", session["columns"], "id")
-    total = conn.execute("SELECT coalesce(sum(id), 0) FROM session_analytics").fetchone()[0]
-    return found["digest_sha256"], found["rows"], total
+    return found["digest_sha256"], found["rows"], conn.execute("SELECT coalesce(sum(id), 0) FROM session_analytics").fetchone()[0]
 
 
 def _session_change(before, after):
-    kind = "rows added" if after[1] > before[1] else "rows removed" if after[1] < before[1] else "rows changed"
-    return (f"session_analytics changed inside the delete transaction (digest B != digest A): {kind}, "
-            f"count {before[1]} -> {after[1]}, sum(id) {before[2]} -> {after[2]}")
+    kind = ("rows added", "rows removed")[after[1] < before[1]] if after[1] != before[1] else "rows changed"
+    return f"session_analytics changed inside the delete transaction (digest B != digest A): {kind}, count {before[1]} -> {after[1]}, sum(id) {before[2]} -> {after[2]}"
 
 
 def _deleted_ok(state, permit):

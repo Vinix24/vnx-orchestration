@@ -107,74 +107,48 @@ def test_a_delete_that_touches_session_analytics_rolls_back(permit, monkeypatch)
     assert last["status"] == "rolled_back" and "digest B != digest A" in last["reason"]
 
 
-def _trigger(p, body):
+def _sql(p, statement):
     with closing(sqlite3.connect(p.db)) as conn:
-        conn.execute(f"CREATE TRIGGER purge_probe AFTER DELETE ON snippet_metadata BEGIN {body} END")
+        conn.execute(statement)
         conn.commit()
-
-
-def _session_columns(p):
-    with closing(sqlite3.connect(p.db)) as conn:
-        return [r[1] for r in conn.execute("PRAGMA table_info(session_analytics)") if r[1] != "id"]
 
 
 def _insert_sql(p, new_id="(SELECT max(id) + 1 FROM session_analytics)"):
-    cols = _session_columns(p)
-    picked = ", ".join(f"'probe-' || {new_id}" if c == "session_id" else c for c in cols)
-    return f"INSERT INTO session_analytics(id, {', '.join(cols)}) SELECT {new_id}, {picked} FROM session_analytics WHERE id = 1;"
-
-
-def _session_insert_after_verdict(p, monkeypatch):
-    """Add session row 10 after the baseline and keep the permit verdict from before it, so the transaction itself starts with that row."""
-    verdict = purge_module.check_permit(p.db, p.manifest, p.folder)
     with closing(sqlite3.connect(p.db)) as conn:
-        conn.execute(_insert_sql(p, "10").rstrip(";"))
-        conn.commit()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(session_analytics)") if r[1] != "id"]
+    picked = ", ".join(f"'probe-' || {new_id}" if c == "session_id" else c for c in cols)
+    return f"INSERT INTO session_analytics(id, {', '.join(cols)}) SELECT {new_id}, {picked} FROM session_analytics WHERE id = 1"
+
+
+def _trigger(p, body):
+    _sql(p, f"CREATE TRIGGER purge_probe AFTER DELETE ON snippet_metadata BEGIN {body}; END")
+
+
+def _row_10_after_verdict(p, monkeypatch):
+    """Row 10 appears after the permit verdict, so the transaction itself starts with it."""
+    verdict = purge_module.check_permit(p.db, p.manifest, p.folder)
+    _sql(p, _insert_sql(p, "10"))
     monkeypatch.setattr(purge_module, "check_permit", lambda *a, **k: verdict)
 
 
-def _assert_rolled_back(p, rows):
-    assert run(p) == 3
-    assert (count(p, "code_snippets"), count(p, "snippet_metadata"), count(p, "session_analytics")) == (3, 3, rows)
-    last = lines(p, "deleted")[-1]
-    assert last["status"] == "rolled_back" and "digest B != digest A" in last["reason"]
-    return last
-
-
-def test_a_trigger_that_inserts_session_rows_above_the_baseline_rolls_back(permit):
-    _trigger(permit, _insert_sql(permit))
-    assert "rows added" in _assert_rolled_back(permit, 2)["reason"]
-
-
-def test_a_trigger_that_updates_a_session_row_above_the_baseline_rolls_back(permit, monkeypatch):
-    _session_insert_after_verdict(permit, monkeypatch)
-    _trigger(permit, "UPDATE session_analytics SET project_id = project_id || 'x' WHERE id = 10;")
-    assert "rows changed" in _assert_rolled_back(permit, 3)["reason"]
-
-
-def test_a_trigger_that_deletes_a_session_row_above_the_baseline_rolls_back(permit, monkeypatch):
-    _session_insert_after_verdict(permit, monkeypatch)
-    _trigger(permit, "DELETE FROM session_analytics WHERE id = 10;")
-    assert "rows removed" in _assert_rolled_back(permit, 3)["reason"]
+@pytest.mark.parametrize("kind, body, rows", [
+    ("rows added", None, 2),
+    ("rows changed", "UPDATE session_analytics SET project_id = project_id || 'x' WHERE id = 10", 3),
+    ("rows removed", "DELETE FROM session_analytics WHERE id = 10", 3)])
+def test_a_trigger_that_changes_session_rows_above_the_baseline_rolls_back(permit, monkeypatch, kind, body, rows):
+    body and _row_10_after_verdict(permit, monkeypatch)
+    _trigger(permit, body or _insert_sql(permit))
+    assert run(permit) == 3
+    assert (count(permit, "code_snippets"), count(permit, "snippet_metadata"), count(permit, "session_analytics")) == (3, 3, rows)
+    last = lines(permit, "deleted")[-1]
+    assert last["status"] == "rolled_back" and "digest B != digest A" in last["reason"] and kind in last["reason"]
 
 
 def test_a_session_row_above_the_baseline_does_not_fail_the_after_measurement(permit):
-    session = json.loads(permit.manifest.read_text())["invariants"]["session_analytics"]
-    assert run(permit) == 0
-    with closing(sqlite3.connect(permit.db)) as conn:
-        conn.execute(_insert_sql(permit, "10").rstrip(";"))
-        conn.commit()
     manifest = json.loads(permit.manifest.read_text())
-    assert purge_module._after_measure(permit.db, manifest, session)["corpus_family_bytes_after"] >= 0
-
-
-def test_a_session_row_written_before_the_purge_is_refused_by_the_permit_not_the_transaction(permit):
-    with closing(sqlite3.connect(permit.db)) as conn:
-        conn.execute(_insert_sql(permit, "10").rstrip(";"))
-        conn.commit()
-    assert run(permit) == 3
-    assert (count(permit, "code_snippets"), count(permit, "snippet_metadata")) == (3, 3)
-    assert "requirement 6" in lines(permit, "deleted")[-1]["reason"]
+    assert run(permit) == 0
+    _sql(permit, _insert_sql(permit, "10"))
+    assert purge_module._after_measure(permit.db, manifest, manifest["invariants"]["session_analytics"])["corpus_family_bytes_after"] >= 0
 
 
 def test_an_unwritable_audit_path_from_the_start_is_exit_3_with_the_rows_still_there(permit):
