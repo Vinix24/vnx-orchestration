@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ._common import IntelligenceItem, SuppressionRecord
 
@@ -65,7 +65,7 @@ class InjectionResult:
     suppressed: List[SuppressionRecord]
     task_class: str
     dispatch_id: str
-    ab_arm: str = "treatment"
+    ab_arm: Optional[str] = "treatment"
 
     @property
     def items_injected(self) -> int:

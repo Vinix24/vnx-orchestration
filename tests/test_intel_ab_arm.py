@@ -191,3 +191,77 @@ def test_resolve_arm_uses_hash_in_window(monkeypatch):
     expected = sel.arm_for_dispatch("dlv-x", "p1", WINDOW)[0]
     assert sel._resolve_arm("dlv-x") == expected
     assert sel._resolve_arm("") is None
+
+
+# --- an unassigned dispatch is never recorded as treatment (round 2) ---------
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """Patch only the selection and the two audit writers; the arm wiring runs for real."""
+    from intelligence_sources._models import InjectionResult
+
+    audit = []
+
+    def fake_select(self, **kwargs):
+        return InjectionResult(
+            injection_point="dispatch_create",
+            injected_at="2026-11-10T00:00:00Z",
+            items=[],
+            suppressed=[],
+            task_class="coding",
+            dispatch_id=kwargs.get("dispatch_id", ""),
+        )
+
+    monkeypatch.setattr(sel.IntelligenceSelector, "select", fake_select)
+    monkeypatch.setattr(sel.IntelligenceSelector, "emit_event", lambda self, r, **kw: audit.append(("event", r.ab_arm)))
+    monkeypatch.setattr(sel.IntelligenceSelector, "record_injection", lambda self, r, **kw: audit.append(("record", r.ab_arm)))
+    return audit
+
+
+def _run_both(tmp_path):
+    direct = sel.select_intelligence("dlv-x", "dispatch_create", quality_db_path=tmp_path / "q.db", coord_state_dir=tmp_path)
+    ctx = sel.build_intelligence_context(dispatch_id="dlv-x", role="backend-developer", quality_db_path=tmp_path / "q.db", coord_state_dir=tmp_path)
+    return direct, ctx.result
+
+
+@pytest.mark.parametrize("window_env", [None, "not-json", json.dumps({**WINDOW, "control_fraction": 7})])
+def test_disabled_or_invalid_window_records_no_arm(monkeypatch, tmp_path, captured, window_env):
+    monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
+    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
+    if window_env is None:
+        monkeypatch.delenv("VNX_INTEL_AB_WINDOW", raising=False)
+    else:
+        monkeypatch.setenv("VNX_INTEL_AB_WINDOW", window_env)
+    direct, ctx = _run_both(tmp_path)
+    assert direct.ab_arm is None
+    assert ctx.ab_arm is None
+    assert captured and all(arm is None for _, arm in captured)
+
+
+def test_flag_off_records_no_arm(monkeypatch, tmp_path, captured):
+    monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
+    monkeypatch.delenv("VNX_INTEL_AB_TEST", raising=False)
+    monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
+    direct, ctx = _run_both(tmp_path)
+    assert direct.ab_arm is None and ctx.ab_arm is None
+    assert captured and all(arm is None for _, arm in captured)
+
+
+def test_assignment_returning_none_records_no_arm(monkeypatch, tmp_path, captured):
+    monkeypatch.setattr(sel, "_resolve_arm", lambda dispatch_id: None)
+    direct, ctx = _run_both(tmp_path)
+    assert direct.ab_arm is None and ctx.ab_arm is None
+    assert captured and all(arm is None for _, arm in captured)
+
+
+def test_valid_window_records_assigned_arm(monkeypatch, tmp_path, captured):
+    monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
+    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
+    monkeypatch.setenv("VNX_PROJECT_ID", "p1")
+    monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
+    expected = sel.arm_for_dispatch("dlv-x", "p1", WINDOW)[0]
+    assert expected in ("treatment", "control")
+    direct, ctx = _run_both(tmp_path)
+    assert direct.ab_arm == expected and ctx.ab_arm == expected
+    assert captured and all(arm == expected for _, arm in captured)

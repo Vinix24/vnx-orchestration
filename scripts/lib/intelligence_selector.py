@@ -913,8 +913,7 @@ def select_intelligence(
             dispatch_paths=dispatch_paths,
             instruction_text=instruction_text,
         )
-        if ab_arm == "treatment":
-            result.ab_arm = "treatment"
+        result.ab_arm = ab_arm  # None stays None: the "treatment" default must not stand
         selector.emit_event(result)
         selector.record_injection(result)
         return result
@@ -983,8 +982,8 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
             _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (placebo)")
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
-        if ab_arm == "treatment":
-            result.ab_arm = "treatment"
+        # Same explicit assignment as the selector path: None stays None.
+        result.ab_arm = ab_arm
         _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir)
         return IntelligenceContext(result=result, dispatch_id=dispatch_id)
     finally:
