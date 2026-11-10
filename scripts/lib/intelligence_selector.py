@@ -124,36 +124,50 @@ def _ab_test_enabled() -> bool:
         return False
 
 
-def arm_for_dispatch(
-    dispatch_id: object, project_id: object, window: Optional[Dict[str, object]]
-) -> "tuple[Optional[str], Optional[str]]":
-    """Return ``(arm, ab_window)``: a pure function of window, project and dispatch.
+def _frozen_window(window: object) -> Optional[Dict[str, object]]:
+    return load_window_config(json.dumps(window)) if isinstance(window, dict) else None
+
+
+def derive_arm(window: object, project_id: object, dispatch_id: object) -> Optional[str]:
+    """The arm of one dispatch under a frozen window: no flag, no environment, no I/O.
 
     ``sha256(window_id:salt:project_id:dispatch_id)``, the first 8 hex chars as an
     integer over 2**32; below ``control_fraction`` is ``control``, else
-    ``treatment``. ``ab_window`` is ``<window_id>:<config_sha>`` with
-    ``config_sha`` the first 16 hex chars of sha256 over the canonical JSON.
+    ``treatment``. ``None`` when the window is missing or invalid or an id is
+    empty. The cohort re-derives every stored arm through this (decision 14), so
+    closing the window with ``VNX_INTEL_AB_TEST=0`` (decision 12) keeps it countable.
+    """
+    cfg = _frozen_window(window)
+    if cfg is None or not all(isinstance(i, str) and i.strip() for i in (dispatch_id, project_id)):
+        return None
+    digest = hashlib.sha256(
+        f"{cfg['window_id']}:{cfg['salt']}:{project_id}:{dispatch_id}".encode("utf-8")
+    ).hexdigest()
+    return "control" if int(digest[:8], 16) / 2**32 < cfg["control_fraction"] else "treatment"
+
+
+def window_stamp(window: object) -> Optional[str]:
+    """``<window_id>:<config_sha>``, ``config_sha`` the first 16 hex chars of
+    sha256 over the canonical JSON; ``None`` for an invalid window. Pure."""
+    cfg = _frozen_window(window)
+    if cfg is None:
+        return None
+    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+    return f"{cfg['window_id']}:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
+
+
+def arm_for_dispatch(
+    dispatch_id: object, project_id: object, window: Optional[Dict[str, object]]
+) -> "tuple[Optional[str], Optional[str]]":
+    """Return ``(arm, ab_window)`` for the writer: ``derive_arm`` and ``window_stamp``.
+
     ``(None, None)`` when ``VNX_INTEL_AB_TEST`` is off, the window is missing or
     invalid, or the dispatch or project id is empty: never a silent treatment.
     """
     if not _ab_test_enabled():
         return None, None
-    if not isinstance(window, dict):
-        return None, None
-    cfg = load_window_config(json.dumps(window))
-    if cfg is None:
-        return None, None
-    for ident in (dispatch_id, project_id):
-        if not isinstance(ident, str) or not ident.strip():
-            return None, None
-    digest = hashlib.sha256(
-        f"{cfg['window_id']}:{cfg['salt']}:{project_id}:{dispatch_id}".encode("utf-8")
-    ).hexdigest()
-    bucket = int(digest[:8], 16) / 2**32
-    arm = "control" if bucket < cfg["control_fraction"] else "treatment"
-    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
-    config_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
-    return arm, f"{cfg['window_id']}:{config_sha}"
+    arm = derive_arm(window, project_id, dispatch_id)
+    return (arm, window_stamp(window)) if arm is not None else (None, None)
 
 
 def _resolve_arm(dispatch_id: object) -> Optional[str]:
