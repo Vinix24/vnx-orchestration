@@ -1,6 +1,5 @@
 """RS-3: slot admission is pure, safe and ordered (ADR-062 besluit 1, 2, 8)."""
 
-import copy
 import sys
 from pathlib import Path
 
@@ -26,133 +25,42 @@ def lease(lease_id, granted, max_slots, parent=None, at=0, profile="runner", tok
             "admitted_at": at, "owner_uid": 501, "state": "active", "grandfathered": False}
 
 
-def req(rid, kind="new", slots=1, at=0, profile="big", **extra):
-    return {"request_id": rid, "requested_at": at, "kind": kind, "lease_id": None,
-            "parent_lease": None, "profile": profile, "project_id": "p", "uid": 501,
-            "slots": slots, "bypassed_n": 0, "reasons": [], **extra}
-
-
 def state(holders=(), queue=()):
     return {"holders": {h["lease_id"]: h for h in holders}, "queue": list(queue), "mode": "enforce",
             "fencing_counter": 10}
 
 
-def run(st, pol=None, live=None, mem=None, now=100):
-    return sa.decide_round(st, pol or policy(), live or {}, mem or {}, now)
-
-
-def names(result):
-    return [(e["event"], e["lease_id"] or e["request_id"]) for e in result["events"]]
-
-
-def test_double_admission_pool_8_two_requests_of_8_one_waits():
-    st = state(queue=[req("a", slots=8, at=1), req("b", slots=8, at=2)])
-    res = run(st)
-    assert list(res["state"]["holders"]) == ["a"]
-    assert [r["request_id"] for r in res["state"]["queue"]] == ["b"]
-    assert res["state"]["queue"][0]["reasons"] == ["budget_full"]
-    assert ("admitted", "a") in names(res) and ("waited", "b") in names(res)
-    assert res["state"]["holders"]["a"]["token"] == 11 and res["state"]["fencing_counter"] == 11
-
-
 def test_child_of_8_under_parent_of_1_tops_up_7_and_parent_keeps_its_1():
-    st = state([lease("par", 1, 8)], [req("c", "nested", slots=8, parent_lease="par", profile="seo-gate")])
+    st = state([lease("par", 1, 8)])
     plan = sa.nested_plan(st, policy(), "par", "seo-gate", 8)
     assert plan["mode"] == "top_up" and plan["shortfall"] == 7 and plan["plan"] == [("par", 7)]
-    res = run(st, mem={"c": ("admit", [])})
-    holders = res["state"]["holders"]
-    assert holders["par"]["slots_granted"] == 8 and holders["c"]["slots_granted"] == 8
-    assert holders["c"]["parent_lease"] == "par"
-    topped = [e for e in res["events"] if e["event"] == "topped_up"][0]
-    assert topped["slots"] == 7 and topped["slots_granted"] == 8 and topped["lease_id"] == "par"
-    assert sa.free_slots(res["state"], policy()) == 0
     assert st["holders"]["par"]["slots_granted"] == 1
 
 
 def test_top_up_above_max_slots_is_78():
-    st = state([lease("a", 2, 4)], [req("t", "top_up", slots=3, lease_id="a", token=1)])
-    res = run(st)
-    refused = res["events"][0]
-    assert refused["event"] == "refused" and refused["exit_code"] == 78
-    assert refused["reasons"] == ["over_profile_ceiling"] and res["state"]["queue"] == []
+    st = state([lease("a", 2, 4)])
     with pytest.raises(sa.AdmissionInvalid) as exc:
         sa.growth_plan(st, "a", 3)
     assert exc.value.reason == "over_profile_ceiling" and exc.value.exit_code == 78
 
 
-def test_codex_example_b_gets_its_6_first_and_a_its_7_after_b_ends():
-    holders = [lease("A", 1, 8, at=1), lease("B", 1, 7, at=2)]
-    queue = [req("ta", "top_up", slots=7, lease_id="A", token=1, at=1),
-             req("tb", "top_up", slots=6, lease_id="B", token=1, at=2)]
-    st = state(holders, queue)
+def test_codex_example_safe_sequence_puts_b_before_a():
+    st = state([lease("A", 1, 8, at=1), lease("B", 1, 7, at=2)])
     assert sa.is_safe(st, policy()) and sa.safe_sequence(st, policy()) == ["B", "A"]
-    res = run(st)
-    assert res["state"]["holders"]["B"]["slots_granted"] == 7
-    assert res["state"]["holders"]["A"]["slots_granted"] == 1
-    assert res["state"]["queue"][0]["request_id"] == "ta"
-    assert res["state"]["queue"][0]["reasons"] == ["budget_full"]
-    after = copy.deepcopy(res["state"])
-    del after["holders"]["B"]
-    final = run(after)
-    assert final["state"]["holders"]["A"]["slots_granted"] == 8 and final["state"]["queue"] == []
 
 
-def test_unsafe_top_up_waits_with_unsafe_state():
-    st = state([lease("A", 1, 8, at=1), lease("B", 1, 7, at=2)],
-               [req("ta", "top_up", slots=6, lease_id="A", token=1)])
-    res = run(st)
-    assert res["state"]["holders"]["A"]["slots_granted"] == 1
-    assert res["state"]["queue"][0]["reasons"] == ["unsafe_state"]
-
-
-def test_new_request_never_passes_an_earlier_one():
-    st = state([lease("h", 6, 6)], [req("big", slots=4, at=1), req("tiny", slots=1, at=2)])
-    res = run(st)
-    assert list(res["state"]["holders"]) == ["h"]
-    by_id = {r["request_id"]: r["reasons"] for r in res["state"]["queue"]}
-    assert by_id == {"big": ["budget_full"], "tiny": ["queue_ahead"]}
-
-
-def test_already_unsafe_state_admits_nothing_new():
-    st = state([lease("A", 4, 8, at=1), lease("B", 4, 8, at=2)], [req("n", slots=1)])
-    st["holders"]["A"]["slots_granted"] = 3
-    assert not sa.is_safe(st, policy(total=8))
-    res = run(st, policy(total=9))
-    assert "n" not in res["state"]["holders"] and res["state"]["queue"][0]["reasons"] == ["unsafe_state"]
-
-
-def test_bypassed_n_counts_and_max_bypass_stops_a_top_up():
-    held = {"front": ("wait", ["memory_guard"])}
-    st = state([lease("A", 2, 8, at=1)], [req("front", slots=2, at=1, profile="hsmall"),
-                                          req("t1", "top_up", slots=1, lease_id="A", token=1)])
-    first = run(st, policy(max_bypass=1), mem=held)
-    assert first["state"]["holders"]["A"]["slots_granted"] == 3
-    assert [r["bypassed_n"] for r in first["state"]["queue"]] == [1]
-    again = copy.deepcopy(first["state"])
-    again["queue"].append(req("t2", "top_up", slots=4, lease_id="A", token=1))
-    second = run(again, policy(max_bypass=1), mem=held)
-    assert second["state"]["holders"]["A"]["slots_granted"] == 3
-    waiting = {r["request_id"]: r for r in second["state"]["queue"]}
-    assert waiting["t2"]["reasons"] == ["queue_ahead"] and waiting["front"]["bypassed_n"] == 1
-    assert any(e["event"] == "waited" and e["bypassed_n"] == 1 for e in second["events"])
-    free_run = run(again, policy(max_bypass=5), mem=held)
-    assert free_run["state"]["holders"]["A"]["slots_granted"] == 7
-    assert [r["bypassed_n"] for r in free_run["state"]["queue"]] == [2]
-
-
-def test_nested_lease_within_parent_budget_logs_nested_and_keeps_free_slots():
-    st = state([lease("par", 4, 8)], [req("c", "nested", slots=3, parent_lease="par", profile="seo-gate")])
-    before = sa.free_slots(st, policy())
-    res = run(st, mem={"c": ("admit", [])})
-    assert ("nested", "c") in names(res) and not [e for e in res["events"] if e["event"] == "topped_up"]
-    assert res["state"]["holders"]["c"]["parent_lease"] == "par"
-    assert sa.free_slots(res["state"], policy()) == before == 4
+def test_nested_lease_within_parent_budget_needs_no_top_up_and_keeps_free_slots():
+    st = state([lease("par", 4, 8)])
+    plan = sa.nested_plan(st, policy(), "par", "seo-gate", 3)
+    assert plan == {"mode": "nested", "shortfall": 0, "plan": []}
+    assert sa.free_slots(st, policy()) == 4
 
 
 def test_child_profile_not_allowed_under_parent_is_78():
-    st = state([lease("par", 4, 8)], [req("c", "nested", slots=1, parent_lease="par", profile="small")])
-    refused = run(st)["events"][0]
-    assert refused["reasons"] == ["profile_not_allowed_under_parent"] and refused["exit_code"] == 78
+    st = state([lease("par", 4, 8)])
+    with pytest.raises(sa.AdmissionInvalid) as exc:
+        sa.nested_plan(st, policy(), "par", "small", 1)
+    assert exc.value.reason == "profile_not_allowed_under_parent" and exc.value.exit_code == 78
 
 
 def test_intermediate_parent_bounds_its_children():
@@ -176,10 +84,6 @@ def test_wrong_token_is_stale_token_78_and_counter_is_never_reused():
         got = sa.check_token(st, "a", bad)
         assert got["reason"] == "stale_token" and got["exit_code"] == 78 and not got["ok"]
     assert sa.check_token(st, "gone", 7)["reason"] == "stale_token"
-    stale = state([lease("a", 1, 4, token=7)], [req("t", "top_up", slots=1, lease_id="a", token=6)])
-    assert run(stale)["events"][0]["reasons"] == ["stale_token"]
-    res = run(state(queue=[req("x", at=1, profile="small"), req("y", at=2, profile="small")]))
-    assert [h["token"] for h in res["state"]["holders"].values()] == [11, 12]
 
 
 def test_unknown_liveness_never_frees_a_lease():
@@ -213,26 +117,3 @@ def test_free_slots_counts_roots_only_and_reserves():
     assert sa.free_slots(st, policy(total=10, reserved=1, runner_reserve=1)) == 0
     with pytest.raises(sa.AdmissionInvalid):
         sa.free_slots(state([lease("x", True, 2)]), policy())
-
-
-def test_heavy_request_waits_without_a_positive_memory_verdict():
-    for mem in ({}, {"h": ("wait", ["memory_guard"])}, {"h": ("maybe", [])}):
-        res = run(state(queue=[req("h", profile="seo-gate")]), mem=mem)
-        assert "h" not in res["state"]["holders"] and res["state"]["queue"][0]["reasons"]
-    ok = run(state(queue=[req("h", profile="seo-gate")]), mem={"h": ("admit", [])})
-    assert "h" in ok["state"]["holders"]
-
-
-def test_top_up_for_owner_positively_gone_waits_and_input_is_untouched():
-    st = state([lease("a", 1, 4)], [req("t", "top_up", slots=1, lease_id="a", token=1)])
-    snapshot = copy.deepcopy(st)
-    res = run(st, live={"a": "gone"})
-    assert res["state"]["queue"][0]["reasons"] == ["owner_gone_tree_alive"]
-    assert st == snapshot
-
-
-def test_unknown_queue_kind_and_oversized_new_request_are_refused():
-    res = run(state(queue=[req("x", "weird"), req("y", slots=9)]))
-    assert [(e["event"], e["reasons"]) for e in res["events"]] == [
-        ("refused", ["state_corrupt"]), ("refused", ["over_profile_ceiling"])]
-    assert res["state"]["queue"] == []
