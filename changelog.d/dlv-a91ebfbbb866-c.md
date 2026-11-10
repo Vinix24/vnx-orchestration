@@ -1,0 +1,1 @@
+- The repo doctor's dream check now delegates to `dream_liveness.assess()` (ADR-066): PASS only when the state is `ok` and no finding is measured, so a completed cycle with no output, or seven closed nights ending in `dream_cycle_failed` or `dream_cycle_timeout`, is a WARN carrying the finding ids (dream PR-2, split 3 of 3).
