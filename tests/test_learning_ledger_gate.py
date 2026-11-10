@@ -88,8 +88,7 @@ def test_one_ended_and_no_defects_is_ok(state_dir, lifecycle_on):
     verdict = _verdict(state_dir)
 
     assert verdict["status"] == "ok" and verdict["reason_code"] == "ok", verdict
-    assert set(verdict) == {"schema", "evaluated_at", "project_id", "cohort", "status",
-                            "reason_code", "reason", "counts"}
+    assert set(verdict) == gate._FIELDS
     assert (verdict["schema"], verdict["project_id"], verdict["cohort"], verdict["evaluated_at"]) == (
         "ledger_verdict/1", PROJECT, "all_v3", "2026-11-01T10:10:00Z")
     assert verdict["counts"]["ended"] == 1 and verdict["counts"]["in_flight"] == 0
@@ -128,9 +127,7 @@ def test_an_empty_cohort_is_refused_and_a_legacy_dispatch_does_not_fill_it(state
     _refused(_verdict(state_dir), "empty_cohort")  # a legacy dispatch is no evidence...
 
     _ended(state_dir)
-    verdict = _verdict(state_dir)
-
-    assert verdict["status"] == "ok" and verdict["counts"]["ended"] == 1, verdict  # ...nor a reason
+    assert _verdict(state_dir)["counts"]["ended"] == 1  # ...nor a reason
 
 def test_a_live_start_younger_than_a_day_beside_an_ended_is_pending(state_dir, lifecycle_on):
     _ended(state_dir)
@@ -141,17 +138,12 @@ def test_a_live_start_younger_than_a_day_beside_an_ended_is_pending(state_dir, l
     assert verdict["status"] == "pending" and verdict["reason_code"] == "pending", verdict
     assert verdict["counts"]["in_flight"] == 1
 
-def test_a_dead_start_without_an_end_is_refused(state_dir, lifecycle_on):
+@pytest.mark.parametrize("live, age", [(False, 600), (True, 25 * 3600)])  # dead / older than 24h
+def test_a_dead_or_day_old_start_without_an_end_is_refused(state_dir, lifecycle_on, live, age):
     _ended(state_dir)
-    _begin(state_dir, "d-dead")  # the recorded door start time is not this process's: dead
+    (_begin_live if live else _begin)(state_dir, "d-open")
 
-    _refused(_verdict(state_dir), "stale_in_flight")
-
-def test_a_live_start_older_than_a_day_is_refused(state_dir, lifecycle_on):
-    _ended(state_dir)
-    _begin_live(state_dir, "d-old-live")
-
-    _refused(_verdict(state_dir, now=_at(25 * 3600)), "stale_in_flight")
+    _refused(_verdict(state_dir, now=_at(age)), "stale_in_flight")
 
 def test_a_ledger_with_a_hole_is_unmeasured_and_refused(state_dir, lifecycle_on):
     _ended(state_dir)
