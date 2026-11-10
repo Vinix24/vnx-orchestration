@@ -160,3 +160,40 @@ def test_the_cli_prints_the_result_as_json(permit):
                              "--quarantine", str(permit.folder), "--state-dir", str(permit.state)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["rows_deleted"] == {"code_snippets_rows": 3, "snippet_metadata_rows": 3}
+
+
+def _empty_store_with_audit(p, *records):
+    with closing(sqlite3.connect(p.db)) as conn:
+        conn.executescript("DELETE FROM code_snippets; DELETE FROM snippet_metadata")
+    sha = hashlib.sha256(p.manifest.read_bytes() + p.quarantine.read_bytes()).hexdigest()
+    ok = json.dumps({"stage": "deleted", "status": "ok", "permit_sha256": sha})
+    (p.state / AUDIT).write_text("\n".join(r.replace("SHA", sha).replace("OK", ok) for r in records) + "\n", encoding="utf-8")
+    return sha
+
+
+def test_a_malformed_line_after_the_matching_line_refuses_the_resume(permit, capsys):
+    sha = _empty_store_with_audit(permit, "OK", '{"stage": "vacuumed", ')
+    with pytest.raises(ValueError, match="audit line 2"):
+        purge_module._deleted_ok(permit.state, sha)
+    capsys.readouterr()
+    assert run(permit) == 3
+    assert "audit line 2" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("bad", ['{"stage": "x", ', "[1]", ""], ids=["truncated", "not-object", "empty-middle"])
+def test_a_malformed_line_before_the_matching_line_refuses(permit, bad):
+    sha = _empty_store_with_audit(permit, bad, "OK")
+    with pytest.raises(ValueError, match="audit line 1"):
+        purge_module._deleted_ok(permit.state, sha)
+
+
+def test_a_valid_file_without_a_matching_line_refuses(permit):
+    sha = _empty_store_with_audit(permit, '{"stage": "deleted", "status": "intent", "permit_sha256": "SHA"}')
+    assert purge_module._deleted_ok(permit.state, sha) is False
+    assert run(permit) == 3
+
+
+def test_a_raw_u2028_inside_a_json_string_does_not_cut_the_line(permit):
+    sha = _empty_store_with_audit(permit, '{"stage": "note", "message": "a b\u0085c d"}', "OK")
+    assert purge_module._deleted_ok(permit.state, sha) is True
+    assert run(permit) == 0

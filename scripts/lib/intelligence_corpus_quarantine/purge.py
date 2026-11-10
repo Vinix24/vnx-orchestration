@@ -56,14 +56,19 @@ def _deleted_ok(state, permit):
         return False
     except OSError as exc:
         raise ValueError(f"audit file unreadable, resume refused: {exc}") from exc
-    for number, raw in enumerate(text.splitlines(), 1):
+    rows = text.split("\n")
+    if rows and rows[-1] == "":
+        rows.pop()
+    found = False
+    for number, raw in enumerate(rows, 1):
         try:
-            record = json.loads(raw) if raw.strip() else {}
+            record = json.loads(raw)
         except ValueError as exc:
             raise ValueError(f"audit line {number} is not JSON, resume refused") from exc
-        if type(record) is dict and (record.get("stage"), record.get("status"), record.get("permit_sha256")) == ("deleted", "ok", permit):
-            return True
-    return False
+        if type(record) is not dict:
+            raise ValueError(f"audit line {number} is not a JSON object, resume refused")
+        found = found or (record.get("stage"), record.get("status"), record.get("permit_sha256")) == ("deleted", "ok", permit)
+    return found
 
 
 def _prove_and_delete(conn, db, manifest_path, folder, session, permit, box):
