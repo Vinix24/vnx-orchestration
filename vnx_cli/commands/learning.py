@@ -147,6 +147,8 @@ def _cmd_review(args) -> int:
                     print(f"Pending prevention rules ({len(rules)}):")
                     for r in rules:
                         print(f"  [{r.get('id', '?')}] {r.get('pattern', '')[:80]}")
+                        print(f"    Terminal: {r.get('terminal_constraint') or 'any'}")
+                        print(f"    Agent: {r.get('agent_constraint') or 'alle'}")
                         print(f"    Prevention: {r.get('prevention', '')[:80]}")
                         print(f"    Confidence: {r.get('confidence', '?')}  "
                               f"Occurrences: {r.get('occurrence_count', '?')}")

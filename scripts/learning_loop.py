@@ -1137,6 +1137,7 @@ class LearningLoop:
 
             now = datetime.now().isoformat()
             ingested_count = 0
+            collapsed_count = 0
 
             for rule in approved:
                 tag_combo = rule.get("terminal_constraint", "any")
@@ -1144,22 +1145,29 @@ class LearningLoop:
                 recommendation = rule.get("prevention", "")[:500]
                 confidence = rule.get("confidence", 0.5)
 
-                # Check for duplicate
+                # Check for duplicate (dedupe key: description + tag_combination)
                 existing = self.conn.execute(
                     "SELECT id FROM prevention_rules WHERE description = ? AND tag_combination = ?",
                     (description, tag_combo),
                 ).fetchone()
 
-                if not existing:
-                    source_dispatch_id = rule.get("source_dispatch_id") or None
-                    self.conn.execute(
+                if existing:
+                    # B12: a collapse onto an existing row is visible, not silent.
+                    rule["ingest_result"] = "duplicate_of_existing_row"
+                    rule["ingest_row_id"] = existing[0]
+                    collapsed_count += 1
+                else:
+                    cur = self.conn.execute(
                         "INSERT INTO prevention_rules "
                         "(tag_combination, rule_type, description, recommendation, "
                         " confidence, created_at, triggered_count, source_dispatch_id) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         (tag_combo, "failure_prevention", description,
-                         recommendation, confidence, now, 0, source_dispatch_id),
+                         recommendation, confidence, now, 0,
+                         rule.get("source_dispatch_id") or None),
                     )
+                    rule["ingest_result"] = "inserted"
+                    rule["ingest_row_id"] = cur.lastrowid
                     ingested_count += 1
 
                 # Mark as ingested in JSON
@@ -1174,8 +1182,9 @@ class LearningLoop:
                 encoding="utf-8",
             )
 
-            if ingested_count:
-                print(f"✅ Ingested {ingested_count} approved prevention rules into DB")
+            if ingested_count or collapsed_count:
+                print(f"✅ Ingested {ingested_count} approved prevention rules into DB "
+                      f"({collapsed_count} collapsed onto an existing row)")
 
         except Exception as e:
             print(f"❌ Error ingesting approved rules: {e}")
