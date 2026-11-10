@@ -1,0 +1,231 @@
+"""D6 (self-learning-loop-reactivate): ``ledger_verdict/1`` on real ledgers (dlv-27fbb7f85633).
+
+The real writers fill a tmp_path state dir; the building blocks run for real and are only
+wrapped where a case needs a value they cannot produce (unknown status, missing field).
+"""
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import replace
+from datetime import timedelta
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+VNX_ROOT = Path(__file__).resolve().parents[1]
+for sub in ("scripts/lib", "scripts", "tests"):
+    sys.path.insert(0, str(VNX_ROOT / sub))
+
+import dispatch_start  # noqa: E402
+import learning_ledger_gate as gate  # noqa: E402
+from append_receipt_internals import lifecycle as append_lifecycle  # noqa: E402
+from test_k9_lifecycle_count import (  # noqa: E402,F401  (fixtures and real-writer helpers)
+    DEADLINE, PROJECT, ROLE, START, _append_raw, _at, _begin, _finish, _handover,
+    _hermetic_append, _insert_row, _ledger, _sweep_heartbeat, data_dir, lifecycle_on, state_dir,
+)
+
+NOW = _at(600)  # ten minutes after the START every start line carries
+REAL_SHA = append_lifecycle.writer_sha()
+DELETE = object()  # marks a key the wrapped building block drops
+
+def _verdict(state_dir, now=NOW, sweep=60, **kwargs) -> dict:
+    if sweep is not None:
+        _sweep_heartbeat(state_dir, now - timedelta(seconds=sweep))
+    return gate.ledger_verdict(state_dir, PROJECT, now=now, **kwargs)
+
+def _ended(state_dir, dispatch_id="d-ok") -> None:
+    _finish(state_dir, _begin(state_dir, dispatch_id))
+
+def _begin_live(state_dir, dispatch_id) -> None:
+    """A start line whose door is this very process: the real liveness reads live."""
+    spec = state_dir.parent / "dispatches" / "completed" / dispatch_id / "dispatch-spec.json"
+    spec.parent.mkdir(parents=True, exist_ok=True)
+    spec.write_text(json.dumps({"dispatch_id": dispatch_id, "deadline_seconds": DEADLINE}))
+    with patch.object(dispatch_start, "_now", lambda: START):
+        dispatch_start.begin(project_id=PROJECT, dispatch_id=dispatch_id, role=ROLE,
+                             base_sha="a" * 40, spec_file=spec, target_slot="T1",
+                             state_dir=state_dir)
+
+def _line(dispatch_id, event="dispatch_finished", version=3, **extra) -> dict:
+    return {"timestamp": START, "event_type": event, "schema_version": version,
+            "project_id": PROJECT, "dispatch_id": dispatch_id, "attempt": 1,
+            "end_state": "completed", "head_sha": "d" * 40, "writer_sha": REAL_SHA, **extra}
+
+def _refused(verdict, code) -> None:
+    assert verdict["status"] == "refused" and verdict["reason_code"] == code, verdict
+    assert verdict["reason"], verdict
+
+def _wrapped(**overrides):
+    real = gate.compute_lifecycle_count
+
+    def run(*args, **kwargs):
+        count = real(*args, **kwargs)
+        for key, value in overrides.items():
+            count.pop(key, None) if value is DELETE else count.__setitem__(key, value)
+        return count
+    return run
+
+def _defect_end_without_start(sd):
+    _finish(sd, _handover("d-ews"))
+
+def _defect_double_end(sd):
+    _append_raw(sd, _line("d-ok"))
+
+def _defect_projection_conflict(sd):
+    _insert_row(sd, "d-conf", state="expired")
+    _finish(sd, _begin(sd, "d-conf"))
+
+def _defect_provenance_unknown(sd):
+    _begin(sd, "d-prov")
+    _append_raw(sd, _line("d-prov", writer_sha="f" * 40))
+
+def test_one_ended_and_no_defects_is_ok(state_dir, lifecycle_on):
+    _ended(state_dir)
+
+    verdict = _verdict(state_dir)
+
+    assert verdict["status"] == "ok" and verdict["reason_code"] == "ok", verdict
+    assert set(verdict) == gate._FIELDS
+    assert (verdict["schema"], verdict["project_id"], verdict["cohort"], verdict["evaluated_at"]) == (
+        "ledger_verdict/1", PROJECT, "all_v3", "2026-11-01T10:10:00Z")
+    assert verdict["counts"]["ended"] == 1 and verdict["counts"]["in_flight"] == 0
+
+@pytest.mark.parametrize("defect", [
+    _defect_end_without_start, _defect_double_end, _defect_projection_conflict,
+    _defect_provenance_unknown])
+def test_each_defect_is_refused_under_its_own_name(state_dir, lifecycle_on, defect):
+    _ended(state_dir)
+    defect(state_dir)
+    verdict = _verdict(state_dir)
+
+    _refused(verdict, defect.__name__.removeprefix("_defect_"))
+    assert verdict["counts"][verdict["reason_code"]] == 1
+
+@pytest.mark.parametrize("sweep", [601, 86400, None])  # None: no heartbeat written at all
+def test_a_stalled_or_absent_sweep_is_refused(state_dir, lifecycle_on, sweep):
+    _ended(state_dir)
+    _refused(_verdict(state_dir, sweep=sweep), "processor_stalled")
+
+def test_pytest_noise_counts_only_among_the_v3_cohort(state_dir, lifecycle_on):
+    _ended(state_dir)
+    _append_raw(state_dir, _line("d-old", "task_complete", version=2, source="pytest"))
+    assert _verdict(state_dir)["status"] == "ok"  # a legacy-schema line is not the cohort
+
+    _append_raw(state_dir, _line("d-noise", "task_complete", source="pytest", status="failed"))
+
+    _refused(_verdict(state_dir), "noise_in_cohort")
+
+def test_an_empty_cohort_is_refused_and_a_legacy_dispatch_does_not_fill_it(state_dir, lifecycle_on):
+    _ledger(state_dir).write_text("", encoding="utf-8")
+    _refused(_verdict(state_dir), "empty_cohort")
+    _append_raw(state_dir, _line("d-legacy", "task_complete", version=2, status="success"))
+    _refused(_verdict(state_dir), "empty_cohort")  # a legacy dispatch is no evidence...
+
+    _ended(state_dir)
+    assert _verdict(state_dir)["counts"]["ended"] == 1  # ...nor a reason
+
+def test_a_live_start_younger_than_a_day_beside_an_ended_is_pending(state_dir, lifecycle_on):
+    _ended(state_dir)
+    _begin_live(state_dir, "d-live")
+    verdict = _verdict(state_dir)
+
+    assert verdict["status"] == "pending" and verdict["counts"]["in_flight"] == 1, verdict
+
+@pytest.mark.parametrize("live, age", [(False, 600), (True, 25 * 3600)])  # dead / older than 24h
+def test_a_dead_or_day_old_start_without_an_end_is_refused(state_dir, lifecycle_on, live, age):
+    _ended(state_dir)
+    (_begin_live if live else _begin)(state_dir, "d-open")
+
+    _refused(_verdict(state_dir, now=_at(age)), "stale_in_flight")
+
+def test_a_ledger_with_a_hole_is_unmeasured_and_refused(state_dir, lifecycle_on):
+    _ended(state_dir)
+    with _ledger(state_dir).open("a", encoding="utf-8") as fh:
+        fh.write("{this is not json}\n")
+    _append_raw(state_dir, _line("d-after-the-hole"))
+
+    _refused(_verdict(state_dir), "unmeasured")
+
+@pytest.mark.parametrize("overrides, code", [
+    ({"status": "mystery"}, "unmeasured"), ({"status": DELETE}, "unmeasured"),
+    ({"counts": DELETE}, "invalid_input"), ({"counts": {"double_end": 0}}, "invalid_input"),
+    ({"counts": dict.fromkeys(gate.DEFECTS, True)}, "invalid_input"),
+    *[({"sweep_heartbeat_age_seconds": v}, "processor_stalled")
+      for v in (DELETE, None, "5", True, -1, float("nan"))],
+])
+def test_an_unknown_missing_or_malformed_field_is_refused(state_dir, lifecycle_on, overrides, code):
+    _ended(state_dir)
+    with patch.object(gate, "compute_lifecycle_count", _wrapped(**overrides)):
+        _refused(_verdict(state_dir), code)
+
+def test_an_unexplained_start_without_an_end_is_refused(state_dir, lifecycle_on):
+    _ended(state_dir)
+    swe = {**dict.fromkeys(gate.DEFECTS, 0), "start_without_end": 1}
+    with patch.object(gate, "compute_lifecycle_count", _wrapped(counts=swe)):
+        _refused(_verdict(state_dir), "stale_in_flight")
+
+def test_an_unknown_attempt_kind_is_refused(state_dir, lifecycle_on):
+    _ended(state_dir)
+    real = gate.attempt_verdict
+    with patch.object(gate, "attempt_verdict",
+                      lambda *a, **k: replace(real(*a, **k), kind="mystery")):
+        _refused(_verdict(state_dir), "invalid_input")
+
+@pytest.mark.parametrize("target, error, code", [
+    ("read_ledger", OSError("boom"), "ledger_unreadable"),
+    ("attempt_verdict", RuntimeError("boom"), "evaluation_failed")])
+def test_an_error_from_a_building_block_is_refused_not_raised(state_dir, lifecycle_on, target,
+                                                              error, code):
+    _ended(state_dir)
+    with patch.object(gate, target, side_effect=error):
+        verdict = _verdict(state_dir)
+
+    _refused(verdict, code)
+    assert "boom" in verdict["reason"]
+
+@pytest.mark.parametrize("project, now", [("  ", NOW), (None, NOW), (PROJECT, "yesterday-ish")])
+def test_a_blank_project_or_an_unusable_clock_is_refused(state_dir, project, now):
+    _refused(gate.ledger_verdict(state_dir, project, now=now), "invalid_input")
+
+def test_the_activation_commit_defaults_to_the_environment(state_dir, lifecycle_on, monkeypatch):
+    _ended(state_dir)
+    monkeypatch.setenv("VNX_LEDGER_ACTIVATION_COMMIT", REAL_SHA)
+
+    assert (_verdict(state_dir)["cohort"], _verdict(state_dir)["status"]) == (REAL_SHA, "ok")
+
+def _append_once_after(real, state_dir, times):
+    """compute_lifecycle_count, then (``times`` calls only) a completed v3 line of unknown
+    provenance lands: the ledger changes between the defect count and the attempt read."""
+    calls = []
+
+    def run(*args, **kwargs):
+        count = real(*args, **kwargs)
+        if len(calls) < times:
+            _append_raw(state_dir, _line(f"d-race{len(calls)}", writer_sha="f" * 40))
+        calls.append(1)
+        return count
+    return run
+
+def test_a_ledger_that_keeps_changing_between_the_two_reads_is_refused(state_dir, lifecycle_on):
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 9)):
+        verdict = _verdict(state_dir)
+
+    _refused(verdict, "evaluation_failed")
+    assert "changed between the defect count and the attempt read" in verdict["reason"]
+
+def test_a_ledger_that_changes_once_and_then_holds_gives_the_normal_verdict(state_dir, lifecycle_on):
+    _ended(state_dir)
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 1)):
+        verdict = _verdict(state_dir)
+
+    _refused(verdict, "end_without_start")  # the retry sees the appended line in both reads
+
+def test_an_initially_empty_ledger_with_an_append_is_never_ok(state_dir, lifecycle_on):
+    _ledger(state_dir).write_text("", encoding="utf-8")
+    with patch.object(gate, "compute_lifecycle_count",
+                      _append_once_after(gate.compute_lifecycle_count, state_dir, 1)):
+        assert _verdict(state_dir)["status"] != "ok"
