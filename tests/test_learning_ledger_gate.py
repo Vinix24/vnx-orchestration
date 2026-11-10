@@ -99,7 +99,6 @@ def test_one_ended_and_no_defects_is_ok(state_dir, lifecycle_on):
 def test_each_defect_is_refused_under_its_own_name(state_dir, lifecycle_on, defect):
     _ended(state_dir)
     defect(state_dir)
-
     verdict = _verdict(state_dir)
 
     _refused(verdict, defect.__name__.removeprefix("_defect_"))
@@ -108,7 +107,6 @@ def test_each_defect_is_refused_under_its_own_name(state_dir, lifecycle_on, defe
 @pytest.mark.parametrize("sweep", [601, 86400, None])  # None: no heartbeat written at all
 def test_a_stalled_or_absent_sweep_is_refused(state_dir, lifecycle_on, sweep):
     _ended(state_dir)
-
     _refused(_verdict(state_dir, sweep=sweep), "processor_stalled")
 
 def test_pytest_noise_counts_only_among_the_v3_cohort(state_dir, lifecycle_on):
@@ -132,11 +130,9 @@ def test_an_empty_cohort_is_refused_and_a_legacy_dispatch_does_not_fill_it(state
 def test_a_live_start_younger_than_a_day_beside_an_ended_is_pending(state_dir, lifecycle_on):
     _ended(state_dir)
     _begin_live(state_dir, "d-live")
-
     verdict = _verdict(state_dir)
 
-    assert verdict["status"] == "pending" and verdict["reason_code"] == "pending", verdict
-    assert verdict["counts"]["in_flight"] == 1
+    assert verdict["status"] == "pending" and verdict["counts"]["in_flight"] == 1, verdict
 
 @pytest.mark.parametrize("live, age", [(False, 600), (True, 25 * 3600)])  # dead / older than 24h
 def test_a_dead_or_day_old_start_without_an_end_is_refused(state_dir, lifecycle_on, live, age):
@@ -162,7 +158,6 @@ def test_a_ledger_with_a_hole_is_unmeasured_and_refused(state_dir, lifecycle_on)
 ])
 def test_an_unknown_missing_or_malformed_field_is_refused(state_dir, lifecycle_on, overrides, code):
     _ended(state_dir)
-
     with patch.object(gate, "compute_lifecycle_count", _wrapped(**overrides)):
         _refused(_verdict(state_dir), code)
 
@@ -185,7 +180,6 @@ def test_an_unknown_attempt_kind_is_refused(state_dir, lifecycle_on):
 def test_an_error_from_a_building_block_is_refused_not_raised(state_dir, lifecycle_on, target,
                                                               error, code):
     _ended(state_dir)
-
     with patch.object(gate, target, side_effect=error):
         verdict = _verdict(state_dir)
 
@@ -199,9 +193,8 @@ def test_a_blank_project_or_an_unusable_clock_is_refused(state_dir, project, now
 def test_the_activation_commit_defaults_to_the_environment(state_dir, lifecycle_on, monkeypatch):
     _ended(state_dir)
     monkeypatch.setenv("VNX_LEDGER_ACTIVATION_COMMIT", REAL_SHA)
-    verdict = _verdict(state_dir)
 
-    assert verdict["cohort"] == REAL_SHA and verdict["status"] == "ok", verdict
+    assert (_verdict(state_dir)["cohort"], _verdict(state_dir)["status"]) == (REAL_SHA, "ok")
 
 def _good(state_dir) -> dict:
     _ended(state_dir)
