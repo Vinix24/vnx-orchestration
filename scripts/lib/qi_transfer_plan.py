@@ -2,14 +2,15 @@
 """qi_transfer_plan.py: the plan of a cross-database pattern move (reattr L3a).
 
 Plans, never runs: every database is opened ``mode=ro``, the plan goes to
-stdout only; ``--out`` follows in dispatch ``dlv-2df4000f3899-b``. L3b executes
-it, L6 verifies it (ADR-068 besluit 13-17).
+stdout, or with ``--out`` to a file published atomically (and never into the
+directory of a source database). L3b executes it, L6 verifies it (ADR-068
+besluit 13-17).
 Only L2 ``moves`` rows become moves (13: full row plus junction rows keyed on
 ``pattern_id``); ``content_key`` is sha256 over all columns but ``id`` and
 ``project_id`` (14); a non-NULL value the destination has no column for is
 ``schema_gap`` (15); the journal path and states are defined, not written (17).
 
-CLI: python3 scripts/lib/qi_transfer_plan.py --db PATH [--all --vnx-data-root DIR] --json
+CLI: python3 scripts/lib/qi_transfer_plan.py --db PATH [--all --vnx-data-root DIR] [--out PLAN.json] --json
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from atomic_io import atomic_write_text
 from pattern_reattribution import (
     _PATTERN_ID_PREFIX,
     STATUS_MOVES,
@@ -218,8 +220,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--db", type=Path, required=True, help="source quality_intelligence.db")
     p.add_argument("--all", action="store_true", help="plan every project database under --vnx-data-root")
     p.add_argument("--vnx-data-root", type=Path, default=None)
+    p.add_argument("--out", type=Path, default=None, help="publish the plan here atomically; stdout stays empty")
     p.add_argument("--json", action="store_true", help="JSON output (the only format)")
     return p
+
+
+def _out_beside_a_database(out: Path, plan: Dict[str, Any]) -> Optional[Path]:
+    """The database of the plan whose directory ``out`` would be written into, if any."""
+    out_dir = out.resolve().parent
+    for db in plan["user_versions"]:
+        if Path(db).resolve().parent == out_dir:
+            return Path(db)
+    return None
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -232,7 +244,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     dbs = sorted(set(index.qi_databases.values()) | {args.db.resolve()}) if args.all else [args.db]
     plan = build_plan(dbs, index)
     text = json.dumps(plan, indent=2, sort_keys=True, default=_json_default)
-    print(text)
+    if args.out is None:
+        print(text)
+        return 0
+    beside = _out_beside_a_database(args.out, plan)
+    if beside is not None:
+        print(f"[qi_transfer_plan] --out {args.out} is in the directory of source database {beside}", file=sys.stderr)
+        return 2
+    atomic_write_text(args.out, text + "\n")
     return 0
 
 
