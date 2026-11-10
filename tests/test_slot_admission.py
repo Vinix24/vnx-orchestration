@@ -307,10 +307,12 @@ def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
     assert res["state"]["queue"] == []
 
 
-def test_admitted_and_top_up_events_carry_the_request_id_when_it_differs_from_the_lease_id():
-    admitted = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))["events"]
-    assert [(e["request_id"], e["lease_id"]) for e in admitted if e["event"] == "admitted"] == [
-        ("req-1", "L-1")]
+def test_admitted_event_carries_the_request_id_also_when_it_differs_from_the_lease_id():
+    events = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))["events"]
+    assert [(e["request_id"], e["lease_id"]) for e in events if e["event"] == "admitted"] == [("req-1", "L-1")]
+
+
+def test_top_up_event_carries_the_request_id_of_the_queued_record():
     st = state([lease("A", 1, 8, at=1)], [req("req-ta", "top_up", slots=3, lease_id="A", token=1)])
     topped = [e for e in run(st)["events"] if e["event"] == "topped_up"]
     assert [(e["request_id"], e["lease_id"]) for e in topped] == [("req-ta", "A")]
