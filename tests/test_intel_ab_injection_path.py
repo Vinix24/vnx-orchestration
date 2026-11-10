@@ -112,8 +112,7 @@ def test_no_active_window_is_byte_identical_and_unstamped(env, state, monkeypatc
 def test_a_forced_control_draw_with_the_window_off_still_injects(env, state, monkeypatch):
     dispatch_id = _id_for("control")
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "0")
-    assert _fetch(state, dispatch_id) != ""
-    assert _injections(state)[0][1:3] == (None, None)
+    assert _fetch(state, dispatch_id) != "" and _injections(state)[0][1:3] == (None, None)
 
 
 def test_a_store_without_the_arm_columns_writes_the_row_without_the_arm(env, state, caplog):
@@ -132,9 +131,9 @@ def test_a_store_without_the_arm_columns_writes_the_row_without_the_arm(env, sta
 
 
 def _events(state: Path, dispatch_id: str):
-    rows = _rows(state, "SELECT event_id, event_type, metadata_json FROM coordination_events "
-                        "WHERE entity_id = ? AND event_type LIKE 'intelligence_%' ORDER BY rowid", (dispatch_id,))
-    return [(r[0], r[1], json.loads(r[2])) for r in rows]
+    sql = ("SELECT event_id, event_type, metadata_json FROM coordination_events "
+           "WHERE entity_id = ? AND event_type LIKE 'intelligence_%' ORDER BY rowid")
+    return [(r[0], r[1], json.loads(r[2])) for r in _rows(state, sql, (dispatch_id,))]
 
 
 def _ledger(state: Path, dispatch_id: str):
@@ -193,7 +192,8 @@ def test_emit_event_raising_writes_no_row_but_the_dispatch_proceeds(env, state, 
 def test_the_ledger_write_failing_writes_no_row(env, state, monkeypatch):
     import dispatch_register
     monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
-    assert _fetch(state, _id_for("treatment")) != ""
+    assert _fetch(state, dispatch_id := _id_for("treatment")) != ""
+    assert _events(state, dispatch_id) == []  # no derived event without its ledger line
     assert _rows(state, "SELECT dispatch_id FROM intelligence_injections") == []
 
 

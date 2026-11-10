@@ -315,7 +315,7 @@ def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> 
         result.project_id = current_project_id()
         recorded = _record_arm_decision(result, state_dir)
         try:
-            recorded = selector.emit_event(result, coord_state_dir=state_dir) is not None and recorded
+            recorded = recorded and selector.emit_event(result, coord_state_dir=state_dir) is not None
         except Exception as exc:
             recorded = False
             logger.warning("emit_event failed for %s: %s", dispatch_id, exc)
