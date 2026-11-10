@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""The approval record the learning loop's persist path requires (ADR-068, besluit 18): the read side.
+"""The approval record the learning loop's persist path requires (ADR-068, besluit 18).
 
 ``<state-dir>/learning_approvals/learn-<changes_sha256>.json`` binds one operator decision to one
-change set. ``VNX_LEARNING_LOOP_APPROVED`` only selects the file; ``load_approval`` validates it and reads
-``intelligence_usage.ndjson``. The ledger wins: a ``learning_persist`` line naming the proposal makes it used,
-whatever its record says. The claim (under a lock, ledger first per ADR-005: that line, then ``consumed_at``)
-lands in split 1b; ``write_record`` with the approve CLI in split 3.
+change set. ``VNX_LEARNING_LOOP_APPROVED`` only selects the file; the hash is recomputed from the rows
+about to be written. Used once, under a lock, before the first DB write, ledger first (ADR-005): a
+``learning_persist`` line with the record hash goes to ``intelligence_usage.ndjson``, then the record
+gets ``consumed_at``. The ledger wins: a proposal that line names is used, whatever its record says.
+``write_record`` lands with the approve CLI in split 3.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, Iterable, NoReturn
+from typing import Any, Callable, Collection, Dict, Iterable, List, NoReturn, Tuple
+
+from atomic_io import atomic_write_json, slot_lock
+from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 APPROVED_ENV = "VNX_LEARNING_LOOP_APPROVED"
 RECORD_DIRNAME = "learning_approvals"
 USAGE_LOG_NAME = "intelligence_usage.ndjson"
+TORN_TAIL_MARKER = "torn_tail_closed"
 RECORD_FIELDS = ("proposal_id", "changes_sha256", "approved_by", "approved_at", "reason", "consumed_at")
 _PROPOSAL_ID = re.compile(r"learn-([0-9a-f]{64})")
 # The write instant, not learned content: a recomputation at persist time
@@ -98,22 +104,118 @@ def load_approval(state_dir: Path, valid_approvers: Collection[str]) -> Dict[str
     return record
 
 
+def _torn_tail_marker(offset: int, fragment: bytes) -> Dict[str, Any]:
+    return {"event_type": TORN_TAIL_MARKER, "offset": offset, "length": len(fragment),
+            "sha256": hashlib.sha256(fragment).hexdigest()}
+
+
+def _closes(marker: Dict[str, Any], offset: int, line: bytes) -> bool:
+    """Whether ``marker`` is the line ``_append_event`` writes after a torn ``line`` (no ``\\n``) at ``offset``.
+    Integers only: ``19.0 == 19`` in Python, and the writer never writes a float or a bool there."""
+    return (bool(line) and marker == _torn_tail_marker(offset, line)
+            and all(type(marker[key]) is int for key in ("offset", "length")))
+
+
+def _untrusted(log: Path, number: int, why: str) -> NoReturn:
+    _refuse(f"{log} line {number} {why}: the log is not trustworthy")
+
+
+def _claimed_in_lines(log: Path, lines: Iterable[bytes], proposal_id: str) -> bool:
+    claimed, start, before, unclosed, raw = False, 0, (0, b""), None, b"\n"
+    for number, raw in enumerate(lines, 1):
+        event = _parsed(json.loads, raw)
+        persist = isinstance(event, dict) and event.get("event_type") == "learning_persist"
+        if isinstance(event, dict) and event.get("event_type") == TORN_TAIL_MARKER:
+            if not _closes(event, *before):
+                _untrusted(log, number, "is a torn_tail_closed marker that does not match the line before it")
+            unclosed = None
+        elif unclosed is not None:
+            _untrusted(log, unclosed, "is no JSON event and no torn_tail_closed marker follows it")
+        if persist and not _PROPOSAL_ID.fullmatch(str(event.get("proposal_id"))):
+            _untrusted(log, number, "is a learning_persist line naming no proposal")
+        unclosed = unclosed if isinstance(event, dict) else number
+        claimed = claimed or persist and event["proposal_id"] == proposal_id
+        before, start = (start, raw[:-1]), start + len(raw)  # a line with a successor always ends in \n
+    if unclosed is not None and raw.endswith(b"\n"):
+        _untrusted(log, unclosed, "is no JSON event and no torn_tail_closed marker follows it")
+    return claimed
+
+
 def _claimed_in_log(state_dir: Path, proposal_id: str) -> bool:
-    """Whether the ledger holds a ``learning_persist`` line for ``proposal_id`` (a missing log holds none). Only a
-    torn last append is skipped; any other line that is no JSON event, or a persist line naming no proposal, refuses."""
-    log, claimed = Path(state_dir) / USAGE_LOG_NAME, False
+    """Whether the ledger holds a ``learning_persist`` line for ``proposal_id`` (a missing log holds none).
+
+    Read under the log's shared flock, so an append made under the lock is seen whole or not at all. A torn last line is
+    skipped. A line that is no JSON event is accepted only as a torn tail an append closed: the next line must be
+    the ``torn_tail_closed`` marker whose offset, length and sha256 match its bytes, and it never counts as a claim.
+    A torn ``learning_persist`` fragment is therefore no claim, rightly: the ledger line comes before ``consumed_at``,
+    so a crash that tore it left the record unmarked too and the approval stays usable. Any other line that is no
+    JSON event, a marker that does not match the line before it, or a persist line naming no proposal refuses."""
+    log = Path(state_dir) / USAGE_LOG_NAME
     try:
         with open(log, "rb") as handle:
-            for number, raw in enumerate(handle, 1):
-                event = _parsed(json.loads, raw)
-                persist = isinstance(event, dict) and event.get("event_type") == "learning_persist"
-                if (not isinstance(event, dict) and raw.endswith(b"\n")
-                        or persist and not _PROPOSAL_ID.fullmatch(str(event.get("proposal_id")))):
-                    _refuse(f"{log} line {number} is no JSON event or a persist line naming no proposal: "
-                            "the log is not trustworthy")
-                claimed = claimed or persist and event["proposal_id"] == proposal_id
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            return _claimed_in_lines(log, handle, proposal_id)
     except FileNotFoundError:
         return False
     except OSError as exc:
         _refuse(f"{log} is unreadable ({exc}), so whether {proposal_id} was used is unknown")
-    return claimed
+
+
+def _torn_tail(fd: int, size: int) -> Tuple[int, bytes]:
+    """``(offset, bytes)`` of a last line without ``\\n`` (a torn append); ``(size, b"")`` when none is torn."""
+    start = size
+    while start > 0:
+        step = min(start, 1 << 16)
+        cut = os.pread(fd, step, start - step).rfind(b"\n")
+        start -= step
+        if cut >= 0:
+            start += cut + 1
+            break
+    return start, os.pread(fd, size - start, start)
+
+
+def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
+    """One line under the log's flock. A torn last line is first closed with ``\\n`` and followed by a
+    ``torn_tail_closed`` marker naming its offset, length and sha256, so ``_claimed_in_log`` can tell it from a
+    corrupted line. Append-only (ADR-005): no byte is removed. One fsync covers all three."""
+    with open(Path(state_dir) / USAGE_LOG_NAME, "a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        offset, fragment = _torn_tail(handle.fileno(), handle.seek(0, os.SEEK_END))
+        closed = b"\n" + _canonical(_torn_tail_marker(offset, fragment)).encode("utf-8") + b"\n" if fragment else b""
+        handle.write(closed + _canonical(event).encode("utf-8") + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def claim_approval(state_dir: Path, valid_approvers: Collection[str], changes: List[Dict[str, Any]]) -> str:
+    """Bind the selected record to ``changes`` and use it up before the first DB write; returns the
+    record sha256. Re-read under the lock: of two concurrent persists on one record only one gets through. The
+    ledger line is the decision and comes first; ``consumed_at`` in the record follows it."""
+    record = load_approval(state_dir, valid_approvers)
+    try:
+        actual = preview(changes)["changes_sha256"]
+    except (TypeError, ValueError) as exc:
+        _refuse(f"the rows to write are no canonical JSON ({exc})")
+    if actual != record["changes_sha256"]:
+        _refuse(f"the rows to write hash to {actual}, the approval is for {record['changes_sha256']}")
+    path = record_path(state_dir, record["proposal_id"])
+    for target in (path, Path(state_dir) / USAGE_LOG_NAME):
+        refuse_real_central_store_write_under_test_runner(target)
+    with slot_lock(path):
+        if load_approval(state_dir, valid_approvers) != record:
+            _refuse(f"approval record {path} changed while this persist read it")
+        record_sha256, consumed_at = _sha256(record), datetime.now(timezone.utc).isoformat()
+        try:
+            _append_event(state_dir, {"event_type": "learning_persist", "timestamp": consumed_at, "rows": len(changes),
+                                      "proposal_id": record["proposal_id"], "changes_sha256": actual,
+                                      "approval_record_sha256": record_sha256, "approved_by": record["approved_by"]})
+        except OSError as exc:
+            raise LearningApprovalRefused(f"appending the learning_persist line failed ({exc}): the record is "
+                                          "untouched, no row was written; the approval is used only if that line "
+                                          "reached the log") from exc
+        try:
+            atomic_write_json(path, dict(record, consumed_at=consumed_at))
+        except OSError as exc:
+            raise LearningApprovalRefused(f"the ledger holds the claim but record {path} was not marked used ({exc}); "
+                                          "no row was written and the approval counts as used") from exc
+    return record_sha256
