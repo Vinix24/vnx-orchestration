@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure intelligence stores without changing their contents."""
+"""Measure intelligence stores and quarantine their corpus without changing the source."""
 import argparse
 import sqlite3
 import sys
@@ -13,6 +13,7 @@ from project_root import resolve_project_root
 from intelligence_corpus_quarantine.baseline import measure_baseline
 from intelligence_corpus_quarantine.contract import write_manifest
 from intelligence_corpus_quarantine.snapshot import reuse_snapshot
+from intelligence_corpus_quarantine.store import quarantine
 
 
 class Parser(argparse.ArgumentParser):
@@ -22,17 +23,24 @@ class Parser(argparse.ArgumentParser):
 
 def main(argv=None):
     parser = Parser(description=__doc__)
-    baseline = parser.add_subparsers(dest="command", required=True).add_parser("baseline")
+    commands = parser.add_subparsers(dest="command", required=True)
+    baseline = commands.add_parser("baseline")
     baseline.add_argument("--db", type=Path, required=True)
     baseline.add_argument("--out", type=Path, required=True)
     snapshots = baseline.add_mutually_exclusive_group()
     snapshots.add_argument("--snapshot", type=Path)
     snapshots.add_argument("--reuse-snapshot", type=Path)
+    store = commands.add_parser("quarantine")
+    store.add_argument("--db", type=Path, required=True)
+    store.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     if not args.out.is_dir():
         parser.error(f"output directory does not exist: {args.out}")
     try:
         resolve_project_root(__file__)
+        if args.command == "quarantine":
+            print(quarantine(args.db, args.out))
+            return 0
         target = args.out / "manifest.json"
         if args.db.expanduser().resolve() in (target.resolve(), target.with_suffix(".json.tmp").resolve()):
             raise ValueError("manifest output would overwrite the database")
