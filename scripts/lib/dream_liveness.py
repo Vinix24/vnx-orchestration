@@ -295,6 +295,31 @@ def _history(dated: List[Tuple[datetime, dict]]) -> Dict[str, int]:
     return out
 
 
+def _blocked_findings(plist: dict, dated: List[Tuple[datetime, dict]], horizon: datetime,
+                      tz: Optional[tzinfo]) -> List[dict]:
+    """One `blocked_skip` per blocked attempt in the horizon, in one pass.
+
+    Each blocked event goes to the window (closed or open) that holds it: one
+    finding per window, the newest in the detail. A blocked skip outside every
+    window is a finding of its own; a failure or timeout there is history only
+    (ADR-066, ## nachten).
+    """
+    per_window: Dict[datetime, str] = {}
+    outside: List[str] = []
+    for ts, e in sorted(dated, key=lambda p: p[0]):
+        kind, reason = _ATTEMPT_TYPES[e["event_type"]], e.get("reason")
+        skip_blocked = kind == "skipped" and classify_skip(reason, e.get("detail"))[0] == BLOCKED
+        if ts < horizon or not (skip_blocked or kind in ("failed", "timeout")):
+            continue
+        label = reason if skip_blocked and isinstance(reason, str) and reason else kind
+        start, end = _containing_window(ts, plist, tz)
+        if start <= ts <= end:  # ascending order: the newest blocked event of the window wins
+            per_window[start] = f"night {(start.astimezone(tz) if tz else start.astimezone()).date()}: {label}"
+        elif skip_blocked:
+            outside.append(f"{ts.isoformat()}: {label} outside every scheduled window")
+    return [_finding("blocked_skip", d) for d in [per_window[s] for s in sorted(per_window)] + outside]
+
+
 def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: int,
                     now: datetime, tz: Optional[tzinfo]) -> Tuple[List[dict], List[dict], List[dict], dict]:
     """(nights, in_flight, findings, progress_window) over the last closed nights."""
@@ -313,16 +338,7 @@ def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: in
         else:
             findings.append(_finding("started_without_end",
                                      f"cycle {e.get('cycle_id')!r} started {ts.isoformat()} without a terminal event"))
-    for n in nights:  # one blocked_skip per blocked night; the newest attempt is never reported twice
-        if n["class"] == BLOCKED:
-            findings.append(_finding("blocked_skip", f"night {n['night']}: {n['reason'] or n['terminal']}"))
-    open_start, open_end = _containing_window(now, plist, tz)
-    if open_start <= now < open_end:  # the open night is reported at once but never joins nights or the progress window
-        day = open_start.astimezone(tz).date() if tz else open_start.astimezone().date()
-        open_night = classify_night(day, open_start, open_end, dated)
-        if open_night["class"] == BLOCKED:
-            findings.append(_finding("blocked_skip", f"night {open_night['night']}: "
-                                     f"{open_night['reason'] or open_night['terminal']}"))
+    findings += _blocked_findings(plist, dated, horizon, tz)  # the open window never joins nights or progress
     silent = [n["night"] for n in nights if not n["attempt"]]
     if silent:
         findings.append(_finding("no_scheduled_attempt", "no attempt inside the window on " + ", ".join(silent)))

@@ -404,3 +404,43 @@ def test_open_night_is_reported_exactly_once_after_the_window_closes():
     events = closed_week() + [ev("dream_cycle_skipped", "2026-11-10", reason="probe_not_ok")]
     assert blocked_ids(doc(events, now=OPEN_NOW)) == 1
     assert blocked_ids(doc(events, now=NOW)) == 1
+
+
+SKIP, OUTSIDE = "dream_cycle_skipped", "outside every scheduled window"
+MIDNIGHT_OPEN = datetime(2026, 11, 10, 1, 30, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("extra,plist,now,expected", [
+    ([ev(SKIP, "2026-11-09", "03:30", reason="probe_not_ok")], PLIST, NOW, ["night 2026-11-09: probe_not_ok"]),
+    ([ev(SKIP, "2026-11-10", reason="probe_not_ok")], PLIST, OPEN_NOW, ["night 2026-11-10: probe_not_ok"]),
+    ([ev(SKIP, "2026-11-10", "09:00", reason="probe_not_ok")], PLIST, NOW,
+     [f"2026-11-10T09:00:00+00:00: probe_not_ok {OUTSIDE}"]),
+    ([ev(SKIP, "2026-11-09", "03:10", reason="probe_not_ok"), ev("dream_cycle_failed", "2026-11-09", "03:20")],
+     PLIST, NOW, ["night 2026-11-09: failed"]),
+    ([ev(SKIP, "2026-11-10", "08:00", reason="scheduler_disabled"),
+      ev(SKIP, "2026-11-10", "09:00", reason="provider_switched_off")], PLIST, NOW,
+     [f"2026-11-10T08:00:00+00:00: scheduler_disabled {OUTSIDE}",
+      f"2026-11-10T09:00:00+00:00: provider_switched_off {OUTSIDE}"]),
+    ([ev(SKIP, "2026-11-09", "03:30", reason="probe_not_ok"), ev("dream_cycle_timeout", "2026-11-10", "03:40")],
+     PLIST, OPEN_NOW, ["night 2026-11-09: probe_not_ok", "night 2026-11-10: timeout"]),
+    ([ev(SKIP, "2026-11-09", "03:01", reason="probe_not_ok")], PLIST, NOW, ["night 2026-11-09: probe_not_ok"]),
+    ([ev(SKIP, "2026-11-10", "09:00", reason="nonsense")], PLIST, NOW, [f"2026-11-10T09:00:00+00:00: nonsense {OUTSIDE}"]),
+    ([ev(SKIP, "2026-11-10", "09:00", reason="insufficient_data")], PLIST, NOW, []),
+    ([ev(SKIP, "2026-10-01", "09:00", reason="probe_not_ok")], PLIST, NOW, []),
+    ([ev(SKIP, "2026-11-10", "00:30", reason="probe_not_ok")], P23, NOW, ["night 2026-11-09: probe_not_ok"]),
+    ([ev(SKIP, "2026-11-10", "00:30", reason="probe_not_ok")], P23, MIDNIGHT_OPEN, ["night 2026-11-09: probe_not_ok"]),
+], ids=["closed-night", "open-window", "outside", "two-in-one-night", "two-outside", "closed-plus-open",
+        "blocked-then-completed", "unknown-outside", "allowed-outside", "before-horizon",
+        "cross-midnight-closed", "cross-midnight-open"])
+def test_every_blocked_attempt_is_reported_exactly_once(extra, plist, now, expected):
+    d = doc((closed_week() if now == OPEN_NOW else good_week()) + extra, plist=plist, now=now)
+    assert [f["detail"] for f in d["findings"] if f["id"] == "blocked_skip"] == expected
+    assert d["state"] == ("deviation" if expected else "ok"), d["findings"]
+
+
+@pytest.mark.parametrize("reason", ["probe_not_ok", "insufficient_data"])
+def test_skip_outside_every_window_leaves_nights_and_progress_window_unchanged(reason):
+    base = doc(good_week())
+    d = doc(good_week() + [ev(SKIP, "2026-11-10", "09:00", reason=reason)])
+    assert d["nights"] == base["nights"] and d["progress_window"] == base["progress_window"]
+    assert d["outcome"]["class"] == classify_skip(reason, None)[0]
