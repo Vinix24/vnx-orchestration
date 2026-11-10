@@ -1,8 +1,7 @@
 """ADR-065 §1 and §2: one failure class per dispatch, one failure per dispatch
-with merged evidence (learning loop D1)."""
+with merged evidence (learning loop D1, split 1: the classifier on its own)."""
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,7 +12,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 
-import learning_loop as ll  # noqa: E402
 from learning_failure_class import (  # noqa: E402
     ELIGIBLE_CLASSES,
     FAILURE_CLASSES,
@@ -37,23 +35,6 @@ def _r(event_type="subprocess_completion", status="failed", dispatch_id="d-1", *
     }
     receipt.update(extra)
     return receipt
-
-
-def _loop(tmp_path: Path, monkeypatch, receipts: list[dict]):
-    monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
-    state_dir = tmp_path / ".vnx-data" / "vnx-dev" / "state"
-    state_dir.mkdir(parents=True)
-    loop = ll.LearningLoop.__new__(ll.LearningLoop)
-    loop.receipts_path = state_dir / "t0_receipts.ndjson"
-    loop.db_path = state_dir / "quality_intelligence.db"
-    loop.receipts_path.write_text(
-        "\n".join(json.dumps(r) for r in receipts) + "\n", encoding="utf-8"
-    )
-    return loop
-
-
-def _window():
-    return datetime.now(timezone.utc) - timedelta(days=2)
 
 
 # --- the table ---------------------------------------------------------------
@@ -121,106 +102,3 @@ def test_merge_identity_from_top_rank_evidence_first_non_empty():
 
 def test_merge_of_nothing_is_empty():
     assert merge_dispatch_group([]) == {}
-
-
-# --- extraction and counts ---------------------------------------------------
-
-def test_two_receipts_of_one_dispatch_are_one_failure_with_the_text(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [
-        _r("dispatch_finished", "failure"),
-        _r("subprocess_completion", "failed", failure_reason="Exhausted 3 retries"),
-    ])
-    failures = loop.extract_failure_patterns(start_time=_window())
-    assert len(failures) == 1
-    assert failures[0]["error"] == "Exhausted 3 retries"
-    assert failures[0]["dispatch_id"] == "d-1"
-    assert failures[0]["event_type"] == "dispatch_finished"
-    assert failures[0]["failure_class"] == "failed"
-
-
-def test_count_invariants_and_class_counts(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [
-        _r("dispatch_finished", "failure", dispatch_id="a"),
-        _r(dispatch_id="a", failure_reason="PHANTOM: empty"),
-        _r(dispatch_id="b", failure_reason="x"),
-        _r(dispatch_id=None, failure_reason="y"),
-        _r(dispatch_id="", failure_reason="y"),
-    ])
-    failures = loop.extract_failure_patterns(start_time=_window())
-    stats = loop.receipt_stats
-    assert stats["failure_receipts"] == 5
-    assert stats["dispatches"] == 2
-    assert stats["without_dispatch_id"] == 2
-    assert stats["merged_duplicates"] == 1
-    assert len(failures) == stats["dispatches"] + stats["without_dispatch_id"]
-    assert stats["failure_receipts"] == len(failures) + stats["merged_duplicates"]
-    assert set(stats["class_counts"]) == set(FAILURE_CLASSES)
-    assert stats["class_counts"]["phantom"] == 1
-    assert stats["class_counts"]["failed"] == 3
-    assert stats["class_counts"]["unclassified"] == 0
-    assert sum(stats["class_counts"].values()) == len(failures)
-
-
-def test_empty_stream_keeps_receipt_stats_shape(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [])
-    assert loop.extract_failure_patterns(start_time=_window()) == []
-
-
-# --- rules -------------------------------------------------------------------
-
-def test_dispatches_without_any_text_make_no_rule_and_count_as_unclassified(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [
-        _r("task_complete", "weird", dispatch_id="a"),
-        _r("task_complete", "weird", dispatch_id="b"),
-    ])
-    # a status outside _FAILURE_STATUSES never reaches extraction; feed patterns directly
-    patterns = [
-        {"error": "Unknown error", "terminal": "T1", "agent": "claude",
-         "failure_class": "unclassified", "dispatch_id": d}
-        for d in ("a", "b")
-    ]
-    assert loop.generate_prevention_rules(patterns) == []
-    assert loop.generate_prevention_rules(
-        [dict(p, failure_class="mystery") for p in patterns]
-    ) == []
-    assert loop.generate_prevention_rules(
-        [dict(p, failure_class="contract_violations_empty") for p in patterns]
-    ) == []
-
-
-def test_textless_failure_receipts_are_unclassified_through_extraction(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [
-        _r("dispatch_finished", "failure", dispatch_id="a"),
-        _r("dispatch_finished", "failure", dispatch_id="b"),
-    ])
-    failures = loop.extract_failure_patterns(start_time=_window())
-    assert {f["error"] for f in failures} == {"Unknown error"}
-    assert {f["failure_class"] for f in failures} == {"unclassified"}
-    assert loop.receipt_stats["class_counts"]["unclassified"] == 2
-    assert loop.generate_prevention_rules(failures) == []
-    assert classify_failure([{"event_type": "task_complete", "status": "x"}]) == "unclassified"
-
-
-def test_rule_counts_dispatches_and_carries_class_and_sources(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [])
-    patterns = [
-        {"error": "boom", "terminal": "T1", "agent": "claude",
-         "failure_class": "failed", "dispatch_id": f"d-{n:02d}"}
-        for n in range(25, 0, -1)
-    ]
-    rules = loop.generate_prevention_rules(patterns)
-    assert len(rules) == 1
-    assert rules[0]["failure_class"] == "failed"
-    assert rules[0]["occurrence_count"] == 25
-    ids = rules[0]["source_dispatch_ids"]
-    assert ids == sorted(ids) and len(ids) == 20
-    assert loop.generate_prevention_rules(patterns[:1]) == []
-
-
-def test_same_error_in_two_classes_is_two_groups(tmp_path, monkeypatch):
-    loop = _loop(tmp_path, monkeypatch, [])
-    patterns = [
-        {"error": "boom", "terminal": "T1", "agent": "claude", "failure_class": "failed", "dispatch_id": "a"},
-        {"error": "boom", "terminal": "T1", "agent": "claude", "failure_class": "timeout", "dispatch_id": "b"},
-    ]
-    assert loop.generate_prevention_rules(patterns) == []

@@ -34,12 +34,6 @@ from contract_invalid_window import (
     is_contract_invalid,
     is_stale_contract_invalid,
 )
-from learning_failure_class import (
-    ELIGIBLE_CLASSES,
-    FAILURE_CLASSES,
-    classify_failure,
-    merge_dispatch_group,
-)
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
 from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
@@ -652,7 +646,6 @@ class LearningLoop:
             start_time = _to_aware_utc(start_time)
 
         failure_patterns: List[Dict] = []
-        kept: List[tuple] = []
 
         if not self.receipts_path.exists():
             return failure_patterns
@@ -738,19 +731,23 @@ class LearningLoop:
                         if ts_dt is None or ts_dt < start_time:
                             continue
 
-                    kept.append((total_scanned, receipt))
+                    failure_patterns.append({
+                        "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
+                        "terminal": _scope_value(receipt.get("terminal")) or _scope_value(receipt.get("terminal_id")),
+                        "agent": _agent_identity(receipt),
+                        "error": self._failure_error_message(receipt),
+                        "timestamp": ts_raw or datetime.now(timezone.utc).isoformat(),
+                    })
 
         except OSError as e:
             print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
-        failure_patterns, merge_stats = self._merge_failure_receipts(kept)
         self.receipt_stats = {
             "read": total_scanned,
             "after_cutoff": total_scanned - before_cutoff,
             "before_cutoff": before_cutoff,
             "no_provider_filtered": no_provider_skipped,
             "foreign_project": foreign_project,
-            **merge_stats,
         }
         post_filter = total_scanned - no_provider_skipped - foreign_project
         print(
@@ -763,49 +760,6 @@ class LearningLoop:
             f"{len(failure_patterns)} failures in window"
         )
         return failure_patterns
-
-    def _merge_failure_receipts(self, kept: List[tuple]) -> tuple:
-        """One failure per dispatch (ADR-065 §2). ``kept`` holds ``(line number,
-        receipt)`` for every receipt that passed the filters. The group key is
-        ``dispatch_id`` alone; a receipt without one is its own group
-        ``receipt:<line number>``. Returns the failure dicts and the count
-        fields of ``receipt_stats``; ``len(patterns) == dispatches +
-        without_dispatch_id`` and ``failure_receipts == len(patterns) +
-        merged_duplicates`` hold by construction."""
-        groups: Dict[str, List[Dict]] = {}
-        without_id = 0
-        for line_no, receipt in kept:
-            raw_id = receipt.get("dispatch_id")
-            dispatch_id = str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
-            if not dispatch_id:
-                without_id += 1
-                dispatch_id = f"receipt:{line_no}"
-            groups.setdefault(dispatch_id, []).append(receipt)
-
-        class_counts = {name: 0 for name in sorted(FAILURE_CLASSES)}
-        patterns: List[Dict] = []
-        for key, group in groups.items():
-            merged = merge_dispatch_group(group)
-            failure_class = classify_failure(group)
-            class_counts[failure_class] += 1
-            patterns.append({
-                "task": str(merged.get("task_id") or merged.get("task_description") or ""),
-                "terminal": _scope_value(merged.get("terminal")) or _scope_value(merged.get("terminal_id")),
-                "agent": _agent_identity(merged),
-                "error": self._failure_error_message(merged),
-                "timestamp": merged.get("timestamp") or datetime.now(timezone.utc).isoformat(),
-                "dispatch_id": None if key.startswith("receipt:") else key,
-                "event_type": str(merged.get("event_type") or merged.get("event") or ""),
-                "failure_class": failure_class,
-            })
-        stats = {
-            "failure_receipts": len(kept),
-            "dispatches": len(groups) - without_id,
-            "without_dispatch_id": without_id,
-            "merged_duplicates": len(kept) - len(patterns),
-            "class_counts": class_counts,
-        }
-        return patterns, stats
 
     def extract_open_item_signals(self) -> List[Dict[str, Any]]:
         """Group this project's unresolved open items into recurring classes.
@@ -946,45 +900,33 @@ class LearningLoop:
         return "Unknown error"
 
     def generate_prevention_rules(self, failure_patterns: List[Dict]) -> List[Dict]:
-        """Generate new prevention rules from failure patterns.
-
-        One pattern is one dispatch (``extract_failure_patterns`` merges the
-        receipts), so the threshold counts dispatches. A class outside
-        ``ELIGIBLE_CLASSES`` is counted in ``receipt_stats`` and never a rule.
-        """
+        """Generate new prevention rules from failure patterns"""
         new_rules = []
 
-        # The key is the proposal's identity (class, error, terminal scope, agent
-        # scope); a missing terminal is "any" and a missing agent is None. A
-        # pattern with an unknown class is "unclassified": no evidence, no rule.
-        # A dict with no ``failure_class`` key at all is the pre-class shape of a
-        # hand-built caller; every such dict already passed the failure-status
-        # filter, so it is a plain "failed" (extraction always sets the key).
+        # Group failures by similar characteristics. The key is the proposal's
+        # identity (error, terminal scope, agent scope); a missing terminal is
+        # "any" and a missing agent is None, never "" or "unknown".
         failure_groups = defaultdict(list)
         for failure in failure_patterns:
-            failure_class = failure.get('failure_class', 'failed')
             key = (
-                failure_class if failure_class in FAILURE_CLASSES else 'unclassified',
                 str(failure.get('error') or '')[:50],
                 _scope_value(failure.get('terminal')) or 'any',
                 _scope_value(failure.get('agent')) or None,
             )
             failure_groups[key].append(failure)
 
-        for (failure_class, error, terminal, agent), failures in failure_groups.items():
-            if failure_class not in ELIGIBLE_CLASSES or len(failures) < 2:
-                continue
-            ids = sorted({str(f['dispatch_id']) for f in failures if f.get('dispatch_id')})
-            new_rules.append({
-                'pattern': f"Error pattern: {error}",
-                'terminal_constraint': terminal,
-                'agent_constraint': agent,
-                'prevention': self.generate_prevention_suggestion(error, failures),
-                'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
-                'occurrence_count': len(failures),
-                'failure_class': failure_class,
-                'source_dispatch_ids': ids[:20],
-            })
+        # Generate rules for repeated failures
+        for (error, terminal, agent), failures in failure_groups.items():
+            if len(failures) >= 2:  # Only create rule if pattern repeats
+                rule = {
+                    'pattern': f"Error pattern: {error}",
+                    'terminal_constraint': terminal,
+                    'agent_constraint': agent,
+                    'prevention': self.generate_prevention_suggestion(error, failures),
+                    'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
+                    'occurrence_count': len(failures)
+                }
+                new_rules.append(rule)
 
         return new_rules
 

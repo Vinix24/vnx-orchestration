@@ -211,8 +211,8 @@ def test_double_sentinel_noise_without_report_path_reaches_no_proposal(store):
 
 def test_real_provider_and_terminal_pass_through_unchanged(store):
     _write_ledger(store, [
-        _hand_receipt("dlv-d3-real-aaaa", provider="claude", terminal="T1", failure_reason="Exhausted 3 retries"),
-        _hand_receipt("dlv-d3-real-bbbb", provider="claude", terminal="T1", failure_reason="Exhausted 3 retries"),
+        _hand_receipt("dlv-d3-real-aaaa", provider="claude", terminal="T1"),
+        _hand_receipt("dlv-d3-real-bbbb", provider="claude", terminal="T1"),
     ])
     pending = _proposals(store)
     assert len(pending) == 1
