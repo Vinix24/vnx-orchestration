@@ -237,7 +237,7 @@ def test_read_verdict_of_a_stale_file_is_refused(state_dir, lifecycle_on):
 @pytest.mark.parametrize("change", [
     {"schema": "ledger_verdict/2"}, {"status": "fine"}, {"evaluated_at": "yesterday"},
     {"counts": "none"}, {"reason_code": ""}, {"project_id": None}, {"extra": 1},
-    {"reason": DELETE},
+    {"reason": DELETE}, {"status": []}, {"status": {}}, {"schema": []}, {"counts": "x"},
 ])
 def test_read_verdict_of_a_wrong_shape_is_refused(state_dir, lifecycle_on, change):
     verdict = {k: v for k, v in {**_good(state_dir), **change}.items() if v is not DELETE}

@@ -58,6 +58,43 @@ def _defect_counts(count: Dict[str, Any]) -> Optional[Dict[str, int]]:
                         for v in parsed.values())
     return parsed if ok else None
 
+def _cohort_lines(records: Any, activation: Optional[str], project: str) -> list:
+    """lifecycle_count's cohort: this project's v3 lines the activation keeps."""
+    return [line for line in records if isinstance(line, dict) and line.get("schema_version") == 3
+            and _cohort_membership(line, str(DEFAULT_REPO), activation, project)
+            not in (None, "out")]
+
+def _cohort_attempts(state_dir: Path, project: str, records: Any, cohort_lines: list):
+    """(ended count, unfinished attempts, error text for an unknown attempt kind or '')."""
+    dispatch_ids = dict.fromkeys(
+        str(line.get("dispatch_id") or "").strip() for line in cohort_lines
+        if line.get("event_type") == DISPATCH_STARTED_EVENT_TYPE
+        and str(line.get("lifecycle_mode") or "").strip() == MODE_V3)
+    ended, unfinished = 0, []
+    for dispatch_id in filter(None, dispatch_ids):
+        attempt = attempt_verdict(state_dir, project, dispatch_id, records=records)
+        if attempt.kind not in ATTEMPT_KINDS:
+            return ended, unfinished, f"{dispatch_id}: unknown attempt kind {attempt.kind!r}"
+        if attempt.kind == KIND_ENDED:
+            ended += 1
+        elif attempt.kind != KIND_LEGACY:
+            unfinished.append(attempt)
+    return ended, unfinished, ""
+
+def _stale_in_flight(unfinished: list, evaluated: datetime) -> str:
+    """The reason the first in-flight attempt is stale (dead, unreadable start, future, >24h), or ''."""
+    for attempt in unfinished:
+        try:
+            started = _as_utc((attempt.start_line or {}).get("timestamp"))
+        except ValueError:
+            started = None
+        where = f"{attempt.dispatch_id} attempt {attempt.attempt}"
+        if attempt.kind == KIND_DEAD_NO_END:
+            return f"{where} is dead without an end"
+        if started is None or not timedelta(0) <= evaluated - started <= PENDING_MAX_AGE:
+            return f"{where} start time is unreadable, in the future or older than 24h"
+    return ""
+
 def _evaluate(state_dir: Path, project_id: Any, activation_commit: Optional[str],
               evaluated: datetime) -> Dict[str, Any]:
     project = project_id.strip() if isinstance(project_id, str) else ""
@@ -99,27 +136,14 @@ def _evaluate(state_dir: Path, project_id: Any, activation_commit: Optional[str]
         records = read_ledger(state_dir)
     except OSError as exc:
         return refuse(REASON_LEDGER_UNREADABLE, f"cannot read the ledger: {exc}", counts)
-    cohort_lines = [  # lifecycle_count's cohort: this project's v3 lines the activation keeps
-        line for line in records if isinstance(line, dict) and line.get("schema_version") == 3
-        and _cohort_membership(line, str(DEFAULT_REPO), activation, project) not in (None, "out")]
+    cohort_lines = _cohort_lines(records, activation, project)
     noisy = sum(1 for line in cohort_lines if noise_reason(line, project) == "pytest")
     if noisy:  # rule 4
         return refuse(REASON_NOISE_IN_COHORT,
                       f"{noisy} source=pytest receipt(s) among the cohort's receipts", counts)
-    dispatch_ids = dict.fromkeys(
-        str(line.get("dispatch_id") or "").strip() for line in cohort_lines
-        if line.get("event_type") == DISPATCH_STARTED_EVENT_TYPE
-        and str(line.get("lifecycle_mode") or "").strip() == MODE_V3)
-    ended, unfinished = 0, []
-    for dispatch_id in filter(None, dispatch_ids):
-        attempt = attempt_verdict(state_dir, project, dispatch_id, records=records)
-        if attempt.kind not in ATTEMPT_KINDS:
-            return refuse(REASON_INVALID_INPUT,
-                          f"{dispatch_id}: unknown attempt kind {attempt.kind!r}", counts)
-        if attempt.kind == KIND_ENDED:
-            ended += 1
-        elif attempt.kind != KIND_LEGACY:
-            unfinished.append(attempt)
+    ended, unfinished, bad = _cohort_attempts(state_dir, project, records, cohort_lines)
+    if bad:
+        return refuse(REASON_INVALID_INPUT, bad, counts)
     counts = dict(counts, ended=ended, in_flight=len(unfinished))
     if ended == 0:  # rule 5
         return refuse(REASON_EMPTY_COHORT, "no ended attempt in the cohort: it proves nothing",
@@ -128,17 +152,9 @@ def _evaluate(state_dir: Path, project_id: Any, activation_commit: Optional[str]
     if unpaired > 0:
         return refuse(REASON_STALE_IN_FLIGHT, f"{unpaired} start(s) without an end that "
                       "attempt_verdict does not explain", counts)
-    for attempt in unfinished:
-        try:
-            started = _as_utc((attempt.start_line or {}).get("timestamp"))
-        except ValueError:
-            started = None
-        where = f"{attempt.dispatch_id} attempt {attempt.attempt}"
-        if attempt.kind == KIND_DEAD_NO_END:
-            return refuse(REASON_STALE_IN_FLIGHT, f"{where} is dead without an end", counts)
-        if started is None or not timedelta(0) <= evaluated - started <= PENDING_MAX_AGE:
-            return refuse(REASON_STALE_IN_FLIGHT, f"{where} start time is unreadable, in the "
-                          "future or older than 24h", counts)
+    stale = _stale_in_flight(unfinished, evaluated)
+    if stale:
+        return refuse(REASON_STALE_IN_FLIGHT, stale, counts)
     if unfinished:
         return verdict(STATUS_PENDING, REASON_PENDING,
                        f"{len(unfinished)} attempt(s) in flight, none older than 24h", counts)
@@ -162,11 +178,12 @@ def _is_verdict(verdict: Any) -> bool:
     """True only for an object with exactly the ``ledger_verdict/1`` fields and usable values."""
     try:
         return (isinstance(verdict, dict) and set(verdict) == _FIELDS
-                and verdict["schema"] == SCHEMA and verdict["status"] in STATUSES
+                and isinstance(verdict["schema"], str) and verdict["schema"] == SCHEMA
+                and isinstance(verdict["status"], str) and verdict["status"] in STATUSES
                 and all(isinstance(verdict[n], str) and verdict[n].strip() for n in (
                     "evaluated_at", "project_id", "cohort", "reason_code", "reason"))
                 and isinstance(verdict["counts"], dict) and _as_utc(verdict["evaluated_at"]))
-    except ValueError:  # an evaluated_at that is not the ledger timestamp format
+    except (ValueError, TypeError):  # a bad evaluated_at; the type checks above come first
         return False
 
 def write_verdict(state_dir, verdict: Dict[str, Any]) -> Path:
