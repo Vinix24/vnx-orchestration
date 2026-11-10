@@ -14,21 +14,13 @@ D3c (a follow-up PR) will deduplicate on ``(project_id, pattern_type, title)``,
 so this reattribution must land first — deduping before the project_id is
 correct would merge rows that belong to different tenants.
 
-Ground truth for "which project does dispatch X belong to": the central
-receipt store that carries a ``t0_receipts.ndjson`` record for X
-(``~/.vnx-data/<project_id>/state/t0_receipts.ndjson``, one store per
-project — ADR-007). A dispatch's receipt is appended to its own project's
-store, so store membership is the strongest available signal — stronger than
-trusting the row's own (possibly wrong) ``project_id``.
-
-Decision rule per row (never guessed):
-  - no ``source_dispatch_ids`` at all              -> stays, reason ``no_sources``
-  - every source id is unresolvable                -> stays, reason ``no_match``
-  - some resolve, some don't                        -> stays, reason ``partial_match``
-  - resolved sources disagree on project             -> stays, reason ``mixed``
-  - all resolved sources agree on project P:
-      - P == the row's current project_id           -> ``unchanged`` (no write)
-      - P != the row's current project_id           -> ``moved`` to P
+Ground truth (ADR-068 besluit 2): per dispatch_id, a vote over its receipt
+copies under ``<root>/<project>/state/``. A copy votes for its store, its body
+``project_id`` and the ``/.vnx-data/<project>/`` root of its report path; a
+sentinel or an unknown project is no vote. P wins with two or more votes and
+more than all others together. The fail-closed row categories (besluit 3) are
+in :func:`decide_row`; only ``moves`` acts, and ``--apply`` refuses (exit 3) a
+move into another DB file: a transfer (``qi_transfer_apply.py``, besluit 13-17).
 
 Safe to move: ``id`` is ``INTEGER PRIMARY KEY AUTOINCREMENT`` on both tables,
 so it is already globally unique across every project_id: the composite
@@ -48,34 +40,37 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import sqlite3
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from ledger_schema_version import iter_receipts
-from pattern_dedup import _merge_source_dispatch_ids, _table_exists
+from pattern_dedup import _table_exists
 
 # ---------------------------------------------------------------------------
 # Status vocabulary
 # ---------------------------------------------------------------------------
 
-STATUS_MOVED = "moved"
-STATUS_UNCHANGED = "unchanged"
-STATUS_MIXED = "mixed"
-STATUS_NO_MATCH = "no_match"
-STATUS_PARTIAL_MATCH = "partial_match"
-STATUS_NO_SOURCES = "no_sources"
+STATUS_POSITIVE_OWN = "positive_own"
+STATUS_STORE_ONLY = "store_only"
+STATUS_MOVES = "moves"
+STATUS_AMBIGUOUS = "ambiguous"
+STATUS_ABSENT = "absent"
+STATUS_UNATTRIBUTED = "unattributed"
 
 ALL_STATUSES = (
-    STATUS_MOVED,
-    STATUS_UNCHANGED,
-    STATUS_MIXED,
-    STATUS_NO_MATCH,
-    STATUS_PARTIAL_MATCH,
-    STATUS_NO_SOURCES,
+    STATUS_POSITIVE_OWN, STATUS_STORE_ONLY, STATUS_MOVES,
+    STATUS_AMBIGUOUS, STATUS_ABSENT, STATUS_UNATTRIBUTED,
 )
+
+# ADR-068 besluit 2: placeholders that are never a vote and never an id.
+_SENTINELS = frozenset({"", "unknown", "none", "null"})
+_REPORT_ROOT_RE = re.compile(r"/\.vnx-data/([^/]+)/")
 
 # Tables this reattribution scans, and the pattern_id prefix each row's id
 # maps to in the junction tables (matches the convention in
@@ -97,22 +92,38 @@ _JUNCTION_TABLES: Tuple[str, ...] = (
 
 
 # ---------------------------------------------------------------------------
-# source_dispatch_ids parsing (reuses pattern_dedup's JSON-list parser)
+# source_dispatch_ids parsing and signal votes (ADR-068 besluit 2, 3g, 11)
 # ---------------------------------------------------------------------------
 
-def _parse_source_dispatch_ids(raw: Optional[str]) -> List[str]:
-    """Parse one row's ``source_dispatch_ids`` JSON column into a list of ids.
+def _is_sentinel(value: object) -> bool:
+    return not isinstance(value, str) or value.strip().lower() in _SENTINELS
 
-    Delegates to :func:`pattern_dedup._merge_source_dispatch_ids` (a single-raw
-    "merge" is just its parse), so both callers agree on tolerance for
-    malformed/non-list JSON.
+
+def _project_vote(value: object, known_projects: Set[str]) -> Optional[str]:
+    if _is_sentinel(value) or value.strip() not in known_projects:
+        return None
+    return value.strip()
+
+
+def _parse_source_dispatch_ids(raw: object, known_projects: Set[str]) -> Optional[List[str]]:
+    """The row's ids, or ``None`` (``unattributed``) unless it is a JSON list of strings.
+
+    One unreadable element could name another project, so the rest never
+    decides alone. Sentinels are no ids; a known-project prefix is stripped.
     """
-    merged = _merge_source_dispatch_ids([raw])
     try:
-        parsed = json.loads(merged)
-    except (json.JSONDecodeError, TypeError):
-        return []
-    return parsed if isinstance(parsed, list) else []
+        parsed = json.loads(raw) if isinstance(raw, str) else None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, list) or not all(isinstance(e, str) for e in parsed):
+        return None
+    ids: List[str] = []
+    for element in parsed:
+        prefix, sep, rest = element.strip().partition(":")
+        sid = rest.strip() if sep and prefix in known_projects else element.strip()
+        if not _is_sentinel(sid) and sid not in ids:
+            ids.append(sid)
+    return ids or None
 
 
 # ---------------------------------------------------------------------------
@@ -137,23 +148,62 @@ def discover_receipt_stores(vnx_data_root: Path) -> Dict[str, Path]:
     return stores
 
 
-def build_dispatch_project_index(stores: Dict[str, Path]) -> Dict[str, Set[str]]:
-    """dispatch_id -> set of project_ids whose store carries a receipt for it.
+def build_dispatch_project_index(stores: Dict[str, Path], known_projects: Set[str]) -> Dict[str, Dict[str, int]]:
+    """dispatch_id -> {project: votes} over every receipt copy (besluit 2).
 
     Built via :func:`ledger_schema_version.iter_receipts` (torn-tail-safe,
-    schema-version aware, never writes). A dispatch_id found in more than one
-    store's set is not collapsed here — that ambiguity is surfaced per-row by
-    :func:`decide_row` as ``mixed``, the same as a source_dispatch_ids list
-    naming projects that disagree.
+    schema-version aware, never writes). A copy is one store's lines for an
+    id: one vote for the store, one per distinct known project in a body or
+    report path. More lines stay one copy, so one signal never has two votes.
     """
-    index: Dict[str, Set[str]] = {}
-    for project_id, path in stores.items():
+    copies: Dict[str, Dict[str, Set[Tuple[str, Optional[str]]]]] = {}
+    for store, path in stores.items():
         for receipt in iter_receipts(path):
             dispatch_id = receipt.get("dispatch_id")
-            if not dispatch_id:
+            if _is_sentinel(dispatch_id):
                 continue
-            index.setdefault(str(dispatch_id), set()).add(project_id)
-    return index
+            named = copies.setdefault(dispatch_id.strip(), {}).setdefault(
+                store, {("store", _project_vote(store, known_projects))})
+            named.add(("body", _project_vote(receipt.get("project_id"), known_projects)))
+            for value in (receipt.get("report_path"), receipt.get("report_file")):
+                root = _REPORT_ROOT_RE.search(value) if isinstance(value, str) else None
+                named.add(("path", _project_vote(root.group(1), known_projects) if root else None))
+    return {
+        dispatch_id: dict(Counter(p for named in per_store.values() for _, p in named if p))
+        for dispatch_id, per_store in copies.items()
+    }
+
+
+def vote_winner(tally: Dict[str, int]) -> Optional[str]:
+    """The project with at least two votes and more than all others together."""
+    total = sum(tally.values())
+    return next((p for p, n in tally.items() if n >= 2 and n > total - n), None)
+
+
+@dataclass
+class AttributionIndex:
+    votes: Dict[str, Dict[str, int]]  # dispatch_id -> {project: votes}
+    qi_databases: Dict[str, Path]  # project -> its own quality_intelligence.db
+    known_projects: Set[str]
+    stores: Dict[str, Path]
+
+
+def build_attribution_index(vnx_data_root: Path) -> AttributionIndex:
+    """Everything a row decision reads, from ``<root>/<project>/state/`` only."""
+    dirs = sorted(vnx_data_root.glob("*/state")) if vnx_data_root.is_dir() else []
+    known = {d.parent.name for d in dirs if d.is_dir() and not _is_sentinel(d.parent.name)}
+    dbs = {d.parent.name: d / "quality_intelligence.db" for d in dirs if d.parent.name in known}
+    stores = discover_receipt_stores(vnx_data_root)
+    qi_databases = {p: db for p, db in dbs.items() if db.is_file()}
+    return AttributionIndex(build_dispatch_project_index(stores, known), qi_databases, known, stores)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """True only when both paths are provably one file (fail closed)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +217,10 @@ class ReattributionDecision:
     title: str
     old_project_id: str
     status: str
-    new_project_id: str  # == old_project_id unless status == STATUS_MOVED
+    new_project_id: str  # == old_project_id unless status == STATUS_MOVES
     source_ids: List[str] = field(default_factory=list)
     resolved_projects: List[str] = field(default_factory=list)
+    destination_db: Optional[str] = None  # set only when status == STATUS_MOVES
 
 
 def decide_row(
@@ -179,57 +230,37 @@ def decide_row(
     title: str,
     project_id: str,
     source_dispatch_ids_raw: Optional[str],
-    dispatch_index: Dict[str, Set[str]],
+    dispatch_index: AttributionIndex,
+    db_path: Path,
 ) -> ReattributionDecision:
-    """Apply the D3b decision rule to a single pattern row. Never guesses."""
-    source_ids = _parse_source_dispatch_ids(source_dispatch_ids_raw)
-    if not source_ids:
-        return ReattributionDecision(
-            table, row_id, title, project_id, STATUS_NO_SOURCES, project_id,
-            source_ids, [],
-        )
-
-    found_projects: Set[str] = set()
-    any_found = False
-    any_missing = False
-    for sid in source_ids:
-        projects = dispatch_index.get(sid, set())
-        if projects:
-            any_found = True
-            found_projects |= projects
-        else:
-            any_missing = True
-
-    if not any_found:
-        return ReattributionDecision(
-            table, row_id, title, project_id, STATUS_NO_MATCH, project_id,
-            source_ids, [],
-        )
-    if any_missing:
-        return ReattributionDecision(
-            table, row_id, title, project_id, STATUS_PARTIAL_MATCH, project_id,
-            source_ids, sorted(found_projects),
-        )
-    if len(found_projects) > 1:
-        return ReattributionDecision(
-            table, row_id, title, project_id, STATUS_MIXED, project_id,
-            source_ids, sorted(found_projects),
-        )
-
-    resolved = next(iter(found_projects))
-    if resolved == project_id:
-        return ReattributionDecision(
-            table, row_id, title, project_id, STATUS_UNCHANGED, project_id,
-            source_ids, sorted(found_projects),
-        )
+    """Apply the ADR-068 besluit 3 categories (a)-(g) to one pattern row. Never guesses."""
+    source_ids = _parse_source_dispatch_ids(source_dispatch_ids_raw, dispatch_index.known_projects)
+    with_receipt = [sid for sid in source_ids or [] if sid in dispatch_index.votes]
+    winners = sorted({w for w in (vote_winner(dispatch_index.votes[s]) for s in with_receipt) if w})
+    destination = winners[0] if len(winners) == 1 else None
+    own_db = dispatch_index.qi_databases.get(destination) if destination else None
+    if source_ids is None:  # (g) no ids, only sentinels, not a JSON list of strings
+        status = STATUS_UNATTRIBUTED
+    elif not with_receipt:  # (a, f) an id without a receipt never counts
+        status = STATUS_ABSENT
+    elif not winners:  # (e) one vote or a tie on every id: never verifies, never moves
+        status = STATUS_STORE_ONLY
+    elif own_db is None:  # (d) winners disagree, or the one winner has no own DB file
+        status = STATUS_AMBIGUOUS
+    elif destination == project_id and _same_file(own_db, db_path):  # (b) P's file, label P
+        status = STATUS_POSITIVE_OWN
+    else:  # (c) the consumer of P cannot see the row: wrong label, wrong file, or both
+        status = STATUS_MOVES
+    moves = status == STATUS_MOVES
     return ReattributionDecision(
-        table, row_id, title, project_id, STATUS_MOVED, resolved,
-        source_ids, sorted(found_projects),
+        table, row_id, title, project_id, status,
+        destination if moves else project_id, source_ids or [], winners,
+        str(own_db) if moves else None,
     )
 
 
 def scan_database(
-    db_path: Path, dispatch_index: Dict[str, Set[str]],
+    db_path: Path, dispatch_index: AttributionIndex,
 ) -> List[ReattributionDecision]:
     """Compute the reattribution decision for every row in every scanned table.
 
@@ -257,6 +288,7 @@ def scan_database(
                         project_id=row["project_id"],
                         source_dispatch_ids_raw=row["source_dispatch_ids"],
                         dispatch_index=dispatch_index,
+                        db_path=db_path,
                     )
                 )
         return decisions
@@ -448,19 +480,31 @@ def _reattribute_junction_rows(
     _reattribute_pattern_injection_outcome(conn, pattern_id, old_pid, new_pid)
 
 
+class CrossDatabaseMove(RuntimeError):
+    """A ``moves`` decision into another DB file: a transfer, never a relabel."""
+
+
 def apply_decisions(
     db_path: Path, decisions: List[ReattributionDecision],
 ) -> Dict[str, int]:
-    """Apply every ``moved`` decision to ``db_path`` in a single transaction.
+    """Relabel, in one transaction, every ``moves`` row inside ``db_path``.
 
-    Idempotent by construction: a decision is only ever ``moved`` when the
-    row's current ``project_id`` differs from the resolved project. After a
-    row is moved, a fresh :func:`scan_database` recomputes the same resolved
-    project but now finds it equal to the (already-updated) ``project_id``,
-    so it decides ``unchanged`` and this function is never asked to move it
-    again.
+    Raises :class:`CrossDatabaseMove` before any write when a destination is
+    not provably ``db_path`` itself. Idempotent: a relabelled row reads back
+    as ``positive_own``, so it is never moved twice.
     """
-    to_move = [d for d in decisions if d.status == STATUS_MOVED]
+    to_move = [d for d in decisions if d.status == STATUS_MOVES]
+    foreign = [
+        d for d in to_move
+        if not d.destination_db or not _same_file(Path(d.destination_db), db_path)
+    ]
+    if foreign:
+        named = ", ".join(f"{d.table}:{d.row_id}->{d.new_project_id}" for d in foreign[:10])
+        raise CrossDatabaseMove(
+            f"refusing to apply to {db_path}: {len(foreign)} row(s) belong in another project's "
+            f"DB file ({named}); a relabel here reaches no consumer. Transfer them with "
+            "scripts/lib/qi_transfer_apply.py (ADR-068 besluit 13-17). Nothing was written."
+        )
     if not to_move:
         return {"rows_moved": 0}
     conn = sqlite3.connect(str(db_path))
@@ -537,6 +581,7 @@ def build_report(
                 "status": d.status,
                 "source_dispatch_ids": d.source_ids,
                 "resolved_projects": d.resolved_projects,
+                "destination_db": d.destination_db,
             }
         )
     return {
@@ -591,7 +636,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--apply",
         action="store_true",
-        help="Apply moved rows (mutates --db). Requires an explicit --db.",
+        help="Relabel moves rows inside --db; refuses any move into another DB file.",
     )
     parser.add_argument(
         "--vnx-data-root",
@@ -628,18 +673,21 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     vnx_data_root = args.vnx_data_root or (Path.home() / ".vnx-data")
-    stores = discover_receipt_stores(vnx_data_root)
-    dispatch_index = build_dispatch_project_index(stores)
+    dispatch_index = build_attribution_index(vnx_data_root)
     decisions = scan_database(args.db, dispatch_index)
 
     if args.apply:
-        apply_decisions(args.db, decisions)
+        try:
+            apply_decisions(args.db, decisions)
+        except CrossDatabaseMove as exc:
+            print(f"[pattern_reattribution] {exc}", file=sys.stderr)
+            return 3
         # Recompute so the report reflects the post-apply state (moved rows
-        # now read back as unchanged), matching what a second dry-run would show.
+        # now read back as positive_own), matching what a second dry-run would show.
         decisions = scan_database(args.db, dispatch_index)
 
     mode = "apply" if args.apply else "dry-run"
-    report = build_report(decisions, mode=mode, db_path=args.db, stores=stores)
+    report = build_report(decisions, mode=mode, db_path=args.db, stores=dispatch_index.stores)
     print(format_report_text(report))
     if args.report is not None:
         args.report.write_text(json.dumps(report, indent=2))
