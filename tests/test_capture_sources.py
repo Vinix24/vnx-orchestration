@@ -140,13 +140,15 @@ def test_memory_notes_unsafe_or_unreadable_is_error(env, kind):
     assert notes == [] and cs.state_of(status) == "error"
 
 
-@pytest.mark.parametrize("kind", ["dangling_outside", "dangling_inside", "escape_existing"])
+@pytest.mark.parametrize("kind", ["dangling_outside", "dangling_inside", "escape_existing", "self_loop"])
 def test_note_symlink_dangling_or_escaping_is_error_not_empty_ok(env, kind):
     link = env["memory"] / "broken.md"
     if kind == "dangling_outside":
         link.symlink_to(env["outside"] / "missing.md")
     elif kind == "dangling_inside":
         link.symlink_to(env["memory"] / "missing.md")
+    elif kind == "self_loop":
+        link.symlink_to(link)
     else:
         (env["outside"] / "real.md").write_text("x", encoding="utf-8")
         link.symlink_to(env["outside"] / "real.md")

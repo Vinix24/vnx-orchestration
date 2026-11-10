@@ -182,8 +182,10 @@ def read_memory_notes(binding: dict) -> Tuple[List[dict], str]:
             if path.suffix != ".md" or path.name == "MEMORY.md":
                 continue
             if path.is_symlink():
-                # Judged before the non-file filter: a dangling link is not "no note".
-                target = path.resolve(strict=False)
+                try:  # judged before the non-file filter; a loop raises RuntimeError on 3.12
+                    target = path.resolve(strict=False)
+                except RuntimeError:
+                    return [], f"{STATE_ERROR}: note {path.name} is a symlink loop"
                 if not _under(target, root):
                     return [], f"{STATE_ERROR}: note {path.name} resolves outside memory_dir"
                 if not target.is_file():
