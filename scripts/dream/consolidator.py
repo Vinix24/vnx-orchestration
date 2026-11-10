@@ -158,13 +158,23 @@ def _check_receipt_completeness(
     return True, "ok"
 
 
+def _utc_timestamp() -> str:
+    """UTC ISO-8601 timestamp in the format the dream events already carry."""
+    return datetime.now(timezone.utc).isoformat()
+
+
 def _emit_dream_event(event: dict[str, Any], data_root: Path) -> None:
     """Emit NDJSON event BEFORE any DB mutation (ADR-005).
+
+    Every event is stamped here through `_utc_timestamp`, so a new event dict
+    cannot be written without one; an explicit ``timestamp`` is kept as-is.
 
     ``data_root`` must be the canonical VNX data root (from _resolve_data_root),
     NOT resolve_project_root(__file__)/.vnx-data — that path is the source repo
     and breaks on central installs.
     """
+    if not event.get("timestamp"):
+        event = {**event, "timestamp": _utc_timestamp()}
     events_dir = data_root / "events" / "dream"
     events_dir.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -210,27 +220,50 @@ def _filter_restricted_rows(
     return clean, dropped
 
 
+def _emit_skipped(
+    cycle_id: str,
+    project_id: str,
+    data_root: Path,
+    reason: str,
+    detail: str,
+    *,
+    event_extra: "dict[str, Any] | None" = None,
+    result_extra: "dict[str, Any] | None" = None,
+) -> dict[str, Any]:
+    """Emit a ``dream_cycle_skipped`` event and return the matching skipped result.
+
+    One builder for every skip path: `_emit_dream_event` stamps the event, and
+    ``event_extra``/``result_extra`` carry each caller's own fields (``outcome``,
+    ``probe_health``, ...) without widening the shared shape.
+    """
+    event: dict[str, Any] = {
+        "event_type": "dream_cycle_skipped",
+        "cycle_id": cycle_id,
+        "project_id": project_id,
+        "reason": reason,
+        "detail": detail,
+    }
+    event.update(event_extra or {})
+    _emit_dream_event(event, data_root)
+    result: dict[str, Any] = {"status": "skipped", "cycle_id": cycle_id, "reason": reason}
+    result.update(result_extra or {})
+    return result
+
+
 def _skip_cycle(
     cycle_id: str, project_id: str, data_root: Path, outcome: str, detail: str, **extra: Any
 ) -> dict[str, Any]:
     """Emit a ``dream_cycle_skipped`` event and return the skipped result, both carrying ``outcome``."""
-    _emit_dream_event(
-        {
-            "event_type": "dream_cycle_skipped",
-            "cycle_id": cycle_id,
-            "project_id": project_id,
-            "reason": outcome,
-            "outcome": outcome,
-            "detail": detail,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            **extra,
-        },
+    shared = {"outcome": outcome, **extra}
+    return _emit_skipped(
+        cycle_id,
+        project_id,
         data_root,
+        outcome,
+        detail,
+        event_extra=shared,
+        result_extra={"detail": detail, **shared},
     )
-    return {
-        "status": "skipped", "cycle_id": cycle_id, "reason": outcome, "outcome": outcome,
-        "detail": detail, **extra,
-    }
 
 
 def _content_boundary_skip(
@@ -284,23 +317,14 @@ def _pre_kimi_skip(
         patterns.get("antipatterns", [])
     )
     if core_count < _MIN_PATTERN_THRESHOLD:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "insufficient_data",
-                "detail": f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
+        return _emit_skipped(
+            cycle_id,
+            project_id,
             data_root,
+            "insufficient_data",
+            f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
+            result_extra={"detail": f"core_count={core_count}"},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "insufficient_data",
-            "detail": f"core_count={core_count}",
-        }
     decision = provider_switch.decide("kimi", consumer="dream", project_id=project_id)
     if not decision.allowed:
         return _skip_cycle(
@@ -501,6 +525,36 @@ def _dispatch_kimi_consolidation(
     return merged
 
 
+def _write_pending_review(
+    data_root: Path,
+    cycle_id: str,
+    project_id: str,
+    total_input: int,
+    restricted_rows_dropped: dict[str, int],
+    probe_health: str,
+    consolidation: dict[str, Any],
+    proposal_only: bool,
+) -> Path:
+    """Write the pending-review JSON (stamped with ``created_at``) and return its path."""
+    review_dir = data_root / "state" / "dream"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    review_path = review_dir / f"{cycle_id}-pending-review.json"
+    review: dict[str, Any] = {
+        "cycle_id": cycle_id,
+        "project_id": project_id,
+        "created_at": _utc_timestamp(),
+        "input_count": total_input,
+        "restricted_rows_dropped": restricted_rows_dropped,
+        "probe_health": probe_health,
+        "consolidation": consolidation,
+        "requires_operator_review": True,
+    }
+    if proposal_only:
+        review["mode"] = "proposal_only"
+    review_path.write_text(json.dumps(review, indent=2), encoding="utf-8")
+    return review_path
+
+
 def run_dream_cycle(
     project_id: str,
     db_path: Path,
@@ -536,23 +590,11 @@ def run_dream_cycle(
     # cycle exists to fix, so skipping on it deadlocked the remedy. Everything
     # outside _PROBE_HEALTH_RUNNABLE (produces_crap, unknown, unrecognised) skips.
     if os.environ.get("VNX_DREAM_SCHEDULER_ENABLED", "0") != "1":
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "scheduler_disabled",
-                "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+        detail = "VNX_DREAM_SCHEDULER_ENABLED=0"
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "scheduler_disabled", detail,
+            result_extra={"detail": detail},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "scheduler_disabled",
-            "detail": "VNX_DREAM_SCHEDULER_ENABLED=0",
-        }
 
     # Content boundary, before any kimi call.
     boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root)
@@ -561,44 +603,19 @@ def run_dream_cycle(
 
     probe_health = _injection_probe_health(db_path.parent)
     if probe_health not in _PROBE_HEALTH_RUNNABLE:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "probe_not_ok",
-                "detail": f"injection-effectiveness probe health={probe_health}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "probe_not_ok",
+            f"injection-effectiveness probe health={probe_health}",
+            result_extra={"probe_health": probe_health},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "probe_not_ok",
-            "probe_health": probe_health,
-        }
 
     # GAP-7: receipt-completeness preflight — skip cycle on empty/stale data
     complete, detail = _check_receipt_completeness(_data_root)
     if not complete:
-        _emit_dream_event(
-            {
-                "event_type": "dream_cycle_skipped",
-                "cycle_id": cycle_id,
-                "project_id": project_id,
-                "reason": "incomplete_data",
-                "detail": detail,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            _data_root,
+        return _emit_skipped(
+            cycle_id, project_id, _data_root, "incomplete_data", detail,
+            result_extra={"detail": detail},
         )
-        return {
-            "status": "skipped",
-            "cycle_id": cycle_id,
-            "reason": "incomplete_data",
-            "detail": detail,
-        }
 
     proposal_only = probe_health == _PROBE_HEALTH_DEGRADED
 
@@ -608,7 +625,6 @@ def run_dream_cycle(
             "cycle_id": cycle_id,
             "project_id": project_id,
             "probe_health": probe_health,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
         },
         _data_root,
     )
@@ -640,7 +656,6 @@ def run_dream_cycle(
                     "cycle_id": cycle_id,
                     "project_id": project_id,
                     "timeout_seconds": int(kimi_timeout),
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
                 _data_root,
             )
@@ -662,21 +677,10 @@ def run_dream_cycle(
             )
             raise
 
-        review_dir = _data_root / "state" / "dream"
-        review_dir.mkdir(parents=True, exist_ok=True)
-        review_path = review_dir / f"{cycle_id}-pending-review.json"
-        review: dict[str, Any] = {
-            "cycle_id": cycle_id,
-            "project_id": project_id,
-            "input_count": total_input,
-            "restricted_rows_dropped": restricted_rows_dropped,
-            "probe_health": probe_health,
-            "consolidation": consolidation,
-            "requires_operator_review": True,
-        }
-        if proposal_only:
-            review["mode"] = "proposal_only"
-        review_path.write_text(json.dumps(review, indent=2), encoding="utf-8")
+        review_path = _write_pending_review(
+            _data_root, cycle_id, project_id, total_input,
+            restricted_rows_dropped, probe_health, consolidation, proposal_only,
+        )
 
         merged_count = len(consolidation.get("merged", []))
         dropped_count = len(consolidation.get("dropped", []))
@@ -712,7 +716,7 @@ def run_dream_cycle(
                 (
                     cycle_id,
                     project_id,
-                    datetime.now(timezone.utc).isoformat(),
+                    _utc_timestamp(),
                     total_input,
                     merged_count,
                     dropped_count,

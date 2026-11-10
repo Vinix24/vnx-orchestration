@@ -690,6 +690,73 @@ class TestKimiTimeout:
 
 
 # ---------------------------------------------------------------------------
+# Content stamps: every event and the review JSON carry a UTC timestamp
+# ---------------------------------------------------------------------------
+
+
+class TestContentStamps:
+    """The liveness reader can only judge age from content, so the writer stamps it."""
+
+    def _events(self, data_root: Path) -> list[dict]:
+        event_files = list((data_root / "events" / "dream").glob("*.ndjson"))
+        assert event_files, "No NDJSON event file written"
+        return [
+            json.loads(line)
+            for line in event_files[0].read_text().strip().splitlines()
+        ]
+
+    def test_completed_event_carries_timestamp(self, tmp_path):
+        """A completed cycle stamps the event; 3 of 134 measured events lacked one."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_FAKE_CONSOLIDATION,
+        ):
+            consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        completed = [
+            e for e in self._events(data_root) if e["event_type"] == "dream_cycle_completed"
+        ]
+        assert len(completed) == 1
+        assert "timestamp" in completed[0]
+        assert datetime.fromisoformat(completed[0]["timestamp"]).tzinfo == timezone.utc
+
+    def test_failed_event_carries_timestamp(self, tmp_path):
+        """An exception mid-cycle still leaves the failed event datable."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            side_effect=RuntimeError("kimi exploded"),
+        ):
+            with pytest.raises(RuntimeError):
+                consolidator.run_dream_cycle("vnx-dev", db_path, data_root=data_root)
+
+        failed = [
+            e for e in self._events(data_root) if e["event_type"] == "dream_cycle_failed"
+        ]
+        assert len(failed) == 1
+        assert "timestamp" in failed[0]
+
+    def test_review_json_carries_created_at(self, tmp_path):
+        """The pending review records when it was written, from content not mtime."""
+        db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
+
+        with patch(
+            "consolidator._dispatch_kimi_consolidation",
+            return_value=_FAKE_CONSOLIDATION,
+        ):
+            result = consolidator.run_dream_cycle(
+                "vnx-dev", db_path, dry_run=True, data_root=data_root
+            )
+
+        review = json.loads(Path(result["review_path"]).read_text())
+        assert review["created_at"]
+        assert datetime.fromisoformat(review["created_at"]).tzinfo == timezone.utc
+
+
+# ---------------------------------------------------------------------------
 # Entry-print: no more zero-output hangs
 # ---------------------------------------------------------------------------
 
