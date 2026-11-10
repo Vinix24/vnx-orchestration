@@ -122,29 +122,25 @@ def _entry(d: ReattributionDecision) -> Dict[str, Any]:
     }
 
 
-def _scan_rows(db_path: Path, index: AttributionIndex) -> List[ReattributionDecision]:
-    """L2's decision for every row of one database, read through a ro connection."""
-    conn = open_readonly(db_path)
-    try:
-        decisions: List[ReattributionDecision] = []
-        for table in TABLES:
-            if _columns(conn, table) is None:
-                continue
-            for r in conn.execute(f"SELECT id, title, project_id, source_dispatch_ids FROM {table} ORDER BY id"):
-                decisions.append(decide_row(
-                    table=table, row_id=r["id"], title=r["title"] or "", project_id=r["project_id"],
-                    source_dispatch_ids_raw=r["source_dispatch_ids"], dispatch_index=index, db_path=db_path,
-                ))
-        return decisions
-    finally:
-        conn.close()
+def _scan_rows(conn: sqlite3.Connection, db_path: Path, index: AttributionIndex) -> List[ReattributionDecision]:
+    """L2's decision for every row of one database, read on the caller's snapshot."""
+    decisions: List[ReattributionDecision] = []
+    for table in TABLES:
+        if _columns(conn, table) is None:
+            continue
+        for r in conn.execute(f"SELECT id, title, project_id, source_dispatch_ids FROM {table} ORDER BY id"):
+            decisions.append(decide_row(
+                table=table, row_id=r["id"], title=r["title"] or "", project_id=r["project_id"],
+                source_dispatch_ids_raw=r["source_dispatch_ids"], dispatch_index=index, db_path=db_path,
+            ))
+    return decisions
 
 
 def _user_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
-def _plan_move(src: sqlite3.Connection, src_db: Path, d: ReattributionDecision) -> Dict[str, Any]:
+def _plan_move(src: sqlite3.Connection, src_db: Path, src_version: int, d: ReattributionDecision) -> Dict[str, Any]:
     """One decided move: a planned move, a schema_gap or an unplannable entry."""
     pre = read_pre_image(src, d.table, d.row_id)
     if pre is None:
@@ -161,7 +157,7 @@ def _plan_move(src: sqlite3.Connection, src_db: Path, d: ReattributionDecision) 
     base = {
         **_entry(d), "pattern_id": pre["pattern_id"], "source_db": str(src_db),
         "destination_db": d.destination_db, "destination_project_id": d.new_project_id,
-        "source_user_version": _user_version(src), "destination_user_version": dest_version,
+        "source_user_version": src_version, "destination_user_version": dest_version,
     }
     if gaps:
         return {"kind": "schema_gap", "columns": gaps, **base}
@@ -171,22 +167,26 @@ def _plan_move(src: sqlite3.Connection, src_db: Path, d: ReattributionDecision) 
     }
 
 
-def plan_database(db_path: Path, index: AttributionIndex) -> Dict[str, List[Dict[str, Any]]]:
-    """Moves, schema gaps, unplannable moves and listed rows for one source database."""
+def plan_database(db_path: Path, index: AttributionIndex) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
+    """Moves, schema gaps, unplannable moves and listed rows for one source database,
+    plus its ``user_version``: all read inside ONE read transaction (one snapshot)."""
     out: Dict[str, List[Dict[str, Any]]] = {"moves": [], "schema_gap": [], "unplanned": [], "listed": []}
     src = open_readonly(db_path)
     try:
-        for d in _scan_rows(db_path, index):
+        src.execute("BEGIN")
+        version = _user_version(src)  # the first read pins the snapshot
+        for d in _scan_rows(src, db_path, index):
             if d.status != STATUS_MOVES:
                 if d.status != "positive_own":
                     out["listed"].append({**_entry(d), "source_db": str(db_path)})
                 continue
-            item = _plan_move(src, db_path, d)
+            item = _plan_move(src, db_path, version, d)
             key = {"move": "moves", "schema_gap": "schema_gap"}.get(item["kind"], "unplanned")
             out[key].append(item)
+        src.rollback()
     finally:
         src.close()
-    return out
+    return out, version
 
 
 def build_plan(db_paths: List[Path], index: AttributionIndex) -> Dict[str, Any]:
@@ -194,13 +194,9 @@ def build_plan(db_paths: List[Path], index: AttributionIndex) -> Dict[str, Any]:
     parts: Dict[str, List[Dict[str, Any]]] = {"moves": [], "schema_gap": [], "unplanned": [], "listed": []}
     versions: Dict[str, int] = {}
     for db in db_paths:
-        for key, items in plan_database(db, index).items():
+        planned, versions[str(db)] = plan_database(db, index)
+        for key, items in planned.items():
             parts[key].extend(items)
-        conn = open_readonly(db)
-        try:
-            versions[str(db)] = _user_version(conn)
-        finally:
-            conn.close()
     body = {
         "plan_version": PLAN_VERSION, "user_versions": versions,
         "journal_states": list(JOURNAL_STATES),
@@ -235,7 +231,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     index = build_attribution_index(root)
     dbs = sorted(set(index.qi_databases.values()) | {args.db.resolve()}) if args.all else [args.db]
     plan = build_plan(dbs, index)
-    text = json.dumps(plan, indent=2, sort_keys=True)
+    text = json.dumps(plan, indent=2, sort_keys=True, default=_json_default)
     if args.out is not None:
         args.out.write_text(text)  # vnx-atomic-write: the plan file is an output artefact, not state
     if args.out is None:

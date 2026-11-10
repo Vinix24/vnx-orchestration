@@ -29,26 +29,20 @@ SCRIPT = REPO / "scripts" / "lib" / "qi_transfer_plan.py"
 
 
 def _sql(db: Path, sql: str, *args) -> None:
-    with sqlite3.connect(str(db)) as conn:
-        conn.execute(sql, args)
-    sqlite3.connect(str(db)).close()
-
-
-def _junction(db: Path, pattern_id: str, project_id: str) -> None:
     conn = sqlite3.connect(str(db))
-    try:
-        conn.execute(
-            "INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, project_id) VALUES (?, 't', 'h', ?)",
-            (pattern_id, project_id))
-        conn.execute(
-            "INSERT INTO dispatch_pattern_offered (dispatch_id, pattern_id, pattern_title, offered_at, project_id) "
-            "VALUES ('d-x', ?, 't', '2026-11-01T00:00:00Z', ?)", (pattern_id, project_id))
-        conn.execute(
-            "INSERT INTO pattern_injection_outcome (dispatch_id, pattern_id, used, project_id) VALUES ('d-x', ?, 1, ?)",
-            (pattern_id, project_id))
-        conn.commit()
-    finally:
-        conn.close()
+    conn.execute(sql, args)
+    conn.commit()
+    conn.close()
+
+
+def _junction(db: Path, pid: str, project_id: str) -> None:
+    for sql in (
+        "INSERT INTO pattern_usage (pattern_id, pattern_title, pattern_hash, project_id) VALUES (?, 't', 'h', ?)",
+        "INSERT INTO dispatch_pattern_offered (dispatch_id, pattern_id, pattern_title, offered_at, project_id) "
+        "VALUES ('d-x', ?, 't', '2026-11-01T00:00:00Z', ?)",
+        "INSERT INTO pattern_injection_outcome (dispatch_id, pattern_id, used, project_id) VALUES ('d-x', ?, 1, ?)",
+    ):
+        _sql(db, sql, pid, project_id)
 
 
 @pytest.fixture
@@ -89,13 +83,14 @@ def _plan(world) -> dict:
 
 
 def test_script_runs_and_counts_moves_and_gaps(world):
-    proc = _run(world)
-    assert proc.returncode == 0, proc.stderr
-    plan = json.loads(proc.stdout)
+    plan = _plan(world)
     assert plan["moves"] == 1
     assert plan["schema_gap"] == 1
     assert plan["planned_moves"][0]["source_id"] == world["r1"]
     assert plan["schema_gap_rows"][0]["columns"] == ["success_patterns.tags"]
+    move = plan["planned_moves"][0]
+    assert (move["source_user_version"], move["destination_user_version"]) == (34, 28)
+    assert plan["user_versions"] == {str(world["src"]): 34}
 
 
 def test_pre_image_holds_every_column_and_junction_rows(world):
@@ -110,7 +105,7 @@ def test_pre_image_holds_every_column_and_junction_rows(world):
     assert move["pattern_id"] == f"intel_sp_{world['r1']}"
 
 
-def test_content_key_is_hex64_and_ignores_id_and_project_id():
+def test_content_key_is_hex64_and_ignores_id_and_project_id(world):
     a = {"id": 1, "project_id": "alpha", "title": "t", "tags": None, "data": "é"}
     b = {"id": 99, "project_id": "beta", "title": "t", "tags": None, "data": "é"}
     key = qtp.content_key(a)
@@ -120,16 +115,8 @@ def test_content_key_is_hex64_and_ignores_id_and_project_id():
     assert qtp.content_key({"id": 1, "blob": b"\x00\x01"}) != qtp.content_key({"id": 1, "blob": b"\x00\x02"})
 
 
-def test_move_content_key_matches_its_row(world):
     move = _plan(world)["planned_moves"][0]
     assert move["content_key"] == qtp.content_key(move["pre_image"]["row"])
-
-
-def test_both_user_versions_are_in_the_plan(world):
-    plan = _plan(world)
-    move = plan["planned_moves"][0]
-    assert (move["source_user_version"], move["destination_user_version"]) == (34, 28)
-    assert plan["user_versions"] == {str(world["src"]): 34}
 
 
 def test_sources_are_untouched(world):
@@ -174,8 +161,6 @@ def test_out_file_receives_the_plan_and_stdout_stays_empty(world, tmp_path):
     assert json.loads(out.read_text())["moves"] == 1
 
 
-
-
 def test_missing_destination_table_with_data_is_a_schema_gap(world):
     conn = sqlite3.connect(str(world["dest"]))
     conn.execute("DROP TABLE pattern_usage")
@@ -195,6 +180,22 @@ def test_unreadable_destination_is_unplanned_not_planned(world):
     assert all(u["reason"].startswith("destination_unreadable") for u in plan["unplanned_rows"])
 
 
+def test_plan_reads_attribution_and_pre_image_from_one_snapshot(world, monkeypatch):
+    _sql(world["src"], "PRAGMA journal_mode=WAL")
+    real = qtp.read_pre_image
+
+    def racing(conn, table, row_id):
+        _sql(world["src"], "UPDATE success_patterns SET source_dispatch_ids = ? WHERE id = ?", '["d-gamma"]', world["r1"])
+        return real(conn, table, row_id)
+
+    monkeypatch.setattr(qtp, "read_pre_image", racing)
+    plan = qtp.build_plan([world["src"]], qtp.build_attribution_index(world["root"]))
+    move = plan["planned_moves"][0]
+    assert move["source_user_version"] == 34 and move["destination_project_id"] == "beta"
+    assert json.loads(move["pre_image"]["row"]["source_dispatch_ids"]) == ["d-beta-1"]
 
 
-
+def test_blob_column_survives_the_cli_output(world):
+    _sql(world["src"], "UPDATE success_patterns SET pattern_data = ? WHERE id = ?", b"\x00\xff", world["r1"])
+    move = _plan(world)["planned_moves"][0]
+    assert move["pre_image"]["row"]["pattern_data"] == {"__bytes_hex__": "00ff"}
