@@ -62,9 +62,18 @@ _TOKEN_STOPWORDS = frozenset({
 
 
 def _injection_why_enabled() -> bool:
-    """VNX_INJECTION_WHY_ENABLED — off by default; direct env read (no config_registry
-    DB-precedence round-trip on the receipt-processing hot path)."""
-    return os.environ.get("VNX_INJECTION_WHY_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    """VNX_INJECTION_WHY_ENABLED through the config_registry precedence chain.
+
+    Override > ``project_config`` row > process env > registry default, via the one resolver
+    (``config_runtime.get_bool``, one read per call). A resolver that fails gives ``False``:
+    here the default IS the fail-closed answer (feature off, no new reads or writes).
+    """
+    try:
+        import config_runtime  # scripts/lib is on sys.path (module header)
+
+        return config_runtime.get_bool("VNX_INJECTION_WHY_ENABLED")
+    except Exception:
+        return False
 
 
 def _tokenize(text: str) -> set:

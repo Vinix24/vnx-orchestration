@@ -315,8 +315,29 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "activate the learning loop.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
-        # this subsystem's 2 flags. Not re-audited by this dispatch — out of scope.
+        # this subsystem's 4 flags. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
+    # intelligence-effect-measurable PR-1: the A/B window as registered, audited configuration
+    # (project_config rows) instead of a plist edit. Every default is off or empty: registering
+    # these keys opens no window. cockpit_canonical stays on VNX_INJECTION_WHY_ENABLED.
+    "VNX_INTEL_AB_TEST": _e(
+        "VNX_INTEL_AB_TEST", "bool", "0", "intelligence",
+        "Open the intelligence-injection A/B window: dispatches are assigned a treatment or "
+        "control arm. Off = no assignment, every dispatch injects as before.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_PLACEBO_ARM": _e(
+        "VNX_INTEL_PLACEBO_ARM", "bool", "0", "intelligence",
+        "Give the control arm of the A/B window a placebo section instead of nothing. "
+        "Off = the control arm receives no intelligence section.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_AB_WINDOW": _e(
+        "VNX_INTEL_AB_WINDOW", "string", "", "intelligence",
+        "The frozen A/B window configuration (window id, salt, bounds) as one JSON document. "
+        "Empty = no window is open.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
         "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "

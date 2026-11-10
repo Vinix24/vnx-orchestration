@@ -568,3 +568,18 @@ def test_fleet_pin_max_lag_reads_through_the_precedence_chain(monkeypatch):
     assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "7"
     monkeypatch.setenv("VNX_OVERRIDE_FLEET_PIN_MAX_LAG_RELEASES", "9")
     assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "9"
+
+
+def test_intel_ab_window_keys_registered_off_and_not_canonical():
+    # intelligence-effect-measurable PR-1: the A/B window is registered configuration, every
+    # default off or empty, and the single canonical flag of the subsystem stays the WHY flag.
+    sub = "injection-effectiveness-eval-loop"
+    for key, default in (("VNX_INTEL_AB_TEST", "0"), ("VNX_INTEL_PLACEBO_ARM", "0"),
+                         ("VNX_INTEL_AB_WINDOW", "")):
+        entry = cr.CONFIG_REGISTRY[key]
+        assert entry.subsystem == sub
+        assert entry.default == default
+        assert cr.get(key) == default
+        assert not entry.cockpit_canonical
+    assert cr.CONFIG_REGISTRY["VNX_INJECTION_WHY_ENABLED"].cockpit_canonical
+    assert not cr.get_bool("VNX_INTEL_AB_TEST")
