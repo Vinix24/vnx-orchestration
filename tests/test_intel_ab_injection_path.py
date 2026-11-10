@@ -6,6 +6,7 @@ over the real migration directory, the quality store with the selector test help
 
 from __future__ import annotations
 
+import importlib
 import json
 import sqlite3
 import sys
@@ -19,7 +20,6 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts", _ROOT / "tests"):
         sys.path.insert(0, str(_p))
 
 import coordination_db
-import dispatch_register
 import intelligence_injection
 import intelligence_selector as sel
 from migrations.auto_apply import auto_apply
@@ -35,7 +35,10 @@ STAMPED = "SELECT source_dispatch_ids FROM success_patterns WHERE source_dispatc
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    monkeypatch.setattr(dispatch_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
+    # The module the code under test imports now, not the collection-time reference: an
+    # earlier test may have re-imported it, and a patch on the stale object misses.
+    live_register = importlib.import_module("dispatch_register")
+    monkeypatch.setattr(live_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
