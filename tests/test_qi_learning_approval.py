@@ -15,6 +15,14 @@ ROWS = [{"table": "antipatterns", "title": "failure x", "occurrence_count": 3, "
         {"table": "success_patterns", "title": "approach y", "confidence_score": 0.8, "valid_from": "2026-11-10"}]
 PROPOSAL_ID, OTHER_ID = qla.preview(ROWS)["proposal_id"], "learn-" + "0" * 64
 PERSIST = b'{"event_type":"learning_persist","proposal_id":"%s"}' % PROPOSAL_ID.encode()
+HEAD, TORN = b'{"event_type":"x"}\n', PERSIST[:-5]  # TORN: a learning_persist line for PROPOSAL_ID cut short
+
+
+def _marker(fragment=TORN, **override) -> bytes:
+    """The torn_tail_closed line for ``fragment`` right after HEAD, with ``override`` patched in."""
+    marker = {"event_type": "torn_tail_closed", "offset": len(HEAD), "length": len(fragment),
+              "sha256": hashlib.sha256(fragment).hexdigest()}
+    return _canonical(dict(marker, **override)).encode() + b"\n"
 
 
 def _write_record(state: Path) -> Path:
@@ -46,8 +54,8 @@ def _snapshot(state: Path) -> dict:
 
 
 def _claims(state: Path) -> list:
-    lines = (state / qla.USAGE_LOG_NAME).read_text(encoding="utf-8").splitlines()
-    return [e for e in map(json.loads, lines) if e["event_type"] == "learning_persist"]
+    events = (qla._parsed(json.loads, line) for line in (state / qla.USAGE_LOG_NAME).read_bytes().splitlines())
+    return [e for e in events if isinstance(e, dict) and e["event_type"] == "learning_persist"]
 
 
 def _assert_claim_refused(state: Path, match: str, rows=ROWS) -> None:
@@ -228,3 +236,47 @@ def test_a_torn_last_append_or_another_proposals_claim_does_not_block_a_first_cl
     (state / qla.USAGE_LOG_NAME).write_bytes(log)
     qla.claim_approval(state, APPROVERS, ROWS)
     assert json.loads((state / qla.USAGE_LOG_NAME).read_bytes().splitlines()[-1])["proposal_id"] == PROPOSAL_ID
+
+
+@pytest.mark.parametrize("fragment", [b'{"event_type":"x","n":1', TORN,  # half an event; a torn persist for this one
+                                      PERSIST.replace(PROPOSAL_ID.encode(), OTHER_ID.encode())[:-5],  # or another
+                                      pytest.param(b'{"pad":"' + b"a" * (1 << 17), id="longer-than-one-read-chunk")])
+def test_a_torn_tail_an_append_closed_leaves_an_approval_usable_exactly_once(approved, fragment):
+    state = approved[0]
+    log = state / qla.USAGE_LOG_NAME
+    log.write_bytes(HEAD + fragment)
+    qla._append_event(state, {"event_type": "x"})
+    qla.claim_approval(state, APPROVERS, ROWS)
+    assert log.read_bytes().startswith(HEAD + fragment + b"\n" + _marker(fragment) + HEAD)  # no byte removed
+    assert [claim["proposal_id"] for claim in _claims(state)] == [PROPOSAL_ID]
+    _assert_refused(state, "already used")
+
+
+def test_two_torn_tails_in_a_row_each_closed_by_its_own_marker_still_read(approved):
+    state = approved[0]
+    log = state / qla.USAGE_LOG_NAME
+    log.write_bytes(HEAD + TORN)
+    qla._append_event(state, {"event_type": "x", "n": 1})
+    with open(log, "r+b") as handle:  # that append torn too: its event line lost its last 5 bytes
+        handle.truncate(log.stat().st_size - 5)
+    qla.claim_approval(state, APPROVERS, ROWS)
+    lines = log.read_bytes().splitlines()
+    assert [json.loads(lines[n])["event_type"] for n in (2, 4)] == ["torn_tail_closed"] * 2
+    assert json.loads(lines[4])["offset"] == len(b"\n".join(lines[:3])) + 1 and len(_claims(state)) == 1
+    _assert_refused(state, "already used")
+
+
+@pytest.mark.parametrize("log", [
+    HEAD + TORN + b"\n" + _marker(sha256="0" * 64),
+    HEAD + TORN + b"\n" + _marker(offset=0),
+    HEAD + TORN + b"\n" + _marker(offset=float(len(HEAD))),  # 19.0 == 19 in Python: the type must be int too
+    HEAD + TORN + b"\n" + _marker(length=1),
+    HEAD + TORN + b"\n" + _marker(closes="anything"),
+    HEAD + TORN + b"\n" + HEAD + _marker(),  # the marker must be the very next line
+    HEAD + TORN + b"\n" + HEAD,  # a closed fragment and no marker at all
+    HEAD + b"\n" + _marker(b""),  # an empty line is no torn tail
+    _marker(offset=0),  # a marker on the first line closes nothing
+])
+def test_a_torn_tail_marker_that_does_not_match_the_line_before_it_refuses(approved, log):
+    (approved[0] / qla.USAGE_LOG_NAME).write_bytes(log)
+    _assert_refused(approved[0], "not trustworthy")
