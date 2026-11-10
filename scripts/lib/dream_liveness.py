@@ -2,18 +2,22 @@
 
 ADR-066. Writes nothing (D15). Fail-closed on evidence (D11): a missing source,
 an undated event, an unknown event type or an unexplained skip reason is a
-finding, never a pass. This module reads two sources (the event stream and the
-installed plist); the log, job, db and review sources are added by later rows
-and are left out of `sources` until they are read.
+finding, never a pass. This module reads the event stream, the installed plist,
+the `launchctl` job state and the `StandardOutPath` log; the db and review sources
+are added by later rows and are left out of `sources` until they are read.
 """
 from __future__ import annotations
 import json
+import os
 import plistlib
+import re
+import subprocess
 from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from xml.parsers.expat import ExpatError
 
-from vnx_paths import resolve_central_data_dir
+from vnx_paths import refuse_real_launchctl_under_test_runner, resolve_central_data_dir
 
 
 SCHEMA = "dream_liveness/1"
@@ -24,6 +28,18 @@ WINDOW_NIGHTS = 7
 PROGRESS_TARGET = 5
 MAX_ALLOWED_SKIP_STREAK = 2
 PLIST_UNREADABLE = "unreadable"
+LOG_UNREADABLE = "unreadable"
+SUBPROCESS_TIMEOUT = 10
+_TEMPLATE = Path(__file__).resolve().parents[1] / "dream" / "templates" / f"{PLIST_LABEL}.plist.j2"
+_RUN_LINE = re.compile(r"^dream run: cycle=(\S+) project=(\S+)")
+
+# ADR-066 line 91: the closed finding set. An id outside it is a reader bug, so `_finding` refuses it.
+FINDING_IDS = frozenset({
+    "plist_missing", "plist_unreadable", "job_not_loaded", "arm_switch_off", "template_drift",
+    "events_missing", "log_missing", "log_unreadable", "db_unavailable", "reviews_unreadable",
+    "no_attempt_26h", "no_scheduled_attempt", "started_without_end", "undated_event",
+    "unknown_event_type", "unknown_skip_reason", "blocked_skip", "allowed_skip_streak",
+    "no_output", "review_overdue", "watch_stale"})
 
 ALLOWED, BLOCKED = "allowed_skip", "blocked"
 _ATTEMPT_TYPES = {
@@ -49,6 +65,7 @@ SEVERITY = {
     "arm_switch_off": "warn", "undated_event": "warn", "allowed_skip_streak": "warn",
     "no_output": "warn", "review_overdue": "warn",
     "events_missing": "warn", "plist_missing": "warn", "plist_unreadable": "warn",
+    "job_not_loaded": "error", "template_drift": "warn", "log_missing": "warn", "log_unreadable": "warn",
 }
 
 
@@ -96,8 +113,8 @@ def read_plist(plist_path: Path) -> Any:
     if not plist_path.is_file():
         return None
     try:
-        data = plistlib.loads(plist_path.read_bytes())
-    except (OSError, plistlib.InvalidFileException, ValueError):
+        data = _plist_data(plist_path)
+    except (OSError, plistlib.InvalidFileException, ValueError, ExpatError, subprocess.SubprocessError):
         return PLIST_UNREADABLE
     if not isinstance(data, dict):
         return PLIST_UNREADABLE
@@ -117,20 +134,92 @@ def read_plist(plist_path: Path) -> Any:
     env = env if isinstance(env, dict) else {}
     return {"path": str(plist_path), "label": data.get("Label"), "project_id": project_id,
             "hour": interval.get("Hour"), "minute": interval.get("Minute"),
-            "arm_switch": env.get("VNX_DREAM_SCHEDULER_ENABLED")}
+            "arm_switch": env.get("VNX_DREAM_SCHEDULER_ENABLED"), "program_arguments": args,
+            "interval": interval, "stdout_path": data.get("StandardOutPath")}
+
+
+def _run(argv: List[str], timeout: int = SUBPROCESS_TIMEOUT) -> Tuple[int, str]:
+    """The one subprocess seam (plutil and launchctl). Tests patch it; a test never reaches the real launchctl."""
+    if argv[0] == "launchctl":
+        refuse_real_launchctl_under_test_runner()
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    return proc.returncode, proc.stdout
+
+
+def _plist_data(path: Path) -> Any:
+    """`plutil -convert json` output, or plistlib on a machine without plutil. A refusing plutil raises."""
+    try:
+        code, out = _run(["plutil", "-convert", "json", "-o", "-", str(path)])
+    except FileNotFoundError:  # no plutil on this machine (not macOS): plistlib reads the same file
+        return plistlib.loads(path.read_bytes())
+    if code != 0:
+        raise ValueError("plutil refused the plist")
+    return json.loads(out)
+
+
+def read_job(label: str = PLIST_LABEL, uid: Optional[int] = None) -> Optional[dict]:
+    """`launchctl print gui/<uid>/<label>`. Non-zero is "not loaded" (nothing proves it runs); None when launchctl cannot be asked."""
+    try:
+        code, out = _run(["launchctl", "print", f"gui/{os.getuid() if uid is None else uid}/{label}"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if code != 0:
+        return {"loaded": False, "last_exit": None}
+    exit_code = re.search(r"last exit code = (-?\d+)", out)
+    return {"loaded": True, "last_exit": int(exit_code.group(1)) if exit_code else None}
+
+
+def read_log(stdout_path: object) -> Any:
+    """{"name", "lines": {cycle_id: "name:line"}} from the `dream run:` lines; None when absent, LOG_UNREADABLE when not readable."""
+    if not isinstance(stdout_path, str) or not stdout_path.strip():
+        return None
+    path = Path(stdout_path)
+    if not path.is_file():
+        return None
+    lines: Dict[str, str] = {}
+    try:
+        for number, text in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            hit = _RUN_LINE.match(text)
+            if hit:
+                lines[hit.group(1)] = f"{path.name}:{number}"
+    except OSError:
+        return LOG_UNREADABLE
+    return {"name": path.name, "lines": lines}
+
+
+def template_drift(plist: dict, log_path: Path) -> Optional[List[str]]:
+    """Fields of Label, ProgramArguments, StartCalendarInterval, StandardOutPath that differ from the template ([] = none).
+    The binary path and project id are the installer's input, so ProgramArguments[0] only has to exist. None: template unreadable."""
+    ctx = {"vnx_bin_path": "vnx", "project_id": plist.get("project_id") or "", "project_root": "/",
+           "path_env": "/", "log_dir": str(log_path.parent)}
+    try:
+        text = re.sub(r"\{\{\s*(\w+)\s*\}\}", lambda m: ctx[m.group(1)], _TEMPLATE.read_text(encoding="utf-8"))
+        want = plistlib.loads(text.encode("utf-8"))
+        want_args, args = want["ProgramArguments"], plist.get("program_arguments")
+        same = {"Label": plist.get("label") == want["Label"],
+                "ProgramArguments": (isinstance(args, list) and len(args) == len(want_args)
+                                     and isinstance(args[0], str) and bool(args[0]) and args[1:] == want_args[1:]),
+                "StartCalendarInterval": plist.get("interval") == want["StartCalendarInterval"],
+                "StandardOutPath": plist.get("stdout_path") == want["StandardOutPath"]}
+    except (OSError, KeyError, IndexError, plistlib.InvalidFileException, ValueError, ExpatError):
+        return None
+    return [name for name, ok in same.items() if not ok]
 
 
 def load_sources(project_id: str, *, data_root: Optional[Path] = None,
                  plist_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Read both sources. The data root follows the project id (D5), unless given."""
+    """Read the sources: events, plist, and (with a plist) job and log. The data root follows the project id (D5), unless given."""
     central = resolve_central_data_dir(project_id)  # the caller's id: ValueError when vnx_paths rejects it
     plist_path = plist_path or (Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist")
     plist = read_plist(plist_path)
     if isinstance(plist, dict) and plist.get("project_id"):
         project_id, central = plist["project_id"], resolve_central_data_dir(plist["project_id"])
     root = Path(data_root) if data_root else central
-    return {"project_id": project_id, "events": read_events(root / "events" / "dream"),
-            "plist": plist}
+    sources = {"project_id": project_id, "events": read_events(root / "events" / "dream"), "plist": plist}
+    if isinstance(plist, dict):  # no plist: no label state to trust and no StandardOutPath to read
+        plist["drift"] = template_drift(plist, root / "events" / "dream" / "launchd.out.log")
+        sources.update(job=read_job(), log=read_log(plist.get("stdout_path")))
+    return sources
 
 
 def classify_skip(reason: object, detail: object) -> Tuple[str, bool]:
@@ -147,6 +236,8 @@ def classify_skip(reason: object, detail: object) -> Tuple[str, bool]:
 
 
 def _finding(fid: str, detail: str, measured: bool = True) -> dict:
+    if fid not in FINDING_IDS:
+        raise ValueError(f"finding id outside the closed ADR-066 set: {fid!r}")
     return {"id": fid, "severity": SEVERITY[fid], "measured": measured, "detail": detail}
 
 
@@ -342,12 +433,14 @@ def _blocked_findings(plist: Optional[dict], dated: List[Tuple[datetime, dict]],
     return [_finding("blocked_skip", d) for d in [per_window[s] for s in sorted(per_window)] + outside]
 
 
-def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: int,
-                    now: datetime, tz: Optional[tzinfo]) -> Tuple[List[dict], List[dict], List[dict], dict]:
-    """(nights, in_flight, findings, progress_window) over the last closed nights."""
+def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], proven: List[Tuple[datetime, dict]],
+                    undated: int, now: datetime,
+                    tz: Optional[tzinfo]) -> Tuple[List[dict], List[dict], List[dict], dict]:
+    """(nights, in_flight, findings, progress_window) over the last closed nights.
+    A night counts only the `proven` attempts (log and event); a blocked or open event is read from `dated`."""
     findings: List[dict] = []
     closed = _closed_nights(plist, now, tz)
-    nights = [classify_night(d, s, e, dated) for d, s, e in closed]
+    nights = [classify_night(d, s, e, proven) for d, s, e in closed]
     ended = {e.get("cycle_id") for _, e in dated if _ATTEMPT_TYPES[e["event_type"]] != "started"
              and isinstance(e.get("cycle_id"), str)}
     horizon = closed[0][1] if closed else now
@@ -374,8 +467,9 @@ def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: in
     return nights, in_flight, findings, window
 
 
-def _newest_block(dated: List[Tuple[datetime, dict]], now: datetime) -> Tuple[dict, Optional[dict]]:
-    """attempts + outcome of the newest dated attempt."""
+def _newest_block(dated: List[Tuple[datetime, dict]], now: datetime,
+                  refs: Optional[Dict[str, str]] = None) -> Tuple[dict, Optional[dict]]:
+    """attempts + outcome of the newest dated attempt; `refs` maps a cycle_id to its `file:line` in the log."""
     dated.sort(key=lambda p: p[0])
     attempts: Dict[str, Any] = {"newest": None, "age_hours": None, "bound_hours": BOUND_HOURS}
     if not dated:
@@ -383,6 +477,8 @@ def _newest_block(dated: List[Tuple[datetime, dict]], now: datetime) -> Tuple[di
     at, ev = dated[-1]
     attempts["age_hours"] = round((now - at).total_seconds() / 3600, 2)
     attempts["newest"] = {"cycle_id": ev.get("cycle_id"), "at": at.isoformat()}
+    if refs is not None:
+        attempts["newest"]["log"] = refs.get(ev.get("cycle_id"))
     kind = _ATTEMPT_TYPES[ev["event_type"]]
     klass = classify_skip(ev.get("reason"), ev.get("detail")) if kind == "skipped" else None
     outcome = {"event_type": ev["event_type"], "reason": ev.get("reason"),
@@ -391,6 +487,47 @@ def _newest_block(dated: List[Tuple[datetime, dict]], now: datetime) -> Tuple[di
         if isinstance(ev.get(key), str):
             outcome[key] = ev[key]
     return attempts, outcome
+
+
+def _log_proof(sources: Dict[str, Any], src: Dict[str, str], findings: List[dict]) -> Optional[Dict[str, str]]:
+    """{cycle_id: "file:line"} from the log; None when no `log` key was given. An unreadable log proves nothing (empty)."""
+    if "log" not in sources:
+        return None
+    raw = sources["log"]
+    if isinstance(raw, dict) and isinstance(raw.get("lines"), dict):
+        src["log"] = "ok"
+        return raw["lines"]
+    unreadable = raw == LOG_UNREADABLE
+    src["log"] = LOG_UNREADABLE if unreadable else "missing"
+    findings.append(_finding("log_unreadable" if unreadable else "log_missing",
+                             "StandardOutPath of the installed plist cannot be read" if unreadable
+                             else "StandardOutPath of the installed plist is unknown or absent", False))
+    return {}
+
+
+def _job_findings(sources: Dict[str, Any], plist: Optional[dict]) -> Tuple[Optional[dict], List[dict]]:
+    """job facts and the `job_not_loaded` / `template_drift` findings; an unreadable job or template is measured false."""
+    findings: List[dict] = []
+    if plist is None:
+        return None, findings
+    job = {"plist_path": plist.get("path"), "label": plist.get("label"),
+           "scheduled": {"hour": plist["hour"], "minute": plist["minute"], "grace_hours": GRACE_HOURS},
+           "arm_switch": plist.get("arm_switch")}
+    if "job" in sources:
+        raw = sources["job"] if isinstance(sources["job"], dict) else None
+        job.update(loaded=raw.get("loaded") if raw else None, last_exit=raw.get("last_exit") if raw else None)
+        if raw is None:
+            findings.append(_finding("job_not_loaded", "launchctl could not be asked", False))
+        elif raw.get("loaded") is not True:
+            findings.append(_finding("job_not_loaded", f"launchctl print gui/<uid>/{PLIST_LABEL} says not loaded"))
+    if "drift" in plist:
+        drift = plist["drift"] if isinstance(plist["drift"], list) else None
+        job["drift"] = ", ".join(drift) if drift else None
+        if drift is None:
+            findings.append(_finding("template_drift", "the plist template could not be read", False))
+        elif drift:
+            findings.append(_finding("template_drift", "installed plist differs from the template in " + ", ".join(drift)))
+    return job, findings
 
 
 def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
@@ -405,25 +542,29 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
     src, findings, plist, events = _source_state(sources.get("events"), sources.get("plist"))
     dated, scan, undated = _scan_events(events, now)
     findings += scan
-    attempts, outcome = _newest_block(dated, now)
-    if src["events"] == "ok" and (not dated or attempts["age_hours"] > BOUND_HOURS):
-        findings.append(_finding("no_attempt_26h", "no dated attempt event in the last "
-                                 f"{BOUND_HOURS}h" + ("" if not dated else f" (newest {attempts['age_hours']}h ago)")))
+    logged = _log_proof(sources, src, findings)
+    # An attempt is proven by its log line and its event together (D3); without a log read the event stands alone.
+    proven = dated if logged is None else [(t, e) for t, e in dated if isinstance(e.get("cycle_id"), str)
+                                           and e["cycle_id"] in logged]
+    attempts = _newest_block(proven, now, logged)[0]
+    outcome = _newest_block(dated, now)[1]
+    if src["events"] == "ok" and (not proven or attempts["age_hours"] > BOUND_HOURS):
+        findings.append(_finding("no_attempt_26h", "no proven attempt in the last "
+                                 f"{BOUND_HOURS}h" + ("" if not proven else f" (newest {attempts['age_hours']}h ago)")))
 
     nights: List[dict] = []
     in_flight: List[dict] = []
     window = None
     if plist is not None and src["events"] == "ok":  # without both sources the window is unmeasured
-        nights, in_flight, more, window = _night_findings(plist, dated, undated, now, tz)
+        nights, in_flight, more, window = _night_findings(plist, dated, proven, undated, now, tz)
         findings += more
     elif src["events"] == "ok":  # a blocked skip is measured without a plist; only its window is unknown
         findings += _blocked_findings(None, dated, now - timedelta(days=WINDOW_NIGHTS), tz, f"plist {src['plist']}")
 
-    state = ("deviation" if any(f["severity"] == "error" for f in findings)
-             else "unmeasured" if any(v != "ok" for v in src.values()) else "ok")
-    job = {"plist_path": plist.get("path"), "label": plist.get("label"),
-           "scheduled": {"hour": plist["hour"], "minute": plist["minute"], "grace_hours": GRACE_HOURS},
-           "arm_switch": plist.get("arm_switch")} if plist else None
+    job, job_findings = _job_findings(sources, plist)
+    findings += job_findings
+    unmeasured = any(v != "ok" for v in src.values()) or any(f["measured"] is False for f in findings)
+    state = "deviation" if any(f["severity"] == "error" for f in findings) else "unmeasured" if unmeasured else "ok"
     return {"schema": SCHEMA, "project_id": project, "generated_at": now.isoformat(), "state": state,
             "sources": src, "job": job, "attempts": attempts, "outcome": outcome, "nights": nights,
             "progress_window": window, "in_flight": in_flight, "history": _history(dated),
