@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """qi_transfer_apply.py: execute a cross-database pattern move plan (reattr L3b, split 1 of 3: copy, verify).
 
-ADR-068 besluit 13-17. Steps 1 and 2 of every move; the source is opened read-only. (1) One
-``BEGIN IMMEDIATE`` on the destination re-reads the source row: ``drift`` (content_key is not the
-plan's), ``user_version_changed``, ``schema_gap``, ``same_file`` and ``evidence_changed`` (L2 no
-longer moves it there) change nothing. Else it journals the pre-image, inserts row and junction rows
-under the new ``pattern_id`` (or finds them ``already_present``) and journals ``copied`` with
-``created`` BEFORE the COMMIT, so a copy that never committed reads back absent and is copied again.
-(2) The destination is re-read: ``verified``. A move ends there and the source still holds the row.
-Split ``-b`` adds step 3 (``source_removed``, ``done``) and ``resume``, split ``-c`` adds ``undo``.
+ADR-068 besluit 13-17. Steps 1 and 2 of every move; the source is opened read-only. (1) One ``BEGIN IMMEDIATE`` on
+the destination re-reads the source row: ``drift`` (content_key is not the plan's), ``user_version_changed``,
+``schema_gap``, ``same_file`` and ``evidence_changed`` (L2 no longer moves it there) change nothing. Else it
+journals the pre-image, inserts row and junction rows under the new ``pattern_id`` (or finds them
+``already_present``) and journals ``copied`` with ``created`` BEFORE the COMMIT, so a copy that never committed
+reads back absent and is copied again. (2) The destination is re-read: ``verified``. Every path checks a ``copied``
+line field by field before it reads one. A move ends there and the source still holds the row. Split ``-b`` adds
+step 3 (``source_removed``, ``done``) and ``resume``, split ``-c`` adds ``undo``.
 
 CLI: qi_transfer_apply.py apply --plan PLAN.json --reason TEXT [--vnx-data-root DIR]
 """
@@ -73,9 +73,9 @@ def _journal(path: Path, line: Dict[str, Any]) -> None:
 
 
 def read_journal(path: Path) -> Dict[str, List[Dict[str, Any]]]:
-    """Lines per move key; a line that is no JSON object with a move and a state is a PlanError."""
+    """Lines per move key, cut on bytes (a str also breaks at U+2028); no JSON object with move and state: PlanError."""
     out: Dict[str, List[Dict[str, Any]]] = {}
-    for n, raw in enumerate(path.read_text(encoding="utf-8").splitlines() if path.is_file() else [], 1):
+    for n, raw in enumerate(path.read_bytes().splitlines() if path.is_file() else [], 1):
         try:
             line = json.loads(raw)
         except ValueError as exc:
@@ -123,8 +123,7 @@ class _Move:
     def __init__(self, move: Dict[str, Any], plan_id: str):
         self.m, self.table, self.pid = move, move["table"], move["destination_project_id"]
         self.src, self.dst = Path(move["source_db"]), Path(move["destination_db"])
-        self.key = f"{self.table}:{move['source_id']}"
-        self.jpath = journal_path(self.src, plan_id)
+        self.key, self.jpath = f"{self.table}:{move['source_id']}", journal_path(self.src, plan_id)
 
     def lines(self) -> List[Dict[str, Any]]:
         return read_journal(self.jpath).get(self.key, [])
@@ -195,6 +194,22 @@ def _copy(mv: _Move, index, reason: str) -> str:
         dst.close()
 
 
+def _checked(mv: _Move, c: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``copied`` line, once every field this module reads holds what _insert_copy wrote; else a PlanError."""
+    cols, junction = c.get("cols"), c.get("junction")
+    ok = {"created": isinstance(c.get("created"), bool), "dest_id": type(c.get("dest_id")) is int,  # a bool is no id
+          "row_key": isinstance(c.get("row_key"), str),
+          "pattern_id": c.get("pattern_id") == pattern_id_for(mv.table, c.get("dest_id")),
+          "cols": isinstance(cols, dict) and set(cols) == {mv.table, *JUNCTION_TABLES}
+          and all(isinstance(cs, list) and all(isinstance(x, str) for x in cs) for cs in cols.values()),
+          "junction": isinstance(junction, list) and all(
+              isinstance(j, list) and len(j) == 3 and j[0] in JUNCTION_TABLES and isinstance(j[1], str)
+              and isinstance(j[2], bool) for j in junction)}
+    if not all(ok.values()):
+        raise PlanError(f"{mv.key}: no copied line with a valid {', '.join(f for f, good in ok.items() if not good)}")
+    return c
+
+
 def _verify(mv: _Move, copied: Dict[str, Any]) -> Optional[bool]:
     """Step 2: True when row and every junction row are there by content; None when the copy never committed."""
     cols, dst = copied["cols"], _connect(mv.dst)
@@ -208,9 +223,8 @@ def _verify(mv: _Move, copied: Dict[str, Any]) -> Optional[bool]:
                 for t, k, fresh in copied["junction"]]
         if all(hit for _, hit in hits):
             return True
-        # created false and none of this move's own junction rows: the transaction rolled back
-        uncommitted = copied["created"] is False and not any(hit for fresh, hit in hits if fresh is True)
-        return None if uncommitted and all(hit for fresh, hit in hits if fresh is False) else False
+        # created false, no junction row of its own and every row it found before: the copy never committed
+        return None if not copied["created"] and all(hit != fresh for fresh, hit in hits) else False
     finally:
         dst.close()
 
@@ -219,15 +233,15 @@ def _advance(mv: _Move, index, reason: str) -> str:
     """Run one move from its last journal state to ``verified``; a no-op on a move an earlier run verified."""
     for step in range(3):
         lines = mv.lines()
-        state, copied = (_latest(lines) or {}).get("state"), _latest(lines, "copied")
+        state = (_latest(lines) or {}).get("state")
+        if state not in (None, "planned", "copied", "verified"):
+            raise PlanError(f"{mv.key}: journal state {state} needs step 3, which this version does not run")
+        # before any field is read; no copied line at all ({}) misses every field
+        copied = _checked(mv, _latest(lines, "copied") or {}) if state in ("copied", "verified") else None
         if state == "verified" and step == 0:  # read again, write nothing
             return "already_present" if _verify(mv, copied) is True else "destination_missing"
         if state == "verified":
-            if not isinstance(copied.get("created"), bool):  # missing or malformed: never read as either
-                raise PlanError(f"{mv.key}: the copied line has no boolean created")
             return "verified" if copied["created"] else "already_present"
-        if state not in (None, "planned", "copied"):
-            raise PlanError(f"{mv.key}: journal state {state} needs step 3, which this version does not run")
         ok = _verify(mv, copied) if state == "copied" else None
         if ok is True:
             mv.log("verified")
