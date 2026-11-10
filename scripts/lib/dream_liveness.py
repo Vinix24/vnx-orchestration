@@ -7,10 +7,9 @@ installed plist); the log, job, db and review sources are added by later rows
 and are left out of `sources` until they are read.
 """
 from __future__ import annotations
-
 import json
 import plistlib
-from datetime import date, datetime, time, timedelta, timezone, tzinfo
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,9 +19,6 @@ SCHEMA = "dream_liveness/1"
 PLIST_LABEL = "com.vnx.auto-dream"
 GRACE_HOURS = 3
 BOUND_HOURS = 26
-WINDOW_NIGHTS = 7
-PROGRESS_TARGET = 5
-MAX_ALLOWED_SKIP_STREAK = 2
 PLIST_UNREADABLE = "unreadable"
 
 ALLOWED, BLOCKED = "allowed_skip", "blocked"
@@ -34,10 +30,21 @@ _ATTEMPT_TYPES = {
     "dream_cycle_timeout": "timeout",
 }
 _REVIEW_TYPES = {"dream_cycle_approved", "dream_cycle_rejected"}
-_OUTPUT_KEYS = ("merged_count", "dropped_count", "archived_count", "flagged_count")
 _ALLOWED_REASONS = {"insufficient_data", "content_restricted_project",
                     "content_restricted_all_rows"}
 _BLOCKED_REASONS = {"scheduler_disabled", "probe_not_ok", "provider_switched_off"}
+
+# ADR-066 line 85: `deviation` only for severity `error`. D11: an unexplained reason
+# or silence is never a pass; D13: a `blocked` skip is no allowed skip. Ids of later
+# rows (started_without_end, allowed_skip_streak, no_output, review_overdue) sit here
+# so this stays the one place that names severity.
+SEVERITY = {
+    "blocked_skip": "error", "unknown_event_type": "error", "unknown_skip_reason": "error",
+    "no_attempt_26h": "error", "started_without_end": "error",
+    "arm_switch_off": "warn", "undated_event": "warn", "allowed_skip_streak": "warn",
+    "no_output": "warn", "review_overdue": "warn",
+    "events_missing": "warn", "plist_missing": "warn", "plist_unreadable": "warn",
+}
 
 
 def _parse_ts(value: object) -> Optional[datetime]:
@@ -88,8 +95,8 @@ def read_plist(plist_path: Path) -> Any:
         return PLIST_UNREADABLE
     args = data.get("ProgramArguments")
     args = args if isinstance(args, list) else []
-    project_id = args[args.index("--project-id") + 1] if (
-        "--project-id" in args and args.index("--project-id") + 1 < len(args)) else None
+    at = args.index("--project-id") + 1 if "--project-id" in args else len(args)
+    project_id = args[at] if at < len(args) else None
     interval = data.get("StartCalendarInterval")
     interval = interval[0] if isinstance(interval, list) and interval else interval
     interval = interval if isinstance(interval, dict) else {}
@@ -125,64 +132,8 @@ def classify_skip(reason: object, detail: object) -> Tuple[str, bool]:
     return BLOCKED, reason in _BLOCKED_REASONS
 
 
-def _has_output(event: dict) -> bool:
-    return any(isinstance(event.get(k), int) and not isinstance(event.get(k), bool)
-               and event[k] > 0 for k in _OUTPUT_KEYS)
-
-
-def _window(day: date, hour: int, minute: int, tz: Optional[tzinfo]) -> Tuple[datetime, datetime]:
-    naive = datetime.combine(day, time(hour, minute))
-    start = naive.astimezone() if tz is None else naive.replace(tzinfo=tz)
-    return start, start + timedelta(hours=GRACE_HOURS)
-
-
-def classify_night(day: date, start: datetime, end: datetime,
-                   dated: List[Tuple[datetime, dict]]) -> dict:
-    """One night record from the dated attempt events inside [start, end]."""
-    inside = sorted((ts, e) for ts, e in dated if start <= ts <= end)
-    terminals = [(ts, e) for ts, e in inside if _ATTEMPT_TYPES[e["event_type"]] != "started"]
-    record: Dict[str, Any] = {"night": day.isoformat(), "attempt": bool(inside),
-                              "terminal": "none", "reason": None, "class": None,
-                              "progress": any(_ATTEMPT_TYPES[e["event_type"]] == "completed"
-                                              and _has_output(e) for _, e in inside)}
-    if not terminals:
-        record["terminal"] = "started" if inside else "none"
-        return record
-    kind = _ATTEMPT_TYPES[terminals[-1][1]["event_type"]]
-    last = terminals[-1][1]
-    record["terminal"] = kind
-    if kind == "skipped":
-        record["reason"] = last.get("reason") if isinstance(last.get("reason"), str) else None
-        record["class"] = classify_skip(last.get("reason"), last.get("detail"))[0]
-    elif kind in ("failed", "timeout"):
-        record["class"] = BLOCKED
-    return record
-
-
-def progress_window(nights: List[dict], undated: int) -> dict:
-    streak = best = 0
-    for n in nights:
-        streak = streak + 1 if (n["terminal"] == "skipped" and n["class"] == ALLOWED) else 0
-        best = max(best, streak)
-    return {"nights": WINDOW_NIGHTS, "completed_with_output": sum(n["progress"] for n in nights),
-            "allowed_skip_streak_max": best,
-            "nights_without_attempt": sum(not n["attempt"] for n in nights),
-            "undated_events": undated}
-
-
-def _closed_nights(plist: dict, now: datetime, tz: Optional[tzinfo]) -> List[Tuple[date, datetime, datetime]]:
-    today = now.astimezone(tz).date() if tz else now.astimezone().date()
-    found = []
-    for back in range(-1, WINDOW_NIGHTS + 3):
-        day = today - timedelta(days=back)
-        start, end = _window(day, plist["hour"], plist["minute"], tz)
-        if end <= now:
-            found.append((day, start, end))
-    return sorted(found)[-WINDOW_NIGHTS:]
-
-
-def _finding(fid: str, detail: str, measured: bool = True, severity: str = "error") -> dict:
-    return {"id": fid, "severity": severity, "measured": measured, "detail": detail}
+def _finding(fid: str, detail: str, measured: bool = True) -> dict:
+    return {"id": fid, "severity": SEVERITY[fid], "measured": measured, "detail": detail}
 
 
 def _valid_clock(plist: dict) -> bool:
@@ -191,16 +142,15 @@ def _valid_clock(plist: dict) -> bool:
 
 
 def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
-           now: Optional[datetime] = None, tz: Optional[tzinfo] = None) -> dict:
+           now: Optional[datetime] = None) -> dict:
     """Build the `dream_liveness/1` document from already-read sources.
 
-    state: any measured finding is `deviation` (fail-closed, stricter than the
-    ADR's severity rule: a warn is never an ok); else any unmeasured source is
-    `unmeasured`; only a document with neither is `ok`.
+    state (ADR-066): `deviation` when a finding has severity `error`; else
+    `unmeasured` when a source is not `ok`; else `ok`. A warn alone is `ok`.
     """
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     findings: List[dict] = []
-    src: Dict[str, str] = {}
+    src: Dict[str, str] = {}  # every key is read; a key that is not "ok" is never passing
     raw = sources.get("events")
     plist = sources.get("plist")
     project = project_id or sources.get("project_id") or "unknown"
@@ -225,12 +175,10 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
         src["plist"] = "ok"
         if plist.get("arm_switch") != "1":
             findings.append(_finding("arm_switch_off",
-                                     f"VNX_DREAM_SCHEDULER_ENABLED={plist.get('arm_switch')!r} in the installed plist",
-                                     severity="warn"))
+                                     f"VNX_DREAM_SCHEDULER_ENABLED={plist.get('arm_switch')!r} in the installed plist"))
 
     dated: List[Tuple[datetime, dict]] = []
     undated = 0
-    history = {"completed": 0, "completed_with_output": 0, "failed": 0, "timeout": 0}
     for event in events:
         event = event if isinstance(event, dict) else {}
         etype = event.get("event_type")
@@ -242,20 +190,15 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
             undated += 1
             continue
         if etype in _REVIEW_TYPES:
-            continue  # own bucket (D4): never an attempt, an age or progress
+            continue  # own bucket (D4): never an attempt or an age
         dated.append((ts.astimezone(timezone.utc), event))
-        kind = _ATTEMPT_TYPES[etype]
-        if kind in history:
-            history[kind] += 1
-        if kind == "completed" and _has_output(event):
-            history["completed_with_output"] += 1
     if undated:
         findings.append(_finding("undated_event", f"{undated} event(s) without a usable timestamp"))
     seen = set()
     for _, e in dated:
-        kind = _ATTEMPT_TYPES[e["event_type"]]
         reason, detail = e.get("reason"), e.get("detail")
-        if kind == "skipped" and not classify_skip(reason, detail)[1] and repr((reason, detail)) not in seen:
+        if (_ATTEMPT_TYPES[e["event_type"]] == "skipped" and not classify_skip(reason, detail)[1]
+                and repr((reason, detail)) not in seen):
             seen.add(repr((reason, detail)))
             findings.append(_finding("unknown_skip_reason", f"reason={reason!r} detail={detail!r}"))
 
@@ -268,55 +211,23 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
         attempts["age_hours"] = round(age, 2)
         attempts["newest"] = {"cycle_id": newest[1].get("cycle_id"), "at": newest[0].isoformat()}
         kind = _ATTEMPT_TYPES[newest[1]["event_type"]]
+        klass = (classify_skip(newest[1].get("reason"), newest[1].get("detail"))
+                 if kind == "skipped" else None)
         outcome = {"event_type": newest[1]["event_type"], "reason": newest[1].get("reason"),
-                   "class": (classify_skip(newest[1].get("reason"), newest[1].get("detail"))[0]
-                             if kind == "skipped" else BLOCKED if kind in ("failed", "timeout") else None)}
+                   "class": klass[0] if klass else BLOCKED if kind in ("failed", "timeout") else None}
         for key in ("cycle_id", "detail", "review_path", "probe_health"):
             if isinstance(newest[1].get(key), str):
                 outcome[key] = newest[1][key]
+        if klass and klass == (BLOCKED, True):
+            findings.append(_finding("blocked_skip", f"newest attempt skipped: {newest[1].get('reason')!r}"))
     if src["events"] == "ok" and (newest is None or attempts["age_hours"] > BOUND_HOURS):
         findings.append(_finding("no_attempt_26h", "no dated attempt event in the last "
                                  f"{BOUND_HOURS}h" + ("" if newest is None else f" (newest {attempts['age_hours']}h ago)")))
 
-    nights: List[dict] = []
-    in_flight: List[dict] = []
-    if plist is not None and src["events"] == "ok":  # no events source: the window is unmeasured
-        closed = _closed_nights(plist, now, tz)
-        attempt_events = [(ts, e) for ts, e in dated]
-        nights = [classify_night(d, s, e, attempt_events) for d, s, e in closed]
-        ended = {e.get("cycle_id") for _, e in dated
-                 if _ATTEMPT_TYPES[e["event_type"]] not in ("started",) and isinstance(e.get("cycle_id"), str)}
-        horizon = closed[0][1] if closed else now
-        for ts, e in dated:
-            if _ATTEMPT_TYPES[e["event_type"]] != "started" or ts < horizon or e.get("cycle_id") in ended:
-                continue
-            day = ts.astimezone(tz).date() if tz else ts.astimezone().date()
-            if _window(day, plist["hour"], plist["minute"], tz)[1] > now:
-                in_flight.append({"cycle_id": e.get("cycle_id"), "at": ts.isoformat()})
-            else:
-                findings.append(_finding("started_without_end",
-                                         f"cycle {e.get('cycle_id')!r} started {ts.isoformat()} without a terminal event"))
-        blocked = [n for n in nights if n["class"] == BLOCKED]
-        if blocked:
-            findings.append(_finding("blocked_skip", ", ".join(
-                f"{n['night']}:{n['reason'] or n['terminal']}" for n in blocked)))
-        silent = [n["night"] for n in nights if not n["attempt"]]
-        if silent:
-            findings.append(_finding("no_scheduled_attempt", "no attempt inside the window on " + ", ".join(silent)))
-    window = progress_window(nights, undated)
-    if nights:
-        if window["allowed_skip_streak_max"] > MAX_ALLOWED_SKIP_STREAK:
-            findings.append(_finding("allowed_skip_streak",
-                                     f"{window['allowed_skip_streak_max']} allowed skips in a row"))
-        if window["completed_with_output"] < PROGRESS_TARGET:
-            findings.append(_finding("no_output", f"{window['completed_with_output']} of {WINDOW_NIGHTS} "
-                                     f"closed nights completed with output (target {PROGRESS_TARGET})"))
-
-    state = ("deviation" if any(f["measured"] for f in findings)
-             else "unmeasured" if findings else "ok")
+    state = ("deviation" if any(f["severity"] == "error" for f in findings)
+             else "unmeasured" if any(v != "ok" for v in src.values()) else "ok")
     job = {"plist_path": plist.get("path"), "label": plist.get("label"),
            "scheduled": {"hour": plist["hour"], "minute": plist["minute"], "grace_hours": GRACE_HOURS},
            "arm_switch": plist.get("arm_switch")} if plist else None
     return {"schema": SCHEMA, "project_id": project, "generated_at": now.isoformat(), "state": state,
-            "sources": src, "job": job, "attempts": attempts, "outcome": outcome, "nights": nights,
-            "progress_window": window, "in_flight": in_flight, "history": history, "findings": findings}
+            "sources": src, "job": job, "attempts": attempts, "outcome": outcome, "findings": findings}

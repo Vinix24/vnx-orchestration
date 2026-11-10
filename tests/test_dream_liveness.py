@@ -5,7 +5,7 @@ missing, None, malformed and unknown: all four stay blocking.
 """
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
 import dream_liveness as dl
-from dream_liveness import ALLOWED, BLOCKED, assess, classify_night, classify_skip
+from dream_liveness import ALLOWED, BLOCKED, SEVERITY, assess, classify_skip
 
 UTC = timezone.utc
 NOW = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
@@ -29,7 +29,7 @@ def ev(etype, day, hhmm="03:05", **fields):
 
 
 def doc(events, plist=PLIST, now=NOW):
-    return assess({"events": events, "plist": plist}, project_id="vnx-dev", now=now, tz=UTC)
+    return assess({"events": events, "plist": plist}, project_id="vnx-dev", now=now)
 
 
 def ids(document):
@@ -39,8 +39,6 @@ def ids(document):
 def good_week():
     return [ev("dream_cycle_completed", f"2026-11-{d:02d}", merged_count=1) for d in range(3, 11)]
 
-
-# --- the closed D13 table -------------------------------------------------
 
 @pytest.mark.parametrize("reason,detail,expected", [
     ("insufficient_data", "", (ALLOWED, True)),
@@ -73,8 +71,6 @@ def test_unknown_skip_reason_is_a_finding(reason):
     assert d["state"] == "deviation"
 
 
-# --- events ------------------------------------------------------------------
-
 @pytest.mark.parametrize("etype", ["dream_cycle_nonsense", None, "", 3, ["x"]])
 def test_unknown_event_type_is_a_finding_and_not_an_attempt(etype):
     d = doc([{"event_type": etype, "timestamp": "2026-11-10T11:00:00+00:00"}])
@@ -92,7 +88,6 @@ def test_undated_event_is_counted_and_never_an_age(stamp):
         event["timestamp"] = stamp
     d = doc([event])
     assert "undated_event" in ids(d)
-    assert d["progress_window"]["undated_events"] == 1
     assert d["attempts"]["age_hours"] is None
     assert "no_attempt_26h" in ids(d)
 
@@ -119,9 +114,8 @@ def test_read_events_reads_every_file_not_by_date(tmp_path):
 
 def test_read_plist_states(tmp_path):
     assert dl.read_plist(tmp_path / "none.plist") is None
-    bad = tmp_path / "bad.plist"
-    bad.write_text("<<not a plist")
-    assert dl.read_plist(bad) == dl.PLIST_UNREADABLE
+    (tmp_path / "bad.plist").write_text("<<not a plist")
+    assert dl.read_plist(tmp_path / "bad.plist") == dl.PLIST_UNREADABLE
 
 
 def test_load_sources_data_root_follows_project_id(tmp_path, monkeypatch):
@@ -133,11 +127,9 @@ def test_load_sources_data_root_follows_project_id(tmp_path, monkeypatch):
     assert len(got["events"]) == 1 and got["plist"] is None
 
 
-# --- state and sources: fail-closed ------------------------------------------
-
 @pytest.mark.parametrize("events", [None, "x", {"a": 1}, 7])
 def test_missing_or_malformed_events_source_is_unmeasured_never_ok(events):
-    d = assess({"events": events, "plist": PLIST}, now=NOW, tz=UTC)
+    d = assess({"events": events, "plist": PLIST}, now=NOW)
     assert d["state"] == "unmeasured" and "events_missing" in ids(d)
     assert d["sources"]["events"] != "ok"
 
@@ -150,11 +142,10 @@ def test_missing_or_malformed_plist_never_ok(plist):
     d = doc(good_week(), plist=plist)
     assert d["state"] != "ok"
     assert ids(d) & {"plist_missing", "plist_unreadable"}
-    assert d["nights"] == []
 
 
 def test_assess_without_any_source_is_unmeasured():
-    d = assess({}, now=NOW, tz=UTC)
+    d = assess({}, now=NOW)
     assert d["state"] == "unmeasured"
     assert {"events_missing", "plist_missing"} <= ids(d)
     assert d["schema"] == "dream_liveness/1"
@@ -163,42 +154,20 @@ def test_assess_without_any_source_is_unmeasured():
 @pytest.mark.parametrize("arm", [None, "0", "", 1, "true"])
 def test_arm_switch_must_be_exactly_one(arm):
     d = doc(good_week(), plist=dict(PLIST, arm_switch=arm))
-    assert "arm_switch_off" in ids(d) and d["state"] != "ok"
+    assert "arm_switch_off" in ids(d)
+    assert [f["severity"] for f in d["findings"] if f["id"] == "arm_switch_off"] == ["warn"]
 
 
 def test_empty_events_with_installed_plist_is_a_finding():
     d = doc([])
     assert d["state"] == "deviation"
-    assert {"no_attempt_26h", "no_scheduled_attempt", "no_output"} <= ids(d)
+    assert "no_attempt_26h" in ids(d)
 
 
 def test_progressing_week_is_ok():
     d = doc(good_week())
     assert d["state"] == "ok", d["findings"]
-    assert d["progress_window"]["completed_with_output"] == 7
-    assert d["findings"] == [] and len(d["nights"]) == 7
-    assert d["nights"][-1]["night"] == "2026-11-10"
-
-
-# --- progress (D3) and attempts (D4) -----------------------------------------
-
-@pytest.mark.parametrize("counts", [
-    {}, {"merged_count": 0, "dropped_count": 0, "archived_count": 0, "flagged_count": 0},
-    {"merged_count": None}, {"merged_count": "3"}, {"merged_count": True}, {"merged_count": -1},
-    {"merged_count": 2.5},
-])
-def test_completed_night_without_real_output_is_no_progress(counts):
-    night = classify_night(date(2026, 11, 9), datetime(2026, 11, 9, 3, tzinfo=UTC),
-                           datetime(2026, 11, 9, 6, tzinfo=UTC),
-                           [(datetime(2026, 11, 9, 3, 5, tzinfo=UTC),
-                             ev("dream_cycle_completed", "2026-11-09", **counts))])
-    assert night["progress"] is False and night["terminal"] == "completed"
-
-
-@pytest.mark.parametrize("key", dl._OUTPUT_KEYS)
-def test_any_output_key_counts_as_progress(key):
-    d = doc([ev("dream_cycle_completed", "2026-11-09", **{key: 1})])
-    assert d["progress_window"]["completed_with_output"] == 1
+    assert d["findings"] == [] and d["sources"] == {"events": "ok", "plist": "ok"}
 
 
 def test_review_event_after_40_days_of_silence_refreshes_nothing():
@@ -208,46 +177,31 @@ def test_review_event_after_40_days_of_silence_refreshes_nothing():
     d = doc(events)
     assert d["attempts"]["age_hours"] > 26
     assert "no_attempt_26h" in ids(d)
-    assert d["progress_window"]["completed_with_output"] == 0
-    assert all(not n["attempt"] for n in d["nights"])
 
 
-def test_started_without_end_in_a_closed_window_and_in_flight_in_an_open_one():
-    closed = doc([ev("dream_cycle_started", "2026-11-09")])
-    assert "started_without_end" in ids(closed)
-    open_now = datetime(2026, 11, 10, 4, 0, tzinfo=UTC)
-    flying = doc([ev("dream_cycle_started", "2026-11-10")], now=open_now)
-    assert "started_without_end" not in ids(flying)
-    assert flying["in_flight"][0]["cycle_id"] == "c-2026-11-10-dream_cycle_started"
-    ended = doc([ev("dream_cycle_started", "2026-11-09", cycle_id="c1"),
-                 ev("dream_cycle_completed", "2026-11-09", "03:20", cycle_id="c1")])
-    assert "started_without_end" not in ids(ended)
+def test_severity_table_is_exactly_the_decided_one():
+    errors = {"blocked_skip", "unknown_event_type", "unknown_skip_reason",
+              "no_attempt_26h", "started_without_end"}
+    warns = {"arm_switch_off", "undated_event", "allowed_skip_streak", "no_output", "review_overdue"}
+    assert {k for k, v in SEVERITY.items() if v == "error"} == errors
+    assert warns <= {k for k, v in SEVERITY.items() if v == "warn"}
+    assert set(SEVERITY.values()) == {"error", "warn"}
 
 
-def test_failure_outside_the_window_is_history_only():
-    d = doc(good_week() + [ev("dream_cycle_failed", "2026-11-09", "09:00")])
-    assert d["history"]["failed"] == 1
-    assert "blocked_skip" not in ids(d)
+def test_warn_only_document_is_ok():
+    d = doc(good_week(), plist=dict(PLIST, arm_switch="0"))
+    assert [f["id"] for f in d["findings"]] == ["arm_switch_off"]
+    assert d["state"] == "ok"
 
 
-def test_failure_inside_the_window_is_blocked():
-    d = doc(good_week() + [ev("dream_cycle_timeout", "2026-11-09", "03:40")])
-    assert "blocked_skip" in ids(d)
-    assert [n["class"] for n in d["nights"] if n["night"] == "2026-11-09"] == [BLOCKED]
+def test_one_blocked_skip_is_deviation():
+    d = doc([ev("dream_cycle_skipped", "2026-11-10", "11:00", reason="probe_not_ok")])
+    assert ids(d) == {"blocked_skip"}
+    assert d["state"] == "deviation"
 
 
-def test_blocked_skip_and_allowed_streak():
-    skips = [ev("dream_cycle_skipped", f"2026-11-{d:02d}", reason="insufficient_data")
-             for d in (6, 7, 8)]
-    d = doc(skips + [ev("dream_cycle_skipped", "2026-11-09", reason="probe_not_ok")])
-    assert d["progress_window"]["allowed_skip_streak_max"] == 3
-    assert {"allowed_skip_streak", "blocked_skip", "no_output"} <= ids(d)
-
-
-def test_two_allowed_skips_in_a_row_are_tolerated():
-    skips = [ev("dream_cycle_skipped", f"2026-11-{d:02d}", reason="insufficient_data") for d in (9, 10)]
-    d = doc([ev("dream_cycle_completed", f"2026-11-0{n}", merged_count=1) for n in range(4, 9)] + skips)
-    assert d["state"] == "ok", d["findings"]
+def test_allowed_skip_is_no_finding():
+    assert doc([ev("dream_cycle_skipped", "2026-11-10", "11:00", reason="insufficient_data")])["findings"] == []
 
 
 def test_outcome_carries_the_class():
