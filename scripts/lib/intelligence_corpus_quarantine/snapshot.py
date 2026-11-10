@@ -17,7 +17,24 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def create_snapshot(conn, target):
+def table_evidence(conn, names):
+    result = {}
+    for name in names:
+        columns = [row[1] for row in conn.execute(f"PRAGMA table_info({name})")]
+        found = table_digest(conn, name, columns, "id" if name == "session_analytics" else "rowid")
+        result[name] = dict(rows=found["rows"], digest_sha256=found["digest_sha256"])
+    return result
+
+
+def compare_evidence(expected, actual, message):
+    """Raise ValueError on the first table whose rows or digest differ."""
+    for name, wanted in expected.items():
+        for field, label in (("rows", "rows"), ("digest_sha256", "digest")):
+            if wanted[field] != actual[name][field]:
+                raise ValueError(f"{message}: {name} {label}")
+
+
+def create_snapshot(conn, target, expected=None):
     path = Path(target).expanduser().absolute()
     try:
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -33,11 +50,15 @@ def create_snapshot(conn, target):
             raise ValueError(f"snapshot integrity_check failed: {exc}") from exc
         if checks != [("ok",)]:
             raise ValueError(f"snapshot integrity_check failed: {checks}")
+        if expected is not None:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as copy:
+                copy.execute("BEGIN")
+                compare_evidence(expected, table_evidence(copy, expected), "fresh snapshot differs from the measured corpus")
         with path.open("rb") as source:
             os.fsync(source.fileno())
         result = dict(path=str(path.resolve()), bytes=path.stat().st_size,
                       sha256=file_sha256(path), integrity_check="ok")
-        path.chmod(0o444)
+        path.chmod(0o400)  # owner-only: a full corpus copy must not be wider than its source
         return result
     except BaseException:
         path.unlink()  # Remove only the failed copy exclusively created by this invocation.
@@ -49,14 +70,8 @@ def verify_reused_corpus(conn, target):
     path = Path(target).expanduser().resolve()
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as copy:
         copy.execute("BEGIN")
-        for name in CORPUS_TABLES:
-            evidence = []
-            for source in (conn, copy):
-                columns = [row[1] for row in source.execute(f"PRAGMA table_info({name})")]
-                evidence.append(table_digest(source, name, columns, "rowid"))
-            for field, label in (("rows", "rows"), ("digest_sha256", "digest")):
-                if evidence[0][field] != evidence[1][field]:
-                    raise ValueError(f"live corpus differs from the reused snapshot: {name} {label}")
+        compare_evidence(table_evidence(conn, CORPUS_TABLES), table_evidence(copy, CORPUS_TABLES),
+                         "live corpus differs from the reused snapshot")
 
 
 def reuse_snapshot(target, manifest_path):

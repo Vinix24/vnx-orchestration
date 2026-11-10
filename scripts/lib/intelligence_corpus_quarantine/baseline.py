@@ -7,10 +7,10 @@ from pathlib import Path
 
 from .contract import CORPUS_TABLES, SCHEMA, TRACK, validate_corpus, validate_manifest, validate_session
 from .digest import table_digest
-from .snapshot import create_snapshot, verify_reused_corpus
+from .snapshot import create_snapshot, table_evidence, verify_reused_corpus
 
 
-def measure_baseline(db_path, *, snapshot=None, reused_snapshot=None):
+def measure_baseline(db_path, *, snapshot=None, reused_snapshot=None, _before_snapshot=None):
     """Measure a real store; I/O/SQL errors propagate instead of becoming zero rows."""
     path = Path(db_path).expanduser().resolve()
     if not path.is_file():
@@ -41,10 +41,15 @@ def measure_baseline(db_path, *, snapshot=None, reused_snapshot=None):
             generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), db=db, tables=tables)
         if snapshot is not None or reused_snapshot is not None:
             manifest.update(corpus=_corpus(conn, tables), invariants=dict(session_analytics=_session(conn)))
+            session = manifest["invariants"]["session_analytics"]
+            expected = {**table_evidence(conn, CORPUS_TABLES),
+                        "session_analytics": dict(rows=session["rows"], digest_sha256=session["digest_sha256"])}
             if reused_snapshot is not None:
                 verify_reused_corpus(conn, reused_snapshot["path"])
             conn.rollback()  # VACUUM cannot run inside the measurement transaction.
-            manifest["snapshot"] = create_snapshot(conn, snapshot) if snapshot is not None else reused_snapshot
+            if _before_snapshot is not None:
+                _before_snapshot()  # test seam: a writer landing between measurement and copy
+            manifest["snapshot"] = create_snapshot(conn, snapshot, expected) if snapshot is not None else reused_snapshot
     return validate_manifest(manifest)
 
 
@@ -74,6 +79,6 @@ def _corpus(conn, tables):
 def _session(conn):
     columns = [r[1] for r in conn.execute("PRAGMA table_info(session_analytics)")]
     rows, max_id, sum_id = conn.execute("SELECT count(*),max(id),sum(id) FROM session_analytics").fetchone()
-    digest = table_digest(conn, "session_analytics", columns, "id", where=f"id <= {max_id}" if rows else "0")
+    digest = table_digest(conn, "session_analytics", columns, "id")
     return validate_session(dict(rows=rows, max_id=max_id, sum_id=sum_id,
                                  columns=columns, digest_sha256=digest["digest_sha256"]))

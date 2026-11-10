@@ -45,7 +45,7 @@ def test_snapshot(database, tmp_path, journal_mode):
     snapshot = tmp_path / "snapshot.db"
     result = run(database, tmp_path, "--snapshot", snapshot)
     assert result.returncode == 0, result.stderr
-    assert snapshot.is_file()
+    assert snapshot.stat().st_mode & 0o777 == 0o400
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["invariants"]["session_analytics"]["digest_sha256"]
     assert manifest["corpus"]["languages"]
@@ -55,12 +55,8 @@ def test_snapshot(database, tmp_path, journal_mode):
     with closing(sqlite3.connect(database)) as conn:
         corpus = manifest["corpus"]
         assert corpus["languages"] == dict(conn.execute("SELECT language,count(*) FROM code_snippets GROUP BY language"))
-        assert corpus["distinct_file_path"] == conn.execute("SELECT count(DISTINCT file_path) FROM code_snippets").fetchone()[0]
-        assert corpus["created_at"] == dict(zip(("min", "max"), conn.execute(
-            "SELECT min(created_at),max(created_at) FROM snippet_metadata").fetchone()))
-        assert corpus["join"]["orphans"] == conn.execute("SELECT count(*) FROM snippet_metadata m "
-            "LEFT JOIN code_snippets s ON m.snippet_rowid=s.rowid WHERE s.rowid IS NULL").fetchone()[0] == 1
-        assert corpus["join"]["duplicate_snippet_rowid"] == 0
+        assert corpus["distinct_file_path"] == 2 and corpus["join"] == dict(orphans=1, duplicate_snippet_rowid=0)
+        assert corpus["created_at"] == dict(min="2026-06-01 00:00:00", max="2026-06-04")
         assert corpus["file_path_roots"] == {"/one/two/three/four/five": 1, "/one/two/three": 2}
         assert corpus["tables"] == ["code_snippets", "snippet_metadata"]
         for table in corpus["tables"]:
@@ -94,6 +90,7 @@ def test_reuse_and_all_column_digest(database, tmp_path, extra_column):
         conn.commit()
     result = run(database, tmp_path, "--reuse-snapshot", snapshot)
     assert result.returncode == 0, result.stderr
+    assert snapshot.stat().st_mode & 0o777 == 0o400
     after = json.loads(target.read_bytes())
     assert target.read_bytes() != original and after["snapshot"] == before["snapshot"]
     assert list(snapshot_dir.iterdir()) == files
@@ -240,3 +237,31 @@ def test_missing_corpus_evidence(database, tmp_path, field):
     result = run(database, tmp_path, "--snapshot", tmp_path / "copy.db")
     assert result.returncode == 3 and "invalid" in result.stderr
     assert not (tmp_path / "copy.db").exists() and not (tmp_path / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("sql,reason", [
+    ("UPDATE code_snippets SET code='late' WHERE rowid=2", "code_snippets digest"),
+    ("INSERT INTO snippet_metadata(snippet_rowid,file_path) VALUES (2,'/late')", "snippet_metadata rows"),
+    ("UPDATE session_analytics SET deep_analysis_json='late' WHERE id=1", "session_analytics digest"),
+], ids=["snippet-update", "metadata-insert", "session-update"])
+def test_fresh_snapshot_refused_when_source_changes_before_copy(database, tmp_path, sql, reason):
+    from intelligence_corpus_quarantine.baseline import measure_baseline
+
+    def writer():
+        with closing(sqlite3.connect(database)) as other:
+            other.execute(sql)
+            other.commit()
+
+    target = tmp_path / "copy.db"
+    with pytest.raises(ValueError, match=f"fresh snapshot differs from the measured corpus: {reason}"):
+        measure_baseline(database, snapshot=target, _before_snapshot=writer)
+    assert not target.exists()
+
+
+def test_session_digest_covers_all_rows_without_where(database):
+    from intelligence_corpus_quarantine.baseline import _session
+    from intelligence_corpus_quarantine.digest import table_digest
+    with closing(sqlite3.connect(database)) as conn:
+        columns = [r[1] for r in conn.execute("PRAGMA table_info(session_analytics)")]
+        assert _session(conn)["digest_sha256"] == table_digest(
+            conn, "session_analytics", columns, "id", where="id <= 2")["digest_sha256"]
