@@ -310,22 +310,43 @@ def _write_dream_events(vnx_env, events, filename="2026-08-08.ndjson"):
     return events_dir
 
 
-def _install_dream_plist(home, arm="1", hour=3, minute=0):
-    """Write the installed dream plist under a tmp HOME (the doctor reads it from there)."""
+def _install_dream_plist(home, arm="1", hour=3, minute=0, data_dir=None):
+    """Write the installed dream plist under a tmp HOME (the doctor reads it from there).
+    With `data_dir` it carries the StandardOutPath the template would give."""
     import plistlib
     agents = Path(home) / "Library" / "LaunchAgents"
     agents.mkdir(parents=True, exist_ok=True)
-    (agents / "com.vnx.auto-dream.plist").write_bytes(plistlib.dumps({
+    body = {
         "Label": "com.vnx.auto-dream",
         "ProgramArguments": ["vnx", "dream", "run", "--project-id", "vnx-dev"],
         "EnvironmentVariables": {"VNX_DREAM_SCHEDULER_ENABLED": arm},
         "StartCalendarInterval": {"Hour": hour, "Minute": minute},
-    }))
+    }
+    if data_dir is not None:
+        body["StandardOutPath"] = str(Path(data_dir) / "events" / "dream" / "launchd.out.log")
+    (agents / "com.vnx.auto-dream.plist").write_bytes(plistlib.dumps(body))
+
+
+def _write_dream_log(vnx_env, cycle_ids):
+    """The launchd stdout log: one `dream run:` line per cycle id."""
+    log = Path(vnx_env["VNX_DATA_DIR"]) / "events" / "dream" / "launchd.out.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("".join(f"dream run: cycle={c} project=vnx-dev\n" for c in cycle_ids), encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
 def _tmp_home_for_dream(tmp_path, monkeypatch):
-    """The doctor reads the installed plist from $HOME: never the real one."""
+    """The doctor reads the installed plist from $HOME: never the real one.
+    The subprocess seam answers a loaded job and no plutil: the real launchctl is never reached."""
+    import dream_liveness
+
+    def fake_run(argv, timeout=10):
+        if argv[0] == "plutil":
+            raise FileNotFoundError("plutil")
+        assert argv[:2] == ["launchctl", "print"], argv
+        return 0, "last exit code = 0\n"
+
+    monkeypatch.setattr(dream_liveness, "_run", fake_run)
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -448,7 +469,7 @@ class TestDreamCycleProgressPasses:
 
     def test_progressing_window_passes(self, vnx_env, _tmp_home_for_dream):
         from datetime import datetime, timedelta
-        _install_dream_plist(_tmp_home_for_dream)
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
         now = datetime.now().astimezone()
         events = []
         for back in range(9):
@@ -457,7 +478,28 @@ class TestDreamCycleProgressPasses:
                 events.append({"event_type": "dream_cycle_completed", "cycle_id": f"c{back}",
                                "merged_count": 2, "timestamp": at.isoformat()})
         _write_dream_events(vnx_env, events)
+        _write_dream_log(vnx_env, [e["cycle_id"] for e in events])
         assert check_dream_cycle(vnx_env)[0].status == PASS
+
+    def test_loaded_job_without_attempt_is_not_pass(self, vnx_env, _tmp_home_for_dream):
+        """Red run (ADR-066): a loaded job whose log has no `dream run:` line is no attempt."""
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
+        _write_dream_events(vnx_env, [])
+        _write_dream_log(vnx_env, [])
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status == WARN
+        assert "no_attempt_26h" in check.message
+
+    def test_unloaded_job_is_not_pass(self, vnx_env, _tmp_home_for_dream, monkeypatch):
+        """A job launchctl does not know is a finding even when the events look fine."""
+        import dream_liveness
+        _install_dream_plist(_tmp_home_for_dream, data_dir=vnx_env["VNX_DATA_DIR"])
+        real_fake = dream_liveness._run
+        monkeypatch.setattr(dream_liveness, "_run",
+                            lambda argv, timeout=10: (113, "") if argv[0] == "launchctl" else real_fake(argv))
+        check = check_dream_cycle(vnx_env)[0]
+        assert check.status == WARN
+        assert "job_not_loaded" in check.message
 
 
 class TestDreamCycleDegradedIsNotPass:

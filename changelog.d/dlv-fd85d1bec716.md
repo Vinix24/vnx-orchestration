@@ -1,0 +1,1 @@
+- `vnx doctor`'s dream check proves a night with the `dream run:` log line and its event (same cycle id), reads the installed plist through `plutil`, asks `launchctl print` whether the job is loaded and reports `template_drift` against the plist template (dream PR-4, ADR-066).
