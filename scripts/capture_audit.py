@@ -2,6 +2,10 @@
 """Capture audit CLI: project-bound sources and the audit (capture PR-2, PR-3).
 
 Subcommands:
+  bind     check the paths and the project id, record the binding in the ledger
+           (``state_mutation`` receipt in ``t0_receipts.ndjson``), then write
+           ``<state-dir>/capture_sources.json`` atomically. A failed check or a
+           failed ledger append writes nothing and exits 1 with the reason.
   sources  show per source the state (ok, absent, unbound, error) and counts.
            Never prints a name, title, heading or body.
   audit    compute the window, the pairs and their disposition and write
@@ -31,6 +35,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
 import capture_sources as cs
+from atomic_io import atomic_write_json
 from vnx_paths import project_id_from_state_dir
 
 LIB_FILE = SCRIPT_DIR / "lib" / "capture_audit.py"
@@ -70,6 +75,78 @@ def _recent_months(now: datetime, count: int) -> List[str]:
         if month == 0:
             year, month = year - 1, 12
     return months
+
+
+def _bind_problem(state_dir: Path, memory_dir: Path, bucket_dir: Path, slug: str) -> Optional[str]:
+    if not state_dir.is_dir():
+        return "state dir does not exist"
+    if not project_id_from_state_dir(state_dir):
+        return "project id cannot be derived from the state dir"
+    if not memory_dir.is_dir():
+        return "memory dir does not exist"
+    if cs._memory_dir_problem(str(memory_dir)):
+        return "memory dir is not under ~/.claude/projects/"
+    if not bucket_dir.is_dir():
+        return "bucket dir does not exist"
+    if not slug.strip():
+        return "bucket slug is empty"
+    return None
+
+
+def _record_bind(state_dir: Path, payload: Dict[str, object], transition: str) -> Optional[str]:
+    """ADR-005: the binding decision lands in the ledger before the derived JSON. Fail closed.
+
+    Returns None when the receipt is in the ledger, else the reason the bind must be refused."""
+    receipt = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event_type": "state_mutation",
+        "receipt_kind": "state_mutation",
+        "terminal": "T0",
+        "source": "capture_audit",
+        "file": cs.BINDING_FILENAME,
+        "trigger": "capture_bind",
+        "project_id": payload["project_id"],
+        "bucket_slug": payload["bucket_slug"],
+        "transition": transition,
+    }
+    try:
+        from append_receipt import append_receipt_payload
+        ledger = str(state_dir / "t0_receipts.ndjson")
+        result = append_receipt_payload(receipt, receipts_file=ledger, skip_enrichment=True)
+    # append_receipt raises SystemExit when its import bootstrap fails; like
+    # planning_cli._retarget_receipt, that must refuse the bind, not escape cmd_bind.
+    except (Exception, SystemExit) as exc:
+        return f"ledger append failed ({exc})"
+    status = getattr(result, "status", None)
+    if status in ("appended", "duplicate"):
+        return None
+    return f"ledger append failed (append result {status!r})"
+
+
+def cmd_bind(args: argparse.Namespace) -> int:
+    state_dir = Path(args.state_dir).expanduser().resolve()
+    memory_dir = Path(args.memory_dir).expanduser().resolve()
+    bucket_dir = Path(args.bucket_dir).expanduser().resolve()
+    problem = _bind_problem(state_dir, memory_dir, bucket_dir, args.bucket_slug)
+    if problem:
+        print(f"bind refused: {problem}", file=sys.stderr)
+        return 1
+    payload = {
+        "schema": cs.BINDING_SCHEMA,
+        "project_id": project_id_from_state_dir(state_dir),
+        "memory_dir": str(memory_dir),
+        "bucket_dir": str(bucket_dir),
+        "bucket_slug": args.bucket_slug.strip(),
+        "bound_at": datetime.now(timezone.utc).isoformat(),
+    }
+    target = state_dir / cs.BINDING_FILENAME
+    refusal = _record_bind(state_dir, payload, "replaced" if target.exists() else "created")
+    if refusal:
+        print(f"bind refused: {refusal}", file=sys.stderr)
+        return 1
+    atomic_write_json(target, payload)
+    print(f"bound project {payload['project_id']}: {target}")
+    return 0
 
 
 def _bin(status: str, count: int, **extra: int) -> Dict[str, object]:
@@ -130,6 +207,12 @@ def cmd_audit(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Capture audit: project-bound sources and the audit")
     sub = parser.add_subparsers(dest="command", required=True)
+    bind = sub.add_parser("bind", help="record the binding in the ledger, then write the binding file")
+    bind.add_argument("--state-dir", required=True)
+    bind.add_argument("--memory-dir", required=True)
+    bind.add_argument("--bucket-dir", required=True)
+    bind.add_argument("--bucket-slug", required=True)
+    bind.set_defaults(func=cmd_bind)
     sources = sub.add_parser("sources", help="show the state and counts per source")
     sources.add_argument("--state-dir", required=True)
     sources.add_argument("--json", action="store_true")
