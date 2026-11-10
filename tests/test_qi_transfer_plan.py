@@ -191,3 +191,36 @@ def test_blob_column_survives_the_cli_output(world):
     _sql(world["src"], "UPDATE success_patterns SET pattern_data = ? WHERE id = ?", b"\x00\xff", world["r1"])
     move = _plan(world)["planned_moves"][0]
     assert move["pre_image"]["row"]["pattern_data"] == {"__bytes_hex__": "00ff"}
+
+
+def test_out_receives_the_plan_and_stdout_stays_empty(world, tmp_path):
+    out = tmp_path / "plans" / "plan.json"
+    proc = _run(world, "--out", str(out))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == ""
+    assert json.loads(out.read_text()) == _plan(world)
+
+
+def test_out_failure_leaves_the_existing_plan_and_no_temp_file(world, tmp_path, monkeypatch, capsys):
+    out = tmp_path / "plans" / "plan.json"
+    out.parent.mkdir()
+    out.write_bytes(b'{"old": "plan"}\n')
+
+    def boom(src, dst):
+        raise OSError("replace refused")
+
+    monkeypatch.setattr(os, "replace", boom)
+    argv = ["--db", str(world["src"]), "--vnx-data-root", str(world["root"]), "--json", "--out", str(out)]
+    with pytest.raises(OSError, match="replace refused"):
+        qtp.main(argv)
+    assert out.read_bytes() == b'{"old": "plan"}\n'
+    assert [p.name for p in out.parent.iterdir()] == ["plan.json"]
+    assert capsys.readouterr().out == ""
+
+
+def test_out_in_the_directory_of_a_source_database_is_refused(world):
+    out = world["src"].parent / "plan.json"
+    proc = _run(world, "--out", str(out))
+    assert proc.returncode == 2
+    assert proc.stdout == ""
+    assert not out.exists()
