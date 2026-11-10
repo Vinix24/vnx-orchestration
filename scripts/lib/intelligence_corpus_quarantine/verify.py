@@ -61,7 +61,11 @@ def _load(path, label):
 
 def _open_ro(path, req, what):
     try:
-        conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+        uri = Path(path).as_uri() + "?mode=ro"  # ValueError: a relative path has no file URI
+    except ValueError as exc:
+        raise Refusal(req, f"{what} path {str(path)!r} cannot be opened as a database: {exc}") from exc
+    try:
+        conn = sqlite3.connect(uri, uri=True)
         conn.execute("BEGIN")
         if conn.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
             conn.close()
@@ -175,7 +179,10 @@ def _session(live, manifest):
 def _snapshot(manifest):
     """Requirement 8: the snapshot file is the one the manifest recorded, intact and readable."""
     snap = _get(manifest, "snapshot", dict, 8)
-    path, size, sha = Path(_get(snap, "path", str, 8)), _get(snap, "bytes", int, 8), _hex(snap, "sha256", 8)
+    raw_path, size, sha = _get(snap, "path", str, 8), _get(snap, "bytes", int, 8), _hex(snap, "sha256", 8)
+    path = Path(raw_path)
+    if not path.is_absolute() or "\0" in raw_path:  # the baseline writes an absolute path; anything else is a foreign manifest
+        raise Refusal(8, f"snapshot.path must be an absolute path without NUL: {raw_path!r}")
     if _get(snap, "integrity_check", str, 8) != "ok" or size == 0:
         raise Refusal(8, "snapshot integrity_check is not ok or bytes is 0")
     try:

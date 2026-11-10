@@ -103,7 +103,8 @@ def test_valid_permit_is_exit_0_with_a_true_verdict_and_changes_nothing(permit):
     assert all(verdict[name] is True for name in BOOLEANS)
     expected = hashlib.sha256(permit.manifest.read_bytes() + permit.quarantine.read_bytes()).hexdigest()
     assert verdict["permit_sha256"] == expected
-    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3} and verdict["session_rows"] == 2
+    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3}
+    assert verdict["session_rows"] == 2
     assert verdict["requirements_checked"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert isinstance(verdict["user_version"], int)
     assert {f: fingerprint(f) for f in before} == before
@@ -250,3 +251,42 @@ def test_check_permit_runs_on_the_callers_connection(permit):
     with closing(sqlite3.connect(permit.db.as_uri() + "?mode=ro", uri=True)) as conn:
         verdict = verify_module.check_permit(permit.db, permit.manifest, permit.folder, conn=conn)
     assert verdict["digests_equal"] is True
+
+
+@pytest.fixture
+def relative_snapshot(permit, monkeypatch):
+    """A manifest whose snapshot.path is relative but resolves to the real snapshot from the working directory."""
+    monkeypatch.chdir(permit.snapshot.parent)
+    tamper(permit.manifest, jset("snapshot.path", permit.snapshot.name))
+    return permit
+
+
+def test_relative_snapshot_path_refuses_requirement_8(relative_snapshot):
+    p = relative_snapshot
+    with pytest.raises(verify_module.Refusal) as info:
+        verify_module.check_permit(p.db, p.manifest, p.folder)
+    assert info.value.requirement == 8
+    assert "snap.db" in str(info.value)
+
+
+def test_verify_writes_one_refused_audit_line_for_a_relative_snapshot_path(relative_snapshot):
+    p = relative_snapshot
+    with pytest.raises(verify_module.Refusal) as info:
+        verify_module.verify(p.db, p.manifest, p.folder, state_dir=p.state)
+    assert info.value.requirement == 8
+    (line,) = audit_lines(p)
+    assert (line["status"], line["requirement"]) == ("refused", 8)
+
+
+def test_snapshot_path_with_nul_refuses_requirement_8(permit):
+    tamper(permit.manifest, jset("snapshot.path", str(permit.snapshot) + "\u0000x"))
+    with pytest.raises(verify_module.Refusal) as info:
+        verify_module.check_permit(permit.db, permit.manifest, permit.folder)
+    assert info.value.requirement == 8
+
+
+def test_open_ro_refuses_a_relative_path_for_its_own_requirement():
+    with pytest.raises(verify_module.Refusal) as info:
+        verify_module._open_ro("rel.db", 3, "artifact")
+    assert info.value.requirement == 3
+    assert "artifact" in str(info.value)
