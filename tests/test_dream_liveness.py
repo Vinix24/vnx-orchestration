@@ -5,6 +5,7 @@ missing, None, malformed and unknown: all four stay blocking.
 """
 import json
 import plistlib
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -197,7 +198,9 @@ def test_review_event_after_40_days_of_silence_refreshes_nothing():
 def test_severity_table_is_exactly_the_decided_one():
     errors = {"blocked_skip", "unknown_event_type", "unknown_skip_reason",
               "no_attempt_26h", "started_without_end", "no_scheduled_attempt"}
-    warns = {"arm_switch_off", "undated_event", "allowed_skip_streak", "no_output", "review_overdue"}
+    errors.add("job_not_loaded")
+    warns = {"arm_switch_off", "undated_event", "allowed_skip_streak", "no_output", "review_overdue",
+             "template_drift", "log_missing", "log_unreadable"}
     assert {k for k, v in SEVERITY.items() if v == "error"} == errors
     assert warns <= {k for k, v in SEVERITY.items() if v == "warn"}
     assert set(SEVERITY.values()) == {"error", "warn"}
@@ -425,3 +428,200 @@ def test_skip_outside_every_window_leaves_nights_and_progress_window_unchanged(r
     d = doc(good_week() + [ev(SKIP, "2026-11-10", "09:00", reason=reason)])
     assert d["nights"] == base["nights"] and d["progress_window"] == base["progress_window"]
     assert d["outcome"]["class"] == classify_skip(reason, None)[0]
+
+
+@pytest.fixture(autouse=True)
+def _no_real_subprocess(monkeypatch):
+    """Every plutil and launchctl call goes through the seam; here it answers a loaded job and no plutil."""
+    calls = []
+
+    def fake(argv, timeout=dl.SUBPROCESS_TIMEOUT):
+        calls.append(argv)
+        if argv[0] == "plutil":
+            raise FileNotFoundError("plutil")
+        assert argv[:2] == ["launchctl", "print"], argv
+        return 0, "state = not running\n\tlast exit code = 0\n"
+
+    monkeypatch.setattr(dl, "_run", fake)
+    return calls
+
+
+def logged(events):
+    return {"name": "launchd.out.log", "lines": {e["cycle_id"]: f"launchd.out.log:{i}" for i, e in enumerate(events, 1)}}
+
+
+UNSET = object()
+
+
+def full(events, log=UNSET, job=None, plist=PLIST):
+    sources = {"events": events, "plist": dict(plist, drift=[]), "log": logged(events) if log is UNSET else log,
+               "job": {"loaded": True, "last_exit": 0} if job is None else job}
+    return assess(sources, project_id="vnx-dev", now=NOW, tz=UTC)
+
+
+def test_proven_week_with_loaded_job_and_no_drift_is_ok():
+    d = full(good_week())
+    assert d["state"] == "ok" and d["findings"] == [] and d["sources"]["log"] == "ok"
+    assert d["job"]["loaded"] is True and d["job"]["last_exit"] == 0 and d["attempts"]["newest"]["log"]
+
+
+def test_loaded_job_without_attempt_is_not_pass():
+    d = full([], log={"name": "launchd.out.log", "lines": {}})
+    assert d["state"] == "deviation" and {"no_attempt_26h", "no_scheduled_attempt"} <= ids(d)
+
+
+def test_attempt_without_log_line_is_not_proven():
+    started = ev("dream_cycle_started", "2026-11-10", "03:05")
+    d = full(good_week()[:-1] + [started], log=logged(good_week()[:-1]))
+    assert d["nights"][-1]["attempt"] is False and "no_scheduled_attempt" in ids(d)
+
+
+def test_review_events_do_not_refresh_attempts():
+    old = [ev("dream_cycle_completed", "2026-09-30", merged_count=1)]
+    review = ev("dream_cycle_approved", "2026-11-10", "11:00")
+    d = full(old + [review], log=logged(old + [review]))
+    assert d["attempts"]["age_hours"] > 26 and "no_attempt_26h" in ids(d)
+    assert d["attempts"]["newest"]["cycle_id"] == old[0]["cycle_id"]
+
+
+@pytest.mark.parametrize("log,fid,state", [
+    ("missing", "log_missing", "missing"), (dl.LOG_UNREADABLE, "log_unreadable", dl.LOG_UNREADABLE),
+    (None, "log_missing", "missing"), ("junk", "log_missing", "missing"), ({"lines": "x"}, "log_missing", "missing")])
+def test_log_that_cannot_be_read_proves_nothing(log, fid, state):
+    d = full(good_week(), log=log)
+    assert fid in ids(d) and d["sources"]["log"] == state and d["state"] != "ok"
+    assert "no_attempt_26h" in ids(d) and hits(d, fid)[0]["measured"] is False
+
+
+@pytest.mark.parametrize("job,measured", [({"loaded": False, "last_exit": None}, True), (None, False),
+                                          ({"loaded": None}, True), ({}, True), ("loaded", False)])
+def test_job_not_loaded_stays_blocking(job, measured):
+    d = full(good_week(), job=job) if job is not None else assess(
+        {"events": good_week(), "plist": dict(PLIST, drift=[]), "log": logged(good_week()), "job": None},
+        now=NOW, tz=UTC)
+    found = hits(d, "job_not_loaded")
+    assert len(found) == 1 and found[0]["measured"] is measured and d["state"] != "ok"
+
+
+@pytest.mark.parametrize("drift", [["Label"], ["StandardOutPath", "StartCalendarInterval"], None, "Label"])
+def test_template_drift_is_a_finding_and_unreadable_is_unmeasured(drift):
+    d = assess({"events": good_week(), "plist": dict(PLIST, drift=drift), "log": logged(good_week()),
+                "job": {"loaded": True, "last_exit": 0}}, now=NOW, tz=UTC)
+    found = hits(d, "template_drift")
+    assert len(found) == 1 and found[0]["measured"] is isinstance(drift, list)
+    assert d["state"] == ("ok" if isinstance(drift, list) else "unmeasured")  # drift is a warn; unread is unmeasured
+
+
+def test_the_finding_ids_are_the_closed_adr_set():
+    adr = (Path(__file__).resolve().parent.parent / "docs/governance/decisions/ADR-066-dream-liveness-watch.md")
+    line = [l for l in adr.read_text(encoding="utf-8").splitlines() if l.startswith("- **`findings`**")][0]
+    import re
+    named = set(re.findall(r"`([a-z0-9_]+)`", line.split("verzameling ids", 1)[1].split("Een id buiten")[0]))
+    assert named - {"severity", "measured", "detail"} == dl.FINDING_IDS and set(SEVERITY) <= dl.FINDING_IDS
+    pytest.raises(ValueError, dl._finding, "made_up", "x")
+
+
+PLUTIL_JSON = json.dumps({"Label": "com.vnx.auto-dream", "ProgramArguments": ["vnx", "dream", "run", "--project-id", "vnx-dev"],
+                          "StartCalendarInterval": {"Hour": 3, "Minute": 0}, "StandardOutPath": "/x/launchd.out.log"})
+
+
+def test_read_plist_prefers_plutil_and_falls_back_to_plistlib(tmp_path, monkeypatch, _no_real_subprocess):
+    path = tmp_path / "a.plist"
+    path.write_bytes(plistlib.dumps({"Label": "from-plistlib"}))
+    assert dl.read_plist(path)["label"] == "from-plistlib"  # fixture: no plutil
+    monkeypatch.setattr(dl, "_run", lambda argv, timeout=10: _no_real_subprocess.append(argv) or (0, PLUTIL_JSON))
+    got = dl.read_plist(path)
+    assert got["label"] == "com.vnx.auto-dream" and got["stdout_path"] == "/x/launchd.out.log"
+    assert _no_real_subprocess[-1] == ["plutil", "-convert", "json", "-o", "-", str(path)]
+
+
+@pytest.mark.parametrize("answer", [(1, ""), (0, "not json"), (0, "[1]"), (0, ""), subprocess.TimeoutExpired("plutil", 10)])
+def test_plutil_that_refuses_times_out_or_returns_junk_is_unreadable(tmp_path, monkeypatch, answer):
+    path = tmp_path / "a.plist"
+    path.write_bytes(plistlib.dumps({"Label": "x"}))
+    monkeypatch.setattr(dl, "_run", lambda argv, timeout=10: (_ for _ in ()).throw(answer) if isinstance(answer, Exception) else answer)
+    assert dl.read_plist(path) == dl.PLIST_UNREADABLE
+
+
+@pytest.mark.parametrize("answer,expected", [
+    ((0, "x\n\tlast exit code = 78\n"), {"loaded": True, "last_exit": 78}),
+    ((113, "Could not find service"), {"loaded": False, "last_exit": None})])
+def test_read_job_asks_launchctl_print_for_the_gui_domain(monkeypatch, answer, expected):
+    seen = []
+    monkeypatch.setattr(dl, "_run", lambda argv, timeout=10: seen.append(argv) or answer)
+    assert dl.read_job(uid=501) == expected and seen == [["launchctl", "print", "gui/501/com.vnx.auto-dream"]]
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError, OSError, lambda: subprocess.TimeoutExpired("launchctl", 10)])
+def test_read_job_that_cannot_ask_is_none(monkeypatch, exc):
+    monkeypatch.setattr(dl, "_run", lambda argv, timeout=10: (_ for _ in ()).throw(exc()))
+    assert dl.read_job(uid=501) is None
+
+
+def test_read_log_collects_dream_run_lines(tmp_path):
+    log = tmp_path / "launchd.out.log"
+    log.write_bytes(b"noise\ndream run: cycle=dream-1 project=vnx-dev\n\xff\xfe garbage\ndream run: cycle=dream-2 project=x\n")
+    got = dl.read_log(str(log))
+    assert got == {"name": "launchd.out.log", "lines": {"dream-1": "launchd.out.log:2", "dream-2": "launchd.out.log:4"}}
+    assert dl.read_log(None) is None and dl.read_log(str(tmp_path / "no.log")) is None
+
+
+def _installed(tmp_path, **override):
+    body = {"Label": "com.vnx.auto-dream", "ProgramArguments": ["/bin/vnx", "dream", "run", "--project-id", "vnx-dev"],
+            "StartCalendarInterval": {"Hour": 3, "Minute": 0},
+            "StandardOutPath": str(tmp_path / "events" / "dream" / "launchd.out.log")}
+    body.update(override)
+    path = tmp_path / "p.plist"
+    path.write_bytes(plistlib.dumps(body))
+    return dl.read_plist(path)
+
+
+def test_an_installed_plist_equal_to_the_template_has_no_drift(tmp_path):
+    assert dl.template_drift(_installed(tmp_path), tmp_path / "events" / "dream" / "launchd.out.log") == []
+
+
+@pytest.mark.parametrize("override,field", [
+    ({"Label": "com.other"}, "Label"),
+    ({"ProgramArguments": ["/bin/vnx", "dream", "run"]}, "ProgramArguments"),
+    ({"ProgramArguments": ["", "dream", "run", "--project-id", "vnx-dev"]}, "ProgramArguments"),
+    ({"StartCalendarInterval": {"Hour": 4, "Minute": 0}}, "StartCalendarInterval"),
+    ({"StandardOutPath": "/elsewhere/launchd.out.log"}, "StandardOutPath")])
+def test_each_compared_field_reports_drift(tmp_path, override, field):
+    got = dl.template_drift(_installed(tmp_path, **override), tmp_path / "events" / "dream" / "launchd.out.log")
+    assert got == [field]
+
+
+def test_a_missing_template_is_unmeasured(tmp_path, monkeypatch):
+    plist = _installed(tmp_path)
+    monkeypatch.setattr(dl, "_TEMPLATE", tmp_path / "gone.j2")
+    assert dl.template_drift(plist, tmp_path / "x" / "launchd.out.log") is None
+
+
+def test_load_sources_reads_job_log_and_drift_for_an_installed_plist(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    plist, root = tmp_path / "p.plist", tmp_path / "data"
+    (root / "events" / "dream").mkdir(parents=True)
+    log = root / "events" / "dream" / "launchd.out.log"
+    log.write_text("dream run: cycle=c1 project=vnx-dev\n")
+    plist.write_bytes(plistlib.dumps({"Label": "com.vnx.auto-dream", "StandardOutPath": str(log),
+                                      "ProgramArguments": ["vnx", "dream", "run", "--project-id", "vnx-dev"],
+                                      "StartCalendarInterval": {"Hour": 3, "Minute": 0}}))
+    src = dl.load_sources("vnx-dev", data_root=root, plist_path=plist)
+    assert src["plist"]["drift"] == [] and src["job"] == {"loaded": True, "last_exit": 0}
+    assert src["log"]["lines"] == {"c1": "launchd.out.log:1"}
+
+
+def test_the_seam_runs_a_real_subprocess_and_guards_launchctl(monkeypatch):
+    monkeypatch.undo()  # the seam itself, not the autouse fake
+    guard = []
+    monkeypatch.setattr(dl, "refuse_real_launchctl_under_test_runner", lambda: guard.append(1))
+    ran = []
+
+    def fake_subprocess(argv, **kw):
+        ran.append((argv, kw["timeout"]))
+        return type("P", (), {"returncode": 3, "stdout": "out"})()
+
+    monkeypatch.setattr(dl.subprocess, "run", fake_subprocess)
+    assert dl._run(["launchctl", "print", "x"], 4) == (3, "out") and guard == [1]
+    assert dl._run(["plutil", "-p", "x"]) == (3, "out") and guard == [1]
+    assert ran == [(["launchctl", "print", "x"], 4), (["plutil", "-p", "x"], dl.SUBPROCESS_TIMEOUT)]
