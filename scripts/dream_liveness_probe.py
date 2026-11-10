@@ -45,12 +45,19 @@ def _append_line(path: Path, document: dict) -> None:
         os.close(fd)
 
 
-def _write(state_dir: Path, document: dict, append: bool) -> None:
+def _write(data_root: Path, document: dict, append: bool) -> None:
+    """The ledger line goes under <data_root>/state, the beacon under <data_root>/health.
+
+    HealthBeacon takes the data root and writes <root>/health/<component>.json, the
+    place every beacon reader looks. Handing it <data_root>/state lands it in
+    state/health, which nothing reads.
+    """
+    state_dir = data_root / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     if append:
         _append_line(state_dir / LEDGER_NAME, document)
     # heartbeat_strict raises on I/O failure; the best-effort heartbeat would swallow it.
-    HealthBeacon(state_dir, BEACON_COMPONENT,
+    HealthBeacon(data_root, BEACON_COMPONENT,
                  expected_interval_seconds=BEACON_INTERVAL_SECONDS).heartbeat_strict(
         status="ok" if document["state"] == "ok" else "fail",
         details={"state": document["state"], "project_id": document["project_id"],
@@ -79,7 +86,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(json.dumps(document, indent=2, sort_keys=True))
     if args.append:
         try:
-            _write(data_root / "state", document, append=True)
+            _write(data_root, document, append=True)
         except OSError as exc:
             print(f"dream_liveness_probe: write failed: {exc}", file=sys.stderr)
             return 1

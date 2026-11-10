@@ -64,7 +64,7 @@ def test_append_adds_exactly_one_line_and_the_beacon(root):
     assert probe.main(["--project-id", PROJECT, "--append"]) == 0
     lines = (root / "state" / "dream_liveness.ndjson").read_text().splitlines()
     assert len(lines) == 2 and all(json.loads(x)["schema"] == "dream_liveness/1" for x in lines)
-    beacon = json.loads((root / "state" / "health" / "dream_liveness.json").read_text())
+    beacon = json.loads((root / "health" / "dream_liveness.json").read_text())
     assert beacon["component"] == "dream_liveness"
     assert beacon["expected_interval_seconds"] == 90000
     assert beacon["status"] == "fail"  # the blocked-skip fixture is not ok: never a favourable default
@@ -73,8 +73,17 @@ def test_append_adds_exactly_one_line_and_the_beacon(root):
 def test_append_writes_only_the_two_paths_of_d15(root):
     probe.main(["--project-id", PROJECT, "--append"])
     written = {p for p in _tree(root) if (root / p).is_file()}
-    assert written == {"state/dream_liveness.ndjson", "state/health/dream_liveness.json",
-                       "state/health/dream_liveness.json.lock"}
+    assert written == {"state/dream_liveness.ndjson", "health/dream_liveness.json",
+                       "health/dream_liveness.json.lock"}
+    assert not (root / "state" / "health").exists()
+
+
+def test_a_beacon_reader_finds_the_beacon_after_one_append(root):
+    from health_beacon import all_beacons
+    probe.main(["--project-id", PROJECT, "--append"])
+    beacons = all_beacons(root)
+    assert "dream_liveness" in beacons
+    assert beacons["dream_liveness"]["status"] == "fail"
 
 
 def test_unwritable_state_dir_is_exit_1_and_no_beacon(root, capsys):
@@ -88,7 +97,7 @@ def test_unwritable_state_dir_is_exit_1_and_no_beacon(root, capsys):
     finally:
         state.chmod(0o700)
     assert "write failed" in capsys.readouterr().err
-    assert not (state / "health" / "dream_liveness.json").exists()
+    assert not (root / "health" / "dream_liveness.json").exists()
 
 
 def test_beacon_failure_after_the_append_is_exit_1(root, monkeypatch, capsys):
