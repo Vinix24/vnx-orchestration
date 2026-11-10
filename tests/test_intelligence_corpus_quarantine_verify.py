@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 CLI = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py"
 AUDIT = "intelligence_corpus_quarantine_audit.ndjson"
-BOOLEANS = ["rows_equal", "digests_equal", "seal_ok"]
+BOOLEANS = ["rows_equal", "digests_equal", "ddl_equal", "snapshot_ok", "seal_ok", "session_equal"]
 DROP = object()
 spec = importlib.util.spec_from_file_location("corpus_cli", CLI)
 cli = importlib.util.module_from_spec(spec)
@@ -34,6 +34,8 @@ def permit(tmp_path):
                           (19946, "rowid mod", "x = 1", "/src/c.py", "python")])
         conn.executemany("INSERT INTO snippet_metadata(snippet_rowid,file_path,created_at) VALUES (?,?,'2026-06-01')",
                          [(2, "/src/a.py"), (3, "/src/b.py"), (19946, "/src/c.py")])
+        conn.executemany("INSERT INTO session_analytics(session_id,project_id,project_path,session_date) "
+                         "VALUES (?,'fixture','/fixture','2026-06-01')", [("a",), ("b",)])
         conn.commit()
     out, state = tmp_path / "permit", tmp_path / "state"
     out.mkdir()
@@ -101,7 +103,8 @@ def test_valid_permit_is_exit_0_with_a_true_verdict_and_changes_nothing(permit):
     assert all(verdict[name] is True for name in BOOLEANS)
     expected = hashlib.sha256(permit.manifest.read_bytes() + permit.quarantine.read_bytes()).hexdigest()
     assert verdict["permit_sha256"] == expected
-    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3}; assert verdict["requirements_checked"] == [1, 2, 3, 4]
+    assert verdict["rows"] == {"code_snippets": 3, "snippet_metadata": 3} and verdict["session_rows"] == 2
+    assert verdict["requirements_checked"] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert isinstance(verdict["user_version"], int)
     assert {f: fingerprint(f) for f in before} == before
     assert permit.folder.stat().st_mode & 0o777 == 0o555 and permit.artifact.stat().st_mode & 0o777 == 0o444
@@ -131,6 +134,26 @@ MATRIX = [  # (requirement, file, name, change)
     (4, "quarantine", "digest changed", jset("tables.0.content_digest", "0" * 64)),
     (4, "quarantine", "columns malformed", jset("tables.0.columns", "x")),
     (4, "quarantine", "table entry missing", jset("tables.1", DROP)),
+    (5, "quarantine", "ddl hash missing", jset("source_ddl_sha256", DROP)),
+    (5, "quarantine", "ddl hash None", jset("source_ddl_sha256", None)),
+    (5, "quarantine", "ddl hash truncated", jset("source_ddl_sha256", "abc")),
+    (5, "quarantine", "ddl hash unknown", jset("source_ddl_sha256", "0" * 64)),
+    (6, "manifest", "session digest missing", jset("invariants.session_analytics.digest_sha256", DROP)),
+    (6, "manifest", "session rows None", jset("invariants.session_analytics.rows", None)),
+    (6, "manifest", "session columns malformed", jset("invariants.session_analytics.columns", "x")),
+    (6, "manifest", "session sum_id unknown", jset("invariants.session_analytics.sum_id", 999)),
+    (7, "manifest", "corpus rows missing", jset("corpus.rows", DROP)),
+    (7, "manifest", "corpus count None", jset("corpus.rows.code_snippets", None)),
+    (7, "manifest", "corpus rows malformed", jset("corpus.rows", "x")),
+    (7, "manifest", "corpus count unknown", jset("corpus.rows.code_snippets", 99)),
+    (8, "manifest", "snapshot missing", jset("snapshot", DROP)),
+    (8, "manifest", "snapshot sha None", jset("snapshot.sha256", None)),
+    (8, "manifest", "snapshot bytes malformed", jset("snapshot.bytes", "x")),
+    (8, "snapshot", "snapshot truncated", lambda raw: raw[:100]),
+    (9, "manifest", "db bytes missing", jset("db.bytes", DROP)),
+    (9, "manifest", "db bytes None", jset("db.bytes", None)),
+    (9, "manifest", "db bytes malformed", jset("db.bytes", "x")),
+    (9, "manifest", "db bytes zero", jset("db.bytes", 0)),
 ]
 
 
@@ -138,6 +161,14 @@ MATRIX = [  # (requirement, file, name, change)
 def test_every_broken_requirement_refuses_with_exit_3(permit, capsys, requirement, target, case, change):
     tamper(getattr(permit, target), change)
     refused(permit, capsys, requirement)
+
+
+def test_a_changed_session_column_names_its_id(permit, capsys):
+    with closing(sqlite3.connect(permit.db)) as conn:
+        conn.execute("UPDATE session_analytics SET deep_analysis_json='changed' WHERE id=2")
+        conn.commit()
+    refused(permit, capsys, 6)
+    assert "id 2 is missing" in audit_lines(permit)[-1]["reason"]
 
 
 def test_a_row_added_after_quarantine_names_its_rowid(permit, capsys):
@@ -194,6 +225,15 @@ def test_audit_failures_are_never_a_silent_success(permit, capsys, tmp_path):
     assert cli.main(argv(permit)[:-2] + ["--state-dir", str(tmp_path / "missing")]) == 1
     assert "audit line was not written" in capsys.readouterr().err
     assert cli.main(argv(permit)[:-2] + ["--state-dir", str(permit.folder / "inside")]) == 3
+
+
+@pytest.mark.parametrize("where", ["permit dir itself", "sibling of the sealed folder"])
+def test_verify_refuses_an_audit_dir_anywhere_in_the_permit_dir(permit, where):
+    state = permit.folder.parent if where == "permit dir itself" else permit.folder.parent / "audit"
+    state.mkdir(exist_ok=True)
+    with pytest.raises(ValueError, match="B4"):
+        verify_module.verify(permit.db, permit.manifest, permit.folder, state_dir=state)
+    assert not (state / AUDIT).exists()
 
 
 def test_a_fresh_interpreter_with_only_scripts_lib_runs_verify(permit):
