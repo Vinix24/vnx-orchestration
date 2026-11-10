@@ -35,9 +35,12 @@ from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import lesson_refs
+from vnx_paths import project_id_from_state_dir, resolve_paths
 
 MAX_MEMORY_CHARS = 1200       # leaves budget for prior_round + adr + code_anchor
 MAX_MEMORIES_PER_DISPATCH = 3
@@ -89,6 +92,9 @@ class OperatorMemory:
     body: str
     tags: frozenset         # inferred + explicit
     referenced_files: frozenset
+    open_item_refs: frozenset = frozenset()   # OI-<n> named in the body
+    # one tuple per ref: (ref, resolved, status, closed_at, pr_id, reason)
+    open_item_status: tuple = ()
 
 
 @dataclass
@@ -247,6 +253,7 @@ def _parse_memory_file(file_path: Path, text: str) -> Optional[OperatorMemory]:
         body=body.strip(),
         tags=tags,
         referenced_files=frozenset(referenced),
+        open_item_refs=frozenset(lesson_refs.find_oi_refs(body)),
     )
 
 
@@ -396,7 +403,9 @@ def fetch_relevant_memories(
     scored.sort(key=lambda x: (-x[0], x[1].type != "feedback"))
 
     # Cap at MAX_MEMORIES_PER_DISPATCH and fit within budget
-    candidates = [m for _, m in scored[:MAX_MEMORIES_PER_DISPATCH * 2]]
+    candidates = _attach_open_item_status(
+        [m for _, m in scored[:MAX_MEMORIES_PER_DISPATCH * 2]]
+    )
     trimmed: List[OperatorMemory] = []
     for mem in candidates:
         if len(trimmed) >= MAX_MEMORIES_PER_DISPATCH:
@@ -406,6 +415,48 @@ def fetch_relevant_memories(
             trimmed.append(mem)
 
     return trimmed
+
+
+def _attach_open_item_status(candidates: List[OperatorMemory]) -> List[OperatorMemory]:
+    """Hang the live status of every named OI on the candidates (read-only).
+
+    The store of this process (``VNX_STATE_DIR``) is read once per call and only
+    when a candidate names an OI. Without a valid project id nothing is read and
+    every ref is ``onbekend (project_unknown)``. Unknown is never open.
+    """
+    if not any(m.open_item_refs for m in candidates):
+        return candidates
+    state_dir = Path(resolve_paths()["VNX_STATE_DIR"])
+    if project_id_from_state_dir(state_dir):
+        index, state = lesson_refs.load_oi_index(state_dir)
+    else:
+        index, state = {}, lesson_refs.REASON_PROJECT_UNKNOWN
+    result: List[OperatorMemory] = []
+    for mem in candidates:
+        if not mem.open_item_refs:
+            result.append(mem)
+            continue
+        resolved = lesson_refs.resolve_oi_refs(sorted(mem.open_item_refs), index, state)
+        status = tuple(
+            (ref, r["resolved"], r["status"], r["closed_at"], r["pr_id"], r["reason"])
+            for ref, r in resolved.items()
+        )
+        result.append(replace(mem, open_item_status=status))
+    return result
+
+
+def _format_open_item_line(entry: tuple) -> str:
+    ref, resolved, status, closed_at, pr_id, reason = entry
+    if not resolved:
+        return f"- {ref}: onbekend ({reason})"
+    if status not in lesson_refs.CLOSED_STATUSES:
+        return f"- {ref}: {status}"
+    parts = []
+    if closed_at:
+        parts.append(f"gesloten {closed_at[:10]}")
+    if pr_id:
+        parts.append(f"#{pr_id.lstrip('#')}")
+    return f"- {ref}: {status} ({', '.join(parts)})" if parts else f"- {ref}: {status}"
 
 
 def format_memories_section(memories: List[OperatorMemory]) -> str:
@@ -433,6 +484,10 @@ def format_memories_section(memories: List[OperatorMemory]) -> str:
         lines.append("")
         if mem.description:
             lines.append(f"*{mem.description}*")
+            lines.append("")
+        if mem.open_item_status:
+            lines.append("Open items named in this note (live status):")
+            lines.extend(_format_open_item_line(e) for e in mem.open_item_status)
             lines.append("")
         if mem.body:
             lines.append(mem.body)
