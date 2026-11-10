@@ -19,11 +19,8 @@ sys.path.insert(0, str(_LIB_DIR))
 import intelligence_selector as sel  # noqa: E402
 
 WINDOW = {
-    "window_id": "w1",
-    "salt": "salt-a",
-    "control_fraction": 0.5,
-    "opened_utc": "2026-11-10T08:00:00Z",
-    "hash_version": 1,
+    "window_id": "w1", "salt": "salt-a", "control_fraction": 0.5,
+    "opened_utc": "2026-11-10T08:00:00Z", "hash_version": 1,
 }
 
 
@@ -66,25 +63,12 @@ def test_missing_or_malformed_window_gives_no_arm(ab_on, window):
     assert sel.arm_for_dispatch("dlv-x", "p1", window) == (None, None)
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"control_fraction": 0},
-        {"control_fraction": 1},
-        {"control_fraction": -0.1},
-        {"control_fraction": "0.5"},
-        {"control_fraction": None},
-        {"control_fraction": True},
-        {"hash_version": 2},
-        {"hash_version": None},
-        {"window_id": ""},
-        {"salt": "  "},
-        {"salt": None},
-        {"opened_utc": "gisteren"},
-        {"opened_utc": None},
-        {"extra": 1},
-    ],
-)
+@pytest.mark.parametrize("change", [
+    {"control_fraction": 0}, {"control_fraction": 1}, {"control_fraction": -0.1},
+    {"control_fraction": "0.5"}, {"control_fraction": None}, {"control_fraction": True},
+    {"hash_version": 2}, {"hash_version": None}, {"window_id": ""}, {"salt": "  "},
+    {"salt": None}, {"opened_utc": "gisteren"}, {"opened_utc": None}, {"extra": 1},
+])
 def test_invalid_window_field_gives_no_arm(ab_on, change):
     window = {**WINDOW, **change}
     assert sel.arm_for_dispatch("dlv-x", "p1", window) == (None, None)
@@ -121,21 +105,17 @@ def test_empty_ids_give_no_arm(ab_on, dispatch_id, project_id):
     assert sel.arm_for_dispatch(dispatch_id, project_id, dict(WINDOW)) == (None, None)
 
 
-def test_salt_changes_assignment(ab_on):
+@pytest.mark.parametrize("what", ["salt", "project", "config"])
+def test_input_change_changes_assignment_or_stamp(ab_on, what):
     ids = [f"dlv-{i}" for i in range(200)]
-    other = {**WINDOW, "salt": "salt-b"}
-    assert _arms(WINDOW, ids) != _arms(other, ids)
-
-
-def test_project_id_changes_assignment(ab_on):
-    ids = [f"dlv-{i}" for i in range(200)]
-    assert _arms(WINDOW, ids, "p1") != _arms(WINDOW, ids, "p2")
-
-
-def test_config_change_changes_window_stamp(ab_on):
-    _, a = sel.arm_for_dispatch("dlv-x", "p1", dict(WINDOW))
-    _, b = sel.arm_for_dispatch("dlv-x", "p1", {**WINDOW, "control_fraction": 0.4})
-    assert a != b
+    if what == "salt":
+        assert _arms(WINDOW, ids) != _arms({**WINDOW, "salt": "salt-b"}, ids)
+    elif what == "project":
+        assert _arms(WINDOW, ids, "p1") != _arms(WINDOW, ids, "p2")
+    else:
+        _, a = sel.arm_for_dispatch("dlv-x", "p1", dict(WINDOW))
+        _, b = sel.arm_for_dispatch("dlv-x", "p1", {**WINDOW, "control_fraction": 0.4})
+        assert a != b
 
 
 def test_two_subprocesses_agree(tmp_path):
@@ -151,29 +131,25 @@ def test_two_subprocesses_agree(tmp_path):
         "VNX_PROJECT_ID": "p1",
         "HOME": str(tmp_path),
     }
-    outs = [
-        subprocess.run(
-            [sys.executable, "-c", code, str(_LIB_DIR)],
-            env=env, capture_output=True, text=True, check=True, cwd=tmp_path,
-        ).stdout
-        for _ in range(2)
-    ]
+    run = lambda: subprocess.run([sys.executable, "-c", code, str(_LIB_DIR)], env=env, capture_output=True, text=True, check=True, cwd=tmp_path).stdout
+    outs = [run(), run()]
     assert outs[0] == outs[1]
     arm, ab_window = json.loads(outs[0])
     assert arm in {"control", "treatment"} and ab_window.startswith("w1:")
 
 
 def test_old_random_arm_is_gone():
-    assert not hasattr(sel, "_ab_arm")
-    assert not hasattr(sel, "AB_CONTROL_FRACTION")
-    assert not hasattr(sel, "random")
+    assert not any(hasattr(sel, n) for n in ("_ab_arm", "AB_CONTROL_FRACTION", "random"))
 
 
-def test_resolve_arm_placebo_wins(monkeypatch):
+@pytest.mark.parametrize("dispatch_id,assigned", [("dlv-c", "control"), ("dlv-a", "treatment")])
+def test_resolve_arm_placebo_wins(monkeypatch, dispatch_id, assigned):
     monkeypatch.setenv("VNX_INTEL_PLACEBO_ARM", "1")
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
+    monkeypatch.setenv("VNX_PROJECT_ID", "p1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
-    assert sel._resolve_arm("dlv-x") == "placebo"
+    assert sel.arm_for_dispatch(dispatch_id, "p1", WINDOW)[0] == assigned
+    assert sel._resolve_arm(dispatch_id) == "placebo"
 
 
 def test_resolve_arm_without_window_is_none_not_treatment(monkeypatch):
@@ -214,8 +190,8 @@ def captured(monkeypatch):
         )
 
     monkeypatch.setattr(sel.IntelligenceSelector, "select", fake_select)
-    monkeypatch.setattr(sel.IntelligenceSelector, "emit_event", lambda self, r, **kw: audit.append(("event", r.ab_arm)))
-    monkeypatch.setattr(sel.IntelligenceSelector, "record_injection", lambda self, r, **kw: audit.append(("record", r.ab_arm)))
+    for name in ("emit_event", "record_injection"):
+        monkeypatch.setattr(sel.IntelligenceSelector, name, lambda self, r, _n=name, **kw: audit.append((_n, r.ab_arm)))
     return audit
 
 
@@ -225,24 +201,16 @@ def _run_both(tmp_path):
     return direct, ctx.result
 
 
-@pytest.mark.parametrize("window_env", [None, "not-json", json.dumps({**WINDOW, "control_fraction": 7})])
-def test_disabled_or_invalid_window_records_no_arm(monkeypatch, tmp_path, captured, window_env):
+@pytest.mark.parametrize("ab_flag,window_env", [
+    ("1", None),
+    ("1", "not-json"),
+    ("1", json.dumps({**WINDOW, "control_fraction": 7})),
+    (None, json.dumps(WINDOW)),
+])
+def test_disabled_or_invalid_window_records_no_arm(monkeypatch, tmp_path, captured, ab_flag, window_env):
     monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
-    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-    if window_env is None:
-        monkeypatch.delenv("VNX_INTEL_AB_WINDOW", raising=False)
-    else:
-        monkeypatch.setenv("VNX_INTEL_AB_WINDOW", window_env)
-    direct, ctx = _run_both(tmp_path)
-    assert direct.ab_arm is None
-    assert ctx.ab_arm is None
-    assert captured and all(arm is None for _, arm in captured)
-
-
-def test_flag_off_records_no_arm(monkeypatch, tmp_path, captured):
-    monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
-    monkeypatch.delenv("VNX_INTEL_AB_TEST", raising=False)
-    monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
+    for key, val in (("VNX_INTEL_AB_TEST", ab_flag), ("VNX_INTEL_AB_WINDOW", window_env)):
+        monkeypatch.delenv(key, raising=False) if val is None else monkeypatch.setenv(key, val)
     direct, ctx = _run_both(tmp_path)
     assert direct.ab_arm is None and ctx.ab_arm is None
     assert captured and all(arm is None for _, arm in captured)
