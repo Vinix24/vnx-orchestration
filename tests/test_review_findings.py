@@ -1,9 +1,10 @@
-"""DR-1: a stable finding id, including scopes inside compound statements.
+"""DR-1: a stable finding id and a status that never closes silently.
 
 Pure tests, no tmp files and no git. Plan "Klaar per levering" item 2: the
 same finding on another line gives the same id, another function gives another
 id — also when the functions sit inside ``if``/``try``/``with``/``for``/
-``match``. The fail-closed status tests follow in the second half of the split.
+``match`` — a vanished anchor gives ``unverifiable`` and ``fixed`` ->
+``regressed`` is recognised.
 """
 
 from __future__ import annotations
@@ -195,6 +196,54 @@ def test_symbolic_context_inside_compound_statements(source, line, expected):
 )
 def test_symbolic_context_empty_cases(source, line):
     assert rf.symbolic_context(source, line) == ""
+
+
+# --- transitions -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "previous, answer, anchor, expected",
+    [
+        (None, None, True, rf.STATUS_OPEN),  # unanswered id stays open
+        ("open", "", True, rf.STATUS_OPEN),
+        (None, "not-a-status", True, rf.STATUS_OPEN),
+        (None, "open", True, rf.STATUS_OPEN),
+        ("open", "fixed", True, rf.STATUS_FIXED),
+        (None, "regressed", True, rf.STATUS_REGRESSED),
+        ("fixed", "open", True, rf.STATUS_REGRESSED),  # fixed -> there again
+        ("fixed", "regressed", True, rf.STATUS_REGRESSED),
+        ("fixed", "fixed", True, rf.STATUS_FIXED),
+        (None, "waived", True, rf.STATUS_OPEN),  # reviewer cannot waive
+        ("open", "waived", True, rf.STATUS_OPEN),
+        ("waived", "waived", True, rf.STATUS_WAIVED),  # carried from previous
+        ("waived", "fixed", True, rf.STATUS_FIXED),
+        (None, None, False, rf.STATUS_UNVERIFIABLE),  # anchor wins
+        ("open", "fixed", False, rf.STATUS_UNVERIFIABLE),
+        ("fixed", "fixed", False, rf.STATUS_UNVERIFIABLE),
+        ("waived", "waived", False, rf.STATUS_UNVERIFIABLE),
+    ],
+)
+def test_next_status(previous, answer, anchor, expected):
+    assert rf.next_status(previous, answer, anchor) == expected
+
+
+# --- blocking (the C2 rule for DR-4a) --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "status, expected",
+    [
+        ("open", True),
+        ("regressed", True),
+        ("unverifiable", True),
+        ("fixed", False),
+        ("waived", False),
+        (None, True),  # fail-closed
+        ("something-else", True),
+    ],
+)
+def test_blocks(status, expected):
+    assert rf.blocks(status) is expected
 
 
 # --- id_for_finding contract ----------------------------------------------

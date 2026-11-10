@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""review_findings.py — stable finding identity for the delta review.
+"""review_findings.py — stable finding identity and fail-closed status transitions.
 
 The delta review (plan ``deltareview-met-ouderketen``, Besluit 3) needs an id
-that survives a line shift. Pure: no file, git or logging; callers pass the
-source text; DR-3 writes these ids into the ledger, DR-4a puts them in the
-prompt.
+that survives a line shift and a status model in which a finding never closes
+because nobody answered. Pure: no file, git or logging; callers pass the source
+text; DR-3 writes these ids into the ledger, DR-4a puts them in the prompt.
 
 Identity is ``sha256(seat, path, symbolic context, normalised text)[:16]``, no
 line number in it (research question 4). The symbolic context is the dotted
 qualified name of the innermost ``def``/``async def``/``class`` around the
 line, found through compound statements as well, so two functions with the
-same finding text never share one id. The fail-closed status model
-(``next_status``, ``blocks``) follows in the second half of this split.
+same finding text never share one id. Status is fail-closed: an unanswered id
+stays ``open``, a vanished anchor is ``unverifiable``, ``waived`` is only
+carried from a previous status, and ``open``/``regressed``/``unverifiable`` and
+unknown values block (see :func:`blocks`).
 """
 
 from __future__ import annotations
@@ -21,6 +23,28 @@ import hashlib
 import re
 import unicodedata
 from typing import Any, Mapping, Optional
+
+# Statuses (Besluit 3)
+
+STATUS_OPEN = "open"
+STATUS_FIXED = "fixed"
+STATUS_WAIVED = "waived"
+STATUS_REGRESSED = "regressed"
+STATUS_UNVERIFIABLE = "unverifiable"
+
+STATUSES = (
+    STATUS_OPEN,
+    STATUS_FIXED,
+    STATUS_WAIVED,
+    STATUS_REGRESSED,
+    STATUS_UNVERIFIABLE,
+)
+
+#: Answers that report the finding is still present (meaningful after ``fixed``).
+_STILL_PRESENT_ANSWERS = (STATUS_OPEN, STATUS_REGRESSED)
+
+#: Non-blocking statuses. Everything else (including ``None``) blocks.
+_NON_BLOCKING_STATUSES = (STATUS_FIXED, STATUS_WAIVED)
 
 # ---------------------------------------------------------------------------
 # Normalisation
@@ -186,3 +210,45 @@ def id_for_finding(seat: str, finding: Mapping[str, Any], source: Optional[str])
     path = finding.get("file_path") or ""
     line = finding.get("line")
     return finding_id(seat, str(path), symbolic_context(source, line), message)
+
+
+# Transitions
+
+
+def next_status(
+    previous: Optional[str],
+    answer: Optional[str],
+    anchor_present: bool,
+) -> str:
+    """Status of an existing finding after a delta round.
+
+    In order: a missing anchor gives ``unverifiable`` (it wins over any
+    answer); no answer (``None``, ``""``, an unknown value) gives ``open``;
+    ``previous == "fixed"`` answered ``open``/``regressed`` gives
+    ``regressed``; ``waived`` is only carried from ``previous`` (an answer
+    ``waived`` elsewhere gives ``open``); otherwise the answer.
+
+    The no-answer rule runs before the waiver carry, so a ``waived`` id the
+    reviewer does not answer becomes ``open`` again. Besluit 3 says an id
+    without an answer counts as ``open`` and a finding never closes silently;
+    a waiver is therefore not an operator decision that outlives a silent
+    round.
+    """
+    if not anchor_present:
+        return STATUS_UNVERIFIABLE
+    if answer not in STATUSES:
+        return STATUS_OPEN
+    if previous == STATUS_FIXED and answer in _STILL_PRESENT_ANSWERS:
+        return STATUS_REGRESSED
+    if answer == STATUS_WAIVED and previous != STATUS_WAIVED:
+        return STATUS_OPEN
+    return answer
+
+
+def blocks(status: Optional[str]) -> bool:
+    """Whether ``status`` blocks a PASS.
+
+    ``open``, ``regressed`` and ``unverifiable`` block; ``fixed`` and
+    ``waived`` do not. ``None`` and unknown values block (fail-closed).
+    """
+    return status not in _NON_BLOCKING_STATUSES
