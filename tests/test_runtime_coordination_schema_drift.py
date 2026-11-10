@@ -537,3 +537,132 @@ def test_no_runtime_coordination_schema_drift() -> None:
             "Schema-code drift detected — code references columns absent from "
             "the runtime_coordination schema:\n" + "\n".join(lines)
         )
+
+
+# ---------------------------------------------------------------------------
+# Written columns against a store built from the real migration directory
+# ---------------------------------------------------------------------------
+#
+# The scan above compares code to SQL text. This one compares the columns the
+# recorder writes on intelligence_injections with a store that auto_apply built,
+# so a column that only a comment names is a failure, not a pass.
+
+_RECORDER = _LIB_DIR / "intelligence_sources" / "_recording.py"
+_INJECTIONS = "intelligence_injections"
+_INSERT_COLUMNS_RE = re.compile(
+    rf"INSERT\s+INTO\s+{_INJECTIONS}\s*\(([^)]*)\)", re.IGNORECASE
+)
+_MIGRATIONS_DIR = _SCHEMAS_DIR / "migrations"
+_RUNNERS_DIR = _LIB_DIR / "migrations"
+
+
+def recorder_written_columns(source_path: Path = _RECORDER) -> Set[str]:
+    """Every column in the INSERT column lists the recorder builds for the table."""
+    columns: Set[str] = set()
+    for node in ast.walk(ast.parse(source_path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            for m in _INSERT_COLUMNS_RE.finditer(node.value):
+                columns.update(c.strip() for c in m.group(1).split(",") if c.strip())
+    return columns
+
+
+def store_columns(root: Path, migrations_dir: Path, runners_dir: Path) -> Set[str]:
+    """Columns of the table in a store built by init_schema + auto_apply."""
+    import sqlite3
+    from coordination_db import db_path_from_state_dir, init_schema
+    from migrations.auto_apply import auto_apply
+
+    state_dir = root / ".vnx-data" / "proj-a" / "state"
+    state_dir.mkdir(parents=True)
+    init_schema(state_dir)
+    db = db_path_from_state_dir(state_dir)
+    auto_apply(db, migrations_dir=migrations_dir, runners_dir=runners_dir)
+    conn = sqlite3.connect(str(db))
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({_INJECTIONS})")}
+    finally:
+        conn.close()
+
+
+def missing_written_columns(
+    root: Path, migrations_dir: Path, runners_dir: Path, source_path: Path = _RECORDER
+) -> Set[str]:
+    """Written columns the store lacks. An empty derivation is a failure, not a pass."""
+    written = recorder_written_columns(source_path)
+    if not written:
+        return {"<no INSERT column list found in the recorder>"}
+    present = store_columns(root, migrations_dir, runners_dir)
+    if not present:
+        return {"<table missing from the store>"} | written
+    return written - present
+
+
+@pytest.fixture
+def _no_project_env(monkeypatch):
+    import schema_migration
+
+    saved = {k: list(v) for k, v in schema_migration._PREFLIGHT_HOOKS.items()}
+    monkeypatch.delenv("VNX_PROJECT_ID", raising=False)
+    yield
+    schema_migration._PREFLIGHT_HOOKS.clear()
+    schema_migration._PREFLIGHT_HOOKS.update(saved)
+
+
+def _comment_only_dirs(root: Path) -> Tuple[Path, Path]:
+    """Real migrations up to 0037, plus a 0038 that names ab_arm only in a comment.
+
+    The runners are the real ones up to 0037; 0038 is declared an applied-elsewhere
+    no-op by the caller, so nothing builds the column.
+    """
+    import shutil
+
+    migrations = root / "migrations"
+    runners = root / "runners"
+    migrations.mkdir(parents=True)
+    runners.mkdir(parents=True)
+    for path in sorted(_MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")):
+        if path.name.endswith("_down.sql") or int(path.name[:4]) > 37:
+            continue
+        shutil.copyfile(path, migrations / path.name)
+    for path in sorted(_RUNNERS_DIR.glob("apply_*.py")):
+        if int(path.stem.split("_")[1]) <= 37:
+            shutil.copyfile(path, runners / path.name)
+    (migrations / "0038_comment_only.sql").write_text(
+        "-- ALTER TABLE intelligence_injections ADD COLUMN ab_arm TEXT;\n"
+        "-- The column is only named here, in a comment.\n",
+        encoding="utf-8",
+    )
+    return migrations, runners
+
+
+def test_recorder_written_columns_are_derived_from_the_code() -> None:
+    columns = recorder_written_columns()
+    assert {"injection_id", "dispatch_id", "items_json", "project_id", "ab_arm"} <= columns
+
+
+def test_recorder_written_columns_empty_for_source_without_insert(tmp_path: Path) -> None:
+    source = tmp_path / "recorder.py"
+    source.write_text("def f():\n    return 'SELECT 1'\n", encoding="utf-8")
+    assert recorder_written_columns(source) == set()
+    assert missing_written_columns(tmp_path / "s", _MIGRATIONS_DIR, _RUNNERS_DIR, source)
+
+
+def test_recorder_columns_exist_in_a_store_built_from_the_real_migrations(
+    tmp_path: Path, _no_project_env
+) -> None:
+    missing = missing_written_columns(tmp_path, _MIGRATIONS_DIR, _RUNNERS_DIR)
+    assert not missing, (
+        f"the recorder writes {sorted(missing)} on {_INJECTIONS}, but a store built "
+        "from schemas/migrations/ has no such column"
+    )
+
+
+def test_guard_fails_when_a_column_is_named_only_in_a_comment(
+    tmp_path: Path, monkeypatch, _no_project_env
+) -> None:
+    from migrations import auto_apply as auto_apply_mod
+
+    migrations, runners = _comment_only_dirs(tmp_path / "fixture")
+    monkeypatch.setitem(auto_apply_mod.APPLIED_ELSEWHERE, 38, "fixture: comment only")
+    missing = missing_written_columns(tmp_path / "store", migrations, runners)
+    assert "ab_arm" in missing
