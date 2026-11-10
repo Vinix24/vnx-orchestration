@@ -138,6 +138,33 @@ def test_two_subprocesses_agree(tmp_path):
     assert arm in {"control", "treatment"} and ab_window.startswith("w1:")
 
 
+@pytest.mark.parametrize("flag", ["1", "0", None])
+def test_derive_arm_is_the_writers_arm_and_reads_no_flag(monkeypatch, flag):
+    ids = [f"dlv-{i}" for i in range(200)]
+    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
+    written = [sel.arm_for_dispatch(i, "p1", dict(WINDOW)) for i in ids]
+    monkeypatch.delenv("VNX_INTEL_AB_TEST") if flag is None else monkeypatch.setenv("VNX_INTEL_AB_TEST", flag)
+
+    def no_read(*_args, **_kwargs):
+        raise AssertionError("derive_arm read a flag or the environment")
+
+    import config_runtime
+    for target, name in ((sel, "_ab_test_enabled"), (config_runtime, "get"), (config_runtime, "get_bool")):
+        monkeypatch.setattr(target, name, no_read)
+    monkeypatch.setattr(sel, "os", None)  # an environment read inside the selector now fails
+    assert [(sel.derive_arm(dict(WINDOW), "p1", i), sel.window_stamp(dict(WINDOW))) for i in ids] == written
+
+
+@pytest.mark.parametrize("window,dispatch_id,project_id", [
+    (None, "dlv-x", "p1"), ("x", "dlv-x", "p1"), ({**WINDOW, "salt": ""}, "dlv-x", "p1"),
+    ({**WINDOW, "extra": 1}, "dlv-x", "p1"), (dict(WINDOW), "", "p1"), (dict(WINDOW), "dlv-x", None),
+])
+def test_derive_arm_and_window_stamp_give_none_on_invalid_input(window, dispatch_id, project_id):
+    assert sel.derive_arm(window, project_id, dispatch_id) is None
+    if not isinstance(window, dict) or sel.load_window_config(json.dumps(window)) is None:
+        assert sel.window_stamp(window) is None
+
+
 def test_old_random_arm_is_gone():
     assert not any(hasattr(sel, n) for n in ("_ab_arm", "AB_CONTROL_FRACTION", "random"))
 

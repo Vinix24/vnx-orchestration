@@ -1,4 +1,4 @@
-"""Effect PR-6, split 1 of 2: the cohort command (outcome classes, dedup, cohort controls, the hard floor).
+"""Effect PR-6: the cohort command (classes, dedup, controls, re-derivation, maturity, attrition, coverage, floor).
 
 RC is ``init_schema`` plus the real migrations to 0038, without the state CHECK the live stores lack. The
 writer's ``arm_for_dispatch`` stamps the arms; QI is empty (decision 4). Temp stores only, never ~/.vnx-data.
@@ -12,7 +12,7 @@ import sqlite3
 import subprocess
 import sys
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -35,6 +35,8 @@ WINDOW = {"window_id": "w1", "salt": "s1", "control_fraction": 0.5,
 DAY1, DAY2 = "2026-11-02T00:00:00.000Z", "2026-11-03T00:00:00.000Z"
 AS_OF = datetime(2026, 11, 20, tzinfo=timezone.utc)
 _ROW1 = "WHERE id = (SELECT min(id) FROM intelligence_injections)"
+_STUCK = ("UPDATE dispatches SET state = 'proposed' WHERE dispatch_id IN (SELECT dispatch_id FROM "
+          "intelligence_injections WHERE project_id = 'p1' AND ab_arm = 'control' ORDER BY id LIMIT ?)")
 _CFG = f"UPDATE project_config SET config_value = ? WHERE project_id = 'p1' AND config_key = '{co.WINDOW_KEY}'"
 
 
@@ -58,6 +60,10 @@ def rc(tmp_path, monkeypatch) -> Path:
     _exec(path, "INSERT INTO project_config (project_id, config_key, config_value, updated_by) VALUES (?, ?, ?, 't')",
           [(pid, co.WINDOW_KEY, json.dumps(WINDOW)) for pid in ("p1", "p2")])
     return path
+
+
+def _at(hours):
+    return (AS_OF - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def _seed(rc, ids, pid="p1", state="completed", at=DAY1, stamp=True, task="coding_interactive"):
@@ -98,7 +104,7 @@ def test_the_cli_counts_per_arm_and_refuses_below_the_floor_with_the_rule(rc, n,
     assert run.returncode == data["exit_code"] == code and "never a verdict" in run.stdout, run.stdout + run.stderr
     lines = run.stdout.splitlines()
     assert [line.split() for line in lines if line.split()[:1] in (["control"], ["treatment"])] == [
-        [arm, str(n), "0", "0", "0"] for arm in co.ARMS]
+        [arm, str(n), "0", "0", "0", "0", "0.00%"] for arm in co.ARMS]
     assert {arm: c["resolved"] for arm, c in data["arms"].items()} == dict.fromkeys(co.ARMS, n)
     assert [line for line in lines if line.startswith("REFUSED")] == ([refused] if refused else [])
     assert [r["reason"] for r in data["refusals"]] == (["below_floor"] if refused else [])
@@ -108,7 +114,12 @@ def test_the_cli_counts_per_arm_and_refuses_below_the_floor_with_the_rule(rc, n,
 @pytest.mark.parametrize("reason, sql, params", [
     ("unstamped_after_open", "INSERT INTO intelligence_injections (injection_id, dispatch_id, injection_point, "
      "task_class, injected_at, project_id) VALUES ('x', 'dlv-x', 'p', 't', '2026-11-02T00:00:00.000Z', 'p1')", ()),
+    ("assignment_not_reproducible", "UPDATE intelligence_injections SET ab_arm = CASE ab_arm WHEN 'control' "
+     f"THEN 'treatment' ELSE 'control' END {_ROW1}", ()),
+    ("assignment_not_reproducible", "UPDATE intelligence_injections SET ab_window = 'w1:0000000000000000'", ()),
+    ("assignment_not_reproducible", _CFG, (json.dumps({**WINDOW, "salt": "s2"}),)),
     ("config_diverged", f"UPDATE intelligence_injections SET ab_window = 'w1:0000000000000000' {_ROW1}", ()),
+    ("differential_attrition", _STUCK, (11,)),
     ("arm_invalid", f"UPDATE intelligence_injections SET ab_arm = 'placebo' {_ROW1}", ()),
     ("arm_invalid", f"UPDATE intelligence_injections SET ab_arm = NULL {_ROW1}", ()),
     ("unknown_states", "UPDATE dispatches SET state = 'paused' WHERE dispatch_id = 'dlv-00000'", ()),
@@ -135,7 +146,7 @@ def test_open_states_never_count_withdrawn_is_excluded_and_a_new_state_is_unknow
         _seed(rc, [f"dlv-extra-{i}"], state=state)
     cohort = co.build_cohort(rc, "p1", AS_OF)
     total = {key: sum(counts[key] for counts in cohort.arms().values()) for key in co.COUNT_KEYS}
-    assert total == {"resolved": 400, "unresolved": 3, "excluded": 1, "unknown": 0}
+    assert total == {"resolved": 400, "unresolved": 3, "excluded": 1, "unknown": 0, "immature": 0}
     assert cohort.exit_code == 0, cohort.refusals
     monkeypatch.setattr(co, "DISPATCH_STATES", co.DISPATCH_STATES | {"paused"})
     assert c("paused") == "unknown"  # a state new in coordination_db waits for its class here
@@ -146,6 +157,8 @@ def test_a_second_project_with_the_same_ids_changes_nothing(rc):
     before = co.as_dict(co.build_cohort(rc, "p1", AS_OF))
     _seed(rc, ids, pid="p2", state="proposed")
     _seed(rc, ["dlv-00000"], pid="p2", stamp=False)
+    _exec(rc, "INSERT INTO dispatches (dispatch_id, project_id, state, created_at) VALUES (?, 'p2', 'completed', ?)",
+          [("dlv-orphan", DAY1)])
     assert co.as_dict(co.build_cohort(rc, "p1", AS_OF)) == before
     assert "unstamped_after_open" in co.build_cohort(rc, "p2", AS_OF).reasons
 
@@ -175,3 +188,58 @@ def test_dedup_keeps_the_first_row_and_a_missing_dispatches_row_is_unknown(rc):
     assert {d.dispatch_id: d.task_class for d in cohort.dispatches} == {
         "dlv-a": "coding_interactive", "dlv-b": "coding_interactive", "dlv-d": "coding_sql"}
     assert cohort.deduplicated == 2 and "unknown_states" in cohort.reasons
+
+
+@pytest.mark.parametrize("flag", ["0", None])
+def test_a_closed_flag_never_fails_the_rederivation(rc, monkeypatch, flag):
+    """Decision 12 closes the window with VNX_INTEL_AB_TEST=0; decision 14 re-derives from the frozen window."""
+    _seed(rc, _balanced(200))
+    monkeypatch.delenv("VNX_INTEL_AB_TEST") if flag is None else monkeypatch.setenv("VNX_INTEL_AB_TEST", flag)
+    assert sel.arm_for_dispatch("dlv-00000", "p1", WINDOW) == (None, None)  # the writer is closed
+    assert co.build_cohort(rc, "p1", AS_OF).refusals == []
+    run = _cli(rc)
+    assert run.returncode == 0 and "REFUSED" not in run.stdout, run.stdout + run.stderr
+
+
+def test_71_hours_is_immature_and_72_hours_is_mature(rc):
+    _seed(rc, ["dlv-71"], at=_at(71))
+    _seed(rc, ["dlv-72s"], at=_at(72 - 1 / 3600))
+    _seed(rc, ["dlv-72"], at=_at(72))
+    cohort = co.build_cohort(rc, "p1", AS_OF)
+    assert {d.dispatch_id: d.mature for d in cohort.dispatches} == {"dlv-71": False, "dlv-72s": False, "dlv-72": True}
+    total = {key: sum(c[key] for c in cohort.arms().values()) for key in co.COUNT_KEYS}
+    assert total == {"resolved": 1, "unresolved": 0, "excluded": 0, "unknown": 0, "immature": 2}
+
+
+@pytest.mark.parametrize("stuck, refused", [(10, False), (11, True)])
+def test_differential_attrition_refuses_above_5pp_only(rc, stuck, refused):
+    _seed(rc, _balanced(200))
+    _exec(rc, _STUCK, [(stuck,)])  # 10 of 200 is exactly 5 pp
+    assert ("differential_attrition" in co.build_cohort(rc, "p1", AS_OF).reasons) == refused
+
+
+def test_attrition_is_exact_and_an_arm_without_mature_dispatches_refuses():
+    def arms(stuck, unknown=0, mature=100):
+        counts = {"resolved": mature - stuck - unknown, "unresolved": stuck, "excluded": 0, "unknown": unknown}
+        return {"control": {**counts, "immature": 0},
+                "treatment": {"resolved": 91, "unresolved": 9, "excluded": 0, "unknown": 0, "immature": 0}}
+    assert 14 / 100 - 9 / 100 > 0.05 and co.attrition_gap(arms(10, unknown=4)) is None  # floats would refuse
+    assert "5.01 pp" in co.attrition_gap(arms(1401, mature=10000))
+    assert "not computable" in co.attrition_gap(arms(0, mature=0))
+
+
+def test_the_coverage_line_counts_every_group(rc):
+    _seed(rc, ["dlv-b"], state=None)  # an injection without a dispatches row
+    _seed(rc, ["dlv-e"], at="2026-10-31T00:00:00.000Z", stamp=False)  # first injection before the open
+    _seed(rc, ["dlv-e"], state=None)
+    _exec(rc, "INSERT INTO intelligence_injections (injection_id, dispatch_id, injection_point, task_class, "
+              "injected_at, project_id, ab_arm, ab_window) VALUES (?, ?, 'p', 't', ?, 'p1', 'control', 'w0:ab')",
+          [("x-f", "dlv-f", DAY1), ("x-g", "dlv-g", DAY1)])  # rows of another window, dlv-f's first injection
+    _seed(rc, ["dlv-f"], at=DAY2)
+    _exec(rc, "INSERT INTO dispatches (dispatch_id, project_id, state, created_at) VALUES (?, ?, 'completed', ?)",
+          [("dlv-c", "p1", DAY1), ("dlv-early", "p1", "2026-10-30T00:00:00Z"), ("other-c", "p1", DAY1)])
+    cohort = co.build_cohort(rc, "p1", AS_OF)
+    assert cohort.coverage == {"door_without_injection_row": 1, "injection_without_dispatches_row": 1,
+                               "other_window_rows": 2, "first_injection_before_open": 1,
+                               "first_injection_off_window": 1}
+    assert "# coverage: door_without_injection_row 1, injection_without_dispatches_row 1" in co.render(cohort)
