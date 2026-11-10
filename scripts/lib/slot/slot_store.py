@@ -3,17 +3,18 @@
 Every refusal is a SlotError with exit code 78. A corrupt state, a wrong right or an
 invalid policy is never an empty state and never mode ``off``. Paths are parameters:
 no environment variable chooses a path or a budget.
+
+Split 1 of RS-2 is read-only: this module writes nothing anywhere. Split 2 adds the
+transaction (control lock, atomic state write) and the initial state.
 """
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import grp
 import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 DEFAULT_STORE_DIR = Path("/Users/Shared/vnx-slots")
 DEFAULT_POLICY_PATH = Path("/Users/Shared/vnx-slots-policy/host.json")
@@ -161,60 +162,6 @@ class SlotStore:
         state = _load(self.store_dir / "state.json", "state_corrupt")
         _validate_state(state)
         return state
-
-    def _guard(self) -> None:
-        reasons = self.check_store() + self.check_policy()
-        if reasons:
-            raise SlotError(reasons[0].split(":")[0], "; ".join(reasons))
-
-    def _write_state(self, state: Dict[str, Any]) -> None:
-        tmp = self.store_dir / f".state.json.{os.getpid()}.tmp"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
-        try:
-            os.fchmod(fd, 0o660)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fd = -1
-                fh.write(json.dumps(state, sort_keys=True))
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.store_dir / "state.json")  # vnx-atomic-write: temp file + replace under the lock
-        except BaseException:
-            if fd >= 0:
-                os.close(fd)
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp)
-            raise
-
-    @contextlib.contextmanager
-    def _lock(self) -> Iterator[None]:
-        self._guard()
-        fd = os.open(self.store_dir / "ledger.lock", os.O_RDWR | os.O_CREAT, 0o660)
-        try:
-            os.fchmod(fd, 0o660)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
-        finally:
-            os.close(fd)  # closing the descriptor releases the flock
-
-    @contextlib.contextmanager
-    def transaction(self) -> Iterator[Dict[str, Any]]:
-        """Read state under the control lock; write it back atomically on a clean exit only."""
-        with self._lock():
-            state = self.read_state()
-            yield state
-            _validate_state(state)
-            self._write_state(state)
-
-    def initialize_state(self) -> None:
-        """The only way an empty state comes into being; refuses over an existing state.json."""
-        policy_mode = self.read_policy()["mode"]
-        with self._lock():
-            if (self.store_dir / "state.json").exists():
-                raise SlotError("state_corrupt", "state.json already exists; not re-initialising")
-            self._write_state({
-                "holders": {}, "queue": [], "samples": [], "mode": "off" if policy_mode == "off" else "observe",
-                "fencing_counter": 0, "transition": None, "shadow": {"holders": {}, "queue": []},
-                "memory_recovery": {"blocked": False, "clean_buckets": []}})
 
     def doctor(self) -> Tuple[int, List[str]]:
         reasons = self.check_store() + self.check_policy()

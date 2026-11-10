@@ -2,7 +2,6 @@
 import copy
 import json
 import os
-import stat
 import sys
 from pathlib import Path
 
@@ -18,6 +17,8 @@ POLICY = {"total": 10, "reserved": 2, "runner_reserve": 1, "max_bypass": 3, "max
           "memory": {"swap_growth_mb": 256, "swap_level_mb": 2048, "compressor_gb": 8},
           "profiles": {"runner": {"slots": 1, "max_slots": 8, "max_wait_s": 1800, "heavy": False, "children": ["gate"]},
                        "gate": {"slots": 2, "max_slots": 4, "max_wait_s": 900, "heavy": True, "children": []}}}
+STATE = {"holders": {}, "queue": [], "samples": [], "mode": "observe", "fencing_counter": 0, "transition": None,
+         "shadow": {"holders": {}, "queue": []}, "memory_recovery": {"blocked": False, "clean_buckets": []}}
 
 
 def rights(uid=501, group="vnxslot", mode=0o2770, acl=ACL):
@@ -34,9 +35,9 @@ def env(tmp_path):
     return st, table, store, pdir
 
 
-def test_valid_setup_and_initialized_state_pass_doctor(env):
-    st, *_ = env
-    st.initialize_state()
+def test_valid_setup_and_state_pass_doctor(env):
+    st, _, store, _ = env
+    (store / "state.json").write_text(json.dumps(STATE))
     assert st.doctor() == (0, [])
 
 
@@ -104,10 +105,6 @@ def test_corrupt_state_is_state_corrupt_never_empty(env, content):
     with pytest.raises(SlotError) as exc:
         st.read_state()
     assert exc.value.code == "state_corrupt"
-    with pytest.raises(SlotError):
-        with st.transaction():
-            pass
-    assert (store / "state.json").read_text() == content
     assert st.doctor()[0] == 78
 
 
@@ -115,58 +112,3 @@ def test_missing_state_is_not_an_empty_store(env):
     st, *_ = env
     with pytest.raises(SlotError):
         st.read_state()
-
-
-def test_initialize_refuses_over_existing_state(env):
-    st, _, store, _ = env
-    st.initialize_state()
-    before = (store / "state.json").read_bytes()
-    with pytest.raises(SlotError):
-        st.initialize_state()
-    assert (store / "state.json").read_bytes() == before
-
-
-def test_exception_in_transaction_leaves_state_byte_identical(env):
-    st, _, store, _ = env
-    st.initialize_state()
-    before = (store / "state.json").read_bytes()
-    with pytest.raises(RuntimeError):
-        with st.transaction() as state:
-            state["fencing_counter"] = 5
-            raise RuntimeError("boom")
-    assert (store / "state.json").read_bytes() == before
-    assert [p.name for p in store.iterdir() if p.name.endswith(".tmp")] == []
-
-
-def test_clean_transaction_persists_and_files_are_0660_under_umask_022(env):
-    st, _, store, _ = env
-    old = os.umask(0o022)
-    try:
-        st.initialize_state()
-        with st.transaction() as state:
-            state["fencing_counter"] = 7
-    finally:
-        os.umask(old)
-    assert st.read_state()["fencing_counter"] == 7
-    for name in ("state.json", "ledger.lock"):
-        assert stat.S_IMODE((store / name).stat().st_mode) == 0o660
-
-
-def test_transaction_refuses_on_wrong_rights(env):
-    st, table, store, _ = env
-    st.initialize_state()
-    table[store]["mode"] = 0o2777
-    with pytest.raises(SlotError) as exc:
-        with st.transaction():
-            pass
-    assert exc.value.code == "store_invalid"
-
-
-def test_state_rewrite_with_invalid_shape_is_refused(env):
-    st, _, store, _ = env
-    st.initialize_state()
-    before = (store / "state.json").read_bytes()
-    with pytest.raises(SlotError):
-        with st.transaction() as state:
-            state["holders"] = None
-    assert (store / "state.json").read_bytes() == before
