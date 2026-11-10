@@ -316,6 +316,13 @@ def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: in
     for n in nights:  # one blocked_skip per blocked night; the newest attempt is never reported twice
         if n["class"] == BLOCKED:
             findings.append(_finding("blocked_skip", f"night {n['night']}: {n['reason'] or n['terminal']}"))
+    open_start, open_end = _containing_window(now, plist, tz)
+    if open_start <= now < open_end:  # the open night is reported at once but never joins nights or the progress window
+        day = open_start.astimezone(tz).date() if tz else open_start.astimezone().date()
+        open_night = classify_night(day, open_start, open_end, dated)
+        if open_night["class"] == BLOCKED:
+            findings.append(_finding("blocked_skip", f"night {open_night['night']}: "
+                                     f"{open_night['reason'] or open_night['terminal']}"))
     silent = [n["night"] for n in nights if not n["attempt"]]
     if silent:
         findings.append(_finding("no_scheduled_attempt", "no attempt inside the window on " + ", ".join(silent)))

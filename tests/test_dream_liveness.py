@@ -361,3 +361,46 @@ def test_load_sources_data_root_follows_project_id(tmp_path, monkeypatch):
     (folder / "a.ndjson").write_text(json.dumps(ev("dream_cycle_started", "2026-11-10")) + "\n")
     got = dl.load_sources("p1", plist_path=tmp_path / "none.plist")
     assert len(got["events"]) == 1 and got["plist"] is None
+
+
+OPEN_NOW = datetime(2026, 11, 10, 4, 0, tzinfo=UTC)
+
+
+def closed_week():
+    return [ev("dream_cycle_completed", f"2026-11-{d:02d}", merged_count=1) for d in range(3, 10)]
+
+
+def blocked_ids(document):
+    return [f["id"] for f in document["findings"]].count("blocked_skip")
+
+
+def test_blocked_skip_in_the_open_window_is_reported_at_once():
+    d = doc(closed_week() + [ev("dream_cycle_skipped", "2026-11-10", reason="probe_not_ok")], now=OPEN_NOW)
+    assert blocked_ids(d) == 1 and d["state"] != "ok"
+    found = [f for f in d["findings"] if f["id"] == "blocked_skip"][0]
+    assert "night 2026-11-10: probe_not_ok" in found["detail"]
+
+
+def test_timeout_in_the_open_window_is_reported_at_once():
+    d = doc(closed_week() + [ev("dream_cycle_timeout", "2026-11-10", "03:40")], now=OPEN_NOW)
+    assert blocked_ids(d) == 1
+    assert [f for f in d["findings"] if f["id"] == "blocked_skip"][0]["detail"] == "night 2026-11-10: timeout"
+
+
+def test_completion_with_output_in_the_open_window_gives_no_finding():
+    d = doc(closed_week() + [ev("dream_cycle_completed", "2026-11-10", merged_count=1)], now=OPEN_NOW)
+    assert blocked_ids(d) == 0 and d["state"] == "ok" and d["findings"] == []
+
+
+def test_open_window_event_leaves_nights_and_progress_window_unchanged():
+    base = doc(closed_week(), now=OPEN_NOW)
+    blocked = doc(closed_week() + [ev("dream_cycle_failed", "2026-11-10", "03:10")], now=OPEN_NOW)
+    assert blocked["progress_window"] == base["progress_window"]
+    assert blocked["nights"] == base["nights"]
+    assert "2026-11-10" not in [n["night"] for n in blocked["nights"]]
+
+
+def test_open_night_is_reported_exactly_once_after_the_window_closes():
+    events = closed_week() + [ev("dream_cycle_skipped", "2026-11-10", reason="probe_not_ok")]
+    assert blocked_ids(doc(events, now=OPEN_NOW)) == 1
+    assert blocked_ids(doc(events, now=NOW)) == 1
