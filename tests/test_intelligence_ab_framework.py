@@ -85,7 +85,7 @@ def _make_fake_get_conn(db_path: Path):
     import contextlib
 
     @contextlib.contextmanager
-    def _fake_get_conn(state_dir, **_kwargs):
+    def _fake_get_conn(state_dir, *, timeout=10.0):
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         try:
