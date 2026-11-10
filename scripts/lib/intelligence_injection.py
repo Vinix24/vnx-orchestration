@@ -298,11 +298,12 @@ def _ledger_decision_matches(result, state_dir: Path) -> bool:
     """
     import dispatch_register  # noqa: PLC0415
     try:
-        text = dispatch_register._resolve_register_path(state_dir=state_dir).read_text(encoding="utf-8")
+        # bytes + errors="replace" like dispatch_register: a damaged byte spoils only its own line
+        text = dispatch_register._resolve_register_path(state_dir=state_dir).read_bytes().decode("utf-8", errors="replace")
     except OSError as exc:
         logger.warning("arm ledger unreadable for %s: %s", result.dispatch_id, exc)
         return False
-    for line in text.splitlines():
+    for line in text.split("\n"):
         try:
             record = json.loads(line)
         except ValueError:

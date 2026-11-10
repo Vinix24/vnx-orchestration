@@ -93,7 +93,8 @@ def _events(state: Path, dispatch_id: str):
 
 def _ledger(state: Path, dispatch_id: str):
     path = state / "dispatch_register.ndjson"
-    lines = [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+    raw = path.read_bytes().decode("utf-8", errors="replace").split("\n") if path.exists() else []
+    lines = [json.loads(x) for x in raw if x.startswith("{") and x.endswith("}")]
     return [x for x in lines if x.get("dispatch_id") == dispatch_id]
 
 
@@ -241,6 +242,34 @@ def test_an_unreadable_ledger_line_after_the_write_is_not_a_recorded_decision(en
     dispatch_id = _id_for("treatment")
     monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: True)
     assert intelligence_injection._record_arm_decision(_decided(dispatch_id), state) is False
+
+
+def _fetch(state: Path, dispatch_id: str):
+    return intelligence_injection.fetch_intelligence_section(
+        dispatch_id, "architect", state, dispatch_paths=["scripts/lib/x.py"], instruction_text="build x")
+
+
+ENTRY_POINTS = pytest.mark.parametrize("call", [_call_select, _call_build, _fetch], ids=["select", "build", "fetch"])
+DAMAGED = b"\xff\xfe{\x80 not utf-8 \xc3\x28\n"
+
+
+@ENTRY_POINTS
+def test_a_damaged_line_elsewhere_in_the_register_spoils_only_that_line(env, state, call):
+    dispatch_id = _id_for("treatment")
+    (state / "dispatch_register.ndjson").write_bytes(DAMAGED)
+    call(state, dispatch_id)
+    assert len(_ledger(state, dispatch_id)) == 1
+    assert [r[:3] for r in _injections(state)] == [(dispatch_id, "treatment", _decided(dispatch_id).ab_window)]
+
+
+@ENTRY_POINTS
+def test_a_register_of_only_damaged_bytes_is_not_recorded_and_raises_nothing(env, state, monkeypatch, call):
+    dispatch_id = _id_for("treatment")
+    path = state / "dispatch_register.ndjson"
+    path.write_bytes(DAMAGED)
+    monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: True)
+    call(state, dispatch_id)
+    assert _injections(state) == []
 
 
 def _decided(dispatch_id: str):
