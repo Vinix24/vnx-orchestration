@@ -202,11 +202,18 @@ def test_two_projects_with_the_same_dispatch_id_get_their_own_rows(env, state, m
     dispatch_id = _id_for("control", "proj-a")
     other = next(p for p in ("proj-b", "proj-c", "proj-d", "proj-e", "proj-f")
                  if sel.arm_for_dispatch(dispatch_id, p, dict(WINDOW))[0] == "treatment")
+    second = state / "second-project"  # one state dir per project: a shared one refuses the second decision
+    second.mkdir()
+    coordination_db.init_schema(second)
+    auto_apply(second / "runtime_coordination.db")
+    qi = _setup_quality_db(second / "quality_intelligence.db")
+    _seed_proven_pattern(qi, category="architect", confidence=0.9, usage_count=10)
+    qi.close()
     _fetch(state, dispatch_id)
     monkeypatch.setenv("VNX_PROJECT_ID", other)
-    _fetch(state, dispatch_id)
-    rows = {r[4]: r for r in _injections(state)}
-    assert (rows["proj-a"][1], rows[other][1]) == ("control", "treatment")
+    _fetch(second, dispatch_id)
+    assert _injections(state)[0][1] == "control" and _injections(state)[0][4] == "proj-a"
+    assert _injections(second)[0][1] == "treatment" and _injections(second)[0][4] == other
 
 
 def test_the_default_of_the_result_is_not_assigned():

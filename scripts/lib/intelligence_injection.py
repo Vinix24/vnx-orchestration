@@ -289,16 +289,50 @@ def build_intelligence_section(
     )
 
 
+def _ledger_decision_matches(result, state_dir: Path) -> bool:
+    """True when the ledger's first ``intelligence_arm_assigned`` line for this dispatch equals ``result``.
+
+    ``append_event_idempotent`` dedups on event and dispatch id only, so a line written
+    under another window or project also reads as "present". Fail-closed: an unreadable
+    ledger or a missing line is a mismatch.
+    """
+    import dispatch_register  # noqa: PLC0415
+    try:
+        text = dispatch_register._resolve_register_path(state_dir=state_dir).read_text(encoding="utf-8")
+    except OSError as exc:
+        logger.warning("arm ledger unreadable for %s: %s", result.dispatch_id, exc)
+        return False
+    for line in text.splitlines():
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue  # vnx-silent-except: a torn line is not this decision; no match found means not recorded
+        if (isinstance(record, dict) and record.get("event") == "intelligence_arm_assigned"
+                and record.get("dispatch_id") == result.dispatch_id):
+            extra = record.get("extra")
+            existing = (extra.get("ab_arm"), extra.get("ab_window"), record.get("project_id")) if isinstance(extra, dict) else None
+            if existing == (result.ab_arm, result.ab_window, result.project_id):
+                return True
+            logger.warning(
+                "arm decision for %s already recorded as %s, this one is %s: not recorded",
+                result.dispatch_id, existing, (result.ab_arm, result.ab_window, result.project_id),
+            )
+            return False
+    logger.warning("arm decision for %s not found in the ledger after the write", result.dispatch_id)
+    return False
+
+
 def _record_arm_decision(result, state_dir: Path) -> bool:
-    """Write the arm decision to the canonical NDJSON ledger (ADR-005). True when durable."""
-    from dispatch_register import append_event_idempotent  # noqa: PLC0415
-    return append_event_idempotent(
+    """Write the arm decision to the canonical NDJSON ledger (ADR-005). True when durable and equal."""
+    import dispatch_register  # noqa: PLC0415
+    written = dispatch_register.append_event_idempotent(
         "intelligence_arm_assigned",
         dispatch_id=result.dispatch_id,
         project_id=result.project_id,
         extra={"ab_arm": result.ab_arm, "ab_window": result.ab_window},
         state_dir=state_dir,
     )
+    return bool(written) and _ledger_decision_matches(result, state_dir)
 
 
 def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> bool:
@@ -315,7 +349,8 @@ def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> 
         result.project_id = current_project_id()
         recorded = _record_arm_decision(result, state_dir)
         try:
-            recorded = recorded and selector.emit_event(result, coord_state_dir=state_dir) is not None
+            # no coordination store (state_dir None) = no event to write, not a failed one
+            recorded = recorded and (state_dir is None or selector.emit_event(result, coord_state_dir=state_dir) is not None)
         except Exception as exc:
             recorded = False
             logger.warning("emit_event failed for %s: %s", dispatch_id, exc)
