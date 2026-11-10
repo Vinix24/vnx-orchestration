@@ -17,6 +17,7 @@ from intelligence_corpus_quarantine.baseline import measure_baseline
 from intelligence_corpus_quarantine.contract import write_manifest
 from intelligence_corpus_quarantine.snapshot import reuse_snapshot
 from intelligence_corpus_quarantine.store import quarantine, restore
+from intelligence_corpus_quarantine.verify import verify
 
 
 class Parser(argparse.ArgumentParser):
@@ -40,13 +41,23 @@ def main(argv=None):
     back.add_argument("--db", type=Path, required=True)
     back.add_argument("--quarantine", type=Path, required=True)
     back.add_argument("--allow-existing", action="store_true")
-    for command in (store, back):
+    proof = commands.add_parser("verify")
+    proof.add_argument("--db", type=Path, required=True)
+    proof.add_argument("--manifest", type=Path, required=True)
+    proof.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
+    proof.add_argument("--human", action="store_true", help="key: value lines instead of JSON")
+    for command in (store, back, proof):
         command.add_argument("--state-dir", type=Path, help="audit dir (default: the resolved VNX_STATE_DIR)")
     args = parser.parse_args(argv)
-    if args.command != "restore" and not args.out.is_dir():
+    if args.command in ("baseline", "quarantine") and not args.out.is_dir():
         parser.error(f"output directory does not exist: {args.out}")
     try:
         resolve_project_root(__file__)
+        if args.command == "verify":
+            verdict = verify(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir())
+            print("\n".join(f"{k}: {v}" for k, v in verdict.items()) if args.human
+                  else json.dumps(verdict, sort_keys=True))
+            return 0
         if args.command == "quarantine":
             print(quarantine(args.db, args.out, state_dir=args.state_dir or resolve_state_dir()))
             return 0
