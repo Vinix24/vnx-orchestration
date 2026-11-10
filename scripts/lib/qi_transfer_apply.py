@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""qi_transfer_apply.py: execute a cross-database pattern move plan (reattr L3b: apply, resume).
+"""qi_transfer_apply.py: execute a cross-database pattern move plan (reattr L3b, split 1 of 3: copy, verify).
 
-ADR-068 besluit 13-17. Per move: (1) one ``BEGIN IMMEDIATE`` on the destination
-re-reads the source row; ``drift`` (its content_key is not the plan's),
-``user_version_changed``, ``schema_gap`` and ``evidence_changed`` (L2 no longer
-moves it to the same project) change nothing. Otherwise it journals the
-pre-image, inserts row and junction rows under the new ``pattern_id`` (or finds
-the content ``already_present``) and journals ``copied`` with ``created`` per
-row BEFORE the COMMIT, so a copy that never committed reads back absent and is
-copied again. (2) The destination is re-read: ``verified``. (3) One ``BEGIN
-IMMEDIATE`` on the source deletes row and junction rows only while they equal
-the journaled pre-image: ``source_removed``, ``done``. A crash leaves a row in
-both files, never in neither. No atomicity across files is claimed.
+ADR-068 besluit 13-17. Steps 1 and 2 of every move; the source is opened read-only. (1) One
+``BEGIN IMMEDIATE`` on the destination re-reads the source row: ``drift`` (content_key is not the
+plan's), ``user_version_changed``, ``schema_gap``, ``same_file`` and ``evidence_changed`` (L2 no
+longer moves it there) change nothing. Else it journals the pre-image, inserts row and junction rows
+under the new ``pattern_id`` (or finds them ``already_present``) and journals ``copied`` with
+``created`` BEFORE the COMMIT, so a copy that never committed reads back absent and is copied again.
+(2) The destination is re-read: ``verified``. A move ends there and the source still holds the row.
+Split ``-b`` adds step 3 (``source_removed``, ``done``) and ``resume``, split ``-c`` adds ``undo``.
 
-CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID} [--vnx-data-root DIR]
+CLI: qi_transfer_apply.py apply --plan PLAN.json --reason TEXT [--vnx-data-root DIR]
 """
 from __future__ import annotations
 
@@ -21,7 +18,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import sqlite3
 import sys
 from contextlib import ExitStack
@@ -29,15 +25,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from atomic_io import atomic_write_text, slot_lock
+from atomic_io import slot_lock
 from pattern_reattribution import STATUS_MOVES, TABLES, _same_file, build_attribution_index, decide_row
 from qi_transfer_plan import (
-    JOURNAL_STATES, JUNCTION_TABLES, PLAN_VERSION, _columns, _fetch_rows, _json_default, _user_version,
-    canonical_json, content_key, journal_path, pattern_id_for, read_pre_image, schema_gaps,
+    JOURNAL_STATES, JUNCTION_TABLES, PLAN_VERSION, _columns, _user_version, canonical_json, content_key,
+    journal_path, pattern_id_for, read_pre_image, schema_gaps,
 )
 
 _MOVE_KEYS = ("table", "source_id", "source_db", "destination_db", "destination_project_id", "content_key",
               "source_user_version", "destination_user_version")
+_FINISHED = ("verified", "already_present")
+_SOURCE_KEPT = "the source still holds the row: step 3 (remove it from the source) follows in a later version"
 
 
 class PlanError(ValueError):
@@ -62,19 +60,6 @@ def load_plan(path: Path) -> Dict[str, Any]:
     digest = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()[:16]
     if body["plan_version"] != PLAN_VERSION or digest != plan.get("plan_id"):
         raise PlanError(f"not a version {PLAN_VERSION} plan whose plan_id is the hash of its content")
-    return plan
-
-
-def find_plan(root: Path, plan_id: str) -> Dict[str, Any]:
-    """The copy ``apply`` published beside a journal of this plan."""
-    if not re.fullmatch(r"[0-9a-f]{16}", plan_id):
-        raise PlanError(f"not a plan id: {plan_id!r}")
-    copies = sorted(Path(root).glob(f"*/state/reattribution/{plan_id}/plan.json"))
-    if not copies:
-        raise PlanError(f"no journal of plan {plan_id} under {root}")
-    plan = load_plan(copies[0])
-    if plan["plan_id"] != plan_id:
-        raise PlanError(f"{copies[0]} holds plan {plan['plan_id']}, not {plan_id}")
     return plan
 
 
@@ -106,16 +91,11 @@ def _latest(lines: List[Dict[str, Any]], state: Optional[str] = None) -> Optiona
     return hits[-1] if hits else None
 
 
-def _connect(db: Path) -> sqlite3.Connection:
-    """Autocommit and ``mode=rw``: a missing file is an error, never a new empty database."""
-    conn = sqlite3.connect(f"{Path(db).resolve().as_uri()}?mode=rw", uri=True, isolation_level=None, timeout=30)
+def _connect(db: Path, mode: str = "rw") -> sqlite3.Connection:
+    """Autocommit; ``rw`` or ``ro``, never ``rwc``: a missing file is an error, never a new empty database."""
+    conn = sqlite3.connect(f"{Path(db).resolve().as_uri()}?mode={mode}", uri=True, isolation_level=None, timeout=30)
     conn.row_factory = sqlite3.Row
     return conn
-
-
-def _rollback(conn: sqlite3.Connection) -> None:
-    if conn.in_transaction:
-        conn.execute("ROLLBACK")
 
 
 def _key(row: Dict[str, Any], cols: List[str]) -> str:
@@ -190,7 +170,7 @@ def _insert_copy(dst, mv: _Move, pre, cols) -> Dict[str, Any]:
 
 def _copy(mv: _Move, index, reason: str) -> str:
     """Step 1, one ``BEGIN IMMEDIATE`` on the destination: ``copied`` or a refusal."""
-    dst, src = _connect(mv.dst), _connect(mv.src)
+    dst, src = _connect(mv.dst), _connect(mv.src, "ro")
     try:
         dst.execute("BEGIN IMMEDIATE")
         src.execute("BEGIN")  # one read snapshot of the source
@@ -209,7 +189,8 @@ def _copy(mv: _Move, index, reason: str) -> str:
         dst.execute("COMMIT")
         return "copied"
     finally:
-        _rollback(dst)
+        if dst.in_transaction:
+            dst.execute("ROLLBACK")
         src.close()
         dst.close()
 
@@ -234,47 +215,20 @@ def _verify(mv: _Move, copied: Dict[str, Any]) -> Optional[bool]:
         dst.close()
 
 
-def _remove(mv: _Move, pre: Dict[str, Any]) -> str:
-    """Step 3, one ``BEGIN IMMEDIATE`` on the source: delete only what equals the journaled pre-image."""
-    src = _connect(mv.src)
-    try:
-        src.execute("BEGIN IMMEDIATE")
-        live = read_pre_image(src, mv.table, mv.m["source_id"])
-        if live is None and not any(_fetch_rows(src, t, "pattern_id = ?", pre["pattern_id"]) for t in JUNCTION_TABLES):
-            return "source_removed"  # this step committed, then a crash took its journal line
-        if live is None or canonical_json(live) != canonical_json(pre):
-            return "drift"
-        src.execute(f"DELETE FROM {mv.table} WHERE id = ?", (mv.m["source_id"],))
-        for t in JUNCTION_TABLES:
-            if pre["junction"][t]:
-                src.execute(f"DELETE FROM {t} WHERE pattern_id = ?", (pre["pattern_id"],))
-        src.execute("COMMIT")
-        return "source_removed"
-    finally:
-        _rollback(src)
-        src.close()
-
-
 def _advance(mv: _Move, index, reason: str) -> str:
-    """Run one move from its last journal state to ``done``."""
-    for _ in range(len(JOURNAL_STATES) * 2):
+    """Run one move from its last journal state to ``verified``; a no-op on a move an earlier run verified."""
+    for step in range(3):
         lines = mv.lines()
-        state = (_latest(lines) or {}).get("state")  # None: the move has not started
-        if state == "done":
-            return "already_present" if _verify(mv, _latest(lines, "copied")) else "destination_missing"
-        if state == "source_removed":
-            created = (_latest(lines, "copied") or {}).get("created")
-            if not isinstance(created, bool):  # missing or malformed: refused, never read as either
-                raise PlanError(f"{mv.key}: the copied line has no boolean created")
-            mv.log("done")
-            return "done" if created else "already_present"
+        state, copied = (_latest(lines) or {}).get("state"), _latest(lines, "copied")
+        if state == "verified" and step == 0:  # read again, write nothing
+            return "already_present" if _verify(mv, copied) is True else "destination_missing"
         if state == "verified":
-            outcome = _remove(mv, _latest(lines, "planned")["pre_image"])
-            mv.log(outcome)
-            if outcome == "drift":
-                return outcome
-            continue
-        ok = _verify(mv, _latest(lines, "copied")) if state == "copied" else None
+            if not isinstance(copied.get("created"), bool):  # missing or malformed: never read as either
+                raise PlanError(f"{mv.key}: the copied line has no boolean created")
+            return "verified" if copied["created"] else "already_present"
+        if state not in (None, "planned", "copied"):
+            raise PlanError(f"{mv.key}: journal state {state} needs step 3, which this version does not run")
+        ok = _verify(mv, copied) if state == "copied" else None
         if ok is True:
             mv.log("verified")
         elif ok is False:
@@ -287,23 +241,15 @@ def _advance(mv: _Move, index, reason: str) -> str:
     raise PlanError(f"{mv.key}: no progress from the journal")
 
 
-def run(plan: Dict[str, Any], command: str, reason: Optional[str], root: Path) -> Dict[str, str]:
-    """Every planned move from its journal state, under the lock of each journal involved."""
+def run(plan: Dict[str, Any], reason: str, root: Path) -> Dict[str, str]:
+    """Steps 1 and 2 of every planned move from its journal state, under the lock of each journal involved."""
     moves = [_Move(m, plan["plan_id"]) for m in plan["planned_moves"]]
     journals = sorted({mv.jpath for mv in moves})
     with ExitStack() as stack:
         for path in journals:
             stack.enter_context(slot_lock(path))
-            if command == "apply" and not (path.parent / "plan.json").exists():
-                text = json.dumps(plan, indent=2, sort_keys=True, default=_json_default) + "\n"
-                atomic_write_text(path.parent / "plan.json", text)
-        if command == "resume":
-            runs = [x for p in journals for x in read_journal(p).get("*", []) if x.get("command") == "apply"]
-            reason = runs[-1].get("reason") if runs else None
-            if not isinstance(reason, str) or not reason.strip():
-                raise PlanError("the journal holds no apply run with a reason to resume")
         for path in journals:
-            _journal(path, {"move": "*", "state": "run", "command": command, "reason": reason})
+            _journal(path, {"move": "*", "state": "run", "command": "apply", "reason": reason})
         index, out = build_attribution_index(root), {}
         for mv in moves:
             try:
@@ -314,26 +260,23 @@ def run(plan: Dict[str, Any], command: str, reason: Optional[str], root: Path) -
 
 
 def main(argv: Optional[List[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Apply or resume a cross-database pattern move plan.")
-    sub = parser.add_subparsers(dest="command", required=True)
-    apply_p, resume_p = sub.add_parser("apply"), sub.add_parser("resume")
+    parser = argparse.ArgumentParser(description="Copy and verify the moves of a cross-database pattern plan.")
+    apply_p = parser.add_subparsers(dest="command", required=True).add_parser("apply")
     apply_p.add_argument("--plan", type=Path, required=True, help="plan from qi_transfer_plan.py --out")
     apply_p.add_argument("--reason", required=True)
-    resume_p.add_argument("--plan-id", required=True)
-    for p in (apply_p, resume_p):
-        p.add_argument("--vnx-data-root", type=Path, default=None)
+    apply_p.add_argument("--vnx-data-root", type=Path, default=None)
     args = parser.parse_args(argv)
-    root = args.vnx_data_root or (Path.home() / ".vnx-data")
     try:
-        if args.command == "apply" and not args.reason.strip():
+        if not args.reason.strip():
             raise PlanError("--reason is empty")
-        plan = load_plan(args.plan) if args.command == "apply" else find_plan(root, args.plan_id)
-        outcomes = run(plan, args.command, getattr(args, "reason", None), root)
+        plan = load_plan(args.plan)
+        outcomes = run(plan, args.reason, args.vnx_data_root or (Path.home() / ".vnx-data"))
     except PlanError as exc:
         print(f"[qi_transfer_apply] {exc}", file=sys.stderr)
         return 2
-    print(json.dumps({"plan_id": plan["plan_id"], "command": args.command, "outcomes": outcomes}, indent=2))
-    return 0 if all(o in ("done", "already_present") for o in outcomes.values()) else 1
+    notes = {k: _SOURCE_KEPT for k, o in outcomes.items() if o in _FINISHED}
+    print(json.dumps({"plan_id": plan["plan_id"], "command": "apply", "outcomes": outcomes, "notes": notes}, indent=2))
+    return 0 if all(o in _FINISHED for o in outcomes.values()) else 1
 
 
 if __name__ == "__main__":
