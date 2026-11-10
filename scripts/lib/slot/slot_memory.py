@@ -1,19 +1,8 @@
 """Host-wide memory samples and the memory condition for heavy requests (RS-5).
 
-The functions work on the ``state`` dict of ADR-062 sections 4 and 11: the
-clock (``now``) and the measurement come in from the caller, and nothing here
-opens a file, takes a lock or starts a process. ``take_sample`` is the one
-seam, and even there the caller injects the runner (RS-6 owns the subprocess).
-
-One sample per 30-second bucket host-wide, retention on time (600 s, never on
-count), a growth rule over the 5-minute window when two usable samples at least
-4 minutes apart exist, otherwise the level rule. Recovery needs two consecutive
-clean samples from two different buckets. A missing, stale or unreadable
-measurement is ``memory_metric_unavailable``; it is never a value and never 0.
-
-``policy`` is validated by RS-2 before it reaches here, so an absent profile or
-threshold raises ``KeyError`` instead of admitting the request.
-"""
+Pure over the ADR-062 ``state`` dict (sections 4 and 11); ``take_sample`` is the one seam,
+its runner injected (RS-6). Each sample is judged at its own moment with only the samples
+before it, and an absent ``policy`` key (RS-2 validates it) raises ``KeyError``."""
 
 from __future__ import annotations
 
@@ -64,11 +53,9 @@ def _retained(sample: dict, now: float) -> bool:
 def record_sample(state: dict, sample: dict, now: float) -> bool:
     """Write the sample for the bucket of ``now`` only when that bucket is empty.
 
-    Samples older than ``RETENTION_SECONDS`` are dropped (on time, never on
-    count) and the list stays sorted on time. Returns whether it wrote. A sample
-    whose status is not exactly ``ok`` — or that claims ``ok`` without both
-    values — is stored as ``unavailable`` with null values: unknown is not a
-    measurement.
+    Returns whether it wrote. Samples older than ``RETENTION_SECONDS`` go (on time,
+    never on count); the list stays sorted. A status other than exactly ``ok``, or
+    ``ok`` without both values, is stored ``unavailable`` with nulls, never as 0.
     """
     bucket = bucket_start(now)
     samples = state.setdefault("samples", [])
@@ -94,75 +81,60 @@ def needs_own_sample(state: dict, now: float) -> bool:
     return not any(s.get("bucket_start") == bucket for s in state.get("samples") or [])
 
 
-def _measurement_reason(latest: dict | None, now: float) -> str | None:
-    """``memory_metric_unavailable`` unless the newest sample is fresh and usable."""
-    if latest is None:
-        return MEMORY_METRIC_UNAVAILABLE
-    measured_at = _number(latest.get("measured_at"))
-    if measured_at is None or not 0 <= now - measured_at <= FRESH_SECONDS:
-        return MEMORY_METRIC_UNAVAILABLE
-    return None if _usable(latest) else MEMORY_METRIC_UNAVAILABLE
+def _measurement_reason(sample: dict | None, now: float) -> str | None:
+    """``memory_metric_unavailable`` unless ``sample`` is usable and fresh at ``now``."""
+    measured_at = _number((sample or {}).get("measured_at"))   # no sample: None, unavailable
+    fresh = measured_at is not None and 0 <= now - measured_at <= FRESH_SECONDS
+    return None if fresh and _usable(sample) else MEMORY_METRIC_UNAVAILABLE
 
 
-def _memory_reasons(samples: list[dict], latest: dict, memory: dict, now: float) -> list[str]:
-    """The guard reason, or none: growth rule when the window allows it, else level."""
-    usable = [s for s in samples if _usable(s)
+def _sample_is_clean(samples: list[dict], index: int, memory: dict) -> bool:
+    """Whether ``samples[index]`` (sorted on bucket) passed at its own moment.
+
+    Judged at its ``measured_at`` with only ``samples[:index + 1]``, so no later sample or
+    clock can change it; not fresh at the last second of its own bucket means it went in
+    stale. Growth rule with two usable samples 4 minutes apart there, else level rule.
+    """
+    target = samples[index]
+    moment, started = _number(target.get("measured_at")), _number(target.get("bucket_start"))
+    if (moment is None or started is None
+            or _measurement_reason(target, started + BUCKET_SECONDS - 1) is not None):
+        return False
+    window = [s for s in samples[:index + 1] if _usable(s)
               and _number(s.get("measured_at")) is not None
-              and 0 <= now - s["measured_at"] <= GROWTH_WINDOW_SECONDS]
-    usable.sort(key=lambda s: s["measured_at"])
-    enough_history = (len(usable) >= 2
-                      and usable[-1]["measured_at"] - usable[0]["measured_at"]
-                      >= GROWTH_MIN_SPAN_SECONDS)
-    if enough_history:
-        grew = usable[-1]["swap_used_mb"] - usable[0]["swap_used_mb"]
-        compressed = usable[-1]["compressor_gb"] >= memory["compressor_gb"]
-        return [MEMORY_GUARD] if grew >= memory["swap_growth_mb"] and compressed else []
-    if (latest["swap_used_mb"] >= memory["swap_level_mb"]
-            and latest["compressor_gb"] >= memory["compressor_gb"]):
-        return [MEMORY_GUARD]
-    return []
+              and 0 <= moment - s["measured_at"] <= GROWTH_WINDOW_SECONDS]
+    first = min(window, key=lambda s: s["measured_at"])   # the target itself is in the window
+    growth = moment - first["measured_at"] >= GROWTH_MIN_SPAN_SECONDS
+    hot = (target["swap_used_mb"] - first["swap_used_mb"] >= memory["swap_growth_mb"] if growth
+           else target["swap_used_mb"] >= memory["swap_level_mb"])
+    return not (hot and target["compressor_gb"] >= memory["compressor_gb"])
 
 
 def memory_verdict(state: dict, policy: dict, profile: str, now: float) -> tuple[str, list[str]]:
     """``(decision, reasons)`` for one request of ``profile``, per ADR-062.
 
-    ``heavy`` is a property of the request, so a nested lease or a top-up under
-    a light parent is checked here exactly like a new request; the function has
-    no parent argument on purpose. A non-heavy profile always admits, with no
-    reason, and never touches ``memory_recovery``.
-
-    A blocked heavy request goes through only after two consecutive clean
-    recorded samples from two different buckets (``state["memory_recovery"]``:
-    ``blocked`` and ``clean_buckets``); a bucket counts once.
+    ``heavy`` belongs to the request, so a nested lease or a top-up under a light parent
+    is checked like a new one; a non-heavy profile admits and leaves ``memory_recovery``.
+    ``now`` only decides whether the newest sample is stale for this request; a block lifts
+    when ``_sample_is_clean`` passes the last two samples, two buckets, no stale gap between.
     """
     if not policy["profiles"][profile].get("heavy"):
         return ADMIT, []
-    samples = sorted(state.get("samples") or [],
-                     key=lambda s: _number(s.get("bucket_start")) or 0)
+    samples = sorted(state.get("samples") or [], key=lambda s: _number(s.get("bucket_start")) or 0)
     recovery = state.setdefault("memory_recovery", {"blocked": False, "clean_buckets": []})
-    latest = samples[-1] if samples else None
-    reason = _measurement_reason(latest, now)
-    if reason is None:
-        reasons = _memory_reasons(samples, latest, policy["memory"], now)
-    if reason is not None or reasons:
-        recovery["blocked"] = True
-        recovery["clean_buckets"] = []
-        return WAIT, [reason] if reason is not None else reasons
-    if not recovery.get("blocked"):
-        recovery["clean_buckets"] = []
-        return ADMIT, []
-    clean: list[int] = []
-    for recorded in reversed(samples):
-        if (_measurement_reason(recorded, now) is not None
-                or _memory_reasons(samples, recorded, policy["memory"], now)):
-            break
-        clean.insert(0, recorded["bucket_start"])
-    clean = clean[-RECOVERY_BUCKETS:]
-    if len(clean) < RECOVERY_BUCKETS:
-        recovery["clean_buckets"] = clean
-        return WAIT, [MEMORY_GUARD]
-    recovery["blocked"] = False
-    recovery["clean_buckets"] = []
+    reason = _measurement_reason(samples[-1] if samples else None, now)
+    run: list[dict] = []        # the clean run that ends the record, oldest first
+    for index in range(len(samples) - 1, -1, -1):
+        if (reason is not None or len(run) == RECOVERY_BUCKETS
+                or not _sample_is_clean(samples, index, policy["memory"])
+                or run and _measurement_reason(samples[index], run[0]["measured_at"]) is not None):
+            break   # stale before the next was measured: no fresh sample in between either
+        run.insert(0, samples[index])
+    clean = [s["bucket_start"] for s in run]
+    if not clean or (recovery.get("blocked") and len(clean) < RECOVERY_BUCKETS):
+        recovery["blocked"], recovery["clean_buckets"] = True, clean
+        return WAIT, [reason or MEMORY_GUARD]
+    recovery["blocked"], recovery["clean_buckets"] = False, []
     return ADMIT, []
 
 

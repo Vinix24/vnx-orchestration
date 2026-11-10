@@ -1,9 +1,4 @@
-"""Tests for scripts/lib/slot/slot_memory.py (RS-5, rekenslot-per-machine).
-
-Each item of "Klaar per levering" 6 is its own test. The module is pure over
-the ADR-062 state dict; only ``take_sample`` touches the outside world, and its
-runner is a fake here, so no test needs a live host.
-"""
+"""Tests for scripts/lib/slot/slot_memory.py (RS-5): pure, and no test needs a live host."""
 
 from __future__ import annotations
 
@@ -158,6 +153,46 @@ def test_two_consecutive_clean_recorded_samples_recover(mod, evaluate_each):
             verdict = mod.memory_verdict(state, POLICY, "seo-gate", at)
     assert verdict == (mod.ADMIT, [])
     assert state["memory_recovery"] == {"blocked": False, "clean_buckets": []}
+
+
+@pytest.mark.parametrize("then_clean", [False, True], ids=["codex-sequence", "then-a-clean-bucket"])
+def test_a_sample_that_blocked_at_its_own_moment_never_turns_clean_later(mod, then_clean):
+    """Codex, round 2: compressor 9 GB throughout, swap 1000/1400/1100 MB at t=0/240/270."""
+    t0, state, wait = 1_000_020.0, {}, (mod.WAIT, [mod.MEMORY_GUARD])
+    steps = [(0, 1000, None), (240, 1400, wait), (270, 1100, wait)]
+    for offset, swap, expected in steps + ([(300, 1100, (mod.ADMIT, []))] if then_clean else []):
+        mod.record_sample(state, sample(int(t0) + offset, swap, 9.0), t0 + offset)
+        if expected is not None:
+            assert mod.memory_verdict(state, POLICY, "seo-gate", t0 + offset) == expected, offset
+
+
+def test_a_level_clean_sample_stays_clean_when_later_history_brings_the_growth_rule(mod):
+    """t=240 spans 210 s, so the level rule passes it; t=270 spans 240 s: growth +200 MB."""
+    t0, state = 1_000_020.0, {"memory_recovery": {"blocked": True, "clean_buckets": []}}
+    for offset, swap in ((30, 1000), (240, 1300), (270, 1200)):   # t=240 would fail growth
+        mod.record_sample(state, sample(int(t0) + offset, swap, 9.0), t0 + offset)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", t0 + 270) == (mod.ADMIT, [])
+
+
+def test_the_newest_sample_keeps_its_own_verdict_later_in_its_bucket(mod):
+    t0, state = 1_000_020.0, {}   # at t=299 the baseline of t=-29 is outside the window of now
+    for at, swap in ((t0 - 29, 1000), (t0 + 270, 1300)):   # +300 MB over 299 s blocks at t=270
+        mod.record_sample(state, sample(int(at), swap, 9.0), at)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", t0 + 299) == (mod.WAIT, [mod.MEMORY_GUARD])
+
+
+@pytest.mark.parametrize("stamp, gap", [(-150, 30), (30, 30), (None, 30), (0, 150)],
+                         ids=["150s-old", "after-its-bucket", "none", "stale-before-the-next"])
+def test_a_sample_stale_at_its_own_moment_or_before_the_next_never_counts(mod, stamp, gap):
+    """Stale on entry (150 s old, stamped after its bucket, no time) or 150 s before the next."""
+    t0, state = 1_000_020.0, {}
+    mod.record_sample(state, sample(int(t0), 3500, 9.0), t0)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", t0) == (mod.WAIT, [mod.MEMORY_GUARD])
+    odd, latest = t0 + mod.BUCKET_SECONDS, t0 + mod.BUCKET_SECONDS + gap
+    mod.record_sample(state, sample(None if stamp is None else int(odd) + stamp, 100, 1.0), odd)
+    mod.record_sample(state, sample(int(latest), 100, 1.0), latest)
+    assert mod.memory_verdict(state, POLICY, "seo-gate", latest) == (mod.WAIT, [mod.MEMORY_GUARD])
+    assert state["memory_recovery"]["clean_buckets"] == [mod.bucket_start(latest)]
 
 
 def test_a_heavy_nested_lease_under_a_light_parent_is_checked(mod):
