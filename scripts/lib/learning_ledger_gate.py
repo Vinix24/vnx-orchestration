@@ -4,7 +4,7 @@ A thin projection of ``compute_lifecycle_count`` and ``attempt_verdict`` (no sec
 Seven rules, top first, first hit wins; see ``_evaluate``. Fail closed: an unknown value, a
 missing field, an ``OSError`` or any exception from a building block gives ``refused`` with
 the reason, never ``ok`` and never a raise. A ``legacy`` dispatch is no evidence and never a
-reason to refuse. The verdict file (``write_verdict``/``read_verdict``) is added in split 2.
+reason to refuse. Storing and re-reading the verdict file is added in split 2.
 """
 from __future__ import annotations
 
