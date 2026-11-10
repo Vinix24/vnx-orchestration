@@ -307,20 +307,11 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
-    "VNX_INJECTION_WHY_ENABLED": _e(
-        "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
-        "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
-        "time via a deterministic content-overlap check + reason classifier. Off = byte-for-byte "
-        "the current filename-only record_adoption_from_receipt behavior (no new reads/writes). "
-        "Prerequisite instrumentation for the reason-aware evaluator (PR-B); does not itself "
-        "activate the learning loop.",
-        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
-        # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
-        # this subsystem's 4 flags. Not re-audited by this dispatch — out of scope.
-        cockpit_canonical=True),
     # intelligence-effect-measurable PR-1: the A/B window as registered, audited configuration
     # (project_config rows) instead of a plist edit. Every default is off or empty: registering
-    # these keys opens no window. cockpit_canonical stays on VNX_INJECTION_WHY_ENABLED.
+    # these keys opens no window. They sit BEFORE VNX_INJECTION_WHY_ENABLED on purpose: the
+    # SUBSYSTEMS.md ledger generator takes the last-inserted entry of a subsystem, and that
+    # must stay VNX_INJECTION_WHY_ENABLED (also the cockpit_canonical flag).
     "VNX_INTEL_AB_TEST": _e(
         "VNX_INTEL_AB_TEST", "bool", "0", "intelligence",
         "Open the intelligence-injection A/B window: dispatches are assigned a treatment or "
@@ -339,6 +330,17 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Empty = no window is open.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
         read_site_wired=False),
+    "VNX_INJECTION_WHY_ENABLED": _e(
+        "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
+        "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
+        "time via a deterministic content-overlap check + reason classifier. Off = byte-for-byte "
+        "the current filename-only record_adoption_from_receipt behavior (no new reads/writes). "
+        "Prerequisite instrumentation for the reason-aware evaluator (PR-B); does not itself "
+        "activate the learning loop.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
+        # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
+        cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
         "Flag with no effect since P1: plan_gate_enforcement.complex_only_active() "

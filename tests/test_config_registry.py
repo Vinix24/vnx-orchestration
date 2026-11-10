@@ -601,3 +601,15 @@ def test_intel_ab_window_keys_registered_off_and_not_canonical():
         assert not entry.cockpit_canonical
     assert cr.CONFIG_REGISTRY["VNX_INJECTION_WHY_ENABLED"].cockpit_canonical
     assert not cr.get_bool("VNX_INTEL_AB_TEST")
+
+
+def test_injection_effectiveness_ledger_flag_stays_why_enabled():
+    """The SUBSYSTEMS.md ledger takes the last-inserted entry of a subsystem; for
+    injection-effectiveness-eval-loop that must stay VNX_INJECTION_WHY_ENABLED (the wired,
+    cockpit-canonical flag), not an unwired A/B key added after it."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from vnx_cli.commands.subsystems import _canonical_flags
+
+    sub = "injection-effectiveness-eval-loop"
+    assert _canonical_flags(cr)[sub] == "VNX_INJECTION_WHY_ENABLED"
+    assert cr.canonical_flags()[sub] == "VNX_INJECTION_WHY_ENABLED"
