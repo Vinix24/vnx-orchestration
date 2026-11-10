@@ -215,18 +215,6 @@ def test_initialize_refuses_over_existing_state(env):
     assert (store / "state.json").read_bytes() == before
 
 
-def test_exception_in_transaction_leaves_state_byte_identical(env):
-    st, _, store, _ = env
-    st.initialize_state()
-    before = (store / "state.json").read_bytes()
-    with pytest.raises(RuntimeError):
-        with st.transaction() as state:
-            state["fencing_counter"] = 5
-            raise RuntimeError("boom")
-    assert (store / "state.json").read_bytes() == before
-    assert [p.name for p in store.iterdir() if p.name.endswith(".tmp")] == []
-
-
 def test_clean_transaction_persists_and_files_are_0660_under_umask_022(env):
     st, _, store, _ = env
     old = os.umask(0o022)
@@ -253,14 +241,27 @@ def test_transaction_refuses_on_wrong_rights(env):
     assert (store / "state.json").read_bytes() == before
 
 
-def test_state_rewrite_with_invalid_shape_is_refused(env):
+def _boom(state):
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("mutate,exc,code", [
+    (_boom, RuntimeError, None),
+    (lambda s: s.update(holders=None), SlotError, None),
+    *[(lambda s, v=v: s["samples"].append(v), SlotError, "state_corrupt")
+      for v in (float("nan"), float("inf"), -float("inf"))],
+])
+def test_failed_transaction_leaves_state_untouched(env, mutate, exc, code):
     st, _, store, _ = env
     st.initialize_state()
     before = (store / "state.json").read_bytes()
-    with pytest.raises(SlotError):
+    with pytest.raises(exc) as info:
         with st.transaction() as state:
-            state["holders"] = None
+            mutate(state)
+    assert code is None or info.value.code == code
     assert (store / "state.json").read_bytes() == before
+    assert [p.name for p in store.iterdir() if p.name.endswith(".tmp")] == []
+    assert st.read_state()["samples"] == []
 
 
 def test_initial_state_follows_policy_mode(env):

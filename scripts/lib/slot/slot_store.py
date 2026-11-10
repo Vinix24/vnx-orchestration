@@ -192,13 +192,17 @@ class SlotStore:
             raise SlotError(reasons[0].split(":")[0], "; ".join(reasons))
 
     def _write_state(self, state: Dict[str, Any]) -> None:
+        try:
+            payload = json.dumps(state, sort_keys=True, allow_nan=False)
+        except ValueError as exc:
+            raise SlotError("state_corrupt", f"state holds a non-finite number: {exc}") from exc
         tmp = self.store_dir / f".state.json.{os.getpid()}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o660)
         try:
             os.fchmod(fd, 0o660)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fd = -1
-                fh.write(json.dumps(state, sort_keys=True))
+                fh.write(payload)
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self.store_dir / "state.json")  # vnx-atomic-write: temp file + replace under the lock
