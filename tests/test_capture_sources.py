@@ -349,4 +349,5 @@ def test_cli_sources_absent_open_items_is_absent(env):
 
 
 def test_cli_rejects_unknown_subcommand(env):
-    assert _run("audit", home=env["home"]).returncode == 2
+    proc = _run("bestaat-niet", home=env["home"])
+    assert proc.returncode == 2 and "invalid choice: 'bestaat-niet'" in proc.stderr

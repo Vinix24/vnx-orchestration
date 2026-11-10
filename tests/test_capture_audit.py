@@ -1,7 +1,8 @@
-"""Capture PR-3, split 1: the window, the pairs, the disposition and the anchor rule.
+"""Capture PR-3: the window, the pairs, the disposition, the anchor rule and the read model.
 
 Fixtures live under tmp_path with HOME pointing there (never ~/.claude or ~/.vnx-data).
-The bins are read with the real capture_sources readers; the TZ cases run in a subprocess.
+The bins are read with the real capture_sources readers; the TZ cases and the CLI run
+in a subprocess.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(_REPO_ROOT / "scripts" / "lib"))
 import capture_audit as ca
 import capture_sources as cs
 
+SCRIPT = _REPO_ROOT / "scripts" / "capture_audit.py"
 SINCE, UNTIL = "2026-11-09T12:00:00Z", "2026-11-10T12:00:00Z"
 NOW = datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
 WINDOW = ca.parse_window(SINCE, UNTIL, chain_until=None, now=NOW)
@@ -36,22 +38,30 @@ w = ca.parse_window(sys.argv[3], sys.argv[4], chain_until=None, now=datetime.now
 raw = {ca.OI: (items, cs.state_of(state), {})}
 print(ca.audit_model(raw, w, project_id='p', dismissed_ids=frozenset())['bins']['open_items']['new'])
 """
+_CLI_FIRST_PROBE = """import json, os, sys
+sys.path.insert(0, sys.argv[1] + '/scripts')
+import capture_audit as cli
+print(json.dumps([os.path.realpath(cli.__file__), os.path.realpath(cli.ca.__file__), callable(cli.ca.audit_model)]))
+"""
 
 
-@pytest.fixture
-def env(tmp_path, monkeypatch):
-    home = tmp_path / "home"
-    monkeypatch.setenv("HOME", str(home))
-    d = {"home": home, "state": home / ".vnx-data" / "proj-a" / "state",
-         "memory": home / ".claude" / "projects" / "-proj-a" / "memory", "bucket": home / "bucket"}
+def _project(home: Path, project: str) -> dict:
+    d = {"home": home, "state": home / ".vnx-data" / project / "state",
+         "memory": home / ".claude" / "projects" / f"-{project}" / "memory", "bucket": home / f"bucket-{project}"}
     for key in ("state", "memory", "bucket"):
         d[key].mkdir(parents=True)
     (d["state"] / cs.BINDING_FILENAME).write_text(json.dumps({
-        "schema": cs.BINDING_SCHEMA, "project_id": "proj-a", "memory_dir": str(d["memory"]),
+        "schema": cs.BINDING_SCHEMA, "project_id": project, "memory_dir": str(d["memory"]),
         "bucket_dir": str(d["bucket"]), "bucket_slug": "mine", "bound_at": NEW}))
     _items(d)
     _nugget(d, "2026-10-01", "koffie-zetten-ochtend")
     return d
+
+
+@pytest.fixture
+def env(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    return _project(tmp_path / "home", "proj-a")
 
 
 def _items(d, *items):
@@ -244,3 +254,148 @@ def test_a_dismissal_of_one_project_never_dismisses_the_same_pair_of_another(env
     _note(env, "merge-lock-note", NOTE_DESC)
     pid_a = _model(env)["pairs"][0]["pair_id"]
     assert _model(env, dismissed=frozenset({pid_a}), project="proj-b")["pairs"][0]["disposition"] == "open"
+
+
+def _audit(d):
+    return ca.build_audit(d["state"], ca.parse_window(SINCE, UNTIL, chain_until=None, now=NOW))
+
+
+def _written(d):
+    return json.loads((d["state"] / ca.AUDIT_FILENAME).read_text())
+
+
+def _run(*args, home):
+    drop = ("VNX_PROJECT_ID", "VNX_DISPATCH_PATHS", "VNX_ENFORCE_WORKER_PERMISSIONS")
+    proc_env = {**{k: v for k, v in os.environ.items() if k not in drop}, "HOME": str(home)}
+    return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
+                          env=proc_env, cwd=str(home))
+
+
+def test_cli_audit_window(env):
+    _items(env, ("OI-7", OI_TITLE, "2026-10-01T10:00:00"))
+    _note(env, "merge-lock-note", NOTE_DESC)
+    proc = _run("audit", "--state-dir", str(env["state"]), "--since", SINCE, "--until", UNTIL, "--json", home=env["home"])
+    assert proc.returncode == 0, f"proc.returncode == 0: {proc.stderr}"
+    audit = _written(env)
+    assert json.loads(proc.stdout) == audit
+    assert (audit["window"]["source"], audit["anchors_total"], audit["open_pairs"], audit["backlog_open_pairs"]) \
+        == ("explicit", 1, 1, 0)
+    assert audit["bins"]["bucket"]["foreign_slug_skipped"] == 0
+    [pair] = audit["pairs"]
+    assert (pair["kind"], pair["oi_id"], pair["anchor_bin"], pair["disposition"]) == ("oi_mem", "OI-7", "memory", "open")
+    text = _run("audit", "--state-dir", str(env["state"]), "--since", SINCE, "--until", UNTIL, home=env["home"])
+    assert text.returncode == 0 and "open_pairs=1" in text.stdout and "merge" not in text.stdout
+
+
+def test_cli_audit_refuses_and_writes_nothing(env):
+    proc = _run("audit", "--state-dir", str(env["state"]), "--since", SINCE, home=env["home"])
+    assert proc.returncode == 2 and not (env["state"] / ca.AUDIT_FILENAME).exists()
+    missing = env["home"] / "tikfout" / "state"  # a typo in --state-dir never creates a stray state dir
+    proc = _run("audit", "--state-dir", str(missing), "--since", SINCE, "--until", UNTIL, home=env["home"])
+    assert proc.returncode == 2 and not missing.parent.exists()
+
+
+def test_build_audit_without_binding_is_unbound_and_null(env):
+    (env["state"] / cs.BINDING_FILENAME).unlink()
+    audit = _audit(env)
+    assert {row["state"] for row in audit["bins"].values()} == {"unbound"}
+    assert (audit["open_pairs"], audit["window"]["chain_until"]) == (None, None)
+
+
+def test_ledger_dismissal_counts_and_broken_lines_do_not(env):
+    _items(env, ("OI-7", OI_TITLE, OLD))
+    _note(env, "merge-lock-note", NOTE_DESC)
+    pid = _audit(env)["pairs"][0]["pair_id"]
+    good = {"pair_id": pid, "reason": "geen duplicaat", "at": NEW, "by": "operator"}
+    broken = ["{kapot", json.dumps({**good, "reason": " "}), json.dumps({**good, "at": "2026-11-10T08:00:00"}),
+              json.dumps({**good, "pair_id": pid[:-1] + "g"}), json.dumps({**good, "pair_id": 7}),
+              json.dumps({k: v for k, v in good.items() if k != "by"})]
+    ledger = env["state"] / ca.LEDGER_FILENAME
+    ledger.write_text("\n".join(broken) + "\n")
+    assert _audit(env)["pairs"][0]["disposition"] == "open"
+    ledger.write_text("\n".join(broken + [json.dumps(good)]) + "\n")
+    assert _audit(env)["pairs"][0]["disposition"] == "dismissed"
+    ledger.write_bytes(b"\xff\xfe")
+    assert _audit(env)["pairs"][0]["disposition"] == "open"
+
+
+def test_written_json_has_no_title_heading_body_or_file_name(env):
+    _items(env, ("OI-7", OI_TITLE, OLD))
+    _note(env, "merge-lock-note", NOTE_DESC, body="geheime notitietekst OI-7", name="merge-lock-naam")
+    _nugget(env, "2026-11-10", "merge-lock-blijft-achter", "- geheime nuggettekst")
+    assert len(_audit(env)["pairs"]) == 3
+    blob = (env["state"] / ca.AUDIT_FILENAME).read_text()
+    for secret in (OI_TITLE, NOTE_DESC, "merge-lock-note", "merge-lock-naam", "merge-lock-blijft-achter",
+                   "koffie-zetten-ochtend", "geheime", "afgebroken", "blijft"):
+        assert secret not in blob
+
+
+def test_two_projects_with_the_same_oi_ids_do_not_see_each_other_on_disk(env):
+    other = _project(env["home"], "proj-b")
+    for d in (env, other):
+        _items(d, ("OI-7", OI_TITLE, OLD))
+        _note(d, "merge-lock-note", NOTE_DESC)
+    a = _audit(env)
+    (other["state"] / ca.LEDGER_FILENAME).write_text(json.dumps(
+        {"pair_id": a["pairs"][0]["pair_id"], "reason": "r", "at": NEW, "by": "operator"}) + "\n")
+    b = _audit(other)
+    assert (a["project_id"], b["project_id"], len(a["pairs"]), len(b["pairs"])) == ("proj-a", "proj-b", 1, 1)
+    assert a["pairs"][0]["pair_id"] != b["pairs"][0]["pair_id"] and b["pairs"][0]["disposition"] == "open"
+    assert set(a["pairs"][0]["locators"]).isdisjoint(b["pairs"][0]["locators"])
+
+
+def test_chain_starts_at_the_last_successful_until(env):
+    assert ca.previous_chain_until(env["state"]) is None
+    ca.build_audit(env["state"], ca.parse_window(None, None, chain_until=None, now=NOW))
+    assert ca.previous_chain_until(env["state"]) == NOW
+    later = NOW + timedelta(hours=6)
+    explicit = ca.parse_window("2026-11-10T13:00:00Z", "2026-11-10T14:00:00Z", chain_until=None, now=later)
+    ca.build_audit(env["state"], explicit)  # an explicit run never moves the chain
+    assert ca.previous_chain_until(env["state"]) == NOW
+    (env["state"] / "open_items.json").unlink()  # a failed chain run carries the chain on
+    failed = ca.build_audit(env["state"], ca.parse_window(None, None, chain_until=NOW, now=later))
+    assert (failed["window"]["since"], ca.previous_chain_until(env["state"])) == (NOW.isoformat(), NOW)
+    _items(env)
+    ca.build_audit(env["state"], ca.parse_window(None, None, chain_until=NOW, now=later))
+    assert ca.previous_chain_until(env["state"]) == later
+    for corrupt in ("{kapot", "[]", json.dumps({"schema": "capture_audit/9", "window": {"chain_until": None}}),
+                    json.dumps({"schema": ca.AUDIT_SCHEMA, "window": {"chain_until": "2026-11-10T12:00:00"}})):
+        (env["state"] / ca.AUDIT_FILENAME).write_text(corrupt)
+        with pytest.raises(ValueError):
+            ca.previous_chain_until(env["state"])
+        with pytest.raises(ValueError):  # an explicit run cannot carry an unknown chain_until, so it writes nothing
+            ca.build_audit(env["state"], explicit)
+        assert (env["state"] / ca.AUDIT_FILENAME).read_text() == corrupt
+    for args in ((), ("--since", SINCE, "--until", UNTIL)):
+        assert _run("audit", "--state-dir", str(env["state"]), *args, home=env["home"]).returncode == 2
+
+
+def test_cli_chain_run_starts_at_the_previous_chain_until(env):
+    first = ca.build_audit(env["state"], ca.parse_window(
+        None, None, chain_until=None, now=datetime.now(timezone.utc) - timedelta(hours=1)))
+    chain = json.loads(_run("audit", "--state-dir", str(env["state"]), "--json", home=env["home"]).stdout)
+    assert (chain["window"]["source"], chain["window"]["since"]) == ("chain", first["window"]["chain_until"])
+    explicit = _run("audit", "--state-dir", str(env["state"]), "--since", SINCE, "--until", UNTIL, home=env["home"])
+    assert explicit.returncode == 0 and _written(env)["window"]["chain_until"] == chain["window"]["until"]
+
+
+@pytest.mark.parametrize("reader,bin_name,reshape", [
+    ("read_open_items", ca.OI, lambda r: (*r, 0)), ("read_open_items", ca.OI, list),
+    ("read_memory_notes", ca.MEM, lambda r: (*r, 0)), ("read_bucket_entries", ca.NUG, lambda r: (*r[:2], None)),
+    ("read_bucket_entries", ca.NUG, lambda r: (*r[:2], True))])
+def test_a_reader_of_another_shape_is_error_and_the_measurement_null(env, monkeypatch, reader, bin_name, reshape):
+    _items(env, ("OI-7", OI_TITLE, OLD))
+    _note(env, "merge-lock-note", NOTE_DESC)
+    real = getattr(cs, reader)
+    monkeypatch.setattr(cs, reader, lambda *args: reshape(real(*args)))
+    audit = _audit(env)
+    assert audit["bins"][bin_name] == {"state": "error", "count": None, "new": None}
+    assert (audit["anchors_total"], audit["open_pairs"], audit["backlog_open_pairs"]) == (None, None, None)
+
+
+def test_cli_imported_first_still_loads_the_lib(env):
+    proc = subprocess.run([sys.executable, "-c", _CLI_FIRST_PROBE, str(_REPO_ROOT)],
+                          capture_output=True, text=True, cwd=str(env["home"]))
+    assert proc.returncode == 0, proc.stderr
+    lib = _REPO_ROOT / "scripts" / "lib" / "capture_audit.py"
+    assert json.loads(proc.stdout) == [str(SCRIPT.resolve()), str(lib.resolve()), True]
