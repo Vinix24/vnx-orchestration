@@ -48,6 +48,19 @@ def _session_digest(conn, session):
     return table_digest(conn, "session_analytics", session["columns"], "id", where=where)["digest_sha256"]
 
 
+def _session_whole(conn, session):
+    """Digest over every session_analytics row (no id bound), with count and sum(id): inside the purge's own lock any change is its own doing."""
+    found = table_digest(conn, "session_analytics", session["columns"], "id")
+    total = conn.execute("SELECT coalesce(sum(id), 0) FROM session_analytics").fetchone()[0]
+    return found["digest_sha256"], found["rows"], total
+
+
+def _session_change(before, after):
+    kind = "rows added" if after[1] > before[1] else "rows removed" if after[1] < before[1] else "rows changed"
+    return (f"session_analytics changed inside the delete transaction (digest B != digest A): {kind}, "
+            f"count {before[1]} -> {after[1]}, sum(id) {before[2]} -> {after[2]}")
+
+
 def _deleted_ok(state, permit):
     """True only on a `deleted` line with status ok for this permit; an unreadable or malformed audit file refuses."""
     try:
@@ -79,15 +92,17 @@ def _prove_and_delete(conn, db, manifest_path, folder, session, permit, box):
     if verdict.get("permit_sha256") != permit:
         raise ValueError("permit files changed while the purge ran")
     family_bytes = _family_bytes(conn)
-    digest_a = _session_digest(conn, session)
+    whole_a = _session_whole(conn, session)
     box[0] = "rolled_back"  # from the first DELETE on, a failure is a rollback and not a refusal
     for sql in DELETE_SQL:
         conn.execute(sql)
-    if _session_digest(conn, session) != digest_a:
-        raise ValueError("session_analytics changed inside the delete transaction (digest B != digest A)")
+    whole_b = _session_whole(conn, session)
+    if whole_b != whole_a:
+        raise ValueError(_session_change(whole_a, whole_b))
     if any(_counts(conn).values()):
         raise ValueError("corpus tables are not empty after the DELETE")
-    return dict(session_in_transaction_equal=True, baseline_max_id=session["max_id"], corpus_family_bytes_before=family_bytes)
+    return dict(session_in_transaction_equal=True, baseline_max_id=session["max_id"],
+                session_rows_before=whole_a[1], session_rows_after=whole_b[1], corpus_family_bytes_before=family_bytes)
 
 
 def _after_measure(db, manifest, session):
