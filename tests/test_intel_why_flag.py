@@ -74,20 +74,58 @@ def test_row_beats_plain_environment(monkeypatch):
     assert gi._injection_why_enabled() is False
 
 
-def test_resolver_that_raises_gives_false(monkeypatch):
-    def _boom(key):
-        raise RuntimeError("config store down")
+def test_reader_failure_gives_false_and_logs_a_warning(monkeypatch, caplog):
+    def _boom(*a, **kw):
+        raise RuntimeError("config wiring broke")
 
-    monkeypatch.setattr(config_runtime, "get_bool", _boom)
-    assert gi._injection_why_enabled() is False
+    monkeypatch.setattr(config_runtime, "autowire", _boom)
+    monkeypatch.setenv(KEY, "1")
+    with caplog.at_level("WARNING", logger=gi.log.name):
+        assert gi._injection_why_enabled() is False
+    assert any(KEY in r.getMessage() and "config wiring broke" in r.getMessage()
+               for r in caplog.records)
 
 
-def test_failing_db_resolver_gives_false_not_true():
+def test_failing_db_resolver_gives_false_not_true(caplog):
+    def _boom(pid, key):
+        raise RuntimeError("db down")
+
+    cr.set_db_resolver(_boom)
+    with caplog.at_level("WARNING"):
+        assert gi._injection_why_enabled() is False
+    assert any(KEY in r.getMessage() and "db down" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("env", ["1", "true", "0", None])
+def test_failing_db_resolver_ignores_the_environment(monkeypatch, env):
+    if env is not None:
+        monkeypatch.setenv(KEY, env)
+
     def _boom(pid, key):
         raise RuntimeError("db down")
 
     cr.set_db_resolver(_boom)
     assert gi._injection_why_enabled() is False
+
+
+def test_override_wins_before_a_failing_db_is_consulted(monkeypatch):
+    calls = []
+
+    def _boom(pid, key):
+        calls.append(key)
+        raise RuntimeError("db down")
+
+    cr.set_db_resolver(_boom)
+    monkeypatch.setenv(f"VNX_OVERRIDE_{cr._bare(KEY)}", "1")
+    assert gi._injection_why_enabled() is True
+    assert calls == []
+
+
+def test_no_row_falls_to_environment_then_default(monkeypatch):
+    cr.set_db_resolver(_row(None))
+    assert gi._injection_why_enabled() is False
+    monkeypatch.setenv(KEY, "1")
+    assert gi._injection_why_enabled() is True
 
 
 def test_at_most_one_store_read_per_call():

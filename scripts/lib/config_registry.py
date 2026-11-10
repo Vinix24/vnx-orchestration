@@ -35,6 +35,7 @@ dedicated flag (e.g. ``phantom_guard``, ``dispatch-plan``) are not represented h
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
@@ -705,7 +706,7 @@ def _bare(key: str) -> str:
 
 def resolve_with_source(
     key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
-    *, use_default_resolver: bool = True,
+    *, use_default_resolver: bool = True, strict_resolver: bool = False,
 ) -> "tuple[Optional[str], str]":
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
@@ -714,6 +715,12 @@ def resolve_with_source(
     ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
+
+    ``strict_resolver`` (default ``False``) changes what a raising DB resolver means. Off, it is
+    treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
+    On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
+    unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
+    override is still read first, before the DB is consulted.
     """
     entry = CONFIG_REGISTRY.get(key)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
@@ -725,7 +732,12 @@ def resolve_with_source(
     if resolver is not None:
         try:
             db_val = resolver(project_id, key)
-        except Exception:
+        except Exception as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning(
+                    "config_registry: project_config resolver failed for %s (%s: %s)",
+                    key, type(exc).__name__, exc)
+                return None, "project_config_error"
             db_val = None
         if db_val is not None:
             return db_val, "project_config"

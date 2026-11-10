@@ -125,6 +125,24 @@ def test_db_resolver_error_falls_through(monkeypatch):
     assert cr.get("VNX_SCOUT_PREPASS") == "0"
 
 
+def test_strict_resolver_surfaces_a_db_error_as_a_source():
+    def _boom(pid, key):
+        raise RuntimeError("db down")
+    cr.set_db_resolver(_boom)
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == (
+        None, "project_config_error")
+    # The default stays lenient for every existing caller.
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS") == ("0", "default")
+
+
+def test_strict_resolver_does_not_change_a_healthy_chain(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "1")
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == (
+        "1", "project_config")
+    cr.set_db_resolver(lambda pid, key: None)
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == ("0", "default")
+
+
 def test_unknown_key_returns_none():
     assert cr.get("VNX_NOT_A_REAL_FLAG") is None
 
