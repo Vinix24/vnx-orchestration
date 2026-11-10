@@ -52,56 +52,35 @@ def _emit_stamp_failed(conn, result, project_id, has_ab_arm: bool, has_ab_window
         logger.warning("ab_stamp_failed event not written for %s: %s", result.dispatch_id, exc)
 
 
+# The one literal column list for the table. The schema-drift guard reads it from
+# the source; the INSERT below is built from it, so the two cannot disagree.
+_INJECTION_INSERT_HEAD = (
+    "INSERT INTO intelligence_injections (injection_id, dispatch_id, injection_point, "
+    "task_class, items_injected, items_suppressed, payload_chars, items_json, "
+    "suppressed_json, project_id, ab_arm, ab_window)"
+)
+_INJECTION_HEAD_END = _INJECTION_INSERT_HEAD.index("(") + 1
+_INJECTION_BASE_COLUMNS: Tuple[str, ...] = tuple(  # the nine columns every store shape has
+    c.strip() for c in _INJECTION_INSERT_HEAD[_INJECTION_HEAD_END:-1].split(",")
+)[:9]
+
+
 def _insert_injection_row(
     conn, base: tuple, project_id, ab_arm, ab_window,
     has_project: bool, has_ab_arm: bool, has_ab_window: bool,
 ) -> None:
-    """INSERT one intelligence_injections row in the shape the store supports."""
-    if has_project and has_ab_arm and has_ab_window:
-        conn.execute(
-            """INSERT INTO intelligence_injections
-                (injection_id, dispatch_id, injection_point, task_class,
-                 items_injected, items_suppressed, payload_chars,
-                 items_json, suppressed_json, project_id, ab_arm, ab_window)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            base + (project_id, ab_arm, ab_window),
-        )
-    elif has_project and has_ab_arm:
-        conn.execute(
-            """INSERT INTO intelligence_injections
-                (injection_id, dispatch_id, injection_point, task_class,
-                 items_injected, items_suppressed, payload_chars,
-                 items_json, suppressed_json, project_id, ab_arm)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            base + (project_id, ab_arm),
-        )
-    elif has_project:
-        conn.execute(
-            """INSERT INTO intelligence_injections
-                (injection_id, dispatch_id, injection_point, task_class,
-                 items_injected, items_suppressed, payload_chars,
-                 items_json, suppressed_json, project_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            base + (project_id,),
-        )
-    elif has_ab_arm:
-        conn.execute(
-            """INSERT INTO intelligence_injections
-                (injection_id, dispatch_id, injection_point, task_class,
-                 items_injected, items_suppressed, payload_chars,
-                 items_json, suppressed_json, ab_arm)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            base + (ab_arm,),
-        )
-    else:
-        conn.execute(
-            """INSERT INTO intelligence_injections
-                (injection_id, dispatch_id, injection_point, task_class,
-                 items_injected, items_suppressed, payload_chars,
-                 items_json, suppressed_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            base,
-        )
+    """INSERT one intelligence_injections row in the shape the store supports.
+
+    Column names come only from the fixed literal above; values are bound parameters.
+    """
+    optional = (("project_id", project_id, has_project), ("ab_arm", ab_arm, has_ab_arm),
+                ("ab_window", ab_window, has_ab_window))
+    columns = _INJECTION_BASE_COLUMNS + tuple(c for c, _, on in optional if on)
+    conn.execute(
+        _INJECTION_INSERT_HEAD[:_INJECTION_HEAD_END] + ", ".join(columns)
+        + ") VALUES (" + ", ".join("?" * len(columns)) + ")",
+        base + tuple(v for _, v, on in optional if on),
+    )
 
 
 def record_injection_audit(
