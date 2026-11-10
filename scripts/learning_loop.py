@@ -6,7 +6,6 @@ Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -41,6 +40,7 @@ from learning_failure_class import (
     merge_dispatch_group,
 )
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
+from prevention_rule_store import rule_id
 from project_scope import resolve_stamp_project_id
 from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
@@ -134,17 +134,10 @@ def _agent_identity(receipt: Dict[str, Any]) -> str:
 
 
 def _rule_id(rule: Dict[str, Any]) -> str:
-    """The one persistent id of a failure-prevention proposal: sha1 over the
-    pattern, the terminal scope and the agent scope, joined by a separator that
-    cannot occur in them, so ("ab", "c") and ("a", "bc") never collide. The
-    grouping key of ``generate_prevention_rules`` holds the same three values:
-    two proposals are one proposal exactly when this id is equal."""
-    parts = (
-        str(rule.get("pattern") or ""),
-        _scope_value(rule.get("terminal_constraint")) or "any",
-        _scope_value(rule.get("agent_constraint")),
-    )
-    return f"rule-{hashlib.sha1(chr(0x1f).join(parts).encode()).hexdigest()[:8]}"
+    """The persistent id of a failure-prevention proposal. The definition lives in
+    ``prevention_rule_store.rule_id`` (pattern, terminal scope, agent scope and
+    failure class): two proposals are one proposal exactly when it is equal."""
+    return rule_id(rule)
 
 
 def normalize_open_item_title(title: Any) -> str:
@@ -792,7 +785,7 @@ class LearningLoop:
                 "task": str(merged.get("task_id") or merged.get("task_description") or ""),
                 "terminal": _scope_value(merged.get("terminal")) or _scope_value(merged.get("terminal_id")),
                 "agent": _agent_identity(merged),
-                "error": self._failure_error_message(merged),
+                "error": self._failure_error_message(merged, failure_class),
                 "timestamp": merged.get("timestamp") or datetime.now(timezone.utc).isoformat(),
                 "dispatch_id": None if key.startswith("receipt:") else key,
                 "event_type": str(merged.get("event_type") or merged.get("event") or ""),
@@ -885,18 +878,20 @@ class LearningLoop:
             for sig in signals
         ]
 
-    def _failure_error_message(self, receipt: Dict) -> str:
+    def _failure_error_message(self, receipt: Dict, failure_class: str = "") -> str:
         """Derive a stable error string from a failure receipt.
 
         Prefers the structured ``failure_reason`` (e.g. "Exhausted 3 retries"),
-        then summarizes ``contract_violations`` for contract-invalid receipts,
+        then summarizes ``contract_violations`` when the group's class (from
+        ``classify_failure``) is ``contract_invalid``: the merged record keeps the
+        status of the top-ranked receipt, so it cannot decide that itself,
         and finally falls back to scanning any free-text error field.
         """
         reason = receipt.get("failure_reason")
         if reason:
             return str(reason)[:200]
 
-        if is_contract_invalid(receipt):
+        if failure_class == "contract_invalid":
             violations = receipt.get("contract_violations")
             summary = self._summarize_contract_violations(violations)
             if summary:
@@ -1065,7 +1060,7 @@ class LearningLoop:
                     "confidence": rule["confidence"],
                     "occurrence_count": rule.get("occurrence_count", 1),
                     "status": "pending",
-                    **{k: rule[k] for k in ("signal", "source_oi_ids") if k in rule},
+                    **{k: rule[k] for k in ("signal", "source_oi_ids", "failure_class") if k in rule},
                 }
                 # Deduplicate by id
                 if not any(e.get("id") == queued["id"] for e in existing):

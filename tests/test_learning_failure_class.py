@@ -224,3 +224,43 @@ def test_same_error_in_two_classes_is_two_groups(tmp_path, monkeypatch):
         {"error": "boom", "terminal": "T1", "agent": "claude", "failure_class": "timeout", "dispatch_id": "b"},
     ]
     assert loop.generate_prevention_rules(patterns) == []
+
+
+# --- round 2: the text follows the group's class, the id carries the class ---
+
+def test_contract_invalid_group_under_a_failed_completion_keeps_the_violations_text(tmp_path, monkeypatch):
+    loop = _loop(tmp_path, monkeypatch, [
+        _r("subprocess_completion", "failed"),
+        _r("report_contract_invalid", "contract_invalid", contract_violations=["## Summary", "## Open Items"]),
+    ])
+    failures = loop.extract_failure_patterns(start_time=_window())
+    assert len(failures) == 1
+    assert failures[0]["failure_class"] == "contract_invalid"
+    assert failures[0]["error"] == "Contract violations: ## Summary, ## Open Items"
+
+
+def test_violations_text_is_not_used_outside_the_contract_invalid_class(tmp_path, monkeypatch):
+    loop = _loop(tmp_path, monkeypatch, [])
+    receipt = {"contract_violations": ["## Summary"]}
+    assert loop._failure_error_message(receipt, "failed") == "Unknown error"
+    assert loop._failure_error_message(receipt) == "Unknown error"
+    assert loop._failure_error_message(receipt, None) == "Unknown error"
+    assert loop._failure_error_message(receipt, "contract_invalid") == "Contract violations: ## Summary"
+    assert loop._failure_error_message(
+        {"failure_reason": "kept", "contract_violations": ["x"]}, "contract_invalid"
+    ) == "kept"
+
+
+def test_same_error_terminal_agent_in_two_classes_gets_two_store_ids(tmp_path, monkeypatch):
+    from prevention_rule_store import rule_id
+
+    loop = _loop(tmp_path, monkeypatch, [])
+    patterns = [
+        {"error": "boom", "terminal": "T1", "agent": "claude", "failure_class": cls, "dispatch_id": f"{cls}-{n}"}
+        for cls in ("contract_invalid", "timeout") for n in range(2)
+    ]
+    rules = loop.generate_prevention_rules(patterns)
+    assert {r["failure_class"] for r in rules} == {"contract_invalid", "timeout"}
+    ids = [ll._rule_id(r) for r in rules]
+    assert len(set(ids)) == 2
+    assert ids == [rule_id(r) for r in rules]
