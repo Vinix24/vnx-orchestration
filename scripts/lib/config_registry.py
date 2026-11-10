@@ -234,6 +234,16 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
+    # default: no project approves a takeover, so every project keeps today's behaviour.
+    "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
+        "VNX_REVIEW_TAKEOVER_FULL_FILL", "string", "", "gate",
+        "Comma-separated gate:model pairs (e.g. deepseek_gate:deepseek-v4-pro) whose takeover "
+        "of seat 1 counts as a direct seat-1 PASS under the signal seat rule, given a PASS, zero "
+        "blocking findings and both warning counts known on the exact head. Empty (the default) "
+        "approves nobody, as does a malformed entry (logged); any other takeover keeps every "
+        "seat.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,

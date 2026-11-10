@@ -69,8 +69,9 @@ enforceable:
   verdict line also carries ``warning_count`` and ``prescan_notice_count``,
   read from that verdict's own report (``review_report_counts``) and never from
   an earlier run on the PR. The field is absent when the count is unknown -- an
-  old line, a missing or unreadable report, or a takeover -- and absent is
-  never read as zero.
+  old line, a missing or unreadable report, or a takeover whose report does
+  not name its own gate and PR -- and absent is never read as zero. The
+  payload's ``model`` is booked as ``reviewer_model`` (OI-2701).
 
 Readers: ``gate_request_handler`` (refusal where a run starts),
 ``review_seat_evaluation`` (the merge door, ``vnx-gate/review``,
@@ -154,6 +155,7 @@ _VERDICTS = ("pass", VERDICT_FAIL)
 _STRING_FIELDS = (
     "project_id", "head_sha", "seat", "reviewer", "takeover_from", "verdict",
     "report_path", "dispatch_id", "recorded_at", "branch", "source", "reanchored_from", "granted_by",
+    "reviewer_model",
 )
 
 
@@ -371,6 +373,8 @@ class RoundLine:
     # without it reads the same way. Unknown is never zero.
     warning_count: Optional[int] = None
     prescan_notice_count: Optional[int] = None
+    # OI-2701: the payload's ``model``; ``""`` when it named none, and for an old line.
+    reviewer_model: str = ""
 
     @property
     def key(self) -> Tuple[str, int, str, str]:
@@ -406,6 +410,8 @@ class RoundLine:
             record["warning_count"] = self.warning_count
         if self.prescan_notice_count is not None:
             record["prescan_notice_count"] = self.prescan_notice_count
+        if self.reviewer_model:
+            record["reviewer_model"] = self.reviewer_model
         return record
 
     @classmethod
@@ -1508,8 +1514,9 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
     takeover_from = str(payload.get("takeover_from") or "") if payload.get("takeover") is True else ""
     override = payload.get("override_b3")
     # OI-2476: this verdict's own report, never an earlier run's. Unknown stays
-    # ``None`` and is not written; a takeover books unknown (review_report_counts).
+    # ``None`` and is not written; so is a takeover whose report is not its own.
     counts = counts_for_payload(payload)
+    model = payload.get("model")
     return RoundLine(
         project_id=project_id, pr_number=pr_number, head_sha=head_sha,
         seat=payload_seat(gate, payload), reviewer=gate, takeover_from=takeover_from,
@@ -1522,6 +1529,7 @@ def line_from_payload(payload: Dict[str, Any], *, gate: str, project_id: str) ->
         reanchored_from=reanchored_from(payload),
         warning_count=counts.warnings if counts is not None else None,
         prescan_notice_count=counts.notices if counts is not None else None,
+        reviewer_model=model.strip() if isinstance(model, str) else "",
     )
 
 

@@ -156,6 +156,8 @@ De schaduwtoets uit dit amendement is gehaald. De T0 zet vnx-dev daarna op de si
 
 **Verwachte belasting van stoel 2.** Onder de risicoregel vroegen 37 van de 213 merges stoel 2 (17 procent); onder de signaalregel zijn dat er 40 (19 procent), op andere PR's. De belasting blijft dus gelijk en verschuift van gate-merge-paden naar PR's met een echte waarschuwing of een steekproef.
 
+**Een overname die stoel 1 volledig vult (OI-2701, operatorbesluit 09-11, optie a).** De sleutel `VNX_REVIEW_TAKEOVER_FULL_FILL` noemt per project de reviewers waarvan een overname van stoel 1 als stoel 1 telt, als komma-lijst van `gate:model`-paren (bijvoorbeeld `deepseek_gate:deepseek-v4-pro`). De sleutel is standaard leeg en keurt dan niemand goed; een item dat geen `gate:model` is wordt gelogd en keurt ook niemand goed. Een goedgekeurde overname met PASS, nul blokkerende bevindingen en beide tellingen bekend op exact de kop wordt beoordeeld als een directe PASS van stoel 1: haar eigen tellingen, uit haar eigen rapport, en elk ander signaal beslissen. Een overname buiten de lijst houdt elke stoel, zoals hierboven. Het besluit noemt het paar dat telde (`takeover_full_fill`).
+
 **Terugdraaien en criterium.** Zet de rij terug op `first_seat_or_every_seat_by_risk` (of gebruik `VNX_OVERRIDE_REVIEW_SEAT_RULE` als de onmiddellijke noodrem) zodra het terugdraaicriterium van dit amendement geldt: een misratio boven 10 procent van de steekproef; de herhaalmeting na 50 merges telt ook mee wat codex-alleen-merges daarna als fix-forward kregen.
 
 ## Amendement 4 (08-11-2026): poortprofiel en veiligheidsondergrens
