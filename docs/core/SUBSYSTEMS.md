@@ -22,7 +22,7 @@ This document is the single source of truth for which VNX subsystems are live, p
 | evidence-bound-gate | D3 evidence-bound merge gate. | `VNX_EVIDENCE_BOUND_GATE` | PARK-with-trigger | produces-crap — advisory only, enforces nothing |
 | intelligence-self-learning-loop | Daily pattern learning, skill refinements, confidence updates. | `VNX_LEARNING_LOOP_ENABLED` | ACTIVATE-and-measure | produces-crap — last committed reading, not re-measured |
 | dream-consolidation | Nightly memory consolidation + pending review dispatch. | `VNX_DREAM_SCHEDULER_ENABLED` | ACTIVATE-and-measure | unknown — no cycles run |
-| injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INJECTION_WHY_ENABLED` | ACTIVATE-and-measure | unknown — probe not built yet |
+| injection-effectiveness-eval-loop | Instrument WHY patterns are ignored before tuning generation. | `VNX_INTEL_AB_WINDOW` | ACTIVATE-and-measure | unknown — probe not built yet |
 | cross-project-federation | Cross-project intelligence federation (not yet implemented). | `VNX_USE_FEDERATION` | ACTIVATE-and-measure | unknown — no probe yet |
 | cheap-recon-scout | Cheap-model scout recon pre-pass in the dispatch door (fail-open). | `VNX_SCOUT_PREPASS` | ACTIVATE-and-measure | unknown — no probe yet |
 | horizon-planning | Autonomous roadmap auto-next loading (starts work unattended). | `VNX_ROADMAP_AUTOPILOT` | ACTIVATE-and-measure | unknown — no probe yet |
