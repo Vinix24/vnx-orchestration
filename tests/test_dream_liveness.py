@@ -4,6 +4,7 @@ Every branch that could turn a silence into a PASS is pinned with the field
 missing, None, malformed and unknown: all four stay blocking.
 """
 import json
+import plistlib
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -298,21 +299,12 @@ def test_failure_outside_the_window_is_history_only():
     assert d["history"]["failed"] == 1 and "blocked_skip" not in ids(d)
 
 
-def test_failure_inside_the_window_is_blocked():
-    d = doc(good_week() + [ev("dream_cycle_timeout", "2026-11-09", "03:40")])
-    assert "blocked_skip" in ids(d) and night(d, "2026-11-09")["class"] == BLOCKED
-
-
 @pytest.mark.parametrize("etype", ["dream_cycle_failed", "dream_cycle_timeout"])
-def test_in_window_failure_blocks_the_night_even_before_a_good_completion(etype):
-    d = doc(good_week() + [ev(etype, "2026-11-09", "03:01")])
+@pytest.mark.parametrize("hhmm", ["03:01", "03:40"])
+def test_in_window_failure_blocks_the_night_before_or_after_a_good_completion(etype, hhmm):
+    d = doc(good_week() + [ev(etype, "2026-11-09", hhmm)])
     assert night(d, "2026-11-09")["class"] == BLOCKED and night(d, "2026-11-09")["progress"] is False
-    assert "blocked_skip" in ids(d) and d["state"] != "ok"
-
-
-def test_timeout_at_0340_leaves_no_progress():
-    d = doc(good_week() + [ev("dream_cycle_timeout", "2026-11-09", "03:40")])
-    assert night(d, "2026-11-09")["progress"] is False and d["progress_window"]["completed_with_output"] == 6
+    assert "blocked_skip" in ids(d) and d["state"] != "ok" and d["progress_window"]["completed_with_output"] == 6
 
 
 @pytest.mark.parametrize("etype", ["dream_cycle_failed", "dream_cycle_timeout"])
@@ -341,28 +333,32 @@ def test_two_allowed_skips_in_a_row_are_tolerated():
     assert d["state"] == "ok", d["findings"]
 
 
-def test_load_sources_data_root_follows_project_id(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pid,plist_id,root", [
+    (None, None, "p1"), ("../../etc", dl.PLIST_UNREADABLE, "p1"), (7, dl.PLIST_UNREADABLE, "p1"),
+    ("", dl.PLIST_UNREADABLE, "p1"), ("vnx-dev", "vnx-dev", "vnx-dev")],
+    ids=["no-plist", "traversal", "integer", "empty", "valid"])
+def test_a_plist_project_id_is_used_only_when_vnx_paths_accepts_it(tmp_path, monkeypatch, pid, plist_id, root):
     monkeypatch.setenv("HOME", str(tmp_path))
-    folder = tmp_path / ".vnx-data" / "p1" / "events" / "dream"
+    folder, plist, seen = tmp_path / ".vnx-data" / root / "events" / "dream", tmp_path / "p.plist", []
     folder.mkdir(parents=True)
     (folder / "a.ndjson").write_text(json.dumps(ev("dream_cycle_started", "2026-11-10")) + "\n")
-    got = dl.load_sources("p1", plist_path=tmp_path / "none.plist")
-    assert len(got["events"]) == 1 and got["plist"] is None
+    if pid is not None:
+        plist.write_bytes(plistlib.dumps({"ProgramArguments": ["dream", "--project-id", pid]}))
+    got = dl.read_plist(plist)
+    assert (got["project_id"] if isinstance(got, dict) else got) == plist_id, got
+    monkeypatch.setattr(dl, "read_events", lambda path, real=dl.read_events: seen.append(path) or real(path))
+    src = dl.load_sources("p1", plist_path=plist)
+    assert seen == [folder] and len(src["events"]) == 1 and src["project_id"] == root
+    pytest.raises(ValueError, dl.load_sources, "../p1", plist_path=tmp_path / "none.plist")
 
 
-def test_blocked_skip_in_the_open_window_is_reported_at_once():
-    d = doc(good_week()[:-1] + [ev(SKIP, "2026-11-10", reason="probe_not_ok")], now=OPEN_NOW)
-    assert [f["detail"] for f in hits(d)] == ["night 2026-11-10: probe_not_ok"] and d["state"] != "ok"
-
-
-def test_timeout_in_the_open_window_is_reported_at_once():
-    d = doc(good_week()[:-1] + [ev("dream_cycle_timeout", "2026-11-10", "03:40")], now=OPEN_NOW)
-    assert [f["detail"] for f in hits(d)] == ["night 2026-11-10: timeout"]
-
-
-def test_completion_with_output_in_the_open_window_gives_no_finding():
-    d = doc(good_week()[:-1] + [ev("dream_cycle_completed", "2026-11-10", merged_count=1)], now=OPEN_NOW)
-    assert d["state"] == "ok" and d["findings"] == []
+@pytest.mark.parametrize("extra,expected", [
+    (ev(SKIP, "2026-11-10", reason="probe_not_ok"), ["night 2026-11-10: probe_not_ok"]),
+    (ev("dream_cycle_timeout", "2026-11-10", "03:40"), ["night 2026-11-10: timeout"]),
+    (ev("dream_cycle_completed", "2026-11-10", merged_count=1), [])], ids=["skip", "timeout", "completed"])
+def test_the_open_window_reports_a_blocked_attempt_at_once_and_nothing_else(extra, expected):
+    d = doc(good_week()[:-1] + [extra], now=OPEN_NOW)
+    assert [f["detail"] for f in d["findings"]] == expected and d["state"] == ("deviation" if expected else "ok")
 
 
 def test_open_window_event_leaves_nights_and_progress_window_unchanged():

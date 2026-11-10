@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from project_root import resolve_central_data_dir
+from vnx_paths import resolve_central_data_dir
 
 
 SCHEMA = "dream_liveness/1"
@@ -88,7 +88,10 @@ def read_events(events_dir: Path) -> Optional[List[dict]]:
 
 
 def read_plist(plist_path: Path) -> Any:
-    """Parsed facts of the installed plist, None when absent, PLIST_UNREADABLE when broken."""
+    """Parsed facts of the installed plist, None when absent, PLIST_UNREADABLE when broken.
+    A plist project id is only used when `vnx_paths.resolve_central_data_dir` accepts it. A present
+    `--project-id` it rejects (not a string, empty, off the pattern) makes the plist PLIST_UNREADABLE:
+    no other field is trusted, and blocked skips from the events log stay findings as for any unreadable plist."""
     plist_path = Path(plist_path)
     if not plist_path.is_file():
         return None
@@ -102,6 +105,11 @@ def read_plist(plist_path: Path) -> Any:
     args = args if isinstance(args, list) else []
     at = args.index("--project-id") + 1 if "--project-id" in args else len(args)
     project_id = args[at] if at < len(args) else None
+    try:
+        if project_id is not None:
+            resolve_central_data_dir(project_id)
+    except (TypeError, ValueError):
+        return PLIST_UNREADABLE
     interval = data.get("StartCalendarInterval")
     interval = interval[0] if isinstance(interval, list) and interval else interval
     interval = interval if isinstance(interval, dict) else {}
@@ -115,11 +123,12 @@ def read_plist(plist_path: Path) -> Any:
 def load_sources(project_id: str, *, data_root: Optional[Path] = None,
                  plist_path: Optional[Path] = None) -> Dict[str, Any]:
     """Read both sources. The data root follows the project id (D5), unless given."""
+    central = resolve_central_data_dir(project_id)  # the caller's id: ValueError when vnx_paths rejects it
     plist_path = plist_path or (Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist")
     plist = read_plist(plist_path)
     if isinstance(plist, dict) and plist.get("project_id"):
-        project_id = plist["project_id"]
-    root = Path(data_root) if data_root else resolve_central_data_dir(project_id)
+        project_id, central = plist["project_id"], resolve_central_data_dir(plist["project_id"])
+    root = Path(data_root) if data_root else central
     return {"project_id": project_id, "events": read_events(root / "events" / "dream"),
             "plist": plist}
 
