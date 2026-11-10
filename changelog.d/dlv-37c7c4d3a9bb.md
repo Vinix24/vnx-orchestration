@@ -1,0 +1,1 @@
+- ADR-064 (the delta review: a fresh verdict on the exact head, the parent chain in the ledger, shadow first, `VNX_REVIEW_SCOPE` as the one switch back) and the matching ADR-060 amendment for the new profile key (deltareview DR-0).
