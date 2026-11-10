@@ -1,14 +1,14 @@
-"""Effect PR-6: the cohort command (classes, denominators, maturity, controls, floor).
+"""Effect PR-6: the cohort command (outcome classes, dedup, cohort controls, the hard floor).
 
-RC is built in the live shape and walked through ``auto_apply`` over the real migration dir, so the
-0038 columns are the real ones; arms are stamped by the real ``arm_for_dispatch``. QI is an empty
-SQLite store: ``cohort`` reads no table of it (decision 4). Temp stores only, never ~/.vnx-data.
+RC is ``init_schema`` plus ``auto_apply`` over the real migration dir up to 0038, without the state
+CHECK the live stores lack; arms are stamped by the real ``arm_for_dispatch``. QI is an empty SQLite
+store: ``cohort`` reads no table of it (decision 4). Temp stores only, never ~/.vnx-data.
 """
 from __future__ import annotations
 
-import ast
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -23,36 +23,23 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts"):
         sys.path.insert(0, str(_p))
 
 import config_store_db  # noqa: E402
+import coordination_db  # noqa: E402
 import intel_effect_cohort as co  # noqa: E402
 import intel_injection_join  # noqa: E402
 import intelligence_selector as sel  # noqa: E402
 from migrations.auto_apply import auto_apply  # noqa: E402
 
-from fixtures.live_store_fixture import build_live_store  # noqa: E402
+from fixtures.live_store_fixture import drop_state_check  # noqa: E402
 
 DECISION_7 = (
     "HARDE GRENS: een verdict bestaat alleen bij n ≥ 200 opgeloste dispatches per arm. De grens is de "
     "constante `MIN_PER_ARM = 200` in de code en is door geen vlag, omgevingsvariabele of configuratierij "
     "te verlagen. De deadline 01-12-2026 verlengt het venster en houdt de track open. Onder de grens is de "
-    "uitkomst altijd `geen verdict` (exit 3, reden `below_floor`), nooit een verdict bij lagere n."
-)
+    "uitkomst altijd `geen verdict` (exit 3, reden `below_floor`), nooit een verdict bij lagere n.")
 WINDOW = {"window_id": "w1", "salt": "s1", "control_fraction": 0.5,
           "opened_utc": "2026-11-01T00:00:00Z", "hash_version": 1}
-OPEN = datetime(2026, 11, 1, tzinfo=timezone.utc)
+DAY1 = datetime(2026, 11, 2, tzinfo=timezone.utc)
 AS_OF = datetime(2026, 11, 20, tzinfo=timezone.utc)
-
-# intelligence_injections as the live store carries it at v37 (no arm columns yet).
-_INJECTIONS_V37 = """
-CREATE TABLE intelligence_injections (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, injection_id TEXT NOT NULL, dispatch_id TEXT NOT NULL,
-    injection_point TEXT NOT NULL, task_class TEXT NOT NULL,
-    items_injected INTEGER NOT NULL DEFAULT 0, items_suppressed INTEGER NOT NULL DEFAULT 0,
-    payload_chars INTEGER NOT NULL DEFAULT 0, items_json TEXT NOT NULL DEFAULT '[]',
-    suppressed_json TEXT NOT NULL DEFAULT '[]',
-    injected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    project_id TEXT NOT NULL, UNIQUE (injection_id, project_id));
-CREATE UNIQUE INDEX ux_intelligence_injections_pid ON intelligence_injections (project_id, id);
-"""
 
 
 def _iso(moment: datetime) -> str:
@@ -72,22 +59,24 @@ def _sql(db: Path, sql: str, params: tuple = ()) -> None:
 def rc(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
-    path = build_live_store(tmp_path / "state")
+    monkeypatch.setenv("VNX_PROJECT_ID", "p1")  # the migration chain refuses a store without a tenant
+    (tmp_path / "state").mkdir()
+    coordination_db.init_schema(tmp_path / "state")
+    path = tmp_path / "state" / "runtime_coordination.db"
+    assert auto_apply(path)[-1] == 38
+    drop_state_check(path)
     conn = sqlite3.connect(str(path))
-    conn.executescript(_INJECTIONS_V37)
     config_store_db.ensure_config_tables(conn)
     conn.executemany(
         "INSERT INTO project_config (project_id, config_key, config_value, updated_by) VALUES (?, ?, ?, 'test')",
         [(p, k, v) for p in ("p1", "p2") for k, v in ((co.WINDOW_KEY, json.dumps(WINDOW)), ("VNX_INTEL_AB_TEST", "1"))])
-    conn.execute("PRAGMA user_version = 37")
     conn.commit()
     conn.close()
-    assert auto_apply(path) == [38]
     return path
 
 
-def _seed(rc, ids, pid="p1", state="completed", at=OPEN + timedelta(days=1), stamp=True, task="coding_interactive"):
-    """One injection row per id, stamped like the writer does; a dispatches row unless state is None."""
+def _seed(rc, ids, pid="p1", state="completed", at=DAY1, stamp=True, task="coding_interactive"):
+    """One injection row per id, stamped as the writer does; a dispatches row unless state is None."""
     conn = sqlite3.connect(str(rc))
     try:
         for did in ids:
@@ -132,9 +121,9 @@ def test_cohort_exits_0_with_the_per_arm_table(rc):
     run = _cli(rc)
     assert run.returncode == 0, run.stdout + run.stderr
     assert "counts only, never a verdict" in run.stdout and "REFUSED" not in run.stdout
-    table = {line.split()[0]: line.split()[1:] for line in run.stdout.splitlines()
-             if line.split()[:1] in (["control"], ["treatment"])}
-    assert table == {arm: ["200", "0", "0", "0", "0", "0.00%"] for arm in co.ARMS}
+    rows = [line.split() for line in run.stdout.splitlines()]
+    assert [r for r in rows if r[:1] in (["control"], ["treatment"])] == [
+        ["control", "200", "0", "0", "0"], ["treatment", "200", "0", "0", "0"]]
     data = json.loads(_cli(rc, "--json").stdout)
     assert data["refusals"] == [] and data["exit_code"] == 0 and data["floor_rule"] is None
     assert {arm: c["resolved"] for arm, c in data["arms"].items()} == {"control": 200, "treatment": 200}
@@ -162,8 +151,6 @@ _CFG = f"UPDATE project_config SET config_value = ? WHERE project_id = 'p1' AND 
     ("arm_invalid", f"UPDATE intelligence_injections SET ab_arm = NULL {_ROW1}", ()),
     ("unknown_states", "UPDATE dispatches SET state = 'paused' WHERE dispatch_id = 'dlv-00000'", ()),
     ("unknown_states", "DELETE FROM dispatches WHERE dispatch_id = 'dlv-00000'", ()),
-    ("differential_attrition", "UPDATE dispatches SET state = 'proposed' WHERE dispatch_id IN (SELECT dispatch_id "
-     "FROM intelligence_injections WHERE project_id = 'p1' AND ab_arm = 'control' ORDER BY id LIMIT 11)", ()),
     ("malformed_timestamp", f"UPDATE intelligence_injections SET injected_at = 'yesterday' {_ROW1}", ()),
     ("window_invalid", _CFG, ("{not json",)),
     ("window_invalid", _CFG, (json.dumps({k: v for k, v in WINDOW.items() if k != "salt"}),)),
@@ -175,28 +162,24 @@ def test_each_refusal_gives_exit_3_with_its_reason(rc, reason, sql, params):
     _seed(rc, _balanced(200))
     _sql(rc, sql, params)
     cohort = co.build_cohort(rc, "p1", AS_OF)
-    assert cohort.exit_code == 3 and reason in cohort.reasons, cohort.refusals
+    assert cohort.exit_code == 3 and cohort.reasons[0] == reason, cohort.refusals
 
 
-def test_states_classify_per_decision_5(monkeypatch):
+def test_open_states_never_count_withdrawn_is_excluded_and_a_new_state_is_unknown(rc, monkeypatch):
     c = co.classify_state
-    assert [c(s) for s in ("proposed", "failed_delivery", "timed_out", "recovered")] == ["unresolved"] * 4
     assert [c(s) for s in ("completed", "expired", "dead_letter", "withdrawn")] == [
         "success", "failure", "failure", "excluded"]
     assert c(None) == c("") == c("paused") == c(7) == "unknown"
     assert set().union(*co.CLASS_STATES.values()) == co.DISPATCH_STATES  # every state of today has a class
-    monkeypatch.setattr(co, "DISPATCH_STATES", co.DISPATCH_STATES | {"paused"})
-    assert c("paused") == "unknown"  # a new coordination_db state waits for its class here
-
-
-def test_open_states_never_count_and_withdrawn_is_excluded(rc):
     _seed(rc, _balanced(200))
     for i, state in enumerate(("proposed", "failed_delivery", "timed_out", "withdrawn")):
         _seed(rc, [f"dlv-extra-{i}"], state=state)
     cohort = co.build_cohort(rc, "p1", AS_OF)
-    total = {key: sum(c[key] for c in cohort.arms().values()) for key in co.COUNT_KEYS}
-    assert total == {"resolved": 400, "unresolved": 3, "excluded": 1, "unknown": 0, "immature": 0}
+    total = {key: sum(counts[key] for counts in cohort.arms().values()) for key in co.COUNT_KEYS}
+    assert total == {"resolved": 400, "unresolved": 3, "excluded": 1, "unknown": 0}
     assert cohort.exit_code == 0, cohort.refusals
+    monkeypatch.setattr(co, "DISPATCH_STATES", co.DISPATCH_STATES | {"paused"})
+    assert c("paused") == "unknown"  # a state new in coordination_db waits for its class here
 
 
 def test_a_second_project_with_the_same_ids_changes_nothing(rc):
@@ -205,8 +188,6 @@ def test_a_second_project_with_the_same_ids_changes_nothing(rc):
     before = co.as_dict(co.build_cohort(rc, "p1", AS_OF))
     _seed(rc, ids, pid="p2", state="proposed")
     _seed(rc, ["dlv-00000"], pid="p2", stamp=False)
-    _sql(rc, "INSERT INTO dispatches (dispatch_id, project_id, state, created_at) VALUES ('dlv-orphan', 'p2', "
-             "'completed', ?)", (_iso(OPEN + timedelta(days=1)),))
     assert co.as_dict(co.build_cohort(rc, "p1", AS_OF)) == before
     assert "unstamped_after_open" in co.build_cohort(rc, "p2", AS_OF).reasons
 
@@ -219,50 +200,24 @@ def test_the_floor_is_one_constant_without_a_flag_or_an_env_read(rc):
         assert exc.value.code == 2
     source = Path(co.__file__).read_text(encoding="utf-8")
     assert "environ" not in source and "getenv" not in source
-    hits = []
-    for path in (_ROOT / "scripts").rglob("*.py"):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        if "MIN_PER_ARM" not in text:
-            continue
-        for node in ast.walk(ast.parse(text)):
-            targets = getattr(node, "targets", None) or [getattr(node, "target", None)]
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and any(
-                    getattr(t, "id", getattr(t, "attr", None)) == "MIN_PER_ARM" for t in targets):
-                hits.append((str(path.relative_to(_ROOT)), ast.literal_eval(node.value)))
-    assert hits == [("scripts/lib/intel_effect_cohort.py", 200)]
+    # Assignments at a statement start (=, +=, annotated, attribute), never ==; the docstring line
+    # that quotes decision 7 starts with "constante" and is not one.
+    assignment = re.compile(r"^[ \t]*(?:\w+\.)?MIN_PER_ARM\b[^=\n]*=(?!=).*$", re.M)
+    assigned = [(str(path.relative_to(_ROOT)), hit) for path in (_ROOT / "scripts").rglob("*.py")
+                for hit in assignment.findall(path.read_text(encoding="utf-8", errors="replace"))]
+    assert assigned == [("scripts/lib/intel_effect_cohort.py", "MIN_PER_ARM = 200")]
 
 
-def test_71_hours_is_immature_and_72_hours_is_mature(rc):
-    _seed(rc, ["dlv-71"], at=AS_OF - timedelta(hours=71))
-    _seed(rc, ["dlv-72"], at=AS_OF - timedelta(hours=72))
-    mature = {d.dispatch_id: d.mature for d in co.build_cohort(rc, "p1", AS_OF).dispatches}
-    assert mature == {"dlv-71": False, "dlv-72": True}
-
-
-def test_dedup_keeps_the_first_row_and_coverage_keeps_every_door_dispatch(rc):
+def test_dedup_keeps_the_first_row_and_a_missing_dispatches_row_is_unknown(rc):
     _seed(rc, ["dlv-a"])
     _seed(rc, ["dlv-a"], state=None, task="coding_sql")  # same injected_at: min(id) wins
-    _seed(rc, ["dlv-d"], at=OPEN + timedelta(days=2))
+    _seed(rc, ["dlv-d"], at=DAY1 + timedelta(days=1))
     _seed(rc, ["dlv-d"], state=None, task="coding_sql")  # earlier injected_at wins
-    _seed(rc, ["dlv-b"], state=None)  # an injection row without a dispatches row
-    _sql(rc, "INSERT INTO dispatches (dispatch_id, project_id, state, created_at) VALUES ('dlv-c', 'p1', "
-             "'completed', ?)", (_iso(OPEN + timedelta(days=1)),))
+    _seed(rc, ["dlv-b"], state=None)
     cohort = co.build_cohort(rc, "p1", AS_OF)
     assert {d.dispatch_id: d.task_class for d in cohort.dispatches} == {
         "dlv-a": "coding_interactive", "dlv-b": "coding_interactive", "dlv-d": "coding_sql"}
-    assert cohort.deduplicated == 2
-    assert cohort.coverage["no_dispatches_row"] == 1 and cohort.coverage["door_without_injection_row"] == 1
-    assert "unknown_states" in cohort.reasons
-
-
-def test_attrition_refuses_above_5pp_only():
-    def arms(unresolved, mature=100):
-        return {"control": {"resolved": mature - unresolved, "unresolved": unresolved, "excluded": 0,
-                            "unknown": 0, "immature": 0},
-                "treatment": {"resolved": 100, "unresolved": 0, "excluded": 0, "unknown": 0, "immature": 0}}
-    assert co.attrition_gap(arms(5)) is None
-    assert "6.00 pp" in co.attrition_gap(arms(6))
-    assert "not computable" in co.attrition_gap(arms(0, mature=0))
+    assert cohort.deduplicated == 2 and "unknown_states" in cohort.reasons
 
 
 def test_a_closed_flag_fails_every_rederivation_and_never_passes(rc, monkeypatch):

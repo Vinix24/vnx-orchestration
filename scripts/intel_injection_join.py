@@ -400,26 +400,12 @@ def run_placebo(qi_db: Path) -> int:
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Effect PR-6 — the A/B cohort (scripts/lib/intel_effect_cohort.py)
-# ---------------------------------------------------------------------------
-
 def _iso_arg(value: str) -> datetime:
     from intel_effect_cohort import parse_utc
     parsed = parse_utc(value)
     if parsed is None:
         raise argparse.ArgumentTypeError(f"not an ISO timestamp: {value!r}")
     return parsed
-
-
-def _add_cohort_parser(sub) -> None:
-    # No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
-    p_co = sub.add_parser("cohort", help="A/B window cohort: per-arm counts and refusals, never a verdict")
-    p_co.add_argument("--qi", help="path to quality_intelligence.db (opened read-only, not read)")
-    p_co.add_argument("--rc", help="path to runtime_coordination.db")
-    p_co.add_argument("--project-id", help="tenant (default: project_root.resolve_project_id())")
-    p_co.add_argument("--as-of", type=_iso_arg, help="ISO timestamp (default: now, UTC)")
-    p_co.add_argument("--json", action="store_true")
 
 
 def _run_cohort(args: argparse.Namespace, state_dir: Path, parser: argparse.ArgumentParser) -> int:
@@ -454,7 +440,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p_pl = sub.add_parser("placebo", help="adoption rate per injection arm (placebo discrimination)")
     p_pl.add_argument("--qi", help="path to quality_intelligence.db")
-    _add_cohort_parser(sub)
+
+    # Effect PR-6. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
+    p_co = sub.add_parser("cohort", help="A/B window cohort: per-arm counts and refusals, never a verdict")
+    p_co.add_argument("--qi", help="path to quality_intelligence.db (opened read-only, not read)")
+    p_co.add_argument("--rc", help="path to runtime_coordination.db")
+    p_co.add_argument("--project-id", help="tenant (default: project_root.resolve_project_id())")
+    p_co.add_argument("--as-of", type=_iso_arg, help="ISO timestamp (default: now, UTC)")
+    p_co.add_argument("--json", action="store_true")
 
     args = parser.parse_args(argv)
     state_dir = _default_state_dir()
