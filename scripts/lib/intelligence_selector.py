@@ -11,10 +11,10 @@ Governance: G-R5 (max 3 items), G-R6 (confidence+evidence+scope), G-R7 (advisory
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
-import random
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -41,8 +41,6 @@ from intelligence_sources import stamp_source_dispatch_ids as _stamp
 
 logger = logging.getLogger(__name__)
 
-AB_CONTROL_FRACTION = 0.10  # 10% control arm when A/B testing is active
-
 # Negative-control (placebo) arm for the adoption-metric discrimination test
 # (dispatch 20260920-191500-placebo-arm). Default OFF — this is build-only
 # instrumentation; it is never activated without an explicit operator opt-in.
@@ -63,22 +61,118 @@ def _placebo_arm_enabled() -> bool:
         return os.environ.get("VNX_INTEL_PLACEBO_ARM", "0") in {"1", "true", "yes", "on"}
 
 
-def _ab_arm() -> str:
-    """Return 'placebo' | 'control' | 'treatment'.
+_WINDOW_FIELDS = frozenset({"window_id", "salt", "control_fraction", "opened_utc", "hash_version"})
+_WINDOW_HASH_VERSION = 1
 
-    The placebo arm is a negative control: a dispatch in it still gets an
-    injection, but the offered pattern is deliberately drawn from a different
-    domain (see ``_select_placebo_pattern``). It is gated by its OWN flag
-    (``VNX_INTEL_PLACEBO_ARM``) and takes precedence over the A/B control arm so
-    a placebo measurement run is never contaminated by control-arm suppression.
 
-    When neither flag is set: always 'treatment' (the no-op default).
+def _is_iso_utc(value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def load_window_config(raw: Optional[str] = None) -> Optional[Dict[str, object]]:
+    """Parse the frozen A/B window (``VNX_INTEL_AB_WINDOW``) strictly.
+
+    Returns the parsed object, or ``None`` when the window is missing or
+    ``invalid``: invalid JSON, a missing or unknown field, an empty
+    ``window_id``/``salt``, a ``control_fraction`` outside (0, 1), a
+    ``hash_version`` other than 1 or an unparseable ``opened_utc``. ``None``
+    means no arm is assigned; it is never read as treatment.
+    """
+    if raw is None:
+        try:
+            import config_runtime
+            raw = config_runtime.get("VNX_INTEL_AB_WINDOW")
+        except Exception as exc:
+            logger.warning("intelligence_selector: A/B window unreadable: %s", exc)
+            return None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        cfg = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(cfg, dict) or set(cfg) != _WINDOW_FIELDS:
+        return None
+    for key in ("window_id", "salt"):
+        if not isinstance(cfg[key], str) or not cfg[key].strip():
+            return None
+    fraction = cfg["control_fraction"]
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        return None
+    if not 0 < fraction < 1:
+        return None
+    version = cfg["hash_version"]
+    if isinstance(version, bool) or version != _WINDOW_HASH_VERSION:
+        return None
+    if not _is_iso_utc(cfg["opened_utc"]):
+        return None
+    return cfg
+
+
+def _ab_test_enabled() -> bool:
+    try:
+        import config_runtime
+        return config_runtime.get_bool("VNX_INTEL_AB_TEST")
+    except Exception as exc:
+        logger.warning("intelligence_selector: A/B flag unreadable, no arm assigned: %s", exc)
+        return False
+
+
+def arm_for_dispatch(
+    dispatch_id: object, project_id: object, window: Optional[Dict[str, object]]
+) -> "tuple[Optional[str], Optional[str]]":
+    """Return ``(arm, ab_window)``: a pure function of window, project and dispatch.
+
+    ``sha256(window_id:salt:project_id:dispatch_id)``, the first 8 hex chars as an
+    integer over 2**32; below ``control_fraction`` is ``control``, else
+    ``treatment``. ``ab_window`` is ``<window_id>:<config_sha>`` with
+    ``config_sha`` the first 16 hex chars of sha256 over the canonical JSON.
+    ``(None, None)`` when ``VNX_INTEL_AB_TEST`` is off, the window is missing or
+    invalid, or the dispatch or project id is empty: never a silent treatment.
+    """
+    if not _ab_test_enabled():
+        return None, None
+    if not isinstance(window, dict):
+        return None, None
+    cfg = load_window_config(json.dumps(window))
+    if cfg is None:
+        return None, None
+    for ident in (dispatch_id, project_id):
+        if not isinstance(ident, str) or not ident.strip():
+            return None, None
+    digest = hashlib.sha256(
+        f"{cfg['window_id']}:{cfg['salt']}:{project_id}:{dispatch_id}".encode("utf-8")
+    ).hexdigest()
+    bucket = int(digest[:8], 16) / 2**32
+    arm = "control" if bucket < cfg["control_fraction"] else "treatment"
+    canonical = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+    config_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return arm, f"{cfg['window_id']}:{config_sha}"
+
+
+def _resolve_arm(dispatch_id: object) -> Optional[str]:
+    """Return 'placebo' | 'control' | 'treatment' | None (no arm assigned).
+
+    The placebo arm is a negative control (see ``_select_placebo_pattern``),
+    gated by its OWN flag and ahead of the A/B arm so a placebo run is never
+    contaminated by control-arm suppression. Otherwise the arm comes from
+    ``arm_for_dispatch`` inside the frozen window; ``None`` means the dispatch
+    gets its normal injection and no arm is recorded.
     """
     if _placebo_arm_enabled():
         return PLACEBO_ARM
-    if os.environ.get("VNX_INTEL_AB_TEST", "0") != "1":
-        return "treatment"
-    return "control" if random.random() < AB_CONTROL_FRACTION else "treatment"
+    try:
+        project_id: object = current_project_id()
+    except ValueError:
+        project_id = None
+    arm, _ = arm_for_dispatch(dispatch_id, project_id, load_window_config())
+    return arm
 
 
 try:
@@ -770,7 +864,7 @@ def select_intelligence(
     """Convenience function: select, emit event, record injection, return result."""
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        ab_arm = _ab_arm()
+        ab_arm = _resolve_arm(dispatch_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping injection for dispatch %s",
@@ -819,7 +913,7 @@ def select_intelligence(
             dispatch_paths=dispatch_paths,
             instruction_text=instruction_text,
         )
-        result.ab_arm = "treatment"
+        result.ab_arm = ab_arm  # None stays None: the "treatment" default must not stand
         selector.emit_event(result)
         selector.record_injection(result)
         return result
@@ -856,7 +950,7 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
         return None
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        ab_arm = _ab_arm()
+        ab_arm = _resolve_arm(dispatch_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping context build for dispatch %s",
@@ -888,7 +982,8 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
             _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (placebo)")
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
-        result.ab_arm = "treatment"
+        # Same explicit assignment as the selector path: None stays None.
+        result.ab_arm = ab_arm
         _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir)
         return IntelligenceContext(result=result, dispatch_id=dispatch_id)
     finally:

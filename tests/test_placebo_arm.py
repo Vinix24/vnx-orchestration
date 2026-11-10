@@ -13,8 +13,8 @@ These tests are build-only: nothing here activates or runs the arm in
 production. Each component is tested on its own.
 
 Coverage:
-1. ``_ab_arm`` returns ``'placebo'`` only when ``VNX_INTEL_PLACEBO_ARM`` is on,
-   and takes precedence over the A/B control arm.
+1. The arm is chosen by ``_resolve_arm`` and is tested in
+   ``tests/test_intel_ab_arm.py``.
 2. ``_select_placebo_pattern`` picks the candidate with the LOWEST token
    overlap with the dispatch context, tie-broken toward a different scope-tag
    group, and returns exactly one item with ``ab_arm='placebo'``.
@@ -170,35 +170,6 @@ def _db_with_outcome_no_ab_arm() -> sqlite3.Connection:
     """)
     conn.commit()
     return conn
-
-
-# ---------------------------------------------------------------------------
-# 1. _ab_arm + placebo flag
-# ---------------------------------------------------------------------------
-
-class TestAbArmPlacebo:
-    def test_default_returns_treatment(self, monkeypatch):
-        monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
-        monkeypatch.delenv("VNX_INTEL_AB_TEST", raising=False)
-        assert isel._ab_arm() == "treatment"
-
-    def test_placebo_flag_on_returns_placebo(self, monkeypatch):
-        monkeypatch.setenv("VNX_INTEL_PLACEBO_ARM", "1")
-        monkeypatch.delenv("VNX_INTEL_AB_TEST", raising=False)
-        assert isel._ab_arm() == "placebo"
-
-    def test_placebo_takes_precedence_over_control(self, monkeypatch):
-        """Placebo must not be contaminated by control-arm suppression."""
-        monkeypatch.setenv("VNX_INTEL_PLACEBO_ARM", "1")
-        monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-        with patch("intelligence_selector.random.random", return_value=0.01):
-            assert isel._ab_arm() == "placebo"
-
-    def test_placebo_flag_off_ab_test_still_control(self, monkeypatch):
-        monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
-        monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-        with patch("intelligence_selector.random.random", return_value=0.05):
-            assert isel._ab_arm() == "control"
 
 
 # ---------------------------------------------------------------------------
