@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from project_root import resolve_central_data_dir
 
 SCHEMA = "dream_liveness/1"
 PLIST_LABEL = "com.vnx.auto-dream"
@@ -107,18 +106,6 @@ def read_plist(plist_path: Path) -> Any:
             "arm_switch": env.get("VNX_DREAM_SCHEDULER_ENABLED")}
 
 
-def load_sources(project_id: str, *, data_root: Optional[Path] = None,
-                 plist_path: Optional[Path] = None) -> Dict[str, Any]:
-    """Read both sources. The data root follows the project id (D5), unless given."""
-    plist_path = plist_path or (Path.home() / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist")
-    plist = read_plist(plist_path)
-    if isinstance(plist, dict) and plist.get("project_id"):
-        project_id = plist["project_id"]
-    root = Path(data_root) if data_root else resolve_central_data_dir(project_id)
-    return {"project_id": project_id, "events": read_events(root / "events" / "dream"),
-            "plist": plist}
-
-
 def classify_skip(reason: object, detail: object) -> Tuple[str, bool]:
     """(class, known) from the closed D13 table. Unknown or empty is blocked."""
     reason = reason if isinstance(reason, str) else ""
@@ -141,21 +128,11 @@ def _valid_clock(plist: dict) -> bool:
                for k in ("hour", "minute")) and 0 <= plist["hour"] < 24 and 0 <= plist["minute"] < 60
 
 
-def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
-           now: Optional[datetime] = None) -> dict:
-    """Build the `dream_liveness/1` document from already-read sources.
-
-    state (ADR-066): `deviation` when a finding has severity `error`; else
-    `unmeasured` when a source is not `ok`; else `ok`. A warn alone is `ok`.
-    """
-    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+def _source_state(raw: object, plist: object) -> Tuple[Dict[str, str], List[dict], Optional[dict], list]:
+    """Source status per key (every key is read; one that is not "ok" is never passing)."""
+    src: Dict[str, str] = {}
     findings: List[dict] = []
-    src: Dict[str, str] = {}  # every key is read; a key that is not "ok" is never passing
-    raw = sources.get("events")
-    plist = sources.get("plist")
-    project = project_id or sources.get("project_id") or "unknown"
     events = raw if isinstance(raw, list) else None
-
     if events is None:
         src["events"] = "missing"
         findings.append(_finding("events_missing", "events/dream is absent or unreadable", False))
@@ -176,53 +153,76 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
         if plist.get("arm_switch") != "1":
             findings.append(_finding("arm_switch_off",
                                      f"VNX_DREAM_SCHEDULER_ENABLED={plist.get('arm_switch')!r} in the installed plist"))
+    return src, findings, plist, events
 
+
+def _scan_events(events: list, now: datetime) -> Tuple[List[Tuple[datetime, dict]], List[dict]]:
+    """Dated attempts plus findings. A skip reason is judged on every skip event, dated or not.
+    A timestamp later than `now` is not usable: it is counted as undated, never an attempt."""
+    findings: List[dict] = []
     dated: List[Tuple[datetime, dict]] = []
     undated = 0
+    seen = set()
     for event in events:
         event = event if isinstance(event, dict) else {}
         etype = event.get("event_type")
         if not isinstance(etype, str) or (etype not in _ATTEMPT_TYPES and etype not in _REVIEW_TYPES):
             findings.append(_finding("unknown_event_type", f"event_type={etype!r}"))
             continue
-        ts = _parse_ts(event.get("timestamp"))
-        if ts is None:
-            undated += 1
-            continue
-        if etype in _REVIEW_TYPES:
-            continue  # own bucket (D4): never an attempt or an age
-        dated.append((ts.astimezone(timezone.utc), event))
-    if undated:
-        findings.append(_finding("undated_event", f"{undated} event(s) without a usable timestamp"))
-    seen = set()
-    for _, e in dated:
-        reason, detail = e.get("reason"), e.get("detail")
-        if (_ATTEMPT_TYPES[e["event_type"]] == "skipped" and not classify_skip(reason, detail)[1]
+        reason, detail = event.get("reason"), event.get("detail")
+        if (_ATTEMPT_TYPES.get(etype) == "skipped" and not classify_skip(reason, detail)[1]
                 and repr((reason, detail)) not in seen):
             seen.add(repr((reason, detail)))
             findings.append(_finding("unknown_skip_reason", f"reason={reason!r} detail={detail!r}"))
+        ts = _parse_ts(event.get("timestamp"))
+        ts = ts.astimezone(timezone.utc) if ts is not None else None
+        if ts is None or ts > now:
+            undated += 1
+        elif etype not in _REVIEW_TYPES:  # review events: own bucket (D4), never an attempt or an age
+            dated.append((ts, event))
+    if undated:
+        findings.append(_finding("undated_event", f"{undated} event(s) without a usable timestamp "
+                                 "(missing, unparsable or later than now)"))
+    return dated, findings
 
+
+def _newest_block(dated: List[Tuple[datetime, dict]], now: datetime, findings: List[dict]) -> Tuple[dict, Optional[dict]]:
+    """attempts + outcome of the newest dated attempt; appends blocked_skip to `findings`."""
     dated.sort(key=lambda p: p[0])
-    newest = dated[-1] if dated else None
     attempts: Dict[str, Any] = {"newest": None, "age_hours": None, "bound_hours": BOUND_HOURS}
-    outcome = None
-    if newest:
-        age = (now - newest[0]).total_seconds() / 3600
-        attempts["age_hours"] = round(age, 2)
-        attempts["newest"] = {"cycle_id": newest[1].get("cycle_id"), "at": newest[0].isoformat()}
-        kind = _ATTEMPT_TYPES[newest[1]["event_type"]]
-        klass = (classify_skip(newest[1].get("reason"), newest[1].get("detail"))
-                 if kind == "skipped" else None)
-        outcome = {"event_type": newest[1]["event_type"], "reason": newest[1].get("reason"),
-                   "class": klass[0] if klass else BLOCKED if kind in ("failed", "timeout") else None}
-        for key in ("cycle_id", "detail", "review_path", "probe_health"):
-            if isinstance(newest[1].get(key), str):
-                outcome[key] = newest[1][key]
-        if klass and klass == (BLOCKED, True):
-            findings.append(_finding("blocked_skip", f"newest attempt skipped: {newest[1].get('reason')!r}"))
-    if src["events"] == "ok" and (newest is None or attempts["age_hours"] > BOUND_HOURS):
+    if not dated:
+        return attempts, None
+    at, ev = dated[-1]
+    attempts["age_hours"] = round((now - at).total_seconds() / 3600, 2)
+    attempts["newest"] = {"cycle_id": ev.get("cycle_id"), "at": at.isoformat()}
+    kind = _ATTEMPT_TYPES[ev["event_type"]]
+    klass = classify_skip(ev.get("reason"), ev.get("detail")) if kind == "skipped" else None
+    outcome = {"event_type": ev["event_type"], "reason": ev.get("reason"),
+               "class": klass[0] if klass else BLOCKED if kind in ("failed", "timeout") else None}
+    for key in ("cycle_id", "detail", "review_path", "probe_health"):
+        if isinstance(ev.get(key), str):
+            outcome[key] = ev[key]
+    if klass == (BLOCKED, True):
+        findings.append(_finding("blocked_skip", f"newest attempt skipped: {ev.get('reason')!r}"))
+    return attempts, outcome
+
+
+def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
+           now: Optional[datetime] = None) -> dict:
+    """Build the `dream_liveness/1` document from already-read sources.
+
+    state (ADR-066): `deviation` when a finding has severity `error`; else
+    `unmeasured` when a source is not `ok`; else `ok`. A warn alone is `ok`.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    project = project_id or sources.get("project_id") or "unknown"
+    src, findings, plist, events = _source_state(sources.get("events"), sources.get("plist"))
+    dated, scan = _scan_events(events, now)
+    findings += scan
+    attempts, outcome = _newest_block(dated, now, findings)
+    if src["events"] == "ok" and (not dated or attempts["age_hours"] > BOUND_HOURS):
         findings.append(_finding("no_attempt_26h", "no dated attempt event in the last "
-                                 f"{BOUND_HOURS}h" + ("" if newest is None else f" (newest {attempts['age_hours']}h ago)")))
+                                 f"{BOUND_HOURS}h" + ("" if not dated else f" (newest {attempts['age_hours']}h ago)")))
 
     state = ("deviation" if any(f["severity"] == "error" for f in findings)
              else "unmeasured" if any(v != "ok" for v in src.values()) else "ok")

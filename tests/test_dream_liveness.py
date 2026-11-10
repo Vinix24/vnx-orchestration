@@ -92,6 +92,29 @@ def test_undated_event_is_counted_and_never_an_age(stamp):
     assert "no_attempt_26h" in ids(d)
 
 
+def test_undated_unknown_skip_reason_still_gives_the_error_next_to_a_fresh_completion():
+    skipped = ev("dream_cycle_skipped", "2026-11-09", reason="nonsense")
+    del skipped["timestamp"]
+    d = doc([ev("dream_cycle_completed", "2026-11-10", "11:00", merged_count=1), skipped])
+    assert {"unknown_skip_reason", "undated_event"} <= ids(d)
+    assert d["state"] == "deviation"
+
+
+def test_sole_future_completion_is_undated_and_no_attempt():
+    d = doc([ev("dream_cycle_completed", "2027-11-10", merged_count=1)])
+    assert {"undated_event", "no_attempt_26h"} <= ids(d)
+    assert d["attempts"]["newest"] is None and d["attempts"]["age_hours"] is None
+    assert d["state"] == "deviation"
+
+
+def test_future_event_never_becomes_the_newest_attempt():
+    valid = ev("dream_cycle_completed", "2026-11-10", "11:00", merged_count=1)
+    d = doc([valid, ev("dream_cycle_completed", "2026-11-11", merged_count=1)])
+    assert d["attempts"]["newest"]["cycle_id"] == valid["cycle_id"]
+    assert "undated_event" in ids(d) and "no_attempt_26h" not in ids(d)
+    assert d["attempts"]["age_hours"] == 1.0
+
+
 def test_torn_and_non_object_lines_surface_as_undated(tmp_path):
     folder = tmp_path / "events" / "dream"
     folder.mkdir(parents=True)
@@ -116,15 +139,6 @@ def test_read_plist_states(tmp_path):
     assert dl.read_plist(tmp_path / "none.plist") is None
     (tmp_path / "bad.plist").write_text("<<not a plist")
     assert dl.read_plist(tmp_path / "bad.plist") == dl.PLIST_UNREADABLE
-
-
-def test_load_sources_data_root_follows_project_id(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    folder = tmp_path / ".vnx-data" / "p1" / "events" / "dream"
-    folder.mkdir(parents=True)
-    (folder / "a.ndjson").write_text(json.dumps(ev("dream_cycle_started", "2026-11-10")) + "\n")
-    got = dl.load_sources("p1", plist_path=tmp_path / "none.plist")
-    assert len(got["events"]) == 1 and got["plist"] is None
 
 
 @pytest.mark.parametrize("events", [None, "x", {"a": 1}, 7])
