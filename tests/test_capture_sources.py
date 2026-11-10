@@ -140,6 +140,28 @@ def test_memory_notes_unsafe_or_unreadable_is_error(env, kind):
     assert notes == [] and cs.state_of(status) == "error"
 
 
+@pytest.mark.parametrize("kind", ["dangling_outside", "dangling_inside", "escape_existing"])
+def test_note_symlink_dangling_or_escaping_is_error_not_empty_ok(env, kind):
+    link = env["memory"] / "broken.md"
+    if kind == "dangling_outside":
+        link.symlink_to(env["outside"] / "missing.md")
+    elif kind == "dangling_inside":
+        link.symlink_to(env["memory"] / "missing.md")
+    else:
+        (env["outside"] / "real.md").write_text("x", encoding="utf-8")
+        link.symlink_to(env["outside"] / "real.md")
+    notes, status = cs.read_memory_notes(_binding(env))
+    assert notes == [] and cs.state_of(status) == "error"
+    assert "broken.md" in status
+
+
+def test_note_symlink_inside_memory_dir_is_read(env):
+    (env["memory"] / "echt.md").write_text("zie OI-5\n", encoding="utf-8")
+    (env["memory"] / "alias.md").symlink_to(env["memory"] / "echt.md")
+    notes, status = cs.read_memory_notes(_binding(env))
+    assert status == "ok" and {n["key"] for n in notes} == {"echt", "alias"}
+
+
 @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
 def test_memory_dir_unlistable_is_error_not_empty_ok(env):
     (env["memory"] / "n.md").write_text("x", encoding="utf-8")

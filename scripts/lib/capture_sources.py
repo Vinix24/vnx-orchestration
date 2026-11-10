@@ -179,10 +179,17 @@ def read_memory_notes(binding: dict) -> Tuple[List[dict], str]:
     try:
         # iterdir propagates a directory-read error; glob swallows it as "empty".
         for path in sorted(root.iterdir()):
-            if path.suffix != ".md" or path.name == "MEMORY.md" or not path.is_file():
+            if path.suffix != ".md" or path.name == "MEMORY.md":
                 continue
-            if not _under(path.resolve(), root):
-                return [], f"{STATE_ERROR}: a note resolves outside memory_dir"
+            if path.is_symlink():
+                # Judged before the non-file filter: a dangling link is not "no note".
+                target = path.resolve(strict=False)
+                if not _under(target, root):
+                    return [], f"{STATE_ERROR}: note {path.name} resolves outside memory_dir"
+                if not target.is_file():
+                    return [], f"{STATE_ERROR}: note {path.name} is a dangling or non-file symlink"
+            elif not path.is_file():
+                continue
             notes.append(_read_note(path))
     except (OSError, UnicodeDecodeError):
         return [], f"{STATE_ERROR}: a memory note cannot be read"
