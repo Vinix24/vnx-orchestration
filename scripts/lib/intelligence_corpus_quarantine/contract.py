@@ -13,7 +13,7 @@ DB_FIELDS = dict(path=str, bytes=int, page_size=int, page_count=int, freelist_co
 MANIFEST_FIELDS = dict(schema=int, track=str, generated_at=str, db=dict, tables=list)
 TABLE_FIELDS = dict(name=str, rows=int, dbstat_bytes=int)
 CORPUS_TABLES = ["code_snippets", "snippet_metadata"]
-Q2_FIELDS = dict(corpus=dict, invariants=dict)
+Q2_FIELDS = dict(snapshot=dict, corpus=dict, invariants=dict)
 
 
 def _fields(value, fields):
@@ -49,6 +49,7 @@ def validate_manifest(manifest):
     if "code_snippets" not in names or len(names) != len(set(names)):
         raise ValueError("missing code_snippets or duplicate tables")
     if extended:
+        _validate_snapshot(manifest["snapshot"])
         validate_corpus(manifest["corpus"])
         _fields(manifest["invariants"], dict(session_analytics=dict))
         validate_session(manifest["invariants"]["session_analytics"])
@@ -62,6 +63,13 @@ def validate_manifest(manifest):
 def _sha256(value):
     if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
         raise ValueError("invalid sha256")
+
+
+def _validate_snapshot(snapshot):
+    _fields(snapshot, dict(path=str, bytes=int, sha256=str, integrity_check=str))
+    _sha256(snapshot["sha256"])
+    if not Path(snapshot["path"]).is_absolute() or snapshot["bytes"] == 0 or snapshot["integrity_check"] != "ok":
+        raise ValueError("invalid snapshot path, bytes or integrity_check")
 
 
 def validate_session(session):
