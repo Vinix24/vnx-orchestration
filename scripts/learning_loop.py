@@ -107,6 +107,37 @@ def _is_unusable_provenance_receipt(receipt: Dict[str, Any]) -> bool:
     return True
 
 
+def _scope_value(value: Any) -> str:
+    """A scope or identity field as a stripped string, or "" when it is no
+    usable value: absent, not a string (a number, a list), blank or a sentinel.
+    Only positive evidence survives; nothing malformed becomes a scope."""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    return "" if text.lower() in _NONE_SENTINELS else text
+
+
+def _agent_identity(receipt: Dict[str, Any]) -> str:
+    """The worker identity of a receipt: the first of ``provider`` and ``model``
+    that is a real value, else "". A sentinel ``provider`` ("unknown") no longer
+    shadows a real ``model``."""
+    return _scope_value(receipt.get("provider")) or _scope_value(receipt.get("model"))
+
+
+def _rule_id(rule: Dict[str, Any]) -> str:
+    """The one persistent id of a failure-prevention proposal: sha1 over the
+    pattern, the terminal scope and the agent scope, joined by a separator that
+    cannot occur in them, so ("ab", "c") and ("a", "bc") never collide. The
+    grouping key of ``generate_prevention_rules`` holds the same three values:
+    two proposals are one proposal exactly when this id is equal."""
+    parts = (
+        str(rule.get("pattern") or ""),
+        _scope_value(rule.get("terminal_constraint")) or "any",
+        _scope_value(rule.get("agent_constraint")),
+    )
+    return f"rule-{hashlib.sha1(chr(0x1f).join(parts).encode()).hexdigest()[:8]}"
+
+
 def normalize_open_item_title(title: Any) -> str:
     """Class key of an open item: lowercase letters only (digits, ids, PR numbers
     and punctuation dropped), first ``_TITLE_WORDS`` words."""
@@ -585,7 +616,15 @@ class LearningLoop:
         provider alone no longer skips a receipt: a real failure the converter
         booked with an unresolved provider (a real ``model`` value, or a
         converter-stamped ``report_path``) now reaches pattern detection. The
-        post-filter corpus size and both counters are logged.
+        post-filter corpus size and both counters are logged. Measured
+        2026-11-07 over 6 ledgers (command: plan ``learning-d3-provider-filter-drop``,
+        "Done measurement" point 1): 54,086 receipts, 11,911 failure-status, 953
+        with a sentinel provider, of which 916 pass (184 via a real model, 732 via
+        ``report_path``) and 37 are double-sentinel noise.
+
+        Projection: ``agent`` is the first real value of ``provider`` and
+        ``model`` (``_agent_identity``), ``terminal`` the first real value of
+        ``terminal`` and ``terminal_id``; a sentinel or non-string is "".
 
         Project scope (ADR-007): a line stamped with another project's
         ``project_id`` is that project's failure, never this one's — even when
@@ -688,8 +727,8 @@ class LearningLoop:
 
                     failure_patterns.append({
                         "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
-                        "terminal": str(receipt.get("terminal") or receipt.get("terminal_id") or ""),
-                        "agent": str(receipt.get("provider") or receipt.get("model") or ""),
+                        "terminal": _scope_value(receipt.get("terminal")) or _scope_value(receipt.get("terminal_id")),
+                        "agent": _agent_identity(receipt),
                         "error": self._failure_error_message(receipt),
                         "timestamp": ts_raw or datetime.now(timezone.utc).isoformat(),
                     })
@@ -858,11 +897,16 @@ class LearningLoop:
         """Generate new prevention rules from failure patterns"""
         new_rules = []
 
-        # Group failures by similar characteristics
+        # Group failures by similar characteristics. The key is the proposal's
+        # identity (error, terminal scope, agent scope); a missing terminal is
+        # "any" and a missing agent is None, never "" or "unknown".
         failure_groups = defaultdict(list)
         for failure in failure_patterns:
-            # Create a key based on error type and context
-            key = (failure['error'][:50], failure['terminal'], failure['agent'] or 'none')
+            key = (
+                str(failure.get('error') or '')[:50],
+                _scope_value(failure.get('terminal')) or 'any',
+                _scope_value(failure.get('agent')) or None,
+            )
             failure_groups[key].append(failure)
 
         # Generate rules for repeated failures
@@ -871,7 +915,7 @@ class LearningLoop:
                 rule = {
                     'pattern': f"Error pattern: {error}",
                     'terminal_constraint': terminal,
-                    'agent_constraint': agent if agent != 'none' else None,
+                    'agent_constraint': agent,
                     'prevention': self.generate_prevention_suggestion(error, failures),
                     'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
                     'occurrence_count': len(failures)
@@ -917,7 +961,8 @@ class LearningLoop:
                 {
                     "rule_type": "failure_prevention",
                     "pattern": rule["pattern"],
-                    "terminal_constraint": rule.get("terminal_constraint", "any"),
+                    "terminal_constraint": _scope_value(rule.get("terminal_constraint")) or "any",
+                    "agent_constraint": _scope_value(rule.get("agent_constraint")) or None,
                     "prevention": rule["prevention"],
                     "confidence": rule["confidence"],
                     "occurrence_count": rule.get("occurrence_count", 1),
@@ -942,14 +987,16 @@ class LearningLoop:
                     existing = []
 
             now = datetime.now().isoformat()
+            added = 0
             for rule in new_rules:
                 queued = {
-                    "id": f"rule-{hashlib.sha1((rule['pattern'] + rule.get('terminal_constraint', '')).encode()).hexdigest()[:8]}",
+                    "id": _rule_id(rule),
                     "created_at": now,
                     "source": "learning_loop",
                     "rule_type": "failure_prevention",
                     "pattern": rule["pattern"],
-                    "terminal_constraint": rule.get("terminal_constraint", "any"),
+                    "terminal_constraint": _scope_value(rule.get("terminal_constraint")) or "any",
+                    "agent_constraint": _scope_value(rule.get("agent_constraint")) or None,
                     "prevention": rule["prevention"],
                     "confidence": rule["confidence"],
                     "occurrence_count": rule.get("occurrence_count", 1),
@@ -959,12 +1006,15 @@ class LearningLoop:
                 # Deduplicate by id
                 if not any(e.get("id") == queued["id"] for e in existing):
                     existing.append(queued)
+                    added += 1
 
             pending_path.write_text(
                 json.dumps({"pending_rules": existing}, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-            print(f"📋 Queued {len(new_rules)} prevention rules for operator review → {pending_path}")
+            already = len(new_rules) - added
+            note = f" ({already} already pending)" if already else ""
+            print(f"📋 Queued {added} prevention rules{note} for operator review → {pending_path}")
 
         except Exception as e:
             print(f"❌ Error queuing prevention rules: {e}")
