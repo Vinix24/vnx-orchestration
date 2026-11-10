@@ -93,8 +93,10 @@ def _bind_problem(state_dir: Path, memory_dir: Path, bucket_dir: Path, slug: str
     return None
 
 
-def _record_bind(state_dir: Path, payload: Dict[str, object], transition: str) -> bool:
-    """ADR-005: the binding decision lands in the ledger before the derived JSON. Fail closed."""
+def _record_bind(state_dir: Path, payload: Dict[str, object], transition: str) -> Optional[str]:
+    """ADR-005: the binding decision lands in the ledger before the derived JSON. Fail closed.
+
+    Returns None when the receipt is in the ledger, else the reason the bind must be refused."""
     receipt = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "event_type": "state_mutation",
@@ -111,9 +113,14 @@ def _record_bind(state_dir: Path, payload: Dict[str, object], transition: str) -
         from append_receipt import append_receipt_payload
         ledger = str(state_dir / "t0_receipts.ndjson")
         result = append_receipt_payload(receipt, receipts_file=ledger, skip_enrichment=True)
-        return getattr(result, "status", None) in ("appended", "duplicate")
-    except Exception:  # vnx-silent-except: any append failure refuses the bind, reported by the caller
-        return False
+    # append_receipt raises SystemExit when its import bootstrap fails; like
+    # planning_cli._retarget_receipt, that must refuse the bind, not escape cmd_bind.
+    except (Exception, SystemExit) as exc:
+        return f"ledger append failed ({exc})"
+    status = getattr(result, "status", None)
+    if status in ("appended", "duplicate"):
+        return None
+    return f"ledger append failed (append result {status!r})"
 
 
 def cmd_bind(args: argparse.Namespace) -> int:
@@ -133,8 +140,9 @@ def cmd_bind(args: argparse.Namespace) -> int:
         "bound_at": datetime.now(timezone.utc).isoformat(),
     }
     target = state_dir / cs.BINDING_FILENAME
-    if not _record_bind(state_dir, payload, "replaced" if target.exists() else "created"):
-        print("bind refused: ledger append failed", file=sys.stderr)
+    refusal = _record_bind(state_dir, payload, "replaced" if target.exists() else "created")
+    if refusal:
+        print(f"bind refused: {refusal}", file=sys.stderr)
         return 1
     atomic_write_json(target, payload)
     print(f"bound project {payload['project_id']}: {target}")

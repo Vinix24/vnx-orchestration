@@ -450,9 +450,19 @@ def test_bind_appends_ledger_before_the_json_exists(local_env, monkeypatch):
     assert seen["receipt"]["transition"] == "created" and "memory_dir" not in seen["receipt"]
 
 
-@pytest.mark.parametrize("outcome", ["raise", "rejected", "none"])
+@pytest.mark.parametrize(
+    ("outcome", "cause"),
+    [
+        ("raise", "(disk)"),
+        ("exit", "(bootstrap failed)"),
+        ("rejected", "append result 'rejected'"),
+        ("none", "append result None"),
+    ],
+)
 @pytest.mark.parametrize("existing", [False, True])
-def test_bind_fails_closed_when_the_ledger_append_fails(local_env, monkeypatch, capsys, outcome, existing):
+def test_bind_fails_closed_when_the_ledger_append_fails(
+    local_env, monkeypatch, capsys, outcome, cause, existing
+):
     env = local_env
     import append_receipt
     capture_audit = _script_module()
@@ -463,11 +473,13 @@ def test_bind_fails_closed_when_the_ledger_append_fails(local_env, monkeypatch, 
     def fake(receipt, receipts_file=None, skip_enrichment=False):
         if outcome == "raise":
             raise OSError("disk")
+        if outcome == "exit":
+            raise SystemExit("bootstrap failed")
         return None if outcome == "none" else type("R", (), {"status": "rejected"})()
 
     monkeypatch.setattr(append_receipt, "append_receipt_payload", fake)
     assert capture_audit.cmd_bind(_bind_namespace(env)) == 1
-    assert "bind refused: ledger append failed" in capsys.readouterr().err
+    assert f"bind refused: ledger append failed {cause}" in capsys.readouterr().err
     target = env["state"] / cs.BINDING_FILENAME
     assert (target.read_bytes() == before) if existing else not target.exists()
 
