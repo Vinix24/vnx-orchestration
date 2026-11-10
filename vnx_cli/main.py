@@ -1604,8 +1604,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
     lr_dismiss.add_argument(
         "--reason",
         dest="reason",
-        default="",
-        required=True,
+        default="", required=True,
         help="non-empty rationale for the dismissal (REQUIRED)",
     )
     lr_dismiss.add_argument(
