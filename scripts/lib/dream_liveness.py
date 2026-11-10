@@ -30,6 +30,8 @@ MAX_ALLOWED_SKIP_STREAK = 2
 PLIST_UNREADABLE = "unreadable"
 LOG_UNREADABLE = "unreadable"
 SUBPROCESS_TIMEOUT = 10
+REVIEW_OVERDUE_SECONDS = 30 * 86400  # ADR-066 section 6: new policy, ADR-019 sets no maximum age
+REVIEWS_UNREADABLE = "unreadable"
 _TEMPLATE = Path(__file__).resolve().parents[1] / "dream" / "templates" / f"{PLIST_LABEL}.plist.j2"
 _RUN_LINE = re.compile(r"^dream run: cycle=(\S+) project=(\S+)")
 
@@ -62,7 +64,7 @@ _BLOCKED_REASONS = {"scheduler_disabled", "probe_not_ok", "provider_switched_off
 SEVERITY = {
     "blocked_skip": "error", "unknown_event_type": "error", "unknown_skip_reason": "error",
     "no_attempt_26h": "error", "started_without_end": "error", "no_scheduled_attempt": "error",
-    "arm_switch_off": "warn", "undated_event": "warn", "allowed_skip_streak": "warn",
+    "arm_switch_off": "warn", "undated_event": "warn", "reviews_unreadable": "warn", "allowed_skip_streak": "warn",
     "no_output": "warn", "review_overdue": "warn",
     "events_missing": "warn", "plist_missing": "warn", "plist_unreadable": "warn",
     "job_not_loaded": "error", "template_drift": "warn", "log_missing": "warn", "log_unreadable": "warn",
@@ -206,6 +208,103 @@ def template_drift(plist: dict, log_path: Path) -> Optional[List[str]]:
     return [name for name, ok in same.items() if not ok]
 
 
+def _event_stamp(cycle_id: object, events: list) -> Optional[datetime]:
+    if not isinstance(cycle_id, str):
+        return None
+    for event in events:
+        if (isinstance(event, dict) and event.get("event_type") == "dream_cycle_completed"
+                and event.get("cycle_id") == cycle_id):
+            ts = _parse_ts(event.get("timestamp"))
+            if ts is not None:
+                return ts
+    return None
+
+
+def _review_stamp(data: dict, path: Path, events: list, now: datetime) -> Tuple[Optional[datetime], Optional[str]]:
+    """ADR-066 D8 chain: `created_at` in the review, the matching completion event, then mtime.
+    A timestamp later than `now` is not usable and falls through to the next link."""
+    for source, ts in (("content", _parse_ts(data.get("created_at"))),
+                       ("event", _event_stamp(data.get("cycle_id"), events))):
+        if ts is not None and ts.astimezone(timezone.utc) <= now:
+            return ts.astimezone(timezone.utc), source
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc), "mtime"
+    except OSError:
+        return None, None
+
+
+def _load_review(path: Path) -> Optional[dict]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None  # a file that is not a review object is unreadable
+
+
+def read_reviews(data_root: Path, project_id: str, *, events: Optional[List[dict]] = None,
+                 now: Optional[datetime] = None) -> dict:
+    """Pending dream reviews under `<data_root>/state/dream`, with the age from content (ADR-066 D8).
+
+    A review file that does not parse is counted in `unreadable_count` (its name, never its
+    content, goes in `unreadable_paths`) instead of being skipped. A directory that cannot be
+    listed is `available: False`. `pending_count == 0` is only a measurement when both hold.
+    """
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    root = Path(data_root)
+    if events is None:
+        events = read_events(root / "events" / "dream") or []
+    review_dir = root / "state" / "dream"
+    block: Dict[str, Any] = {"available": True, "pending_count": 0, "oldest_age_seconds": None,
+                             "created_at_source": None, "unreadable_count": 0, "unreadable_paths": [],
+                             "overdue": False, "pending_reviews": []}
+    try:
+        names = sorted(n for n in os.listdir(review_dir) if n.endswith("-pending-review.json")) \
+            if review_dir.is_dir() else []
+    except OSError:
+        return {**block, "available": False}
+    oldest: Tuple[float, Optional[str]] = (-1.0, None)
+    for name in names:
+        path = review_dir / name
+        data = _load_review(path)
+        if data is None:
+            block["unreadable_count"] += 1
+            block["unreadable_paths"].append(name)
+            continue
+        if data.get("project_id") != project_id or not data.get("requires_operator_review"):
+            continue
+        ts, source = _review_stamp(data, path, events, now)
+        age = max(0.0, (now - ts).total_seconds()) if ts is not None else None
+        block["pending_reviews"].append({"cycle_id": data.get("cycle_id"), "input_count": data.get("input_count"),
+                                         "created_at": ts.isoformat() if ts else "", "age_seconds": age,
+                                         "created_at_source": source})
+        if age is not None and age > oldest[0]:
+            oldest = (age, source)
+    block["pending_count"] = len(block["pending_reviews"])
+    if oldest[1] is not None:
+        block["oldest_age_seconds"], block["created_at_source"] = oldest
+        block["overdue"] = oldest[0] > REVIEW_OVERDUE_SECONDS
+    return block
+
+
+def _review_findings(reviews: object, src: Dict[str, str], findings: List[dict]) -> Optional[dict]:
+    """Source state and findings of the review queue. No `reviews` in `sources`: not read, no claim."""
+    if not isinstance(reviews, dict):
+        return None
+    count = reviews.get("unreadable_count")
+    listed = reviews.get("available") is True
+    if not listed or not isinstance(count, int) or isinstance(count, bool) or count != 0:
+        src["reviews"] = REVIEWS_UNREADABLE
+        detail = ("the review directory cannot be listed" if not listed else
+                  f"{count} review file(s) do not parse: {', '.join(reviews.get('unreadable_paths') or [])}")
+        findings.append(_finding("reviews_unreadable", detail))
+    else:
+        src["reviews"] = "ok"
+    if reviews.get("overdue") is True:
+        findings.append(_finding("review_overdue", f"oldest pending proposal is {reviews.get('oldest_age_seconds')}s "
+                                 f"old (limit {REVIEW_OVERDUE_SECONDS}s, ADR-066)"))
+    return reviews
+
+
 def load_sources(project_id: str, *, data_root: Optional[Path] = None,
                  plist_path: Optional[Path] = None) -> Dict[str, Any]:
     """Read the sources: events, plist, and (with a plist) job and log. The data root follows the project id (D5), unless given."""
@@ -219,6 +318,7 @@ def load_sources(project_id: str, *, data_root: Optional[Path] = None,
     if isinstance(plist, dict):  # no plist: no label state to trust and no StandardOutPath to read
         plist["drift"] = template_drift(plist, root / "events" / "dream" / "launchd.out.log")
         sources.update(job=read_job(), log=read_log(plist.get("stdout_path")))
+    sources["reviews"] = read_reviews(root, project_id, events=sources["events"] or [])
     return sources
 
 
@@ -563,9 +663,10 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
 
     job, job_findings = _job_findings(sources, plist)
     findings += job_findings
+    reviews = _review_findings(sources.get("reviews"), src, findings)
     unmeasured = any(v != "ok" for v in src.values()) or any(f["measured"] is False for f in findings)
     state = "deviation" if any(f["severity"] == "error" for f in findings) else "unmeasured" if unmeasured else "ok"
     return {"schema": SCHEMA, "project_id": project, "generated_at": now.isoformat(), "state": state,
             "sources": src, "job": job, "attempts": attempts, "outcome": outcome, "nights": nights,
             "progress_window": window, "in_flight": in_flight, "history": _history(dated),
-            "findings": findings}
+            "findings": findings, **({"reviews": reviews} if reviews is not None else {})}

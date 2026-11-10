@@ -4,6 +4,7 @@ Every branch that could turn a silence into a PASS is pinned with the field
 missing, None, malformed and unknown: all four stay blocking.
 """
 import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -625,3 +626,114 @@ def test_the_seam_runs_a_real_subprocess_and_guards_launchctl(monkeypatch):
     assert dl._run(["launchctl", "print", "x"], 4) == (3, "out") and guard == [1]
     assert dl._run(["plutil", "-p", "x"]) == (3, "out") and guard == [1]
     assert ran == [(["launchctl", "print", "x"], 4), (["plutil", "-p", "x"], dl.SUBPROCESS_TIMEOUT)]
+
+
+# --- dream PR-5: the review queue (ADR-066 D8) ---------------------------------
+
+def _review(root, cycle, project="vnx-dev", **fields):
+    review_dir = root / "state" / "dream"
+    review_dir.mkdir(parents=True, exist_ok=True)
+    path = review_dir / f"{cycle}-pending-review.json"
+    path.write_text(json.dumps({"cycle_id": cycle, "project_id": project,
+                                "requires_operator_review": True, **fields}), encoding="utf-8")
+    return path
+
+
+def _stamp(days):
+    return (NOW - timedelta(days=days)).isoformat()
+
+
+def test_unreadable_review_is_counted_not_skipped(tmp_path):
+    _review(tmp_path, "a", created_at=_stamp(1))
+    _review(tmp_path, "b", created_at=_stamp(2))
+    (tmp_path / "state" / "dream" / "c-pending-review.json").write_text('{"leak": "SECRET"', encoding="utf-8")
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    assert (block["unreadable_count"], block["pending_count"]) == (1, 2)
+    assert block["unreadable_paths"] == ["c-pending-review.json"]
+    assert "SECRET" not in json.dumps(block)
+
+
+def test_non_object_review_file_is_unreadable(tmp_path):
+    _review(tmp_path, "a", created_at=_stamp(1))
+    (tmp_path / "state" / "dream" / "d-pending-review.json").write_text("[1, 2]", encoding="utf-8")
+    assert dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)["unreadable_count"] == 1
+
+
+def test_age_chain_content_event_mtime(tmp_path):
+    _review(tmp_path, "c-content", created_at=_stamp(5))
+    _review(tmp_path, "c-event")
+    mt = _review(tmp_path, "c-mtime")
+    os.utime(mt, ((NOW - timedelta(days=2)).timestamp(),) * 2)
+    events = [{"event_type": "dream_cycle_completed", "cycle_id": "c-event", "timestamp": _stamp(9)},
+              {"event_type": "dream_cycle_completed", "cycle_id": "other", "timestamp": _stamp(20)}]
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=events, now=NOW)
+    by = {r["cycle_id"]: r for r in block["pending_reviews"]}
+    assert by["c-content"]["created_at_source"] == "content"
+    assert by["c-event"]["created_at_source"] == "event"
+    assert by["c-mtime"]["created_at_source"] == "mtime"
+    assert by["c-event"]["age_seconds"] == pytest.approx(9 * 86400)
+    assert (block["oldest_age_seconds"], block["created_at_source"]) == (pytest.approx(9 * 86400), "event")
+
+
+@pytest.mark.parametrize("bad", [None, "", "garbage", 42, _stamp(-3)])
+def test_unusable_created_at_falls_through(tmp_path, bad):
+    _review(tmp_path, "x", created_at=bad)
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    assert block["pending_reviews"][0]["created_at_source"] == "mtime"
+
+
+def test_unlistable_directory_is_unreadable_and_not_ok(tmp_path):
+    _review(tmp_path, "a", created_at=_stamp(1))
+    review_dir = tmp_path / "state" / "dream"
+    review_dir.chmod(0o000)
+    try:
+        block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    finally:
+        review_dir.chmod(0o755)
+    assert block["available"] is False
+    out = assess({"events": [], "plist": PLIST, "reviews": block}, project_id="vnx-dev", now=NOW, tz=UTC)
+    finding = next(f for f in out["findings"] if f["id"] == "reviews_unreadable")
+    assert finding["measured"] is True
+    assert out["sources"]["reviews"] == "unreadable"
+    assert out["state"] != "ok"
+
+
+def test_unreadable_file_makes_the_source_not_ok(tmp_path):
+    (tmp_path / "state" / "dream").mkdir(parents=True)
+    (tmp_path / "state" / "dream" / "z-pending-review.json").write_text("{", encoding="utf-8")
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    out = assess({"events": [], "plist": PLIST, "reviews": block}, project_id="vnx-dev", now=NOW, tz=UTC)
+    assert "reviews_unreadable" in ids(out)
+    assert out["sources"]["reviews"] == "unreadable"
+
+
+@pytest.mark.parametrize("broken", [{"available": True}, {"available": True, "unreadable_count": None},
+                                    {"available": "yes", "unreadable_count": 0}, {}])
+def test_malformed_reviews_block_stays_blocking(broken):
+    out = assess({"events": [], "plist": PLIST, "reviews": broken}, project_id="vnx-dev", now=NOW, tz=UTC)
+    assert "reviews_unreadable" in ids(out)
+    assert out["state"] != "ok"
+
+
+def test_empty_readable_queue_is_ok(tmp_path):
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    out = assess({"events": [], "plist": PLIST, "reviews": block}, project_id="vnx-dev", now=NOW, tz=UTC)
+    assert out["sources"]["reviews"] == "ok"
+    assert not {"reviews_unreadable", "review_overdue"} & set(ids(out))
+
+
+@pytest.mark.parametrize("days,overdue", [(31, True), (29, False)])
+def test_review_overdue_threshold(tmp_path, days, overdue):
+    _review(tmp_path, "old", created_at=_stamp(days))
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    out = assess({"events": [], "plist": PLIST, "reviews": block}, project_id="vnx-dev", now=NOW, tz=UTC)
+    assert ("review_overdue" in ids(out)) is overdue
+    assert block["overdue"] is overdue
+
+
+def test_other_project_and_resolved_reviews_are_not_pending(tmp_path):
+    _review(tmp_path, "mine", created_at=_stamp(1))
+    _review(tmp_path, "theirs", project="other", created_at=_stamp(40))
+    _review(tmp_path, "done", created_at=_stamp(40), requires_operator_review=False)
+    block = dl.read_reviews(tmp_path, "vnx-dev", events=[], now=NOW)
+    assert block["pending_count"] == 1 and block["overdue"] is False
