@@ -10,10 +10,14 @@ file can no longer erase the operator decisions in it.
 A decided rule never returns to ``pending`` and its evidence never changes. A
 proposal activates nothing: this module does no database access.
 
-Follows in later splits: D3 adds ``decide``, ``mint_approval_id``,
-``approved_decision`` and ``reconcile`` to this module, and split 2 of D2 moves
-the queue write of ``update_terminal_constraints`` in ``scripts/learning_loop.py``
-to ``queue_rules`` here.
+Decisions (loop D3): ``state/prevention_rule_decisions.ndjson`` is the truth, the
+``status`` in the queue file is a projection of it. ``decide`` appends the record
+(fsynced) first and projects second; ``reconcile`` repairs a projection that lags
+after a crash. This module is the only producer of ``approval_id`` and
+``bundle_ref`` (``mint_approval_id``, ``mint_bundle_ref``).
+
+Follows in split 2 of D2: the queue write of ``update_terminal_constraints`` in
+``scripts/learning_loop.py`` moves to ``queue_rules`` here.
 """
 
 from __future__ import annotations
@@ -22,8 +26,9 @@ import fcntl
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
 QUEUE_FILENAME = "pending_rules.json"
 LOCK_FILENAME = ".prevention_rules.lock"
@@ -31,6 +36,11 @@ SCHEMA = "pending_rule/1"
 STATUS_PENDING = "pending"
 DECIDED_STATUSES = frozenset({"approved", "rejected", "ingested", "deactivated"})
 KNOWN_STATUSES = DECIDED_STATUSES | {STATUS_PENDING}
+DECISIONS_FILENAME = "prevention_rule_decisions.ndjson"
+DECISIONS = frozenset({"approved", "rejected"})
+RECORD_DECISIONS = DECISIONS | {"deactivated"}
+ROLLOUT_SCOPE = "project"
+RECOVERY_PATH = "scripts/deactivate_pattern_activation.py --activation-id <id> --reason <tekst>"
 MAX_SOURCE_DISPATCH_IDS = 20
 _SEP = chr(0x1F)
 _NONE_SENTINELS = frozenset({"", "none", "null", "unknown", "n/a", "na", "-"})
@@ -216,3 +226,231 @@ def queue_rules(
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return counts
+
+
+class DecisionsUnreadable(ValueError):
+    """The decision record has a line that is not a valid decision object."""
+
+
+class RuleNotFound(LookupError):
+    """A rule id is not in the queue."""
+
+
+class DecisionRefused(ValueError):
+    """A decision cannot be recorded: conflicting, not pending, another project or
+    a proposal that no longer matches its hash."""
+
+
+def _digest(*parts: str) -> str:
+    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:12]
+
+
+def mint_approval_id(project_id: str, rule_id: str, decision: str, decided_at: str, decided_by: str) -> str:
+    """``apr-`` plus 12 hex of sha256 over the five fields. The only place an
+    approval id is formed."""
+    return "apr-" + _digest(project_id, rule_id, decision, decided_at, decided_by)
+
+
+def mint_bundle_ref(rule_ids: Sequence[str], decided_at: str) -> str:
+    """``bundle-`` plus 12 hex of sha256 over the sorted rule ids of one call and
+    the decision time. The only place a bundle ref is formed."""
+    return "bundle-" + _digest(",".join(sorted(rule_ids)), decided_at)
+
+
+@contextmanager
+def _locked(state_dir: Path) -> Iterator[None]:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    with open(state_dir / LOCK_FILENAME, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _parse_record(path: Path, number: int, line: str) -> Dict[str, Any]:
+    try:
+        record = json.loads(line)
+    except ValueError as exc:
+        raise DecisionsUnreadable(f"{path}:{number}: not JSON ({exc})") from exc
+    if (
+        not isinstance(record, dict)
+        or not isinstance(record.get("rule_id"), str)
+        or not record["rule_id"]
+        or record.get("decision") not in RECORD_DECISIONS
+    ):
+        raise DecisionsUnreadable(f"{path}:{number}: not a decision record")
+    return record
+
+
+def decisions(state_dir: Path) -> List[Dict[str, Any]]:
+    """Every decision record in file order. A missing file is an empty list; a line
+    that is not a valid record raises ``DecisionsUnreadable`` (never skipped)."""
+    path = Path(state_dir) / DECISIONS_FILENAME
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        raise DecisionsUnreadable(f"{path}: unreadable ({exc})") from exc
+    return [_parse_record(path, n, ln) for n, ln in enumerate(text.splitlines(), 1) if ln.strip()]
+
+
+def _latest(records: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:
+    return {record["rule_id"]: record for record in records}
+
+
+def approved_decision(state_dir: Path, rule_id: str) -> Optional[Dict[str, Any]]:
+    """The latest decision of ``rule_id`` when it is ``approved``; None when there is
+    none or the latest one is a rejection or deactivation. Readers of the record
+    (D5, D9) call this and ask for nothing the record does not carry."""
+    record = _latest(decisions(state_dir)).get(rule_id)
+    return dict(record) if record is not None and record["decision"] == "approved" else None
+
+
+def _project(rules: List[Dict[str, Any]], latest: Mapping[str, Mapping[str, Any]]) -> int:
+    changed = 0
+    for rule in rules:
+        record = latest.get(rule.get("id"))
+        if record is None or rule.get("status") == record["decision"]:
+            continue
+        if rule.get("status") == "ingested" and record["decision"] == "approved":
+            continue  # ingest is downstream of the approval: it stays ingested
+        rule["status"] = record["decision"]
+        changed += 1
+    return changed
+
+
+def _reconcile_locked(state_dir: Path) -> int:
+    path = state_dir / QUEUE_FILENAME
+    if not path.exists():
+        return 0
+    rules = _read_queue(path)
+    changed = _project(rules, _latest(decisions(state_dir)))
+    if changed:
+        _write_atomic(path, rules)
+    return changed
+
+
+def reconcile(state_dir: Path) -> int:
+    """Set the queue ``status`` to the latest decision record of each rule (the
+    record is the truth). Returns the number of entries changed."""
+    state_dir = Path(state_dir)
+    with _locked(state_dir):
+        return _reconcile_locked(state_dir)
+
+
+def _baseline(entry: Mapping[str, Any]) -> Dict[str, Any]:
+    count = entry.get("occurrence_count")
+    fclass = entry.get("failure_class")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 1 or not isinstance(fclass, str) or not fclass:
+        return {"baseline_metric": None, "baseline_value": None}
+    return {"baseline_metric": f"dispatches_with_class:{fclass}", "baseline_value": count}
+
+
+def _check_entry(entry: Mapping[str, Any], project_id: str, decision: str, prior: Optional[Mapping[str, Any]]) -> bool:
+    """True when the entry takes a new decision, False for an identical repeat."""
+    if entry.get("project_id") != project_id:
+        raise DecisionRefused(f"{entry.get('id')}: queue entry belongs to another project")
+    if entry.get("proposal_hash") != proposal_hash(entry):
+        raise DecisionRefused(f"{entry.get('id')}: the proposal no longer matches its proposal_hash")
+    if prior is None:
+        if entry.get("status") != STATUS_PENDING:
+            raise DecisionRefused(f"{entry.get('id')}: status {entry.get('status')!r} has no decision record")
+        return True
+    if prior["decision"] == decision:
+        return False
+    if prior["decision"] == "deactivated" and decision == "approved":
+        return True
+    raise DecisionRefused(f"{entry.get('id')}: already {prior['decision']}, cannot become {decision}")
+
+
+def _build_record(
+    entry: Mapping[str, Any], decision: str, reason: str, decided_by: str, project_id: str,
+    now: str, bundle: Optional[str], effect_criterion: Optional[str], stop_condition: Optional[str],
+) -> Dict[str, Any]:
+    approval_id = mint_approval_id(project_id, entry["id"], decision, now, decided_by)
+    approved = decision == "approved"
+    record: Dict[str, Any] = {
+        "decision_id": "dec-" + _digest(approval_id),
+        "approval_id": approval_id,
+        "rule_id": entry["id"],
+        "proposal_hash": entry["proposal_hash"],
+        "decision": decision,
+        "reason": reason,
+        "decided_by": decided_by,
+        "decided_at": now,
+        "project_id": project_id,
+        "rollout_scope": ROLLOUT_SCOPE,
+        "failure_class": entry.get("failure_class"),
+        **_baseline(entry),
+        "effect_criterion": effect_criterion if approved else None,
+        "stop_condition": stop_condition if approved else None,
+        "recovery_path": RECOVERY_PATH if approved else None,
+    }
+    if approved:
+        record["bundle_ref"] = bundle
+    return record
+
+
+def _append_records(path: Path, records: Sequence[Mapping[str, Any]]) -> None:
+    payload = "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in records)
+    with open(path, "a", encoding="utf-8") as handle:  # vnx-atomic-write: append-only record, fsynced
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def decide(
+    state_dir: Path,
+    rule_ids: Sequence[str],
+    decision: str,
+    *,
+    reason: str,
+    decided_by: str,
+    project_id: str,
+    now: str,
+    effect_criterion: Optional[str] = None,
+    stop_condition: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Record one decision per rule id as one bundle, under the lock.
+
+    Returns the records newly written (an identical repeat writes nothing). All
+    rule ids are checked before anything is written, so a bundle is all or nothing:
+    ``RuleNotFound`` for an id not in the queue, ``DecisionRefused`` for a conflict.
+    The record is appended and fsynced first; the queue projection follows.
+    """
+    if decision not in DECISIONS:
+        raise ValueError(f"decision must be one of {sorted(DECISIONS)}")
+    texts = {"reason": reason, "decided_by": decided_by, "project_id": project_id, "now": now}
+    for name, value in texts.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    if decision == "approved":
+        for name, value in (("effect_criterion", effect_criterion), ("stop_condition", stop_condition)):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} is required for an approval")
+    ids = sorted(set(rule_ids))
+    if not ids or not all(isinstance(i, str) and i for i in ids):
+        raise ValueError("rule_ids must hold at least one non-empty string")
+    state_dir = Path(state_dir)
+    with _locked(state_dir):
+        _reconcile_locked(state_dir)
+        path = state_dir / QUEUE_FILENAME
+        rules = _read_queue(path)
+        by_id = {rule.get("id"): rule for rule in rules}
+        latest = _latest(decisions(state_dir))
+        missing = [i for i in ids if i not in by_id]
+        if missing:
+            raise RuleNotFound(", ".join(missing))
+        fresh = [i for i in ids if _check_entry(by_id[i], project_id, decision, latest.get(i))]
+        bundle = mint_bundle_ref(fresh, now) if decision == "approved" else None
+        records = [
+            _build_record(by_id[i], decision, reason, decided_by, project_id, now, bundle, effect_criterion, stop_condition)
+            for i in fresh
+        ]
+        if records:
+            _append_records(state_dir / DECISIONS_FILENAME, records)
+            _project(rules, _latest(records))
+            _write_atomic(path, rules)
+    return records
