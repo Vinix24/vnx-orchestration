@@ -35,12 +35,9 @@ STATE_ABSENT = "absent"
 STATE_UNBOUND = "unbound"
 STATE_ERROR = "error"
 
-_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _OI_REF_RE = re.compile(r"(?<![A-Za-z0-9])OI-[1-9][0-9]*(?![0-9])")
 _MEM_REF_RE = re.compile(r"\[\[([^\]\|#]+)")
 _NEWLINE_RE = re.compile(r"\r?\n")
-_HEADING_SEP = " · "
 
 
 def projects_root() -> Path:
@@ -189,76 +186,6 @@ def read_memory_notes(binding: dict) -> Tuple[List[dict], str]:
     except (OSError, UnicodeDecodeError):
         return [], f"{STATE_ERROR}: a memory note cannot be read"
     return notes, STATE_OK
-
-
-# --- build-log bucket ------------------------------------------------------
-
-def _parse_heading(line: str) -> Optional[Tuple[str, str, str]]:
-    parts = line[4:].strip().split(_HEADING_SEP, 2)
-    if len(parts) != 3 or not _DATE_RE.match(parts[0].strip()):
-        return None
-    return parts[0].strip(), parts[1].strip(), parts[2].strip()
-
-
-def _split_sections(text: str) -> List[Tuple[str, List[str]]]:
-    sections: List[Tuple[str, List[str]]] = []
-    for line in _NEWLINE_RE.split(text):
-        if line.startswith("### "):
-            sections.append((line, []))
-        elif sections:
-            sections[-1][1].append(line)
-    return sections
-
-
-def _month_entries(text: str, binding: dict) -> Tuple[List[dict], int]:
-    entries: List[dict] = []
-    foreign = 0
-    for heading, body in _split_sections(text):
-        parsed = _parse_heading(heading)
-        # A heading that cannot be attributed to a slug is never read as ours.
-        if parsed is None or parsed[1] != binding["bucket_slug"]:
-            foreign += 1
-            continue
-        date, _slug, title = parsed
-        entries.append({
-            "date": date,
-            "title_tokens_input": title.replace("-", " "),
-            "body_refs": find_refs("\n".join(body)),
-            "locator": _locator(binding["project_id"], "nugget", f"{date}|{title}"),
-        })
-    return entries, foreign
-
-
-def read_bucket_entries(binding: dict, months: List[str]) -> Tuple[List[dict], str, int]:
-    """Entries of the bound slug for the given ``YYYY-MM`` months.
-
-    Returns ``(entries, state, foreign_slug_skipped)``. No month file at all is
-    ``absent``; a bad month, missing field or unreadable file is ``error``.
-    """
-    if not months or not all(isinstance(m, str) and _MONTH_RE.match(m) for m in months):
-        return [], f"{STATE_ERROR}: months must be a non-empty list of YYYY-MM", 0
-    try:
-        bucket_dir = Path(binding["bucket_dir"]).expanduser()
-        binding["bucket_slug"], binding["project_id"]
-    except (KeyError, TypeError):
-        return [], f"{STATE_ERROR}: binding lacks bucket fields", 0
-    if not bucket_dir.is_dir():
-        return [], f"{STATE_ERROR}: bucket_dir is not a directory", 0
-    entries: List[dict] = []
-    foreign = 0
-    found = 0
-    for month in months:
-        path = bucket_dir / f"{month}.md"
-        if not path.is_file():
-            continue
-        found += 1
-        try:
-            month_entries, month_foreign = _month_entries(path.read_text(encoding="utf-8"), binding)
-        except (OSError, UnicodeDecodeError):
-            return [], f"{STATE_ERROR}: a bucket file cannot be read", 0
-        entries.extend(month_entries)
-        foreign += month_foreign
-    return entries, (STATE_OK if found else STATE_ABSENT), foreign
 
 
 # --- open items ------------------------------------------------------------
