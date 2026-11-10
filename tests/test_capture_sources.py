@@ -455,8 +455,8 @@ def test_bind_appends_ledger_before_the_json_exists(local_env, monkeypatch):
     [
         ("raise", "(disk)"),
         ("exit", "(bootstrap failed)"),
-        ("rejected", "append result 'rejected'"),
-        ("none", "append result None"),
+        ("rejected", "(append result 'rejected')"),
+        ("none", "(append result None)"),
     ],
 )
 @pytest.mark.parametrize("existing", [False, True])
