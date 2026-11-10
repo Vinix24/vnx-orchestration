@@ -64,8 +64,7 @@ def _legacy_counter(db: Path) -> int:
 
 
 def _injection_violations(db: Path) -> list[str]:
-    """What the version-38 manifest says about intelligence_injections. The live-shaped fixture
-    store does not satisfy the other tables' invariants, so only this table is read."""
+    """The version-38 manifest verdict for intelligence_injections only (the fixture store fails the other tables)."""
     conn = sqlite3.connect(str(db))
     try:
         return [v for v in schema_manifest.validate_db_at_version(conn, 38) if v.startswith(apply_0038.TABLE)]
@@ -123,7 +122,6 @@ def test_a_store_that_already_has_ab_arm_reaches_38_without_error(db):
     assert auto_apply(db) == [38]
     assert _version(db) == 38
     assert {"ab_arm", "ab_window"} <= set(_columns(db))
-    # the value that was already there is kept, not reset
     assert _q(db, "SELECT DISTINCT ab_arm FROM intelligence_injections") == [("treatment",)]
 
 
@@ -136,9 +134,8 @@ def test_a_store_that_has_both_columns_reaches_38(db):
 
 def test_the_round_trip_37_38_37_38_keeps_other_columns_and_rows(db):
     before = _snapshot(db)
-    columns_before = [c for c in _columns(db)]
-    legacy = _legacy_counter(db)
-    assert legacy == 15
+    columns_before = _columns(db)
+    assert _legacy_counter(db) == 15
 
     assert apply_0038.apply_migration(db, SQL) is True
     assert _snapshot(db) == before
@@ -195,7 +192,6 @@ def test_down_refuses_up_front_on_a_sqlite_without_drop_column(db, monkeypatch):
 
 
 def test_a_failing_up_rolls_back_and_leaves_the_store_at_37(db):
-    # the index needs project_id, which this table lacks
     _q(db, "DROP TABLE intelligence_injections")
     _q(db, "CREATE TABLE intelligence_injections (id INTEGER PRIMARY KEY, injection_id TEXT)")
     with pytest.raises(sqlite3.Error):
