@@ -295,14 +295,21 @@ def _history(dated: List[Tuple[datetime, dict]]) -> Dict[str, int]:
     return out
 
 
-def _blocked_findings(plist: dict, dated: List[Tuple[datetime, dict]], horizon: datetime,
-                      tz: Optional[tzinfo]) -> List[dict]:
+def _blocked_findings(plist: Optional[dict], dated: List[Tuple[datetime, dict]], horizon: datetime,
+                      tz: Optional[tzinfo], unknown: str = "") -> List[dict]:
     """One `blocked_skip` per blocked attempt in the horizon, in one pass.
 
     Each blocked event goes to the window (closed or open) that holds it: one
     finding per window, the newest in the detail. A blocked skip outside every
     window is a finding of its own; a failure or timeout there is history only
     (ADR-066, ## nachten).
+
+    A blocked skip read from the events log is always a finding: the plist
+    decides the window it is assigned to, never whether it is seen. Without a
+    usable plist (`plist` None, `unknown` names why) every blocked skip in the
+    horizon (then WINDOW_NIGHTS days back from `now`) becomes one finding that
+    says the schedule is unknown and names the newest such event; a failure or
+    timeout then stays history only.
     """
     per_window: Dict[datetime, str] = {}
     outside: List[str] = []
@@ -312,11 +319,17 @@ def _blocked_findings(plist: dict, dated: List[Tuple[datetime, dict]], horizon: 
         if ts < horizon or not (skip_blocked or kind in ("failed", "timeout")):
             continue
         label = reason if skip_blocked and isinstance(reason, str) and reason else kind
+        if plist is None:
+            outside += [f"{ts.isoformat()}: {label}"] if skip_blocked else []
+            continue
         start, end = _containing_window(ts, plist, tz)
         if start <= ts <= end:  # ascending order: the newest blocked event of the window wins
             per_window[start] = f"night {(start.astimezone(tz) if tz else start.astimezone()).date()}: {label}"
         elif skip_blocked:
             outside.append(f"{ts.isoformat()}: {label} outside every scheduled window")
+    if plist is None:
+        return [_finding("blocked_skip", f"schedule unknown ({unknown}): {len(outside)} blocked skip(s) "
+                         f"since {horizon.isoformat()}, newest {outside[-1]}")] if outside else []
     return [_finding("blocked_skip", d) for d in [per_window[s] for s in sorted(per_window)] + outside]
 
 
@@ -394,6 +407,8 @@ def assess(sources: Dict[str, Any], *, project_id: Optional[str] = None,
     if plist is not None and src["events"] == "ok":  # without both sources the window is unmeasured
         nights, in_flight, more, window = _night_findings(plist, dated, undated, now, tz)
         findings += more
+    elif src["events"] == "ok":  # a blocked skip is measured without a plist; only its window is unknown
+        findings += _blocked_findings(None, dated, now - timedelta(days=WINDOW_NIGHTS), tz, f"plist {src['plist']}")
 
     state = ("deviation" if any(f["severity"] == "error" for f in findings)
              else "unmeasured" if any(v != "ok" for v in src.values()) else "ok")
