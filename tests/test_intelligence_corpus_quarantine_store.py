@@ -2,6 +2,7 @@
 import hashlib
 import importlib
 import json
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 CLI = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py"
+AUDIT = "intelligence_corpus_quarantine_audit.ndjson"
 
 contract = importlib.import_module("intelligence_corpus_quarantine.contract")
 table_digest = importlib.import_module("intelligence_corpus_quarantine.digest").table_digest
@@ -34,12 +36,15 @@ def database(tmp_path):
                                               (19946, "/src/c.py", None, 7)])
         conn.commit()
     (tmp_path / "permit").mkdir()
+    (tmp_path / "permit/manifest.json").write_text('{"baseline": "fixture"}\n')
+    (tmp_path / "state").mkdir()
     return db
 
 
-def run(db, out):
-    return subprocess.run([sys.executable, str(CLI), "quarantine", "--db", str(db), "--out", str(out)],
-                          capture_output=True, text=True, cwd=out.parent)
+def run(db, out, state=None):
+    return subprocess.run([sys.executable, str(CLI), "quarantine", "--db", str(db), "--out", str(out),
+                           "--state-dir", str(state or out.parent / "state")], capture_output=True, text=True,
+                          cwd=out.parent)
 
 
 def sha(path):
@@ -82,6 +87,35 @@ def test_quarantine_writes_a_proven_sealed_artifact(database, tmp_path, journal_
             assert (table["rows"], table["row_min"], table["row_max"]) == (3, found["row_min"], found["row_max"])
         assert copy.execute("SELECT typeof(quality_score) FROM corpus_code_snippets ORDER BY rowid").fetchall() == [
             ("integer",), ("real",), ("null",)]
+    readme = tmp_path / "permit/LEESMIJ.md"
+    assert readme.stat().st_mode & 0o777 == 0o444
+    quoted = [shlex.quote(str(p.resolve())) for p in (database, folder / "quarantine.json")]
+    assert "restore --db {} --quarantine {}".format(*quoted) in readme.read_text()
+    [line] = [json.loads(x) for x in (tmp_path / "state" / AUDIT).read_text().splitlines()]
+    permit = hashlib.sha256((tmp_path / "permit/manifest.json").read_bytes() + (folder / "quarantine.json").read_bytes())
+    assert (line["stage"], line["status"], line["permit_sha256"]) == ("quarantined", "ok", permit.hexdigest())
+    assert (line["code_snippets_rows"], line["snippet_metadata_rows"]) == (3, 3)
+    assert line["artifact_sha256"] == document["artifact_sha256"]
+
+
+def test_unwritable_audit_path_after_the_seal_is_exit_4_and_keeps_the_artifact(database, tmp_path):
+    blocked = tmp_path / "state-is-a-file"
+    blocked.write_text("")
+    result = run(database, tmp_path / "permit", state=blocked)
+    assert result.returncode == 4 and "artifact sealed and valid" in result.stderr, result.stderr
+    folder = tmp_path / "permit/artifact"
+    document = contract.load_quarantine(folder / "quarantine.json")
+    assert sha(folder / document["artifact"]) == document["artifact_sha256"] and folder.stat().st_mode & 0o777 == 0o555
+    assert blocked.read_text() == "" and result.stdout == ""
+
+
+@pytest.mark.parametrize("case", ["no-manifest", "state-in-permit"])
+def test_refusals_before_any_write(database, tmp_path, case):
+    if case == "no-manifest":
+        (tmp_path / "permit/manifest.json").unlink()
+    result = run(database, tmp_path / "permit", state=tmp_path / "permit" if case == "state-in-permit" else None)
+    assert result.returncode == 3 and ("manifest.json" if case == "no-manifest" else "B4") in result.stderr
+    assert not (tmp_path / "permit/artifact").exists() and not (tmp_path / "state" / AUDIT).exists()
 
 
 @pytest.mark.parametrize("field,value,reason", [
@@ -162,8 +196,9 @@ def test_fresh_interpreter_with_only_scripts_lib(database, tmp_path):
     script = "\n".join(["import sys", "sys.path.insert(0, sys.argv[1])",
                         "from intelligence_corpus_quarantine.store import quarantine",
                         "from intelligence_corpus_quarantine.contract import load_quarantine",
-                        "print(load_quarantine(quarantine(sys.argv[2], sys.argv[3]))['track'])"])
+                        "print(load_quarantine(quarantine(*sys.argv[2:4], state_dir=sys.argv[4]))['track'])"])
     result = subprocess.run([sys.executable, "-I", "-c", script, str(ROOT / "scripts/lib"), str(database),
-                             str(tmp_path / "permit")], cwd=tmp_path, capture_output=True, text=True)
+                             str(tmp_path / "permit"), str(tmp_path / "state")], cwd=tmp_path, capture_output=True,
+                            text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "intelligence-corpus-quarantine"

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Measure intelligence stores and quarantine their corpus without changing the source."""
+"""Measure intelligence stores, quarantine their corpus without changing the source, and restore it."""
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -10,10 +11,12 @@ if str(_LIB_DIR) not in sys.path:
     sys.path.insert(0, str(_LIB_DIR))
 
 from project_root import resolve_project_root
+from vnx_paths import resolve_state_dir
+from intelligence_corpus_quarantine.audit import AfterCommitError
 from intelligence_corpus_quarantine.baseline import measure_baseline
 from intelligence_corpus_quarantine.contract import write_manifest
 from intelligence_corpus_quarantine.snapshot import reuse_snapshot
-from intelligence_corpus_quarantine.store import quarantine
+from intelligence_corpus_quarantine.store import quarantine, restore
 
 
 class Parser(argparse.ArgumentParser):
@@ -33,13 +36,23 @@ def main(argv=None):
     store = commands.add_parser("quarantine")
     store.add_argument("--db", type=Path, required=True)
     store.add_argument("--out", type=Path, required=True)
+    back = commands.add_parser("restore")
+    back.add_argument("--db", type=Path, required=True)
+    back.add_argument("--quarantine", type=Path, required=True)
+    back.add_argument("--allow-existing", action="store_true")
+    for command in (store, back):
+        command.add_argument("--state-dir", type=Path, help="audit dir (default: the resolved VNX_STATE_DIR)")
     args = parser.parse_args(argv)
-    if not args.out.is_dir():
+    if args.command != "restore" and not args.out.is_dir():
         parser.error(f"output directory does not exist: {args.out}")
     try:
         resolve_project_root(__file__)
         if args.command == "quarantine":
-            print(quarantine(args.db, args.out))
+            print(quarantine(args.db, args.out, state_dir=args.state_dir or resolve_state_dir()))
+            return 0
+        if args.command == "restore":
+            print(json.dumps(restore(args.db, args.quarantine, state_dir=args.state_dir or resolve_state_dir(),
+                                     allow_existing=args.allow_existing), sort_keys=True))
             return 0
         target = args.out / "manifest.json"
         if args.db.expanduser().resolve() in (target.resolve(), target.with_suffix(".json.tmp").resolve()):
@@ -49,6 +62,9 @@ def main(argv=None):
                 raise ValueError("manifest output would overwrite the snapshot")
         reused = reuse_snapshot(args.reuse_snapshot, target) if args.reuse_snapshot is not None else None
         write_manifest(target, measure_baseline(args.db, snapshot=args.snapshot, reused_snapshot=reused))
+    except AfterCommitError as exc:
+        print(" ".join(str(exc).splitlines()), file=sys.stderr)
+        return 4
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         print(" ".join(str(exc).splitlines()), file=sys.stderr)
         return 3 if isinstance(exc, ValueError) else 1
