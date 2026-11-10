@@ -133,6 +133,8 @@ vnx learning run
 
 Operator: vnx learning review --mode rules
   → inspect pattern, prevention text, confidence, occurrences
+  → each rule shows its Terminal: and Agent: scope ("alle" = every agent)
+  → an approved proposal is not yet guaranteed to be applied at dispatch while P-act is open
 
 Operator: edit pending_rules.json — set status="approved" for accepted rules
 
