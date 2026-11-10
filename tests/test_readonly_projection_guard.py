@@ -22,9 +22,9 @@ ROOT = Path(__file__).resolve().parents[1]
 LEARNING_LOOP = ROOT / "scripts" / "learning_loop.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "readonly_guard"
 
-# Statements whose first keyword is one of these mutate a store. A literal SELECT or
-# EXPLAIN is a read, a PRAGMA only in a proven read-only form (see below). Any other keyword (WITH, VACUUM, a non-SQL string)
-# cannot be classified with certainty, so it fails closed like an unreadable one.
+# Statements whose first keyword is one of these mutate a store. A SELECT or EXPLAIN is
+# a read, a PRAGMA only in a proven read-only form (see below), and only when the whole
+# statement text is known. Any other keyword (WITH, VACUUM, a non-SQL string) fails closed.
 WRITE_KEYWORDS = frozenset({"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"})
 READ_KEYWORDS = frozenset({"SELECT", "PRAGMA", "EXPLAIN"})
 SQL_METHODS = frozenset({"execute", "executemany", "executescript"})
@@ -72,28 +72,28 @@ class Finding:
         return f"{self.function}:{self.line}: {self.reason}"
 
 
-def _literal_sql_head(node: ast.AST) -> str | None:
-    """The readable leading text of a SQL argument, or None when there is none.
-
-    A plain string is itself. An f-string or a ``+``/``%`` concatenation yields the
-    literal prefix before the first interpolated value; ``"INSERT " + table`` is
-    readable, ``table + " INSERT"`` is not. ``"...".format(x)`` yields the template.
-    """
+def _fold_sql(node: ast.AST) -> tuple[str, bool]:
+    """``(known text, complete)`` of a SQL argument. ``complete`` is True only when the
+    scanner folds the whole statement to one exact string: a literal, a literal
+    concatenation or an f-string without placeholders. Anything dynamic (a placeholder,
+    a ``+`` with a non-literal operand, ``%``, ``.format``, a name) is incomplete and
+    yields only the known text before the first dynamic part ("" when none)."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
+        return node.value, True
     if isinstance(node, ast.JoinedStr):
-        parts = []
-        for value in node.values:
-            if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                parts.append(value.value)
-            else:
-                break
-        return "".join(parts) or None
-    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
-        return _literal_sql_head(node.left)
+        parts = [v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)]
+        return "".join(parts), len(parts) == len(node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, left_done = _fold_sql(node.left)
+        if not left_done:
+            return left, False
+        right, right_done = _fold_sql(node.right)
+        return left + right, right_done
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mod):
+        return _fold_sql(node.left)[0], False
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "format":
-        return _literal_sql_head(node.func.value)
-    return None
+        return _fold_sql(node.func.value)[0], False
+    return "", False
 
 
 def _strip_leading_comments(sql: str) -> str:
@@ -162,20 +162,20 @@ def _classify_statement(statement: str) -> str | None:
 
 
 def _classify_sql(argument: ast.AST) -> str | None:
-    """The blocking reason for an ``execute`` argument: a write in any statement
-    wins over an unreadable one; None only when every statement is a proven read."""
-    head = _literal_sql_head(argument)
-    if head is None:
-        return UNREADABLE_SQL
-    complete = isinstance(argument, ast.Constant)
+    """The blocking reason for an ``execute`` argument. A write in any statement of the
+    known text wins over an unreadable one. A proven read needs the COMPLETE statement
+    text: with a dynamic part the known head can only prove a write, never a read."""
+    head, complete = _fold_sql(argument)
     statements = _statements(head, complete)
     if statements is None:
+        return UNREADABLE_SQL
+    if not complete and _first_keyword(head) == "PRAGMA" and not _PRAGMA_FORM.match(_strip_leading_comments(head)):
         return UNREADABLE_SQL
     reasons = [_classify_statement(statement) for statement in statements] or [UNREADABLE_SQL]
     writes = [reason for reason in reasons if reason is not None and reason.startswith("write:")]
     if writes:
         return writes[0]
-    return UNREADABLE_SQL if UNREADABLE_SQL in reasons else None
+    return UNREADABLE_SQL if UNREADABLE_SQL in reasons or not complete else None
 
 
 def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
@@ -281,29 +281,6 @@ def test_a_literal_select_is_a_read_but_every_executemany_is_a_write():
     assert [(f.function, f.line, f.reason) for f in findings] == [("write_anyway", 13, "write:executemany")]
 
 
-@pytest.mark.parametrize(
-    "snippet, expected_reason",
-    [
-        ("conn.execute()", UNREADABLE_SQL),
-        ("conn.execute(None)", UNREADABLE_SQL),
-        ("conn.execute(statement)", UNREADABLE_SQL),
-        ("conn.execute(f'{table} rows')", UNREADABLE_SQL),
-        ('conn.execute("")', UNREADABLE_SQL),
-        ('conn.execute("VACUUM")', UNREADABLE_SQL),
-        ('conn.execute("INSERT INTO t VALUES (1)")', "write:INSERT"),
-    ],
-)
-def test_missing_none_malformed_and_unknown_arguments_stay_blocking(tmp_path, snippet, expected_reason):
-    module = tmp_path / "case.py"
-    module.write_text(
-        "def not_allowlisted(conn, statement=None, table=None):\n    " + snippet + "\n",
-        encoding="utf-8",
-    )
-    findings = scan_module(module)
-    assert [(f.function, f.reason) for f in findings] == [("not_allowlisted", expected_reason)]
-    assert blocking(findings, ALLOWED_WRITES) == findings
-
-
 def test_a_write_at_module_level_is_outside_every_allowed_function(tmp_path):
     module = tmp_path / "module_level.py"
     module.write_text('conn.execute("INSERT INTO t VALUES (1)")\n', encoding="utf-8")
@@ -337,6 +314,22 @@ def _scan_snippet(tmp_path, snippet: str) -> list[Finding]:
 @pytest.mark.parametrize(
     "snippet, expected_reason",
     [
+        ("conn.execute()", UNREADABLE_SQL),
+        ("conn.execute(None)", UNREADABLE_SQL),
+        ("conn.execute(statement)", UNREADABLE_SQL),
+        ("conn.execute(f'{table} rows')", UNREADABLE_SQL),
+        ('conn.execute("")', UNREADABLE_SQL),
+        ('conn.execute("VACUUM")', UNREADABLE_SQL),
+        ('conn.execute("INSERT INTO t VALUES (1)")', "write:INSERT"),
+        ('conn.execute("PRAGMA user_version" + suffix)', UNREADABLE_SQL),
+        ('conn.execute(f"PRAGMA {name}")', UNREADABLE_SQL),
+        ('conn.execute("SELECT 1" + tail)', UNREADABLE_SQL),
+        ('conn.execute("SELECT %s" % value)', UNREADABLE_SQL),
+        ('conn.execute("SELECT {}".format(value))', UNREADABLE_SQL),
+        ('conn.execute("PRAGMA user_version" + " = 42")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA user_" + "version = 42")', "write:PRAGMA"),
+        ('conn.execute(f"UPDATE {table} SET a = 1")', "write:UPDATE"),
+        ('conn.execute("INSERT INTO t " + tail)', "write:INSERT"),
         ('conn.executescript("SELECT 1; DELETE FROM t;")', "write:executescript"),
         ('conn.executescript("SELECT 1")', "write:executescript"),
         ("conn.executescript(script)", "write:executescript"),
@@ -389,6 +382,8 @@ def test_every_statement_is_read_and_a_writing_pragma_or_script_blocks(tmp_path,
         'conn.execute("pragma table_info(x);")',
         'conn.execute("SELECT 1; SELECT 2;")',
         'conn.execute("SELECT 1 -- a; b\\n")',
+        'conn.execute("PRAGMA table_" + "info(x)")',
+        'conn.execute(f"SELECT 1")',
     ],
 )
 def test_proven_read_forms_stay_reads(tmp_path, snippet):
