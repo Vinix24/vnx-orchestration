@@ -41,7 +41,7 @@ class _FakePaths:
 
 def _make_loop(tmp_path: Path, persist: bool):
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
-    state_dir.mkdir(parents=True)
+    state_dir.mkdir(parents=True, exist_ok=True)
     vnx_home = tmp_path / "repo"
     vnx_home.mkdir()
     fake = _FakePaths(state_dir, vnx_home)
@@ -51,7 +51,8 @@ def _make_loop(tmp_path: Path, persist: bool):
 
 
 @pytest.fixture
-def persisting(tmp_path):
+def persisting(tmp_path, approve_learning_persist):
+    approve_learning_persist(tmp_path / "vnx-data" / "vnx-dev" / "state")
     loop, fake, state_dir = _make_loop(tmp_path, persist=True)
     yield loop, fake, state_dir
     loop.conn.close()

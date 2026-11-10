@@ -167,8 +167,9 @@ def test_shadow_run_leaves_db_and_state_byte_identical(env):
 
 
 # (b) the flag turns persisting on
-def test_persist_flag_writes_db_and_state(env, monkeypatch):
+def test_persist_flag_writes_db_and_state(env, monkeypatch, approve_learning_persist):
     state_dir, _ = env
+    approve_learning_persist(state_dir, _run_cycle()["shadow"]["persist_preview"]["proposal_id"])
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
     before = _snapshot(state_dir)
     report = _run_cycle()

@@ -988,3 +988,24 @@ def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # Patch the probe, not the stream: derive() resolves _stdin_isatty at call time,
     # and sys.stdin stays what pytest provides for every other code path.
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: True)
+
+
+@pytest.fixture()
+def approve_learning_persist(monkeypatch: pytest.MonkeyPatch):
+    """Write an unused learning-loop approval record and select it (ADR-068 besluit 18), the way
+    ``_write_record`` in test_qi_learning_approval.py does until ``write_record`` lands. Without an id
+    it approves the empty change set: a persist-mode loop whose bridge step writes no rows. Returns the path."""
+    import qi_learning_approval as qla
+    from atomic_io import slot_lock
+
+    def _approve(state_dir, proposal_id=None):
+        proposal_id = proposal_id or qla.preview([])["proposal_id"]
+        path = qla.record_path(Path(state_dir), proposal_id)
+        record = {"proposal_id": proposal_id, "changes_sha256": proposal_id[6:], "approved_by": "operator",
+                  "approved_at": "2026-11-10T08:00:00+00:00", "reason": "test approval", "consumed_at": None}
+        with slot_lock(path):
+            path.write_text(json.dumps(record), encoding="utf-8")
+        monkeypatch.setenv(qla.APPROVED_ENV, proposal_id)
+        return path
+
+    return _approve

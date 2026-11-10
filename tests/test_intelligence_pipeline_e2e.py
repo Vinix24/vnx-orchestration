@@ -148,10 +148,15 @@ def test_env(tmp_path, monkeypatch):
 
 class _LoopContext:
     """Holds a LearningLoop with ensure_env permanently mocked."""
+    approve = None  # the approval fixture of the running test, set by _persist_mode
+
     def __init__(self, env):
         self._patcher = patch("learning_loop.ensure_env", return_value=env)
         self._patcher.start()
         from learning_loop import LearningLoop
+        shadow = LearningLoop(persist=False)  # approve exactly what the persist loop will write
+        shadow.persist_to_intelligence_db()
+        _LoopContext.approve(env["VNX_STATE_DIR"], shadow.shadow["persist_preview"]["proposal_id"])
         self.loop = LearningLoop()
 
     def close(self):
@@ -497,6 +502,7 @@ class TestSelectorReadsLearningLoopPatterns:
 
 
 @pytest.fixture(autouse=True)
-def _persist_mode(monkeypatch):
+def _persist_mode(monkeypatch, approve_learning_persist):
     """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    _LoopContext.approve = approve_learning_persist

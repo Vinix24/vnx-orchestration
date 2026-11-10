@@ -36,7 +36,10 @@ from contract_invalid_window import (
 )
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from project_scope import resolve_stamp_project_id
+from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
+
+_PATTERN_WRITERS = {"success_patterns": upsert_success_pattern, "antipatterns": upsert_antipattern}
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -355,6 +358,9 @@ class LearningLoop:
         self.archive_path = state_dir / "archive" / "patterns"
 
         if self.persist:
+            # ADR-068 besluit 18: no writable connection without a usable approval
+            # record. The hash binding is checked again before the bridge write.
+            load_approval(state_dir, _DISPOSITION_VALID_APPROVERS)
             # Create archive directory if it doesn't exist
             self.archive_path.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(self.db_path)
@@ -1027,8 +1033,12 @@ class LearningLoop:
 
         - Patterns with used_count > 0 and confidence >= 0.6 → success_patterns
         - Failure patterns with occurrence >= 2 → antipatterns
+
+        The rows are planned first. In persist mode ``_write_planned`` refuses
+        before the first write unless an approval record is bound to exactly them.
         """
         now = datetime.now().isoformat()
+        planned: List[tuple] = []
         patterns_written = 0
         antipatterns_written = 0
 
@@ -1045,8 +1055,7 @@ class LearningLoop:
                     title = metric.pattern_title[:120]
                     # Use empty string category so intelligence_selector scope
                     # matching treats these as universal (empty scope = matches all)
-                    upsert_success_pattern(
-                        self.conn,
+                    planned.append(("success_patterns", dict(
                         project_id=project_id,
                         pattern_type="approach",
                         title=title,
@@ -1059,7 +1068,7 @@ class LearningLoop:
                         last_used=now,
                         valid_from=now,
                         counter="max",
-                    )
+                    )))
                     patterns_written += 1
 
             # Write failure patterns with occurrence >= 2 to antipatterns
@@ -1075,14 +1084,13 @@ class LearningLoop:
                 title = f"Recurring failure: {error_key}"[:120]
                 severity = "high" if len(failures) >= 5 else "medium"
                 # len(failures) is recounted over all receipts on every run.
-                upsert_antipattern(
-                    self.conn,
+                planned.append(("antipatterns", dict(
                     project_id=project_id,
                     pattern_type="approach",
                     title=title,
                     category="",
                     description=f"Error seen {len(failures)} times: {error_key}",
-                    pattern_data=json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
+                    pattern_data=json.dumps({"source": "learning_loop", "terminals": sorted({f['terminal'] for f in failures}, key=str)}),
                     why_problematic=error_key,
                     severity=severity,
                     occurrence_count=len(failures),
@@ -1091,25 +1099,40 @@ class LearningLoop:
                     valid_from=now,
                     counter="max",
                     always_update=("severity",),
-                )
+                )))
                 antipatterns_written += 1
 
+            persist_preview = self._write_planned(planned)
             self.conn.commit()
             if self.persist:
                 print(f"💾 Persisted to intelligence DB: {patterns_written} success patterns, {antipatterns_written} antipatterns")
             else:
                 print(f"👥 Shadow: would persist {patterns_written} success patterns, {antipatterns_written} antipatterns (in-memory copy only)")
-            self.shadow["persist_preview"] = {
-                "success_patterns": patterns_written,
-                "antipatterns": antipatterns_written,
-            }
+            self.shadow["persist_preview"] = persist_preview
 
+        except LearningApprovalRefused:
+            raise
         except Exception as e:
             print(f"❌ Error persisting to intelligence DB: {e}")
             try:
                 self.conn.rollback()
             except sqlite3.OperationalError as rb_err:
                 log.debug("Failed to rollback after persist error: %s", rb_err)
+
+    def _write_planned(self, planned: List[tuple]) -> Dict[str, Any]:
+        """Write the planned (table, row) pairs and return the preview: the counts,
+        the rows, their hash and the proposal id to approve. In persist mode the
+        approval record must be bound to exactly these rows (ADR-068 besluit 18);
+        a refusal raises before the first write."""
+        changes = [dict(row, table=table) for table, row in planned]
+        result = {"success_patterns": sum(t == "success_patterns" for t, _ in planned),
+                  "antipatterns": sum(t == "antipatterns" for t, _ in planned), **preview(changes)}
+        if self.persist:
+            result["approval_record_sha256"] = claim_approval(
+                self.db_path.parent, _DISPOSITION_VALID_APPROVERS, changes)
+        for table, row in planned:
+            _PATTERN_WRITERS[table](self.conn, **row)
+        return result
 
     def ingest_approved_rules(self):
         """Ingest operator-approved prevention rules from pending_rules.json into DB.

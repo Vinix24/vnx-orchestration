@@ -82,7 +82,7 @@ def _new_loop(fake_paths: _FakePaths):
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
+def store(tmp_path, monkeypatch, approve_learning_persist):
     data = tmp_path / "vnx-data"
     state = data / "state"
     reports = data / "unified_reports"
@@ -94,6 +94,7 @@ def store(tmp_path, monkeypatch):
     # environment; pin it to the tmp store so nothing under ~/.vnx-data is read.
     monkeypatch.setenv("VNX_DATA_DIR", str(data))
     fake = _FakePaths(state, home)
+    approve_learning_persist(state)
     loop = _new_loop(fake)
     yield SimpleNamespace(data=data, state=state, reports=reports,
                           reports_dir=reports, home=home, fake=fake, loop=loop)
