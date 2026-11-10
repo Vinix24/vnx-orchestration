@@ -28,6 +28,7 @@ if command -v rg >/dev/null 2>&1; then
     --glob '!**/intelligence_export.py' \
     --glob '!**/intelligence_import.py' \
     --glob '!**/vnx_install.py' \
+    --glob '!**/slot/host_paths.py' \
     --glob '!**/commands/merge_preflight.sh' \
     --glob '!**/*.deprecated' \
     --glob '!**/*.log' \
@@ -55,6 +56,7 @@ else
     --exclude='intelligence_export.py' \
     --exclude='intelligence_import.py' \
     --exclude='vnx_install.py' \
+    --exclude='host_paths.py' \
     --exclude='merge_preflight.sh' \
     --exclude='*.deprecated' \
     --exclude='*.log' \

@@ -1,4 +1,4 @@
-"""RS-2: slot_store rights checks, reads, transaction and doctor (all on tmp_path, platform-free)."""
+"""RS-2: slot_store rights checks, policy read and doctor (all on tmp_path, platform-free)."""
 import copy
 import json
 import os
@@ -17,9 +17,6 @@ POLICY = {"total": 10, "reserved": 2, "runner_reserve": 1, "max_bypass": 3, "max
           "memory": {"swap_growth_mb": 256, "swap_level_mb": 2048, "compressor_gb": 8},
           "profiles": {"runner": {"slots": 1, "max_slots": 8, "max_wait_s": 1800, "heavy": False, "children": ["gate"]},
                        "gate": {"slots": 2, "max_slots": 4, "max_wait_s": 900, "heavy": True, "children": []}}}
-STATE = {"holders": {}, "queue": [], "samples": [], "mode": "observe", "fencing_counter": 0, "transition": None,
-         "shadow": {"holders": {}, "queue": []}, "memory_recovery": {"blocked": False, "clean_buckets": []}}
-
 
 def rights(uid=501, group="vnxslot", mode=0o2770, acl=ACL):
     return {"uid": uid, "group": group, "mode": mode, "acl": acl}
@@ -35,9 +32,8 @@ def env(tmp_path):
     return st, table, store, pdir
 
 
-def test_valid_setup_and_state_pass_doctor(env):
+def test_valid_setup_passes_doctor(env):
     st, _, store, _ = env
-    (store / "state.json").write_text(json.dumps(STATE))
     assert st.doctor() == (0, [])
 
 
@@ -58,6 +54,36 @@ def test_doctor_78_for_bad_policy_rights(env, target, patch):
     table[pdir if target == "dir" else pdir / "host.json"].update(patch)
     code, reasons = st.doctor()
     assert code == 78 and any(r.startswith("policy_invalid") for r in reasons)
+
+
+EXTRA = " 1: {} {} list,add_file,search,delete_child,file_inherit,directory_inherit"
+
+
+@pytest.mark.parametrize("who", ["everyone", "user:other", "group:staff", "group:vnxslot2"])
+def test_foreign_allow_acl_is_refused(env, who):
+    st, table, store, _ = env
+    table[store]["acl"] = ACL + "\n" + EXTRA.format(who, "allow")
+    assert any(r == f"store_invalid: ACL grant for {who}" for r in st.check_store())
+
+
+def test_deny_acl_is_accepted_and_unparsable_line_is_refused(env):
+    st, table, store, _ = env
+    table[store]["acl"] = ACL + "\n" + EXTRA.format("everyone", "deny")
+    assert st.check_store() == []
+    table[store]["acl"] = ACL + "\n garbage line"
+    assert "store_invalid: unparsable ACL line" in st.check_store()
+
+
+@pytest.mark.parametrize("children", [[{}], [1], [None]])
+def test_non_string_child_is_policy_invalid_and_doctor_78(env, children):
+    st, _, store, pdir = env
+    bad = copy.deepcopy(POLICY)
+    bad["profiles"]["gate"]["children"] = children
+    (pdir / "host.json").write_text(json.dumps(bad))
+    with pytest.raises(SlotError) as exc:
+        st.read_policy()
+    assert str(exc.value) == "policy_invalid: profile 'gate' has a non-string child"
+    assert st.doctor()[0] == 78
 
 
 def test_doctor_78_for_unreadable_host_json(env):
@@ -96,19 +122,3 @@ def test_env_budget_never_changes_the_policy_budget(env, monkeypatch):
     monkeypatch.setenv("VNX_SLOT_MODE", "off")
     policy = st.read_policy()
     assert policy["total"] == 10 and policy["mode"] == "observe"
-
-
-@pytest.mark.parametrize("content", ["{broken", "[]", json.dumps({"holders": {}})])
-def test_corrupt_state_is_state_corrupt_never_empty(env, content):
-    st, _, store, _ = env
-    (store / "state.json").write_text(content)
-    with pytest.raises(SlotError) as exc:
-        st.read_state()
-    assert exc.value.code == "state_corrupt"
-    assert st.doctor()[0] == 78
-
-
-def test_missing_state_is_not_an_empty_store(env):
-    st, *_ = env
-    with pytest.raises(SlotError):
-        st.read_state()

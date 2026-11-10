@@ -1,27 +1,29 @@
 """Host-wide capacity store and operator policy (ADR-062 besluit 3, 7, 14; RS-2).
 
-Every refusal is a SlotError with exit code 78. A corrupt state, a wrong right or an
-invalid policy is never an empty state and never mode ``off``. Paths are parameters:
-no environment variable chooses a path or a budget.
+Every refusal is a SlotError with exit code 78. A wrong right or an invalid policy is
+never mode ``off``. Paths are parameters: no environment variable chooses a path or budget.
 
-Split 1 of RS-2 is read-only: this module writes nothing anywhere. Split 2 adds the
-transaction (control lock, atomic state write) and the initial state.
+Split 1 of RS-2 is read-only: this module writes nothing anywhere. doctor() checks the
+store rights, the policy rights and the policy content only. Split 2 adds the state
+(read_state and its validation), the transaction (control lock, atomic write) and the
+initial state.
 """
 from __future__ import annotations
 
 import grp
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple
 
-DEFAULT_STORE_DIR = Path("/Users/Shared/vnx-slots")
-DEFAULT_POLICY_PATH = Path("/Users/Shared/vnx-slots-policy/host.json")
+from .host_paths import DEFAULT_POLICY_PATH, DEFAULT_STORE_DIR
+
 STORE_GROUP = "vnxslot"
 EXIT_INVALID = 78
+ACL_LINE = re.compile(r"^\s*\d+:\s+(.+?)\s+(allow|deny)\b")
 MODES = ("off", "observe", "enforce")
-STATE_MODES = ("off", "observe", "enforce_pending", "enforce")
 
 
 class SlotError(Exception):
@@ -83,6 +85,8 @@ def _validate_policy(p: Dict[str, Any]) -> None:
         if not (ok and prof["slots"] <= prof["max_slots"] and _int(prof.get("max_wait_s"), 1)
                 and isinstance(prof.get("heavy"), bool) and isinstance(prof.get("children"), list)):
             raise bad(f"profile {name!r}")
+        if not all(isinstance(c, str) for c in prof["children"]):
+            raise bad(f"profile {name!r} has a non-string child")
         unknown = [c for c in prof["children"] if c not in profiles]
         if unknown:
             raise bad(f"profile {name!r} references unknown profiles {unknown}")
@@ -93,20 +97,6 @@ def _validate_policy(p: Dict[str, Any]) -> None:
         raise bad("max_bypass/max_transition/max_queue")
     if p.get("mode") not in MODES or not isinstance(p.get("enforce_activation"), dict):
         raise bad("mode/enforce_activation")
-
-
-def _validate_state(s: Dict[str, Any]) -> None:
-    shadow, rec = s.get("shadow"), s.get("memory_recovery")
-    ok = (isinstance(s.get("holders"), dict) and isinstance(s.get("queue"), list)
-          and isinstance(s.get("samples"), list) and s.get("mode") in STATE_MODES
-          and _int(s.get("fencing_counter"), 0) and "transition" in s
-          and (s["transition"] is None or isinstance(s["transition"], dict))
-          and isinstance(shadow, dict) and isinstance(shadow.get("holders"), dict)
-          and isinstance(shadow.get("queue"), list)
-          and isinstance(rec, dict) and isinstance(rec.get("blocked"), bool)
-          and isinstance(rec.get("clean_buckets"), list))
-    if not ok:
-        raise SlotError("state_corrupt", "state.json misses or mistypes a required field")
 
 
 class SlotStore:
@@ -130,8 +120,14 @@ class SlotStore:
             reasons.append(f"store_invalid: group is {st.get('group')!r}, not {STORE_GROUP}")
         if not isinstance(st.get("mode"), int) or st["mode"] & 0o007:
             reasons.append("store_invalid: rights for others")
-        if not any(f"group:{STORE_GROUP} allow" in ln and "file_inherit" in ln and "directory_inherit" in ln
-                   for ln in acl.splitlines()):
+        entries = [(ACL_LINE.match(ln), ln) for ln in acl.splitlines() if ln.strip()]
+        if any(m is None for m, _ in entries):
+            reasons.append("store_invalid: unparsable ACL line")
+        grants = [(m.group(1), ln) for m, ln in entries if m and m.group(2) == "allow"]
+        reasons += [f"store_invalid: ACL grant for {who}" for who in dict.fromkeys(w for w, _ in grants)
+                    if who != f"group:{STORE_GROUP}"]
+        if not any(who == f"group:{STORE_GROUP}" and "file_inherit" in ln and "directory_inherit" in ln
+                   for who, ln in grants):
             reasons.append("store_invalid: inheritable group ACL entry missing")
         return reasons
 
@@ -158,16 +154,10 @@ class SlotStore:
         _validate_policy(policy)
         return policy
 
-    def read_state(self) -> Dict[str, Any]:
-        state = _load(self.store_dir / "state.json", "state_corrupt")
-        _validate_state(state)
-        return state
-
     def doctor(self) -> Tuple[int, List[str]]:
         reasons = self.check_store() + self.check_policy()
-        for reader in (self.read_policy, self.read_state):
-            try:
-                reader()
-            except SlotError as exc:
-                reasons.append(str(exc))
+        try:
+            self.read_policy()
+        except SlotError as exc:
+            reasons.append(str(exc))
         return (EXIT_INVALID, reasons) if reasons else (0, [])
