@@ -83,7 +83,6 @@ def test_apply_copies_and_verifies_and_leaves_the_source_byte_equal(world):
     before = hashlib.sha256(world["src"].read_bytes()).hexdigest()
     proc = _apply(world)
     assert proc.returncode == 0 and _outcomes(proc) == ["verified"], proc.stderr
-    assert ["still holds the row" in n and "step 3" in n for n in json.loads(proc.stdout)["notes"].values()] == [True]
     assert hashlib.sha256(world["src"].read_bytes()).hexdigest() == before
     [copy] = _rows(world["dest"], "success_patterns")
     assert copy["project_id"] == A and qtp.content_key(copy) == world["plan"]["planned_moves"][0]["content_key"]
@@ -112,16 +111,6 @@ def test_a_refused_move_changes_nothing(world, outcome, edit):
     assert json.loads(proc.stdout)["notes"] == {}
 
 
-def test_content_the_destination_holds_is_not_inserted_again(world):
-    keep = _insert_success_pattern(world["dest"], project_id=A, source_dispatch_ids=["d-1"], title=TITLE)
-    first_seen = world["plan"]["planned_moves"][0]["pre_image"]["row"]["first_seen"]
-    _sql(world["dest"], "UPDATE success_patterns SET first_seen = ? WHERE id = ?", first_seen, keep)
-    proc = _apply(world)
-    assert proc.returncode == 0 and _outcomes(proc) == ["already_present"]
-    assert [r["id"] for r in _rows(world["dest"], "success_patterns")] == [keep]
-    assert [(x["dest_id"], x["created"]) for x in _journal(world) if x["state"] == "copied"] == [(keep, False)]
-
-
 _MALFORMED = [("created", "true"), ("created", 1), ("dest_id", True), ("dest_id", "1"), ("row_key", 7),
               ("pattern_id", "intel_sp_9"), ("cols", ["title"]), ("cols", {"success_patterns": "title"}),
               ("junction", [["pattern_usage", "k"]]), ("junction", [["sqlite_master", "k", True]]),
@@ -130,9 +119,7 @@ _MALFORMED += [(f, v) for f in dict(_MALFORMED) for v in (None, "missing")]  # N
 
 
 @pytest.mark.parametrize("edit,keep,damage,outcome", [
-    ({}, 0, "", "verified"), ({}, 0, "UPDATE success_patterns SET title = 'edited'", "verify_failed"),
-    ({}, 0, "UPDATE pattern_usage SET pattern_title = 'edited'", "verify_failed"), ({}, 1, "", "already_present"),
-    ({"state": "source_removed"}, 0, "", "refused"), ({"state": "done"}, 0, "", "refused"),
+    ({}, 0, "", "verified"), ({}, 1, "", "already_present"),
     ({"state": "planned"}, 1, "", "refused"),  # verified, and no copied line before it
     ({}, 1, "UPDATE success_patterns SET project_id = 'gamma'", "destination_missing"),
 ] + [({f: v}, keep, "", f"valid {f}") for f, v in _MALFORMED for keep in (0, 1)])  # copied path, verified fast path

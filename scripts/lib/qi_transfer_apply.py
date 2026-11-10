@@ -65,9 +65,8 @@ def load_plan(path: Path) -> Dict[str, Any]:
 
 def _journal(path: Path, line: Dict[str, Any]) -> None:
     """Append one line and fsync it before the caller takes its next step."""
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     with open(path, "a", encoding="utf-8") as fh:  # vnx-atomic-write: append-only journal, fsync per line
-        fh.write(canonical_json({**line, "ts": stamp}) + "\n")
+        fh.write(canonical_json({**line, "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")}) + "\n")
         fh.flush()
         os.fsync(fh.fileno())
 
