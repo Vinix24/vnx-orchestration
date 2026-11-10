@@ -215,6 +215,22 @@ def _window(day: date, hour: int, minute: int, tz: Optional[tzinfo]) -> Tuple[da
     return start, start + timedelta(hours=GRACE_HOURS)
 
 
+def _containing_window(ts: datetime, plist: dict, tz: Optional[tzinfo]) -> Tuple[datetime, datetime]:
+    """The scheduled window [start, end] that holds `ts`.
+
+    A window that crosses midnight belongs to the evening before, so the day
+    before `ts` is checked as well. Outside every window it is the window of
+    the calendar day of `ts`.
+    """
+    day = ts.astimezone(tz).date() if tz else ts.astimezone().date()
+    own = _window(day, plist["hour"], plist["minute"], tz)
+    before = _window(day - timedelta(days=1), plist["hour"], plist["minute"], tz)
+    for start, end in (own, before):
+        if start <= ts <= end:
+            return start, end
+    return own
+
+
 def classify_night(day: date, start: datetime, end: datetime,
                    dated: List[Tuple[datetime, dict]]) -> dict:
     """One night record from the dated attempt events inside [start, end].
@@ -292,8 +308,7 @@ def _night_findings(plist: dict, dated: List[Tuple[datetime, dict]], undated: in
     for ts, e in dated:
         if _ATTEMPT_TYPES[e["event_type"]] != "started" or ts < horizon or e.get("cycle_id") in ended:
             continue
-        day = ts.astimezone(tz).date() if tz else ts.astimezone().date()
-        if _window(day, plist["hour"], plist["minute"], tz)[1] > now:
+        if _containing_window(ts, plist, tz)[1] > now:
             in_flight.append({"cycle_id": e.get("cycle_id"), "at": ts.isoformat()})
         else:
             findings.append(_finding("started_without_end",

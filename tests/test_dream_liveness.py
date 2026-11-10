@@ -274,6 +274,25 @@ def test_started_without_end_in_a_closed_window_and_in_flight_in_an_open_one():
     assert "started_without_end" not in ids(ended)
 
 
+P23 = dict(PLIST, hour=23)
+
+
+def test_cross_midnight_unmatched_start_belongs_to_the_evening_window():
+    start = ev("dream_cycle_started", "2026-11-10", "00:30")
+    late = doc([start], plist=P23)
+    assert "started_without_end" in ids(late) and late["in_flight"] == []
+    flying = doc([start], plist=P23, now=datetime(2026, 11, 10, 1, 30, tzinfo=UTC))
+    assert "started_without_end" not in ids(flying) and len(flying["in_flight"]) == 1
+
+
+def test_start_outside_every_window_keeps_the_calendar_day_window():
+    start = ev("dream_cycle_started", "2026-11-10", "10:00")
+    same_day = doc([start], plist=P23)
+    assert "started_without_end" not in ids(same_day) and len(same_day["in_flight"]) == 1
+    after = doc([start], plist=P23, now=datetime(2026, 11, 11, 3, 0, tzinfo=UTC))
+    assert "started_without_end" in ids(after) and after["in_flight"] == []
+
+
 def test_failure_outside_the_window_is_history_only():
     d = doc(good_week() + [ev("dream_cycle_failed", "2026-11-09", "09:00")])
     assert d["history"]["failed"] == 1 and "blocked_skip" not in ids(d)
