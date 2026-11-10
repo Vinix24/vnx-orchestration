@@ -12,6 +12,7 @@ write fails as stale. The guard takes the module path, so the fixtures under
 from __future__ import annotations
 
 import ast
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,12 +22,26 @@ ROOT = Path(__file__).resolve().parents[1]
 LEARNING_LOOP = ROOT / "scripts" / "learning_loop.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "readonly_guard"
 
-# Statements whose first keyword is one of these mutate a store. A literal SELECT,
-# PRAGMA or EXPLAIN is a read. Any other keyword (WITH, VACUUM, a non-SQL string)
+# Statements whose first keyword is one of these mutate a store. A literal SELECT or
+# EXPLAIN is a read, a PRAGMA only in a proven read-only form (see below). Any other keyword (WITH, VACUUM, a non-SQL string)
 # cannot be classified with certainty, so it fails closed like an unreadable one.
 WRITE_KEYWORDS = frozenset({"INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER"})
 READ_KEYWORDS = frozenset({"SELECT", "PRAGMA", "EXPLAIN"})
 SQL_METHODS = frozenset({"execute", "executemany", "executescript"})
+# Always a write, whatever the argument: splitting a script into statements needs an
+# SQL tokenizer (a string or comment can hold a ``;``) and this guard must not rely on one.
+ALWAYS_WRITE_METHODS = frozenset({"executemany", "executescript"})
+# PRAGMA is a read only in a form proven read-only, from these two closed sets. Any
+# ``= value``, any parenthesized argument on another name and any other name is a write.
+PRAGMA_WITH_ARGUMENT = frozenset({
+    "table_info", "table_xinfo", "index_list", "index_info", "index_xinfo",
+    "foreign_key_list", "integrity_check", "quick_check",
+})
+PRAGMA_BARE = PRAGMA_WITH_ARGUMENT | frozenset({
+    "user_version", "schema_version", "journal_mode", "database_list", "compile_options",
+})
+_PRAGMA_FORM = re.compile(r"PRAGMA\s+(?:\w+\.)?(\w+)\s*(.*)\Z", re.IGNORECASE | re.DOTALL)
+_QUOTES = "'\"`["
 UNREADABLE_SQL = "unreadable_sql"
 
 # One line per entry, each naming why this function may write SQL. Built from
@@ -81,8 +96,9 @@ def _literal_sql_head(node: ast.AST) -> str | None:
     return None
 
 
-def _first_keyword(sql: str) -> str:
-    """The first SQL word, after leading whitespace and ``--`` / ``/* */`` comments."""
+def _strip_leading_comments(sql: str) -> str:
+    """``sql`` after leading whitespace and ``--`` / ``/* */`` comments. An unclosed
+    comment leaves nothing readable and yields an empty string."""
     body = sql.lstrip()
     while True:
         if body.startswith("--"):
@@ -96,8 +112,70 @@ def _first_keyword(sql: str) -> str:
                 return ""
             body = body[end + 2:].lstrip()
         else:
-            break
-    return body.split()[0].upper() if body.split() else ""
+            return body
+
+
+def _first_keyword(sql: str) -> str:
+    """The first SQL word, after leading whitespace and ``--`` / ``/* */`` comments."""
+    words = _strip_leading_comments(sql).split()
+    return words[0].upper() if words else ""
+
+
+def _pragma_is_read(statement: str) -> bool:
+    """True only for a PRAGMA in one of the two proven read-only forms."""
+    match = _PRAGMA_FORM.match(_strip_leading_comments(statement).rstrip())
+    if match is None:
+        return False
+    name, rest = match.group(1).lower(), match.group(2)
+    if not rest:
+        return name in PRAGMA_BARE
+    return rest.startswith("(") and rest.endswith(")") and name in PRAGMA_WITH_ARGUMENT
+
+
+def _statements(head: str, complete: bool) -> list[str] | None:
+    """The statements in ``head``, or None when the split is not certain.
+
+    Without a ``;`` the head is one statement. With one, a quote anywhere or a tail
+    that is not a complete literal makes the split uncertain; otherwise comments are
+    removed and the head is cut on ``;`` (no quote means no ``;`` inside a string).
+    """
+    if ";" not in head:
+        return [head]
+    if not complete or any(quote in head for quote in _QUOTES):
+        return None
+    without_comments = re.sub(r"--[^\n]*", " ", head)
+    if "/*" in re.sub(r"/\*.*?\*/", " ", without_comments, flags=re.DOTALL):
+        return None
+    without_comments = re.sub(r"/\*.*?\*/", " ", without_comments, flags=re.DOTALL)
+    return [part for part in without_comments.split(";") if part.strip()]
+
+
+def _classify_statement(statement: str) -> str | None:
+    """``write:<KEYWORD>`` for a write, UNREADABLE_SQL when it cannot be classified,
+    None for a proven read."""
+    keyword = _first_keyword(statement)
+    if keyword in WRITE_KEYWORDS:
+        return f"write:{keyword}"
+    if keyword == "PRAGMA":
+        return None if _pragma_is_read(statement) else "write:PRAGMA"
+    return None if keyword in READ_KEYWORDS else UNREADABLE_SQL
+
+
+def _classify_sql(argument: ast.AST) -> str | None:
+    """The blocking reason for an ``execute`` argument: a write in any statement
+    wins over an unreadable one; None only when every statement is a proven read."""
+    head = _literal_sql_head(argument)
+    if head is None:
+        return UNREADABLE_SQL
+    complete = isinstance(argument, ast.Constant)
+    statements = _statements(head, complete)
+    if statements is None:
+        return UNREADABLE_SQL
+    reasons = [_classify_statement(statement) for statement in statements] or [UNREADABLE_SQL]
+    writes = [reason for reason in reasons if reason is not None and reason.startswith("write:")]
+    if writes:
+        return writes[0]
+    return UNREADABLE_SQL if UNREADABLE_SQL in reasons else None
 
 
 def _parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
@@ -119,8 +197,9 @@ def _enclosing_function(call: ast.Call, parents: dict[ast.AST, ast.AST]) -> str:
 
 
 def scan_module(path: Path) -> list[Finding]:
-    """Every SQL-writing call in ``path``: static writes, unreadable statements and
-    every ``executemany`` call (a write even when its argument looks like a read)."""
+    """Every SQL-writing call in ``path``: static writes in any statement, unreadable
+    statements, writing PRAGMAs and every ``executemany`` / ``executescript`` call (a
+    write even when its argument looks like a read)."""
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     parents = _parent_map(tree)
     findings: list[Finding] = []
@@ -130,18 +209,12 @@ def scan_module(path: Path) -> list[Finding]:
         if call.func.attr not in SQL_METHODS:
             continue
         function = _enclosing_function(call, parents)
-        if call.func.attr == "executemany":
-            findings.append(Finding(function, call.lineno, "write:executemany"))
+        if call.func.attr in ALWAYS_WRITE_METHODS:
+            findings.append(Finding(function, call.lineno, f"write:{call.func.attr}"))
             continue
-        if not call.args:
-            findings.append(Finding(function, call.lineno, UNREADABLE_SQL))
-            continue
-        head = _literal_sql_head(call.args[0])
-        keyword = _first_keyword(head) if head is not None else ""
-        if keyword in WRITE_KEYWORDS:
-            findings.append(Finding(function, call.lineno, f"write:{keyword}"))
-        elif keyword not in READ_KEYWORDS:
-            findings.append(Finding(function, call.lineno, UNREADABLE_SQL))
+        reason = _classify_sql(call.args[0]) if call.args else UNREADABLE_SQL
+        if reason is not None:
+            findings.append(Finding(function, call.lineno, reason))
     return findings
 
 
@@ -253,3 +326,70 @@ def test_leading_whitespace_and_comments_do_not_hide_a_write(tmp_path):
     )
     findings = scan_module(module)
     assert [(f.function, f.reason) for f in findings] == [("hidden", "write:DELETE")]
+
+
+def _scan_snippet(tmp_path, snippet: str) -> list[Finding]:
+    module = tmp_path / "snippet.py"
+    module.write_text("def not_allowlisted(conn):\n    " + snippet + "\n", encoding="utf-8")
+    return scan_module(module)
+
+
+@pytest.mark.parametrize(
+    "snippet, expected_reason",
+    [
+        ('conn.executescript("SELECT 1; DELETE FROM t;")', "write:executescript"),
+        ('conn.executescript("SELECT 1")', "write:executescript"),
+        ("conn.executescript(script)", "write:executescript"),
+        ("conn.executescript()", "write:executescript"),
+        ('conn.execute("SELECT 1; DELETE FROM t")', "write:DELETE"),
+        ('conn.execute("SELECT 1;\\n-- note\\nUPDATE t SET a = 1;")', "write:UPDATE"),
+        ('conn.execute("SELECT 1; /* ; */ DROP TABLE t")', "write:DROP"),
+        ('conn.execute("SELECT 1; WITH x AS (SELECT 1) SELECT * FROM x")', UNREADABLE_SQL),
+        ('conn.execute("SELECT 1; " + tail)', UNREADABLE_SQL),
+        ('conn.execute("SELECT \'a;b\'; DELETE FROM t")', UNREADABLE_SQL),
+        ('conn.execute("SELECT 1; /* open")', UNREADABLE_SQL),
+        ('conn.execute("SELECT \'a;b\'")', UNREADABLE_SQL),
+        ('conn.execute("PRAGMA user_version = 42")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA main.user_version=42")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA journal_mode = WAL")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA journal_mode(WAL)")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA user_version(42)")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA foo")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA foo(1)")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA")', "write:PRAGMA"),
+        ('conn.execute("PRAGMA table_info(" + name + ")")', "write:PRAGMA"),
+        ('conn.execute("SELECT 1; PRAGMA user_version = 1")', "write:PRAGMA"),
+    ],
+)
+def test_every_statement_is_read_and_a_writing_pragma_or_script_blocks(tmp_path, snippet, expected_reason):
+    findings = _scan_snippet(tmp_path, snippet)
+    assert [(f.function, f.reason) for f in findings] == [("not_allowlisted", expected_reason)]
+    assert blocking(findings, ALLOWED_WRITES) == findings
+    scoped = {"not_allowlisted": "fixture: reviewed statement"}
+    assert blocking(findings, scoped) == []
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        'conn.execute("PRAGMA table_info(x)")',
+        'conn.execute("PRAGMA table_xinfo(\'x\')")',
+        'conn.execute("PRAGMA index_list(x)")',
+        'conn.execute("PRAGMA index_info(i)")',
+        'conn.execute("PRAGMA index_xinfo(i)")',
+        'conn.execute("PRAGMA foreign_key_list(x)")',
+        'conn.execute("PRAGMA integrity_check(5)")',
+        'conn.execute("PRAGMA quick_check(5)")',
+        'conn.execute("PRAGMA user_version")',
+        'conn.execute("PRAGMA main.schema_version")',
+        'conn.execute("PRAGMA journal_mode")',
+        'conn.execute("PRAGMA database_list")',
+        'conn.execute("PRAGMA compile_options")',
+        'conn.execute("PRAGMA integrity_check")',
+        'conn.execute("pragma table_info(x);")',
+        'conn.execute("SELECT 1; SELECT 2;")',
+        'conn.execute("SELECT 1 -- a; b\\n")',
+    ],
+)
+def test_proven_read_forms_stay_reads(tmp_path, snippet):
+    assert _scan_snippet(tmp_path, snippet) == []
