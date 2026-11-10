@@ -1,6 +1,5 @@
-"""Q3 split 2: restore puts a quarantined corpus back with one command and proves it before COMMIT."""
+"""Q3 split 2: restore puts a quarantined corpus back with one command, between an intent and an outcome line."""
 import hashlib
-import importlib
 import importlib.util
 import json
 import os
@@ -14,18 +13,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
-CLI = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py"
-AUDIT = "intelligence_corpus_quarantine_audit.ndjson"
-ROWIDS = [2, 3, 19946]  # 19946 % 9973 == 0: the modulus sample, beyond the first and last 20
+CLI, AUDIT = ROOT / "scripts/vnx_intelligence_corpus_quarantine.py", "intelligence_corpus_quarantine_audit.ndjson"
+ROWIDS, SHA = [2, 3, 19946], "a" * 64  # 19946 % 9973 == 0: the modulus sample, beyond the first and last 20
+META = "INSERT INTO snippet_metadata(id,snippet_rowid,file_path) VALUES ({},2,'x');"
+BETWEEN, MERGE = "INSERT INTO code_snippets(rowid,title) VALUES (500,'between');", ("--allow-existing",)
 
-contract = importlib.import_module("intelligence_corpus_quarantine.contract")
-store = importlib.import_module("intelligence_corpus_quarantine.store")
-table_digest = importlib.import_module("intelligence_corpus_quarantine.digest").table_digest
-
-
-def cli(*args, cwd, state=None):
-    env = dict(os.environ, **({"VNX_STATE_DIR": str(state)} if state else {}))
-    return subprocess.run([sys.executable, str(CLI), *map(str, args)], capture_output=True, text=True, cwd=cwd, env=env)
+audit, contract, digest, store = (importlib.import_module(f"intelligence_corpus_quarantine.{name}")
+                                  for name in ("audit", "contract", "digest", "store"))
+quarantine_cli = importlib.util.module_from_spec(importlib.util.spec_from_file_location("quarantine_cli", CLI))
+quarantine_cli.__loader__.exec_module(quarantine_cli)  # the real main() in this process: a monkeypatched seam holds
 
 
 def content(db, table):
@@ -36,8 +32,7 @@ def content(db, table):
 
 
 def counts(db):
-    with closing(sqlite3.connect(db)) as conn:
-        return [conn.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in contract.CORPUS_TABLES]
+    return [len(content(db, t)) for t in contract.CORPUS_TABLES]
 
 
 @pytest.fixture
@@ -55,118 +50,106 @@ def permit(tmp_path):
     (tmp_path / "permit").mkdir()
     (tmp_path / "permit/manifest.json").write_text('{"baseline": "fixture"}\n')
     state.mkdir()
-    result = cli("quarantine", "--db", db, "--out", tmp_path / "permit", cwd=tmp_path, state=state)  # default state dir
-    assert result.returncode == 0, result.stderr
+    result = subprocess.run([sys.executable, CLI, "quarantine", "--db", db, "--out", tmp_path / "permit"], cwd=tmp_path,
+                            capture_output=True, text=True, env=dict(os.environ, VNX_STATE_DIR=str(state)))
+    assert result.returncode == 0, result.stderr  # no --state-dir: the default, the resolved VNX_STATE_DIR
     before = {t: content(db, t) for t in contract.CORPUS_TABLES}
-    with closing(sqlite3.connect(db)) as conn:
-        conn.execute("DELETE FROM code_snippets")
-        conn.execute("DELETE FROM snippet_metadata")
-        conn.execute("DELETE FROM sqlite_sequence WHERE name='snippet_metadata'")  # restore must re-seed it itself
-        conn.commit()
+    with closing(sqlite3.connect(db)) as conn:  # sqlite_sequence too: restore must re-seed it itself
+        conn.executescript("DELETE FROM code_snippets; DELETE FROM snippet_metadata; DELETE FROM sqlite_sequence;")
     return dict(db=db, q=tmp_path / "permit/artifact/quarantine.json", state=state, before=before, tmp=tmp_path)
 
 
-def restore(p, *extra, state=None):
-    return cli("restore", "--db", p["db"], "--quarantine", p["q"], "--state-dir", state or p["state"], *extra,
-               cwd=p["tmp"])
+def restore(p, capsys, *extra, state=None):
+    return (quarantine_cli.main(["restore", "--db", str(p["db"]), "--quarantine", str(p["q"]),
+                                 "--state-dir", str(state or p["state"]), *extra]), *capsys.readouterr())
 
 
-def audit_lines(state, stage):
-    lines = (state / AUDIT).read_text().splitlines() if (state / AUDIT).is_file() else []
-    return [r for r in map(json.loads, lines) if r["stage"] == stage]
+def outcome(p, *statuses, stage="restored"):
+    """Assert the audit lines of a stage carry exactly these statuses, in order, all bound to this permit."""
+    lines = [r for r in map(json.loads, (p["state"] / AUDIT).read_text().splitlines()) if r["stage"] == stage]
+    sha = hashlib.sha256((p["q"].parent.parent / "manifest.json").read_bytes() + p["q"].read_bytes()).hexdigest()
+    assert [(r["status"], r["permit_sha256"]) for r in lines] == [(s, sha) for s in statuses]
+    return lines
 
 
-def test_restore_puts_rows_rowids_join_digest_and_index_back(permit):
-    result = restore(permit)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["rows"] == {"code_snippets": 3, "snippet_metadata": 3}
+def insert_then_raise(conn, tables, insert=store._insert_and_prove):
+    insert(conn, tables)
+    raise ValueError("injected after the insert")
+
+
+def test_restore_puts_rows_rowids_join_digest_and_index_back(permit, capsys):
+    rc, out, err = restore(permit, capsys)
+    assert rc == 0 and json.loads(out)["rows"] == {"code_snippets": 3, "snippet_metadata": 3}, err
     with closing(sqlite3.connect(permit["db"])) as conn:
-        for table in contract.load_quarantine(permit["q"])["tables"]:  # rows, rowids, storage classes, digest
-            assert content(permit["db"], table["name"]) == permit["before"][table["name"]]
-            assert table_digest(conn, table["name"], table["columns"], "rowid")["digest_sha256"] == table["content_digest"]
+        for t in contract.load_quarantine(permit["q"])["tables"]:  # rows, rowids, storage classes, digest
+            assert content(permit["db"], t["name"]) == permit["before"][t["name"]]
+            assert digest.table_digest(conn, t["name"], t["columns"], "rowid")["digest_sha256"] == t["content_digest"]
         assert conn.execute("SELECT rowid FROM code_snippets WHERE code_snippets MATCH 'parse' "
                             "ORDER BY rowid").fetchall() == [(r,) for r in ROWIDS]
         assert conn.execute("SELECT count(*) FROM snippet_metadata m JOIN code_snippets s "
                             "ON s.rowid = m.snippet_rowid").fetchone() == (3,)
         assert conn.execute("INSERT INTO snippet_metadata(snippet_rowid,file_path) VALUES (2,'n')").lastrowid > 20046
         assert conn.execute("INSERT INTO code_snippets(title) VALUES ('n')").lastrowid > 19946
-    [line] = audit_lines(permit["state"], "restored")
-    assert len(audit_lines(permit["state"], "quarantined")) == 1  # the fixture's default: the resolved VNX_STATE_DIR
-    manifest = permit["q"].parent.parent / "manifest.json"
-    assert line["permit_sha256"] == hashlib.sha256(manifest.read_bytes() + permit["q"].read_bytes()).hexdigest()
-    assert (line["status"], line["code_snippets_rows"], line["snippet_metadata_rows"]) == ("ok", 3, 3)
+    intent, ok = outcome(permit, "intent", "ok")
+    outcome(permit, "ok", stage="quarantined")  # the fixture's quarantine wrote to the resolved VNX_STATE_DIR
+    assert [(r["code_snippets_rows"], r["snippet_metadata_rows"]) for r in (intent, ok)] == [(3, 3), (3, 3)]
 
 
-def test_non_empty_target_without_allow_existing_inserts_nothing(permit):
-    with closing(sqlite3.connect(permit["db"])) as conn:
-        conn.execute("INSERT INTO snippet_metadata(id,snippet_rowid,file_path) VALUES (900,2,'later')")
-        conn.commit()
-    result = restore(permit)
-    assert result.returncode == 3 and "snippet_metadata is not empty" in result.stderr, result.stderr
-    assert counts(permit["db"]) == [0, 1] and audit_lines(permit["state"], "restored") == []
+@pytest.mark.parametrize("sql,seam,flag,after,status,reason", [
+    (META.format(900), None, (), [0, 1], "refused", "snippet_metadata is not empty"),
+    (BETWEEN + META.format(103), None, MERGE, [1, 1], "refused", "collision in snippet_metadata: 1 rowids [103]"),
+    (BETWEEN, None, MERGE, [4, 3], "ok", ""),
+    ("", ("table_digest", lambda *a, **k: dict(rows=3, digest_sha256=SHA)), (), [0, 0], "rolled_back", "digest"),
+    ("", ("_probe_query", lambda values: '"absentword"'), (), [0, 0], "rolled_back", "missed [2, 3, 19946]"),
+    ("", ("_insert_and_prove", insert_then_raise), (), [0, 0], "rolled_back", "injected after the insert"),
+], ids=["not-empty", "collision", "merge", "digest", "match-probe", "insert-raises"])
+def test_intent_then_refused_rolled_back_or_ok(permit, monkeypatch, capsys, sql, seam, flag, after, status, reason):
+    with closing(sqlite3.connect(permit["db"])) as conn:  # the second table refuses: the first gets nothing either
+        conn.executescript(sql)
+    if seam:
+        monkeypatch.setattr(store, *seam)
+    rc, _, err = restore(permit, capsys, *flag)
+    assert rc == (0 if status == "ok" else 3) and reason in err and counts(permit["db"]) == after, err
+    assert reason in outcome(permit, "intent", status)[1].get("reason", "")
 
 
-@pytest.mark.parametrize("clash,rc,after", [(True, 3, [1, 1]), (False, 0, [4, 3])], ids=["collision", "merge"])
-def test_allow_existing_names_a_rowid_collision_or_merges_around_existing_rows(permit, clash, rc, after):
-    with closing(sqlite3.connect(permit["db"])) as conn:
-        conn.execute("INSERT INTO code_snippets(rowid,title) VALUES (500,'between')")  # inside the restored range
-        if clash:  # the second table collides: one transaction means the first table gets nothing either
-            conn.execute("INSERT INTO snippet_metadata(id,snippet_rowid,file_path) VALUES (103,500,'clash')")
-        conn.commit()
-    result = restore(permit, "--allow-existing")
-    assert result.returncode == rc, result.stderr
-    assert not clash or "collision in snippet_metadata: 1 rowids [103]" in result.stderr
-    assert counts(permit["db"]) == after
+@pytest.mark.parametrize("fails,rc,after,message", [("ok", 4, [3, 3], "committed, but the audit line was not written"),
+                                                     ("rolled_back", 3, [0, 0], "rolled_back outcome line is missing")])
+def test_failed_outcome_line_keeps_the_intent(permit, monkeypatch, capsys, fails, rc, after, message):
+    def append(state_dir, stage, permit_sha256, status, real=audit.append, **numbers):
+        if status == fails:
+            raise OSError(f"injected: no {status} line")
+        return real(state_dir, stage, permit_sha256, status, **numbers)
+    monkeypatch.setattr(audit, "append", append)
+    if fails == "rolled_back":  # the transaction fails too: its outcome line is the one that cannot be written
+        monkeypatch.setattr(store, "_insert_and_prove", insert_then_raise)
+    code, out, err = restore(permit, capsys)
+    assert (code, out) == (rc, "") and message in err and counts(permit["db"]) == after, err
+    outcome(permit, "intent")
 
 
-@pytest.mark.parametrize("seam,value,reason", [
-    ("table_digest", lambda *a, **k: dict(rows=3, digest_sha256="0" * 64), "code_snippets digest"),
-    ("_probe_query", lambda values: '"absentword"', "missed [2, 3, 19946]"),
-], ids=["digest", "match-probe"])
-def test_failed_proof_rolls_back_and_exits_3(permit, monkeypatch, capsys, seam, value, reason):
-    spec = importlib.util.spec_from_file_location("quarantine_cli", CLI)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    monkeypatch.setattr(store, seam, value)
-    rc = module.main(["restore", "--db", str(permit["db"]), "--quarantine", str(permit["q"]),
-                      "--state-dir", str(permit["state"])])
-    assert rc == 3 and reason in capsys.readouterr().err
-    assert counts(permit["db"]) == [0, 0] and audit_lines(permit["state"], "restored") == []
-
-
-def test_flipped_artifact_byte_refuses_before_any_write(permit):
-    artifact = permit["q"].parent / contract.load_quarantine(permit["q"])["artifact"]
-    permit["q"].parent.chmod(0o755)
-    artifact.chmod(0o644)
-    data = bytearray(artifact.read_bytes())
-    data[len(data) // 2] ^= 0xFF
-    artifact.write_bytes(bytes(data))
+@pytest.mark.parametrize("case,reason", [("flipped-byte", "artifact does not match quarantine.json"),
+                                         ("state-is-a-file", "intent line was not written"), ("state-in-permit", "B4")])
+def test_refusal_before_the_intent_line_leaves_the_store_unopened(permit, capsys, case, reason):
+    state = {"state-is-a-file": permit["tmp"] / case, "state-in-permit": permit["q"].parent.parent}.get(case)
+    (permit["tmp"] / "state-is-a-file").write_text("")
+    if case == "flipped-byte":
+        artifact = permit["q"].parent / contract.load_quarantine(permit["q"])["artifact"]
+        artifact.chmod(0o644)  # the sealed folder stays 0555: rewriting a file needs only the file's own mode
+        data = bytearray(artifact.read_bytes())
+        data[len(data) // 2] ^= 0xFF
+        artifact.write_bytes(bytes(data))
     before = permit["db"].read_bytes()
-    result = restore(permit)
-    assert result.returncode == 3 and "artifact does not match quarantine.json" in result.stderr, result.stderr
-    assert permit["db"].read_bytes() == before and audit_lines(permit["state"], "restored") == []
+    rc, out, err = restore(permit, capsys, state=state)
+    assert rc == 3 and reason in err and out == "" and permit["db"].read_bytes() == before, err
+    assert counts(permit["db"]) == [0, 0] and outcome(permit) == [] and not (state and (state / AUDIT).exists())
 
 
-def test_unwritable_audit_path_is_exit_4_without_a_success_line(permit):
-    blocked = permit["tmp"] / "state-is-a-file"
-    blocked.write_text("")
-    result = restore(permit, state=blocked)
-    assert result.returncode == 4 and "audit line was not written" in result.stderr, result.stderr
-    assert result.stdout == "" and blocked.read_text() == ""
-    assert counts(permit["db"]) == [3, 3]  # committed: exit 4 says the rows are back, only the record is missing
-
-
-def test_audit_state_dir_inside_the_permit_dir_is_refused(permit):
-    result = restore(permit, state=permit["q"].parent.parent)
-    assert result.returncode == 3 and "B4" in result.stderr
-    assert counts(permit["db"]) == [0, 0]
-
-
-@pytest.mark.parametrize("stage,permit,status,reason", [("purged", "a" * 64, "ok", "stage"), (None, "a" * 64, "ok", "stage"),
-    ("Restored", "a" * 64, "ok", "stage"), ("restored", "abc", "ok", "permit"), ("restored", None, "ok", "permit"),
-    ("restored", "a" * 64, "", "status")])
-def test_audit_append_refuses_an_unknown_stage_or_bad_field_and_writes_nothing(tmp_path, stage, permit, status, reason):
-    audit = importlib.import_module("intelligence_corpus_quarantine.audit")
+@pytest.mark.parametrize("stage,permit,status,reason", [
+    ("purged", SHA, "ok", "stage"), (None, SHA, "ok", "stage"), ("Restored", SHA, "ok", "stage"),
+    ("restored", "abc", "ok", "permit"), ("restored", None, "ok", "permit"), ("restored", SHA, "", "status"),
+    ("restored", SHA, None, "status"), ("restored", SHA, "done", "status"), ("restored", SHA, "OK", "status")])
+def test_audit_append_refuses_an_unknown_stage_status_or_field(tmp_path, stage, permit, status, reason):
     (tmp_path / "state").mkdir()
     with pytest.raises(ValueError, match=reason):
         audit.append(tmp_path / "state", stage, permit, status, rows=1)

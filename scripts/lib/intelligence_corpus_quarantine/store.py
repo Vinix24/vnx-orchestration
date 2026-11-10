@@ -237,7 +237,7 @@ def _insert_and_prove(conn, tables):
 
 
 def restore(db_path, quarantine_path, *, state_dir, allow_existing=False):
-    """Put the artefact rows back in one transaction that proves itself before COMMIT; refusals change nothing."""
+    """Intent line, one transaction that proves itself before COMMIT, outcome line (the invariant in audit.py)."""
     document_path = Path(quarantine_path).expanduser().resolve()
     document = load_quarantine(document_path)
     artifact = document_path.parent / document["artifact"]
@@ -246,21 +246,34 @@ def restore(db_path, quarantine_path, *, state_dir, allow_existing=False):
     manifest = audit.prepare(state_dir, document_path.parent.parent)
     permit = audit.permit_sha256(manifest, document_path)
     db = _existing_db(db_path)
-    with closing(sqlite3.connect(db.as_uri() + "?mode=rw", uri=True, isolation_level=None)) as conn:
-        conn.execute("ATTACH DATABASE ? AS art", (artifact.as_uri() + "?mode=ro",))
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            _refuse_occupied(conn, document["tables"], allow_existing)
-            proof = _insert_and_prove(conn, document["tables"])
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
     rows = {t["name"]: t["rows"] for t in document["tables"]}
+    numbers = dict(artifact_sha256=document["artifact_sha256"], **{f"{n}_rows": k for n, k in rows.items()})
     try:
-        audit.append(state_dir, "restored", permit, "ok", artifact_sha256=document["artifact_sha256"],
-                     match_probe=proof["match_probe"], **{f"{n}_rows": k for n, k in rows.items()})
+        audit.append(state_dir, "restored", permit, "intent", **numbers)
+    except Exception as exc:
+        raise ValueError(f"nothing restored: the intent line was not written, the store stays closed: {exc}") from exc
+    status = "refused"  # until the first insert nothing can have been written
+    try:
+        with closing(sqlite3.connect(db.as_uri() + "?mode=rw", uri=True, isolation_level=None)) as conn:
+            conn.execute("ATTACH DATABASE ? AS art", (artifact.as_uri() + "?mode=ro",))
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                _refuse_occupied(conn, document["tables"], allow_existing)
+                status = "rolled_back"
+                proof = _insert_and_prove(conn, document["tables"])
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+    except BaseException as exc:
+        try:
+            audit.append(state_dir, "restored", permit, status, reason=f"{type(exc).__name__}: {exc}")
+        except Exception as missed:  # the rollback holds: still exit 3, and the message names the missing line
+            raise ValueError(f"nothing restored ({exc}), but its {status} outcome line is missing: {missed}") from exc
+        raise
+    try:
+        audit.append(state_dir, "restored", permit, "ok", match_probe=proof["match_probe"], **numbers)
     except Exception as exc:
         raise audit.AfterCommitError(f"rows restored and committed, but the audit line was not written: {exc}") from exc
     return dict(rows=rows, match_probe=proof["match_probe"], db=str(db))
