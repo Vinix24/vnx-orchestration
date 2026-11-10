@@ -133,6 +133,44 @@ def test_non_finite_memory_threshold_is_policy_invalid(env, raw):
     assert st.doctor()[0] == 78
 
 
+MEM_FIELDS = ("swap_growth_mb", "swap_level_mb", "compressor_gb")
+
+
+@pytest.mark.parametrize("field", MEM_FIELDS)
+@pytest.mark.parametrize("big", [10**400, -(10**400)])
+def test_huge_integer_threshold_is_policy_invalid_not_overflow(env, field, big):
+    st, _, _, pdir = env
+    bad = copy.deepcopy(POLICY)
+    bad["memory"][field] = big
+    (pdir / "host.json").write_text(json.dumps(bad))
+    with pytest.raises(SlotError) as exc:
+        st.read_policy()
+    assert exc.value.code == "policy_invalid" and exc.value.exit_code == 78 and field in str(exc.value)
+    code, reasons = st.doctor()
+    assert code == 78 and any(r.startswith("policy_invalid") and field in r for r in reasons)
+
+
+@pytest.mark.parametrize("field", MEM_FIELDS)
+@pytest.mark.parametrize("value", [True, False, None, "5", [1], -1])
+def test_non_number_threshold_is_policy_invalid(env, field, value):
+    st, _, _, pdir = env
+    bad = copy.deepcopy(POLICY)
+    bad["memory"][field] = value
+    (pdir / "host.json").write_text(json.dumps(bad))
+    with pytest.raises(SlotError) as exc:
+        st.read_policy()
+    assert exc.value.code == "policy_invalid" and field in str(exc.value)
+
+
+@pytest.mark.parametrize("value", [7, 7.5, 0])
+def test_normal_integer_and_float_threshold_load(env, value):
+    st, _, _, pdir = env
+    ok = copy.deepcopy(POLICY)
+    ok["memory"]["swap_level_mb"] = value
+    (pdir / "host.json").write_text(json.dumps(ok))
+    assert st.read_policy()["memory"]["swap_level_mb"] == value
+
+
 def test_env_budget_never_changes_the_policy_budget(env, monkeypatch):
     st, *_ = env
     monkeypatch.setenv("VNX_SLOT_TOTAL", "99")

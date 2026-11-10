@@ -56,7 +56,13 @@ def _int(v: Any, minimum: int) -> bool:
 
 
 def _num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+    """A usable non-negative threshold: a finite float, or an int that converts to one."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(v)) and v >= 0
+    except OverflowError:
+        return False
 
 
 def _no_constant(name: str) -> Any:
@@ -95,8 +101,11 @@ def _validate_policy(p: Dict[str, Any]) -> None:
         if unknown:
             raise bad(f"profile {name!r} references unknown profiles {unknown}")
     mem = p.get("memory")
-    if not isinstance(mem, dict) or not all(_num(mem.get(k)) for k in ("swap_growth_mb", "swap_level_mb", "compressor_gb")):
+    if not isinstance(mem, dict):
         raise bad("memory")
+    for key in ("swap_growth_mb", "swap_level_mb", "compressor_gb"):
+        if not _num(mem.get(key)):
+            raise bad(f"memory.{key} is not a finite non-negative number")
     if not (_int(p.get("max_bypass"), 0) and _int(p.get("max_transition"), 1) and _int(p.get("max_queue"), 1)):
         raise bad("max_bypass/max_transition/max_queue")
     if p.get("mode") not in MODES or not isinstance(p.get("enforce_activation"), dict):
