@@ -6,15 +6,18 @@ change set. ``VNX_LEARNING_LOOP_APPROVED`` only selects the file; the hash is re
 about to be written. Used once, under a lock, before the first DB write, ledger first (ADR-005): a
 ``learning_persist`` line with the record hash goes to ``intelligence_usage.ndjson``, then the record
 gets ``consumed_at``. The ledger wins: a proposal that line names is used, whatever its record says.
-``write_record`` lands with the approve CLI in split 3.
+Tamper-evident, not tamper-proof: ``write_record`` logs a ``learning_approval`` event with the record
+hash first, so a receipt whose record hash no approval event carries points at a forged record.
 """
 from __future__ import annotations
 
+import argparse
 import fcntl
 import hashlib
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, NoReturn, Tuple
@@ -187,11 +190,18 @@ def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _guard_writes(state_dir: Path, path: Path) -> None:
+    for target in (path, Path(state_dir) / USAGE_LOG_NAME):
+        refuse_real_central_store_write_under_test_runner(target)
+
+
 def claim_approval(state_dir: Path, valid_approvers: Collection[str], changes: List[Dict[str, Any]]) -> str:
     """Bind the selected record to ``changes`` and use it up before the first DB write; returns the
     record sha256. Re-read under the lock: of two concurrent persists on one record only one gets through. The
     ledger line is the decision and comes first; ``consumed_at`` in the record follows it."""
     record = load_approval(state_dir, valid_approvers)
+    if not isinstance(changes, list) or not all(isinstance(row, dict) for row in changes):
+        _refuse("the rows to write are no canonical JSON (a list of JSON objects)")
     try:
         actual = preview(changes)["changes_sha256"]
     except (TypeError, ValueError) as exc:
@@ -199,8 +209,7 @@ def claim_approval(state_dir: Path, valid_approvers: Collection[str], changes: L
     if actual != record["changes_sha256"]:
         _refuse(f"the rows to write hash to {actual}, the approval is for {record['changes_sha256']}")
     path = record_path(state_dir, record["proposal_id"])
-    for target in (path, Path(state_dir) / USAGE_LOG_NAME):
-        refuse_real_central_store_write_under_test_runner(target)
+    _guard_writes(state_dir, path)
     with slot_lock(path):
         if load_approval(state_dir, valid_approvers) != record:
             _refuse(f"approval record {path} changed while this persist read it")
@@ -219,3 +228,66 @@ def claim_approval(state_dir: Path, valid_approvers: Collection[str], changes: L
             raise LearningApprovalRefused(f"the ledger holds the claim but record {path} was not marked used ({exc}); "
                                           "no row was written and the approval counts as used") from exc
     return record_sha256
+
+
+def write_record(state_dir: Path, proposal_id: str, approved_by: str, reason: str,
+                 valid_approvers: Collection[str]) -> Path:
+    """Create an unused record under its lock, its ``learning_approval`` event first. Never overwrites a record and
+    refuses a proposal the ledger already shows used, since such a record could never be claimed."""
+    digest = _digest_of(proposal_id)
+    if not isinstance(approved_by, str) or approved_by not in valid_approvers:
+        _refuse(f"approved_by {approved_by!r} is not one of {sorted(valid_approvers)}")
+    if not isinstance(reason, str) or not reason.strip():
+        _refuse("an approval needs a non-empty --reason")
+    path = record_path(state_dir, proposal_id)
+    _guard_writes(state_dir, path)
+    record = {"proposal_id": proposal_id, "changes_sha256": digest, "approved_by": approved_by,
+              "approved_at": datetime.now(timezone.utc).isoformat(), "reason": reason.strip(), "consumed_at": None}
+    with slot_lock(path):
+        if path.exists() or path.is_symlink():
+            _refuse(f"{path} already exists; an approval record is never overwritten")
+        if _claimed_in_log(state_dir, proposal_id):
+            _refuse(f"approval {proposal_id} was already used: {USAGE_LOG_NAME} holds its learning_persist line")
+        try:
+            _append_event(state_dir, {"event_type": "learning_approval", "timestamp": record["approved_at"],
+                                      "proposal_id": proposal_id, "changes_sha256": digest,
+                                      "approval_record_sha256": _sha256(record), "approved_by": approved_by})
+        except OSError as exc:
+            raise LearningApprovalRefused(f"appending the learning_approval line failed ({exc}); "
+                                          "no record was written") from exc
+        try:
+            atomic_write_json(path, record)
+        except OSError as exc:
+            raise LearningApprovalRefused(f"the ledger holds the learning_approval line but record {path} was not "
+                                          f"written ({exc}); no approval exists, approve again") from exc
+    return path
+
+
+def main(argv: List[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Approve one learning-loop proposal (ADR-068, besluit 18).")
+    commands = parser.add_subparsers(dest="command", required=True)
+    approve = commands.add_parser("approve", help="create the approval record; needs an interactive terminal")
+    approve.add_argument("--proposal-id", required=True)
+    approve.add_argument("--reason", required=True)
+    approve.add_argument("--approved-by", default="operator")
+    args = parser.parse_args(argv)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("REFUSED: approve needs an interactive terminal (stdin and stdout a tty); no record written",
+              file=sys.stderr)
+        return 1
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from learning_loop import _DISPOSITION_VALID_APPROVERS
+    from vnx_paths import ensure_env
+
+    state_dir = Path(ensure_env()["VNX_STATE_DIR"]).expanduser().resolve()
+    try:
+        path = write_record(state_dir, args.proposal_id, args.approved_by, args.reason, _DISPOSITION_VALID_APPROVERS)
+    except LearningApprovalRefused as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+    print(f"approved: {path}\nnext: {APPROVED_ENV}={args.proposal_id} VNX_LEARNING_LOOP_PERSIST=1")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
