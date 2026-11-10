@@ -67,24 +67,20 @@ def test_unexplained_or_unknown_reason_is_blocked_and_unknown(reason, detail):
 @pytest.mark.parametrize("reason", ["nonsense", None, "", 5])
 def test_unknown_skip_reason_is_a_finding(reason):
     d = doc([ev("dream_cycle_skipped", "2026-11-09", reason=reason)])
-    assert "unknown_skip_reason" in ids(d)
-    assert d["state"] == "deviation"
+    assert "unknown_skip_reason" in ids(d) and d["state"] == "deviation"
 
 
 @pytest.mark.parametrize("etype", ["dream_cycle_nonsense", None, "", 3, ["x"]])
 def test_unknown_event_type_is_a_finding_and_not_an_attempt(etype):
     d = doc([{"event_type": etype, "timestamp": "2026-11-10T11:00:00+00:00"}])
-    assert "unknown_event_type" in ids(d)
-    assert d["attempts"]["newest"] is None
-    assert "no_attempt_26h" in ids(d)
+    assert {"unknown_event_type", "no_attempt_26h"} <= ids(d) and d["attempts"]["newest"] is None
 
 
 @pytest.mark.parametrize("stamp", [None, "", "not-a-date", 12345, True, {"a": 1}])
 def test_undated_event_is_counted_and_never_an_age(stamp):
     event = ev("dream_cycle_completed", "2026-11-10", merged_count=3)
-    if stamp is None:
-        del event["timestamp"]
-    else:
+    event.pop("timestamp")
+    if stamp is not None:
         event["timestamp"] = stamp
     d = doc([event])
     assert "undated_event" in ids(d)
@@ -102,9 +98,8 @@ def test_undated_unknown_skip_reason_still_gives_the_error_next_to_a_fresh_compl
 
 def test_sole_future_completion_is_undated_and_no_attempt():
     d = doc([ev("dream_cycle_completed", "2027-11-10", merged_count=1)])
-    assert {"undated_event", "no_attempt_26h"} <= ids(d)
+    assert {"undated_event", "no_attempt_26h"} <= ids(d) and d["state"] == "deviation"
     assert d["attempts"]["newest"] is None and d["attempts"]["age_hours"] is None
-    assert d["state"] == "deviation"
 
 
 def test_future_event_never_becomes_the_newest_attempt():
@@ -121,9 +116,7 @@ def test_torn_and_non_object_lines_surface_as_undated(tmp_path):
     (folder / "a.ndjson").write_text('{broken\n[1, 2]\n"x"\n\n' + json.dumps(
         ev("dream_cycle_started", "2026-11-10")) + "\n")
     events = dl.read_events(folder)
-    assert len(events) == 4
-    d = doc(events)
-    assert "unknown_event_type" in ids(d)
+    assert len(events) == 4 and "unknown_event_type" in ids(doc(events))
 
 
 def test_read_events_reads_every_file_not_by_date(tmp_path):
@@ -131,8 +124,7 @@ def test_read_events_reads_every_file_not_by_date(tmp_path):
     folder.mkdir(parents=True)
     (folder / "2020-01-01.ndjson").write_text(json.dumps(ev("dream_cycle_started", "2026-11-10")) + "\n")
     (folder / "zzz-other.ndjson").write_text(json.dumps(ev("dream_cycle_skipped", "2026-11-10")) + "\n")
-    assert len(dl.read_events(folder)) == 2
-    assert dl.read_events(tmp_path / "absent") is None
+    assert len(dl.read_events(folder)) == 2 and dl.read_events(tmp_path / "absent") is None
 
 
 def test_read_plist_states(tmp_path):
@@ -154,14 +146,12 @@ def test_missing_or_malformed_events_source_is_unmeasured_never_ok(events):
                                    {"hour": True, "minute": 0}])
 def test_missing_or_malformed_plist_never_ok(plist):
     d = doc(good_week(), plist=plist)
-    assert d["state"] != "ok"
-    assert ids(d) & {"plist_missing", "plist_unreadable"}
+    assert d["state"] != "ok" and ids(d) & {"plist_missing", "plist_unreadable"}
 
 
 def test_assess_without_any_source_is_unmeasured():
     d = assess({}, now=NOW)
-    assert d["state"] == "unmeasured"
-    assert {"events_missing", "plist_missing"} <= ids(d)
+    assert d["state"] == "unmeasured" and {"events_missing", "plist_missing"} <= ids(d)
     assert d["schema"] == "dream_liveness/1"
 
 
@@ -173,15 +163,13 @@ def test_arm_switch_must_be_exactly_one(arm):
 
 
 def test_empty_events_with_installed_plist_is_a_finding():
-    d = doc([])
-    assert d["state"] == "deviation"
-    assert "no_attempt_26h" in ids(d)
+    assert doc([])["state"] == "deviation" and "no_attempt_26h" in ids(doc([]))
 
 
 def test_progressing_week_is_ok():
     d = doc(good_week())
-    assert d["state"] == "ok", d["findings"]
-    assert d["findings"] == [] and d["sources"] == {"events": "ok", "plist": "ok"}
+    assert d["state"] == "ok" and d["findings"] == []
+    assert d["sources"] == {"events": "ok", "plist": "ok"}
 
 
 def test_review_event_after_40_days_of_silence_refreshes_nothing():
@@ -204,18 +192,14 @@ def test_severity_table_is_exactly_the_decided_one():
 
 def test_warn_only_document_is_ok():
     d = doc(good_week(), plist=dict(PLIST, arm_switch="0"))
-    assert [f["id"] for f in d["findings"]] == ["arm_switch_off"]
-    assert d["state"] == "ok"
+    assert [f["id"] for f in d["findings"]] == ["arm_switch_off"] and d["state"] == "ok"
 
 
-def test_one_blocked_skip_is_deviation():
-    d = doc([ev("dream_cycle_skipped", "2026-11-10", "11:00", reason="probe_not_ok")])
-    assert ids(d) == {"blocked_skip"}
-    assert d["state"] == "deviation"
-
-
-def test_allowed_skip_is_no_finding():
-    assert doc([ev("dream_cycle_skipped", "2026-11-10", "11:00", reason="insufficient_data")])["findings"] == []
+@pytest.mark.parametrize("reason,found,state", [
+    ("probe_not_ok", {"blocked_skip"}, "deviation"), ("insufficient_data", set(), "ok")])
+def test_one_skip_is_judged_by_its_class(reason, found, state):
+    d = doc([ev("dream_cycle_skipped", "2026-11-10", "11:00", reason=reason)])
+    assert ids(d) == found and d["state"] == state
 
 
 def test_outcome_carries_the_class():
