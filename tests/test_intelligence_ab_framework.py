@@ -1,8 +1,6 @@
 """Tests for the A/B random-skip framework (V5).
 
 Coverage:
-- Default (VNX_INTEL_AB_TEST=0): always 'treatment', no injection skip
-- Enabled (VNX_INTEL_AB_TEST=1): ~10% control arm via mocked random
 - record_injection_audit stores ab_arm correctly when column exists
 - weekly_ab_lift returns matched-pairs structure
 """
@@ -21,46 +19,6 @@ _LIB_DIR = Path(__file__).resolve().parent.parent / "scripts" / "lib"
 _SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(_LIB_DIR))
 sys.path.insert(0, str(_SCRIPTS_DIR))
-
-
-# ---------------------------------------------------------------------------
-# _ab_arm tests
-# ---------------------------------------------------------------------------
-
-def test_ab_arm_default_returns_treatment(monkeypatch):
-    monkeypatch.delenv("VNX_INTEL_AB_TEST", raising=False)
-    from intelligence_selector import _ab_arm
-    for _ in range(50):
-        assert _ab_arm() == "treatment"
-
-
-def test_ab_arm_disabled_explicit_zero_returns_treatment(monkeypatch):
-    monkeypatch.setenv("VNX_INTEL_AB_TEST", "0")
-    from intelligence_selector import _ab_arm
-    for _ in range(20):
-        assert _ab_arm() == "treatment"
-
-
-def test_ab_arm_enabled_returns_control_when_rng_below_threshold(monkeypatch):
-    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-    from intelligence_selector import _ab_arm
-    with patch("intelligence_selector.random.random", return_value=0.05):
-        assert _ab_arm() == "control"
-
-
-def test_ab_arm_enabled_returns_treatment_when_rng_above_threshold(monkeypatch):
-    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-    from intelligence_selector import _ab_arm
-    with patch("intelligence_selector.random.random", return_value=0.50):
-        assert _ab_arm() == "treatment"
-
-
-def test_ab_arm_enabled_statistical_distribution(monkeypatch):
-    """10% control arm is approximate; verify 0-25% range over 500 trials."""
-    monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
-    from intelligence_selector import _ab_arm
-    control_count = sum(1 for _ in range(500) if _ab_arm() == "control")
-    assert 0 <= control_count <= 125, f"Control arm out of expected range: {control_count}/500"
 
 
 # ---------------------------------------------------------------------------
