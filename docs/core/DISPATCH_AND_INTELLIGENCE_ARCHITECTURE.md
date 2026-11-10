@@ -30,9 +30,12 @@ A dispatch is not "paste text into a worker." It is: **stage an intent → route
    ┌─ ASSEMBLY — dispatch_prepare.prepare / _assemble_context ────────┐
    │  1. repo-map (prepended)                                         │
    │  2. skill body            (the role's SKILL.md)                  │
-   │  3. INTELLIGENCE INJECTION — _build_intelligence_section:        │
-   │       "## Relevant Intelligence (from past dispatches)"          │
-   │       "### Antipatterns to avoid"   (patterns + antipatterns)    │
+   │  3. INTELLIGENCE INJECTION — arm first, then injection:              │
+   │       arm = arm_for_dispatch(dispatch_id, project_id, window)        │
+   │         control: placebo/empty, selector.select() never runs         │
+   │       _build_intelligence_section:                                   │
+   │       "## Relevant Intelligence (from past dispatches)"              │
+   │       "### Antipatterns to avoid"   (patterns + antipatterns)        │
    │  4. the actual instruction                                       │
    │  5. FOOTER — report-contract directive (## Summary / ## Changes  │
    │       / ## Verification / ## Open Items) + END-OF-INSTRUCTION     │
@@ -121,7 +124,8 @@ This is the anti-fabrication backstop: it makes "claimed done with nothing to sh
 
 The quality-intelligence store (`quality_intelligence.db`, per-project under `~/.vnx-data/<project>/`) holds success patterns, antipatterns, prevention rules, and prior-round findings. Two flows:
 
-- **Injection (read path, per dispatch):** `IntelligenceSelector.select()` chooses the most relevant patterns/antipatterns for the dispatch's role + paths + pr_id and `_build_intelligence_section` renders them into the assembled body (§4). Prior-round findings (`prior_round_injector.py`, Wave-5) carry a `contract_hash` so a re-dispatch sees what the last round found.
+- **Injection (read path, per dispatch):** the A/B arm is decided **before** selection: `arm_for_dispatch(dispatch_id, project_id, window)` hashes the dispatch against the frozen window and returns `control`, `treatment`, or `(None, None)` when no window is open. A `control` dispatch gets no `selector.select()` call (a placebo or an empty section); a `treatment` dispatch and a dispatch with no open window select as before. Every injection row carries `ab_arm` and `ab_window` — `NULL` where no window is open means "not assigned", never a silent `treatment`. `IntelligenceSelector.select()` then chooses the most relevant patterns/antipatterns for the dispatch's role + paths + pr_id and `_build_intelligence_section` renders them into the assembled body (§4). Prior-round findings (`prior_round_injector.py`, Wave-5) carry a `contract_hash` so a re-dispatch sees what the last round found.
+- **Measurement (harness, never the verdict):** `scripts/intel_injection_join.py cohort` reports the per-arm counts and the fail-closed controls and never a verdict; `effect` adds the stratified risk difference, its 95% interval and one of four verdict classes, and refuses below `MIN_PER_ARM = 200` resolved dispatches per arm (exit 3) or on a missing/`None`/malformed/unknown value. The measured arms are decided and frozen at window-open time; the full commands, exits and fail-closed table are `claudedocs/specs/intelligence-effect-measurable/protocol.md`, and the decisions are `ADR-0*-intelligence-effectmeting.md`. Opening and closing the window is an operator step, not a code change.
 - **Learning (write path):** the intelligence daemon (`intelligence_daemon.py` + `learning_loop.py`) runs two tiers. Tier-1 auto-tunes pattern *confidence* from receipt outcomes. Tier-2 proposes new rules into an operator-gated `pending_rules.json` — the system proposes, the human approves. Nothing self-promotes a rule without a gate.
 
 The success-pattern and antipattern tables carry the natural key `(project_id, pattern_type, title)`. An import writes them through `pattern_upsert` (`scripts/intelligence_import.py`), so it merges into the local row and never deletes one on an id match.
