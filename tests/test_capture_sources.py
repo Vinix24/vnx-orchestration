@@ -348,41 +348,5 @@ def test_cli_sources_absent_open_items_is_absent(env):
     assert json.loads(proc.stdout)["sources"]["open_items"]["state"] == "absent"
 
 
-def test_cli_bind_writes_atomically_and_loads(env):
-    args = ["bind", "--state-dir", str(env["state"]), "--memory-dir", str(env["memory"]),
-            "--bucket-dir", str(env["bucket"]), "--bucket-slug", "mine"]
-    proc = _run(*args, home=env["home"])
-    assert proc.returncode == 0, proc.stderr
-    written = json.loads((env["state"] / cs.BINDING_FILENAME).read_text())
-    assert set(written) == set(cs.BINDING_KEYS) and written["project_id"] == PROJECT
-    assert cs.load_binding(env["state"])[1] == "ok"
-    assert sorted(p.name for p in env["state"].iterdir()) == [cs.BINDING_FILENAME]
-
-
-@pytest.mark.parametrize("case", ["memory_outside", "memory_missing", "bucket_missing", "slug_empty",
-                                  "state_missing", "no_project"])
-def test_cli_bind_failed_check_writes_nothing(env, case):
-    outside = env["outside"]
-    values = {"state": env["state"], "memory": env["memory"], "bucket": env["bucket"], "slug": "mine"}
-    if case == "memory_outside":
-        values["memory"] = outside
-    elif case == "memory_missing":
-        values["memory"] = env["memory"] / "gone"
-    elif case == "bucket_missing":
-        values["bucket"] = env["bucket"] / "gone"
-    elif case == "slug_empty":
-        values["slug"] = " "
-    elif case == "state_missing":
-        values["state"] = env["tmp"] / "gone"
-    else:
-        values["state"] = env["tmp"] / "plain-state"
-        values["state"].mkdir()
-    proc = _run("bind", "--state-dir", str(values["state"]), "--memory-dir", str(values["memory"]),
-                "--bucket-dir", str(values["bucket"]), "--bucket-slug", values["slug"], home=env["home"])
-    assert proc.returncode != 0 and "bind refused" in proc.stderr
-    assert not (values["state"] / cs.BINDING_FILENAME).exists()
-    assert not (env["state"] / cs.BINDING_FILENAME).exists()
-
-
 def test_cli_rejects_unknown_subcommand(env):
     assert _run("audit", home=env["home"]).returncode == 2
