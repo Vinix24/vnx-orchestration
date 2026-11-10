@@ -228,6 +228,17 @@ def test_unknown_queue_kind_and_oversized_new_request_are_refused():
     assert res["state"]["queue"] == []
 
 
+@pytest.mark.parametrize("kind", ["top_up", "nested"])
+@pytest.mark.parametrize("bad", [{"profile": "nope"}, {"slots": True}, {"slots": -1}, {"slots": "3"}])
+def test_malformed_front_new_request_never_crashes_a_top_up_round(kind, bad):
+    ex = {"lease_id": "a", "token": 1} if kind == "top_up" else {"lease_id": "c", "parent_lease": "a", "profile": "seo-gate"}
+    top, m = req("t", kind, slots=3 if kind == "top_up" else 2, at=1, **ex), req("m", at=0, **bad)
+    mk = lambda *q: state([lease("a", 1, 4), lease("b", 3, 3)], list(q))
+    got = lambda res, rid: [(e["event"], e["reasons"]) for e in res["events"] if e["request_id"] == rid]
+    assert got(run(mk(m, top)), "m") == got(run(mk(m)), "m") == [("refused", got(run(mk(m)), "m")[0][1])]
+    assert got(run(mk(m, top)), "t") == got(run(mk(top)), "t")
+
+
 def test_bypassed_n_never_exceeds_max_bypass_over_a_round_sequence():
     held = {"front": ("wait", ["memory_guard"])}
     pol = policy(max_bypass=2)
@@ -307,12 +318,9 @@ def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
     assert res["state"]["queue"] == []
 
 
-def test_admitted_event_carries_the_request_id_also_when_it_differs_from_the_lease_id():
+def test_admitted_and_top_up_events_carry_the_request_id_of_the_queued_record():
     events = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))["events"]
     assert [(e["request_id"], e["lease_id"]) for e in events if e["event"] == "admitted"] == [("req-1", "L-1")]
-
-
-def test_top_up_event_carries_the_request_id_of_the_queued_record():
     st = state([lease("A", 1, 8, at=1)], [req("req-ta", "top_up", slots=3, lease_id="A", token=1)])
     topped = [e for e in run(st)["events"] if e["event"] == "topped_up"]
     assert [(e["request_id"], e["lease_id"]) for e in topped] == [("req-ta", "A")]

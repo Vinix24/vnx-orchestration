@@ -2,10 +2,10 @@
 
 Pure over the ADR-062 ``state`` and ``policy`` dicts, no IO, no clock (``now`` is passed in).
 The caller (RS-2) holds the store transaction and writes the returned ``events`` to the
-slotlog. Nothing here mutates its input: ``decide_round`` returns a new ``state``. A missing key raises ``KeyError`` (RS-2
+slotlog. Nothing here mutates its input. A missing key raises ``KeyError`` (RS-2
 validates); a value that cannot be right raises ``AdmissionInvalid`` (exit 78). An unknown
-liveness is never evidence to free capacity. ``decide_round`` orders a round on top of these
-blocks: top-ups in the safe order, then new requests in arrival order."""
+liveness is never evidence to free capacity. Split 2 of RS-3 adds the round decision, which
+orders top-ups and new requests on top of these blocks."""
 
 from __future__ import annotations
 
@@ -160,9 +160,7 @@ def _memory_reasons(policy: dict, rec: dict, memory: dict) -> list[str]:
 
 
 def _lease_id(rec: dict) -> str:
-    """The id a queued record would be inserted under: ``lease_id`` when present, else ``request_id``.
-
-    ADR-062: a lease id is a non-empty string. Anything else is ``state_corrupt``."""
+    """The id a queued record is inserted under (``lease_id``, else ``request_id``): a non-empty string, else ``state_corrupt``."""
     raw = rec.get("lease_id")
     lease_id = rec.get("request_id") if raw is None else raw
     if not isinstance(lease_id, str) or not lease_id:
@@ -205,14 +203,17 @@ def _front_harmed(work: dict, policy: dict, grown: dict) -> bool:
     if not news:
         return False
     front = min(news, key=lambda r: r["requested_at"])
-    return _can_admit(work, policy, front, work["holders"]) and not _can_admit(work, policy, front, grown)
+    try:
+        return _can_admit(work, policy, front, work["holders"]) and not _can_admit(work, policy, front, grown)
+    except AdmissionInvalid:
+        return False  # unevaluable front is not harmed; _admit_new refuses it with its own reason
 
 
 def _can_admit(work: dict, policy: dict, rec: dict, holders: dict) -> bool:
-    stub = {"lease_id": "\0candidate", "slots_granted": rec["slots"], "parent_lease": None,
+    stub = {"lease_id": "\0candidate", "slots_granted": (slots := _int(rec["slots"], "over_profile_ceiling")), "parent_lease": None,
             "max_slots": _profile(policy, rec["profile"])["max_slots"], "admitted_at": float("inf")}
     trial = {**work, "holders": {**holders, stub["lease_id"]: stub}}
-    return free_slots({**work, "holders": holders}, policy) >= rec["slots"] and is_safe(trial, policy)
+    return free_slots({**work, "holders": holders}, policy) >= slots and is_safe(trial, policy)
 
 
 def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
@@ -267,9 +268,8 @@ def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
 def _passed_limit(work: dict, policy: dict) -> bool:
     """The front request was already passed ``max_bypass`` times: no further top-up goes first.
 
-    ADR-062 says the bypass counter may not go above ``max_bypass``. The guard therefore
-    blocks at ``bypassed_n >= max_bypass`` (T0 decision), which keeps the counter at most
-    ``max_bypass``. It only matters when the front request is harmed (see ``_front_harmed``)."""
+    ADR-062 caps the counter at ``max_bypass``, so the guard blocks at ``bypassed_n >= max_bypass``
+    (T0 decision). It only matters when the front request is harmed (see ``_front_harmed``)."""
     news = [r for r in work["queue"] if r["kind"] == "new"]
     front = min(news, key=lambda r: r["requested_at"])
     return _int(front["bypassed_n"], "state_corrupt") >= _int(policy["max_bypass"])
@@ -325,10 +325,9 @@ def _admit_new(work: dict, policy: dict, ctx: dict) -> list[dict]:
 def decide_round(state: dict, policy: dict, liveness: dict, memory: dict, now: float) -> dict:
     """One round under the store lock: top-ups first (safe order), then the front new request.
 
-    ``liveness`` maps lease_id to alive/gone/unknown (a top-up for a lease whose owner is
-    positively gone waits with ``owner_gone_tree_alive``: a T0 decision on ADR-062, which does
-    not name this use. It is conservative, nobody uses those slots and cleanup decides;
-    ``alive`` and ``unknown`` do not block); ``memory`` maps request_id to the RS-5 ``(verdict, reasons)``.
+    ``liveness`` maps lease_id to alive/gone/unknown (a top-up for a lease whose owner is positively
+    gone waits with ``owner_gone_tree_alive``: a T0 decision, conservative; ``alive`` and ``unknown``
+    do not block); ``memory`` maps request_id to the RS-5 ``(verdict, reasons)``.
     Returns ``{"state": new state, "events": slotlog events}``; the input is untouched."""
     work = copy.deepcopy(state)
     ctx = {"now": now, "events": [], "liveness": liveness, "memory": memory}
