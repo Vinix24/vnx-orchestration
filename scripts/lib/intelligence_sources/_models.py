@@ -65,7 +65,9 @@ class InjectionResult:
     suppressed: List[SuppressionRecord]
     task_class: str
     dispatch_id: str
-    ab_arm: Optional[str] = "treatment"
+    # None = "not assigned": a row without an arm must never read as treatment.
+    ab_arm: Optional[str] = None
+    ab_window: Optional[str] = None
 
     @property
     def items_injected(self) -> int:

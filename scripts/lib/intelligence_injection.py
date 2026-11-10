@@ -334,14 +334,38 @@ def fetch_intelligence_section(
             coord_db_state_dir=state_dir,
         )
         try:
-            result = selector.select(
-                dispatch_id=dispatch_id,
-                injection_point="dispatch_create",
-                skill_name=role or "",
-                dispatch_paths=dispatch_paths or [],
-                instruction_text=instruction_text or "",
-                pr_id=pr_id,
-            )
+            # The arm is decided BEFORE select(): a control dispatch never selects.
+            # (None, None) = no active window: today's injection, row unstamped.
+            try:
+                from intelligence_selector import arm_for_dispatch, load_window_config  # noqa: PLC0415
+                from intelligence_sources import InjectionResult, _now_utc, resolve_task_class  # noqa: PLC0415
+                from project_scope import current_project_id  # noqa: PLC0415
+                arm, ab_window = arm_for_dispatch(dispatch_id, current_project_id(), load_window_config())
+            except Exception as exc:
+                logger.warning("A/B arm undecidable for %s, no arm assigned: %s", dispatch_id, exc)
+                arm, ab_window = None, None
+            if arm == "control":
+                result = InjectionResult(
+                    injection_point="dispatch_create",
+                    injected_at=_now_utc(),
+                    items=[],
+                    suppressed=[],
+                    task_class=resolve_task_class(None, role or None, dispatch_paths, instruction_text),
+                    dispatch_id=dispatch_id,
+                    ab_arm="control",
+                    ab_window=ab_window,
+                )
+            else:
+                result = selector.select(
+                    dispatch_id=dispatch_id,
+                    injection_point="dispatch_create",
+                    skill_name=role or "",
+                    dispatch_paths=dispatch_paths or [],
+                    instruction_text=instruction_text or "",
+                    pr_id=pr_id,
+                )
+                result.ab_arm = arm
+                result.ab_window = ab_window
             try:
                 selector.emit_event(result, coord_state_dir=state_dir)
             except Exception as exc:
