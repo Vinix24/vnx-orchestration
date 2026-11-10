@@ -144,7 +144,9 @@ def resolve_oi_refs(refs, index: Dict[str, dict], state: str) -> Dict[str, dict]
     ``state`` is the state of the index load (``ok``, ``absent``, ``error``) or
     ``project_unknown`` when the caller could not derive a project id. Only a
     resolved ref carries a status. Everything doubtful is ``resolved: False``
-    with ``status: None`` and a reason, never ``open``.
+    with ``status: None`` and a reason, never ``open``. An item whose status is
+    missing or unknown gets reason ``store_unavailable``: the contract knows
+    three reasons and an unreadable status is a store that cannot answer.
     """
     out: Dict[str, dict] = {}
     for ref in refs:
