@@ -1,6 +1,7 @@
 """RS-3: slot admission is pure, safe and ordered (ADR-062 besluit 1, 2, 8)."""
 
 import copy
+import json
 import sys
 from pathlib import Path
 
@@ -258,3 +259,57 @@ def test_corrupt_sibling_slots_granted_raises_instead_of_skewing_the_delta():
     st["holders"]["sib"] = lease("sib", True, 4, parent="par")
     with pytest.raises(sa.AdmissionInvalid):
         sa.growth_plan(st, "kid", 1)
+
+
+def _frozen(res, lease_id):
+    return json.dumps(res["state"]["holders"][lease_id], sort_keys=True)
+
+
+def _assert_refused_corrupt(st, res, lease_id, before):
+    assert _frozen(res, lease_id) == before
+    assert res["state"]["fencing_counter"] == st["fencing_counter"]
+    assert [(e["event"], e["reasons"], e["exit_code"]) for e in res["events"]] == [
+        ("refused", ["state_corrupt"], 78)]
+    assert res["state"]["queue"] == []
+
+
+def test_new_with_occupied_lease_id_never_replaces_the_holder():
+    st = state([lease("L", 2, 8, profile="big")], [req("r1", slots=1, lease_id="L")])
+    before = json.dumps(st["holders"]["L"], sort_keys=True)
+    _assert_refused_corrupt(st, run(st), "L", before)
+
+
+def test_new_without_lease_id_whose_request_id_is_held_is_refused():
+    st = state([lease("L", 2, 8, profile="big")], [req("L", slots=1)])
+    before = json.dumps(st["holders"]["L"], sort_keys=True)
+    _assert_refused_corrupt(st, run(st), "L", before)
+
+
+def test_nested_with_id_of_existing_child_or_own_parent_is_refused():
+    holders = [lease("par", 4, 8), lease("kid", 1, 8, parent="par", profile="seo-gate")]
+    for clash in ("kid", "par"):
+        st = state(holders, [req("n1", "nested", slots=1, profile="seo-gate", parent_lease="par",
+                                 lease_id=clash)])
+        before = json.dumps(st["holders"][clash], sort_keys=True)
+        res = run(st)
+        _assert_refused_corrupt(st, res, clash, before)
+        assert _frozen(res, "par") == json.dumps(st["holders"]["par"], sort_keys=True)
+
+
+@pytest.mark.parametrize("bad", ["", 7])
+def test_new_with_empty_or_non_string_lease_id_is_refused(bad):
+    st = state([lease("L", 2, 8, profile="big")], [req("r1", slots=1, lease_id=bad)])
+    before = json.dumps(st["holders"]["L"], sort_keys=True)
+    _assert_refused_corrupt(st, run(st), "L", before)
+
+
+def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
+    st = state([lease("L", 2, 2, profile="small")],
+               [req("dup", slots=1, at=1, profile="small", lease_id="L"),
+                req("ok", slots=1, at=2, profile="small")])
+    res = run(st)
+    assert names(res) == [("refused", "L"), ("admitted", "ok")]
+    assert res["events"][0]["reasons"] == ["state_corrupt"] and res["events"][0]["exit_code"] == 78
+    assert _frozen(res, "L") == json.dumps(st["holders"]["L"], sort_keys=True)
+    assert res["state"]["fencing_counter"] == st["fencing_counter"] + 1
+    assert res["state"]["queue"] == []

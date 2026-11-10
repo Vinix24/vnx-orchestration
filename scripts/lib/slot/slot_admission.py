@@ -159,11 +159,28 @@ def _memory_reasons(policy: dict, rec: dict, memory: dict) -> list[str]:
     return [] if verdict[0] == "admit" else list(verdict[1]) or ["memory_guard"]
 
 
+def _lease_id(rec: dict) -> str:
+    """The id a queued record would be inserted under: ``lease_id`` when present, else ``request_id``.
+
+    ADR-062: a lease id is a non-empty string. Anything else is ``state_corrupt``."""
+    raw = rec.get("lease_id")
+    lease_id = rec.get("request_id") if raw is None else raw
+    if not isinstance(lease_id, str) or not lease_id:
+        raise AdmissionInvalid("state_corrupt")
+    return lease_id
+
+
+def _claim_lease_id(work: dict, rec: dict) -> None:
+    """Refuse (``state_corrupt``) a record whose id is invalid or already a key in ``holders``."""
+    if _lease_id(rec) in work["holders"]:
+        raise AdmissionInvalid("state_corrupt")
+
+
 def _make_lease(work: dict, policy: dict, rec: dict, now: float, parent: str | None) -> dict:
     work["fencing_counter"] = _int(work["fencing_counter"], "state_corrupt") + 1
     lease = dict(rec.get("owner") or {})
     lease.update(
-        lease_id=rec["lease_id"] if isinstance(rec.get("lease_id"), str) else rec["request_id"],
+        lease_id=_lease_id(rec),
         token=work["fencing_counter"], profile=rec["profile"], project_id=rec["project_id"],
         slots_granted=rec["slots"], max_slots=_profile(policy, rec["profile"])["max_slots"],
         owner_uid=rec["uid"], parent_lease=parent, state="active", grandfathered=False,
@@ -207,6 +224,7 @@ def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
                 raise AdmissionInvalid("stale_token")
             target, plan = rec["lease_id"], growth_plan(work, rec["lease_id"], _int(rec["slots"], "over_profile_ceiling"))
         else:
+            _claim_lease_id(work, rec)
             target = rec["parent_lease"]
             plan = nested_plan(work, policy, target, rec["profile"], rec["slots"])["plan"]
     except AdmissionInvalid as exc:
@@ -274,6 +292,7 @@ def _admit_new(work: dict, policy: dict, ctx: dict) -> list[dict]:
     news = sorted((r for r in work["queue"] if r["kind"] == "new"), key=lambda r: r["requested_at"])
     for index, rec in enumerate(news):
         try:
+            _claim_lease_id(work, rec)
             ceiling = _int(_profile(policy, rec["profile"])["max_slots"])
             if _int(rec["slots"], "over_profile_ceiling") > ceiling:
                 raise AdmissionInvalid("over_profile_ceiling")
