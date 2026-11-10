@@ -24,6 +24,7 @@ def main(argv=None):
     baseline = parser.add_subparsers(dest="command", required=True).add_parser("baseline")
     baseline.add_argument("--db", type=Path, required=True)
     baseline.add_argument("--out", type=Path, required=True)
+    baseline.add_argument("--corpus", action="store_true")
     args = parser.parse_args(argv)
     if not args.out.is_dir():
         parser.error(f"output directory does not exist: {args.out}")
@@ -32,7 +33,7 @@ def main(argv=None):
         target = args.out / "manifest.json"
         if args.db.expanduser().resolve() in (target.resolve(), target.with_suffix(".json.tmp").resolve()):
             raise ValueError("manifest output would overwrite the database")
-        write_manifest(target, measure_baseline(args.db))
+        write_manifest(target, measure_baseline(args.db, corpus=args.corpus))
     except (OSError, sqlite3.Error, RuntimeError, ValueError) as exc:
         print(" ".join(str(exc).splitlines()), file=sys.stderr)
         return 3 if isinstance(exc, ValueError) else 1

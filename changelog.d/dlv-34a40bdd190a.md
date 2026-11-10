@@ -1,0 +1,1 @@
+- Complete corpus baselines: opt-in corpus and all-column session digests in the baseline manifest.
