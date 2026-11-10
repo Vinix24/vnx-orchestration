@@ -32,13 +32,21 @@ class AuditWriteError(RuntimeError):
     """The audit line could not be written (exit 1, never a silent success)."""
 
 
-def _get(doc, path, kind, req):
+def _get(doc, path, kind, req, prefix=""):
     """doc[path] of exactly type kind (bool is not int); missing, None or another type refuses."""
     value = doc
     for key in path.split("."):
         value = value.get(key) if type(value) is dict else None
     if type(value) is not kind:
-        raise Refusal(req, f"{path} is missing, None or not a {kind.__name__}")
+        raise Refusal(req, f"{prefix}{path} is missing, None or not a {kind.__name__}")
+    return value
+
+
+def _names(doc, path, req, prefix=""):
+    """doc[path] as a column list: non-empty, unique, each a non-empty string without NUL; anything else refuses."""
+    value = _get(doc, path, list, req, prefix)
+    if not value or any(type(n) is not str or not n or "\0" in n for n in value) or len(set(value)) != len(value):
+        raise Refusal(req, f"{prefix}{path} is not a non-empty list of unique non-empty column names")
     return value
 
 
@@ -52,7 +60,7 @@ def _hex(doc, path, req):
 def _load(path, label):
     try:
         document = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RecursionError) as exc:  # RecursionError: JSON nested deeper than the parser's stack
         raise Refusal(1, f"{label} is missing or not parseable JSON: {exc}") from exc
     if type(document) is not dict:
         raise Refusal(1, f"{label} is not a JSON object")
@@ -96,8 +104,8 @@ def _envelope(manifest, quarantine):
 def _artifact(quarantine, folder):
     """Requirement 2: relative artefact name, size and sha256 measured on the file."""
     name = _get(quarantine, "artifact", str, 2)
-    if name in ("", ".", "..") or Path(name).name != name or name.startswith("/"):
-        raise Refusal(2, f"artifact must be a file name relative to quarantine.json, without ..: {name!r}")
+    if name in ("", ".", "..") or Path(name).name != name or name.startswith("/") or "\0" in name:  # NUL: os.stat ValueError
+        raise Refusal(2, f"artifact must be a file name relative to quarantine.json, without .. or NUL: {name!r}")
     size, sha = _get(quarantine, "artifact_bytes", int, 2), _hex(quarantine, "artifact_sha256", 2)
     path = folder / name
     try:
@@ -119,7 +127,7 @@ def _seal(path, folder):
 def _measure(conn, table, columns, want, who):  # table_digest of table; Refusal 4 when missing, unreadable or other columns
     try:
         got = table_digest(conn, table, columns, "rowid") if _columns(conn, table) == columns else None
-    except (sqlite3.Error, ValueError):
+    except (sqlite3.Error, ValueError, TypeError):
         got = None
     if got is None:
         raise Refusal(4, f"{who} table {table} is missing, unreadable or its columns differ from quarantine.json")
@@ -137,7 +145,7 @@ def _tables(live, art, quarantine):
         table = found.get(name)
         if table is None:
             raise Refusal(4, f"quarantine.json has no entry for {name}")
-        columns, digest = _get(table, "columns", list, 4), _hex(table, "content_digest", 4)
+        columns, digest = _names(table, "columns", 4, f"quarantine.json tables[{name}]."), _hex(table, "content_digest", 4)
         bounds = [table.get(k) for k in ("rows", "row_min", "row_max")]
         if type(bounds[0]) is not int or any(type(b) not in (int, type(None)) for b in bounds[1:]):
             raise Refusal(4, f"{name} rows, row_min or row_max are missing or malformed")
@@ -156,14 +164,20 @@ def _tables(live, art, quarantine):
 def _session(live, manifest):
     """Requirement 6: session_analytics is exactly as the baseline measured it (B2)."""
     inv = _get(manifest, "invariants.session_analytics", dict, 6)
-    columns, digest, rows = _get(inv, "columns", list, 6), _hex(inv, "digest_sha256", 6), _get(inv, "rows", int, 6)
+    columns, digest = _names(manifest, "invariants.session_analytics.columns", 6), _hex(inv, "digest_sha256", 6)
+    rows = _get(inv, "rows", int, 6)
     bound = int if rows else type(None)
     max_id, sum_id = _get(inv, "max_id", bound, 6), _get(inv, "sum_id", bound, 6)
-    now = _columns(live, "session_analytics")
+    try:  # as _measure does for requirement 4: a table that cannot be measured refuses, never another exception
+        now = _columns(live, "session_analytics")
+        if now == columns:
+            where = None if max_id is None else f"t.id <= {max_id}"
+            measured = table_digest(live, "session_analytics", columns, "id", where=where)
+            live_rows, live_sum = live.execute("SELECT count(*), sum(id) FROM session_analytics").fetchone()
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        raise Refusal(6, f"live table session_analytics cannot be measured: {type(exc).__name__}: {exc}") from exc
     if now != columns:
         raise Refusal(6, f"session_analytics columns changed: {sorted(set(now) ^ set(columns))}")
-    measured = table_digest(live, "session_analytics", columns, "id", where=None if max_id is None else f"t.id <= {max_id}")
-    live_rows, live_sum = live.execute("SELECT count(*), sum(id) FROM session_analytics").fetchone()
     if (measured["digest_sha256"], live_rows, live_sum) != (digest, rows, sum_id):
         snapshot = manifest.get("snapshot")  # the baseline rows live in the snapshot; it only names the id
         try:
@@ -196,7 +210,11 @@ def _snapshot(manifest):
 
 def _check(live, db, manifest_path, folder):
     manifest, quarantine = _load(manifest_path, "manifest.json"), _load(folder / "quarantine.json", "quarantine.json")
-    if Path(db).stat().st_size == 0:
+    try:  # with conn= the path is the caller's and check_permit has not resolved it
+        empty = Path(db).stat().st_size == 0
+    except (OSError, ValueError) as exc:
+        raise Refusal(9, f"database is not a readable regular file: {exc}") from exc
+    if empty:
         raise Refusal(9, "database is 0 bytes (decoy)")
     _envelope(manifest, quarantine)  # 1
     artifact = _artifact(quarantine, folder)  # 2
@@ -235,7 +253,8 @@ def check_permit(db, manifest_path, quarantine_dir, *, conn=None):
     """Check requirements 1-9 of the permit; return the verdict dict when all hold, else raise Refusal naming the first that does not.
 
     conn is the caller's own connection (Q5, inside its write transaction); without it a read-only
-    connection on db is opened in one read transaction. Nothing is written either way.
+    connection on db is opened in one read transaction. Nothing is written either way. A malformed value in either
+    document, or a store that does not open or cannot be measured, is a Refusal and never another exception.
 
     Requirement 4 compares three things, not two: per corpus table the live table, tables[] in quarantine.json and the same
     table inside the artifact (opened read-only) agree on table_digest, rows, row_min, row_max and the column list. An
@@ -247,7 +266,11 @@ def check_permit(db, manifest_path, quarantine_dir, *, conn=None):
     path = Path(db).expanduser().resolve()
     if not path.is_file():
         raise Refusal(9, "database is not a readable regular file")
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as live:
+    try:
+        live = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)  # a file without read permission fails here
+    except sqlite3.Error as exc:
+        raise Refusal(9, f"database does not open read-only: {exc}") from exc
+    with closing(live):
         live.execute("BEGIN")
         return _check(live, path, manifest_path, folder)
 

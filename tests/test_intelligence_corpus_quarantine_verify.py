@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -25,9 +26,30 @@ verify_module = importlib.import_module("intelligence_corpus_quarantine.verify")
 
 @pytest.fixture
 def permit(tmp_path):
+    return build_permit(tmp_path)
+
+
+def keep_only(conn, kept):
+    """Drop every view and every table outside kept (FTS shadow tables go with their table); the documents keep all fields."""
+    def names(sql):
+        return [row[0] for row in conn.execute(sql).fetchall()]
+
+    for view in names("SELECT name FROM sqlite_master WHERE type='view'"):
+        conn.execute(f'DROP VIEW "{view}"')
+    for vtab in names("SELECT name FROM sqlite_master WHERE sql LIKE 'CREATE VIRTUAL TABLE%'"):
+        if vtab not in kept:
+            conn.execute(f'DROP TABLE "{vtab}"')
+    for table in names("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        if not table.startswith(kept):
+            conn.execute(f'DROP TABLE "{table}"')
+
+
+def build_permit(tmp_path, kept=None):
     db = tmp_path / "source.db"
     with closing(sqlite3.connect(db)) as conn:
         conn.executescript((ROOT / "schemas/quality_intelligence.sql").read_text())
+        if kept:
+            keep_only(conn, kept)
         conn.executemany("INSERT INTO code_snippets(rowid,title,code,file_path,language) VALUES (?,?,?,?,?)",
                          [(2, "parse feed", "def parse(): pass", "/src/a.py", "python"),
                           (3, "store rows", "INSERT INTO t", "/src/b.py", "python"),
@@ -37,6 +59,8 @@ def permit(tmp_path):
         conn.executemany("INSERT INTO session_analytics(session_id,project_id,project_path,session_date) "
                          "VALUES (?,'fixture','/fixture','2026-06-01')", [("a",), ("b",)])
         conn.commit()
+        if kept:
+            conn.execute("VACUUM")
     out, state = tmp_path / "permit", tmp_path / "state"
     out.mkdir()
     state.mkdir()
@@ -125,6 +149,7 @@ MATRIX = [  # (requirement, file, name, change)
     (1, "quarantine", "track None", jset("track", None)),
     (1, "manifest", "truncated file", lambda raw: raw[:20]),
     (1, "quarantine", "schema 2", jset("schema", 2)),
+    (1, "manifest", "nested deeper than the JSON parser's stack", lambda raw: b"[" * 100000 + b"]" * 100000),
     (2, "quarantine", "bytes missing", jset("artifact_bytes", DROP)),
     (2, "quarantine", "sha None", jset("artifact_sha256", None)),
     (2, "quarantine", "sha not hex", jset("artifact_sha256", "xyz")),
@@ -290,3 +315,128 @@ def test_open_ro_refuses_a_relative_path_for_its_own_requirement():
         verify_module._open_ro("rel.db", 3, "artifact")
     assert info.value.requirement == 3
     assert "artifact" in str(info.value)
+
+
+MALFORMED = [None, {}, [], [{}], 0, -1, "x", True, "x\u0000"]  # the last: a NUL reaching os.stat is a ValueError
+COLUMN_ELEMENT = {"manifest": ("invariants", "session_analytics", "columns", 0), "quarantine": ("tables", 0, "columns", 0)}
+
+
+@pytest.fixture(scope="module")
+def corpus(tmp_path_factory):
+    """One valid permit per module, on the three tables the permit reads; a case writes only its own copy of one document."""
+    p = build_permit(tmp_path_factory.mktemp("corpus"), kept=("code_snippets", "snippet_metadata", "session_analytics"))
+    p.docs = {"manifest": json.loads(p.manifest.read_text()), "quarantine": json.loads(p.quarantine.read_text())}
+    return p
+
+
+def key_paths(node, prefix=()):
+    """Every key path below node, list elements and the containers themselves included."""
+    children = node.items() if type(node) is dict else enumerate(node) if type(node) is list else ()
+    for key, child in children:
+        yield prefix + (key,)
+        yield from key_paths(child, prefix + (key,))
+
+
+def mutated(doc, path, value):
+    """A deep copy of doc with path set to value, or None when that is the value it already holds."""
+    copy = node = json.loads(json.dumps(doc))
+    for key in path[:-1]:
+        node = node[key]
+    if type(node[path[-1]]) is type(value) and node[path[-1]] == value:
+        return None
+    node[path[-1]] = value
+    return copy
+
+
+def case_files(p, case, target, document):
+    """Manifest and quarantine dir of one case: a mutated quarantine.json gets its own sealed folder beside a hard link."""
+    if target == "manifest":
+        case.write_text(json.dumps(document))
+        return case, p.folder
+    folder = case / "artifact"
+    folder.mkdir(parents=True)
+    os.link(p.artifact, folder / p.artifact.name)
+    (folder / "quarantine.json").write_text(json.dumps(document))
+    (folder / "quarantine.json").chmod(0o444)
+    folder.chmod(0o555)
+    return p.manifest, folder
+
+
+def outcome(call):
+    try:
+        call()
+    except verify_module.Refusal as refusal:
+        return "refused", refusal.requirement
+    except Exception as exc:
+        return "raised", f"{type(exc).__name__}: {exc}"
+    return "ok", None
+
+
+def appended(log, start):
+    raw = log.read_bytes()[start:] if log.exists() else b""
+    return [(line["stage"], line["status"], line.get("requirement")) for line in map(json.loads, raw.splitlines())]
+
+
+@pytest.mark.parametrize("value", MALFORMED, ids=repr)
+@pytest.mark.parametrize("target", ["manifest", "quarantine"])
+def test_every_malformed_field_of_both_documents_is_a_refusal_or_a_verdict(corpus, tmp_path, target, value):
+    paths = list(key_paths(corpus.docs[target]))
+    assert COLUMN_ELEMENT[target] in paths  # the walk reaches list elements, so a field added later is covered too
+    state, failures, cases = tmp_path / "state", [], 0
+    state.mkdir()
+    log = state / AUDIT
+    for n, path in enumerate(paths):
+        document = mutated(corpus.docs[target], path, value)
+        if document is None:
+            continue
+        cases += 1
+        manifest, folder = case_files(corpus, tmp_path / f"case{n}", target, document)
+        checked = outcome(lambda: verify_module.check_permit(corpus.db, manifest, folder))
+        start = log.stat().st_size if log.exists() else 0
+        verified = outcome(lambda: verify_module.verify(corpus.db, manifest, folder, state_dir=state))
+        lines = appended(log, start)
+        if checked[0] == "raised" or verified != checked or lines != [("verified", *checked)]:
+            failures.append(f"{target}.{'.'.join(map(str, path))} = {value!r}: check_permit {checked}, "
+                            f"verify {verified}, audit {lines}")
+    print(f"{target} = {value!r}: {cases} cases")
+    assert not failures, f"{len(failures)} of {cases} cases:\n" + "\n".join(failures)
+
+
+def recreate_session_table(p, sql):
+    with closing(sqlite3.connect(p.db)) as conn:
+        conn.executescript(f"DROP TABLE session_analytics; {sql}")
+
+
+@pytest.mark.parametrize("sql,columns", [
+    ("CREATE TABLE session_analytics(id, session_id); INSERT INTO session_analytics VALUES (1,'s'),(1,'t');",
+     ["id", "session_id"]),
+    ("CREATE TABLE session_analytics(session_id TEXT); INSERT INTO session_analytics VALUES ('s');", ["session_id"]),
+    ("", []),
+], ids=["id not a unique integer", "no id column", "table gone, columns empty"])
+def test_a_session_table_that_cannot_be_measured_refuses_requirement_6(permit, sql, columns):
+    recreate_session_table(permit, sql)
+    tamper(permit.manifest, jset("invariants.session_analytics.columns", columns))
+    with pytest.raises(verify_module.Refusal) as info:
+        verify_module.verify(permit.db, permit.manifest, permit.folder, state_dir=permit.state)
+    assert info.value.requirement == 6 and "session_analytics" in str(info.value)
+    (line,) = audit_lines(permit)
+    assert (line["status"], line["requirement"]) == ("refused", 6)
+
+
+def test_a_database_without_read_permission_refuses_requirement_9(permit):
+    permit.db.chmod(0)
+    try:
+        with pytest.raises(verify_module.Refusal) as info:
+            verify_module.verify(permit.db, permit.manifest, permit.folder, state_dir=permit.state)
+    finally:
+        permit.db.chmod(0o644)
+    assert info.value.requirement == 9 and "does not open" in str(info.value)
+    (line,) = audit_lines(permit)
+    assert (line["status"], line["requirement"]) == ("refused", 9)
+
+
+def test_a_callers_connection_with_a_missing_database_path_refuses_requirement_9(permit, tmp_path):
+    with closing(sqlite3.connect(permit.db.as_uri() + "?mode=ro", uri=True)) as conn:
+        with pytest.raises(verify_module.Refusal) as info:
+            verify_module.check_permit(tmp_path / "gone.db", permit.manifest, permit.folder, conn=conn)
+    assert info.value.requirement == 9
