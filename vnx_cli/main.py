@@ -1615,7 +1615,6 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         choices=["success_patterns", "prevention_rules"],
         help="disambiguate when the same id appears in two tables",
     )
-
     _register_learning_decide_rule(learning_subs)
 
 
