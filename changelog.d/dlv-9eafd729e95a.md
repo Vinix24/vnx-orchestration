@@ -1,0 +1,1 @@
+- ADR-066 fixes the `dream_liveness/1` contract, the night and seven-night progress rules, and the review-age chain (track `dream-liveness-watch`, PR-1): the 30-day review-age threshold is new policy introduced here, and the ADR corrects ADR-019, which sets no maximum age for a waiting proposal.
