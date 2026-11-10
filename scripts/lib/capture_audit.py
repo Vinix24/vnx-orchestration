@@ -1,24 +1,34 @@
-"""The capture audit engine (ADR-067, capture PR-3, split 1 of 2).
+"""The capture audit engine and read model (ADR-067, capture PR-3).
 
-Pure functions over the records the ``capture_sources`` readers return: the
-window, the candidate pairs, the disposition and the anchor rule. No I/O.
+Pure functions over the records the ``capture_sources`` readers return (the
+window, the candidate pairs, the disposition and the anchor rule) and
+``build_audit``, which reads the bins and the ledger and writes
+``state/capture_audit.json`` atomically with hashes, ids and counts only.
 Fail-closed: a bin that is not ``ok``, or a window without a new record, makes
 ``open_pairs`` null. A null is no measurement and never reads as zero.
 """
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import capture_sources as cs
+from atomic_io import atomic_write_json
+from vnx_paths import project_id_from_state_dir
 
 TOKEN_MIN_LEN = 4
 JACCARD_MIN = 0.34
 SHARED_MIN = 2
 
+AUDIT_FILENAME = "capture_audit.json"
+AUDIT_SCHEMA = "capture_audit/1"
+LEDGER_FILENAME = "capture_dispositions.ndjson"
 SOURCE_EXPLICIT, SOURCE_CHAIN, SOURCE_FIRST24H = "explicit", "chain", "first24h"
 FIRST_WINDOW = timedelta(hours=24)
 
@@ -28,6 +38,8 @@ BINS = (OI, MEM, NUG)
 KINDS: Dict[str, Tuple[str, str]] = {"oi_mem": (OI, MEM), "oi_nug": (OI, NUG), "mem_nug": (MEM, NUG)}
 
 _TOKEN_RE = re.compile(r"[^\W\d_]+")
+_PAIR_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+_MONTH_FILE_RE = re.compile(r"^(\d{4}-(?:0[1-9]|1[0-2]))\.md$")
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,22 @@ def parse_window(since: Optional[str], until: Optional[str], *,
     return Window(start, end, source)
 
 
+def previous_chain_until(state_dir: Path) -> Optional[datetime]:
+    """Start of the next chain run: the until of the last successful chain or
+    first24h audit. None only when the file does not exist; a file that cannot
+    be read or has another schema raises ValueError, it is never a first run."""
+    try:
+        data = json.loads((Path(state_dir) / AUDIT_FILENAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        raise ValueError("the previous capture_audit.json cannot be read") from exc
+    window = data.get("window") if isinstance(data, dict) else None
+    if not isinstance(window, dict) or data.get("schema") != AUDIT_SCHEMA or "chain_until" not in window:
+        raise ValueError("the previous capture_audit.json has an unknown schema")
+    return None if window["chain_until"] is None else _aware(window["chain_until"], "previous chain_until")
+
+
 def tokens(text: str) -> FrozenSet[str]:
     """Letters-only, lower-case tokens of at least TOKEN_MIN_LEN letters."""
     return frozenset(t for t in _TOKEN_RE.findall((text or "").lower()) if len(t) >= TOKEN_MIN_LEN)
@@ -132,6 +160,34 @@ def disposition(pair: Pair, dismissed_ids: FrozenSet[str]) -> str:
     if carried & (home_keys - {None, ""}):
         return "linked"
     return "dismissed" if pair.pair_id in dismissed_ids else "open"
+
+
+def _valid_dismissal(row: object) -> bool:
+    fields = ("pair_id", "reason", "at", "by")
+    if not isinstance(row, dict) or not all(isinstance(row.get(f), str) and row[f].strip() for f in fields):
+        return False
+    try:
+        _aware(row["at"], "at")
+    except ValueError:
+        return False
+    return bool(_PAIR_ID_RE.match(row["pair_id"]))
+
+
+def read_dismissed(state_dir: Path) -> FrozenSet[str]:
+    """Pair ids with a valid ledger line. Read only; ``dismiss`` (PR-4) writes."""
+    try:
+        text = (Path(state_dir) / LEDGER_FILENAME).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):  # vnx-silent-except: no readable ledger dismisses nothing, every pair stays open
+        return frozenset()
+    ids = set()
+    for line in text.splitlines():
+        try:
+            row = json.loads(line)
+        except ValueError:  # vnx-silent-except: a broken line is no dismissal, its pair stays open
+            continue
+        if _valid_dismissal(row):
+            ids.add(row["pair_id"])
+    return frozenset(ids)
 
 
 def _stamp(bin_name: str, rec: dict):
@@ -201,3 +257,66 @@ def audit_model(raw: Dict[str, tuple], window: Window, *, project_id: str,
     return {"bins": bins, "anchors_total": anchors,
             "open_pairs": open_in if anchors is not None and anchors > 0 else None,
             "backlog_open_pairs": backlog if all_ok else None, "pairs": entries}
+
+
+def _bucket_months(binding: dict, window: Window) -> List[str]:
+    months = {window.until.strftime("%Y-%m")}
+    try:
+        names = os.listdir(Path(binding["bucket_dir"]).expanduser())
+    except OSError:  # vnx-silent-except: read_bucket_entries lists the dir again and reports error
+        names = []
+    months.update(m.group(1) for m in map(_MONTH_FILE_RE.match, names) if m)
+    return sorted(months)
+
+
+# Reader output per bin: (tuple length, key of the foreign count). read_memory_notes returns
+# (records, status); read_open_items and read_bucket_entries add an int count of foreign records.
+_READER_SHAPES: Dict[str, Tuple[int, Optional[str]]] = {
+    OI: (3, "foreign_project_skipped"), MEM: (2, None), NUG: (3, "foreign_slug_skipped")}
+
+
+def _normalize(bin_name: str, result: object) -> tuple:
+    """A reader result as ``(records, state, extra_dict)``. Any other shape is ``error``, so the
+    measurement goes null: an unexpected shape is never read as an ``ok`` bin."""
+    size, foreign_key = _READER_SHAPES[bin_name]
+    if not (isinstance(result, tuple) and len(result) == size and isinstance(result[0], list)
+            and all(isinstance(r, dict) for r in result[0]) and isinstance(result[1], str)):
+        return [], cs.STATE_ERROR, {}
+    if foreign_key is None:
+        return result[0], cs.state_of(result[1]), {}
+    if type(result[2]) is not int or result[2] < 0:  # a bool, None or a negative number is no count
+        return [], cs.STATE_ERROR, {}
+    return result[0], cs.state_of(result[1]), {foreign_key: result[2]}
+
+
+def _read_bins(state_dir: Path, window: Window) -> dict:
+    """Per bin ``(records, state, extra_dict)``; all unbound without a binding."""
+    binding, status = cs.load_binding(state_dir)
+    if binding is None:
+        return {b: ([], cs.state_of(status), {}) for b in BINS}
+    return {OI: _normalize(OI, cs.read_open_items(state_dir)),
+            MEM: _normalize(MEM, cs.read_memory_notes(binding)),
+            NUG: _normalize(NUG, cs.read_bucket_entries(binding, _bucket_months(binding, window)))}
+
+
+def build_audit(state_dir: Path, window: Window) -> dict:
+    """Compute the read model for one window and write ``state/capture_audit.json`` atomically.
+
+    Only a run with every bin ``ok`` on a ``chain`` or ``first24h`` window moves ``chain_until`` to
+    its ``until``. An explicit or failed run carries the previous value on unchanged, so the chain
+    stays gap-free; when that value cannot be read it raises ValueError and writes nothing, as it
+    does for a state dir that does not exist."""
+    state_dir = Path(state_dir)
+    if not state_dir.is_dir():
+        raise ValueError("the state dir is not an existing directory")
+    project_id = project_id_from_state_dir(state_dir) or None
+    model = audit_model(_read_bins(state_dir, window), window, project_id=project_id or "",
+                        dismissed_ids=read_dismissed(state_dir))
+    all_ok = all(row["state"] == cs.STATE_OK for row in model["bins"].values())
+    chain = window.until if all_ok and window.source != SOURCE_EXPLICIT else previous_chain_until(state_dir)
+    audit = {"schema": AUDIT_SCHEMA, "project_id": project_id,
+             "window": {"since": window.since.isoformat(), "until": window.until.isoformat(),
+                        "source": window.source, "chain_until": chain.isoformat() if chain else None},
+             **model}
+    atomic_write_json(state_dir / AUDIT_FILENAME, audit)
+    return audit
