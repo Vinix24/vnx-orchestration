@@ -14,6 +14,8 @@ Usage:
     python3 scripts/intel_injection_join.py join   [--qi <path>] [--rc <path>] [--limit N]
     python3 scripts/intel_injection_join.py adoption [--qi <path>] [--limit N]
     python3 scripts/intel_injection_join.py placebo [--qi <path>]
+    python3 scripts/intel_injection_join.py cohort [--qi <path>] [--rc <path>] [--project-id <id>]
+                                                   [--as-of <ISO>] [--json]
 
 Default DB paths resolve from VNX_STATE_DIR (falling back to
 ~/.vnx-data/vnx-dev/state).
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 _LIB_DIR = Path(__file__).resolve().parent / "lib"
@@ -397,6 +400,27 @@ def run_placebo(qi_db: Path) -> int:
     return 0
 
 
+def _iso_arg(value: str) -> datetime:
+    from intel_effect_cohort import parse_utc
+    parsed = parse_utc(value)
+    if parsed is None:
+        raise argparse.ArgumentTypeError(f"not an ISO timestamp: {value!r}")
+    return parsed
+
+
+def _run_cohort(args: argparse.Namespace, state_dir: Path, parser: argparse.ArgumentParser) -> int:
+    import intel_effect_cohort
+    from project_root import resolve_project_id
+    try:
+        project_id = args.project_id or resolve_project_id()
+    except RuntimeError as exc:
+        parser.error(str(exc))
+    return intel_effect_cohort.run_cohort(
+        _resolve_db(args.qi, "quality_intelligence.db", state_dir),
+        _resolve_db(args.rc, "runtime_coordination.db", state_dir),
+        project_id, args.as_of or datetime.now(timezone.utc), args.json)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -417,6 +441,14 @@ def main(argv: list[str] | None = None) -> int:
     p_pl = sub.add_parser("placebo", help="adoption rate per injection arm (placebo discrimination)")
     p_pl.add_argument("--qi", help="path to quality_intelligence.db")
 
+    # Effect PR-6. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
+    p_co = sub.add_parser("cohort", help="A/B window cohort: per-arm counts and refusals, never a verdict")
+    p_co.add_argument("--qi", help="path to quality_intelligence.db (opened read-only, not read)")
+    p_co.add_argument("--rc", help="path to runtime_coordination.db")
+    p_co.add_argument("--project-id", help="tenant (default: project_root.resolve_project_id())")
+    p_co.add_argument("--as-of", type=_iso_arg, help="ISO timestamp (default: now, UTC)")
+    p_co.add_argument("--json", action="store_true")
+
     args = parser.parse_args(argv)
     state_dir = _default_state_dir()
 
@@ -430,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "placebo":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
         return run_placebo(qi)
+    if args.cmd == "cohort":
+        return _run_cohort(args, state_dir, parser)
     return 2
 
 
