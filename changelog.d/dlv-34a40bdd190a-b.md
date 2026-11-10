@@ -1,0 +1,1 @@
+- Snapshot of the corpus: a read-only `VACUUM INTO` copy of the intelligence store, cross-checked against the measured digest, with verified reuse (`--snapshot`, `--reuse-snapshot`).
