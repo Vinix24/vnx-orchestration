@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sqlite3
 import sys
 from contextlib import closing
@@ -87,6 +88,11 @@ def conn(tmp_path):
         yield connection
 
 
+@pytest.fixture
+def state(tmp_path) -> Path:
+    return tmp_path / "state"
+
+
 def _decide(state: Path, decision: str = "approved", pid: str = PID, pattern: str = "p1") -> dict:
     proposal = {"pattern": pattern, "terminal_constraint": "T1", "failure_class": "timeout",
                 "prevention": "prevent", "confidence": 0.8, "occurrence_count": 3,
@@ -98,30 +104,80 @@ def _decide(state: Path, decision: str = "approved", pid: str = PID, pattern: st
     return record
 
 
-def _deactivation(record: dict, **fields) -> dict:
-    out = {"decision": "deactivated", "rule_id": record["rule_id"], "project_id": record["project_id"],
-           "reason": "effect criterion not met", "decided_by": "v", "decided_at": LATER, **fields}
-    if "approval_id" not in fields:
-        keys = (out["project_id"], out["rule_id"], "deactivated", out["decided_at"], out["decided_by"])
-        out["approval_id"] = store.mint_approval_id(*map(str, keys))
-    return out
+def _remint(record: dict, **changes) -> dict:
+    out = {**record, **changes}
+    keys = (out["project_id"], out["rule_id"], "approved", out["decided_at"], out["decided_by"])
+    return {**out, "approval_id": store.mint_approval_id(*keys)}
+
+
+def _append_line(state: Path, line: str) -> None:
+    with open(state / store.DECISIONS_FILENAME, "a", encoding="utf-8") as handle:
+        handle.write(line + "\n")
 
 
 def _rows(conn) -> list:
     return conn.execute("SELECT * FROM pattern_activation").fetchall()
 
 
-def test_a_store_decision_writes_one_row_and_a_repeat_hits_the_same_key(pa, conn, tmp_path):
-    record = _decide(tmp_path / "state")
-    activation_id = pa.record_activation(conn, record, rule_row_id=ROW, now=LATER)
+def test_a_store_decision_writes_one_row_and_a_repeat_hits_the_same_key(pa, conn, state):
+    record = _decide(state)
+    activation_id = pa.record_activation(conn, record, state_dir=state, rule_row_id=ROW, now=LATER)
     assert activation_id == pa.mint_activation_id(PID, record["approval_id"], record["rule_id"])
     row = pa.activation_for(conn, PID, activation_id)
     for name in ("rule_id", "decision_id", "approval_id", "bundle_ref", "rollout_scope", "baseline_metric",
                  "baseline_value", "effect_criterion", "stop_condition", "recovery_path"):
         assert row[name] == record[name], name
     assert (row["rule_row_id"], row["activated_at"], row["active"], row["deactivated_at"]) == (ROW, LATER, 1, None)
-    assert pa.record_activation(conn, record, rule_row_id=ROW, now="2026-12-01T00:00:00+00:00") == activation_id
+    assert pa.record_activation(conn, record, state_dir=state, rule_row_id=ROW, now=NOW) == activation_id
     assert len(_rows(conn)) == 1 and pa.active_row_ids(conn, PID) == frozenset({ROW})
+
+
+def test_a_hand_built_approval_the_store_never_wrote_is_refused(pa, conn, state):
+    _decide(state, pattern="p2")  # the store holds an approval, only not of this rule
+    rid = "rule-handmade"
+    record = _remint({"decision": "approved", "project_id": PID, "rule_id": rid, "decision_id": "dec-handmade",
+                      "bundle_ref": store.mint_bundle_ref([rid], NOW), "rollout_scope": store.ROLLOUT_SCOPE,
+                      "baseline_metric": "dispatches_with_class:timeout", "baseline_value": 3, "effect_criterion": "e",
+                      "stop_condition": "s", "recovery_path": store.RECOVERY_PATH, "decided_at": NOW, "decided_by": "v"})
+    with pytest.raises(ValueError, match="not an approval"):
+        pa.record_activation(conn, record, state_dir=state, rule_row_id=ROW, now=LATER)
+    assert _rows(conn) == []
+
+
+def test_an_approval_a_later_rejection_overrides_is_refused(pa, conn, state):
+    record = _decide(state)
+    _append_line(state, json.dumps({**record, "decision": "rejected", "decided_at": LATER, "bundle_ref": None}))
+    with pytest.raises(ValueError, match="not an approval"):
+        pa.record_activation(conn, record, state_dir=state, rule_row_id=ROW, now=LATER)
+    assert _rows(conn) == []
+
+
+DIFFERS = [("passed", c) for c in ({"decision_id": "dec-x"}, {"bundle_ref": "bundle-x"}, {"effect_criterion": "x"},
+                                    {"stop_condition": "x"}, {"baseline_metric": "x"}, {"baseline_value": 4},
+                                    {"decided_at": LATER}, {"project_id": "other"}, {"rule_id": "rule-x"})]
+DIFFERS += [("record", c) for c in ({"rollout_scope": "fleet"}, {"recovery_path": "rm -rf state"},
+                                    {"project_id": "other"}, {"bundle_ref": None})]
+
+
+@pytest.mark.parametrize("side, changes", DIFFERS)
+def test_an_approval_that_differs_from_the_record_on_a_stored_field_is_refused(pa, conn, state, side, changes):
+    record = _decide(state)
+    passed = _remint(record, **changes) if side == "passed" else record
+    if side == "record":
+        _append_line(state, json.dumps({**record, **changes}))
+    with pytest.raises(ValueError, match="differ|not an approval"):
+        pa.record_activation(conn, passed, state_dir=state, rule_row_id=ROW, now=LATER)
+    assert _rows(conn) == []
+
+
+@pytest.mark.parametrize("line", ["not json", "[]", '{"rule_id": "", "decision": "approved"}',
+                                  '{"rule_id": "r", "decision": "unknown"}'])
+def test_an_unreadable_decision_record_is_refused(pa, conn, state, line):
+    record = _decide(state)
+    _append_line(state, line)
+    with pytest.raises(store.DecisionsUnreadable):
+        pa.record_activation(conn, record, state_dir=state, rule_row_id=ROW, now=LATER)
+    assert _rows(conn) == []
 
 
 def _drop(name):
@@ -144,28 +200,29 @@ REFUSED += [_set("rollout_scope", "fleet"), _set("rollout_scope", "Project"), _s
 
 
 @pytest.mark.parametrize("mutate", REFUSED)
-def test_a_record_that_cannot_activate_is_refused_and_writes_no_row(pa, conn, tmp_path, mutate):
+def test_a_record_that_cannot_activate_is_refused_and_writes_no_row(pa, conn, state, mutate):
     with pytest.raises(ValueError):
-        pa.record_activation(conn, mutate(_decide(tmp_path / "state")), rule_row_id=ROW, now=LATER)
+        pa.record_activation(conn, mutate(_decide(state)), state_dir=state, rule_row_id=ROW, now=LATER)
     assert _rows(conn) == []
 
 
-def test_a_rejected_store_record_is_refused(pa, conn, tmp_path):
+def test_a_rejected_store_record_is_refused(pa, conn, state):
     with pytest.raises(ValueError, match="approved"):
-        pa.record_activation(conn, _decide(tmp_path / "state", "rejected"), rule_row_id=ROW, now=LATER)
+        pa.record_activation(conn, _decide(state, "rejected"), state_dir=state, rule_row_id=ROW, now=LATER)
     assert _rows(conn) == []
 
 
 @pytest.mark.parametrize("row_id, now", [(0, LATER), (None, LATER), (True, LATER), ("7", LATER), (ROW, None), (ROW, "")])
-def test_a_bad_rule_row_or_time_is_refused(pa, conn, tmp_path, row_id, now):
+def test_a_bad_rule_row_or_time_is_refused(pa, conn, state, row_id, now):
     with pytest.raises(ValueError):
-        pa.record_activation(conn, _decide(tmp_path / "state"), rule_row_id=row_id, now=now)
+        pa.record_activation(conn, _decide(state), state_dir=state, rule_row_id=row_id, now=now)
     assert _rows(conn) == []
 
 
 def test_a_row_of_another_project_is_invisible(pa, conn, tmp_path):
-    mine = pa.record_activation(conn, _decide(tmp_path / "a"), rule_row_id=ROW, now=LATER)
-    theirs = pa.record_activation(conn, _decide(tmp_path / "b", pid="other"), rule_row_id=9, now=LATER)
+    a, b = tmp_path / "a", tmp_path / "b"
+    mine = pa.record_activation(conn, _decide(a), state_dir=a, rule_row_id=ROW, now=LATER)
+    theirs = pa.record_activation(conn, _decide(b, pid="other"), state_dir=b, rule_row_id=9, now=LATER)
     assert pa.activation_for(conn, "other", mine) is None and pa.activation_for(conn, PID, theirs) is None
     assert pa.active_row_ids(conn, PID) == frozenset({ROW}) and pa.active_row_ids(conn, "other") == frozenset({9})
     assert pa.active_row_ids(conn, "nobody") == frozenset()
@@ -174,56 +231,20 @@ def test_a_row_of_another_project_is_invisible(pa, conn, tmp_path):
             pa.active_row_ids(conn, bad)
 
 
-def test_the_same_key_on_another_rule_row_and_a_second_active_activation_are_refused(pa, conn, tmp_path):
-    first = _decide(tmp_path / "state")
-    pa.record_activation(conn, first, rule_row_id=ROW, now=LATER)
+def test_the_same_key_on_another_rule_row_and_a_second_active_activation_are_refused(pa, conn, state):
+    first = _decide(state)
+    pa.record_activation(conn, first, state_dir=state, rule_row_id=ROW, now=LATER)
     with pytest.raises(ValueError, match="rule row"):
-        pa.record_activation(conn, first, rule_row_id=ROW + 1, now=LATER)
+        pa.record_activation(conn, first, state_dir=state, rule_row_id=ROW + 1, now=LATER)
     with pytest.raises(ValueError, match="active"):
-        pa.record_activation(conn, _decide(tmp_path / "state", pattern="p2"), rule_row_id=ROW, now=LATER)
+        pa.record_activation(conn, _decide(state, pattern="p2"), state_dir=state, rule_row_id=ROW, now=LATER)
     assert len(_rows(conn)) == 1
 
 
-def test_deactivate_is_durable_and_a_repeat_ingest_does_not_reactivate(pa, conn, tmp_path):
-    record = _decide(tmp_path / "state")
-    activation_id = pa.record_activation(conn, record, rule_row_id=ROW, now=LATER)
-    off = _deactivation(record)
-    assert pa.deactivate(conn, activation_id, off) is True
-    row = pa.activation_for(conn, PID, activation_id)
-    assert (row["active"], row["deactivated_at"], row["deactivation_reason"], row["deactivation_approval_id"]) == (
-        0, LATER, "effect criterion not met", off["approval_id"])
-    assert pa.deactivate(conn, activation_id, _deactivation(record, reason="again")) is False
-    assert pa.activation_for(conn, PID, activation_id)["deactivation_reason"] == "effect criterion not met"
-    assert pa.record_activation(conn, record, rule_row_id=ROW, now="2026-12-01T00:00:00+00:00") == activation_id
-    assert pa.active_row_ids(conn, PID) == frozenset() and len(_rows(conn)) == 1
-
-
-@pytest.mark.parametrize("fields", [
-    {"decision": "approved"}, {"decision": None}, {"reason": ""}, {"reason": None}, {"decided_at": None},
-    {"approval_id": None}, {"approval_id": "x"}, {"rule_id": "rule-other"},
-])
-def test_a_deactivation_record_that_does_not_hold_is_refused(pa, conn, tmp_path, fields):
-    record = _decide(tmp_path / "state")
-    activation_id = pa.record_activation(conn, record, rule_row_id=ROW, now=LATER)
-    with pytest.raises(ValueError):
-        pa.deactivate(conn, activation_id, _deactivation(record, **fields))
-    assert pa.active_row_ids(conn, PID) == frozenset({ROW})
-
-
-def test_deactivating_an_unknown_or_foreign_activation_is_a_lookup_error(pa, conn, tmp_path):
-    record = _decide(tmp_path / "state")
-    activation_id = pa.record_activation(conn, record, rule_row_id=ROW, now=LATER)
-    with pytest.raises(LookupError):
-        pa.deactivate(conn, "act-unknown", _deactivation(record))
-    with pytest.raises(LookupError):
-        pa.deactivate(conn, activation_id, _deactivation(record, project_id="other"))
-    assert pa.active_row_ids(conn, PID) == frozenset({ROW})
-
-
-def test_a_database_without_the_table_has_no_activation_and_refuses_a_write(pa, tmp_path):
+def test_a_database_without_the_table_has_no_activation_and_refuses_a_write(pa, tmp_path, state):
     db = _bootstrap(tmp_path)
     _back_to_v34(db)
     with closing(sqlite3.connect(db)) as old:
         assert pa.active_row_ids(old, PID) == frozenset() and pa.activation_for(old, PID, "act-x") is None
         with pytest.raises(sqlite3.OperationalError):
-            pa.record_activation(old, _decide(tmp_path / "state"), rule_row_id=ROW, now=LATER)
+            pa.record_activation(old, _decide(state), state_dir=state, rule_row_id=ROW, now=LATER)

@@ -2,9 +2,10 @@
 
 An activation carries the decision record of ``prevention_rule_store`` (loop D3, the
 only producer of ``approval_id`` and ``bundle_ref``) and asks for nothing the record
-does not carry. ``activation_id`` is deterministic over ``(project_id, approval_id,
-rule_id)``: a repeated ingest hits the same key and never switches a deactivated row
-back on; only a new approval gives a new activation.
+does not carry. It is written only from the latest record of its rule in the store.
+``activation_id`` is deterministic over ``(project_id, approval_id, rule_id)``: a repeat
+hits the same key and never switches a deactivated row back on; only a new approval
+gives a new activation. Deactivation lands with its decision (D9).
 
 The table comes from ``_migrate_v35`` in ``scripts/quality_db_init.py``, keyed
 ``(project_id, activation_id)`` (ADR-007); every read filters on ``project_id``. A
@@ -16,24 +17,20 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from typing import Any, Dict, FrozenSet, Mapping, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, FrozenSet, Mapping, Optional
 
 import prevention_rule_store as store
 
 TABLE = "pattern_activation"
-COLUMNS = (
-    "project_id", "activation_id", "rule_row_id", "rule_id", "decision_id", "approval_id", "bundle_ref",
-    "rollout_scope", "baseline_metric", "baseline_value", "effect_criterion", "stop_condition",
-    "recovery_path", "activated_at", "active", "deactivated_at", "deactivation_reason",
-    "deactivation_approval_id",
-)
 RECORD_FIELDS = (
     "rule_id", "decision_id", "approval_id", "bundle_ref", "rollout_scope", "baseline_metric",
     "baseline_value", "effect_criterion", "stop_condition", "recovery_path",
 )
+COLUMNS = ("project_id", "activation_id", "rule_row_id", *RECORD_FIELDS, "activated_at", "active", "deactivated_at",
+           "deactivation_reason", "deactivation_approval_id")
 _APPROVAL_TEXT = ("project_id", "rule_id", "decision_id", "approval_id", "bundle_ref", "baseline_metric",
                   "effect_criterion", "stop_condition", "decided_at", "decided_by")
-_DEACTIVATION_TEXT = ("project_id", "rule_id", "approval_id", "reason", "decided_at", "decided_by")
 
 
 def _is_text(value: Any) -> bool:
@@ -44,35 +41,28 @@ def _is_positive_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
-def _require(record: Any, decision: str, names: Sequence[str]) -> Mapping[str, Any]:
-    """``record`` when it is a ``decision`` record with every name a non-empty string
-    and an ``approval_id`` the store minted for it; ``ValueError`` naming why not."""
-    if not isinstance(record, Mapping):
-        raise ValueError(f"a decision record must be a mapping, not {type(record).__name__}")
-    if record.get("decision") != decision:
-        raise ValueError(f"decision {record.get('decision')!r} is not {decision!r}")
-    for name in names:
-        if not _is_text(record.get(name)):
-            raise ValueError(f"{name} is missing or empty in the {decision} record")
-    minted = store.mint_approval_id(record["project_id"], record["rule_id"], decision,
-                                    record["decided_at"], record["decided_by"])
-    if record["approval_id"] != minted:
-        raise ValueError(f"approval_id {record['approval_id']!r} was not minted by the store for this record")
-    return record
-
-
 def mint_activation_id(project_id: str, approval_id: str, rule_id: str) -> str:
     """``act-`` plus 12 hex of sha256 over the three fields. The only place an
     activation id is formed."""
     return "act-" + hashlib.sha256("|".join((project_id, approval_id, rule_id)).encode("utf-8")).hexdigest()[:12]
 
 
-def validate_activation(decision: Any) -> Dict[str, Any]:
+def validate_activation(record: Any) -> Dict[str, Any]:
     """The activation fields of an approved decision record, ``project_id`` included.
 
     Raises ``ValueError`` naming the first reason the record cannot activate. A
     missing, ``None``, empty, malformed or unknown value always refuses."""
-    record = _require(decision, "approved", _APPROVAL_TEXT)
+    if not isinstance(record, Mapping):
+        raise ValueError(f"a decision record must be a mapping, not {type(record).__name__}")
+    if record.get("decision") != "approved":
+        raise ValueError(f"decision {record.get('decision')!r} is not 'approved'")
+    for name in _APPROVAL_TEXT:
+        if not _is_text(record.get(name)):
+            raise ValueError(f"{name} is missing or empty in the approved record")
+    minted = store.mint_approval_id(record["project_id"], record["rule_id"], "approved",
+                                    record["decided_at"], record["decided_by"])
+    if record["approval_id"] != minted:
+        raise ValueError(f"approval_id {record['approval_id']!r} was not minted by the store for this record")
     if record.get("rollout_scope") != store.ROLLOUT_SCOPE:
         raise ValueError(f"rollout_scope {record.get('rollout_scope')!r} is not {store.ROLLOUT_SCOPE!r}")
     if record.get("recovery_path") != store.RECOVERY_PATH:
@@ -113,19 +103,30 @@ def active_row_ids(conn: sqlite3.Connection, project_id: str) -> FrozenSet[int]:
     return frozenset(row[0] for row in rows)
 
 
-def record_activation(conn: sqlite3.Connection, decision: Any, *, rule_row_id: int, now: str) -> str:
+def _require_in_record(state_dir: Path, fields: Mapping[str, Any]) -> None:
+    """``ValueError`` unless the rule's latest record in ``state_dir`` is ``fields`` on every stored field."""
+    persisted = store.approved_decision(Path(state_dir), fields["rule_id"])
+    if persisted is None:
+        raise ValueError(f"{fields['rule_id']}: the latest record in {state_dir} is not an approval")
+    differs = [name for name in fields if persisted.get(name) != fields[name]]
+    if differs:
+        raise ValueError(f"{fields['rule_id']}: {', '.join(differs)} differ from the approval in the record")
+
+
+def record_activation(conn: sqlite3.Connection, decision: Any, *, state_dir: Path, rule_row_id: int, now: str) -> str:
     """Activate ``rule_row_id`` from an approved decision record; returns the activation id.
 
-    A repeat of the same record on the same rule row writes nothing, also when that
-    activation was deactivated: it stays off. ``ValueError`` for a record
-    ``validate_activation`` refuses, a rule row id that is not a positive integer, an
-    empty ``now``, the same key on another rule row, or a rule row that already has
-    another active activation. Never commits."""
+    ``decision`` must equal ``store.approved_decision(state_dir, rule_id)`` on every stored
+    field, checked before any write. A repeat of the same record on the same rule row
+    writes nothing, also when that activation was deactivated: it stays off. ``ValueError``
+    for a record ``validate_activation`` refuses, a bad rule row id or ``now``, the same key
+    on another rule row, or a rule row with another active activation. Never commits."""
     fields = validate_activation(decision)
     if not _is_positive_int(rule_row_id):
         raise ValueError(f"rule_row_id {rule_row_id!r} is not a positive integer")
     if not _is_text(now):
         raise ValueError("now must be a non-empty string")
+    _require_in_record(state_dir, fields)
     project_id = fields["project_id"]
     activation_id = mint_activation_id(project_id, fields["approval_id"], fields["rule_id"])
     existing = activation_for(conn, project_id, activation_id)
@@ -140,26 +141,3 @@ def record_activation(conn: sqlite3.Connection, decision: Any, *, rule_row_id: i
     conn.execute(f"INSERT INTO {TABLE} ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
                  [row[name] for name in names])
     return activation_id
-
-
-def deactivate(conn: sqlite3.Connection, activation_id: str, decision: Any) -> bool:
-    """Switch an activation off from a ``deactivated`` decision record of the store.
-
-    Sets ``active = 0`` with the record's time, reason and ``approval_id``. True when
-    it changed; False when it was already off (the first deactivation stays as it
-    was recorded). ``LookupError`` when the record's project has no such activation,
-    ``ValueError`` for a record that does not hold or names another rule. Never commits."""
-    record = _require(decision, "deactivated", _DEACTIVATION_TEXT)
-    row = activation_for(conn, record["project_id"], activation_id)
-    if row is None:
-        raise LookupError(f"{activation_id}: no activation in project {record['project_id']!r}")
-    if row["rule_id"] != record["rule_id"]:
-        raise ValueError(f"{activation_id} activates {row['rule_id']!r}, the record names {record['rule_id']!r}")
-    if row["active"] == 0:
-        return False
-    conn.execute(
-        f"UPDATE {TABLE} SET active = 0, deactivated_at = ?, deactivation_reason = ?, deactivation_approval_id = ? "
-        "WHERE project_id = ? AND activation_id = ? AND active = 1",
-        (record["decided_at"], record["reason"], record["approval_id"], record["project_id"], activation_id),
-    )
-    return True
