@@ -289,6 +289,83 @@ def build_intelligence_section(
     )
 
 
+def _record_arm_decision(result, state_dir: Path) -> bool:
+    """Write the arm decision to the canonical NDJSON ledger (ADR-005). True when durable."""
+    from dispatch_register import append_event_idempotent  # noqa: PLC0415
+    return append_event_idempotent(
+        "intelligence_arm_assigned",
+        dispatch_id=result.dispatch_id,
+        project_id=result.project_id,
+        extra={"ab_arm": result.ab_arm, "ab_window": result.ab_window},
+        state_dir=state_dir,
+    )
+
+
+def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> bool:
+    """Ledger line, event, then the row: True when the arm decision is recorded (always without an arm)."""
+    dispatch_id = result.dispatch_id
+    recorded = True
+    if arm is None:
+        try:
+            selector.emit_event(result, coord_state_dir=state_dir)
+        except Exception as exc:
+            logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
+    else:
+        from project_scope import current_project_id  # noqa: PLC0415
+        result.project_id = current_project_id()
+        recorded = _record_arm_decision(result, state_dir)
+        try:
+            recorded = recorded and selector.emit_event(result, coord_state_dir=state_dir) is not None
+        except Exception as exc:
+            recorded = False
+            logger.warning("emit_event failed for %s: %s", dispatch_id, exc)
+    if not recorded:
+        logger.warning("arm decision for %s not recorded: no row, offer or stamp written", dispatch_id)
+        return False
+    try:
+        selector.record_injection(result, coord_state_dir=state_dir)
+    except Exception as exc:
+        logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
+    return True
+
+
+def _arm_result(selector, dispatch_id, role, pr_id, dispatch_paths, instruction_text):
+    """Decide the arm BEFORE select(): a control dispatch never selects. Returns (result, arm).
+
+    arm None = no active window: today's injection, row unstamped.
+    """
+    try:
+        from intelligence_selector import arm_for_dispatch, load_window_config  # noqa: PLC0415
+        from project_scope import current_project_id  # noqa: PLC0415
+        arm, ab_window = arm_for_dispatch(dispatch_id, current_project_id(), load_window_config())
+    except Exception as exc:
+        logger.warning("A/B arm undecidable for %s, no arm assigned: %s", dispatch_id, exc)
+        arm, ab_window = None, None
+    if arm == "control":
+        from intelligence_sources import InjectionResult, _now_utc, resolve_task_class  # noqa: PLC0415
+        return InjectionResult(
+            injection_point="dispatch_create",
+            injected_at=_now_utc(),
+            items=[],
+            suppressed=[],
+            task_class=resolve_task_class(None, role or None, dispatch_paths, instruction_text),
+            dispatch_id=dispatch_id,
+            ab_arm="control",
+            ab_window=ab_window,
+        ), arm
+    result = selector.select(
+        dispatch_id=dispatch_id,
+        injection_point="dispatch_create",
+        skill_name=role or "",
+        dispatch_paths=dispatch_paths or [],
+        instruction_text=instruction_text or "",
+        pr_id=pr_id,
+    )
+    result.ab_arm = arm
+    result.ab_window = ab_window
+    return result, arm
+
+
 def fetch_intelligence_section(
     dispatch_id: str,
     role: Optional[str],
@@ -308,6 +385,12 @@ def fetch_intelligence_section(
     patterns back to their source dispatch on receipt arrival.
 
     INT-2: Also prepends ADR context block from the adrs table when triggers match.
+    **With an arm, nothing derived from it is written unless its decision is
+    recorded:** the canonical NDJSON ledger line (ADR-005) first, then the event with
+    ``ab_arm``/``ab_window``, then the row, offers and stamps (control path too). A
+    failed record is logged, keeps the dispatch and its section, and writes none of
+    them. Without an active window nothing changes.
+
     OSError from ADR event-write propagates (ADR-005: raise on event-write failure).
     Other exceptions are caught and logged; callers receive empty string.
     """
@@ -334,24 +417,13 @@ def fetch_intelligence_section(
             coord_db_state_dir=state_dir,
         )
         try:
-            result = selector.select(
-                dispatch_id=dispatch_id,
-                injection_point="dispatch_create",
-                skill_name=role or "",
-                dispatch_paths=dispatch_paths or [],
-                instruction_text=instruction_text or "",
-                pr_id=pr_id,
+            result, arm = _arm_result(
+                selector, dispatch_id, role, pr_id, dispatch_paths, instruction_text,
             )
+            recorded = _emit_then_record(selector, result, arm, state_dir)
             try:
-                selector.emit_event(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("emit_event failed for %s: %s", dispatch_id, exc)
-            try:
-                selector.record_injection(result, coord_state_dir=state_dir)
-            except Exception as exc:
-                logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
-            try:
-                selector.stamp_source_dispatch_ids(result)
+                if recorded:  # with an arm: no stamp without its recorded decision (ADR-005)
+                    selector.stamp_source_dispatch_ids(result)
             except Exception as exc:
                 logger.debug(
                     "stamp_source_dispatch_ids failed for %s: %s", dispatch_id, exc

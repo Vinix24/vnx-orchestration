@@ -25,7 +25,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 # InjectionResult ab_arm field
 # ---------------------------------------------------------------------------
 
-def test_injection_result_default_ab_arm():
+def test_injection_result_default_ab_arm_is_not_assigned():
     from intelligence_sources._models import InjectionResult
     result = InjectionResult(
         injection_point="dispatch_create",
@@ -35,7 +35,7 @@ def test_injection_result_default_ab_arm():
         task_class="coding_interactive",
         dispatch_id="test-dispatch-001",
     )
-    assert result.ab_arm == "treatment"
+    assert result.ab_arm is None and result.ab_window is None
 
 
 def test_injection_result_control_ab_arm():
