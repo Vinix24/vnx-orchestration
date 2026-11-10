@@ -195,7 +195,7 @@ def test_the_ledger_write_failing_writes_nothing_derived_and_keeps_the_section(e
                 "events": _rows(state, "SELECT event_type FROM coordination_events WHERE entity_id = ?", (d,)),
                 "rows": _rows(state, "SELECT ab_arm FROM intelligence_injections")}
     with monkeypatch.context() as m:
-        m.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
+        m.setattr(importlib.import_module("dispatch_register"), "append_event_idempotent", lambda *a, **k: False)
         section = _fetch(state, d := _id_for("treatment"))
     assert section != "" and derived() == {"ledger": [], "offers": 0, "events": [], "rows": [], "stamps": []}
     assert _fetch(state, d) == section and all(derived().values())  # recorded: same section, every write seen

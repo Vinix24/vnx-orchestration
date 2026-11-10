@@ -15,15 +15,15 @@ _FRESH = "vnx_restore_guard_fresh_module"
 
 
 def test_removed_entry_setup_pops_and_reimports():
-    original = importlib.import_module("json.tool")
+    original = importlib.import_module("json.decoder")
     _SEEN["removed"] = original
-    sys.modules.pop("json.tool", None)
-    again = importlib.import_module("json.tool")
+    sys.modules.pop("json.decoder", None)
+    again = importlib.import_module("json.decoder")
     assert again is not original
 
 
 def test_removed_entry_is_back_as_the_original_object():
-    assert sys.modules["json.tool"] is _SEEN["removed"]
+    assert sys.modules["json.decoder"] is _SEEN["removed"]
 
 
 def test_replaced_entry_setup_swaps_in_another_object():
