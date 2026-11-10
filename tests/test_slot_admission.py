@@ -261,28 +261,23 @@ def test_corrupt_sibling_slots_granted_raises_instead_of_skewing_the_delta():
         sa.growth_plan(st, "kid", 1)
 
 
-def _frozen(res, lease_id):
-    return json.dumps(res["state"]["holders"][lease_id], sort_keys=True)
+def _frozen(state_, lease_id):
+    return json.dumps(state_["holders"][lease_id], sort_keys=True)
 
 
-def _assert_refused_corrupt(st, res, lease_id, before):
-    assert _frozen(res, lease_id) == before
+def _refused_corrupt(st, lease_id):
+    res = run(st)
+    assert _frozen(res["state"], lease_id) == _frozen(st, lease_id)
     assert res["state"]["fencing_counter"] == st["fencing_counter"]
     assert [(e["event"], e["reasons"], e["exit_code"]) for e in res["events"]] == [
         ("refused", ["state_corrupt"], 78)]
     assert res["state"]["queue"] == []
+    return res
 
 
-def test_new_with_occupied_lease_id_never_replaces_the_holder():
-    st = state([lease("L", 2, 8, profile="big")], [req("r1", slots=1, lease_id="L")])
-    before = json.dumps(st["holders"]["L"], sort_keys=True)
-    _assert_refused_corrupt(st, run(st), "L", before)
-
-
-def test_new_without_lease_id_whose_request_id_is_held_is_refused():
-    st = state([lease("L", 2, 8, profile="big")], [req("L", slots=1)])
-    before = json.dumps(st["holders"]["L"], sort_keys=True)
-    _assert_refused_corrupt(st, run(st), "L", before)
+@pytest.mark.parametrize("queued", [req("r1", slots=1, lease_id="L"), req("L", slots=1)])
+def test_new_whose_lease_id_or_request_id_is_held_never_replaces_the_holder(queued):
+    _refused_corrupt(state([lease("L", 2, 8, profile="big")], [queued]), "L")
 
 
 def test_nested_with_id_of_existing_child_or_own_parent_is_refused():
@@ -290,17 +285,14 @@ def test_nested_with_id_of_existing_child_or_own_parent_is_refused():
     for clash in ("kid", "par"):
         st = state(holders, [req("n1", "nested", slots=1, profile="seo-gate", parent_lease="par",
                                  lease_id=clash)])
-        before = json.dumps(st["holders"][clash], sort_keys=True)
-        res = run(st)
-        _assert_refused_corrupt(st, res, clash, before)
-        assert _frozen(res, "par") == json.dumps(st["holders"]["par"], sort_keys=True)
+        res = _refused_corrupt(st, clash)
+        assert _frozen(res["state"], "par") == _frozen(st, "par")
 
 
 @pytest.mark.parametrize("bad", ["", 7])
 def test_new_with_empty_or_non_string_lease_id_is_refused(bad):
     st = state([lease("L", 2, 8, profile="big")], [req("r1", slots=1, lease_id=bad)])
-    before = json.dumps(st["holders"]["L"], sort_keys=True)
-    _assert_refused_corrupt(st, run(st), "L", before)
+    _refused_corrupt(st, "L")
 
 
 def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
@@ -310,18 +302,15 @@ def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
     res = run(st)
     assert names(res) == [("refused", "L"), ("admitted", "ok")]
     assert res["events"][0]["reasons"] == ["state_corrupt"] and res["events"][0]["exit_code"] == 78
-    assert _frozen(res, "L") == json.dumps(st["holders"]["L"], sort_keys=True)
+    assert _frozen(res["state"], "L") == _frozen(st, "L")
     assert res["state"]["fencing_counter"] == st["fencing_counter"] + 1
     assert res["state"]["queue"] == []
 
 
-def test_admitted_event_carries_the_request_id_also_when_it_differs_from_the_lease_id():
-    res = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))
-    admitted = [e for e in res["events"] if e["event"] == "admitted"]
-    assert [(e["request_id"], e["lease_id"]) for e in admitted] == [("req-1", "L-1")]
-
-
-def test_top_up_event_carries_the_request_id_of_the_queued_record():
+def test_admitted_and_top_up_events_carry_the_request_id_when_it_differs_from_the_lease_id():
+    admitted = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))["events"]
+    assert [(e["request_id"], e["lease_id"]) for e in admitted if e["event"] == "admitted"] == [
+        ("req-1", "L-1")]
     st = state([lease("A", 1, 8, at=1)], [req("req-ta", "top_up", slots=3, lease_id="A", token=1)])
     topped = [e for e in run(st)["events"] if e["event"] == "topped_up"]
     assert [(e["request_id"], e["lease_id"]) for e in topped] == [("req-ta", "A")]
