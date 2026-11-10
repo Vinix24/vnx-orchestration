@@ -19,6 +19,7 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts", _ROOT / "tests"):
         sys.path.insert(0, str(_p))
 
 import coordination_db
+import dispatch_register
 import intelligence_injection
 import intelligence_selector as sel
 from migrations.auto_apply import auto_apply
@@ -28,11 +29,12 @@ from test_intelligence_selector import _seed_proven_pattern, _setup_quality_db
 WINDOW = {"window_id": "w1", "salt": "salt-a", "control_fraction": 0.5,
           "opened_utc": "2026-11-10T08:00:00Z", "hash_version": 1}
 PROJECT = "proj-a"
+QI = "quality_intelligence.db"
+STAMPED = "SELECT source_dispatch_ids FROM success_patterns WHERE source_dispatch_ids IS NOT NULL"
 
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    import dispatch_register
     monkeypatch.setattr(dispatch_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
@@ -64,8 +66,8 @@ def _fetch(state: Path, dispatch_id: str) -> str:
         dispatch_id, "architect", state, dispatch_paths=["scripts/lib/x.py"], instruction_text="build x")
 
 
-def _rows(state: Path, sql: str, params: tuple = ()):
-    with sqlite3.connect(str(state / "runtime_coordination.db")) as conn:
+def _rows(state: Path, sql: str, params: tuple = (), db: str = "runtime_coordination.db"):
+    with sqlite3.connect(str(state / db)) as conn:
         return conn.execute(sql, params).fetchall()
 
 
@@ -75,9 +77,8 @@ def _injections(state: Path):
 
 
 def _offers(state: Path) -> int:
-    with sqlite3.connect(str(state / "quality_intelligence.db")) as conn:
-        has = conn.execute("SELECT 1 FROM sqlite_master WHERE name='dispatch_pattern_offered'").fetchone()
-        return conn.execute("SELECT COUNT(*) FROM dispatch_pattern_offered").fetchone()[0] if has else 0
+    has = _rows(state, "SELECT 1 FROM sqlite_master WHERE name='dispatch_pattern_offered'", db=QI)
+    return _rows(state, "SELECT COUNT(*) FROM dispatch_pattern_offered", db=QI)[0][0] if has else 0
 
 
 @pytest.mark.parametrize("arm", ["control", "treatment"])
@@ -121,8 +122,7 @@ def test_a_store_without_the_arm_columns_writes_the_row_without_the_arm(env, sta
                     "ALTER TABLE intelligence_injections DROP COLUMN ab_window",
                     "ALTER TABLE intelligence_injections DROP COLUMN ab_arm"):
             conn.execute(sql)
-    dispatch_id = _id_for("control")
-    assert _fetch(state, dispatch_id) == ""
+    assert _fetch(state, dispatch_id := _id_for("control")) == ""
     assert _rows(state, "SELECT dispatch_id, items_injected FROM intelligence_injections") == [(dispatch_id, 0)]
     events = _rows(state, "SELECT entity_id, metadata_json FROM coordination_events "
                           "WHERE event_type = 'ab_stamp_failed'")
@@ -148,11 +148,9 @@ def test_the_arm_decision_is_in_the_event_and_the_ledger_before_the_row(env, sta
 
     def spy(name, seen):
         real = getattr(sel.IntelligenceSelector, name)
-
         def wrapper(self, result, coord_state_dir=None):
             order.append((name, seen(result.dispatch_id)))
             return real(self, result, coord_state_dir=coord_state_dir)
-
         monkeypatch.setattr(sel.IntelligenceSelector, name, wrapper)
 
     spy("emit_event", lambda d: [x["event"] for x in _ledger(state, d)])
@@ -182,19 +180,22 @@ def test_no_window_event_carries_no_arm_and_writes_no_ledger_line(env, state, mo
 def test_emit_event_raising_writes_no_row_but_the_dispatch_proceeds(env, state, monkeypatch, arm, expect_section):
     def boom(self, result, coord_state_dir=None):
         raise OSError("disk full")
-
     monkeypatch.setattr(sel.IntelligenceSelector, "emit_event", boom)
-    dispatch_id = _id_for(arm)
-    assert (_fetch(state, dispatch_id) != "") is expect_section
+    assert (_fetch(state, _id_for(arm)) != "") is expect_section
     assert _rows(state, "SELECT dispatch_id FROM intelligence_injections") == []
+    assert _rows(state, STAMPED, db=QI) == []
 
 
-def test_the_ledger_write_failing_writes_no_row(env, state, monkeypatch):
-    import dispatch_register
-    monkeypatch.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
-    assert _fetch(state, dispatch_id := _id_for("treatment")) != ""
-    assert _events(state, dispatch_id) == []  # no derived event without its ledger line
-    assert _rows(state, "SELECT dispatch_id FROM intelligence_injections") == []
+def test_the_ledger_write_failing_writes_nothing_derived_and_keeps_the_section(env, state, monkeypatch):
+    def derived():
+        return {"ledger": _ledger(state, d), "offers": _offers(state), "stamps": _rows(state, STAMPED, db=QI),
+                "events": _rows(state, "SELECT event_type FROM coordination_events WHERE entity_id = ?", (d,)),
+                "rows": _rows(state, "SELECT ab_arm FROM intelligence_injections")}
+    with monkeypatch.context() as m:
+        m.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
+        section = _fetch(state, d := _id_for("treatment"))
+    assert section != "" and derived() == {"ledger": [], "offers": 0, "events": [], "rows": [], "stamps": []}
+    assert _fetch(state, d) == section and all(derived().values())  # recorded: same section, every write seen
 
 
 def test_two_projects_with_the_same_dispatch_id_get_their_own_rows(env, state, monkeypatch):
@@ -206,7 +207,6 @@ def test_two_projects_with_the_same_dispatch_id_get_their_own_rows(env, state, m
     _fetch(state, dispatch_id)
     rows = {r[4]: r for r in _injections(state)}
     assert (rows["proj-a"][1], rows[other][1]) == ("control", "treatment")
-    assert rows["proj-a"][2] != rows[other][2] or rows["proj-a"][1] != rows[other][1]
 
 
 def test_the_default_of_the_result_is_not_assigned():

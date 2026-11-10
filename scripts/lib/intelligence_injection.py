@@ -301,8 +301,8 @@ def _record_arm_decision(result, state_dir: Path) -> bool:
     )
 
 
-def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> None:
-    """Ledger line, then the coordination event, then the injection row (see fetch_intelligence_section)."""
+def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> bool:
+    """Ledger line, event, then the row: True when the arm decision is recorded (always without an arm)."""
     dispatch_id = result.dispatch_id
     recorded = True
     if arm is None:
@@ -320,12 +320,13 @@ def _emit_then_record(selector, result, arm: Optional[str], state_dir: Path) -> 
             recorded = False
             logger.warning("emit_event failed for %s: %s", dispatch_id, exc)
     if not recorded:
-        logger.warning("arm decision for %s not recorded: no intelligence_injections row written", dispatch_id)
-        return
+        logger.warning("arm decision for %s not recorded: no row, offer or stamp written", dispatch_id)
+        return False
     try:
         selector.record_injection(result, coord_state_dir=state_dir)
     except Exception as exc:
         logger.debug("record_injection failed for %s: %s", dispatch_id, exc)
+    return True
 
 
 def _arm_result(selector, dispatch_id, role, pr_id, dispatch_paths, instruction_text):
@@ -384,15 +385,11 @@ def fetch_intelligence_section(
     patterns back to their source dispatch on receipt arrival.
 
     INT-2: Also prepends ADR context block from the adrs table when triggers match.
-    **The arm decision is recorded before any write derived from it.** For every
-    dispatch that gets an arm (control or treatment) the decision goes to the
-    canonical NDJSON ledger (``dispatch_register``, ADR-005) first, then the
-    coordination event emitted here carries ``ab_arm`` and ``ab_window`` with
-    ``dispatch_id`` and ``project_id``, and only then ``record_injection`` writes
-    the ``intelligence_injections`` row, on the control path too (before the
-    ``""`` return).  A failure to record is logged and never fails the dispatch,
-    but ``record_injection`` is then not called: no derived row exists without
-    its source event.  Without an active window nothing changes.
+    **With an arm, nothing derived from it is written unless its decision is
+    recorded:** the canonical NDJSON ledger line (ADR-005) first, then the event with
+    ``ab_arm``/``ab_window``, then the row, offers and stamps (control path too). A
+    failed record is logged, keeps the dispatch and its section, and writes none of
+    them. Without an active window nothing changes.
 
     OSError from ADR event-write propagates (ADR-005: raise on event-write failure).
     Other exceptions are caught and logged; callers receive empty string.
@@ -423,9 +420,10 @@ def fetch_intelligence_section(
             result, arm = _arm_result(
                 selector, dispatch_id, role, pr_id, dispatch_paths, instruction_text,
             )
-            _emit_then_record(selector, result, arm, state_dir)
+            recorded = _emit_then_record(selector, result, arm, state_dir)
             try:
-                selector.stamp_source_dispatch_ids(result)
+                if recorded:  # with an arm: no stamp without its recorded decision (ADR-005)
+                    selector.stamp_source_dispatch_ids(result)
             except Exception as exc:
                 logger.debug(
                     "stamp_source_dispatch_ids failed for %s: %s", dispatch_id, exc
