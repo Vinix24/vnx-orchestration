@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""The approval record the learning loop's persist path requires (ADR-068, besluit 18): the read side.
+"""The approval record the learning loop's persist path requires (ADR-068, besluit 18).
 
 ``<state-dir>/learning_approvals/learn-<changes_sha256>.json`` binds one operator decision to one
-change set. ``VNX_LEARNING_LOOP_APPROVED`` only selects the file; ``load_approval`` validates it and reads
-``intelligence_usage.ndjson``. The ledger wins: a ``learning_persist`` line naming the proposal makes it used,
-whatever its record says. The claim (under a lock, ledger first per ADR-005: that line, then ``consumed_at``)
-lands in split 1b; ``write_record`` with the approve CLI in split 3.
+change set. ``VNX_LEARNING_LOOP_APPROVED`` only selects the file; the hash is recomputed from the rows
+about to be written. Used once, under a lock, before the first DB write, ledger first (ADR-005): a
+``learning_persist`` line with the record hash goes to ``intelligence_usage.ndjson``, then the record
+gets ``consumed_at``. The ledger wins: a proposal that line names is used, whatever its record says.
+``write_record`` lands with the approve CLI in split 3.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, Iterable, NoReturn
+from typing import Any, Callable, Collection, Dict, Iterable, List, NoReturn
+
+from atomic_io import atomic_write_json, slot_lock
+from vnx_paths import refuse_real_central_store_write_under_test_runner
 
 APPROVED_ENV = "VNX_LEARNING_LOOP_APPROVED"
 RECORD_DIRNAME = "learning_approvals"
@@ -117,3 +122,48 @@ def _claimed_in_log(state_dir: Path, proposal_id: str) -> bool:
     except OSError as exc:
         _refuse(f"{log} is unreadable ({exc}), so whether {proposal_id} was used is unknown")
     return claimed
+
+
+def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
+    """One line under the log's flock; a torn last line (no newline) is closed first, so this one stays whole."""
+    with open(Path(state_dir) / USAGE_LOG_NAME, "a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        size = handle.seek(0, os.SEEK_END)
+        torn = size > 0 and os.pread(handle.fileno(), 1, size - 1) != b"\n"
+        handle.write((b"\n" if torn else b"") + _canonical(event).encode("utf-8") + b"\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def claim_approval(state_dir: Path, valid_approvers: Collection[str], changes: List[Dict[str, Any]]) -> str:
+    """Bind the selected record to ``changes`` and use it up before the first DB write; returns the
+    record sha256. Re-read under the lock: of two concurrent persists on one record only one gets through. The
+    ledger line is the decision and comes first; ``consumed_at`` in the record follows it."""
+    record = load_approval(state_dir, valid_approvers)
+    try:
+        actual = preview(changes)["changes_sha256"]
+    except (TypeError, ValueError) as exc:
+        _refuse(f"the rows to write are no canonical JSON ({exc})")
+    if actual != record["changes_sha256"]:
+        _refuse(f"the rows to write hash to {actual}, the approval is for {record['changes_sha256']}")
+    path = record_path(state_dir, record["proposal_id"])
+    for target in (path, Path(state_dir) / USAGE_LOG_NAME):
+        refuse_real_central_store_write_under_test_runner(target)
+    with slot_lock(path):
+        if load_approval(state_dir, valid_approvers) != record:
+            _refuse(f"approval record {path} changed while this persist read it")
+        record_sha256, consumed_at = _sha256(record), datetime.now(timezone.utc).isoformat()
+        try:
+            _append_event(state_dir, {"event_type": "learning_persist", "timestamp": consumed_at, "rows": len(changes),
+                                      "proposal_id": record["proposal_id"], "changes_sha256": actual,
+                                      "approval_record_sha256": record_sha256, "approved_by": record["approved_by"]})
+        except OSError as exc:
+            raise LearningApprovalRefused(f"appending the learning_persist line failed ({exc}): the record is "
+                                          "untouched, no row was written; the approval is used only if that line "
+                                          "reached the log") from exc
+        try:
+            atomic_write_json(path, dict(record, consumed_at=consumed_at))
+        except OSError as exc:
+            raise LearningApprovalRefused(f"the ledger holds the claim but record {path} was not marked used ({exc}); "
+                                          "no row was written and the approval counts as used") from exc
+    return record_sha256
