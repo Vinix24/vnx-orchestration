@@ -285,6 +285,42 @@ def test_failure_inside_the_window_is_blocked():
     assert [n["class"] for n in d["nights"] if n["night"] == "2026-11-09"] == [BLOCKED]
 
 
+def _night(d, day):
+    return [n for n in d["nights"] if n["night"] == day][0]
+
+
+@pytest.mark.parametrize("etype", ["dream_cycle_failed", "dream_cycle_timeout"])
+def test_in_window_failure_blocks_the_night_even_before_a_good_completion(etype):
+    d = doc(good_week() + [ev(etype, "2026-11-09", "03:01")])
+    n = _night(d, "2026-11-09")
+    assert n["class"] == BLOCKED and n["progress"] is False
+    assert "blocked_skip" in ids(d) and d["state"] != "ok"
+
+
+def test_timeout_at_0340_leaves_no_progress():
+    d = doc(good_week() + [ev("dream_cycle_timeout", "2026-11-09", "03:40")])
+    assert _night(d, "2026-11-09")["progress"] is False
+    assert d["progress_window"]["completed_with_output"] == 6
+
+
+@pytest.mark.parametrize("etype", ["dream_cycle_failed", "dream_cycle_timeout"])
+def test_seven_blocked_nights_with_completions_are_a_measured_no_output(etype):
+    events = []
+    for n in range(4, 11):
+        day = f"2026-11-{n:02d}"
+        events += [ev(etype, day, "03:01"), ev("dream_cycle_completed", day, "03:30", merged_count=2)]
+    d = doc(events)
+    found = [f for f in d["findings"] if f["id"] == "no_output"]
+    assert found and found[0]["measured"] is True
+    assert d["progress_window"]["completed_with_output"] == 0
+
+
+def test_failure_before_the_window_start_does_not_block_the_night():
+    d = doc(good_week() + [ev("dream_cycle_failed", "2026-11-09", "02:59")])
+    n = _night(d, "2026-11-09")
+    assert n["class"] is None and n["progress"] is True and "blocked_skip" not in ids(d)
+
+
 def test_blocked_night_is_one_finding_and_the_newest_is_not_reported_twice():
     skips = [ev("dream_cycle_skipped", f"2026-11-{d:02d}", reason="insufficient_data") for d in (6, 7, 8)]
     d = doc(skips + [ev("dream_cycle_skipped", "2026-11-10", reason="probe_not_ok")])

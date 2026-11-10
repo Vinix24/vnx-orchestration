@@ -231,14 +231,18 @@ def classify_night(day: date, start: datetime, end: datetime,
     if not terminals:
         record["terminal"] = "started" if inside else "none"
         return record
+    broken = [e for e in terminals if _ATTEMPT_TYPES[e["event_type"]] in ("failed", "timeout")]
+    if broken:  # any in-window failure or timeout blocks the night, whatever completes after it
+        record["terminal"] = _ATTEMPT_TYPES[broken[-1]["event_type"]]
+        record["class"] = BLOCKED
+        record["progress"] = False
+        return record
     last = terminals[-1]
     kind = _ATTEMPT_TYPES[last["event_type"]]
     record["terminal"] = kind
     if kind == "skipped":
         record["reason"] = last.get("reason") if isinstance(last.get("reason"), str) else None
         record["class"] = classify_skip(last.get("reason"), last.get("detail"))[0]
-    elif kind in ("failed", "timeout"):
-        record["class"] = BLOCKED
     return record
 
 
