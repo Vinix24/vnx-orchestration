@@ -221,6 +221,7 @@ def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
     now, out, liveness = ctx["now"], ctx["events"], ctx["liveness"]
     try:
         if rec["kind"] == "top_up":
+            _profile(policy, rec["profile"])
             if not check_token(work, rec["lease_id"], rec.get("token"))["ok"]:
                 raise AdmissionInvalid("stale_token")
             target, plan = rec["lease_id"], growth_plan(work, rec["lease_id"], _int(rec["slots"], "over_profile_ceiling"))
@@ -247,7 +248,7 @@ def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
         return False
     for lease_id, delta in plan:
         out.append(_event(work, "topped_up", now, work["holders"][lease_id], slots=delta,
-                          request_id=rec["request_id"],
+                          request_id=rec["request_id"], reasons=[],
                           slots_granted=grown[lease_id]["slots_granted"],
                           grandfathered=grown[lease_id]["grandfathered"] is True))
     work["holders"] = grown

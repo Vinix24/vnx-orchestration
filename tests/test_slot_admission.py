@@ -257,8 +257,7 @@ def test_reaped_and_lease_held_events_carry_the_granted_slots():
     by_event = {e["lease_id"]: e for e in res["events"] if e["event"] == "reaped"}
     assert by_event["kid"]["slots"] == 2 and by_event["par"]["slots"] == 3
     held = sa.cleanup_decision(st, {"par": "gone", "kid": "alive"}, now=50)
-    lease_held = [e for e in held["events"] if e["event"] == "lease_held"]
-    assert lease_held[0]["slots"] == 3 and lease_held[0]["slots"] is not None
+    assert [e["slots"] for e in held["events"] if e["event"] == "lease_held"][0] == 3
 
 
 def test_corrupt_sibling_slots_granted_raises_instead_of_skewing_the_delta():
@@ -279,10 +278,8 @@ def _frozen(state_, lease_id):
 def _refused_corrupt(st, lease_id):
     res = run(st)
     assert _frozen(res["state"], lease_id) == _frozen(st, lease_id)
-    assert res["state"]["fencing_counter"] == st["fencing_counter"]
-    assert [(e["event"], e["reasons"], e["exit_code"]) for e in res["events"]] == [
-        ("refused", ["state_corrupt"], 78)]
-    assert res["state"]["queue"] == []
+    assert res["state"]["fencing_counter"] == st["fencing_counter"] and res["state"]["queue"] == []
+    assert [(e["event"], e["reasons"], e["exit_code"]) for e in res["events"]] == [("refused", ["state_corrupt"], 78)]
     return res
 
 
@@ -312,10 +309,9 @@ def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
                 req("ok", slots=1, at=2, profile="small")])
     res = run(st)
     assert names(res) == [("refused", "L"), ("admitted", "ok")]
-    assert res["events"][0]["reasons"] == ["state_corrupt"] and res["events"][0]["exit_code"] == 78
-    assert _frozen(res["state"], "L") == _frozen(st, "L")
+    assert (res["events"][0]["reasons"], res["events"][0]["exit_code"]) == (["state_corrupt"], 78)
+    assert _frozen(res["state"], "L") == _frozen(st, "L") and res["state"]["queue"] == []
     assert res["state"]["fencing_counter"] == st["fencing_counter"] + 1
-    assert res["state"]["queue"] == []
 
 
 def test_admitted_and_top_up_events_carry_the_request_id_of_the_queued_record():
@@ -323,7 +319,7 @@ def test_admitted_and_top_up_events_carry_the_request_id_of_the_queued_record():
     assert [(e["request_id"], e["lease_id"]) for e in events if e["event"] == "admitted"] == [("req-1", "L-1")]
     st = state([lease("A", 1, 8, at=1)], [req("req-ta", "top_up", slots=3, lease_id="A", token=1)])
     topped = [e for e in run(st)["events"] if e["event"] == "topped_up"]
-    assert [(e["request_id"], e["lease_id"]) for e in topped] == [("req-ta", "A")]
+    assert [(e["request_id"], e["lease_id"], e["reasons"]) for e in topped] == [("req-ta", "A", [])]
 
 
 def test_nested_and_every_multi_level_top_up_event_carry_the_triggering_request_id():
@@ -331,16 +327,23 @@ def test_nested_and_every_multi_level_top_up_event_carry_the_triggering_request_
     st = state(holders, [req("req-n", "nested", slots=3, profile="seo-gate", parent_lease="mid",
                              lease_id="kid")])
     events = run(st, mem={"req-n": ("admit", [])})["events"]
-    topped = [e for e in events if e["event"] == "topped_up"]
-    nested = [e for e in events if e["event"] == "nested"]
+    topped, nested = [[e for e in events if e["event"] == k] for k in ("topped_up", "nested")]
     assert {e["lease_id"] for e in topped} == {"root", "mid"}
     assert [(e["request_id"], e["lease_id"]) for e in nested] == [("req-n", "kid")]
-    assert all(e["request_id"] == "req-n" for e in topped)
+    assert all(e["request_id"] == "req-n" and e["reasons"] == [] for e in topped)
+
+
+def test_top_up_with_an_unknown_profile_is_refused_alone_and_the_round_goes_on():
+    mk = lambda *q: state([lease("a", 1, 4), lease("b", 1, 4)], list(q))
+    bad = req("bad", "top_up", slots=2, at=1, profile="nope", lease_id="a", token=1)
+    good = req("ok", "top_up", slots=2, at=2, lease_id="b", token=1)
+    res, alone = run(mk(bad, good)), run(mk(good))
+    assert [(e["event"], e["reasons"]) for e in res["events"] if e["request_id"] == "bad"] == [("refused", ["policy_invalid"])]
+    assert res["events"][1:] == alone["events"]
+    assert res["state"]["queue"] == [] and res["state"]["holders"] == alone["state"]["holders"]
 
 
 def test_events_without_a_request_keep_request_id_null():
     st = state([lease("par", 3, 8), lease("kid", 2, 4, parent="par")])
-    events = sa.cleanup_decision(st, {"par": "gone", "kid": "gone"}, now=50)["events"]
-    held = sa.cleanup_decision(st, {"par": "gone", "kid": "alive"}, now=50)["events"]
-    assert events and held
-    assert all(e["request_id"] is None for e in events + held)
+    events = [e for live in ("gone", "alive") for e in sa.cleanup_decision(st, {"par": "gone", "kid": live}, now=50)["events"]]
+    assert events and all(e["request_id"] is None for e in events)
