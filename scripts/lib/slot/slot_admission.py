@@ -246,13 +246,15 @@ def _top_up_step(work: dict, policy: dict, rec: dict, ctx: dict) -> bool:
         return False
     for lease_id, delta in plan:
         out.append(_event(work, "topped_up", now, work["holders"][lease_id], slots=delta,
+                          request_id=rec["request_id"],
                           slots_granted=grown[lease_id]["slots_granted"],
                           grandfathered=grown[lease_id]["grandfathered"] is True))
     work["holders"] = grown
     if rec["kind"] == "nested":
         child = _make_lease(work, policy, rec, now, target)
         work["holders"][child["lease_id"]] = child
-        out.append(_event(work, "nested", now, child, wait_s=now - rec["requested_at"], reasons=[]))
+        out.append(_event(work, "nested", now, child, request_id=rec["request_id"],
+                          wait_s=now - rec["requested_at"], reasons=[]))
     if need:
         for waiting in work["queue"]:
             if waiting["kind"] == "new":
@@ -312,7 +314,8 @@ def _admit_new(work: dict, policy: dict, ctx: dict) -> list[dict]:
             break
         lease = _make_lease(work, policy, rec, now, None)
         work["holders"][lease["lease_id"]] = lease
-        out.append(_event(work, "admitted", now, lease, wait_s=now - rec["requested_at"], reasons=[],
+        out.append(_event(work, "admitted", now, lease, request_id=rec["request_id"],
+                          wait_s=now - rec["requested_at"], reasons=[],
                           slots_granted=lease["slots_granted"], max_slots=lease["max_slots"],
                           bypassed_n=rec["bypassed_n"]))
         gone.append(rec)

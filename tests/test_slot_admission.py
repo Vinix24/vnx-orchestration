@@ -313,3 +313,35 @@ def test_refused_duplicate_at_the_front_does_not_block_the_next_new_request():
     assert _frozen(res, "L") == json.dumps(st["holders"]["L"], sort_keys=True)
     assert res["state"]["fencing_counter"] == st["fencing_counter"] + 1
     assert res["state"]["queue"] == []
+
+
+def test_admitted_event_carries_the_request_id_also_when_it_differs_from_the_lease_id():
+    res = run(state(queue=[req("req-1", slots=2, lease_id="L-1")]))
+    admitted = [e for e in res["events"] if e["event"] == "admitted"]
+    assert [(e["request_id"], e["lease_id"]) for e in admitted] == [("req-1", "L-1")]
+
+
+def test_top_up_event_carries_the_request_id_of_the_queued_record():
+    st = state([lease("A", 1, 8, at=1)], [req("req-ta", "top_up", slots=3, lease_id="A", token=1)])
+    topped = [e for e in run(st)["events"] if e["event"] == "topped_up"]
+    assert [(e["request_id"], e["lease_id"]) for e in topped] == [("req-ta", "A")]
+
+
+def test_nested_and_every_multi_level_top_up_event_carry_the_triggering_request_id():
+    holders = [lease("root", 1, 8), lease("mid", 1, 3, parent="root", profile="mid")]
+    st = state(holders, [req("req-n", "nested", slots=3, profile="seo-gate", parent_lease="mid",
+                             lease_id="kid")])
+    events = run(st, mem={"req-n": ("admit", [])})["events"]
+    topped = [e for e in events if e["event"] == "topped_up"]
+    nested = [e for e in events if e["event"] == "nested"]
+    assert {e["lease_id"] for e in topped} == {"root", "mid"}
+    assert [(e["request_id"], e["lease_id"]) for e in nested] == [("req-n", "kid")]
+    assert all(e["request_id"] == "req-n" for e in topped)
+
+
+def test_events_without_a_request_keep_request_id_null():
+    st = state([lease("par", 3, 8), lease("kid", 2, 4, parent="par")])
+    events = sa.cleanup_decision(st, {"par": "gone", "kid": "gone"}, now=50)["events"]
+    held = sa.cleanup_decision(st, {"par": "gone", "kid": "alive"}, now=50)["events"]
+    assert events and held
+    assert all(e["request_id"] is None for e in events + held)
