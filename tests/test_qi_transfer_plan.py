@@ -153,14 +153,6 @@ def test_journal_path_and_states_are_defined_not_written(world):
     assert plan["journal_states"] == ["planned", "copied", "verified", "source_removed", "done"]
 
 
-def test_out_file_receives_the_plan_and_stdout_stays_empty(world, tmp_path):
-    out = tmp_path / "out" / "plan.json"
-    out.parent.mkdir()
-    proc = _run(world, "--out", str(out))
-    assert proc.returncode == 0 and proc.stdout == ""
-    assert json.loads(out.read_text())["moves"] == 1
-
-
 def test_missing_destination_table_with_data_is_a_schema_gap(world):
     conn = sqlite3.connect(str(world["dest"]))
     conn.execute("DROP TABLE pattern_usage")

@@ -2,13 +2,14 @@
 """qi_transfer_plan.py: the plan of a cross-database pattern move (reattr L3a).
 
 Plans, never runs: every database is opened ``mode=ro``, the plan goes to
-``--out`` or stdout. L3b executes it, L6 verifies it (ADR-068 besluit 13-17).
+stdout only; ``--out`` follows in dispatch ``dlv-2df4000f3899-b``. L3b executes
+it, L6 verifies it (ADR-068 besluit 13-17).
 Only L2 ``moves`` rows become moves (13: full row plus junction rows keyed on
 ``pattern_id``); ``content_key`` is sha256 over all columns but ``id`` and
 ``project_id`` (14); a non-NULL value the destination has no column for is
 ``schema_gap`` (15); the journal path and states are defined, not written (17).
 
-CLI: python3 scripts/lib/qi_transfer_plan.py --db PATH [--all --vnx-data-root DIR] --json [--out FILE]
+CLI: python3 scripts/lib/qi_transfer_plan.py --db PATH [--all --vnx-data-root DIR] --json
 """
 from __future__ import annotations
 
@@ -218,7 +219,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true", help="plan every project database under --vnx-data-root")
     p.add_argument("--vnx-data-root", type=Path, default=None)
     p.add_argument("--json", action="store_true", help="JSON output (the only format)")
-    p.add_argument("--out", type=Path, default=None, help="write the plan here")
     return p
 
 
@@ -232,10 +232,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     dbs = sorted(set(index.qi_databases.values()) | {args.db.resolve()}) if args.all else [args.db]
     plan = build_plan(dbs, index)
     text = json.dumps(plan, indent=2, sort_keys=True, default=_json_default)
-    if args.out is not None:
-        args.out.write_text(text)  # vnx-atomic-write: the plan file is an output artefact, not state
-    if args.out is None:
-        print(text)
+    print(text)
     return 0
 
 
