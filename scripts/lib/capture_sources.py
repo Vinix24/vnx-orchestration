@@ -177,8 +177,9 @@ def read_memory_notes(binding: dict) -> Tuple[List[dict], str]:
         return [], f"{STATE_ERROR}: memory_dir is not a directory"
     notes: List[dict] = []
     try:
-        for path in sorted(root.glob("*.md")):
-            if path.name == "MEMORY.md":
+        # iterdir propagates a directory-read error; glob swallows it as "empty".
+        for path in sorted(root.iterdir()):
+            if path.suffix != ".md" or path.name == "MEMORY.md" or not path.is_file():
                 continue
             if not _under(path.resolve(), root):
                 return [], f"{STATE_ERROR}: a note resolves outside memory_dir"

@@ -6,6 +6,7 @@ Every fixture lives under tmp_path and HOME points there, so nothing touches
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -136,6 +137,18 @@ def test_memory_notes_unsafe_or_unreadable_is_error(env, kind):
     else:
         memory_dir = env["home"] / ".claude" / "projects" / "gone"
     notes, status = cs.read_memory_notes(_binding(env, memory_dir=str(memory_dir)))
+    assert notes == [] and cs.state_of(status) == "error"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_memory_dir_unlistable_is_error_not_empty_ok(env):
+    (env["memory"] / "n.md").write_text("x", encoding="utf-8")
+    binding = _binding(env)
+    os.chmod(env["memory"], 0)
+    try:
+        notes, status = cs.read_memory_notes(binding)
+    finally:
+        os.chmod(env["memory"], 0o755)
     assert notes == [] and cs.state_of(status) == "error"
 
 
