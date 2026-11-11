@@ -1331,9 +1331,11 @@ class LearningLoop:
                 return {"ingest_result": "activation_exists", "ingest_row_id": existing["rule_row_id"],
                         "activation_id": activation_id, "ingested_at": now}
             description, tag = str(rule.get("pattern") or "")[:200], str(rule.get("terminal_constraint") or "any")
+            recommendation = str(rule.get("prevention") or "")[:500]  # the text that gets injected: part of the key
             found = self.conn.execute(
                 "SELECT id FROM prevention_rules WHERE project_id = ? AND source = ? "
-                "AND description = ? AND tag_combination = ?", (project_id, LOOP_SOURCE, description, tag)).fetchone()
+                "AND description = ? AND tag_combination = ? AND recommendation = ?",
+                (project_id, LOOP_SOURCE, description, tag, recommendation)).fetchone()
             if found is not None and found[0] in active_row_ids(self.conn, project_id):
                 # B12: a collapse onto a row another approval keeps active is visible, not silent.
                 return {"ingest_result": "duplicate_of_existing_row", "ingest_row_id": found[0], "ingested_at": now}
@@ -1341,7 +1343,7 @@ class LearningLoop:
                 "INSERT INTO prevention_rules (tag_combination, rule_type, description, recommendation, "
                 "confidence, created_at, triggered_count, source_dispatch_id, project_id, source) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (tag, "failure_prevention", description, str(rule.get("prevention") or "")[:500],
+                (tag, "failure_prevention", description, recommendation,
                  rule.get("confidence", 0.5), now, 0, rule.get("source_dispatch_id") or None,
                  project_id, LOOP_SOURCE)).lastrowid
             record_activation(self.conn, decision, state_dir=state_dir, rule_row_id=row_id, now=now)

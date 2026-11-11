@@ -292,6 +292,23 @@ def test_after_deactivation_the_ingest_leaves_it_off_until_a_new_approval(ingest
     assert store.load_queue(state)[0]["ingest_result"] == "activated_existing_row"
 
 
+def test_a_reused_row_carries_the_recommendation_the_operator_approved(ingest):
+    loop, state = ingest
+    _approve(state)
+    loop.ingest_approved_rules()
+    ((act_id, old_row, *_),) = _acts(state)
+    assert _cli(state, "--activation-id", act_id, "--reason", "no effect").returncode == 0
+    other = {**PROPOSAL, "prevention": "use a different recovery", "agent_constraint": "deepseek"}
+    store.queue_rules(state, [other], project_id=PID, now="2026-11-11T10:00:00+00:00")
+    store.decide(state, [store.rule_id(other)], "approved", reason="r", decided_by="v", project_id=PID,
+                 now="2026-11-11T10:30:00+00:00", effect_criterion="e", stop_condition="s")
+    assert loop.ingest_approved_rules() == {}
+    rows = _read(state, "SELECT id, recommendation FROM prevention_rules WHERE source = 'learning_loop' ORDER BY id")
+    assert [r[1] for r in rows] == ["split the task", "use a different recovery"] and rows[0][0] == old_row
+    assert [(a[1], a[4]) for a in _acts(state)] == [(old_row, 0), (rows[1][0], 1)]
+    assert [e["ingest_result"] for e in store.load_queue(state) if e["id"] == store.rule_id(other)] == ["inserted"]
+
+
 @pytest.mark.parametrize("change, reason", [
     ({"status": "pending"}, None),
     ({"status": "refused"}, "refused"),

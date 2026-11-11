@@ -100,9 +100,10 @@ def test_rule_without_agent_constraint_is_inserted(env):
     assert len(_rows(loop)) == 1
 
 
-def test_other_terminal_is_a_new_row(env):
+@pytest.mark.parametrize("extra", [{"terminal_constraint": "T2"}, {"prevention": "do y"}])
+def test_other_terminal_is_a_new_row(env, extra):
     loop, state_dir = env
-    out = _run(loop, state_dir, [_rule("a", "claude", "T1"), _rule("b", "claude", "T2")])
+    out = _run(loop, state_dir, [_rule("a", "claude", "T1"), _rule("b", "deepseek", **extra)])
     assert [r["ingest_result"] for r in out] == ["inserted", "inserted"]
     assert len(_rows(loop)) == 2
 
