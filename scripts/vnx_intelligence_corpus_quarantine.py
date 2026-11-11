@@ -15,6 +15,7 @@ from vnx_paths import resolve_state_dir
 from intelligence_corpus_quarantine.audit import AfterCommitError
 from intelligence_corpus_quarantine.baseline import measure_baseline
 from intelligence_corpus_quarantine.contract import write_manifest
+from intelligence_corpus_quarantine.purge import purge
 from intelligence_corpus_quarantine.snapshot import reuse_snapshot
 from intelligence_corpus_quarantine.store import quarantine, restore
 from intelligence_corpus_quarantine.verify import verify
@@ -46,7 +47,11 @@ def main(argv=None):
     proof.add_argument("--manifest", type=Path, required=True)
     proof.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
     proof.add_argument("--human", action="store_true", help="key: value lines instead of JSON")
-    for command in (store, back, proof):
+    wipe = commands.add_parser("purge")
+    wipe.add_argument("--db", type=Path, required=True)
+    wipe.add_argument("--manifest", type=Path, required=True)
+    wipe.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
+    for command in (store, back, proof, wipe):
         command.add_argument("--state-dir", type=Path, help="audit dir (default: the resolved VNX_STATE_DIR)")
     args = parser.parse_args(argv)
     if args.command in ("baseline", "quarantine") and not args.out.is_dir():
@@ -57,6 +62,10 @@ def main(argv=None):
             verdict = verify(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir())
             print("\n".join(f"{k}: {v}" for k, v in verdict.items()) if args.human
                   else json.dumps(verdict, sort_keys=True))
+            return 0
+        if args.command == "purge":
+            print(json.dumps(purge(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir()),
+                             sort_keys=True))
             return 0
         if args.command == "quarantine":
             print(quarantine(args.db, args.out, state_dir=args.state_dir or resolve_state_dir()))

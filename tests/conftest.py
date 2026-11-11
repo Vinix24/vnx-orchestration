@@ -967,6 +967,22 @@ def make_vnx_dispatch_bundle(vnx_dispatch_dir: Path):
 
 
 @pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Put back every ``sys.modules`` entry a test removed or replaced.
+
+    A test that pops a module and re-imports it leaves a fresh object behind. A later test
+    file that patched the collection-time object then patches a module the code under test
+    no longer imports (E1: the patch missed and the write hit the real central store). Only
+    removed or replaced entries return; a module first imported during the test stays.
+    """
+    before = dict(sys.modules)
+    yield
+    for name, module in before.items():
+        if sys.modules.get(name) is not module:
+            sys.modules[name] = module
+
+
+@pytest.fixture(autouse=True)
 def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process planning commands run as the operator unless a test says otherwise.
 
