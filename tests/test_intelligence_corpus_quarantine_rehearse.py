@@ -155,6 +155,56 @@ def test_a_live_database_that_changes_during_the_run_is_not_ok(permit, capsys, m
     assert rc == 4 and json.loads(out.out)["live_unchanged"] is False
 
 
+def _wal_only_write(permit, monkeypatch):
+    """Keep the live store open in WAL mode without checkpointing; a rehearsal stage then commits a row that reaches only the -wal."""
+    import intelligence_corpus_quarantine.rehearse as module
+    conn = sqlite3.connect(permit.db)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    real = module._pipeline
+
+    def writing(*args, **kwargs):
+        real(*args, **kwargs)
+        conn.execute("INSERT INTO code_snippets(rowid,title,code,file_path,language) VALUES (9,'w','x = 9','/src/w.py','python')")
+        conn.commit()
+    monkeypatch.setattr(module, "_pipeline", writing)
+    return conn
+
+
+def test_a_commit_that_only_reaches_the_wal_is_live_unchanged_false_and_exit_4(permit, capsys, monkeypatch):
+    conn = _wal_only_write(permit, monkeypatch)
+    try:
+        main_before = sha(permit.db)
+        rc, out = run(permit, capsys)
+        assert sha(permit.db) == main_before  # only the -wal moved
+    finally:
+        conn.close()
+    verdict = json.loads(out.out)
+    assert rc == 4 and verdict["live_unchanged"] is False and verdict["ok"] is False
+    assert verdict["live_sha256_before"] == verdict["live_sha256_after"]
+    assert verdict["live_wal_sha256_before"] != verdict["live_wal_sha256_after"]
+
+
+def test_a_wal_that_appears_during_the_run_is_live_unchanged_false(permit, capsys, monkeypatch):
+    import intelligence_corpus_quarantine.rehearse as module
+    real = module._pipeline
+
+    def appearing(*args, **kwargs):
+        real(*args, **kwargs)
+        permit.db.with_name(permit.db.name + "-wal").write_bytes(b"x")
+    monkeypatch.setattr(module, "_pipeline", appearing)
+    rc, out = run(permit, capsys)
+    verdict = json.loads(out.out)
+    assert rc == 4 and verdict["live_unchanged"] is False
+    assert verdict["live_wal_sha256_before"] == "absent" and verdict["live_wal_sha256_after"] != "absent"
+
+
+def test_without_a_live_wal_the_wal_pair_is_absent_on_both_sides(permit, capsys):
+    rc, out = run(permit, capsys)
+    verdict = json.loads(out.out)
+    assert rc == 0 and verdict["live_wal_sha256_before"] == verdict["live_wal_sha256_after"] == "absent"
+
+
 def test_a_fresh_interpreter_with_only_scripts_lib_on_the_path_rehearses(permit):
     code = ("import json, sys; sys.path.insert(0, sys.argv[1]); from intelligence_corpus_quarantine.rehearse import rehearse; "
             "print(json.dumps(rehearse(*sys.argv[2:5], state_dir=sys.argv[5])))")

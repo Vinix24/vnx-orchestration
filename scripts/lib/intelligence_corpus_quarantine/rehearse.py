@@ -105,7 +105,7 @@ def _verdict(found, document, live):
             fts_match_ok=type(proof.get("match_probe")) is int and proof["match_probe"] > 0,
             session_equal=_same(before["session"], purged["session"], after["session"]),
             purge_empty=all(count == 0 for count in purged["counts"].values()) and len(purged["counts"]) == len(CORPUS_TABLES))
-    flags["live_unchanged"] = live[0] == live[1]
+    flags["live_unchanged"] = live[0]["main"] == live[1]["main"] and live[0]["wal"] == live[1]["wal"]
     orphans = after["orphans"] if ran else None
     return dict(flags, orphans=orphans, ok=all(flags.values()) and type(orphans) is int and orphans == 0)
 
@@ -116,10 +116,16 @@ def _discard(copy):
         copy.with_name(name).unlink(missing_ok=True)  # only the copy this run created in its own work directory
 
 
+def _live_evidence(db):
+    """sha256 of the live main file and of its -wal sidecar; a file that does not exist is the explicit marker 'absent'."""
+    wal = db.with_name(db.name + "-wal")
+    return dict(main=file_sha256(db), wal=file_sha256(wal) if wal.exists() else "absent")
+
+
 def _run(db, folder, work):
-    """Copy the live store (read-only source), run the pipeline on the copy; return (found, failure, copy summary, live sha)."""
+    """Copy the live store (read-only source), run the pipeline on the copy; return (found, failure, copy path, live evidence)."""
     work.mkdir(parents=True, exist_ok=True)
-    live_before = file_sha256(db)
+    live_before = _live_evidence(db)
     with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True, isolation_level=None)) as source:
         copy = create_snapshot(source, work / COPY_NAME)
     copy_path = Path(copy["path"])
@@ -129,7 +135,7 @@ def _run(db, folder, work):
         _pipeline(copy_path, work, found, stage)
     except Exception as exc:  # a stage that raises is a failed rehearsal with a verdict, never a crash
         failure = dict(failed_stage=stage[0], error=f"{type(exc).__name__}: {exc}")
-    return found, failure, copy_path, (live_before, file_sha256(db))
+    return found, failure, copy_path, (live_before, _live_evidence(db))
 
 
 def rehearse(db_path, manifest_path, quarantine_dir, *, state_dir, work_dir=None, discard_copy=False):
@@ -147,7 +153,8 @@ def rehearse(db_path, manifest_path, quarantine_dir, *, state_dir, work_dir=None
     verdict = _verdict(found, document, live)
     if failure is not None:
         verdict.update(failure, ok=False)
-    verdict.update(live_sha256_before=live[0], live_sha256_after=live[1], copy=str(copy_path), work_dir=str(work),
+    verdict.update(live_sha256_before=live[0]["main"], live_sha256_after=live[1]["main"],
+                   live_wal_sha256_before=live[0]["wal"], live_wal_sha256_after=live[1]["wal"], copy=str(copy_path), work_dir=str(work),
                    copy_discarded=bool(discard_copy),
                    counts={k: found[k]["counts"] for k in ("before", "purged", "after") if k in found},
                    family_bytes={k: found[k]["family_bytes"] for k in ("before", "purged", "after") if k in found})
