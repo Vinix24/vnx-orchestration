@@ -1,11 +1,11 @@
 """The proposal store of the operator-steering track (ADR-072 decisions 9 and 14).
 
-``state/steering_proposal_decisions.ndjson`` is the truth: append-only, fsynced first. The projection
-``state/steering_proposals.json`` is rebuilt from the records and never read as input.
-``proposal_id = sha256(project_id | oorzaak | artefact_soort | doelpad)[:16]``; the text is a revision
-under that id. Reopening a rejected proposal comes with ``reconcile`` (OB-5a-b). ``approved`` applies
-nothing; ``applied`` needs an ``applied_ref``. Every read and write is scoped by ``project_id``
-(ADR-007) and takes an exclusive ``fcntl.flock``. An unreadable record file raises ``StoreUnreadable``.
+``state/steering_proposal_decisions.ndjson`` is the truth: append-only, fsynced, every append on a line
+boundary. ``proposal_id = sha256(project_id | oorzaak | artefact_soort | doelpad)[:16]``; the text is a
+revision under that id. The derived projection and reopening a rejected proposal come with ``reconcile``
+(OB-5a-b). ``approved`` applies nothing; ``applied`` needs an ``applied_ref``. Every read and write is
+scoped by ``project_id`` (ADR-007) and takes an exclusive ``fcntl.flock``. An unreadable record file
+raises ``StoreUnreadable``.
 """
 
 from __future__ import annotations
@@ -19,10 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
-PROJECTION_FILENAME = "steering_proposals.json"
 DECISIONS_FILENAME = "steering_proposal_decisions.ndjson"
 LOCK_FILENAME = ".steering_proposals.lock"
-SCHEMA = "steering_proposals/1"
 REVISION_DECISIONS = frozenset({"proposed", "revised"})
 OPERATOR_DECISIONS = frozenset({"approved", "rejected", "applied"})
 RECORD_DECISIONS = REVISION_DECISIONS | OPERATOR_DECISIONS
@@ -186,44 +184,26 @@ def _locked(state_dir: Path) -> Iterator[None]:
 
 
 def _append(state_dir: Path, records: Sequence[Mapping[str, Any]]) -> None:
-    payload = "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in records)
-    with open(Path(state_dir) / DECISIONS_FILENAME, "a", encoding="utf-8") as handle:  # vnx-atomic-write: append-only record, fsynced
+    """Runs under the lock after the whole ledger was read and replayed, so a last line without its newline
+    parsed as a complete record: the payload then starts with a newline and never joins that line."""
+    payload = "".join(json.dumps(r, sort_keys=True, ensure_ascii=False) + "\n" for r in records).encode("utf-8")
+    with open(Path(state_dir) / DECISIONS_FILENAME, "ab+") as handle:  # vnx-atomic-write: append-only record, fsynced
+        end = os.fstat(handle.fileno()).st_size
+        if end and os.pread(handle.fileno(), 1, end - 1) != b"\n":
+            payload = b"\n" + payload
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
 
 
 def _commit(state_dir: Path, state: Dict[str, Dict[str, Any]], record: Mapping[str, Any]) -> None:
-    """Validate as the read path does, fold, append, project; every refusal comes before the write."""
+    """Validate as the read path does, fold, append; every refusal comes before the write."""
     try:
         _validate_record("new record", dict(record))
     except StoreUnreadable as exc:
         raise DecisionRefused(f"record refused: {exc}") from exc
     _apply(state, record)
     _append(state_dir, [record])
-    _project(state_dir, state)
-
-
-def _project(state_dir: Path, state: Mapping[str, Mapping[str, Any]]) -> None:
-    """Write the projection when it differs from the replayed state (temp file plus replace)."""
-    path = Path(state_dir) / PROJECTION_FILENAME
-    body = json.dumps({"schema": SCHEMA, "proposals": sorted(state.values(), key=lambda e: e["proposal_id"])},
-                      indent=2, ensure_ascii=False, sort_keys=True)
-    try:
-        if path.read_text(encoding="utf-8") == body:
-            return
-    except (OSError, ValueError):  # vnx-silent-except: the projection is derived, a missing or unreadable one is rewritten
-        pass
-    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(body)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 def _record(project_id: str, pid: str, revision: int, decision: str, now: str, **extra: Any) -> Dict[str, Any]:
@@ -236,11 +216,10 @@ def _record(project_id: str, pid: str, revision: int, decision: str, now: str, *
 
 
 def proposals(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
-    """Every proposal of this project with all revisions. Rebuilds the projection."""
+    """Every proposal of this project with all revisions, replayed from the records."""
     project_id = _require_project(project_id)
     with _locked(state_dir):
         state = _replay(_read_records(state_dir))
-        _project(state_dir, state)
         return [state[k] for k in sorted(state) if state[k]["project_id"] == project_id]
 
 
@@ -278,7 +257,7 @@ def add_revision(state_dir: Path, project_id: str, proposal: Mapping[str, Any], 
 def decide(state_dir: Path, project_id: str, pid: str, decision: str, *, reason: str, decided_by: str,
            revision: Optional[int] = None, applied_ref: str = "", now: Optional[str] = None) -> Dict[str, Any]:
     """Record an operator decision bound to a revision (default: the latest). The record is
-    appended and fsynced first, the projection follows. ``approved`` applies nothing."""
+    appended and fsynced. ``approved`` applies nothing."""
     project_id = _require_project(project_id)
     if decision not in OPERATOR_DECISIONS or not _text(reason) or not _text(decided_by):
         raise DecisionRefused(f"decision must be one of {sorted(OPERATOR_DECISIONS)}, with a reason and decided_by")

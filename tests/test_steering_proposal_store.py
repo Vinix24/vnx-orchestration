@@ -84,8 +84,8 @@ def test_two_writers_under_the_lock_lose_no_revision(tmp_path):
     assert not list(tmp_path.glob("*.tmp"))
 
 
-@pytest.mark.parametrize("junk", ["{niet json\n", "[1, 2]\n", '{"decision": "approved"}\n', None])
-def test_corrupt_record_file_is_refused_and_left_byte_equal(tmp_path, junk):
+@pytest.mark.parametrize("junk", ["{niet json\n", "[1, 2]\n", '{"decision": "approved"}\n', '{"proposal_id": "torn', None])
+def test_corrupt_record_file_is_refused_and_left_byte_equal(tmp_path, junk):  # torn: a half last line without newline
     seed(tmp_path)
     path = tmp_path / store.DECISIONS_FILENAME
     path.write_text(path.read_text() * 2 if junk is None else path.read_text() + junk)  # None: proposed twice
@@ -95,16 +95,6 @@ def test_corrupt_record_file_is_refused_and_left_byte_equal(tmp_path, junk):
     with pytest.raises(store.StoreUnreadable):
         store.add_revision(tmp_path, "vnx-dev", make("anders"), now=T1)
     assert path.read_bytes() == before
-
-
-def test_projection_is_rebuilt_from_the_records_and_never_read(tmp_path):
-    pid = seed(tmp_path)
-    store.decide(tmp_path, "vnx-dev", pid, "rejected", reason="x", decided_by="op", now=T1)
-    projection = tmp_path / store.PROJECTION_FILENAME
-    good = projection.read_text()
-    projection.write_text("{torn")
-    store.proposals(tmp_path, "vnx-dev")
-    assert projection.read_text() == good
 
 
 @pytest.mark.parametrize("bad", [{}, make(voorstel=""), make(doelpad="  "), make(oorzaak="insufficient_evidence"),
@@ -143,6 +133,20 @@ def test_applied_binds_to_the_approved_revision(tmp_path):
         with pytest.raises(store.DecisionRefused):
             store.decide(tmp_path, "vnx-dev", pid, "applied", reason="r", decided_by="op", revision=revision, applied_ref="#1")
     assert path.read_bytes() == before and store.get(tmp_path, "vnx-dev", pid)["status"] == "approved"
+
+
+@pytest.mark.parametrize("write, revisions, status", [
+    (lambda d, pid: store.add_revision(d, "vnx-dev", make("Tweede tekst"), now=T1), [1, 2], "pending"),
+    (lambda d, pid: store.decide(d, "vnx-dev", pid, "rejected", reason="r", decided_by="op", now=T1), [1], "rejected")],
+    ids=["add_revision", "decide"])
+def test_an_append_after_a_last_line_without_newline_starts_on_a_new_line(tmp_path, write, revisions, status):
+    pid = seed(tmp_path)
+    path = tmp_path / store.DECISIONS_FILENAME
+    path.write_bytes(path.read_bytes().rstrip(b"\n"))
+    record = write(tmp_path, pid)
+    entry = store.get(tmp_path, "vnx-dev", pid)
+    assert [r["revision"] for r in entry["revisions"]] == revisions and entry["status"] == status
+    assert [store.json.loads(line) for line in path.read_text().splitlines()][1:] == [record]
 
 
 def test_a_hand_written_line_approving_a_missing_revision_is_refused_on_read(tmp_path):
