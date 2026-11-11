@@ -1,0 +1,1 @@
+- `tests/test_k7b_manifest_readers.py` checks right after hand-over that a `dispatches` table in the tmp store carries `project_id`; a failure names the database path, `PRAGMA table_info`, the module origins, the cwd and `VNX_HOME`, so the order-dependent E1 failure explains itself (OI-2590, OI-2712).
