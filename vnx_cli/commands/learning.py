@@ -29,6 +29,15 @@ def _resolve_state_dir(project_dir: Path) -> Path:
     return _engine.resolve_data_root(project_dir) / "state"
 
 
+def _print_inventory(state_dir: Path, project_dir: Path) -> None:
+    """The four loop-D4 status blocks: corpus, the three queues, access, decisions."""
+    from learning_inventory import print_status_blocks  # type: ignore[import]
+
+    print_status_blocks(
+        state_dir, project_dir, project_id=_engine.derive_project_id(project_dir)
+    )
+
+
 def _cmd_run(args) -> int:
     """Run the daily learning cycle and write pending proposals for operator review."""
     project_dir = Path(getattr(args, "project_dir", "."))
@@ -116,6 +125,7 @@ def _cmd_status(args) -> int:
         except (json.JSONDecodeError, OSError):
             pass
     print(f"  Pending skill refinements:                  {pending_refinements}")
+    _print_inventory(state_dir, project_dir)
     print()
     print("To review proposals: vnx learning review")
     print("To approve a candidate:   vnx learning approve <id> --approval-id <id> --reason <text>")
