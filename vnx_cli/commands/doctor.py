@@ -1474,6 +1474,75 @@ def _check_t0_state_freshness(project_dir: Path, data_root: Path) -> list[Check]
     ]
 
 
+_DREAM_JOB_IDS = frozenset({
+    "plist_missing", "plist_unreadable", "job_not_loaded", "arm_switch_off", "template_drift",
+    "log_missing", "log_unreadable"})
+_DREAM_REVIEW_IDS = frozenset({"reviews_unreadable", "review_overdue", "db_unavailable"})
+# check name -> (finding ids it owns, sources it needs, sources that count once present).
+# dream:liveness owns every other id, so a finding id this table does not know still lands on
+# a check and is never dropped. `db` is only judged when the document carries it.
+_DREAM_GROUPS = {
+    "dream:job": (_DREAM_JOB_IDS, ("plist",), ("log",)),
+    "dream:reviews": (_DREAM_REVIEW_IDS, ("reviews",), ("db",)),
+}
+_DREAM_NAMES = ("dream:liveness", "dream:job", "dream:reviews")
+
+
+def _dream_unmeasured(reason: str) -> list[Check]:
+    return [Check(name, WARN, f"unmeasured: {reason}") for name in _DREAM_NAMES]
+
+
+def _dream_summary(name: str, doc: dict) -> str:
+    if name == "dream:job":
+        job = doc.get("job") or {}
+        return (f"loaded={job.get('loaded')} last_exit={job.get('last_exit')} "
+                f"arm_switch={job.get('arm_switch')} drift={job.get('drift')}")
+    if name == "dream:reviews":
+        rev = doc.get("reviews") or {}
+        return (f"pending={rev.get('pending_count')} unreadable={rev.get('unreadable_count')} "
+                f"oldest_age_seconds={rev.get('oldest_age_seconds')}")
+    attempts = doc.get("attempts") or {}
+    return f"state={doc.get('state')} attempt_age_hours={attempts.get('age_hours')}"
+
+
+def _dream_check(name: str, doc: dict) -> Check:
+    """One projection of the dream_liveness/1 document (ADR-066, doctor mapping).
+
+    PASS only when this check's sources are all ``ok`` and none of its findings exists:
+    a finding with ``measured: true`` is a measured deviation, one with ``measured: false``
+    is an unmeasured source, and neither is ever a PASS.
+    """
+    owned, wanted, optional = _DREAM_GROUPS.get(name, (frozenset(), ("events",), ()))
+    own = [f for f in doc.get("findings") or []
+           if (f.get("id") in owned if name in _DREAM_GROUPS
+               else f.get("id") not in _DREAM_JOB_IDS | _DREAM_REVIEW_IDS)]
+    sources = doc.get("sources") or {}
+    judged = wanted + tuple(key for key in optional if key in sources)
+    bad = [f"{key}={sources.get(key, 'missing')}" for key in judged if sources.get(key) != "ok"]
+    summary = _dream_summary(name, doc)
+    if not own and not bad and (name in _DREAM_GROUPS or doc.get("state") == "ok"):
+        return Check(name, PASS, summary)
+    parts = [f"{f.get('id')}: {f.get('detail')}" for f in own]
+    if bad:
+        parts.append("unmeasured sources " + ", ".join(bad))
+    return Check(name, WARN, f"{summary}; " + "; ".join(parts or [f"state={doc.get('state')}"]))
+
+
+def _check_dream(project_dir: Path) -> list[Check]:
+    """The dream checks of ``vnx doctor``: one ``assess()`` call, three projections of it."""
+    try:
+        _engine.ensure_engine_on_path()
+        import dream_liveness
+    except Exception as exc:
+        return _dream_unmeasured(f"dream_liveness module not loadable: {exc}")
+    try:
+        project_id = _engine.derive_project_id(project_dir)
+        doc = dream_liveness.assess(dream_liveness.load_sources(project_id), project_id=project_id)
+    except Exception as exc:  # fail-closed: an unreadable measurement is unmeasured, never a crash or a PASS
+        return _dream_unmeasured(f"dream liveness could not be assessed: {exc}")
+    return [_dream_check(name, doc) for name in _DREAM_NAMES]
+
+
 def vnx_doctor(args) -> int:
     project_dir = Path(args.project_dir).resolve()
     emit_json = getattr(args, "json", False)
@@ -1512,6 +1581,7 @@ def vnx_doctor(args) -> int:
     checks.extend(_check_installed_plist_placeholders())
     checks.append(_check_embedded_path_assumptions())
     checks.extend(_check_t0_state_freshness(project_dir, data_root))
+    checks.extend(_check_dream(project_dir))
 
     passed = sum(1 for c in checks if c.status == PASS)
     warned = sum(1 for c in checks if c.status == WARN)

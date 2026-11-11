@@ -6,6 +6,7 @@ over the real migration directory, the quality store with the selector test help
 
 from __future__ import annotations
 
+import importlib
 import json
 import sqlite3
 import sys
@@ -19,7 +20,6 @@ for _p in (_ROOT / "scripts" / "lib", _ROOT / "scripts", _ROOT / "tests"):
         sys.path.insert(0, str(_p))
 
 import coordination_db
-import dispatch_register
 import intelligence_injection
 import intelligence_selector as sel
 from migrations.auto_apply import auto_apply
@@ -35,7 +35,10 @@ STAMPED = "SELECT source_dispatch_ids FROM success_patterns WHERE source_dispatc
 
 @pytest.fixture
 def env(monkeypatch, tmp_path):
-    monkeypatch.setattr(dispatch_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
+    # The module the code under test imports now, not the collection-time reference: an
+    # earlier test may have re-imported it, and a patch on the stale object misses.
+    live_register = importlib.import_module("dispatch_register")
+    monkeypatch.setattr(live_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
     monkeypatch.setenv("VNX_PROJECT_ID", PROJECT)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
@@ -192,7 +195,7 @@ def test_the_ledger_write_failing_writes_nothing_derived_and_keeps_the_section(e
                 "events": _rows(state, "SELECT event_type FROM coordination_events WHERE entity_id = ?", (d,)),
                 "rows": _rows(state, "SELECT ab_arm FROM intelligence_injections")}
     with monkeypatch.context() as m:
-        m.setattr(dispatch_register, "append_event_idempotent", lambda *a, **k: False)
+        m.setattr(importlib.import_module("dispatch_register"), "append_event_idempotent", lambda *a, **k: False)
         section = _fetch(state, d := _id_for("treatment"))
     assert section != "" and derived() == {"ledger": [], "offers": 0, "events": [], "rows": [], "stamps": []}
     assert _fetch(state, d) == section and all(derived().values())  # recorded: same section, every write seen
@@ -202,11 +205,18 @@ def test_two_projects_with_the_same_dispatch_id_get_their_own_rows(env, state, m
     dispatch_id = _id_for("control", "proj-a")
     other = next(p for p in ("proj-b", "proj-c", "proj-d", "proj-e", "proj-f")
                  if sel.arm_for_dispatch(dispatch_id, p, dict(WINDOW))[0] == "treatment")
+    second = state / "second-project"  # one state dir per project: a shared one refuses the second decision
+    second.mkdir()
+    coordination_db.init_schema(second)
+    auto_apply(second / "runtime_coordination.db")
+    qi = _setup_quality_db(second / "quality_intelligence.db")
+    _seed_proven_pattern(qi, category="architect", confidence=0.9, usage_count=10)
+    qi.close()
     _fetch(state, dispatch_id)
     monkeypatch.setenv("VNX_PROJECT_ID", other)
-    _fetch(state, dispatch_id)
-    rows = {r[4]: r for r in _injections(state)}
-    assert (rows["proj-a"][1], rows[other][1]) == ("control", "treatment")
+    _fetch(second, dispatch_id)
+    assert _injections(state)[0][1] == "control" and _injections(state)[0][4] == "proj-a"
+    assert _injections(second)[0][1] == "treatment" and _injections(second)[0][4] == other
 
 
 def test_the_default_of_the_result_is_not_assigned():

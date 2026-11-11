@@ -162,7 +162,7 @@ def disposition(pair: Pair, dismissed_ids: FrozenSet[str]) -> str:
     return "dismissed" if pair.pair_id in dismissed_ids else "open"
 
 
-def _valid_dismissal(row: object) -> bool:
+def valid_dismissal(row: object) -> bool:
     fields = ("pair_id", "reason", "at", "by")
     if not isinstance(row, dict) or not all(isinstance(row.get(f), str) and row[f].strip() for f in fields):
         return False
@@ -174,7 +174,7 @@ def _valid_dismissal(row: object) -> bool:
 
 
 def read_dismissed(state_dir: Path) -> FrozenSet[str]:
-    """Pair ids with a valid ledger line. Read only; ``dismiss`` (PR-4) writes."""
+    """Pair ids with a valid ledger line. Read only; ``dismiss`` writes, through ``valid_dismissal``."""
     try:
         text = (Path(state_dir) / LEDGER_FILENAME).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):  # vnx-silent-except: no readable ledger dismisses nothing, every pair stays open
@@ -185,7 +185,7 @@ def read_dismissed(state_dir: Path) -> FrozenSet[str]:
             row = json.loads(line)
         except ValueError:  # vnx-silent-except: a broken line is no dismissal, its pair stays open
             continue
-        if _valid_dismissal(row):
+        if valid_dismissal(row):
             ids.add(row["pair_id"])
     return frozenset(ids)
 

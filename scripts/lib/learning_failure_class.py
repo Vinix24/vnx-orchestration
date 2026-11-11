@@ -10,8 +10,8 @@ A missing, ``None``, unreadable or unknown field never excludes a receipt: it
 falls through to a lower row of the table, and the answer is always a member of
 ``FAILURE_CLASSES``.
 
-The loop does not call this module yet: split 2 of loop D1 wires it into
-``learning_loop``.
+The learning loop calls this module: ``extract_failure_patterns`` merges the
+receipts of one dispatch and ``generate_prevention_rules`` groups on the class.
 """
 
 from __future__ import annotations

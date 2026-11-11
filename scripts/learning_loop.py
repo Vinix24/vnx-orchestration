@@ -6,7 +6,6 @@ Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -34,7 +33,14 @@ from contract_invalid_window import (
     is_contract_invalid,
     is_stale_contract_invalid,
 )
+from learning_failure_class import (
+    ELIGIBLE_CLASSES,
+    FAILURE_CLASSES,
+    classify_failure,
+    merge_dispatch_group,
+)
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
+from prevention_rule_store import QueueUnreadable, queue_rules, rule_id
 from project_scope import resolve_stamp_project_id
 from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
@@ -60,8 +66,14 @@ DEFAULT_RECEIPT_CUTOFF = "2026-09-28T16:41:11Z"
 CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
 
 # Persisting is opt-in. Anything but "1" leaves the loop in shadow mode: it
-# computes and reports, it changes no database row, no state file, no metric.
+# computes and reports, it changes no database row, no metric and no queue.
 PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
+
+# Queue mode ("1") is shadow plus the operator queue: proposals go to
+# pending_rules.json through the prevention-rule store, also when the probe gate is
+# degraded. No database row, no activation (ADR-065).
+QUEUE_ENV = "VNX_LEARNING_LOOP_QUEUE"
+UNRESOLVED_PROJECT = "unresolved"
 
 # Open items as the second signal source (D5). A class of open items is one
 # normalized title. It counts as recurring when it spans this many DISTINCT
@@ -128,17 +140,10 @@ def _agent_identity(receipt: Dict[str, Any]) -> str:
 
 
 def _rule_id(rule: Dict[str, Any]) -> str:
-    """The one persistent id of a failure-prevention proposal: sha1 over the
-    pattern, the terminal scope and the agent scope, joined by a separator that
-    cannot occur in them, so ("ab", "c") and ("a", "bc") never collide. The
-    grouping key of ``generate_prevention_rules`` holds the same three values:
-    two proposals are one proposal exactly when this id is equal."""
-    parts = (
-        str(rule.get("pattern") or ""),
-        _scope_value(rule.get("terminal_constraint")) or "any",
-        _scope_value(rule.get("agent_constraint")),
-    )
-    return f"rule-{hashlib.sha1(chr(0x1f).join(parts).encode()).hexdigest()[:8]}"
+    """The persistent id of a failure-prevention proposal. The definition lives in
+    ``prevention_rule_store.rule_id`` (pattern, terminal scope, agent scope and
+    failure class): two proposals are one proposal exactly when it is equal."""
+    return rule_id(rule)
 
 
 def normalize_open_item_title(title: Any) -> str:
@@ -181,6 +186,23 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
 def persist_enabled() -> bool:
     """True only when the operator set VNX_LEARNING_LOOP_PERSIST=1."""
     return os.environ.get(PERSIST_ENV, "0") == "1"
+
+
+def queue_enabled() -> bool:
+    """Queue mode is opt-in: only the literal "1" turns it on."""
+    return os.environ.get(QUEUE_ENV, "0") == "1"
+
+
+def _is_queueable(rule: Dict[str, Any]) -> bool:
+    """A failure group is queued only for an eligible class seen in at least two
+    dispatches. An open-item proposal has no failure class and passes."""
+    if "failure_class" not in rule:
+        return True
+    count = rule.get("occurrence_count")
+    return (
+        rule["failure_class"] in ELIGIBLE_CLASSES
+        and isinstance(count, int) and not isinstance(count, bool) and count >= 2
+    )
 
 
 def resolve_receipt_cutoff() -> datetime:
@@ -286,6 +308,7 @@ class LearningLoop:
     # via ``__new__`` behaves like a fresh one (env-derived, never AttributeError).
     _persist: Optional[bool] = None
     _cutoff: Optional[datetime] = None
+    queue_error: Optional[str] = None  # why the proposal queue could not be written
 
     @property
     def persist(self) -> bool:
@@ -646,6 +669,7 @@ class LearningLoop:
             start_time = _to_aware_utc(start_time)
 
         failure_patterns: List[Dict] = []
+        kept: List[tuple] = []
 
         if not self.receipts_path.exists():
             return failure_patterns
@@ -731,23 +755,19 @@ class LearningLoop:
                         if ts_dt is None or ts_dt < start_time:
                             continue
 
-                    failure_patterns.append({
-                        "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
-                        "terminal": _scope_value(receipt.get("terminal")) or _scope_value(receipt.get("terminal_id")),
-                        "agent": _agent_identity(receipt),
-                        "error": self._failure_error_message(receipt),
-                        "timestamp": ts_raw or datetime.now(timezone.utc).isoformat(),
-                    })
+                    kept.append((total_scanned, receipt))
 
         except OSError as e:
             print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
+        failure_patterns, merge_stats = self._merge_failure_receipts(kept)
         self.receipt_stats = {
             "read": total_scanned,
             "after_cutoff": total_scanned - before_cutoff,
             "before_cutoff": before_cutoff,
             "no_provider_filtered": no_provider_skipped,
             "foreign_project": foreign_project,
+            **merge_stats,
         }
         post_filter = total_scanned - no_provider_skipped - foreign_project
         print(
@@ -760,6 +780,49 @@ class LearningLoop:
             f"{len(failure_patterns)} failures in window"
         )
         return failure_patterns
+
+    def _merge_failure_receipts(self, kept: List[tuple]) -> tuple:
+        """One failure per dispatch (ADR-065 §2). ``kept`` holds ``(line number,
+        receipt)`` for every receipt that passed the filters. The group key is
+        ``dispatch_id`` alone; a receipt without one is its own group
+        ``receipt:<line number>``. Returns the failure dicts and the count
+        fields of ``receipt_stats``; ``len(patterns) == dispatches +
+        without_dispatch_id`` and ``failure_receipts == len(patterns) +
+        merged_duplicates`` hold by construction."""
+        groups: Dict[str, List[Dict]] = {}
+        without_id = 0
+        for line_no, receipt in kept:
+            raw_id = receipt.get("dispatch_id")
+            dispatch_id = str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
+            if not dispatch_id:
+                without_id += 1
+                dispatch_id = f"receipt:{line_no}"
+            groups.setdefault(dispatch_id, []).append(receipt)
+
+        class_counts = {name: 0 for name in sorted(FAILURE_CLASSES)}
+        patterns: List[Dict] = []
+        for key, group in groups.items():
+            merged = merge_dispatch_group(group)
+            failure_class = classify_failure(group)
+            class_counts[failure_class] += 1
+            patterns.append({
+                "task": str(merged.get("task_id") or merged.get("task_description") or ""),
+                "terminal": _scope_value(merged.get("terminal")) or _scope_value(merged.get("terminal_id")),
+                "agent": _agent_identity(merged),
+                "error": self._failure_error_message(merged, failure_class),
+                "timestamp": merged.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                "dispatch_id": None if key.startswith("receipt:") else key,
+                "event_type": str(merged.get("event_type") or merged.get("event") or ""),
+                "failure_class": failure_class,
+            })
+        stats = {
+            "failure_receipts": len(kept),
+            "dispatches": len(groups) - without_id,
+            "without_dispatch_id": without_id,
+            "merged_duplicates": len(kept) - len(patterns),
+            "class_counts": class_counts,
+        }
+        return patterns, stats
 
     def extract_open_item_signals(self) -> List[Dict[str, Any]]:
         """Group this project's unresolved open items into recurring classes.
@@ -839,18 +902,20 @@ class LearningLoop:
             for sig in signals
         ]
 
-    def _failure_error_message(self, receipt: Dict) -> str:
+    def _failure_error_message(self, receipt: Dict, failure_class: str = "") -> str:
         """Derive a stable error string from a failure receipt.
 
         Prefers the structured ``failure_reason`` (e.g. "Exhausted 3 retries"),
-        then summarizes ``contract_violations`` for contract-invalid receipts,
+        then summarizes ``contract_violations`` when the group's class (from
+        ``classify_failure``) is ``contract_invalid``: the merged record keeps the
+        status of the top-ranked receipt, so it cannot decide that itself,
         and finally falls back to scanning any free-text error field.
         """
         reason = receipt.get("failure_reason")
         if reason:
             return str(reason)[:200]
 
-        if is_contract_invalid(receipt):
+        if failure_class == "contract_invalid":
             violations = receipt.get("contract_violations")
             summary = self._summarize_contract_violations(violations)
             if summary:
@@ -900,33 +965,45 @@ class LearningLoop:
         return "Unknown error"
 
     def generate_prevention_rules(self, failure_patterns: List[Dict]) -> List[Dict]:
-        """Generate new prevention rules from failure patterns"""
+        """Generate new prevention rules from failure patterns.
+
+        One pattern is one dispatch (``extract_failure_patterns`` merges the
+        receipts), so the threshold counts dispatches. A class outside
+        ``ELIGIBLE_CLASSES`` is counted in ``receipt_stats`` and never a rule.
+        """
         new_rules = []
 
-        # Group failures by similar characteristics. The key is the proposal's
-        # identity (error, terminal scope, agent scope); a missing terminal is
-        # "any" and a missing agent is None, never "" or "unknown".
+        # The key is the proposal's identity (class, error, terminal scope, agent
+        # scope); a missing terminal is "any" and a missing agent is None. A
+        # pattern with an unknown class is "unclassified": no evidence, no rule.
+        # A dict with no ``failure_class`` key at all is the pre-class shape of a
+        # hand-built caller; every such dict already passed the failure-status
+        # filter, so it is a plain "failed" (extraction always sets the key).
         failure_groups = defaultdict(list)
         for failure in failure_patterns:
+            failure_class = failure.get('failure_class', 'failed')
             key = (
+                failure_class if failure_class in FAILURE_CLASSES else 'unclassified',
                 str(failure.get('error') or '')[:50],
                 _scope_value(failure.get('terminal')) or 'any',
                 _scope_value(failure.get('agent')) or None,
             )
             failure_groups[key].append(failure)
 
-        # Generate rules for repeated failures
-        for (error, terminal, agent), failures in failure_groups.items():
-            if len(failures) >= 2:  # Only create rule if pattern repeats
-                rule = {
-                    'pattern': f"Error pattern: {error}",
-                    'terminal_constraint': terminal,
-                    'agent_constraint': agent,
-                    'prevention': self.generate_prevention_suggestion(error, failures),
-                    'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
-                    'occurrence_count': len(failures)
-                }
-                new_rules.append(rule)
+        for (failure_class, error, terminal, agent), failures in failure_groups.items():
+            if failure_class not in ELIGIBLE_CLASSES or len(failures) < 2:
+                continue
+            ids = sorted({str(f['dispatch_id']) for f in failures if f.get('dispatch_id')})
+            new_rules.append({
+                'pattern': f"Error pattern: {error}",
+                'terminal_constraint': terminal,
+                'agent_constraint': agent,
+                'prevention': self.generate_prevention_suggestion(error, failures),
+                'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
+                'occurrence_count': len(failures),
+                'failure_class': failure_class,
+                'source_dispatch_ids': ids[:20],
+            })
 
         return new_rules
 
@@ -957,8 +1034,10 @@ class LearningLoop:
     def update_terminal_constraints(self, new_rules: List[Dict]):
         """Queue new prevention rules for operator confirmation (G-L1: no auto-activation).
 
-        Rules are written to pending_rules.json for operator review.
-        They are NOT inserted directly into prevention_rules table.
+        Rules are written to pending_rules.json through the prevention-rule store.
+        They are NOT inserted directly into prevention_rules table. Shadow mode
+        writes the queue only when queue mode is on. An unreadable queue raises
+        ``QueueUnreadable`` and the file stays as it was.
         """
         if not new_rules:
             return
@@ -976,54 +1055,29 @@ class LearningLoop:
                 }
                 for rule in new_rules
             )
-            print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+            if not queue_enabled():
+                print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+                return
+        queueable = [rule for rule in new_rules if _is_queueable(rule)]
+        if not queueable:
             return
         try:
-            paths = ensure_env()
-            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-            pending_path = state_dir / "pending_rules.json"
-
-            # Load existing pending rules
-            existing: List[Dict] = []
-            if pending_path.exists():
-                try:
-                    data = json.loads(pending_path.read_text(encoding="utf-8"))
-                    existing = data.get("pending_rules", [])
-                except (json.JSONDecodeError, OSError):
-                    existing = []
-
-            now = datetime.now().isoformat()
-            added = 0
-            for rule in new_rules:
-                queued = {
-                    "id": _rule_id(rule),
-                    "created_at": now,
-                    "source": "learning_loop",
-                    "rule_type": "failure_prevention",
-                    "pattern": rule["pattern"],
-                    "terminal_constraint": _scope_value(rule.get("terminal_constraint")) or "any",
-                    "agent_constraint": _scope_value(rule.get("agent_constraint")) or None,
-                    "prevention": rule["prevention"],
-                    "confidence": rule["confidence"],
-                    "occurrence_count": rule.get("occurrence_count", 1),
-                    "status": "pending",
-                    **{k: rule[k] for k in ("signal", "source_oi_ids") if k in rule},
-                }
-                # Deduplicate by id
-                if not any(e.get("id") == queued["id"] for e in existing):
-                    existing.append(queued)
-                    added += 1
-
-            pending_path.write_text(
-                json.dumps({"pending_rules": existing}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            state_dir = Path(ensure_env()["VNX_STATE_DIR"]).expanduser().resolve()
+            counts = queue_rules(
+                state_dir,
+                queueable,
+                # "unresolved" binds to no decision: ``decide`` refuses another project's entry
+                project_id=self._resolve_own_project_id() or UNRESOLVED_PROJECT,
+                now=datetime.now().isoformat(),
             )
-            already = len(new_rules) - added
-            note = f" ({already} already pending)" if already else ""
-            print(f"📋 Queued {added} prevention rules{note} for operator review → {pending_path}")
-
+        except QueueUnreadable:
+            raise
         except Exception as e:
             print(f"❌ Error queuing prevention rules: {e}")
+            return
+        already = counts["merged"] + counts["unchanged"]
+        note = f" ({already} already pending)" if already else ""
+        print(f"📋 Queued {counts['added']} prevention rules{note} for operator review → {state_dir / 'pending_rules.json'}")
 
     def persist_to_intelligence_db(self):
         """Persist high-confidence patterns and failure data to intelligence DB tables.
@@ -1483,6 +1537,53 @@ class LearningLoop:
             print(f"❌ Error queuing stale patterns for supersede: {e}")
         return total
 
+    def _heartbeat(self, status: str, details: Dict[str, Any]) -> None:
+        """One ``learning_loop`` heartbeat; a beacon failure is logged, never fatal."""
+        try:
+            from health_beacon import HealthBeacon
+            from vnx_paths import ensure_env as _hb_ensure_env
+            _hb_paths = _hb_ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "learning_loop",
+                expected_interval_seconds=86400,
+            ).heartbeat(status=status, details=details)
+        except (ImportError, OSError, KeyError) as e:
+            log.debug("HealthBeacon %s heartbeat skipped: %s", status, e)
+
+    def _propose_rules(self, from_history: bool) -> tuple:
+        """Step 3: extraction, generation and queue. Returns ``(new_rules, receipt_stats)``;
+        an unreadable queue lands in ``queue_error`` and the file stays as it was."""
+        failure_window = (
+            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
+            else datetime.now(timezone.utc) - timedelta(hours=24)
+        )
+        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
+        receipt_stats = dict(self.receipt_stats)
+        self.learning_stats["failure_patterns"] = len(failure_patterns)
+        new_rules = self.generate_prevention_rules(failure_patterns)
+        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
+        new_rules = new_rules + oi_rules
+        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
+        self.learning_stats["open_item_signals"] = len(oi_rules)
+        self.learning_stats["proposal_count"] = len(new_rules)
+
+        if new_rules:
+            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
+            try:
+                self.update_terminal_constraints(new_rules)
+            except QueueUnreadable as exc:
+                self.queue_error = str(exc)
+                print(f"❌ Proposal queue unreadable, nothing written: {exc}")
+        return new_rules, receipt_stats
+
+    def _proposal_only_cycle(self, from_history: bool) -> Dict[str, Any]:
+        """Degraded gate in queue mode: extraction, generation and queue, nothing else."""
+        _, receipt_stats = self._propose_rules(from_history)
+        self.learning_stats["receipts_read"] = receipt_stats["read"]
+        self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
+        return dict(self.learning_stats)
+
     def daily_learning_cycle(self, from_history: bool = False):
         """Run the complete daily learning cycle.
 
@@ -1507,26 +1608,18 @@ class LearningLoop:
                 f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
                 f"({gate['detail']}) — skipping pattern updates"
             )
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="degraded",
-                    details={"probe_health": gate["probe_health"], "reason": gate["detail"]},
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon degraded heartbeat skipped: %s", e)
-            return {
+            statistics = self._proposal_only_cycle(from_history) if queue_enabled() else {}
+            reason = self.queue_error or gate["detail"]
+            self._heartbeat("degraded", {"probe_health": gate["probe_health"], "reason": reason})
+            result = {
                 "status": "degraded",
                 "probe_health": gate["probe_health"],
                 "gate": gate,
-                "statistics": {},
+                "statistics": statistics,
             }
+            if self.queue_error:
+                result["reason"] = self.queue_error
+            return result
 
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
         mode += " / PERSIST" if self.persist else " / SHADOW"
@@ -1552,22 +1645,7 @@ class LearningLoop:
 
         # 3. Extract and learn from failures
         print("\n🔍 Step 3: Learning from failures...")
-        failure_window = (
-            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
-            else datetime.now(timezone.utc) - timedelta(hours=24)
-        )
-        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
-        receipt_stats = dict(self.receipt_stats)
-        self.learning_stats["failure_patterns"] = len(failure_patterns)
-        new_rules = self.generate_prevention_rules(failure_patterns)
-        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
-        new_rules = new_rules + oi_rules
-        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
-        self.learning_stats["open_item_signals"] = len(oi_rules)
-
-        if new_rules:
-            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
-            self.update_terminal_constraints(new_rules)
+        new_rules, receipt_stats = self._propose_rules(from_history)
 
         # 4. Archive stale patterns
         print("\n📦 Step 4: Archiving unused patterns...")
@@ -1664,27 +1742,18 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
-        if self.persist:
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="ok",
-                    details={
-                        "elapsed_seconds": round(elapsed, 2),
-                        "patterns_tracked": len(self.pattern_metrics),
-                        "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
-                        "new_prevention_rules": len(new_rules),
-                        "patterns_archived": self.learning_stats.get("patterns_archived", 0),
-                    },
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon heartbeat skipped: %s", e)
+        if self.queue_error:
+            report["status"] = "degraded"
+            report["reason"] = self.queue_error
+            self._heartbeat("degraded", {"reason": self.queue_error})
+        elif self.persist:
+            self._heartbeat("ok", {
+                "elapsed_seconds": round(elapsed, 2),
+                "patterns_tracked": len(self.pattern_metrics),
+                "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
+                "new_prevention_rules": len(new_rules),
+                "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+            })
 
         return report
 
