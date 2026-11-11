@@ -131,6 +131,8 @@ DeprecationWarning: VNX_DATA_DIR env-var set (/tmp/stale) but
 VNX_DATA_DIR_EXPLICIT=1 is required for it to be honored.
 ```
 
+`VNX_STATE_REBUILD_TRIGGER=0` stops lifecycle lines from starting a detached `build_t0_state.py`; `tests/conftest.py` sets it for the whole suite.
+
 ## Migration: Replacing Old Patterns
 
 ### Python
