@@ -14,7 +14,8 @@ Decisions (loop D3): ``state/prevention_rule_decisions.ndjson`` is the truth, th
 ``status`` in the queue file is a projection of it. ``decide`` appends the record
 (fsynced) first and projects second; ``reconcile`` repairs a projection that lags
 after a crash. This module is the only producer of ``approval_id`` and
-``bundle_ref`` (``mint_approval_id``, ``mint_bundle_ref``).
+``bundle_ref`` (``mint_approval_id``, ``mint_bundle_ref``). Loop D9 adds the
+``deactivated`` record (``record_deactivation``).
 
 The queue write of ``update_terminal_constraints`` in ``scripts/learning_loop.py``
 goes through ``queue_rules`` here: it has no writer of its own left.
@@ -318,12 +319,18 @@ def _latest(records: Sequence[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]
     return {record["rule_id"]: record for record in records}
 
 
+def latest_decision(state_dir: Path, rule_id: str) -> Optional[Dict[str, Any]]:
+    """The latest decision record of ``rule_id`` of any kind; None when there is none."""
+    record = _latest(decisions(state_dir)).get(rule_id)
+    return None if record is None else dict(record)
+
+
 def approved_decision(state_dir: Path, rule_id: str) -> Optional[Dict[str, Any]]:
     """The latest decision of ``rule_id`` when it is ``approved``; None when there is
     none or the latest one is a rejection or deactivation. Readers of the record
     (D5, D9) call this and ask for nothing the record does not carry."""
-    record = _latest(decisions(state_dir)).get(rule_id)
-    return dict(record) if record is not None and record["decision"] == "approved" else None
+    record = latest_decision(state_dir, rule_id)
+    return record if record is not None and record["decision"] == "approved" else None
 
 
 def _project(rules: List[Dict[str, Any]], latest: Mapping[str, Mapping[str, Any]]) -> int:
@@ -472,3 +479,36 @@ def decide(
             _project(rules, _latest(records))
             _write_atomic(path, rules)
     return records
+
+
+def record_deactivation(state_dir: Path, activation: Mapping[str, Any], *, reason: str, decided_by: str,
+                        now: str) -> Dict[str, Any]:
+    """Record that ``activation`` (a ``pattern_activation`` row) is switched off, under the lock.
+
+    The rule's latest record must be the approval the activation carries, in its project:
+    ``DecisionRefused`` otherwise. A repeat (the latest record already deactivates this
+    activation) returns that record and writes nothing. The record, with its own minted
+    ``approval_id``, is appended and fsynced first; the queue status ``deactivated`` follows."""
+    for name, value in (("reason", reason), ("decided_by", decided_by), ("now", now)):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    project_id, rid, act = activation["project_id"], activation["rule_id"], activation["activation_id"]
+    state_dir = Path(state_dir)
+    with _locked(state_dir):
+        _reconcile_locked(state_dir)
+        latest = _latest(decisions(state_dir)).get(rid)
+        if latest is not None and latest["decision"] == "deactivated" and latest.get("activation_id") == act:
+            return dict(latest)
+        if latest is None or latest["decision"] != "approved" or latest.get("project_id") != project_id \
+                or latest.get("approval_id") != activation["approval_id"]:
+            raise DecisionRefused(f"{rid}: the latest record is not the approval {act} carries")
+        approval_id = mint_approval_id(project_id, rid, "deactivated", now, decided_by)
+        record = {"decision_id": "dec-" + _digest(approval_id), "approval_id": approval_id, "rule_id": rid,
+                  "proposal_hash": latest.get("proposal_hash"), "decision": "deactivated", "reason": reason,
+                  "decided_by": decided_by, "decided_at": now, "project_id": project_id,
+                  "rollout_scope": ROLLOUT_SCOPE, "failure_class": latest.get("failure_class"),
+                  "activation_id": act, "deactivates_approval_id": latest["approval_id"]}
+        _append_records(state_dir / DECISIONS_FILENAME, [record])
+        _reconcile_locked(state_dir)
+    return record
+
