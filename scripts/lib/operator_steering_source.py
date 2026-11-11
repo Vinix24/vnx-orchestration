@@ -108,8 +108,11 @@ def _fd_path(fd: int) -> str:
 
 
 def open_contained(path: Path, root: Path):
-    """Open ``path`` for reading only if it resolves, before and after opening, under ``root``."""
-    root = root.resolve()
+    """Open ``path`` for reading only if it resolves, before and after opening, under ``root``.
+
+    ``root`` must be the canonical path ``read_sources`` validated. It is never resolved again here:
+    a directory swapped for a symlink after that check must fail both comparisons, not become the boundary.
+    """
     if not _under(Path(os.path.realpath(path)), root):
         raise Refused("outside_bound_dir")
     try:

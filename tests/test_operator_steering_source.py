@@ -1,6 +1,5 @@
 """OB-1: binding and containment per file (ADR-072)."""
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -11,7 +10,6 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 
 import operator_steering_source as src
 
-CLI = ROOT / "scripts" / "operator_steering.py"
 SLUG = "-proj-vnx"
 
 
@@ -32,12 +30,6 @@ def env(tmp_path):
 
 def _bind(state, projects):
     src.bind(state, projects, [SLUG], projects / SLUG / "memory")
-
-
-def _cli(env, *args):
-    state, projects, _ = env
-    return subprocess.run([sys.executable, str(CLI), "--state-dir", str(state), "--projects-root", str(projects), *args],
-                          capture_output=True, text=True)
 
 
 def test_symlink_pointing_outside_is_refused_and_never_opened(env, tmp_path):
@@ -70,6 +62,39 @@ def test_dotdot_path_and_swap_after_listing_are_refused(env, tmp_path):
         src.open_contained(listed[0], tdir)
 
 
+def test_directory_swapped_for_symlink_during_read_is_refused(env, tmp_path):
+    state, projects, tdir = env
+    _bind(state, projects)
+    (tdir / "a.jsonl").write_text("prompt a\n")
+    (tdir / "b.jsonl").write_text("prompt b\n")
+    outside = tmp_path / "buiten"
+    outside.mkdir()
+    (outside / "b.jsonl").write_text("MARKER-BUITEN\n")
+    consumed = []
+
+    def consume(handle, name):
+        consumed.append((name, handle.read()))
+        if len(consumed) == 1:
+            tdir.rename(projects / "weggezet")
+            tdir.symlink_to(outside, target_is_directory=True)
+
+    result = src.read_sources(state, projects, consume)
+    assert result.state == "error"
+    assert result.refused == {"outside_bound_dir": 1}
+    assert all("MARKER-BUITEN" not in text for _, text in consumed)
+
+
+def test_open_contained_refuses_a_root_that_is_now_a_symlink(tmp_path):
+    outside = tmp_path / "buiten"
+    outside.mkdir()
+    (outside / "x.jsonl").write_text("MARKER-BUITEN\n")
+    root = tmp_path / "root"
+    canonical = Path(root.parent.resolve() / "root")
+    root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(src.Refused, match="outside_bound_dir"):
+        src.open_contained(canonical / "x.jsonl", canonical)
+
+
 def test_nothing_is_read_before_a_binding_exists(env):
     state, projects, tdir = env
     (tdir / "s1.jsonl").write_text("prompt\n")
@@ -83,8 +108,9 @@ def test_nothing_is_read_before_a_binding_exists(env):
 @pytest.mark.parametrize("slug", ["clients-x", "My-Business", "-salesminds-app", "a/b", ".."])
 def test_bind_refuses_client_and_business_slugs(env, slug):
     state, projects, _ = env
-    done = _cli(env, "bind", f"--transcript-dir={slug}", "--memory-dir", str(projects / SLUG / "memory"))
-    assert done.returncode == 2 and not (state / src.BINDING_FILE).exists()
+    with pytest.raises(src.BindingError):
+        src.bind(state, projects, [slug], projects / SLUG / "memory")
+    assert not (state / src.BINDING_FILE).exists()
 
 
 def test_binding_with_wrong_project_or_schema_is_unbound(env):
