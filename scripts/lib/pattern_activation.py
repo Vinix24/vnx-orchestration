@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 import prevention_rule_store as store
 from learning_ledger_gate import STATUS_OK, STATUS_PENDING, read_verdict
@@ -182,6 +182,18 @@ def deactivate(conn: sqlite3.Connection, state_dir: Path, activation_id: str, *,
                  "deactivation_approval_id = ? WHERE project_id = ? AND activation_id = ? AND active = 1",
                  (record["decided_at"], record["reason"], record["approval_id"], project_id, activation_id))
     return True
+
+
+def orphaned_activations(conn: sqlite3.Connection, project_id: str) -> List[Dict[str, Any]]:
+    """The active activations of ``project_id`` whose rule row is no loop row of that project any
+    more (deleted, rewritten): what the ingest switches off with reason ``rule_row_missing``."""
+    _project(project_id)
+    if not _has_table(conn):
+        return []
+    rows = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM {TABLE} AS pa WHERE pa.project_id = ? AND pa.active = 1 "
+                        "AND NOT EXISTS (SELECT 1 FROM prevention_rules AS pr WHERE pr.id = pa.rule_row_id "
+                        "AND pr.project_id = pa.project_id AND pr.source = ?)", (project_id, LOOP_SOURCE))
+    return [dict(zip(COLUMNS, row)) for row in rows]
 
 
 def state_dir_of(conn: sqlite3.Connection) -> Optional[Path]:
