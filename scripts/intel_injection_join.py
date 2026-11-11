@@ -454,9 +454,11 @@ def main(argv: list[str] | None = None) -> int:
     # Effect PR-6, PR-7 and PR-8. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
     for name, text in (("cohort", "A/B window cohort: per-arm counts and refusals, never a verdict"),
                        ("effect", "A/B effect: stratified risk difference, 95% interval and verdict class"),
-                      ("secondary", "A/B falsifications F1-F3 and CQS/open items, each with status and coverage")):
-        p_ab = sub.add_parser(name, help=text)
-        p_ab.add_argument("--qi", help="path to quality_intelligence.db (opened read-only, not read)")
+                      ("secondary", "A/B falsifications F1-F3 plus mean CQS and open items per arm, each with status and coverage")):
+        p_ab = sub.add_parser(name, help=text, description=text)
+        p_ab.add_argument("--qi", help=("path to quality_intelligence.db (opened read-only; read for its offers, outcomes and "
+                                        "dispatch_metadata)" if name == "secondary" else
+                                        "path to quality_intelligence.db (opened read-only, not read)"))
         p_ab.add_argument("--rc", help="path to runtime_coordination.db")
         p_ab.add_argument("--project-id", help="tenant (default: project_root.resolve_project_id())")
         p_ab.add_argument("--as-of", type=_iso_arg, help="ISO timestamp (default: now, UTC)")

@@ -1,4 +1,4 @@
-"""Effect PR-8: the falsifications F1-F3 with their coverage (plan decision 19; CQS and open items follow in PR-8b).
+"""Effect PR-8: the falsifications F1-F3 with their coverage and the per-arm CQS and open items (plan decision 19).
 
 Stores are PR-6's RC fixture (real migrations to 0038) plus a QI built here with the columns the measures read.
 The module is imported inside the tests, so on the old code the CLI tests fail on behaviour. Temp stores only.
@@ -38,6 +38,22 @@ def _qi(rc):
         for ddl in _QI_SCHEMA:
             conn.execute(ddl)
     return path
+
+
+_META = ("CREATE TABLE dispatch_metadata (id INTEGER PRIMARY KEY, dispatch_id TEXT NOT NULL, project_id TEXT NOT NULL, "
+         "cqs REAL, open_items_created INTEGER, open_items_resolved INTEGER, UNIQUE (project_id, dispatch_id))")
+
+
+def _meta(rc, cover=(100, 100), cqs=(80.0, 60.0), oi=((2, 1), (4, 3)), pid="p1"):
+    """dispatch_metadata rows for the first ``cover`` % (control, treatment) of the dispatches of each arm."""
+    path = rc.parent / "quality_intelligence.db"
+    _exec(path, _META, [()])
+    with closing(sqlite3.connect(str(rc))) as conn:
+        arms = [[r[0] for r in conn.execute("SELECT dispatch_id FROM intelligence_injections WHERE project_id = 'p1' "
+                                            "AND ab_arm = ? ORDER BY id", (arm,))] for arm in ("control", "treatment")]
+    for ids, pct, score, (made, shut) in zip(arms, cover, cqs, oi):
+        _exec(path, "INSERT INTO dispatch_metadata (dispatch_id, project_id, cqs, open_items_created, open_items_resolved) "
+                    "VALUES (?, ?, ?, ?, ?)", [(d, pid, score, made, shut) for d in ids[:len(ids) * pct // 100]])
 
 
 def _treatment(rc, at):
@@ -80,11 +96,15 @@ def _status(rc, **kw):
     return {name: m["status"] for name, m in data["measures"].items()}, data["measures"]
 
 
+def _f(status):
+    return {k: status[k] for k in ("F1", "F2", "F3")}
+
+
 def test_rising_adoption_without_a_favourable_verdict_fires_f1_and_f2_and_exits_0(rc):
     """Red run: on the old code `secondary` is `invalid choice` (exit 2) and no measure has a status."""
     _world(rc)
     status, m = _status(rc)
-    assert status == {"F1": "fired", "F2": "fired", "F3": "clear"}
+    assert _f(status) == {"F1": "fired", "F2": "fired", "F3": "clear"}
     assert m["F1"]["rise_pp"] == 20.0 and m["F1"]["verdict"] == "equivalent_within_5pp"
     assert (m["F2"]["chars_per_item_first"], m["F2"]["chars_per_item_last"], m["F2"]["drop_pct"]) == (100.0, 80.0, 20.0)
     run, _ = _run(rc, "secondary")
@@ -94,13 +114,13 @@ def test_rising_adoption_without_a_favourable_verdict_fires_f1_and_f2_and_exits_
 def test_f2_stands_on_the_adoption_rise_not_on_the_verdict(rc):
     _world(rc, control_ok=60)
     status, m = _status(rc)
-    assert m["F1"]["verdict"] == "treatment_better" and status == {"F1": "clear", "F2": "fired", "F3": "clear"}
+    assert m["F1"]["verdict"] == "treatment_better" and _f(status) == {"F1": "clear", "F2": "fired", "F3": "clear"}
 
 
 def test_f2_fires_without_any_verdict_when_the_weeks_are_evaluable(rc):
     _world(rc, adoption=(8, 16), size=40)
     status, m = _status(rc)
-    assert "verdict" not in m["F1"] and status == {"F1": "not_evaluable", "F2": "fired", "F3": "not_evaluable"}
+    assert "verdict" not in m["F1"] and _f(status) == {"F1": "not_evaluable", "F2": "fired", "F3": "not_evaluable"}
     assert "below_floor" in m["F1"]["reason"] and m["F1"]["rise_pp"] == 20.0
 
 
@@ -193,3 +213,111 @@ def test_a_refused_cohort_makes_every_measure_not_evaluable(rc):
     _exec(rc, "DELETE FROM project_config WHERE project_id = 'p1'", [()])
     status, m = _status(rc)
     assert set(status.values()) == {"not_evaluable"} and "window_invalid" in m["F1"]["reason"]
+
+
+def test_cqs_and_open_items_report_the_mean_per_arm_with_coverage(rc):
+    """Red run: on the old code `secondary --json` has no `cqs` key at all, so the status lookup raises KeyError."""
+    _world(rc)
+    _meta(rc)
+    status, m = _status(rc)
+    assert (status["cqs"], status["open_items"]) == ("evaluated", "evaluated")
+    control = m["cqs"]["arms"]["control"]
+    assert (control["with_value"], control["coverage_pct"], control["means"]) == (control["resolved"], 100.0, 80.0)
+    assert control["resolved"] > 0 and m["cqs"]["arms"]["treatment"]["means"] == 60.0
+    assert m["open_items"]["arms"]["treatment"]["means"] == {"created": 4.0, "resolved": 3.0}
+    assert "means 80.0" in _run(rc, "secondary")[0].stdout
+
+
+def test_zero_metadata_rows_is_not_evaluable_with_zero_coverage(rc):
+    """Red run: on the old code there is no `cqs` measure to be not_evaluable."""
+    _world(rc)
+    _meta(rc, cover=(0, 0))
+    status, m = _status(rc)
+    assert status["cqs"] == status["open_items"] == "not_evaluable" and "dekking 0 %" in m["cqs"]["reason"]
+    assert m["cqs"]["arms"]["control"]["coverage_pct"] == 0.0
+
+
+def test_coverage_below_80_percent_in_either_arm_is_not_evaluable_and_names_both_percentages(rc):
+    _world(rc)
+    _meta(rc, cover=(60, 100))
+    status, m = _status(rc)
+    arms = m["cqs"]["arms"]
+    assert status["cqs"] == status["open_items"] == "not_evaluable" and arms["control"]["means"] is None
+    assert arms["treatment"]["coverage_pct"] == 100.0 and arms["control"]["coverage_pct"] < 80
+    assert "control" in m["cqs"]["reason"] and "treatment 100 %" in m["cqs"]["reason"]
+
+
+def test_the_coverage_edge_at_80_percent_is_evaluable_and_just_under_is_not(rc, sec):
+    def measure(have):
+        ids = {"control": [f"c{i}" for i in range(10)], "treatment": [f"t{i}" for i in range(10)]}
+        with closing(sqlite3.connect(":memory:")) as qi:
+            qi.execute(_META)
+            qi.executemany("INSERT INTO dispatch_metadata (dispatch_id, project_id, cqs) VALUES (?, 'p1', 50)",
+                           [(d,) for d in ids["control"][:have] + ids["treatment"]])
+            return sec._per_arm("cqs", qi, sec._CQS_SQL, "p1", ids, sec._mean_cqs)
+
+    assert measure(8).status == "evaluated" and measure(7).status == "not_evaluable"
+
+
+@pytest.mark.parametrize("sql", ["DROP TABLE dispatch_metadata", "ALTER TABLE dispatch_metadata DROP COLUMN open_items_created"])
+def test_a_missing_metadata_table_or_column_is_not_evaluable_with_the_reason(rc, sql):
+    _world(rc)
+    _meta(rc)
+    _exec(rc.parent / "quality_intelligence.db", sql, [()])
+    status, m = _status(rc)
+    assert status["open_items"] == "not_evaluable" and "source unreadable" in m["open_items"]["reason"]
+    assert status["cqs"] == ("not_evaluable" if "DROP TABLE" in sql else "evaluated")
+    assert status["F1"] == "fired"  # the other measures do not follow
+
+
+@pytest.mark.parametrize("bad, column", [("'high'", "cqs"), ("NULL", "cqs"), ("-1", "cqs"), ("-3", "open_items_created"),
+                                         ("'x'", "open_items_resolved"), ("NULL", "open_items_resolved")])
+def test_an_unreadable_value_counts_in_the_denominator_not_in_the_mean(rc, bad, column):
+    _world(rc)
+    _meta(rc)
+    _exec(rc.parent / "quality_intelligence.db", f"UPDATE dispatch_metadata SET {column} = {bad} WHERE id % 2 = 0", [()])
+    status, m = _status(rc)
+    name = "cqs" if column == "cqs" else "open_items"
+    control = m[name]["arms"]["control"]
+    assert status[name] == "not_evaluable" and "dekking" in m[name]["reason"]
+    assert control["with_value"] < control["resolved"] and control["means"] is None
+
+
+def test_one_unreadable_value_in_a_covered_arm_leaves_the_mean_over_the_readable_rows(rc):
+    _world(rc)
+    _meta(rc)
+    _exec(rc.parent / "quality_intelligence.db", "UPDATE dispatch_metadata SET cqs = 'high' WHERE id = 1", [()])
+    arm = _status(rc)[1]["cqs"]["arms"]["control"]
+    assert (arm["resolved"] - arm["with_value"], arm["means"]) == (1, 80.0)
+
+
+def test_metadata_of_another_project_is_not_counted(rc):
+    _world(rc)
+    _meta(rc, pid="p2")
+    status, m = _status(rc)
+    assert status["cqs"] == "not_evaluable" and "dekking 0 %" in m["cqs"]["reason"]
+
+
+def test_a_cohort_refusal_makes_cqs_and_open_items_not_evaluable(rc):
+    _world(rc)
+    _meta(rc)
+    _exec(rc, "DELETE FROM project_config WHERE project_id = 'p1'", [()])
+    status, m = _status(rc)
+    assert status["cqs"] == status["open_items"] == "not_evaluable" and "window_invalid" in m["cqs"]["reason"]
+
+
+def test_cqs_rows_never_change_the_verdict_or_the_exit_code_of_effect(rc):
+    _world(rc)
+    before = _run(rc, "effect", "--json")[0]
+    _meta(rc)
+    after = _run(rc, "effect", "--json")[0]
+    assert (before.returncode, before.stdout) == (after.returncode, after.stdout)
+    assert _run(rc, "secondary")[0].returncode == 0
+
+
+def test_the_secondary_help_names_cqs_and_open_items_and_what_it_reads():
+    run = subprocess.run([sys.executable, os.path.join(_ROOT, "scripts", "intel_injection_join.py"), "secondary", "--help"],
+                         capture_output=True, text=True, timeout=60)
+    text = " ".join(run.stdout.split())
+    assert run.returncode == 0 and "CQS" in text and "open items" in text and "dispatch_metadata" in text
+    assert "not read" not in text

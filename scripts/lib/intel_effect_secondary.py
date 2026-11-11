@@ -2,9 +2,10 @@
 """The falsifications and the secondary measures of the intelligence A/B window, each with its coverage.
 
 Effect PR-8 of ``intelligence-effect-measurable``, plan decision 19. ``secondary`` reports F1 (adoption
-rises without effect), F2 (adoption rises through dilution) and F3 (the control arm does better). CQS
-and open items follow in the next PR of the track (PR-8b). Every line has one status: ``fired``, ``clear`` or
-``not_evaluable``. The measures only read: they never change the verdict, the refusals or the exit code
+rises without effect), F2 (adoption rises through dilution) and F3 (the control arm does better), plus two
+secondary measures per arm from ``dispatch_metadata``: ``cqs`` and ``open_items`` (created and resolved per
+dispatch). F1-F3 have one status: ``fired``, ``clear`` or ``not_evaluable``; the two measures are ``evaluated``
+or ``not_evaluable``. The measures only read: they never change the verdict, the refusals or the exit code
 of ``effect`` (the exit code here is 0 for any set of statuses, 1 only for an unusable store).
 
 Fail closed: a measure is ``not_evaluable`` with its reason and coverage whenever its evidence is
@@ -28,8 +29,9 @@ from typing import Dict, Iterator, List, Optional
 import intel_effect_cohort as co
 import intel_effect_estimator as es
 
-FIRED, CLEAR, NOT_EVALUABLE = "fired", "clear", "not_evaluable"
+FIRED, CLEAR, NOT_EVALUABLE, EVALUATED = "fired", "clear", "not_evaluable", "evaluated"
 BLOCK = 500
+MIN_META_COVERAGE = Fraction(80, 100)
 MIN_WEEK_OFFERS = 30
 MIN_WEEK_COVERAGE = Fraction(1, 2)
 ADOPTION_RISE = Fraction(5, 100)
@@ -43,6 +45,9 @@ WHERE o.project_id = ? AND o.dispatch_id IN ({marks})
 """
 _PAYLOAD_SQL = ("SELECT id, dispatch_id, injected_at, payload_chars, items_injected FROM intelligence_injections "
                 "WHERE project_id = ? AND dispatch_id IN ({marks})")
+_CQS_SQL = "SELECT dispatch_id, cqs FROM dispatch_metadata WHERE project_id = ? AND dispatch_id IN ({marks})"
+_OI_SQL = ("SELECT dispatch_id, open_items_created, open_items_resolved FROM dispatch_metadata "
+           "WHERE project_id = ? AND dispatch_id IN ({marks})")
 
 
 @dataclass
@@ -62,6 +67,12 @@ def _rows(conn: sqlite3.Connection, sql: str, project_id: str, ids: List[str]) -
 def _whole(value: object) -> bool:
     """A readable count: an int (not a bool) of 0 or more. The one test for unreadable here."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _score(value: object) -> bool:
+    """A readable CQS: a finite int or float (not a bool) of 0 or more. Text, None and negatives are not."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and value == value
+            and abs(value) != float("inf") and value >= 0)
 
 
 def _pct(fraction: Fraction) -> float:
@@ -165,6 +176,65 @@ def _payload_rows(rc: sqlite3.Connection, project_id: str, week_of: Dict[str, st
     return [row for row in first.values() if not _whole(row[3]) or row[3] > 0]
 
 
+def _resolved_ids(cohort: co.Cohort) -> Dict[str, List[str]]:
+    """The resolved cohort dispatches per arm (mature success or failure): the denominator of the coverage."""
+    return {arm: sorted(d.dispatch_id for d in cohort.dispatches
+                        if d.arm == arm and d.mature and d.outcome in (co.SUCCESS, co.FAILURE)) for arm in co.ARMS}
+
+
+def _metadata_values(qi: sqlite3.Connection, sql: str, project_id: str, ids: List[str], readable) -> Dict[str, tuple]:
+    """dispatch_id -> its readable values. A dispatch with no row, an unreadable value or more than one row is
+    absent: it stays in the coverage denominator and out of the mean."""
+    seen: Dict[str, Optional[tuple]] = {}
+    for did, *values in _rows(qi, sql, project_id, ids):
+        seen[did] = None if did in seen or not all(readable(v) for v in values) else tuple(values)
+    return {did: values for did, values in seen.items() if values is not None}
+
+
+def _per_arm(name: str, qi: sqlite3.Connection, sql: str, project_id: str, ids: Dict[str, List[str]], mean) -> Measure:
+    """Mean per arm over the dispatches with a readable value, evaluated only at >= MIN_META_COVERAGE in both arms."""
+    arms, enough = {}, True
+    for arm, arm_ids in ids.items():
+        got = _metadata_values(qi, sql, project_id, arm_ids, _score if name == "cqs" else _whole)
+        coverage = Fraction(len(got), len(arm_ids)) if arm_ids else None
+        enough = enough and coverage is not None and coverage >= MIN_META_COVERAGE
+        arms[arm] = {"resolved": len(arm_ids), "with_value": len(got), "means": None,
+                     "coverage_pct": None if coverage is None else _pct(coverage), "_values": list(got.values())}
+    pcts = {arm: a["coverage_pct"] for arm, a in arms.items()}
+    if enough:
+        for a in arms.values():
+            a["means"] = mean(a["_values"])
+    for a in arms.values():
+        del a["_values"]
+    if not enough:
+        none = all(a["with_value"] == 0 for a in arms.values())
+        why = ("dekking 0 %" if none else "dekking " + ", ".join(f"{arm} {'-' if p is None else f'{p:g}'} %" for arm, p in pcts.items())
+               ) + f" (minimum {_pct(MIN_META_COVERAGE):g} % in both arms)"
+        return Measure(name, NOT_EVALUABLE, why, {"arms": arms})
+    return Measure(name, EVALUATED, None, {"arms": arms})
+
+
+def _mean_cqs(values: List[tuple]) -> float:
+    return round(sum(v[0] for v in values) / len(values), 4)  # enough coverage means >= 1 value
+
+
+def _mean_oi(values: List[tuple]) -> dict:
+    return {"created": round(sum(v[0] for v in values) / len(values), 4),
+            "resolved": round(sum(v[1] for v in values) / len(values), 4)}
+
+
+def metadata_measures(qi: sqlite3.Connection, project_id: str, cohort: co.Cohort, refused: Optional[str]) -> List[Measure]:
+    """cqs and open_items, one guard each: a missing table or column makes only that measure not_evaluable."""
+    if refused is not None:
+        return [Measure(name, NOT_EVALUABLE, refused, {}) for name in ("cqs", "open_items")]
+    ids = _resolved_ids(cohort)
+    out = []
+    for name, sql, mean in (("cqs", _CQS_SQL, _mean_cqs), ("open_items", _OI_SQL, _mean_oi)):
+        got, err = _guard(lambda: _per_arm(name, qi, sql, project_id, ids, mean))
+        out.append(got or Measure(name, NOT_EVALUABLE, err, {}))
+    return out
+
+
 @dataclass
 class Secondary:
     effect: es.Effect
@@ -197,8 +267,9 @@ def build_secondary(qi_db: Path, rc_db: Path, project_id: str, as_of: datetime) 
             line1 = f1(weeks, verdict, no_verdict)
             adoption, why = _adoption(weeks)
         rows, rows_err = ([], None) if adoption is None else _guard(lambda: _payload_rows(rc, project_id, week_of))
+        meta = metadata_measures(qi, project_id, cohort, refused if other else None)
     line2 = Measure("F2", NOT_EVALUABLE, why or rows_err, {}) if adoption is None or rows_err else f2(adoption, rows)
-    return Secondary(effect, [line1, line2, f3(effect)])
+    return Secondary(effect, [line1, line2, f3(effect), *meta])
 
 
 def as_dict(sec: Secondary) -> dict:
