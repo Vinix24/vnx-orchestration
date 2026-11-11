@@ -1,0 +1,1 @@
+- A test that removes or replaces a `sys.modules` entry no longer leaks it: an autouse fixture in `tests/conftest.py` puts every removed or replaced entry back, `test_append_receipt_identity.py` removes `dispatch_register` through `monkeypatch.delitem`, and `test_intel_ab_injection_path.py` patches the live module. This cured the 8 E1 failures on main (run 42881222755).

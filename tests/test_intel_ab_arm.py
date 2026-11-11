@@ -176,14 +176,14 @@ def test_resolve_arm_placebo_wins(monkeypatch, dispatch_id, assigned):
     monkeypatch.setenv("VNX_PROJECT_ID", "p1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
     assert sel.arm_for_dispatch(dispatch_id, "p1", WINDOW)[0] == assigned
-    assert sel._resolve_arm(dispatch_id) == "placebo"
+    assert sel._resolve_arm(dispatch_id) == ("placebo", None)
 
 
 def test_resolve_arm_without_window_is_none_not_treatment(monkeypatch):
     monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.delenv("VNX_INTEL_AB_WINDOW", raising=False)
-    assert sel._resolve_arm("dlv-x") is None
+    assert sel._resolve_arm("dlv-x") == (None, None)
 
 
 def test_resolve_arm_uses_hash_in_window(monkeypatch):
@@ -191,9 +191,9 @@ def test_resolve_arm_uses_hash_in_window(monkeypatch):
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "p1")
     monkeypatch.setenv("VNX_INTEL_AB_WINDOW", json.dumps(WINDOW))
-    expected = sel.arm_for_dispatch("dlv-x", "p1", WINDOW)[0]
+    expected = sel.arm_for_dispatch("dlv-x", "p1", WINDOW)
     assert sel._resolve_arm("dlv-x") == expected
-    assert sel._resolve_arm("") is None
+    assert sel._resolve_arm("") == (None, None)
 
 
 # --- an unassigned dispatch is never recorded as treatment (round 2) ---------
@@ -244,13 +244,15 @@ def test_disabled_or_invalid_window_records_no_arm(monkeypatch, tmp_path, captur
 
 
 def test_assignment_returning_none_records_no_arm(monkeypatch, tmp_path, captured):
-    monkeypatch.setattr(sel, "_resolve_arm", lambda dispatch_id: None)
+    monkeypatch.setattr(sel, "_resolve_arm", lambda dispatch_id: (None, None))
     direct, ctx = _run_both(tmp_path)
     assert direct.ab_arm is None and ctx.ab_arm is None
     assert captured and all(arm is None for _, arm in captured)
 
 
 def test_valid_window_records_assigned_arm(monkeypatch, tmp_path, captured):
+    import dispatch_register
+    monkeypatch.setattr(dispatch_register, "_resolve_central_data_dir", lambda pid: tmp_path / "central" / pid)
     monkeypatch.delenv("VNX_INTEL_PLACEBO_ARM", raising=False)
     monkeypatch.setenv("VNX_INTEL_AB_TEST", "1")
     monkeypatch.setenv("VNX_PROJECT_ID", "p1")

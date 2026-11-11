@@ -348,6 +348,142 @@ def test_cli_sources_absent_open_items_is_absent(env):
     assert json.loads(proc.stdout)["sources"]["open_items"]["state"] == "absent"
 
 
+@pytest.fixture
+def local_env(env):
+    """A repo-local state dir outside the test HOME: the isolation guard treats anything under
+    ``$HOME/.vnx-data`` as the real central store, so a ledger append must not land there."""
+    repo = env["tmp"] / "repo"
+    state = repo / ".vnx-data" / "state"
+    state.mkdir(parents=True)
+    (repo / ".vnx-project-id").write_text(PROJECT + "\n", encoding="utf-8")
+    return {**env, "state": state}
+
+
+def _bind_args(env):
+    return ["bind", "--state-dir", str(env["state"]), "--memory-dir", str(env["memory"]),
+            "--bucket-dir", str(env["bucket"]), "--bucket-slug", "mine"]
+
+
+def _bind_receipts(env):
+    ledger = env["state"] / "t0_receipts.ndjson"
+    lines = [json.loads(x) for x in ledger.read_text().splitlines() if x.strip()] if ledger.exists() else []
+    return [r for r in lines if r.get("trigger") == "capture_bind" and r.get("event_type") == "state_mutation"]
+
+
+def test_cli_bind_writes_atomically_and_loads(local_env):
+    env = local_env
+    proc = _run(*_bind_args(env), home=env["home"])
+    assert proc.returncode == 0, proc.stderr
+    written = json.loads((env["state"] / cs.BINDING_FILENAME).read_text())
+    assert set(written) == set(cs.BINDING_KEYS) and written["project_id"] == PROJECT
+    assert cs.load_binding(env["state"])[1] == "ok"
+    assert not [p for p in env["state"].iterdir() if p.name.endswith(".tmp")]
+
+
+def test_cli_bind_ledger_records_created_then_replaced(local_env):
+    env = local_env
+    assert _run(*_bind_args(env), home=env["home"]).returncode == 0
+    assert [m["transition"] for m in _bind_receipts(env)] == ["created"]
+    assert _bind_receipts(env)[0]["project_id"] == PROJECT
+    assert _run(*_bind_args(env), home=env["home"]).returncode == 0
+    receipts = _bind_receipts(env)
+    assert [m["transition"] for m in receipts] == ["created", "replaced"]
+    assert all("memory_dir" not in m and "bucket_dir" not in m for m in receipts)
+
+
+@pytest.mark.parametrize("case", ["memory_outside", "memory_missing", "bucket_missing", "slug_empty",
+                                  "state_missing", "no_project"])
+def test_cli_bind_failed_check_writes_nothing(env, case):
+    values = {"state": env["state"], "memory": env["memory"], "bucket": env["bucket"], "slug": "mine"}
+    if case == "memory_outside":
+        values["memory"] = env["outside"]
+    elif case == "memory_missing":
+        values["memory"] = env["memory"] / "gone"
+    elif case == "bucket_missing":
+        values["bucket"] = env["bucket"] / "gone"
+    elif case == "slug_empty":
+        values["slug"] = " "
+    elif case == "state_missing":
+        values["state"] = env["tmp"] / "gone"
+    else:
+        values["state"] = env["tmp"] / "plain-state"
+        values["state"].mkdir()
+    proc = _run("bind", "--state-dir", str(values["state"]), "--memory-dir", str(values["memory"]),
+                "--bucket-dir", str(values["bucket"]), "--bucket-slug", values["slug"], home=env["home"])
+    assert proc.returncode != 0 and "bind refused" in proc.stderr
+    assert not (values["state"] / cs.BINDING_FILENAME).exists()
+    assert not (env["state"] / cs.BINDING_FILENAME).exists()
+    assert not (values["state"] / "t0_receipts.ndjson").exists()
+
+
+def _script_module():
+    """scripts/capture_audit.py by path: scripts/lib/capture_audit.py shares its module name."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("capture_audit_cli", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _bind_namespace(env):
+    import argparse
+    return argparse.Namespace(state_dir=str(env["state"]), memory_dir=str(env["memory"]),
+                              bucket_dir=str(env["bucket"]), bucket_slug="mine")
+
+
+def test_bind_appends_ledger_before_the_json_exists(local_env, monkeypatch):
+    env = local_env
+    import append_receipt
+    capture_audit = _script_module()
+    seen = {}
+
+    def fake(receipt, receipts_file=None, skip_enrichment=False):
+        seen["binding_exists"] = (env["state"] / cs.BINDING_FILENAME).exists()
+        seen["receipt"], seen["file"] = receipt, receipts_file
+        return type("R", (), {"status": "appended"})()
+
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", fake)
+    assert capture_audit.cmd_bind(_bind_namespace(env)) == 0
+    assert seen["binding_exists"] is False
+    assert (env["state"] / cs.BINDING_FILENAME).exists()
+    assert seen["file"] == str(env["state"] / "t0_receipts.ndjson")
+    assert seen["receipt"]["transition"] == "created" and "memory_dir" not in seen["receipt"]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "cause"),
+    [
+        ("raise", "(disk)"),
+        ("exit", "(bootstrap failed)"),
+        ("rejected", "(append result 'rejected')"),
+        ("none", "(append result None)"),
+    ],
+)
+@pytest.mark.parametrize("existing", [False, True])
+def test_bind_fails_closed_when_the_ledger_append_fails(
+    local_env, monkeypatch, capsys, outcome, cause, existing
+):
+    env = local_env
+    import append_receipt
+    capture_audit = _script_module()
+    if existing:
+        _binding(env, bucket_slug="old")
+    before = (env["state"] / cs.BINDING_FILENAME).read_bytes() if existing else None
+
+    def fake(receipt, receipts_file=None, skip_enrichment=False):
+        if outcome == "raise":
+            raise OSError("disk")
+        if outcome == "exit":
+            raise SystemExit("bootstrap failed")
+        return None if outcome == "none" else type("R", (), {"status": "rejected"})()
+
+    monkeypatch.setattr(append_receipt, "append_receipt_payload", fake)
+    assert capture_audit.cmd_bind(_bind_namespace(env)) == 1
+    assert f"bind refused: ledger append failed {cause}" in capsys.readouterr().err
+    target = env["state"] / cs.BINDING_FILENAME
+    assert (target.read_bytes() == before) if existing else not target.exists()
+
+
 def test_cli_rejects_unknown_subcommand(env):
     proc = _run("bestaat-niet", home=env["home"])
     assert proc.returncode == 2 and "invalid choice: 'bestaat-niet'" in proc.stderr
