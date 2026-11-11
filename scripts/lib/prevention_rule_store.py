@@ -15,7 +15,8 @@ Decisions (loop D3): ``state/prevention_rule_decisions.ndjson`` is the truth, th
 (fsynced) first and projects second; ``reconcile`` repairs a projection that lags
 after a crash. This module is the only producer of ``approval_id`` and
 ``bundle_ref`` (``mint_approval_id``, ``mint_bundle_ref``). Loop D9 adds the
-``deactivated`` record (``record_deactivation``).
+``deactivated`` record (``record_deactivation``) and the ingest projection
+(``mark_ingested``).
 
 The queue write of ``update_terminal_constraints`` in ``scripts/learning_loop.py``
 goes through ``queue_rules`` here: it has no writer of its own left.
@@ -512,3 +513,19 @@ def record_deactivation(state_dir: Path, activation: Mapping[str, Any], *, reaso
         _reconcile_locked(state_dir)
     return record
 
+
+def mark_ingested(state_dir: Path, results: Mapping[str, Mapping[str, Any]]) -> int:
+    """Project an ingest into the queue under the lock, after a reconcile: each entry of ``results`` still
+    ``approved`` becomes ``ingested`` with its fields (one switched off stays off). Returns the count."""
+    state_dir = Path(state_dir)
+    with _locked(state_dir):
+        _reconcile_locked(state_dir)
+        path = state_dir / QUEUE_FILENAME
+        rules = _read_queue(path)
+        changed = [r for r in rules if isinstance(r.get("id"), str) and r["id"] in results
+                   and r.get("status") == "approved"]
+        for rule in changed:
+            rule.update(results[rule["id"]], status="ingested")
+        if changed:
+            _write_atomic(path, rules)
+    return len(changed)

@@ -2,8 +2,8 @@
 """d3filter D2 (dlv-a82252463c87): a collapsed ingest is visible (B12)."""
 from __future__ import annotations
 
-import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,7 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
+import learning_ledger_gate as gate
 import learning_loop as ll  # noqa: E402
+import prevention_rule_store as store
+import quality_db_init as qdi
+
+PID = "vnx-dev"
 
 
 class _FakePaths:
@@ -32,38 +37,43 @@ class _FakePaths:
 
 
 @pytest.fixture
-def env(tmp_path, approve_learning_persist):
+def env(tmp_path, approve_learning_persist, monkeypatch):
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
     (tmp_path / "repo").mkdir()
     fake = _FakePaths(state_dir, tmp_path / "repo")
     approve_learning_persist(state_dir)
+    monkeypatch.setenv("VNX_PROJECT_ID", PID)
+    assert qdi.bootstrap_qi_db(state_dir / "quality_intelligence.db") is True  # v35: pattern_activation
+    at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    gate.write_verdict(state_dir, {"schema": gate.SCHEMA, "evaluated_at": at, "project_id": PID, "cohort": "all_v3",
+                                   "status": "ok", "reason_code": "ok", "reason": "fixture", "counts": {}})
     with patch.object(ll, "ensure_env", return_value=fake):
         loop = ll.LearningLoop(persist=True)
-        loop.conn.execute(
-            "CREATE TABLE IF NOT EXISTS prevention_rules ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, tag_combination TEXT, rule_type TEXT, "
-            "description TEXT, recommendation TEXT, confidence REAL, created_at TEXT, "
-            "triggered_count INTEGER, source_dispatch_id TEXT)"
-        )
+        loop.conn.execute("ALTER TABLE prevention_rules ADD COLUMN project_id TEXT NOT NULL DEFAULT ''")
+        loop.conn.execute("ALTER TABLE prevention_rules ADD COLUMN source TEXT")
         loop.conn.commit()
         yield loop, state_dir
     loop.conn.close()
 
 
 def _rule(rid, agent, terminal="T1", **extra):
-    rule = {"id": rid, "status": "approved", "pattern": "same failure",
-            "prevention": "do x", "confidence": 0.8,
+    rule = {"id": rid, "status": "approved", "pattern": "same failure", "failure_class": "timeout",
+            "prevention": "do x", "confidence": 0.8, "occurrence_count": 2,
             "terminal_constraint": terminal, "agent_constraint": agent}
     rule.update(extra)
     return rule
 
 
 def _run(loop, state_dir, rules):
-    (state_dir / "pending_rules.json").write_text(
-        json.dumps({"pending_rules": rules}), encoding="utf-8")
+    """Queue the rules through the store and approve the ``approved`` ones in its record (loop D9)."""
+    store.queue_rules(state_dir, rules, project_id=PID, now="2026-11-11T08:00:00+00:00")
+    approved = [store.rule_id(r) for r in rules if r["status"] == "approved"]
+    if approved:
+        store.decide(state_dir, approved, "approved", reason="r", decided_by="v", project_id=PID,
+                     now="2026-11-11T09:00:00+00:00", effect_criterion="e", stop_condition="s")
     loop.ingest_approved_rules()
-    return json.loads((state_dir / "pending_rules.json").read_text())["pending_rules"]
+    return store.load_queue(state_dir)
 
 
 def _rows(loop):

@@ -21,8 +21,11 @@ ALLOWLIST = {  # (path, stripped line): (occurrences, reason)
     ("scripts/deactivate_pattern_activation.py",
      'row = conn.execute("SELECT source FROM prevention_rules WHERE project_id = ? AND id = ?",'):
         (1, "legacy check of one id before a refusal, prints no rule content"),
-    ("scripts/learning_loop.py", '"SELECT id FROM prevention_rules WHERE description = ? AND tag_combination = ?",'):
-        (1, "ingest dedupe before a write, no injection"),
+    ("scripts/learning_loop.py", '"SELECT id FROM prevention_rules WHERE project_id = ? AND source = ? "'):
+        (1, "ingest dedupe on this project's loop rows before a write, no injection"),
+    ("scripts/lib/pattern_activation.py",
+     '"AND NOT EXISTS (SELECT 1 FROM prevention_rules AS pr WHERE pr.id = pa.rule_row_id "'):
+        (1, "existence check for rule_row_missing, returns activations, no rule content"),
     ("scripts/learning_loop.py", '"SELECT id, description AS title, confidence FROM prevention_rules "'):
         (1, "archival candidates for operator review, no injection"),
     ("scripts/lib/dispatch_enricher.py", "SELECT description, recommendation FROM prevention_rules"):
