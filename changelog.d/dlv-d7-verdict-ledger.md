@@ -1,0 +1,1 @@
+- `write_verdict` appends every learning-ledger verdict to `state/learning_ledger_verdict.ndjson` before it writes the JSON snapshot; a failing append leaves the snapshot untouched (ADR-005, follow-up of D7 #2673).
