@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -26,6 +27,75 @@ import lifecycle_count
 HOOK = _ROOT / "scripts" / "hooks" / "log_prompt_time.py"
 PID = "p-test"
 SECRET = "geheime prompttekst 42"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_prompt_home(tmp_path, monkeypatch):
+    """Even attribution-only tests must never inspect the operator's state."""
+    isolated = tmp_path / "isolated-home"
+    monkeypatch.setenv("HOME", str(isolated))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: isolated))
+
+
+def _registered_prompt_hook():
+    settings = json.loads((_ROOT / ".claude" / "settings.json").read_text())
+    groups = settings["hooks"]["UserPromptSubmit"]
+    assert len(groups) == 1
+    assert groups[0]["matcher"] == ""
+    hooks = groups[0]["hooks"]
+    assert len(hooks) == 1
+    assert hooks[0]["type"] == "command"
+    assert "scripts/hooks/log_prompt_time.py" in hooks[0]["command"]
+    return hooks[0]
+
+
+def test_repo_registers_exactly_one_prompt_logger():
+    _registered_prompt_hook()
+
+
+def test_registered_prompt_hook_timeout_is_at_most_five_seconds():
+    timeout = _registered_prompt_hook()["timeout"]
+    assert type(timeout) is int and 0 < timeout <= 5
+
+
+@pytest.mark.parametrize("with_script", [False, True], ids=["missing-script", "real-script"])
+def test_registered_prompt_command_is_silent_and_nonblocking(home, with_script):
+    home_dir, state = home
+    repo = home_dir / "repo with spaces"
+    cwd = repo / "nested"
+    cwd.mkdir(parents=True)
+    env = {"PATH": os.environ["PATH"], "HOME": str(home_dir), "VNX_PROJECT_ID": PID,
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+    subprocess.run(["git", "init", "-q", str(repo)], env=env, check=True, capture_output=True)
+    if with_script:
+        (repo / "scripts").symlink_to(_ROOT / "scripts", target_is_directory=True)
+    assert (repo / "scripts" / "hooks" / "log_prompt_time.py").is_file() is with_script
+    result = subprocess.run(
+        shlex.split(_registered_prompt_hook()["command"]), cwd=cwd, env=env,
+        input=json.dumps({"session_id": "registered", "cwd": str(cwd), "prompt": SECRET}),
+        capture_output=True, text=True, timeout=5, check=False,
+    )
+    assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
+    ledger = state / "prompt_attribution.ndjson"
+    if with_script:
+        lines = ledger.read_text().splitlines()
+        assert len(lines) == 1 and SECRET not in lines[0]
+        assert json.loads(lines[0])["session_id"] == "registered"
+    else:
+        assert not ledger.exists()
+
+
+def test_other_settings_and_hooks_are_unchanged_from_merge_base():
+    base = subprocess.run(["git", "merge-base", "origin/main", "HEAD"], cwd=_ROOT,
+                          check=True, capture_output=True, text=True).stdout.strip()
+    original = subprocess.run(["git", "show", f"{base}:.claude/settings.json"], cwd=_ROOT,
+                              check=True, capture_output=True, text=True).stdout
+    baseline = json.loads(original)
+    current = json.loads((_ROOT / ".claude" / "settings.json").read_text())
+    current["hooks"].pop("UserPromptSubmit")
+    baseline["hooks"].pop("UserPromptSubmit", None)
+    assert current["hooks"] == baseline["hooks"]
+    assert current == baseline
 
 
 def _attribute(prompt="hallo", env=None, cwd="/nonexistent", now=None):
