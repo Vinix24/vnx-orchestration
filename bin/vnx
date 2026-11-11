@@ -2777,6 +2777,9 @@ main() {
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
       ;;
+    learning)
+      PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main learning "$@"
+      ;;
     context-manifest)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" "$VNX_HOME/scripts/context_manifest_report.py" "$@"
       ;;
