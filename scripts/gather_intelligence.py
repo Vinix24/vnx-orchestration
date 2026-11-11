@@ -28,6 +28,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from agent_directory_loader import load_agent_directory as _load_agent_directory
+from pattern_activation import injectable_clause
 from project_scope import current_project_id
 
 EXIT_OK = 0
@@ -2135,14 +2136,14 @@ class T0IntelligenceGatherer:
         try:
             keywords = self.extract_keywords(task_description)
             keyword_pattern = '%' + '%'.join(keywords) + '%'
-
-            cursor = self.quality_db.execute('''
+            guard_sql, guard_params = injectable_clause(self.quality_db, self.quality_db_path.parent)
+            cursor = self.quality_db.execute(f'''
                 SELECT description, recommendation, confidence
                 FROM prevention_rules
-                WHERE description LIKE ? OR recommendation LIKE ?
+                WHERE (description LIKE ? OR recommendation LIKE ?) AND {guard_sql}
                 ORDER BY confidence DESC
                 LIMIT 3
-            ''', (keyword_pattern, keyword_pattern))
+            ''', (keyword_pattern, keyword_pattern, *guard_params))
 
             rules = cursor.fetchall()
             if rules:
