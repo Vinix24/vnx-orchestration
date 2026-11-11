@@ -170,23 +170,31 @@ def arm_for_dispatch(
     return (arm, window_stamp(window)) if arm is not None else (None, None)
 
 
-def _resolve_arm(dispatch_id: object) -> Optional[str]:
-    """Return 'placebo' | 'control' | 'treatment' | None (no arm assigned).
+def _resolve_arm(dispatch_id: object) -> "tuple[Optional[str], Optional[str]]":
+    """Return ``(arm, ab_window)``; arm is 'placebo' | 'control' | 'treatment' | None.
 
     The placebo arm is a negative control (see ``_select_placebo_pattern``),
     gated by its OWN flag and ahead of the A/B arm so a placebo run is never
-    contaminated by control-arm suppression. Otherwise the arm comes from
-    ``arm_for_dispatch`` inside the frozen window; ``None`` means the dispatch
-    gets its normal injection and no arm is recorded.
+    contaminated by control-arm suppression; it carries no window. Otherwise
+    both come from ``arm_for_dispatch`` inside the frozen window; ``(None, None)``
+    means the dispatch gets its normal injection and no arm is recorded.
     """
     if _placebo_arm_enabled():
-        return PLACEBO_ARM
+        return PLACEBO_ARM, None
     try:
         project_id: object = current_project_id()
     except ValueError:
         project_id = None
-    arm, _ = arm_for_dispatch(dispatch_id, project_id, load_window_config())
-    return arm
+    return arm_for_dispatch(dispatch_id, project_id, load_window_config())
+
+
+def _record_decided(selector: "IntelligenceSelector", result: InjectionResult, arm: Optional[str], state_dir) -> None:
+    """Ledger line, event, then the row, via the live path's helper: a failure is logged, never raised.
+
+    The placebo arm is no A/B decision (no window): it keeps the unrecorded order.
+    """
+    from intelligence_injection import _emit_then_record  # noqa: PLC0415
+    _emit_then_record(selector, result, None if arm == PLACEBO_ARM else arm, state_dir)
 
 
 try:
@@ -878,7 +886,7 @@ def select_intelligence(
     """Convenience function: select, emit event, record injection, return result."""
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        ab_arm = _resolve_arm(dispatch_id)
+        ab_arm, ab_window = _resolve_arm(dispatch_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping injection for dispatch %s",
@@ -893,9 +901,9 @@ def select_intelligence(
                 task_class=resolved_class,
                 dispatch_id=dispatch_id,
                 ab_arm="control",
+                ab_window=ab_window,
             )
-            selector.emit_event(result)
-            selector.record_injection(result)
+            _record_decided(selector, result, ab_arm, coord_state_dir)
             return result
         if ab_arm == PLACEBO_ARM:
             logger.info(
@@ -913,8 +921,7 @@ def select_intelligence(
                 dispatch_paths=dispatch_paths,
                 instruction_text=instruction_text,
             )
-            selector.emit_event(result)
-            selector.record_injection(result)
+            _record_decided(selector, result, ab_arm, coord_state_dir)
             return result
         result = selector.select(
             dispatch_id=dispatch_id,
@@ -928,30 +935,11 @@ def select_intelligence(
             instruction_text=instruction_text,
         )
         result.ab_arm = ab_arm  # None stays None: the "treatment" default must not stand
-        selector.emit_event(result)
-        selector.record_injection(result)
+        result.ab_window = ab_window
+        _record_decided(selector, result, ab_arm, coord_state_dir)
         return result
     finally:
         selector.close()
-
-
-def _emit_and_record(
-    selector: "IntelligenceSelector",
-    result: InjectionResult,
-    *,
-    dispatch_id: str,
-    coord_state_dir,
-    log_suffix: str = "",
-) -> None:
-    """Emit the audit event + record the injection, logging (not raising) on either failure."""
-    try:
-        selector.emit_event(result, coord_state_dir=coord_state_dir)
-    except Exception as exc:
-        logger.debug("build_intelligence_context: emit_event%s failed for %s: %s", log_suffix, dispatch_id, exc)
-    try:
-        selector.record_injection(result, coord_state_dir=coord_state_dir)
-    except Exception as exc:
-        logger.debug("build_intelligence_context: record_injection%s failed for %s: %s", log_suffix, dispatch_id, exc)
 
 
 def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_paths=None, quality_db_path=None, coord_state_dir=None) -> Optional[IntelligenceContext]:
@@ -964,7 +952,7 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
         return None
     selector = IntelligenceSelector(quality_db_path=quality_db_path, coord_db_state_dir=coord_state_dir)
     try:
-        ab_arm = _resolve_arm(dispatch_id)
+        ab_arm, ab_window = _resolve_arm(dispatch_id)
         if ab_arm == "control":
             logger.info(
                 "intelligence_selector: A/B control arm — skipping context build for dispatch %s",
@@ -978,8 +966,9 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
                 task_class=resolve_task_class(None, role or None, dispatch_paths, None),
                 dispatch_id=dispatch_id,
                 ab_arm="control",
+                ab_window=ab_window,
             )
-            _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (control)")
+            _record_decided(selector, result, ab_arm, coord_state_dir)
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         if ab_arm == PLACEBO_ARM:
             logger.info(
@@ -993,12 +982,13 @@ def build_intelligence_context(*, dispatch_id="", role="", pr_id=None, dispatch_
                 dispatch_paths=dispatch_paths or [],
                 pr_id=pr_id,
             )
-            _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir, log_suffix=" (placebo)")
+            _record_decided(selector, result, ab_arm, coord_state_dir)
             return IntelligenceContext(result=result, dispatch_id=dispatch_id)
         result = selector.select(dispatch_id=dispatch_id, injection_point="dispatch_create", skill_name=role or "", dispatch_paths=dispatch_paths or [], pr_id=pr_id)
         # Same explicit assignment as the selector path: None stays None.
         result.ab_arm = ab_arm
-        _emit_and_record(selector, result, dispatch_id=dispatch_id, coord_state_dir=coord_state_dir)
+        result.ab_window = ab_window
+        _record_decided(selector, result, ab_arm, coord_state_dir)
         return IntelligenceContext(result=result, dispatch_id=dispatch_id)
     finally:
         selector.close()
