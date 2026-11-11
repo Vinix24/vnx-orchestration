@@ -13,7 +13,8 @@ the ``planned`` and the ``copied`` line field by field before it reads one. A cr
 never in neither; no atomicity across files is claimed. ``resume`` runs the same steps from each move's last journal
 state. ``undo`` touches only moves with a ``copied`` line: the source gets the pre-image back first (``restored``),
 then the destination loses only what this move created and still holds what it wrote; a changed copy stays
-(``undone_kept_changed_copy``). Apply and resume never move a move again once an undo touched it.
+(``undone_kept_changed_copy``), and so does every copy while the source row is not the pre-image by content
+(``source_missing``, ``source_not_restored``). Apply and resume never move a move again once an undo touched it.
 
 CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID | undo --plan-id ID --reason TEXT}
      [--vnx-data-root DIR]
@@ -43,8 +44,8 @@ _MOVE_KEYS = ("table", "source_id", "source_db", "destination_db", "destination_
               "source_user_version", "destination_user_version")
 _FINISHED = ("done", "already_present")
 _UNDONE = ("undone", "undone_kept_changed_copy")  # a finished undo: a second one answers from the journal
-_UNDO_STATES = ("restored", "source_missing") + _UNDONE
-_UNDO_OK = ("undone", "not_copied")
+_UNDO_STATES = ("restored", "source_missing", "source_not_restored") + _UNDONE
+_UNDO_OK = ("undone", "not_copied")  # source_missing, source_not_restored, undone_kept_changed_copy: exit 1
 _STEP_3_REFUSALS = ("drift", "destination_missing", "destination_locked", "source_locked")
 _SOURCE_KEPT = "step 3 deleted nothing: the source keeps the row; the journal line after verified names why"
 _SOURCE_GONE = "the source row is removed and the copy does not verify: its content is the journal's planned pre-image"
@@ -366,24 +367,34 @@ def _put_back(conn: sqlite3.Connection, table: str, row: Dict[str, Any]) -> int:
     return conn.execute(sql, list(row.values())).lastrowid
 
 
-def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> int:
-    """Undo step 1, one ``BEGIN IMMEDIATE`` on the source: the id under which the source holds this move's row.
+def _holds_pre_image(src: sqlite3.Connection, mv: _Move, pre: Dict[str, Any], rid: int) -> bool:
+    """True when the source row at ``rid`` exists with the plan's content_key and the pre-image's project_id."""
+    rows = _fetch_rows(src, mv.table, "id = ?", rid)  # no row: never the pre-image
+    return bool(rows) and (content_key(rows[0]), rows[0]["project_id"]) == (
+        mv.m["content_key"], pre["row"]["project_id"])
+
+
+def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> Optional[int]:
+    """Undo step 1, one ``BEGIN IMMEDIATE`` on the source: the id under which the source holds this move's pre-image.
 
     The pre-image goes back unless an earlier undo's restore committed, the source still holds it, or the source holds
-    a later version of a row step 3 never removed. ``restored`` is journaled before the COMMIT, as ``copied`` is."""
+    other content on a row step 3 may not have removed (None: left alone). An id is only accepted with its content: a
+    ``restored`` line is journaled before the COMMIT, as ``copied`` is, so its id alone proves nothing."""
     earlier = [x.get("restored_id") for x in lines if x["state"] == "restored"]
     if not all(type(rid) is int for rid in earlier):  # a bool is no id
         raise PlanError(f"{mv.key}: no restored line with a valid restored_id")
     src, sid = _connect(mv.src), mv.m["source_id"]
     try:
         src.execute("BEGIN IMMEDIATE")
-        for rid in earlier:
-            if _fetch_rows(src, mv.table, "id = ?", rid):
+        for rid in earlier:  # an id holding other content (or none): that restore never committed
+            if _holds_pre_image(src, mv, pre, rid):
                 return rid  # that restore committed, then a crash took the rest of the undo
         live = read_pre_image(src, mv.table, sid)
         removed = (_latest(lines) or {}).get("state") in ("source_removed", "done")
         if canonical_json(live) == canonical_json(pre) or (live is not None and not removed):
-            return sid  # step 3 never deleted it, or the source changed it since: it keeps its own row
+            # step 3 never deleted it, or the source changed it since, or another row took the id after step 3
+            # committed and crashed before its journal line: only the pre-image's content is its own row
+            return sid if _holds_pre_image(src, mv, pre, sid) else None
         cols = {t: _columns(src, t) or [] for t in (mv.table,) + JUNCTION_TABLES}
         rid = _put_back(src, mv.table, _decode(pre["row"], cols[mv.table]))
         for t in JUNCTION_TABLES:  # a junction row the source still holds with this content is not put back twice
@@ -392,8 +403,7 @@ def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> int
                 jrow = _decode({**j, "pattern_id": pattern_id_for(mv.table, rid)}, cols[t])
                 if content_key(jrow) not in held:
                     _put_back(src, t, jrow)
-        back = read_pre_image(src, mv.table, rid)["row"]
-        if content_key(back) != mv.m["content_key"] or back["project_id"] != pre["row"]["project_id"]:
+        if not _holds_pre_image(src, mv, pre, rid):
             raise PlanError(f"{mv.key}: the row put back is not the journaled pre-image")  # rolled back below
         mv.log("restored", restored_id=rid, pattern_id=pattern_id_for(mv.table, rid))
         src.execute("COMMIT")
@@ -403,15 +413,16 @@ def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> int
         src.close()
 
 
-def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int) -> str:
+def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int, pre: Dict[str, Any]) -> str:
     """Undo step 2, locks in step 3's order, the source held until the destination COMMIT: only rows this move created
-    that still hold what it wrote go; a copy changed since stays whole."""
+    that still hold what it wrote go; a copy changed since stays whole. An id is only accepted with its content: while
+    the source row at ``rid`` is not the pre-image under the source lock, nothing in the destination goes."""
     dst, src = _connect(mv.dst), _connect(mv.src)
     try:
         dst.execute("BEGIN IMMEDIATE")
         src.execute("BEGIN IMMEDIATE")
-        if not _fetch_rows(src, mv.table, "id = ?", rid):
-            return "source_missing"  # the row left the source after step 1: the copy stays
+        if not _holds_pre_image(src, mv, pre, rid):  # another writer after step 1: the copy stays
+            return "source_not_restored" if _fetch_rows(src, mv.table, "id = ?", rid) else "source_missing"
         cols, intact = copied["cols"], _verify(mv, copied, dst)
         own = [(t, _find(dst, t, mv.pid, k, cols[t], pattern_id=copied["pattern_id"]))
                for t, k, created in copied["junction"] if created]
@@ -439,7 +450,8 @@ def _undo(mv: _Move) -> str:
         return "not_copied"  # no copy ever committed and step 3 never ran: nothing to put back or drop
     copied = _checked(mv, _latest(lines, "copied") or {})  # both lines before any field is read
     pre = _checked_planned(mv, _latest(lines, "planned") or {})["pre_image"]
-    outcome = _drop_copy(mv, copied, _restore(mv, lines, pre))
+    rid = _restore(mv, lines, pre)  # None: the source holds other content on the old id, the copy stays
+    outcome = "source_not_restored" if rid is None else _drop_copy(mv, copied, rid, pre)
     mv.log(outcome)  # after the destination COMMIT: a drop that never committed is found and done again
     return outcome
 

@@ -423,14 +423,17 @@ def test_a_copy_changed_since_stays_and_the_source_still_gets_its_row_back(world
     assert [x["state"] for x in _journal(world)][-2:] == ["restored", "undone_kept_changed_copy"]
 
 
-def test_a_source_that_changed_the_row_since_keeps_it_and_the_copy_goes(world):
+def test_a_source_that_changed_the_row_since_keeps_it_and_so_does_the_copy(world):
     _crash(world, "verified")
     _sql(world["src"], "UPDATE success_patterns SET description = 'edited'")
-    assert _outcomes(_resume(world)) == ["drift"]  # step 3 deleted nothing
-    src = _snapshot(world)[0]
-    proc = _undo(world)
-    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world)[0] == src
-    assert all(_rows(world["dest"], t) == [] for t in FIVE) and "restored" not in [x["state"] for x in _journal(world)]
+    assert _outcomes(_resume(world)) == ["drift"]  # step 3 ran: that it deleted nothing, no journal line proves
+    before = _snapshot(world)
+    proc = _undo(world)  # the source row is not the pre-image: the copy is the only row of the journaled content
+    assert proc.returncode == 1 and _outcomes(proc) == ["source_not_restored"] and _snapshot(world) == before
+    states = [x["state"] for x in _journal(world)]
+    assert states[-1] == "source_not_restored" and "restored" not in states
+    proc = _apply(world)  # an undo outcome like the others: this plan never moves the move again
+    assert proc.returncode == 1 and _outcomes(proc) == ["undo_started"] and _snapshot(world) == before
 
 
 _VANISH = """import sqlite3, sys
@@ -455,6 +458,94 @@ def test_a_row_that_leaves_the_source_after_undo_step_1_keeps_the_copy_until_the
     assert _rows(world["src"], "success_patterns") == [] and _journal(world)[-1]["state"] == "source_missing"
     proc = _undo(world)  # the restore line names a row that is gone: put back again, then the copy goes
     assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before
+
+
+def _on_sid(world, project, **edit) -> None:
+    """A source row on the move's old id: the pre-image row under ``project`` with ``edit`` applied."""
+    row = {**world["plan"]["planned_moves"][0]["pre_image"]["row"], "project_id": project, **edit}
+    _sql(world["src"], f"INSERT INTO success_patterns ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})",
+         *row.values())
+
+
+def _held(world) -> list:
+    """Per file (source, destination): the ids of the rows that hold the plan's content."""
+    key = world["plan"]["planned_moves"][0]["content_key"]
+    return [[r["id"] for r in _rows(world[db], "success_patterns") if qtp.content_key(r) == key]
+            for db in ("src", "dest")]
+
+
+@pytest.mark.parametrize("run,state,after,project,outcome", [
+    (_undo, "restored", True, B, "undone"),  # codex: the restore journaled, its source COMMIT never ran
+    (_undo, "restored", True, "gamma", "undone"),
+    (_apply, "source_removed", False, B, "source_not_restored"),  # step 3 committed, its journal line never written
+], ids=["restore_uncommitted", "restore_uncommitted_other_project", "step_3_committed_unjournaled"])
+def test_an_unrelated_row_on_the_old_id_after_a_crash_is_never_taken_for_the_restored_row(
+        world, run, state, after, project, outcome):
+    if run is _undo:
+        assert _apply(world).returncode == 0 and _held(world)[0] == [] and _held(world)[1]
+    _crash(world, state, after, run)
+    assert _held(world)[0] == [] and len(_held(world)[1]) == 1  # the copy is the only row of the content
+    _on_sid(world, project, title="other")
+    before = _snapshot(world)
+    proc = _undo(world)
+    assert proc.returncode == int(outcome != "undone") and _outcomes(proc) == [outcome], proc.stdout + proc.stderr
+    assert any(_held(world)), "the journaled content is in neither file"
+    assert [r["title"] for r in _rows(world["src"], "success_patterns") if r["id"] == world["row"]] == ["other"]
+    if outcome != "undone":  # the source row on that id may be what step 3 left: undo keeps the copy, changes nothing
+        assert _snapshot(world) == before and _journal(world)[-1]["state"] == outcome
+        return
+    back = _content_back(world)  # the pre-image under a new id, then the copy goes
+    assert back["id"] != world["row"] and _held(world) == [[back["id"]], []]
+    assert [x["restored_id"] for x in _journal(world) if x["state"] == "restored"] == [world["row"], back["id"]]
+    for t in qtp.JUNCTION_TABLES:
+        assert [j["pattern_id"] for j in _rows(world["src"], t)] == [f"intel_sp_{back['id']}"]
+    assert all(_rows(world["dest"], t) == [] for t in FIVE)
+
+
+_FORCED = """import sys
+sys.path.insert(0, {lib!r})
+import qi_transfer_apply as qa
+qa._restore = lambda mv, lines, pre: mv.m["source_id"]  # undo step 1 answers the old id, whatever it holds
+sys.exit(qa.main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.parametrize("project,edit", [(B, {"title": "other"}), (A, {})], ids=["other_content", "other_project"])
+def test_undo_step_2_deletes_nothing_while_the_source_row_on_its_id_is_not_the_pre_image(world, project, edit):
+    assert _apply(world).returncode == 0
+    _on_sid(world, project, **edit)
+    before = _snapshot(world)  # every row of both files, column by column: count and content_key included
+    proc = _undo(world, code=_FORCED.format(lib=str(LIB)))
+    assert proc.returncode == 1 and _outcomes(proc) == ["source_not_restored"], proc.stdout + proc.stderr
+    assert _snapshot(world) == before and _journal(world)[-1]["state"] == "source_not_restored"
+
+
+_KILL_AFTER_RESTORE = """import os, signal, sys
+sys.path.insert(0, {lib!r})
+import qi_transfer_apply as qa
+real = qa._restore
+def restore(mv, lines, pre):  # the restore committed, then a crash before undo step 2
+    real(mv, lines, pre)
+    os.kill(os.getpid(), signal.SIGKILL)
+qa._restore = restore
+sys.exit(qa.main(sys.argv[1:]))
+"""
+
+
+@pytest.mark.parametrize("taken", [False, True], ids=["old_id", "new_id"])
+def test_a_restore_that_committed_before_a_crash_is_taken_and_nothing_goes_back_twice(world, taken):
+    assert _apply(world).returncode == 0
+    if taken:
+        _on_sid(world, B, title="other")
+    assert _undo(world, code=_KILL_AFTER_RESTORE.format(lib=str(LIB))).returncode == -signal.SIGKILL
+    [rid] = [x["restored_id"] for x in _journal(world) if x["state"] == "restored"]
+    assert (rid == world["row"]) is not taken and _held(world)[0] == [rid] and _held(world)[1]
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"], proc.stdout + proc.stderr
+    assert [x["restored_id"] for x in _journal(world) if x["state"] == "restored"] == [rid]
+    assert _held(world) == [[rid], []] and all(_rows(world["dest"], t) == [] for t in FIVE)
+    for t in qtp.JUNCTION_TABLES:
+        assert [j["pattern_id"] for j in _rows(world["src"], t)] == [f"intel_sp_{rid}"]
 
 
 _JUNCTION_CREATED = [lambda x, v=v: {**x, "junction": [j[:2] + ([] if v == "missing" else [v]) for j in x["junction"]]}
