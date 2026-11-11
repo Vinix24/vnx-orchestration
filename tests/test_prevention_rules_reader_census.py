@@ -18,6 +18,9 @@ ROOTS = ("scripts", "vnx_cli", "bin", "dashboard")
 
 ALLOWLIST = {  # (path, stripped line): (occurrences, reason)
     ("scripts/check_intelligence_health.py", '"SELECT COUNT(*) FROM prevention_rules"'): (1, "COUNT(*) only"),
+    ("scripts/deactivate_pattern_activation.py",
+     'row = conn.execute("SELECT source FROM prevention_rules WHERE project_id = ? AND id = ?",'):
+        (1, "legacy check of one id before a refusal, prints no rule content"),
     ("scripts/learning_loop.py", '"SELECT id FROM prevention_rules WHERE description = ? AND tag_combination = ?",'):
         (1, "ingest dedupe before a write, no injection"),
     ("scripts/learning_loop.py", '"SELECT id, description AS title, confidence FROM prevention_rules "'):
