@@ -27,6 +27,7 @@
 - Unified supervisor (auto-respawn, lease sweep, runtime supervision): `UNIFIED_SUPERVISOR.md`
 - Elastic worker pool management (`vnx pool`): `POOL_OPERATIONS.md`
 - Producer freshness monitor (silent-failure detection): `PRODUCER_FRESHNESS_MONITOR.md`
+- Intelligence corpus quarantine (move, never delete; permit, seal, restore, exit codes): `INTELLIGENCE_CORPUS_QUARANTINE.md`
 
 **State and reconciliation**
 - State aggregator (write-path for multi-project state, per-project facet files): `STATE_AGGREGATOR.md`
