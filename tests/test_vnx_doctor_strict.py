@@ -134,6 +134,10 @@ def _make_clean_project(tmp_path: Path, monkeypatch) -> Path:
     # measurement record (check `claude-cli`) must not decide the strict exit code.
     monkeypatch.setattr(doctor_module, "_claude_cli_version", lambda: None)
     monkeypatch.setattr(sys, "platform", "darwin")
+    # The dream job is a host fact too (an installed LaunchAgent, its events and log): a project
+    # without one is WARN by design (ADR-066). tests/test_cli_doctor_dream.py pins the real checks.
+    monkeypatch.setattr(doctor_module, "_check_dream", lambda _project_dir: [
+        doctor_module.Check(name, doctor_module.PASS, "pinned") for name in doctor_module._DREAM_NAMES])
     return project
 
 
