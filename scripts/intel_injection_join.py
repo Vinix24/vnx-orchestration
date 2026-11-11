@@ -18,6 +18,8 @@ Usage:
                                                    [--as-of <ISO>] [--json]
     python3 scripts/intel_injection_join.py effect [--qi <path>] [--rc <path>] [--project-id <id>]
                                                    [--as-of <ISO>] [--json]
+    python3 scripts/intel_injection_join.py secondary [--qi <path>] [--rc <path>] [--project-id <id>]
+                                                   [--as-of <ISO>] [--json]
 
 Default DB paths resolve from VNX_STATE_DIR (falling back to
 ~/.vnx-data/vnx-dev/state).
@@ -411,11 +413,13 @@ def _iso_arg(value: str) -> datetime:
 
 
 def _run_ab(args: argparse.Namespace, state_dir: Path, parser: argparse.ArgumentParser) -> int:
-    """``cohort`` (PR-6) or ``effect`` (PR-7): one project-id default, one pair of stores, one as_of."""
+    """``cohort`` (PR-6), ``effect`` (PR-7) or ``secondary`` (PR-8): one project-id default, one pair of stores, one as_of."""
     if args.cmd == "cohort":
         from intel_effect_cohort import run_cohort as run
-    else:
+    elif args.cmd == "effect":
         from intel_effect_estimator import run_effect as run
+    else:
+        from intel_effect_secondary import run_secondary as run
     from project_root import resolve_project_id
     try:
         project_id = args.project_id or resolve_project_id()
@@ -447,9 +451,10 @@ def main(argv: list[str] | None = None) -> int:
     p_pl = sub.add_parser("placebo", help="adoption rate per injection arm (placebo discrimination)")
     p_pl.add_argument("--qi", help="path to quality_intelligence.db")
 
-    # Effect PR-6 and PR-7. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
+    # Effect PR-6, PR-7 and PR-8. No --min-per-arm: the floor is a constant no flag lowers (plan decision 7).
     for name, text in (("cohort", "A/B window cohort: per-arm counts and refusals, never a verdict"),
-                       ("effect", "A/B effect: stratified risk difference, 95% interval and verdict class")):
+                       ("effect", "A/B effect: stratified risk difference, 95% interval and verdict class"),
+                      ("secondary", "A/B falsifications F1-F3 and CQS/open items, each with status and coverage")):
         p_ab = sub.add_parser(name, help=text)
         p_ab.add_argument("--qi", help="path to quality_intelligence.db (opened read-only, not read)")
         p_ab.add_argument("--rc", help="path to runtime_coordination.db")
@@ -470,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "placebo":
         qi = _resolve_db(args.qi, "quality_intelligence.db", state_dir)
         return run_placebo(qi)
-    if args.cmd in ("cohort", "effect"):
+    if args.cmd in ("cohort", "effect", "secondary"):
         return _run_ab(args, state_dir, parser)
     return 2
 
