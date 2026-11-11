@@ -11,6 +11,10 @@ The table comes from ``_migrate_v35`` in ``scripts/quality_db_init.py``, keyed
 ``(project_id, activation_id)`` (ADR-007); every read filters on ``project_id``. A
 database without the table holds no activation: readers return none, a write raises.
 Writers never commit: the caller owns the transaction.
+
+``injectable_clause`` (D8) is the one predicate every reader of ``prevention_rules`` that
+returns content hangs on its WHERE; ``tests/test_prevention_rules_reader_census.py``
+fails on a new reader without it.
 """
 
 from __future__ import annotations
@@ -18,11 +22,14 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Mapping, Optional
+from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
 
 import prevention_rule_store as store
+from learning_ledger_gate import STATUS_OK, STATUS_PENDING, read_verdict
 
 TABLE = "pattern_activation"
+LOOP_SOURCE = "learning_loop"
+INJECTABLE_VERDICTS = frozenset({STATUS_OK, STATUS_PENDING})
 RECORD_FIELDS = (
     "rule_id", "decision_id", "approval_id", "bundle_ref", "rollout_scope", "baseline_metric",
     "baseline_value", "effect_criterion", "stop_condition", "recovery_path",
@@ -141,3 +148,34 @@ def record_activation(conn: sqlite3.Connection, decision: Any, *, state_dir: Pat
     conn.execute(f"INSERT INTO {TABLE} ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
                  [row[name] for name in names])
     return activation_id
+
+
+def state_dir_of(conn: sqlite3.Connection) -> Optional[Path]:
+    """The directory of ``conn``'s main database file, where its verdict lives; None in memory."""
+    path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    return Path(path).parent if path else None
+
+
+def injectable_clause(conn: sqlite3.Connection, state_dir: Optional[Path], now: Any = None, *,
+                      table: str = "prevention_rules") -> Tuple[str, tuple]:
+    """``(sql, params)`` for the WHERE of a reader of ``prevention_rules``; ``table`` is its name
+    or alias in that reader's FROM.
+
+    A row whose ``source`` is not ``learning_loop`` (legacy) always passes. A loop row passes only
+    with an ``active = 1`` activation on its own ``(project_id, id)``, in the project of the
+    verdict in ``state_dir``, while that verdict is fresh and exactly ``ok`` or ``pending``. No
+    state dir, no ``project_id`` column, no activation table, or a verdict that is missing,
+    unreadable, stale, ``refused`` or unknown keeps every loop row out and every legacy row in."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(prevention_rules)")}
+    if "source" not in columns:
+        return "1 = 1", ()  # no source column: no row can carry the loop stamp, every row is legacy
+    legacy_only = f"{table}.source IS NOT ?", (LOOP_SOURCE,)
+    if state_dir is None or "project_id" not in columns or not _has_table(conn):
+        return legacy_only
+    verdict = read_verdict(state_dir, now=now)
+    status, project = verdict.get("status"), verdict.get("project_id")
+    if not (isinstance(status, str) and status in INJECTABLE_VERDICTS and _is_text(project)):
+        return legacy_only
+    return (f"({table}.source IS NOT ? OR EXISTS (SELECT 1 FROM {TABLE} AS pa WHERE pa.project_id = ? "
+            f"AND pa.project_id = {table}.project_id AND pa.rule_row_id = {table}.id AND pa.active = 1))",
+            (LOOP_SOURCE, project))

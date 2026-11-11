@@ -32,6 +32,7 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths: {exc}")
 
 from digest_text import smart_truncate
+from pattern_activation import injectable_clause
 from receipt_outcome import noise_reason
 from vnx_paths import project_id_from_state_dir
 
@@ -267,14 +268,16 @@ def build_prompt_config_tuning(
     if db:
         remaining = MAX_PER_SECTION - len(recs)
         try:
+            guard_sql, guard_params = injectable_clause(db, state_dir)
             cursor = db.execute(
-                """
+                f"""
                 SELECT id, tag_combination, rule_type, recommendation, confidence
                 FROM prevention_rules
+                WHERE {guard_sql}
                 ORDER BY confidence DESC, triggered_count DESC
                 LIMIT ?
                 """,
-                (remaining,),
+                (*guard_params, remaining),
             )
             for row in cursor.fetchall():
                 rule_id, tags_raw, rule_type, recommendation, confidence = row
