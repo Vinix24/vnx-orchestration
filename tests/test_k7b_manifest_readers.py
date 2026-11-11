@@ -44,6 +44,7 @@ import dispatch_lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import dispatch_worktree_isolation  # noqa: E402
 import orphan_sweep as osweep  # noqa: E402
+import state_rebuild_trigger  # noqa: E402
 import tmux_worktree  # noqa: E402
 from ledger_attempt_state import attempt_verdict  # noqa: E402
 
@@ -63,6 +64,18 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
     monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
     monkeypatch.delenv("VNX_CURRENT_DISPATCH_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_background_state_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every lifecycle line fires ``build_t0_state.py`` as a detached child that inherits this
+    store's ``VNX_STATE_DIR`` and runs ``init_schema`` on it, while the test reads the same
+    store. Under load the child lands between the hand-over and the finalizer: the store
+    appears with the base DDL (no ``project_id``) or half-created, which is the k7b flake
+    (OI-2590, OI-2712, OI-2729). No test here asserts on that rebuild, so it does not run.
+    """
+    monkeypatch.setattr(state_rebuild_trigger, "maybe_trigger_state_rebuild",
+                        lambda *args, **kwargs: False)
 
 
 @pytest.fixture(autouse=True)
@@ -537,6 +550,32 @@ def test_a_foreign_environment_does_not_move_the_v3_lifecycle_out_of_its_own_sto
     assert not (state_dir / "runtime_coordination.db").exists()
     assert (foreign_env / "state" / "runtime_coordination.db").read_bytes() == b""
     assert sorted(str(p.relative_to(foreign_env)) for p in foreign_env.rglob("*")) == before
+
+
+def test_a_v3_lifecycle_spawns_no_background_state_rebuild(
+        data_dir: Path, state_dir: Path, spec_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lifecycle lines fire ``build_t0_state.py`` detached; that child runs ``init_schema``
+    on whatever ``VNX_STATE_DIR`` names and races the finalizer's own read of the tmp store.
+
+    That is the k7b flake of OI-2590, OI-2712 and OI-2729: the child lays down the base DDL
+    (a ``dispatches`` table without ``project_id``) while the parent is projecting. The spy
+    passes every other command through and refuses only the rebuild.
+    """
+    spawned: List[Any] = []
+    real_popen = subprocess.Popen
+
+    def _spy(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if any("build_t0_state" in str(part) for part in (cmd if isinstance(cmd, (list, tuple)) else [cmd])):
+            spawned.append(cmd)
+            raise OSError("the rebuild child is refused in this test")
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _spy)
+
+    _v3(state_dir, spec_file, "d-v3-no-rebuild", end_state="completed")
+
+    assert spawned == []
+    assert not (state_dir / "runtime_coordination.db").exists()
 
 
 def test_a_present_but_schemaless_store_stays_blocking_for_the_finalizer(
