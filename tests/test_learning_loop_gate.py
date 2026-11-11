@@ -176,5 +176,7 @@ class TestEvaluateActivationGateDirect:
 
 @pytest.fixture(autouse=True)
 def _persist_mode(monkeypatch):
-    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing.
+    The ledger verdict is green: tests/test_learning_loop_ledger_gate.py covers the gate."""
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    monkeypatch.setattr(ll, "_ledger_verdict", lambda *_: {"status": "ok", "reason_code": "ok"})

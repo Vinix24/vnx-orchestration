@@ -171,6 +171,7 @@ def test_persist_flag_writes_db_and_state(env, monkeypatch, approve_learning_per
     state_dir, _ = env
     approve_learning_persist(state_dir, _run_cycle()["shadow"]["persist_preview"]["proposal_id"])
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    monkeypatch.setattr(ll, "_ledger_verdict", lambda *_: {"status": "ok", "reason_code": "ok"})  # D7 gate: green here
     before = _snapshot(state_dir)
     report = _run_cycle()
     after = _snapshot(state_dir)

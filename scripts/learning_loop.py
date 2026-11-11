@@ -39,11 +39,16 @@ from learning_failure_class import (
     classify_failure,
     merge_dispatch_group,
 )
+from ledger_attempt_state import (ATTEMPT_KINDS, KIND_ENDED, KIND_LEGACY, MODE_V3,
+                                  attempt_verdict, read_ledger)
+from learning_ledger_gate import (STATUS_OK, STATUS_PENDING, STATUS_REFUSED, VERDICT_FILENAME,
+                                  ledger_verdict, write_verdict)
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
 from prevention_rule_store import QueueUnreadable, queue_rules, rule_id
 from project_scope import resolve_stamp_project_id
 from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
+from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
 
 _PATTERN_WRITERS = {"success_patterns": upsert_success_pattern, "antipatterns": upsert_antipattern}
 
@@ -74,6 +79,10 @@ PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
 # degraded. No database row, no activation (ADR-065).
 QUEUE_ENV = "VNX_LEARNING_LOOP_QUEUE"
 UNRESOLVED_PROJECT = "unresolved"
+
+# Queue and persist mode read ledger_source_check first (ADR-065 §6): a refused
+# verdict stops the cycle with "ledger_source_check: <reason_code>".
+LEDGER_REASON_PREFIX = "ledger_source_check: "
 
 # Open items as the second signal source (D5). A class of open items is one
 # normalized title. It counts as recurring when it spans this many DISTINCT
@@ -205,6 +214,59 @@ def _is_queueable(rule: Dict[str, Any]) -> bool:
     )
 
 
+def _dispatch_key(receipt: Dict[str, Any]) -> str:
+    """The failure group key of a receipt (ADR-065 §2), or "" when it carries no dispatch id."""
+    raw_id = receipt.get("dispatch_id")
+    return str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
+
+
+def _ledger_verdict(state_dir: Path, project_id: Optional[str]) -> Dict[str, Any]:
+    """ledger_source_check for one run: the ``ledger_verdict/1`` of the ledger the loop learns
+    from, stored as ``state/learning_ledger_verdict.json`` on every run. A verdict that cannot be
+    stored is a refusal: a reader of the file would otherwise trust the previous one."""
+    verdict = ledger_verdict(state_dir, project_id)
+    try:
+        write_verdict(state_dir, verdict)
+    except OSError as exc:
+        return {**verdict, "status": STATUS_REFUSED, "reason_code": "verdict_unwritable",
+                "reason": f"cannot store {VERDICT_FILENAME}: {exc}"}
+    return verdict
+
+
+def _ledger_status(verdict: Any) -> tuple:
+    """``(status, reason_code)``. Only an exact ``ok``, ``pending`` or ``refused`` with a reason
+    code counts; anything else (no dict, a missing, blank or unknown value) refuses as
+    ``malformed_verdict``."""
+    status = verdict.get("status") if isinstance(verdict, dict) else None
+    code = verdict.get("reason_code") if isinstance(verdict, dict) else None
+    if status in (STATUS_OK, STATUS_PENDING, STATUS_REFUSED) and isinstance(code, str) and code.strip():
+        return status, code.strip()
+    return STATUS_REFUSED, "malformed_verdict"
+
+
+def _in_flight_dispatch_ids(state_dir: Path, project_id: str) -> frozenset:
+    """This project's failing dispatches whose highest ``v3`` attempt has no end yet (``live``,
+    ``unknown`` or ``dead_no_end`` per ``attempt_verdict``): under a ``pending`` verdict their
+    receipts are no evidence. An unreadable ledger raises ``OSError`` and an attempt kind outside
+    ``ATTEMPT_KINDS`` raises ``ValueError``: neither may read as "nothing in flight"."""
+    records = read_ledger(state_dir)
+    failing = {_dispatch_key(line) for line in records
+               if str(line.get("status", "")).lower() in _FAILURE_STATUSES or is_contract_invalid(line)}
+    failing.discard("")
+    started = {_dispatch_key(line): line["dispatch_id"] for line in records
+               if _dispatch_key(line) in failing and line.get("project_id") == project_id
+               and str(line.get("event_type") or "").strip() == DISPATCH_STARTED_EVENT_TYPE
+               and str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
+    in_flight = set()
+    for key, dispatch_id in sorted(started.items()):
+        kind = attempt_verdict(state_dir, project_id, dispatch_id, records=records).kind
+        if kind not in ATTEMPT_KINDS:
+            raise ValueError(f"{dispatch_id}: unknown attempt kind {kind!r}")
+        if kind not in (KIND_ENDED, KIND_LEGACY):
+            in_flight.add(key)
+    return frozenset(in_flight)
+
+
 def resolve_receipt_cutoff() -> datetime:
     """The instant before which receipts are ignored (env override, else default).
 
@@ -309,6 +371,8 @@ class LearningLoop:
     _persist: Optional[bool] = None
     _cutoff: Optional[datetime] = None
     queue_error: Optional[str] = None  # why the proposal queue could not be written
+    ledger_verdict: Optional[Dict[str, Any]] = None  # this cycle's ledger_source_check, if read
+    _in_flight: frozenset = frozenset()  # dispatches a pending verdict keeps out of the evidence
 
     @property
     def persist(self) -> bool:
@@ -788,12 +852,14 @@ class LearningLoop:
         ``receipt:<line number>``. Returns the failure dicts and the count
         fields of ``receipt_stats``; ``len(patterns) == dispatches +
         without_dispatch_id`` and ``failure_receipts == len(patterns) +
-        merged_duplicates`` hold by construction."""
+        merged_duplicates`` hold by construction. A receipt of a dispatch still
+        in flight under a ``pending`` verdict counts only in ``in_flight_excluded``."""
+        in_flight = sum(1 for _, receipt in kept if _dispatch_key(receipt) in self._in_flight)
+        kept = [item for item in kept if _dispatch_key(item[1]) not in self._in_flight]
         groups: Dict[str, List[Dict]] = {}
         without_id = 0
         for line_no, receipt in kept:
-            raw_id = receipt.get("dispatch_id")
-            dispatch_id = str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
+            dispatch_id = _dispatch_key(receipt)
             if not dispatch_id:
                 without_id += 1
                 dispatch_id = f"receipt:{line_no}"
@@ -821,6 +887,7 @@ class LearningLoop:
             "without_dispatch_id": without_id,
             "merged_duplicates": len(kept) - len(patterns),
             "class_counts": class_counts,
+            "in_flight_excluded": in_flight,
         }
         return patterns, stats
 
@@ -1584,6 +1651,52 @@ class LearningLoop:
         self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
         return dict(self.learning_stats)
 
+    def _ledger_gate(self) -> Optional[Dict[str, Any]]:
+        """ledger_source_check before the extraction, in queue and persist mode only: shadow
+        without queue mode writes nothing and reads no verdict. ``ok`` and ``pending`` return
+        None and the cycle runs on, ``pending`` without the dispatches still in flight. Any other
+        verdict is the ``refused`` result, with a degraded heartbeat carrying the reason."""
+        self.ledger_verdict, self._in_flight = None, frozenset()
+        if not (self.persist or queue_enabled()):
+            return None
+        state_dir, project = self.db_path.parent, self._resolve_own_project_id()
+        verdict = self.ledger_verdict = _ledger_verdict(state_dir, project)
+        status, code = _ledger_status(verdict)
+        detail = verdict.get("reason") if isinstance(verdict, dict) else None
+        if status == STATUS_PENDING:
+            try:
+                self._in_flight = _in_flight_dispatch_ids(state_dir, project)
+            except (OSError, ValueError) as exc:
+                status, code, detail = STATUS_REFUSED, "in_flight_unreadable", f"{type(exc).__name__}: {exc}"
+        if status in (STATUS_OK, STATUS_PENDING):
+            return None
+        reason = LEDGER_REASON_PREFIX + code
+        print(f"⛔ Learning loop refused: {reason} ({detail})")
+        self._heartbeat("degraded", {"reason": reason, "detail": detail, "ledger_verdict": verdict})
+        return {"status": STATUS_REFUSED, "reason": reason, "ledger_verdict": verdict,
+                "statistics": {}}
+
+    def _degraded_cycle(self, gate: Dict[str, Any], from_history: bool) -> Dict[str, Any]:
+        """Probe gate degraded: no pattern update; in queue mode the proposals still reach the queue."""
+        print(
+            f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
+            f"({gate['detail']}) — skipping pattern updates"
+        )
+        statistics = self._proposal_only_cycle(from_history) if queue_enabled() else {}
+        reason = self.queue_error or gate["detail"]
+        self._heartbeat("degraded", {"probe_health": gate["probe_health"], "reason": reason})
+        result = {
+            "status": "degraded",
+            "probe_health": gate["probe_health"],
+            "gate": gate,
+            "statistics": statistics,
+        }
+        if self.queue_error:
+            result["reason"] = self.queue_error
+        if self.ledger_verdict is not None:
+            result["ledger_verdict"] = self.ledger_verdict
+        return result
+
     def daily_learning_cycle(self, from_history: bool = False):
         """Run the complete daily learning cycle.
 
@@ -1591,7 +1704,11 @@ class LearningLoop:
             from_history: When True, mine the full receipt history (all-time window)
                 instead of the default 24-hour window. Use for the first run against
                 a historical trail (``vnx learning run --from-history``).
+
+        In queue and persist mode the ledger verdict comes before the probe branch and
+        the extraction (``_ledger_gate``): a refused ledger stops the cycle with its reason.
         """
+        self.queue_error = None  # this cycle's queue failure only, never a previous cycle's
         if self.persist:
             gate = evaluate_activation_gate(state_dir=self.db_path.parent)
         else:
@@ -1603,23 +1720,11 @@ class LearningLoop:
             print("💤 Learning loop dormant (VNX_LEARNING_LOOP_ENABLED=0) — no-op, no beacon")
             return {"status": "dormant", "gate": gate, "statistics": {}}
 
+        refused = self._ledger_gate()
+        if refused is not None:
+            return refused
         if gate["action"] == "degraded":
-            print(
-                f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
-                f"({gate['detail']}) — skipping pattern updates"
-            )
-            statistics = self._proposal_only_cycle(from_history) if queue_enabled() else {}
-            reason = self.queue_error or gate["detail"]
-            self._heartbeat("degraded", {"probe_health": gate["probe_health"], "reason": reason})
-            result = {
-                "status": "degraded",
-                "probe_health": gate["probe_health"],
-                "gate": gate,
-                "statistics": statistics,
-            }
-            if self.queue_error:
-                result["reason"] = self.queue_error
-            return result
+            return self._degraded_cycle(gate, from_history)
 
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
         mode += " / PERSIST" if self.persist else " / SHADOW"
@@ -1733,6 +1838,8 @@ class LearningLoop:
         report["statistics"] = self.learning_stats
         if not self.persist:
             report["shadow"] = self.shadow
+        if self.ledger_verdict is not None:
+            report["ledger_verdict"] = self.ledger_verdict
 
         elapsed = time.time() - start_time
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
@@ -1753,6 +1860,7 @@ class LearningLoop:
                 "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
                 "new_prevention_rules": len(new_rules),
                 "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+                "ledger_status": self.ledger_verdict["status"],
             })
 
         return report
