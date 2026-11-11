@@ -16,8 +16,8 @@ Decisions (loop D3): ``state/prevention_rule_decisions.ndjson`` is the truth, th
 after a crash. This module is the only producer of ``approval_id`` and
 ``bundle_ref`` (``mint_approval_id``, ``mint_bundle_ref``).
 
-Follows in split 2 of D2: the queue write of ``update_terminal_constraints`` in
-``scripts/learning_loop.py`` moves to ``queue_rules`` here.
+The queue write of ``update_terminal_constraints`` in ``scripts/learning_loop.py``
+goes through ``queue_rules`` here: it has no writer of its own left.
 """
 
 from __future__ import annotations
@@ -118,6 +118,23 @@ def _dispatch_ids(value: Any) -> List[str]:
     return sorted(set(value))
 
 
+def _optional_fields(proposal: Mapping[str, Any]) -> Dict[str, Any]:
+    """``signal`` and ``source_oi_ids`` of an open-item proposal; nothing for a
+    proposal without them, so such a row is byte-equal to one written before."""
+    extra: Dict[str, Any] = {}
+    if "signal" in proposal:
+        signal = proposal["signal"]
+        if not isinstance(signal, str) or not signal.strip():
+            raise ValueError("proposal 'signal' must be a non-empty string")
+        extra["signal"] = signal
+    if "source_oi_ids" in proposal:
+        oi_ids = proposal["source_oi_ids"]
+        if not isinstance(oi_ids, (list, tuple)) or not all(isinstance(v, str) and v for v in oi_ids):
+            raise ValueError("source_oi_ids must be a list of non-empty strings")
+        extra["source_oi_ids"] = list(oi_ids)
+    return extra
+
+
 def _build_entry(proposal: Mapping[str, Any], project_id: str, now: str) -> Dict[str, Any]:
     if not isinstance(proposal, Mapping):
         raise ValueError("a proposal must be a mapping")
@@ -147,6 +164,7 @@ def _build_entry(proposal: Mapping[str, Any], project_id: str, now: str) -> Dict
         "agent_constraint": _scope(proposal.get("agent_constraint")) or None,
         "prevention": proposal["prevention"],
         "confidence": confidence,
+        **_optional_fields(proposal),
     }
 
 
