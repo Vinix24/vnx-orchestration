@@ -13,7 +13,7 @@ the ``planned`` and the ``copied`` line field by field before it reads one. A cr
 never in neither; no atomicity across files is claimed. ``resume`` runs the same steps from each move's last journal
 state. ``undo`` touches only moves with a ``copied`` line: the source gets the pre-image back first (``restored``),
 then the destination loses only what this move created and still holds what it wrote; a changed copy stays
-(``undone_kept_changed_copy``), and so does every copy while the source row is not the pre-image by content
+(``undone_kept_changed_copy``), and so does every copy while the source lacks a row or junction row of the pre-image
 (``source_missing``, ``source_not_restored``). Apply and resume never move a move again once an undo touched it.
 
 CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID | undo --plan-id ID --reason TEXT}
@@ -28,6 +28,7 @@ import os
 import re
 import sqlite3
 import sys
+from collections import Counter
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
@@ -367,44 +368,53 @@ def _put_back(conn: sqlite3.Connection, table: str, row: Dict[str, Any]) -> int:
     return conn.execute(sql, list(row.values())).lastrowid
 
 
-def _holds_pre_image(src: sqlite3.Connection, mv: _Move, pre: Dict[str, Any], rid: int) -> bool:
-    """True when the source row at ``rid`` exists with the plan's content_key and the pre-image's project_id."""
-    rows = _fetch_rows(src, mv.table, "id = ?", rid)  # no row: never the pre-image
-    return bool(rows) and (content_key(rows[0]), rows[0]["project_id"]) == (
-        mv.m["content_key"], pre["row"]["project_id"])
+def _lacking(src: sqlite3.Connection, mv: _Move, pre: Dict[str, Any], rid: int) -> Optional[List[Tuple[str, Dict]]]:
+    """The journaled junction rows the source lacks under ``rid``'s pattern_id, each held row counted once; [] only when
+    it holds this move's complete journaled pre-image at ``rid``; None while the row there is not the pre-image's."""
+    def identity(row):  # a source row is a journaled one when its content_key and project_id are that row's
+        return content_key(row), row.get("project_id")
+    rows, pid, out = _fetch_rows(src, mv.table, "id = ?", rid), pattern_id_for(mv.table, rid), []
+    if not rows or identity(rows[0]) != identity(pre["row"]):  # no row: never the pre-image
+        return None
+    for t in JUNCTION_TABLES:
+        held = Counter(identity(r) for r in _fetch_rows(src, t, "pattern_id = ?", pid))
+        for j in ({**j, "pattern_id": pid} for j in pre["junction"][t]):
+            held[identity(j)] -= 1
+            out += [(t, j)] if held[identity(j)] < 0 else []
+    return out
 
 
 def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> Optional[int]:
     """Undo step 1, one ``BEGIN IMMEDIATE`` on the source: the id under which the source holds this move's pre-image.
 
-    The pre-image goes back unless an earlier undo's restore committed, the source still holds it, or the source holds
+    The row goes back unless an earlier undo's restore committed, the source still holds it, or the source holds
     other content on a row step 3 may not have removed (None: left alone). An id is only accepted with its content: a
-    ``restored`` line is journaled before the COMMIT, as ``copied`` is, so its id alone proves nothing."""
+    ``restored`` line is journaled before the COMMIT, as ``copied`` is, so its id alone proves nothing. Every junction
+    row the source lacks goes back too; the COMMIT runs only once the source holds the complete journaled pre-image."""
     earlier = [x.get("restored_id") for x in lines if x["state"] == "restored"]
     if not all(type(rid) is int for rid in earlier):  # a bool is no id
         raise PlanError(f"{mv.key}: no restored line with a valid restored_id")
     src, sid = _connect(mv.src), mv.m["source_id"]
     try:
         src.execute("BEGIN IMMEDIATE")
-        for rid in earlier:  # an id holding other content (or none): that restore never committed
-            if _holds_pre_image(src, mv, pre, rid):
-                return rid  # that restore committed, then a crash took the rest of the undo
         live = read_pre_image(src, mv.table, sid)
         removed = (_latest(lines) or {}).get("state") in ("source_removed", "done")
-        if canonical_json(live) == canonical_json(pre) or (live is not None and not removed):
-            # step 3 never deleted it, or the source changed it since, or another row took the id after step 3
-            # committed and crashed before its journal line: only the pre-image's content is its own row
-            return sid if _holds_pre_image(src, mv, pre, sid) else None
-        cols = {t: _columns(src, t) or [] for t in (mv.table,) + JUNCTION_TABLES}
-        rid = _put_back(src, mv.table, _decode(pre["row"], cols[mv.table]))
-        for t in JUNCTION_TABLES:  # a junction row the source still holds with this content is not put back twice
-            held = {content_key(r) for r in _fetch_rows(src, t, "pattern_id = ?", pattern_id_for(mv.table, rid))}
-            for j in pre["junction"][t]:
-                jrow = _decode({**j, "pattern_id": pattern_id_for(mv.table, rid)}, cols[t])
-                if content_key(jrow) not in held:
-                    _put_back(src, t, jrow)
-        if not _holds_pre_image(src, mv, pre, rid):
-            raise PlanError(f"{mv.key}: the row put back is not the journaled pre-image")  # rolled back below
+        # sid: step 3 never deleted it, or the source changed it since, or another row took the id after step 3
+        # committed and crashed before its journal line: only the pre-image's content is its own row
+        own = canonical_json(live) == canonical_json(pre) or (live is not None and not removed)
+        # an earlier id holding other content (or none): that restore never committed; holding it, a crash took the rest
+        rid = next((r for r in earlier + ([sid] if own else []) if _lacking(src, mv, pre, r) is not None), None)
+        if rid is None and own:
+            return None
+        cols, put = {t: _columns(src, t) or [] for t in (mv.table,) + JUNCTION_TABLES}, rid is None
+        rid = _put_back(src, mv.table, _decode(pre["row"], cols[mv.table])) if put else rid
+        lacking = _lacking(src, mv, pre, rid)
+        for t, jrow in lacking or ():  # None: the row put back is not the pre-image, refused below
+            _put_back(src, t, _decode(jrow, cols[t]))
+        if not put and lacking == []:
+            return rid  # the source holds the complete pre-image: nothing to write
+        if _lacking(src, mv, pre, rid) != []:  # None or a row still lacking: not the complete pre-image
+            raise PlanError(f"{mv.key}: the rows put back are not the journaled pre-image")  # rolled back below
         mv.log("restored", restored_id=rid, pattern_id=pattern_id_for(mv.table, rid))
         src.execute("COMMIT")
         return rid
@@ -415,13 +425,13 @@ def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> Opt
 
 def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int, pre: Dict[str, Any]) -> str:
     """Undo step 2, locks in step 3's order, the source held until the destination COMMIT: only rows this move created
-    that still hold what it wrote go; a copy changed since stays whole. An id is only accepted with its content: while
-    the source row at ``rid`` is not the pre-image under the source lock, nothing in the destination goes."""
+    that still hold what it wrote go; a copy changed since stays whole. Nothing here goes unless, under the source
+    lock in this step, the source holds the complete journaled pre-image at ``rid``, junction rows included."""
     dst, src = _connect(mv.dst), _connect(mv.src)
     try:
         dst.execute("BEGIN IMMEDIATE")
         src.execute("BEGIN IMMEDIATE")
-        if not _holds_pre_image(src, mv, pre, rid):  # another writer after step 1: the copy stays
+        if _lacking(src, mv, pre, rid) != []:  # its row or a junction row changed or left after step 1
             return "source_not_restored" if _fetch_rows(src, mv.table, "id = ?", rid) else "source_missing"
         cols, intact = copied["cols"], _verify(mv, copied, dst)
         own = [(t, _find(dst, t, mv.pid, k, cols[t], pattern_id=copied["pattern_id"]))

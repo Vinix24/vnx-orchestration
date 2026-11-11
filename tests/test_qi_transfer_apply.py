@@ -569,3 +569,53 @@ def test_undo_reads_no_journal_field_before_it_passed_and_the_retry_refuses_too(
         proc = _undo(world)
         assert proc.returncode == 1 and field in _outcomes(proc)[0], proc.stdout + proc.stderr
         assert _snapshot(world) == before and _journal(world) == lines
+
+
+def _missing(world) -> set:
+    """The journaled rows (the row, each junction row by content) neither file holds under a row of its content."""
+    strip, pre = lambda r: qtp.content_key({**r, "pattern_id": None}), world["plan"]["planned_moves"][0]["pre_image"]
+    out = {"row"} | {(t, strip(j)) for t in qtp.JUNCTION_TABLES for j in pre["junction"][t]}
+    for db, ids in zip(("src", "dest"), _held(world)):
+        pids = {qtp.pattern_id_for("success_patterns", i) for i in ids}
+        out -= {"row"} if pids else set()
+        out -= {(t, strip(j)) for t in qtp.JUNCTION_TABLES for j in _rows(world[db], t) if j["pattern_id"] in pids}
+    return out
+
+
+def test_undo_after_verified_puts_back_the_junction_rows_the_source_lost_before_the_copy_goes(world):
+    before = _snapshot(world)
+    _crash(world, "verified")  # codex 8cf8f73d: then the source loses its pattern_usage row, the copy holds the last
+    _sql(world["src"], "DELETE FROM pattern_usage")
+    assert _missing(world) == set()  # the copy holds the last pattern_usage row
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before, proc.stdout
+    assert [x["state"] for x in _journal(world)][-2:] == ["restored", "undone"]
+
+
+_CHANGE = {"none": lambda w: None, "parent_deleted": lambda w: _sql(w["src"], "DELETE FROM success_patterns"),
+           "junction_deleted": lambda w: _sql(w["src"], "DELETE FROM pattern_usage"),
+           "parent_foreign": lambda w: (_sql(w["src"], "DELETE FROM success_patterns"), _on_sid(w, B, title="other"))}
+
+
+@pytest.mark.parametrize("change", list(_CHANGE))
+@pytest.mark.parametrize("committed", [False, True], ids=["before_commit", "after_commit"])
+@pytest.mark.parametrize("state", ["planned", "copied", "verified", "source_removed", "done", "restored"])
+def test_an_undo_crash_and_a_change_before_the_retry_never_take_the_last_copy_of_a_journaled_row(
+        world, state, committed, change):
+    # planned: no copied line, undo returns not_copied and runs no step 1, so neither crash can occur.
+    # copied, verified: the source holds the whole pre-image, step 1 writes nothing and has no COMMIT to crash before.
+    if state == "planned" or (state in ("copied", "verified") and not committed):
+        pytest.skip("this crash cannot occur in this journal state")
+    before = _snapshot(world)
+    _crash(world, "done" if state == "restored" else state)
+    if state == "restored":  # an earlier undo journaled restored, its source COMMIT never ran
+        _crash(world, "restored", run=_undo)
+    proc = _undo(world, code=_KILL_AFTER_RESTORE.format(lib=str(LIB)) if committed else  # killed after step 1, or
+                 _CRASH.format(lib=str(LIB), state="restored", after=True))  # with restored journaled, before COMMIT
+    assert proc.returncode == -signal.SIGKILL, proc.stderr
+    _CHANGE[change](world)
+    lost, proc = _missing(world), _undo(world)  # lost: what the change overwrote in the one file that held it
+    assert proc.returncode in (0, 1) and _missing(world) <= lost, proc.stdout + proc.stderr  # the undo takes nothing
+    if proc.returncode == 0:  # undone: the source holds the complete pre-image, the destination nothing of this move
+        assert _missing(world) == set() and _content_back(world) and _snapshot(world)[1] == before[1]
+    assert change == "parent_foreign" or (proc.returncode == 0 and _snapshot(world) == before)  # all back, all gone
