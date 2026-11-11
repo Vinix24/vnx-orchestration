@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 from contextlib import closing
@@ -35,6 +36,19 @@ def crash(path, line):
     if line["state"] == {state!r} and {after}:
         os.kill(os.getpid(), signal.SIGKILL)
 qa._journal = crash
+sys.exit(qa.main(sys.argv[1:]))
+"""
+_STEP_3 = """import itertools, sqlite3, sys
+sys.path.insert(0, {lib!r})
+import qi_transfer_apply as qa
+qa._WAIT, real, calls = 0.05, qa.read_pre_image, itertools.count(1)
+def writer(conn, table, row_id):  # step 3 reads the source after the copy verified: a second writer on the copy
+    try:  # the writer's connection closes as soon as the statement ends
+        next(calls) == 2 and {sql!r} and sqlite3.connect({dest!r}, timeout=0, isolation_level=None).execute({sql!r})
+    except sqlite3.OperationalError as exc:
+        print(exc, file=sys.stderr)
+    return real(conn, table, row_id)
+qa.read_pre_image = writer
 sys.exit(qa.main(sys.argv[1:]))
 """
 
@@ -77,9 +91,9 @@ def _apply(world, plan=None, reason="test transfer", code=""):
                    "--vnx-data-root", world["root"], code=code)
 
 
-def _resume(world, plan_id=None):
+def _resume(world, plan_id=None, code=""):
     return _script("qi_transfer_apply.py", "resume", "--plan-id", plan_id or world["plan"]["plan_id"],
-                   "--vnx-data-root", world["root"])
+                   "--vnx-data-root", world["root"], code=code)
 
 
 def _crash(world, state: str, after: bool = True) -> None:
@@ -191,6 +205,8 @@ _GAMMA = "UPDATE success_patterns SET project_id = 'gamma'"
     ("copied", {}, 1, _GAMMA, "destination_missing", ("destination_missing",)),  # step 3 reads the copy again
     ("copied", {}, 2, "", "done", ("done",)), ("copied", {}, 3, "", "already_present", ()),
     ("copied", {}, 3, _GAMMA, "destination_missing", ()),
+    ("copied", {}, 2, _GAMMA, "destination_missing", ("destination_missing",)),  # source_removed: the copy read again
+    ("copied", {}, 2, "DELETE FROM success_patterns", "destination_missing", ("destination_missing",)),
     ("copied", {"state": "source_removed"}, 0, "", "refused", ()), ("copied", {"state": "done"}, 0, "", "refused", ()),
     ("copied", {"state": "planned"}, 1, "", "refused", ()),  # verified, and no copied line before it
     ("planned", {}, 0, "", "drift", ("drift",)),  # a valid planned line: step 1 again, on a source row that is gone
@@ -205,10 +221,12 @@ def test_a_second_apply_finishes_from_the_journal_and_refuses_what_it_cannot_pro
     if damage:
         _sql(world["dest"], damage)
     before, lines = _snapshot(world), _journal(world)
-    for retry in (_apply, _resume)[:1 if logged else 2]:  # a run that journals nothing answers the same again
+    for retry in (_resume, _apply)[:1 if logged else 2]:  # a run that journals nothing answers the same again
         proc = retry(world)
         assert proc.returncode == int(outcome not in ("done", "already_present")), proc.stdout + proc.stderr
         assert outcome in _outcomes(proc)[0] and _snapshot(world) == before
+        gone = "source row is removed" in str(json.loads(proc.stdout)["notes"])  # only the journal has it
+        assert gone == (outcome == "destination_missing" and keep > 1)
     assert tuple(x["state"] for x in _journal(world)[len(lines):]) == logged
 
 
@@ -236,20 +254,33 @@ def test_a_crash_loses_no_row_and_resume_finishes_at_done(world, state, after, i
     (True, "dest", "UPDATE success_patterns SET title = 'edited'", "destination_missing"),
     (True, "planned", {"pre_image": "missing"}, "valid pre_image"),
     (False, "dest", "UPDATE success_patterns SET title = 'edited'", "verify_failed"),  # copied, never verified
-], ids=["source_row_changed", "source_junction_changed", "copy_changed", "planned_line_malformed", "not_verified"])
+    (True, "dest", "BEGIN IMMEDIATE", "destination_locked"), (True, "src", "BEGIN IMMEDIATE", "source_locked"),
+], ids=["source_row", "source_junction", "copy_changed", "planned_malformed", "not_verified", "dest_lock", "src_lock"])
 def test_step_3_deletes_nothing_unless_the_source_is_as_journaled_and_the_copy_verifies(
         world, after, where, damage, outcome):
     _crash(world, "verified", after)  # the row stands in both files
     if where == "planned":
         _rewrite(world, where, damage, 2)
+    elif damage == "BEGIN IMMEDIATE":  # another connection holds the lock while resume runs: refused once, no retry
+        world["lock"] = sqlite3.connect(world[where], isolation_level=None).execute(damage)  # the cursor keeps it open
     else:
         _sql(world[where], damage)
     before = _snapshot(world)
-    proc = _resume(world)
+    proc = _resume(world, code=_STEP_3.format(lib=str(LIB), dest="", sql=""))  # a held lock waits 0.05 s, not 30
     assert proc.returncode == 1 and outcome in _outcomes(proc)[0] and _snapshot(world) == before, proc.stdout
     assert "source_removed" not in [x["state"] for x in _journal(world)]
     kept = ["step 3 deleted nothing" in n for n in json.loads(proc.stdout)["notes"].values()]
-    assert kept == [True] * (outcome in ("drift", "destination_missing"))
+    assert kept == [True] * (outcome in ("drift", "destination_missing") or outcome.endswith("_locked"))
+
+
+@pytest.mark.parametrize("mode", ["delete", "wal"])
+@pytest.mark.parametrize("sql", ["UPDATE success_patterns SET title = 'edited'", "DELETE FROM success_patterns"])
+def test_no_writer_changes_the_copy_between_its_check_and_the_source_delete(world, mode, sql):
+    _sql(world["dest"], f"PRAGMA journal_mode={mode}")
+    proc = _apply(world, code=_STEP_3.format(lib=str(LIB), dest=str(world["dest"]), sql=sql))
+    intact = [r["title"] for r in _rows(world["dest"], "success_patterns")] == [TITLE]  # neither edited nor deleted
+    assert intact or _rows(world["src"], "success_patterns"), "source row deleted, the copy no longer the verified one"
+    assert "database is locked" in proc.stderr and proc.returncode == 0 and _outcomes(proc) == ["done"], proc.stderr
 
 
 def test_misroute_replay(world):

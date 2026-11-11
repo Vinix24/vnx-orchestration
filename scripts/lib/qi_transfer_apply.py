@@ -6,12 +6,12 @@ the source row is re-read; ``drift`` (content_key is not the plan's), ``user_ver
 ``same_file`` and ``evidence_changed`` (L2 no longer moves it there) change nothing. Else it journals the pre-image,
 inserts row and junction rows under the new ``pattern_id`` (or finds them ``already_present``) and journals
 ``copied`` with ``created`` BEFORE the COMMIT, so a copy that never committed reads back absent and is copied again.
-(2) The destination is re-read: ``verified``. (3) Only from ``verified``, and only while the copy still verifies: on
-the source, row and junction rows are re-read and deleted only while they equal the journaled pre-image (else
-``drift``, nothing deleted): ``source_removed``, then ``done``. Every path checks the ``planned`` and the ``copied``
-line field by field before it reads one. A crash leaves the row in both files, never in neither; no atomicity
-across files is claimed. ``resume`` runs the same steps from each move's last journal state. Split ``-c`` adds
-``undo``.
+(2) The destination is re-read: ``verified``. (3) Only from ``verified``: the copy verifies under a destination lock
+held until the source deletes row and junction rows, only while they equal the journaled pre-image (else ``drift``, a
+held lock ``*_locked``; nothing deleted): ``source_removed``, ``done`` once the copy verifies again. Every path checks
+the ``planned`` and the ``copied`` line field by field before it reads one. A crash leaves the row in both files,
+never in neither; no atomicity across files is claimed. ``resume`` runs the same steps from each move's last journal
+state. Split ``-c`` adds ``undo``.
 
 CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID} [--vnx-data-root DIR]
 """
@@ -39,8 +39,11 @@ from qi_transfer_plan import (
 _MOVE_KEYS = ("table", "source_id", "source_db", "destination_db", "destination_project_id", "content_key",
               "source_user_version", "destination_user_version")
 _FINISHED = ("done", "already_present")
-_STEP_3_REFUSALS = ("drift", "destination_missing")
-_SOURCE_KEPT = "step 3 deleted nothing: the source keeps the row until it equals the pre-image and the copy verifies"
+_STEP_3_REFUSALS = ("drift", "destination_missing", "destination_locked", "source_locked")
+_SOURCE_KEPT = "step 3 deleted nothing: the source keeps the row; the journal line after verified names why"
+_SOURCE_GONE = "the source row is removed and the copy does not verify: its content is the journal's planned pre-image"
+_NOTES = {"verified": _SOURCE_KEPT, "source_removed": _SOURCE_GONE, "done": _SOURCE_GONE}
+_WAIT = 30.0  # seconds a statement waits on another connection's lock, then "database is locked"
 
 
 class PlanError(ValueError):
@@ -110,7 +113,7 @@ def _latest(lines: List[Dict[str, Any]], state: Optional[str] = None) -> Optiona
 
 def _connect(db: Path, mode: str = "rw") -> sqlite3.Connection:
     """Autocommit; ``rw`` or ``ro``, never ``rwc``: a missing file is an error, never a new empty database."""
-    conn = sqlite3.connect(f"{Path(db).resolve().as_uri()}?mode={mode}", uri=True, isolation_level=None, timeout=30)
+    conn = sqlite3.connect(f"{Path(db).resolve().as_uri()}?mode={mode}", uri=True, isolation_level=None, timeout=_WAIT)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -249,9 +252,9 @@ def _checked_planned(mv: _Move, p: Dict[str, Any]) -> Dict[str, Any]:
     return p
 
 
-def _verify(mv: _Move, copied: Dict[str, Any]) -> Optional[bool]:
+def _verify(mv: _Move, copied: Dict[str, Any], held: Optional[sqlite3.Connection] = None) -> Optional[bool]:
     """Step 2: True when row and every junction row are there by content; None when the copy never committed."""
-    cols, dst = copied["cols"], _connect(mv.dst)
+    cols, dst = copied["cols"], held if held is not None else _connect(mv.dst)  # held: step 3's locked connection
     try:
         row = dst.execute(f"SELECT * FROM {mv.table} WHERE id = ?", (copied["dest_id"],)).fetchone()
         if row is None:
@@ -265,13 +268,18 @@ def _verify(mv: _Move, copied: Dict[str, Any]) -> Optional[bool]:
         # created false, no junction row of its own and every row it found before: the copy never committed
         return None if not copied["created"] and all(hit != fresh for fresh, hit in hits) else False
     finally:
-        dst.close()
+        if held is None:
+            dst.close()
 
 
-def _remove(mv: _Move, pre: Dict[str, Any]) -> str:
-    """Step 3, one ``BEGIN IMMEDIATE`` on the source: delete row and junction rows only while they equal ``pre``."""
-    src = _connect(mv.src)
+def _remove(mv: _Move, pre: Dict[str, Any], copied: Dict[str, Any]) -> str:
+    """Step 3, locks in step 1's order (destination, then source), held from the copy's check to the source COMMIT."""
+    dst, src, locked = _connect(mv.dst), _connect(mv.src), "destination_locked"
     try:
+        dst.execute("BEGIN IMMEDIATE")
+        if _verify(mv, copied, dst) is not True:
+            return "destination_missing"
+        locked = "source_locked"
         src.execute("BEGIN IMMEDIATE")
         live = read_pre_image(src, mv.table, mv.m["source_id"])
         if live is None and not any(_fetch_rows(src, t, "pattern_id = ?", pre["pattern_id"]) for t in JUNCTION_TABLES):
@@ -284,9 +292,14 @@ def _remove(mv: _Move, pre: Dict[str, Any]) -> str:
                 src.execute(f"DELETE FROM {t} WHERE pattern_id = ?", (pre["pattern_id"],))
         src.execute("COMMIT")
         return "source_removed"
+    except sqlite3.OperationalError as exc:
+        if str(exc) != "database is locked":  # only SQLite's busy answer past _WAIT is a lock; any other error raises
+            raise
+        return locked  # refused once, not retried; nothing deleted
     finally:
-        _rollback(src)
-        src.close()
+        for conn in (src, dst):  # the destination wrote nothing; its lock ends only after the source COMMIT
+            _rollback(conn)
+            conn.close()
 
 
 def _advance(mv: _Move, index, reason: str) -> str:
@@ -299,11 +312,14 @@ def _advance(mv: _Move, index, reason: str) -> str:
         pre = _checked_planned(mv, _latest(lines, "planned") or {})["pre_image"] if state else None
         if state == "done":  # read again, write nothing
             return "already_present" if _verify(mv, copied) is True else "destination_missing"
-        if state == "source_removed":
+        if state == "source_removed":  # the copy read again before done, as the done branch does
+            if _verify(mv, copied) is not True:
+                mv.log("destination_missing")
+                return "destination_missing"
             mv.log("done")
             return "done" if copied["created"] else "already_present"
-        if state == "verified":  # step 3, only while the copy still stands in the destination
-            outcome = _remove(mv, pre) if _verify(mv, copied) is True else "destination_missing"
+        if state == "verified":  # step 3 checks the copy under the destination lock it holds until the delete commits
+            outcome = _remove(mv, pre, copied)
             mv.log(outcome)
             if outcome in _STEP_3_REFUSALS:
                 return outcome
@@ -344,8 +360,8 @@ def run(plan: Dict[str, Any], command: str, reason: Optional[str], root: Path) -
             name = f"{mv.src}#{mv.key}"
             try:
                 out[name] = _advance(mv, index, reason)
-                if out[name] in _STEP_3_REFUSALS and (_latest(mv.lines()) or {}).get("state") == "verified":
-                    notes[name] = _SOURCE_KEPT
+                if out[name] in _STEP_3_REFUSALS and (state := (_latest(mv.lines()) or {}).get("state")) in _NOTES:
+                    notes[name] = _NOTES[state]  # the source kept the row, or only the journal holds it
             except (PlanError, sqlite3.Error, KeyError, TypeError) as exc:  # this move refused, reported, exit 1
                 out[name] = f"refused: {exc}"
     return out, notes
