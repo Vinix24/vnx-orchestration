@@ -177,6 +177,7 @@ def test_persist_mode_queues_the_proposal_with_its_oi_ids(env, monkeypatch, appr
     _write_store(env, _recurring())
     approve_learning_persist(env, _run_cycle()["shadow"]["persist_preview"]["proposal_id"])
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    monkeypatch.setattr(ll, "_ledger_verdict", lambda *_: {"status": "ok", "reason_code": "ok"})  # D7 gate: green here
     _run_cycle()
     rules = json.loads((env / "pending_rules.json").read_text())["pending_rules"]
     assert [r["source_oi_ids"] for r in rules] == [["OI-100", "OI-101", "OI-102"]]
