@@ -31,21 +31,22 @@ ART="$Q/artifact"
 SNAP=~/.vnx-data/_backups/$(date -u +%Y%m%d-%H%MZ)-intelligence-corpus-quarantine/vnx-dev/quality_intelligence.db
 mkdir -p "$Q" "$(dirname "$SNAP")"
 
+# Eén keten: elke stap draait alleen als de vorige exit 0 gaf.
 # 1. Nulmeting plus een bewezen snapshot
-python3 scripts/vnx_intelligence_corpus_quarantine.py baseline --db "$DB" --out "$Q" --snapshot "$SNAP"
-
+python3 scripts/vnx_intelligence_corpus_quarantine.py baseline --db "$DB" --out "$Q" --snapshot "$SNAP" &&
 # 2. Het corpus naar de verzegelde quarantaine (het artefact)
-python3 scripts/vnx_intelligence_corpus_quarantine.py quarantine --db "$DB" --out "$Q"
-
+python3 scripts/vnx_intelligence_corpus_quarantine.py quarantine --db "$DB" --out "$Q" &&
 # 3. De permit: alle negen eisen, niets veranderd
-python3 scripts/vnx_intelligence_corpus_quarantine.py verify --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART" --human
-
+python3 scripts/vnx_intelligence_corpus_quarantine.py verify --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART" --human &&
 # 4. Dezelfde vijf stadia op een kopie van de live store
-python3 scripts/vnx_intelligence_corpus_quarantine.py rehearse --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART"
-
-# 5. Leegmaken in één transactie, daarna checkpoint en VACUUM
+python3 scripts/vnx_intelligence_corpus_quarantine.py rehearse --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART" &&
+# 5. Leegmaken in één transactie, daarna wal_checkpoint(TRUNCATE), FTS5 optimize op code_snippets en VACUUM
 python3 scripts/vnx_intelligence_corpus_quarantine.py purge --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART"
 ```
+
+`purge` gaat alleen na een `rehearse` met exit 0 en `"ok": true`; bij elke andere exit stopt de keten en wordt niets leeggemaakt. Er staat bewust geen `set -e` of `exit` in: een geplakte `exit` sluit je terminal.
+
+De volgorde in `purge` is vast: `DELETE`, `wal_checkpoint(TRUNCATE)`, FTS5 `optimize` op `code_snippets`, `VACUUM`, de na-meting en de auditregel `vacuumed`. Een `DELETE` op een FTS5-tabel laat de indexsegmenten (`code_snippets_data`) staan en `VACUUM` kan die niet vrijmaken zonder de merge.
 
 `quarantine` weigert (exit 3) als `$ART` al bestaat; een tweede quarantaine is een nieuwe `$Q`. `rehearse` laat de kopie staan en noemt zijn pad; alleen `--discard-copy` ruimt die kopie op, niets anders. `baseline` heeft geen `--state-dir` en schrijft geen auditregel; de auditreeks begint bij `quarantined`.
 
@@ -92,7 +93,7 @@ shasum -a 256 "$SNAP"
 
 Klaar als: exit 0; het manifest heeft `db`, `snapshot`, `tables`, `corpus` en `invariants.session_analytics` (met `columns` van 40 namen en `digest_sha256`); `snapshot.integrity_check == "ok"`; `snapshot.bytes > 0`; en `shasum -a 256` geeft dezelfde hash als `snapshot.sha256`.
 
-**Clausule 2 - verplaatst, verwijderd in één transactie, `VACUUM` gedraaid.**
+**Clausule 2 - verplaatst, verwijderd in één transactie, checkpoint, FTS5 `optimize` en `VACUUM` gedraaid.**
 
 ```bash
 sqlite3 -readonly "$DB" "SELECT (SELECT COUNT(*) FROM code_snippets), (SELECT COUNT(*) FROM snippet_metadata), (SELECT freelist_count FROM pragma_freelist_count());"
@@ -106,7 +107,7 @@ Klaar als: `quarantine` exit 0 en `quarantine.json` met `track`, `content_digest
 ```bash
 python3 scripts/gather_intelligence.py gather "corpus quarantaine" T0 ; echo "rc=$?"
 python3 -c "import sys,sqlite3,pathlib; sys.path[:0]=['scripts','scripts/lib']; from intelligence_daemon_monitor import validate_monitor_schema_compatibility, _collect_pattern_metrics; c=sqlite3.connect('file:'+str(pathlib.Path.home()/'.vnx-data/vnx-dev/state/quality_intelligence.db')+'?mode=ro', uri=True); validate_monitor_schema_compatibility(c); print(_collect_pattern_metrics(c))"
-python3 -c "import sys,pathlib; sys.path[:0]=['scripts','scripts/lib']; from quality_dashboard_integration import QualityDashboardIntegrator; print(QualityDashboardIntegrator(pathlib.Path.home()/'.vnx-data/vnx-dev/state/quality_intelligence.db').get_snippet_summary())"
+python3 -c "import sys,pathlib; sys.path[:0]=['scripts','scripts/lib']; from quality_dashboard_integration import QualityDashboardIntegrator; q=QualityDashboardIntegrator(pathlib.Path.home()/'.vnx-data/vnx-dev/state/quality_intelligence.db'); q.connect(); print(q.get_snippet_summary()); q.close()"
 grep '"stage":"verified"' "$AUDIT" | tail -1
 ```
 
@@ -120,4 +121,4 @@ ls -l "$DB"
 python3 -c "import json,os,sys; m=json.load(open(sys.argv[1])); print(m['corpus']['dbstat_bytes'], os.path.getsize(sys.argv[2]))" "$Q/manifest.json" "$DB"
 ```
 
-Klaar als: de corpus-familie in `dbstat` na de purge op of onder 2 MB staat, de bestandsgrootte meetbaar is gedaald en de vergelijking met `manifest.corpus.dbstat_bytes` de winst in bytes toont.
+Klaar als: de corpus-familie in `dbstat` na de purge op of onder 2 MB staat, de bestandsgrootte meetbaar is gedaald en de vergelijking met `manifest.corpus.dbstat_bytes` de winst in bytes toont. Referentie, gemeten op 11-11 op een kopie van de live store: bestand 36,2 MB, corpus-familie 0,04 MB.
