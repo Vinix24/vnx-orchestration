@@ -241,3 +241,95 @@ def test_a_raw_u2028_inside_a_json_string_does_not_cut_the_line(permit):
     sha = _empty_store_with_audit(permit, '{"stage": "note", "message": "a b\u0085c d"}', "OK")
     assert purge_module._deleted_ok(permit.state, sha) is True
     assert run(permit) == 0
+
+
+def _bulk_permit(tmp_path, rows=4000):
+    """A permit over a store whose code_snippets FTS5 index has several segments."""
+    p = build_permit(tmp_path)
+    with closing(sqlite3.connect(p.db)) as conn:
+        for start in range(100, 100 + rows, 500):
+            conn.executemany("INSERT INTO code_snippets(rowid,title,code,file_path,language) VALUES (?,?,?,?,?)",
+                             [(i, f"title {i}", f"def f{i}(): return '{i}' * 40 # {i * 7919}", f"/src/{i}.py", "python")
+                              for i in range(start, start + 500)])
+            conn.commit()
+    out, state = tmp_path / "permit2", tmp_path / "state2"
+    out.mkdir()
+    state.mkdir()
+    assert cli.main(["baseline", "--db", str(p.db), "--out", str(out), "--snapshot", str(tmp_path / "snap2.db")]) == 0
+    assert cli.main(["quarantine", "--db", str(p.db), "--out", str(out), "--state-dir", str(state)]) == 0
+    folder = out / "artifact"
+    p.state, p.folder, p.manifest, p.quarantine = state, folder, out / "manifest.json", folder / "quarantine.json"
+    p.artifact, p.snapshot = next(folder.glob("*.db")), tmp_path / "snap2.db"
+    assert cli.main(argv(p)) == 0
+    return p
+
+
+def _shadow_pages(p, table="code_snippets"):
+    with closing(sqlite3.connect(p.db)) as conn:
+        return conn.execute("SELECT count(*) FROM dbstat WHERE name = ?", (f"{table}_data",)).fetchone()[0]
+
+
+def _empty_without_optimize(p):
+    """The old behaviour: delete the rows and write the deleted/ok line, no optimize, no VACUUM."""
+    sha = hashlib.sha256(p.manifest.read_bytes() + p.quarantine.read_bytes()).hexdigest()
+    with closing(sqlite3.connect(p.db)) as conn:
+        conn.executescript("DELETE FROM code_snippets; DELETE FROM snippet_metadata")
+        conn.commit()
+    audit_module.append(p.state, "deleted", sha, "intent")
+    audit_module.append(p.state, "deleted", sha, "ok")
+    return sha
+
+
+def test_purge_merges_the_fts_index_so_the_file_shrinks_by_the_index_size(tmp_path):
+    p = _bulk_permit(tmp_path)
+    size_before, index_pages = p.db.stat().st_size, _shadow_pages(p)
+    assert index_pages > purge_module.FTS_DATA_PAGES_MAX * 10
+    assert run(p) == 0
+    assert _shadow_pages(p) <= purge_module.FTS_DATA_PAGES_MAX
+    with closing(sqlite3.connect(p.db)) as conn:
+        page = conn.execute("PRAGMA page_size").fetchone()[0]
+        assert conn.execute("PRAGMA freelist_count").fetchone()[0] == 0
+    assert size_before - p.db.stat().st_size >= (index_pages - purge_module.FTS_DATA_PAGES_MAX) * page
+
+
+def test_resume_after_an_unoptimized_delete_gives_the_shrink_and_a_second_vacuumed_line(tmp_path):
+    p = _bulk_permit(tmp_path)
+    sha = _empty_without_optimize(p)
+    assert _shadow_pages(p) > purge_module.FTS_DATA_PAGES_MAX
+    assert run(p) == 0
+    assert _shadow_pages(p) <= purge_module.FTS_DATA_PAGES_MAX
+    vacuumed = lines(p, "vacuumed")
+    assert [x["status"] for x in vacuumed] == ["intent", "ok"]
+    assert {x["permit_sha256"] for x in vacuumed} == {sha}
+    assert run(p) == 0
+    assert [x["status"] for x in lines(p, "vacuumed")] == ["intent", "ok", "intent", "ok"]
+
+
+def test_a_non_fts5_corpus_table_gets_no_optimize_statement(permit, monkeypatch):
+    executed, real = [], sqlite3.connect
+
+    def traced(*args, **kwargs):
+        conn = real(*args, **kwargs)
+        conn.set_trace_callback(executed.append)
+        return conn
+
+    monkeypatch.setattr(purge_module.sqlite3, "connect", traced)
+    assert run(permit) == 0
+    optimize = [x for x in executed if "'optimize'" in x]
+    assert optimize == ['INSERT INTO "code_snippets"("code_snippets") VALUES(\'optimize\')']
+    assert not [x for x in optimize if "snippet_metadata" in x]
+
+
+def test_a_shadow_table_above_the_bound_is_exit_4(tmp_path, monkeypatch, capsys):
+    p = _bulk_permit(tmp_path)
+    monkeypatch.setattr(purge_module, "_optimize_fts", lambda conn: None)
+    assert run(p) == 4
+    assert "code_snippets_data holds" in capsys.readouterr().err
+    assert not [x for x in lines(p, "vacuumed") if x["status"] == "ok"]
+
+
+def test_session_analytics_is_unchanged_after_the_purge_with_optimize(tmp_path):
+    p = _bulk_permit(tmp_path)
+    before = digest_of(p)
+    assert run(p) == 0
+    assert digest_of(p) == before and count(p, "session_analytics") == 2

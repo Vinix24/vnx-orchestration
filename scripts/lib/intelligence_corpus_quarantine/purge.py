@@ -2,7 +2,9 @@
 
 Order (plan "Sessie-invariant (B2)"): intent line, BEGIN IMMEDIATE, check_permit on this connection, digest A over
 session_analytics, DELETE both corpus tables, digest B, A == B or ROLLBACK (exit 3), COMMIT, outcome line. Then, outside
-the transaction: wal_checkpoint(TRUNCATE), VACUUM, the after-measurement, the `vacuumed` line (a failure there is exit 4).
+the transaction: wal_checkpoint(TRUNCATE), FTS5 `optimize` on the corpus tables that are FTS5 virtual tables (a DELETE only
+writes delete markers into the index segments, and VACUUM cannot free pages the segments still hold), VACUUM, the
+after-measurement, the `vacuumed` line (a failure there is exit 4). The resume path runs the same steps.
 Rows only, never tables; this module removes no file, artefact or snapshot.
 """
 import json
@@ -35,6 +37,23 @@ def _counts(conn):
 
 def _family(conn):
     return {row[0] for row in conn.execute(_FAMILY, CORPUS_TABLES)}
+
+
+# Pages an emptied, optimized FTS5 `<t>_data` shadow table keeps: measured on an emptied fixture of 4000 rows, it holds
+# its structure record and the averages record only, 2 rows in 1 page. 4 leaves room for the page size and no more.
+FTS_DATA_PAGES_MAX = 4
+
+
+def _fts_tables(conn):
+    """The corpus tables that are FTS5 virtual tables, by their DDL and not by name."""
+    marks = ", ".join("?" * len(CORPUS_TABLES))
+    rows = conn.execute(f"SELECT name, sql FROM sqlite_master WHERE name IN ({marks})", CORPUS_TABLES).fetchall()
+    return [name for name, sql in rows if "using fts5" in " ".join((sql or "").lower().split())]
+
+
+def _optimize_fts(conn):
+    for name in _fts_tables(conn):
+        conn.execute(f"INSERT INTO {_quote(name)}({_quote(name)}) VALUES('optimize')")
 
 
 def _family_bytes(conn):
@@ -110,6 +129,10 @@ def _after_measure(db, manifest, session):
             raise ValueError("after-measurement: corpus tables are not empty")
         if conn.execute("PRAGMA freelist_count").fetchone()[0] != 0:
             raise ValueError("after-measurement: freelist_count is not 0 after VACUUM")
+        for name in _fts_tables(conn):
+            pages = conn.execute("SELECT count(*) FROM dbstat WHERE name = ?", (f"{name}_data",)).fetchone()[0]
+            if pages > FTS_DATA_PAGES_MAX:
+                raise ValueError(f"after-measurement: {name}_data holds {pages} pages after VACUUM, the bound is {FTS_DATA_PAGES_MAX}")
         family = _family(conn)
         for table in manifest["tables"]:
             if table["name"] not in family:
@@ -131,6 +154,7 @@ def _after_commit(db, state, permit, manifest, folder, deleted):
         with closing(sqlite3.connect(db.as_uri() + "?mode=rw", uri=True, isolation_level=None)) as conn:
             if conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] != 0:
                 raise RuntimeError("wal_checkpoint(TRUNCATE) was blocked by another connection")
+            _optimize_fts(conn)
             conn.execute("VACUUM")
         after = _after_measure(db, manifest, session)
         audit.append(state, "vacuumed", permit, "ok", **{k: v for k, v in (deleted or {}).items() if k.startswith(("corpus_family", "baseline"))}, **after)
