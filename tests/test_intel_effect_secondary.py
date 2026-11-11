@@ -228,6 +228,50 @@ def test_cqs_and_open_items_report_the_mean_per_arm_with_coverage(rc):
     assert "means 80.0" in _run(rc, "secondary")[0].stdout
 
 
+def _plain(rc):
+    run, _ = _run(rc, "secondary")
+    assert run.returncode == 0, run.stdout + run.stderr
+    return run.stdout
+
+
+def _arm_lines(text):
+    return [line for line in text.splitlines() if line.startswith(("#   control:", "#   treatment:"))]
+
+
+def test_plain_text_with_arms_without_resolved_dispatches_prints_dashes_never_a_typeerror(rc):
+    """Red run: on 9152e681 render() formats coverage_pct None with :g and raises TypeError. Dispatches that are
+    all still in flight leave both arms with 0 resolved (an arm empty on one side only is a refused cohort)."""
+    _qi(rc)
+    _seed(rc, _balanced(5), state="running")
+    _meta(rc, cover=(100, 100))
+    text = _plain(rc)
+    lines = {line.split()[0]: line for line in text.splitlines() if line.startswith(("cqs", "open_items"))}
+    assert "not_evaluable" in lines["cqs"] and "not_evaluable" in lines["open_items"]
+    arms = _arm_lines(text)
+    assert len(arms) == 4 and all("resolved 0, with value 0 (-%), means -" in line for line in arms), text
+
+
+def test_plain_text_with_no_injections_at_all_renders_and_exits_0(rc):
+    """Both arms empty: the cohort is refused, every measure says why, nothing is formatted from an absent value."""
+    _qi(rc)
+    _meta(rc, cover=(0, 0))
+    text = _plain(rc)
+    assert "cqs         not_evaluable" in text and "open_items  not_evaluable" in text
+
+
+def test_plain_text_with_coverage_present_but_below_the_minimum_prints_the_number_and_a_dash_for_means(rc):
+    _world(rc)
+    _meta(rc, cover=(60, 100))
+    arms = _arm_lines(_plain(rc))
+    assert arms and all("means -" in line and "(-%)" not in line for line in arms)
+
+
+def test_shown_prints_a_dash_for_none_and_never_raises(sec):
+    assert sec._shown(None) == "-" and sec._shown(None, "n/a") == "n/a"
+    assert sec._shown(80.0) == "80.0" and sec._shown(80.0, spec="g") == "80"
+    assert sec._shown({"created": 1.0}) == "{'created': 1.0}"
+
+
 def test_zero_metadata_rows_is_not_evaluable_with_zero_coverage(rc):
     """Red run: on the old code there is no `cqs` measure to be not_evaluable."""
     _world(rc)

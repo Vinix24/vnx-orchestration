@@ -280,6 +280,11 @@ def as_dict(sec: Secondary) -> dict:
             "effect_exit_code": sec.effect.exit_code}
 
 
+def _shown(value: object, absent: str = "-", spec: str = "") -> str:
+    """The value as text (through `spec`), or `absent` for None: plain text never formats an absent value."""
+    return absent if value is None else format(value, spec)
+
+
 def render(sec: Secondary) -> str:
     data = as_dict(sec)
     out = [f"# Intelligence A/B secondary measures - project {data['project_id']}, window {data['window_id'] or '-'}, "
@@ -287,10 +292,10 @@ def render(sec: Secondary) -> str:
     for m in sec.measures:
         out.append(f"{m.name:11} {m.status}" + (f"  ({m.reason})" if m.reason else ""))
         out += [f"#   week {w['week']}: offers {w['offers']}, with outcome {w['with_outcome']} "
-                f"({w['coverage_pct']:g}% coverage), adoption {w['adoption_pct'] if w['evaluable'] else 'n/a'}"
+                f"({_shown(w['coverage_pct'], spec='g')}% coverage), adoption {_shown(w['adoption_pct'], 'n/a')}"
                 for w in m.data.get("weeks", [])]
-        out += [f"#   {arm}: resolved {a['resolved']}, with value {a['with_value']} ({a['coverage_pct']:g}%), "
-                f"means {a['means']}" for arm, a in m.data.get("arms", {}).items()]
+        out += [f"#   {arm}: resolved {a['resolved']}, with value {a['with_value']} ({_shown(a['coverage_pct'], spec='g')}%), "
+                f"means {_shown(a['means'])}" for arm, a in m.data.get("arms", {}).items()]
     return "\n".join(out)
 
 
