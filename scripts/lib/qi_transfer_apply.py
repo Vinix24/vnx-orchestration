@@ -12,9 +12,9 @@ held lock ``*_locked``; nothing deleted): ``source_removed``, ``done`` once the 
 the ``planned`` and the ``copied`` line field by field before it reads one. A crash leaves the row in both files,
 never in neither; no atomicity across files is claimed. ``resume`` runs the same steps from each move's last journal
 state. ``undo`` touches only moves with a ``copied`` line: the source gets the pre-image back first (``restored``),
-then the destination loses only what this move created and still holds what it wrote; a changed copy stays
-(``undone_kept_changed_copy``), and so does every copy while the source lacks a row or junction row of the pre-image
-(``source_missing``, ``source_not_restored``). Apply and resume never move a move again once an undo touched it.
+then the destination loses only what this move created, still holds what it wrote and nothing else names; a changed
+or named copy stays (``undone_kept_changed_copy``), as does every copy while the source lacks a row or junction row
+of the pre-image (``source_missing``, ``source_not_restored``). Apply and resume never move an undo-touched move again.
 
 CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID | undo --plan-id ID --reason TEXT}
      [--vnx-data-root DIR]
@@ -423,10 +423,16 @@ def _restore(mv: _Move, lines: List[Dict[str, Any]], pre: Dict[str, Any]) -> Opt
         src.close()
 
 
+def _referenced(conn: sqlite3.Connection, pattern_id: str, own: List[Tuple[str, Optional[int]]]) -> bool:
+    """True while a junction row that is not one of ``own`` ((table, rowid)) names ``pattern_id``, any project's."""
+    return any((t, r[0]) not in own for t in JUNCTION_TABLES if _columns(conn, t)
+               for r in conn.execute(f"SELECT rowid FROM {t} WHERE pattern_id = ?", (pattern_id,)))
+
+
 def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int, pre: Dict[str, Any]) -> str:
     """Undo step 2, locks in step 3's order, the source held until the destination COMMIT: only rows this move created
-    that still hold what it wrote go; a copy changed since stays whole. Nothing here goes unless, under the source
-    lock in this step, the source holds the complete journaled pre-image at ``rid``, junction rows included."""
+    that still hold what it wrote go; a copy changed since or named by a junction row it did not create stays whole.
+    Nothing goes unless, under this step's source lock, the source holds the whole journaled pre-image at ``rid``."""
     dst, src = _connect(mv.dst), _connect(mv.src)
     try:
         dst.execute("BEGIN IMMEDIATE")
@@ -436,7 +442,8 @@ def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int, pre: Dict[str, Any])
         cols, intact = copied["cols"], _verify(mv, copied, dst)
         own = [(t, _find(dst, t, mv.pid, k, cols[t], pattern_id=copied["pattern_id"]))
                for t, k, created in copied["junction"] if created]
-        if intact is False or (intact is None and any(rowid is not None for _, rowid in own)):
+        if intact is False or (intact is None and any(rowid is not None for _, rowid in own)) or (
+                intact and copied["created"] and _referenced(dst, copied["pattern_id"], own)):
             return "undone_kept_changed_copy"  # None with a junction row of its own: the copy's row went since
         for t, rowid in own if intact else ():  # None: the copy never committed, nothing of it to delete
             dst.execute(f"DELETE FROM {t} WHERE rowid = ?", (rowid,))

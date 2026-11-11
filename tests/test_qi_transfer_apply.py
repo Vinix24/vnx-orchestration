@@ -423,6 +423,36 @@ def test_a_copy_changed_since_stays_and_the_source_still_gets_its_row_back(world
     assert [x["state"] for x in _journal(world)][-2:] == ["restored", "undone_kept_changed_copy"]
 
 
+_NAMING = {"pattern_usage": {"project_id": "gamma"},  # its key is (pattern_id, project_id)
+           "dispatch_pattern_offered": {"dispatch_id": "d-new"}, "pattern_injection_outcome": {"dispatch_id": "d-new"}}
+
+
+@pytest.mark.parametrize("found", [False, True], ids=["created", "already_present"])
+@pytest.mark.parametrize("table", qtp.JUNCTION_TABLES)
+def test_undo_never_deletes_a_row_a_junction_row_this_move_did_not_create_still_names(world, table, found):
+    if found:
+        _preexisting(world)
+    was = _snapshot(world)
+    assert _apply(world).returncode == 0  # codex b8ffc37a: then a new dispatch is offered the copied pattern
+    [mine] = _rows(world["dest"], table)
+    row = {**{k: v for k, v in mine.items() if k != "id"}, **_NAMING[table]}
+    _sql(world["dest"], f"INSERT INTO {table} ({', '.join(row)}) VALUES ({', '.join('?' * len(row))})", *row.values())
+    dest, outcome = _snapshot(world)[1], "undone" if found else "undone_kept_changed_copy"
+    proc = _undo(world)  # created: the copy stays whole; found: the row stays, only this move's junction row goes
+    assert proc.returncode == int(not found) and _outcomes(proc) == [outcome], proc.stdout + proc.stderr
+    assert _snapshot(world) == [was[0], {**was[1], table: [r for r in dest[table] if r != mine]} if found else dest]
+    assert _content_back(world)["id"] == world["row"]
+
+
+def test_undo_drops_a_copy_from_a_destination_without_a_junction_table_the_move_had_no_rows_for(world):
+    _sql(world["src"], "DELETE FROM pattern_usage")  # the move journals no pattern_usage row: none to copy, none named
+    _sql(world["dest"], "DROP TABLE pattern_usage")
+    assert _apply(world).returncode == 0 and _rows(world["dest"], "success_patterns")
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"], proc.stdout + proc.stderr
+    assert _rows(world["dest"], "success_patterns") == [] and _content_back(world)["id"] == world["row"]
+
+
 def test_a_source_that_changed_the_row_since_keeps_it_and_so_does_the_copy(world):
     _crash(world, "verified")
     _sql(world["src"], "UPDATE success_patterns SET description = 'edited'")
