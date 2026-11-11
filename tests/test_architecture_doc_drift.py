@@ -107,12 +107,13 @@ def test_hook_rows_exclude_unwired_worker_intelligence_injection():
 
 def test_hook_rows_reflect_the_user_level_guard_removal():
     """G3 (dispatch dlv-2f23d1dbf443): the T0 guard moved to the user-level
-    install, so .claude/settings.json wires no UserPromptSubmit event and no
-    t0_context_guard.py entry any more. The generated rows must reflect the
-    file as it is now, not keep a stale hook row."""
+    install, so .claude/settings.json carries no t0_context_guard.py entry any
+    more. The repo's only UserPromptSubmit hook is the prompt logger
+    (zelfstandigheid-meten PR-8c). The generated rows must reflect the file as
+    it is now, not keep a stale hook row."""
     rows = ac.build_hook_rows()
     by_event = {row["event"]: row["scripts"] for row in rows}
-    assert "UserPromptSubmit" not in by_event
+    assert by_event["UserPromptSubmit"] == ["log_prompt_time.py"]
     all_scripts = {name for row in rows for name in row["scripts"]}
     assert "t0_context_guard.py" not in all_scripts
     assert "pretooluse_block_raw_claude_spawn.sh" in by_event["PreToolUse"]

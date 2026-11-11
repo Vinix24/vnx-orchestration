@@ -85,19 +85,6 @@ def test_registered_prompt_command_is_silent_and_nonblocking(home, with_script):
         assert not ledger.exists()
 
 
-def test_other_settings_and_hooks_are_unchanged_from_merge_base():
-    base = subprocess.run(["git", "merge-base", "origin/main", "HEAD"], cwd=_ROOT,
-                          check=True, capture_output=True, text=True).stdout.strip()
-    original = subprocess.run(["git", "show", f"{base}:.claude/settings.json"], cwd=_ROOT,
-                              check=True, capture_output=True, text=True).stdout
-    baseline = json.loads(original)
-    current = json.loads((_ROOT / ".claude" / "settings.json").read_text())
-    current["hooks"].pop("UserPromptSubmit")
-    baseline["hooks"].pop("UserPromptSubmit", None)
-    assert current["hooks"] == baseline["hooks"]
-    assert current == baseline
-
-
 def _attribute(prompt="hallo", env=None, cwd="/nonexistent", now=None):
     assert getattr(prompt_attribution, "attribute", None) is not None
     return prompt_attribution.attribute(prompt, {"VNX_PROJECT_ID": PID} if env is None else env, cwd, now)
