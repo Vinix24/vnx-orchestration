@@ -1,4 +1,4 @@
-"""steering_proposal_store: identity, revisions, decision and reopen records (ADR-072)."""
+"""steering_proposal_store: identity, revisions, decision records (ADR-072)."""
 
 import sys
 import threading
@@ -40,17 +40,6 @@ def test_a_changed_text_is_revision_two_and_revision_one_stays_readable(tmp_path
     assert entry["status"] == "pending"
 
 
-def test_reject_then_reopen_writes_its_own_record_and_keeps_both_visible(tmp_path):
-    pid = seed(tmp_path)
-    with pytest.raises(store.DecisionRefused):
-        store.add_revision(tmp_path, "vnx-dev", make("x"), reopen=True, now=T1)  # pending does not reopen
-    store.decide(tmp_path, "vnx-dev", pid, "rejected", reason="niet nodig", decided_by="op", now=T1)
-    store.add_revision(tmp_path, "vnx-dev", make("nieuw"), reopen=True, evidence_prompt_ids=["p7"], now="2026-11-11T10:00:00Z")
-    entry = store.get(tmp_path, "vnx-dev", pid)
-    assert entry["status"] == "pending" and entry["revisions"][-1]["evidence_prompt_ids"] == ["p7"]
-    assert [r["decision"] for r in store.decisions(tmp_path, "vnx-dev")] == ["proposed", "rejected", "reopened"]
-
-
 def test_decisions_bind_to_a_revision_and_the_state_machine_holds(tmp_path):
     pid = seed(tmp_path)
     for kwargs in ({"decision": "applied", "applied_ref": "#1"}, {"decision": "deferred"},
@@ -70,10 +59,10 @@ def test_decisions_bind_to_a_revision_and_the_state_machine_holds(tmp_path):
 def test_projects_do_not_see_each_other(tmp_path):
     pid_a, pid_b = seed(tmp_path, "proj-a"), seed(tmp_path, "proj-b")
     assert pid_a != pid_b
-    with pytest.raises(store.ProposalNotFound):
-        store.get(tmp_path, "proj-b", pid_a)
-    with pytest.raises(store.ProposalNotFound):
-        store.decide(tmp_path, "proj-b", pid_a, "approved", reason="x", decided_by="op")
+    for call in (lambda: store.get(tmp_path, "proj-b", pid_a),
+                 lambda: store.decide(tmp_path, "proj-b", pid_a, "approved", reason="x", decided_by="op")):
+        with pytest.raises(store.ProposalNotFound):
+            call()
     store.decide(tmp_path, "proj-a", pid_a, "rejected", reason="x", decided_by="op", now=T1)
     assert store.get(tmp_path, "proj-b", pid_b)["status"] == "pending"
     assert {r["project_id"] for r in store.decisions(tmp_path, "proj-a")} == {"proj-a"}
@@ -131,3 +120,35 @@ def test_project_id_is_required_everywhere(tmp_path, project):
     for call in (lambda: store.add_revision(tmp_path, project, make()), lambda: store.proposals(tmp_path, project)):
         with pytest.raises(store.ProposalInvalid):
             call()
+
+
+@pytest.mark.parametrize("revision", [0, -1, True, "1"])
+@pytest.mark.parametrize("decision", ["approved", "rejected"])
+def test_a_decision_the_read_path_would_refuse_is_never_appended(tmp_path, revision, decision):
+    pid = seed(tmp_path)
+    path = tmp_path / store.DECISIONS_FILENAME
+    before = path.read_bytes()
+    with pytest.raises(store.DecisionRefused):
+        store.decide(tmp_path, "vnx-dev", pid, decision, reason="r", decided_by="op", revision=revision, now=T1)
+    assert path.read_bytes() == before and store.get(tmp_path, "vnx-dev", pid)["status"] == "pending"
+
+
+def test_applied_binds_to_the_approved_revision(tmp_path):
+    pid = seed(tmp_path)
+    store.decide(tmp_path, "vnx-dev", pid, "approved", reason="goed", decided_by="op", revision=1, now=T1)
+    seed(tmp_path, voorstel="Tweede revisie")
+    path = tmp_path / store.DECISIONS_FILENAME
+    before = path.read_bytes()
+    for revision in (999, 2):
+        with pytest.raises(store.DecisionRefused):
+            store.decide(tmp_path, "vnx-dev", pid, "applied", reason="r", decided_by="op", revision=revision, applied_ref="#1")
+    assert path.read_bytes() == before and store.get(tmp_path, "vnx-dev", pid)["status"] == "approved"
+
+
+def test_a_hand_written_line_approving_a_missing_revision_is_refused_on_read(tmp_path):
+    pid = seed(tmp_path)
+    path = tmp_path / store.DECISIONS_FILENAME
+    line = store._record("vnx-dev", pid, 3, "approved", T1, reason="r", decided_by="op")
+    path.write_text(path.read_text() + store.json.dumps(line) + "\n")
+    with pytest.raises(store.StoreUnreadable):
+        store.proposals(tmp_path, "vnx-dev")
