@@ -43,7 +43,7 @@ def _back_to_v34(db: Path) -> None:
 
 def test_bootstrap_stamps_v35_with_the_adr007_key(tmp_path):
     db = _bootstrap(tmp_path)
-    assert _sql(db, "PRAGMA user_version") == [(35,)]
+    assert _sql(db, "PRAGMA user_version") == [(qdi.HIGHEST_QI_VERSION,)]
     info = _sql(db, "PRAGMA table_info(pattern_activation)")
     assert [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])] == ["project_id", "activation_id"]
     assert _sql(db, "PRAGMA index_info(idx_pattern_activation_rule_active)") != []
@@ -55,7 +55,7 @@ def test_a_v34_copy_migrates_to_v35_and_keeps_its_rows(tmp_path):
     _sql(db, "INSERT INTO prevention_rules (tag_combination, rule_type, description, recommendation, created_at) "
              "VALUES ('t', 'r', 'd', 'rec', 'now')")
     assert qdi.bootstrap_qi_db(db) is True
-    assert _sql(db, "PRAGMA user_version") == [(35,)]
+    assert _sql(db, "PRAGMA user_version") == [(qdi.HIGHEST_QI_VERSION,)]
     assert _sql(db, "SELECT name FROM sqlite_master WHERE type='table' AND name='pattern_activation'") != []
     assert _sql(db, "SELECT count(*) FROM prevention_rules") == [(1,)]
 

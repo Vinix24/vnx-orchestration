@@ -10,8 +10,9 @@ origin. The dominant origin becomes the dispatch's ``parent_dispatch`` (an exist
 making the "rework → original dispatch" edge persistent and auditable.
 
 Forward-looking by construction: only commits stamped with a token (governed lanes, post-#969) carry
-the link, so edges accrue as governed dispatches land. No new table (ADR-007-free); rework-by-role is a
-self-join over ``parent_dispatch``. Read-git + a single fill-once UPDATE; best-effort, never raises.
+the link, so edges accrue as governed dispatches land. Declared edges live in ``rework_edges``
+(ADR-071, ADR-007 key); rework-by-role is a self-join over ``parent_dispatch``. Read-git + a
+single fill-once UPDATE; best-effort, never raises.
 
 DBs (central per-project store):
   - provenance_registry  -> runtime_coordination.db   (commit_sha -> dispatch_id)
@@ -20,6 +21,7 @@ DBs (central per-project store):
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import subprocess
@@ -118,6 +120,71 @@ def load_dispatch_roles(qi_conn: sqlite3.Connection, project_id: str) -> "Dict[s
     except sqlite3.Error:
         return {}
     return {did: role for did, role in rows if did}
+
+
+EDGE_KINDS = ("round", "oi_fix", "pr_fix", "blame")
+EDGE_CLASSES = ("rework", "churn")
+EDGE_SOURCES = ("spec", "receipt", "blame")
+
+
+def record_edge(
+    qi_conn: sqlite3.Connection,
+    project_id: str,
+    rework_dispatch_id: str,
+    origin_dispatch_id: str,
+    kind: str,
+    edge_class: str,
+    *,
+    source: str,
+    evidence: Optional[dict] = None,
+) -> bool:
+    """Insert one rework edge into ``rework_edges``; fill-once on the ADR-007 key.
+
+    Returns True when a row was written and False when the key already existed (the stored
+    edge is never changed). An unknown ``kind``, ``edge_class`` or ``source``, or an empty id,
+    raises ValueError before any write. The caller owns the transaction.
+    """
+    if kind not in EDGE_KINDS:
+        raise ValueError(f"unknown edge kind {kind!r}; expected one of {EDGE_KINDS}")
+    if edge_class not in EDGE_CLASSES:
+        raise ValueError(f"unknown edge class {edge_class!r}; expected one of {EDGE_CLASSES}")
+    if source not in EDGE_SOURCES:
+        raise ValueError(f"unknown edge source {source!r}; expected one of {EDGE_SOURCES}")
+    for name, value in (
+        ("project_id", project_id),
+        ("rework_dispatch_id", rework_dispatch_id),
+        ("origin_dispatch_id", origin_dispatch_id),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    cur = qi_conn.execute(
+        "INSERT INTO rework_edges "
+        "(project_id, rework_dispatch_id, origin_dispatch_id, kind, class, evidence_json, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (project_id, rework_dispatch_id, origin_dispatch_id, kind) DO NOTHING",
+        (
+            project_id, rework_dispatch_id, origin_dispatch_id, kind, edge_class,
+            json.dumps(evidence or {}, sort_keys=True), source,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def load_edges(qi_conn: sqlite3.Connection, project_id: str) -> List[dict]:
+    """All edges of one project; empty on a store without the table (not yet migrated)."""
+    try:
+        rows = qi_conn.execute(
+            "SELECT rework_dispatch_id, origin_dispatch_id, kind, class, source, evidence_json "
+            "FROM rework_edges WHERE project_id = ? "
+            "ORDER BY rework_dispatch_id, origin_dispatch_id, kind",
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [
+        {"rework": r[0], "origin": r[1], "kind": r[2], "class": r[3], "source": r[4], "evidence_json": r[5]}
+        for r in rows
+    ]
 
 
 def _persist_parent(qi_conn: sqlite3.Connection, project_id: str, rework_did: str, origin_did: str) -> bool:
