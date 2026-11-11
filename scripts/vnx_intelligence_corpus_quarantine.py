@@ -16,6 +16,7 @@ from intelligence_corpus_quarantine.audit import AfterCommitError
 from intelligence_corpus_quarantine.baseline import measure_baseline
 from intelligence_corpus_quarantine.contract import write_manifest
 from intelligence_corpus_quarantine.purge import purge
+from intelligence_corpus_quarantine.rehearse import rehearse
 from intelligence_corpus_quarantine.snapshot import reuse_snapshot
 from intelligence_corpus_quarantine.store import quarantine, restore
 from intelligence_corpus_quarantine.verify import verify
@@ -51,7 +52,13 @@ def main(argv=None):
     wipe.add_argument("--db", type=Path, required=True)
     wipe.add_argument("--manifest", type=Path, required=True)
     wipe.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
-    for command in (store, back, proof, wipe):
+    trial = commands.add_parser("rehearse")
+    trial.add_argument("--db", type=Path, required=True)
+    trial.add_argument("--manifest", type=Path, required=True)
+    trial.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
+    trial.add_argument("--work", type=Path, help="work directory (default: a new rehearse-<time> next to the permit dir)")
+    trial.add_argument("--discard-copy", action="store_true", help="remove the copy afterwards, nothing else")
+    for command in (store, back, proof, wipe, trial):
         command.add_argument("--state-dir", type=Path, help="audit dir (default: the resolved VNX_STATE_DIR)")
     args = parser.parse_args(argv)
     if args.command in ("baseline", "quarantine") and not args.out.is_dir():
@@ -63,6 +70,11 @@ def main(argv=None):
             print("\n".join(f"{k}: {v}" for k, v in verdict.items()) if args.human
                   else json.dumps(verdict, sort_keys=True))
             return 0
+        if args.command == "rehearse":
+            verdict = rehearse(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir(),
+                               work_dir=args.work, discard_copy=args.discard_copy)
+            print(json.dumps(verdict, sort_keys=True))
+            return 0 if verdict["ok"] else 4
         if args.command == "purge":
             print(json.dumps(purge(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir()),
                              sort_keys=True))
