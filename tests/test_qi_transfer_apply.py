@@ -597,15 +597,17 @@ _CHANGE = {"none": lambda w: None, "parent_deleted": lambda w: _sql(w["src"], "D
            "parent_foreign": lambda w: (_sql(w["src"], "DELETE FROM success_patterns"), _on_sid(w, B, title="other"))}
 
 
+# planned: no copied line, undo returns not_copied and runs no step 1, so neither crash can occur.
+# copied, verified: the source holds the whole pre-image, step 1 writes nothing and has no COMMIT to crash before.
+_UNDO_CRASHES = [(s, c) for s in ("planned", "copied", "verified", "source_removed", "done", "restored")
+                 for c in (False, True) if not (s == "planned" or (s in ("copied", "verified") and not c))]
+
+
 @pytest.mark.parametrize("change", list(_CHANGE))
-@pytest.mark.parametrize("committed", [False, True], ids=["before_commit", "after_commit"])
-@pytest.mark.parametrize("state", ["planned", "copied", "verified", "source_removed", "done", "restored"])
+@pytest.mark.parametrize(("state", "committed"), _UNDO_CRASHES,
+                         ids=[f"{s}-{'after' if c else 'before'}_commit" for s, c in _UNDO_CRASHES])
 def test_an_undo_crash_and_a_change_before_the_retry_never_take_the_last_copy_of_a_journaled_row(
         world, state, committed, change):
-    # planned: no copied line, undo returns not_copied and runs no step 1, so neither crash can occur.
-    # copied, verified: the source holds the whole pre-image, step 1 writes nothing and has no COMMIT to crash before.
-    if state == "planned" or (state in ("copied", "verified") and not committed):
-        pytest.skip("this crash cannot occur in this journal state")
     before = _snapshot(world)
     _crash(world, "done" if state == "restored" else state)
     if state == "restored":  # an earlier undo journaled restored, its source COMMIT never ran
