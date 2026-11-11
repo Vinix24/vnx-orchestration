@@ -22,6 +22,9 @@ from project_root import resolve_central_data_dir
 
 _PLIST_LABEL = "com.vnx.auto-dream"
 _PLIST_NAME = f"{_PLIST_LABEL}.plist"
+_WATCH_LABEL = "com.vnx.dream-watch"
+_WATCH_PLIST_NAME = f"{_WATCH_LABEL}.plist"
+_PROBE_PATH = Path(__file__).resolve().parents[1] / "dream_liveness_probe.py"
 _CRON_MARKER = f"# vnx-auto-dream:{_PLIST_LABEL}"
 
 # Fallback PATH for the scheduled job when the installer itself runs with an
@@ -59,28 +62,7 @@ def _render_plist(template_path: Path, ctx: dict) -> str:
         return text
 
 
-def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
-    template_path = (
-        Path(__file__).resolve().parent / "templates" / "com.vnx.auto-dream.plist.j2"
-    )
-    log_dir = _central_log_dir(project_id)
-    ctx = {
-        "vnx_bin_path": vnx_bin,
-        "project_id": project_id,
-        "project_root": str(project_root),
-        "path_env": _path_env(),
-        "log_dir": str(log_dir),
-    }
-    rendered = _render_plist(template_path, ctx)
-
-    # Create the log dir before launchd is asked to write to it — launchd
-    # does not create missing StandardOutPath/StandardErrorPath directories.
-    log_dir.mkdir(parents=True, exist_ok=True)
-
-    out_dir = Path.home() / "Library" / "LaunchAgents"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path = out_dir / _PLIST_NAME
-
+def _write_plist_atomic(out_dir: Path, out_path: Path, rendered: str) -> None:
     fd, tmp_name = tempfile.mkstemp(dir=out_dir, suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -93,9 +75,8 @@ def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
             pass
         raise
 
-    # OI-1891: refuse to mutate the real launchd domain from a test run.
-    _vnx_paths.refuse_real_launchctl_under_test_runner()
 
+def _load_plist(out_path: Path) -> None:
     # Idempotent: unload before re-loading (suppressed if not loaded yet)
     subprocess.run(["launchctl", "unload", "-w", str(out_path)], capture_output=True)
     result = subprocess.run(
@@ -107,17 +88,52 @@ def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
         raise RuntimeError(
             f"launchctl load failed: {result.stderr.strip() or result.stdout.strip()}"
         )
-    return f"Installed and loaded: {out_path}"
+
+
+def _install_macos(project_id: str, project_root: Path, vnx_bin: str) -> str:
+    templates = Path(__file__).resolve().parent / "templates"
+    log_dir = _central_log_dir(project_id)
+    ctx = {
+        "vnx_bin_path": vnx_bin,
+        "python_bin": sys.executable,
+        "probe_path": str(_PROBE_PATH),
+        "project_id": project_id,
+        "project_root": str(project_root),
+        "path_env": _path_env(),
+        "log_dir": str(log_dir),
+    }
+    rendered = _render_plist(templates / f"{_PLIST_LABEL}.plist.j2", ctx)
+    watch_rendered = _render_plist(templates / f"{_WATCH_LABEL}.plist.j2", ctx)
+
+    # Create the log dir before launchd is asked to write to it — launchd
+    # does not create missing StandardOutPath/StandardErrorPath directories.
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    out_dir = Path.home() / "Library" / "LaunchAgents"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / _PLIST_NAME
+    watch_path = out_dir / _WATCH_PLIST_NAME
+    _write_plist_atomic(out_dir, out_path, rendered)
+    _write_plist_atomic(out_dir, watch_path, watch_rendered)
+
+    # OI-1891: refuse to mutate the real launchd domain from a test run.
+    _vnx_paths.refuse_real_launchctl_under_test_runner()
+
+    _load_plist(out_path)
+    _load_plist(watch_path)
+    return f"Installed and loaded: {out_path} and {watch_path}"
 
 
 def _uninstall_macos() -> str:
-    out_path = Path.home() / "Library" / "LaunchAgents" / _PLIST_NAME
-    if not out_path.exists():
-        return f"Not installed: {out_path}"
+    out_dir = Path.home() / "Library" / "LaunchAgents"
+    present = [p for p in (out_dir / _PLIST_NAME, out_dir / _WATCH_PLIST_NAME) if p.exists()]
+    if not present:
+        return f"Not installed: {out_dir / _PLIST_NAME}"
     _vnx_paths.refuse_real_launchctl_under_test_runner()
-    subprocess.run(["launchctl", "unload", "-w", str(out_path)], capture_output=True)
-    out_path.unlink()
-    return f"Unloaded and removed: {out_path}"
+    for path in present:
+        subprocess.run(["launchctl", "unload", "-w", str(path)], capture_output=True)
+        path.unlink()
+    return "Unloaded and removed: " + ", ".join(str(p) for p in present)
 
 
 def _cron_line(
