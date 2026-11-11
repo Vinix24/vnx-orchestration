@@ -40,7 +40,7 @@ from learning_failure_class import (
     merge_dispatch_group,
 )
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
-from prevention_rule_store import rule_id
+from prevention_rule_store import QueueUnreadable, queue_rules, rule_id
 from project_scope import resolve_stamp_project_id
 from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
@@ -66,8 +66,14 @@ DEFAULT_RECEIPT_CUTOFF = "2026-09-28T16:41:11Z"
 CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
 
 # Persisting is opt-in. Anything but "1" leaves the loop in shadow mode: it
-# computes and reports, it changes no database row, no state file, no metric.
+# computes and reports, it changes no database row, no metric and no queue.
 PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
+
+# Queue mode ("1") is shadow plus the operator queue: proposals go to
+# pending_rules.json through the prevention-rule store, also when the probe gate is
+# degraded. No database row, no activation (ADR-065).
+QUEUE_ENV = "VNX_LEARNING_LOOP_QUEUE"
+UNRESOLVED_PROJECT = "unresolved"
 
 # Open items as the second signal source (D5). A class of open items is one
 # normalized title. It counts as recurring when it spans this many DISTINCT
@@ -182,6 +188,23 @@ def persist_enabled() -> bool:
     return os.environ.get(PERSIST_ENV, "0") == "1"
 
 
+def queue_enabled() -> bool:
+    """Queue mode is opt-in: only the literal "1" turns it on."""
+    return os.environ.get(QUEUE_ENV, "0") == "1"
+
+
+def _is_queueable(rule: Dict[str, Any]) -> bool:
+    """A failure group is queued only for an eligible class seen in at least two
+    dispatches. An open-item proposal has no failure class and passes."""
+    if "failure_class" not in rule:
+        return True
+    count = rule.get("occurrence_count")
+    return (
+        rule["failure_class"] in ELIGIBLE_CLASSES
+        and isinstance(count, int) and not isinstance(count, bool) and count >= 2
+    )
+
+
 def resolve_receipt_cutoff() -> datetime:
     """The instant before which receipts are ignored (env override, else default).
 
@@ -285,6 +308,7 @@ class LearningLoop:
     # via ``__new__`` behaves like a fresh one (env-derived, never AttributeError).
     _persist: Optional[bool] = None
     _cutoff: Optional[datetime] = None
+    queue_error: Optional[str] = None  # why the proposal queue could not be written
 
     @property
     def persist(self) -> bool:
@@ -1010,8 +1034,10 @@ class LearningLoop:
     def update_terminal_constraints(self, new_rules: List[Dict]):
         """Queue new prevention rules for operator confirmation (G-L1: no auto-activation).
 
-        Rules are written to pending_rules.json for operator review.
-        They are NOT inserted directly into prevention_rules table.
+        Rules are written to pending_rules.json through the prevention-rule store.
+        They are NOT inserted directly into prevention_rules table. Shadow mode
+        writes the queue only when queue mode is on. An unreadable queue raises
+        ``QueueUnreadable`` and the file stays as it was.
         """
         if not new_rules:
             return
@@ -1029,54 +1055,29 @@ class LearningLoop:
                 }
                 for rule in new_rules
             )
-            print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+            if not queue_enabled():
+                print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+                return
+        queueable = [rule for rule in new_rules if _is_queueable(rule)]
+        if not queueable:
             return
         try:
-            paths = ensure_env()
-            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-            pending_path = state_dir / "pending_rules.json"
-
-            # Load existing pending rules
-            existing: List[Dict] = []
-            if pending_path.exists():
-                try:
-                    data = json.loads(pending_path.read_text(encoding="utf-8"))
-                    existing = data.get("pending_rules", [])
-                except (json.JSONDecodeError, OSError):
-                    existing = []
-
-            now = datetime.now().isoformat()
-            added = 0
-            for rule in new_rules:
-                queued = {
-                    "id": _rule_id(rule),
-                    "created_at": now,
-                    "source": "learning_loop",
-                    "rule_type": "failure_prevention",
-                    "pattern": rule["pattern"],
-                    "terminal_constraint": _scope_value(rule.get("terminal_constraint")) or "any",
-                    "agent_constraint": _scope_value(rule.get("agent_constraint")) or None,
-                    "prevention": rule["prevention"],
-                    "confidence": rule["confidence"],
-                    "occurrence_count": rule.get("occurrence_count", 1),
-                    "status": "pending",
-                    **{k: rule[k] for k in ("signal", "source_oi_ids", "failure_class") if k in rule},
-                }
-                # Deduplicate by id
-                if not any(e.get("id") == queued["id"] for e in existing):
-                    existing.append(queued)
-                    added += 1
-
-            pending_path.write_text(
-                json.dumps({"pending_rules": existing}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            state_dir = Path(ensure_env()["VNX_STATE_DIR"]).expanduser().resolve()
+            counts = queue_rules(
+                state_dir,
+                queueable,
+                # "unresolved" binds to no decision: ``decide`` refuses another project's entry
+                project_id=self._resolve_own_project_id() or UNRESOLVED_PROJECT,
+                now=datetime.now().isoformat(),
             )
-            already = len(new_rules) - added
-            note = f" ({already} already pending)" if already else ""
-            print(f"📋 Queued {added} prevention rules{note} for operator review → {pending_path}")
-
+        except QueueUnreadable:
+            raise
         except Exception as e:
             print(f"❌ Error queuing prevention rules: {e}")
+            return
+        already = counts["merged"] + counts["unchanged"]
+        note = f" ({already} already pending)" if already else ""
+        print(f"📋 Queued {counts['added']} prevention rules{note} for operator review → {state_dir / 'pending_rules.json'}")
 
     def persist_to_intelligence_db(self):
         """Persist high-confidence patterns and failure data to intelligence DB tables.
@@ -1536,6 +1537,53 @@ class LearningLoop:
             print(f"❌ Error queuing stale patterns for supersede: {e}")
         return total
 
+    def _heartbeat(self, status: str, details: Dict[str, Any]) -> None:
+        """One ``learning_loop`` heartbeat; a beacon failure is logged, never fatal."""
+        try:
+            from health_beacon import HealthBeacon
+            from vnx_paths import ensure_env as _hb_ensure_env
+            _hb_paths = _hb_ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "learning_loop",
+                expected_interval_seconds=86400,
+            ).heartbeat(status=status, details=details)
+        except (ImportError, OSError, KeyError) as e:
+            log.debug("HealthBeacon %s heartbeat skipped: %s", status, e)
+
+    def _propose_rules(self, from_history: bool) -> tuple:
+        """Step 3: extraction, generation and queue. Returns ``(new_rules, receipt_stats)``;
+        an unreadable queue lands in ``queue_error`` and the file stays as it was."""
+        failure_window = (
+            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
+            else datetime.now(timezone.utc) - timedelta(hours=24)
+        )
+        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
+        receipt_stats = dict(self.receipt_stats)
+        self.learning_stats["failure_patterns"] = len(failure_patterns)
+        new_rules = self.generate_prevention_rules(failure_patterns)
+        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
+        new_rules = new_rules + oi_rules
+        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
+        self.learning_stats["open_item_signals"] = len(oi_rules)
+        self.learning_stats["proposal_count"] = len(new_rules)
+
+        if new_rules:
+            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
+            try:
+                self.update_terminal_constraints(new_rules)
+            except QueueUnreadable as exc:
+                self.queue_error = str(exc)
+                print(f"❌ Proposal queue unreadable, nothing written: {exc}")
+        return new_rules, receipt_stats
+
+    def _proposal_only_cycle(self, from_history: bool) -> Dict[str, Any]:
+        """Degraded gate in queue mode: extraction, generation and queue, nothing else."""
+        _, receipt_stats = self._propose_rules(from_history)
+        self.learning_stats["receipts_read"] = receipt_stats["read"]
+        self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
+        return dict(self.learning_stats)
+
     def daily_learning_cycle(self, from_history: bool = False):
         """Run the complete daily learning cycle.
 
@@ -1560,26 +1608,18 @@ class LearningLoop:
                 f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
                 f"({gate['detail']}) — skipping pattern updates"
             )
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="degraded",
-                    details={"probe_health": gate["probe_health"], "reason": gate["detail"]},
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon degraded heartbeat skipped: %s", e)
-            return {
+            statistics = self._proposal_only_cycle(from_history) if queue_enabled() else {}
+            reason = self.queue_error or gate["detail"]
+            self._heartbeat("degraded", {"probe_health": gate["probe_health"], "reason": reason})
+            result = {
                 "status": "degraded",
                 "probe_health": gate["probe_health"],
                 "gate": gate,
-                "statistics": {},
+                "statistics": statistics,
             }
+            if self.queue_error:
+                result["reason"] = self.queue_error
+            return result
 
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
         mode += " / PERSIST" if self.persist else " / SHADOW"
@@ -1605,22 +1645,7 @@ class LearningLoop:
 
         # 3. Extract and learn from failures
         print("\n🔍 Step 3: Learning from failures...")
-        failure_window = (
-            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
-            else datetime.now(timezone.utc) - timedelta(hours=24)
-        )
-        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
-        receipt_stats = dict(self.receipt_stats)
-        self.learning_stats["failure_patterns"] = len(failure_patterns)
-        new_rules = self.generate_prevention_rules(failure_patterns)
-        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
-        new_rules = new_rules + oi_rules
-        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
-        self.learning_stats["open_item_signals"] = len(oi_rules)
-
-        if new_rules:
-            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
-            self.update_terminal_constraints(new_rules)
+        new_rules, receipt_stats = self._propose_rules(from_history)
 
         # 4. Archive stale patterns
         print("\n📦 Step 4: Archiving unused patterns...")
@@ -1717,27 +1742,18 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
-        if self.persist:
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="ok",
-                    details={
-                        "elapsed_seconds": round(elapsed, 2),
-                        "patterns_tracked": len(self.pattern_metrics),
-                        "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
-                        "new_prevention_rules": len(new_rules),
-                        "patterns_archived": self.learning_stats.get("patterns_archived", 0),
-                    },
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon heartbeat skipped: %s", e)
+        if self.queue_error:
+            report["status"] = "degraded"
+            report["reason"] = self.queue_error
+            self._heartbeat("degraded", {"reason": self.queue_error})
+        elif self.persist:
+            self._heartbeat("ok", {
+                "elapsed_seconds": round(elapsed, 2),
+                "patterns_tracked": len(self.pattern_metrics),
+                "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
+                "new_prevention_rules": len(new_rules),
+                "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+            })
 
         return report
 

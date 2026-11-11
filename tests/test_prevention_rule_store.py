@@ -211,3 +211,32 @@ def test_module_has_no_database_access():
 
 def test_missing_queue_loads_as_empty(tmp_path):
     assert store.load_queue(tmp_path) == []
+
+
+def test_open_item_fields_are_carried_through(tmp_path):
+    _queue(tmp_path, _proposal(failure_class="", signal="open_items", source_oi_ids=["OI-1", "OI-2"]))
+    row = store.load_queue(tmp_path)[0]
+    assert (row["signal"], row["source_oi_ids"]) == ("open_items", ["OI-1", "OI-2"])
+
+
+def test_absent_open_item_fields_stay_absent(tmp_path):
+    _queue(tmp_path, _proposal())
+    assert not {"signal", "source_oi_ids"} & set(store.load_queue(tmp_path)[0])
+
+
+@pytest.mark.parametrize("bad", [{"signal": ""}, {"source_oi_ids": "OI-1"}])
+def test_malformed_open_item_fields_raise_and_write_nothing(tmp_path, bad):
+    with pytest.raises(ValueError):
+        _queue(tmp_path, _proposal(**bad))
+    assert not _qpath(tmp_path).exists()
+
+
+def test_existing_row_is_unchanged_by_the_optional_fields(tmp_path):
+    base = _proposal()
+    _queue(tmp_path, base)
+    first = _qpath(tmp_path).read_bytes()
+    assert store.rule_id(base) == store.rule_id({**base, "signal": "x", "source_oi_ids": ["OI-9"]})
+    assert store.proposal_hash(base) == store.proposal_hash({**base, "signal": "x", "source_oi_ids": ["OI-9"]})
+    counts = _queue(tmp_path, {**base, "signal": "x", "source_oi_ids": ["OI-9"]})
+    assert counts == {"added": 0, "merged": 0, "unchanged": 1}
+    assert _qpath(tmp_path).read_bytes() == first
