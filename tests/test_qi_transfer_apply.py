@@ -508,7 +508,9 @@ def _held(world) -> list:
     (_undo, "restored", True, B, "undone"),  # codex: the restore journaled, its source COMMIT never ran
     (_undo, "restored", True, "gamma", "undone"),
     (_apply, "source_removed", False, B, "source_not_restored"),  # step 3 committed, its journal line never written
-], ids=["restore_uncommitted", "restore_uncommitted_other_project", "step_3_committed_unjournaled"])
+    (_undo, "undo_started", True, B, "undone"),  # the last line: restore still reads done, so the row is not its own
+], ids=["restore_uncommitted", "restore_uncommitted_other_project", "step_3_committed_unjournaled",
+        "undo_started_last"])
 def test_an_unrelated_row_on_the_old_id_after_a_crash_is_never_taken_for_the_restored_row(
         world, run, state, after, project, outcome):
     if run is _undo:
@@ -526,7 +528,8 @@ def test_an_unrelated_row_on_the_old_id_after_a_crash_is_never_taken_for_the_res
         return
     back = _content_back(world)  # the pre-image under a new id, then the copy goes
     assert back["id"] != world["row"] and _held(world) == [[back["id"]], []]
-    assert [x["restored_id"] for x in _journal(world) if x["state"] == "restored"] == [world["row"], back["id"]]
+    restored = [x["restored_id"] for x in _journal(world) if x["state"] == "restored"]
+    assert restored == [world["row"]] * (state == "restored") + [back["id"]]
     for t in qtp.JUNCTION_TABLES:
         assert [j["pattern_id"] for j in _rows(world["src"], t)] == [f"intel_sp_{back['id']}"]
     assert all(_rows(world["dest"], t) == [] for t in FIVE)
@@ -595,10 +598,13 @@ def test_undo_reads_no_journal_field_before_it_passed_and_the_retry_refuses_too(
         assert _undo(world).returncode == 0
     _rewrite(world, line, edit, 0 if line == "restored" else 9)
     before, lines = _snapshot(world), _journal(world)
-    for _ in range(2):
+    started = ["undo_started"] * ("column the source has" in field)  # the lines passed, then restore refused a value
+    for _ in range(2):  # the retry writes no second undo_started
         proc = _undo(world)
         assert proc.returncode == 1 and field in _outcomes(proc)[0], proc.stdout + proc.stderr
-        assert _snapshot(world) == before and _journal(world) == lines
+        now = _journal(world)
+        assert _snapshot(world) == before and now[:len(lines)] == lines
+        assert [x["state"] for x in now[len(lines):]] == started
 
 
 def _missing(world) -> set:
@@ -651,3 +657,40 @@ def test_an_undo_crash_and_a_change_before_the_retry_never_take_the_last_copy_of
     if proc.returncode == 0:  # undone: the source holds the complete pre-image, the destination nothing of this move
         assert _missing(world) == set() and _content_back(world) and _snapshot(world)[1] == before[1]
     assert change == "parent_foreign" or (proc.returncode == 0 and _snapshot(world) == before)  # all back, all gone
+
+
+# the apply crash that leaves ``state`` the move's last journal state with its copy committed; done: an apply that ran
+_UNDO_FROM = {"copied": ("verified", False), "verified": ("verified", True), "source_removed": ("source_removed", True)}
+
+
+def _undo_killed_before_its_outcome(world, state: str) -> None:
+    """Apply up to ``state``, then an undo killed after undo step 2's destination COMMIT, before it journals undone."""
+    if state in _UNDO_FROM:
+        _crash(world, *_UNDO_FROM[state])
+    else:
+        assert _apply(world).returncode == 0
+    assert _journal(world)[-1]["state"] == state
+    _crash(world, "undone", after=False, run=_undo)
+
+
+@pytest.mark.parametrize("state", ["copied", "verified", "source_removed", "done"])  # copied: codex on 85accf48
+def test_an_undo_killed_after_its_destination_commit_is_never_moved_back_by_resume(world, state):
+    before = _snapshot(world)
+    _undo_killed_before_its_outcome(world, state)
+    lines = _journal(world)
+    proc = _resume(world)  # the old code copied again and removed the restored source row: done
+    assert proc.returncode == 1 and _outcomes(proc) == ["undo_started"], proc.stdout + proc.stderr
+    assert _snapshot(world) == before and _missing(world) == set()  # the source holds the pre-image, no copy is left
+    assert _journal(world) == lines and [x["state"] for x in lines].count("undo_started") == 1
+
+
+@pytest.mark.parametrize("state", ["copied", "verified", "source_removed", "done"])
+def test_a_second_undo_after_that_crash_finishes_and_a_third_answers_from_the_journal(world, state):
+    before = _snapshot(world)
+    _undo_killed_before_its_outcome(world, state)
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before, proc.stdout
+    lines = _journal(world)
+    assert [x["state"] for x in lines].count("undo_started") == 1 and lines[-1]["state"] == "undone"
+    proc = _undo(world)  # a finished undo writes nothing
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _journal(world) == lines

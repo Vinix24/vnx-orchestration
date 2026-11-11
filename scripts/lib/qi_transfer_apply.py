@@ -14,7 +14,8 @@ never in neither; no atomicity across files is claimed. ``resume`` runs the same
 state. ``undo`` touches only moves with a ``copied`` line: the source gets the pre-image back first (``restored``),
 then the destination loses only what this move created, still holds what it wrote and nothing else names; a changed
 or named copy stays (``undone_kept_changed_copy``), as does every copy while the source lacks a row or junction row
-of the pre-image (``source_missing``, ``source_not_restored``). Apply and resume never move an undo-touched move again.
+of the pre-image (``source_missing``, ``source_not_restored``). Undo journals ``undo_started`` before either file
+changes: from that line on, apply and resume never move the move again.
 
 CLI: qi_transfer_apply.py {apply --plan PLAN.json --reason TEXT | resume --plan-id ID | undo --plan-id ID --reason TEXT}
      [--vnx-data-root DIR]
@@ -45,7 +46,7 @@ _MOVE_KEYS = ("table", "source_id", "source_db", "destination_db", "destination_
               "source_user_version", "destination_user_version")
 _FINISHED = ("done", "already_present")
 _UNDONE = ("undone", "undone_kept_changed_copy")  # a finished undo: a second one answers from the journal
-_UNDO_STATES = ("restored", "source_missing", "source_not_restored") + _UNDONE
+_UNDO_STATES = ("undo_started", "restored", "source_missing", "source_not_restored") + _UNDONE  # never advanced again
 _UNDO_OK = ("undone", "not_copied")  # source_missing, source_not_restored, undone_kept_changed_copy: exit 1
 _STEP_3_REFUSALS = ("drift", "destination_missing", "destination_locked", "source_locked")
 _SOURCE_KEPT = "step 3 deleted nothing: the source keeps the row; the journal line after verified names why"
@@ -311,9 +312,10 @@ def _remove(mv: _Move, pre: Dict[str, Any], copied: Dict[str, Any]) -> str:
 
 
 def _advance(mv: _Move, index, reason: str) -> str:
-    """Run one move from its last journal state to ``done``; a no-op on a move an earlier run finished."""
+    """Run one move from its last journal state to ``done``; a no-op on a move an earlier run finished.
+    From the ``undo_started`` line on, which an undo journals before either file changes, the move is never advanced."""
     if any(x["state"] in _UNDO_STATES for x in mv.lines()):
-        return "undo_started"  # an undo touched this move: this plan never moves it again
+        return "undo_started"  # an undo touched this move, or may have: this plan never moves it again
     for _ in range(len(JOURNAL_STATES) * 2):
         lines = mv.lines()
         state = (_latest(lines) or {}).get("state")  # None: the move has not started
@@ -458,7 +460,8 @@ def _drop_copy(mv: _Move, copied: Dict[str, Any], rid: int, pre: Dict[str, Any])
 
 
 def _undo(mv: _Move) -> str:
-    """Put the source back first, then drop only what this move created; a finished undo writes nothing."""
+    """Put the source back first, then drop only what this move created; a finished undo writes nothing.
+    Before either file changes, the journal holds one fsynced ``undo_started`` line: apply and resume stop there."""
     lines = mv.lines()
     finished = [x["state"] for x in lines if x["state"] in _UNDONE]
     if finished:
@@ -467,6 +470,8 @@ def _undo(mv: _Move) -> str:
         return "not_copied"  # no copy ever committed and step 3 never ran: nothing to put back or drop
     copied = _checked(mv, _latest(lines, "copied") or {})  # both lines before any field is read
     pre = _checked_planned(mv, _latest(lines, "planned") or {})["pre_image"]
+    if _latest(lines, "undo_started") is None:  # a crash after a COMMIT below leaves this mark, not copied or verified
+        mv.log("undo_started")
     rid = _restore(mv, lines, pre)  # None: the source holds other content on the old id, the copy stays
     outcome = "source_not_restored" if rid is None else _drop_copy(mv, copied, rid, pre)
     mv.log(outcome)  # after the destination COMMIT: a drop that never committed is found and done again
