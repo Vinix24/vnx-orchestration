@@ -27,6 +27,34 @@ class Parser(argparse.ArgumentParser):
         self.exit(2, f"{self.prog}: {message}\n")
 
 
+def _add_rehearse(commands):
+    trial = commands.add_parser("rehearse")
+    trial.add_argument("--db", type=Path, required=True)
+    trial.add_argument("--manifest", type=Path, required=True)
+    trial.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
+    trial.add_argument("--work", type=Path, help="work directory (default: a new rehearse-<time> next to the permit dir)")
+    trial.add_argument("--discard-copy", action="store_true", help="remove the copy afterwards, nothing else")
+    return trial
+
+
+def _run_rehearse(args):
+    verdict = rehearse(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir(),
+                       work_dir=args.work, discard_copy=args.discard_copy)
+    print(json.dumps(verdict, sort_keys=True))
+    return 0 if verdict["ok"] else 4
+
+
+def _run_baseline(args):
+    target = args.out / "manifest.json"
+    if args.db.expanduser().resolve() in (target.resolve(), target.with_suffix(".json.tmp").resolve()):
+        raise ValueError("manifest output would overwrite the database")
+    for path in (args.snapshot, args.reuse_snapshot):
+        if path is not None and path.expanduser().resolve() == target.resolve():
+            raise ValueError("manifest output would overwrite the snapshot")
+    reused = reuse_snapshot(args.reuse_snapshot, target) if args.reuse_snapshot is not None else None
+    write_manifest(target, measure_baseline(args.db, snapshot=args.snapshot, reused_snapshot=reused))
+
+
 def main(argv=None):
     parser = Parser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -52,12 +80,7 @@ def main(argv=None):
     wipe.add_argument("--db", type=Path, required=True)
     wipe.add_argument("--manifest", type=Path, required=True)
     wipe.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
-    trial = commands.add_parser("rehearse")
-    trial.add_argument("--db", type=Path, required=True)
-    trial.add_argument("--manifest", type=Path, required=True)
-    trial.add_argument("--quarantine", type=Path, required=True, help="the sealed artifact directory")
-    trial.add_argument("--work", type=Path, help="work directory (default: a new rehearse-<time> next to the permit dir)")
-    trial.add_argument("--discard-copy", action="store_true", help="remove the copy afterwards, nothing else")
+    trial = _add_rehearse(commands)
     for command in (store, back, proof, wipe, trial):
         command.add_argument("--state-dir", type=Path, help="audit dir (default: the resolved VNX_STATE_DIR)")
     args = parser.parse_args(argv)
@@ -71,10 +94,7 @@ def main(argv=None):
                   else json.dumps(verdict, sort_keys=True))
             return 0
         if args.command == "rehearse":
-            verdict = rehearse(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir(),
-                               work_dir=args.work, discard_copy=args.discard_copy)
-            print(json.dumps(verdict, sort_keys=True))
-            return 0 if verdict["ok"] else 4
+            return _run_rehearse(args)
         if args.command == "purge":
             print(json.dumps(purge(args.db, args.manifest, args.quarantine, state_dir=args.state_dir or resolve_state_dir()),
                              sort_keys=True))
@@ -86,14 +106,7 @@ def main(argv=None):
             print(json.dumps(restore(args.db, args.quarantine, state_dir=args.state_dir or resolve_state_dir(),
                                      allow_existing=args.allow_existing), sort_keys=True))
             return 0
-        target = args.out / "manifest.json"
-        if args.db.expanduser().resolve() in (target.resolve(), target.with_suffix(".json.tmp").resolve()):
-            raise ValueError("manifest output would overwrite the database")
-        for path in (args.snapshot, args.reuse_snapshot):
-            if path is not None and path.expanduser().resolve() == target.resolve():
-                raise ValueError("manifest output would overwrite the snapshot")
-        reused = reuse_snapshot(args.reuse_snapshot, target) if args.reuse_snapshot is not None else None
-        write_manifest(target, measure_baseline(args.db, snapshot=args.snapshot, reused_snapshot=reused))
+        _run_baseline(args)
     except AfterCommitError as exc:
         print(" ".join(str(exc).splitlines()), file=sys.stderr)
         return 4
