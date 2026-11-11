@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for qi_transfer_apply.py (reattr L3b, split 2 of 3): apply and resume move the row, the source last.
+"""Tests for qi_transfer_apply.py (reattr L3b): apply and resume move the row, the source last; undo puts it back.
 
 Every database, receipt store, plan and journal lives under tmp_path. The script only runs as a
 subprocess, so on a tree without it a test fails on an assertion, never on an ImportError.
@@ -76,6 +76,7 @@ def world(tmp_path: Path):
     _receipt(root, B, "d-1", project_id=A, report_path=f"/u/.vnx-data/{A}/unified_reports/d-1.md")
     row = _insert_success_pattern(src, project_id=B, source_dispatch_ids=["d-1"], title=TITLE)
     _junction(src, qtp.pattern_id_for("success_patterns", row), B)
+    _sql(src, "UPDATE pattern_injection_outcome SET evidence = ?", b"\x00\xff")  # bytes through apply and undo
     for db in (src, dest):
         _sql(db, "CREATE TABLE pattern_activation (pattern_id TEXT, state TEXT, blob BLOB)")
         _sql(db, "INSERT INTO pattern_activation VALUES (?, 'active', ?)", f"intel_sp_{row}", b"\x00\xff")
@@ -96,9 +97,14 @@ def _resume(world, plan_id=None, code=""):
                    "--vnx-data-root", world["root"], code=code)
 
 
-def _crash(world, state: str, after: bool = True) -> None:
-    """An apply killed with SIGKILL right after (or right before) it journals ``state``."""
-    proc = _apply(world, code=_CRASH.format(lib=str(LIB), state=state, after=after))
+def _undo(world, code=""):
+    return _script("qi_transfer_apply.py", "undo", "--plan-id", world["plan"]["plan_id"], "--reason", "test undo",
+                   "--vnx-data-root", world["root"], code=code)
+
+
+def _crash(world, state: str, after: bool = True, run=_apply) -> None:
+    """An apply (or ``run``) killed with SIGKILL right after (or right before) it journals ``state``."""
+    proc = run(world, code=_CRASH.format(lib=str(LIB), state=state, after=after))
     assert proc.returncode == -signal.SIGKILL, proc.stderr
 
 
@@ -334,3 +340,141 @@ def test_resume_refuses_a_journal_it_cannot_trust_and_changes_nothing(world, dam
         assert proc.returncode == 2 and proc.stdout == "", proc.stderr
         assert damage != "torn_last_line" or "is not JSON" in proc.stderr
     assert _snapshot(world) == before and path.read_bytes() == journal
+
+
+def _content_back(world) -> dict:
+    """The one source row of the plan's content, under the source project."""
+    [back] = [r for r in _rows(world["src"], "success_patterns") if r["title"] == TITLE]
+    assert back["project_id"] == B and qtp.content_key(back) == world["plan"]["planned_moves"][0]["content_key"]
+    return back
+
+
+def test_apply_then_undo_gives_the_source_its_row_back_and_leaves_no_copy(world):
+    before = _snapshot(world)
+    assert _apply(world).returncode == 0
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"], proc.stdout + proc.stderr
+    assert _content_back(world)["id"] == world["row"] and _snapshot(world) == before  # every row as before
+    lines = _journal(world)
+    assert [x["state"] for x in lines][-2:] == ["restored", "undone"] and lines[-2]["restored_id"] == world["row"]
+    proc = _apply(world)  # this plan never moves an undone move again
+    assert proc.returncode == 1 and _outcomes(proc) == ["undo_started"] and _snapshot(world) == before
+    proc = _undo(world)  # a second undo writes nothing
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before
+    assert _journal(world) == lines
+
+
+@pytest.mark.parametrize("run,state,after,outcome,pre", [
+    (_apply, "planned", True, "not_copied", False),  # no copied line: nothing to put back or drop
+    (_apply, "copied", True, "undone", False),  # the copy never committed
+    (_apply, "copied", True, "undone", True),  # same, onto content the destination held: it stays
+    (_apply, "verified", True, "undone", False),  # the row in both files
+    (_apply, "source_removed", False, "undone", False),  # the source deleted, its journal line never written
+    (_apply, "source_removed", True, "undone", False),
+    (_undo, "restored", False, "undone", False),  # the source put back, never committed, nothing journaled
+    (_undo, "restored", True, "undone", False),  # journaled, the source COMMIT never ran
+    (_undo, "undone", False, "undone", False),  # both files committed, the undone line never written
+])
+def test_an_undo_after_a_crash_in_each_journal_state_restores_every_row(world, run, state, after, outcome, pre):
+    if pre:
+        _preexisting(world)
+    before = _snapshot(world)
+    if run is _undo:
+        assert _apply(world).returncode == 0
+    _crash(world, state, after, run)
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == [outcome], proc.stdout + proc.stderr
+    assert _snapshot(world) == before and _content_back(world)["id"] == world["row"]
+
+
+def test_undo_puts_the_source_back_under_a_new_id_when_the_old_one_is_taken(world):
+    assert _apply(world).returncode == 0
+    _sql(world["src"], "INSERT INTO success_patterns (id, pattern_type, category, title, description, pattern_data, "
+         "project_id) VALUES (?, 'x', 'x', 'other', 'x', '{}', ?)", world["row"], B)
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"], proc.stdout + proc.stderr
+    back = _content_back(world)
+    assert back["id"] != world["row"] and [x["restored_id"] for x in _journal(world) if x["state"] == "restored"] == [
+        back["id"]]
+    for t in qtp.JUNCTION_TABLES:
+        assert [j["pattern_id"] for j in _rows(world["src"], t)] == [f"intel_sp_{back['id']}"]
+    assert all(_rows(world["dest"], t) == [] for t in FIVE)
+
+
+def test_undo_leaves_content_the_destination_already_held(world):
+    _preexisting(world)
+    before = _snapshot(world)
+    assert _outcomes(_apply(world)) == ["already_present"]
+    proc = _undo(world)  # only the junction rows this move created go, the row it found stays
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before
+
+
+@pytest.mark.parametrize("sql", ["UPDATE success_patterns SET title = 'edited'",
+                                 "UPDATE pattern_usage SET pattern_title = 'edited'",
+                                 "DELETE FROM success_patterns"])  # its junction rows stay behind
+def test_a_copy_changed_since_stays_and_the_source_still_gets_its_row_back(world, sql):
+    assert _apply(world).returncode == 0
+    _sql(world["dest"], sql)
+    dest = _snapshot(world)[1]
+    for _ in range(2):  # the second undo answers from the journal and writes nothing
+        proc = _undo(world)
+        assert proc.returncode == 1 and _outcomes(proc) == ["undone_kept_changed_copy"], proc.stdout + proc.stderr
+        assert _snapshot(world)[1] == dest and _content_back(world)["id"] == world["row"]
+    assert [x["state"] for x in _journal(world)][-2:] == ["restored", "undone_kept_changed_copy"]
+
+
+def test_a_source_that_changed_the_row_since_keeps_it_and_the_copy_goes(world):
+    _crash(world, "verified")
+    _sql(world["src"], "UPDATE success_patterns SET description = 'edited'")
+    assert _outcomes(_resume(world)) == ["drift"]  # step 3 deleted nothing
+    src = _snapshot(world)[0]
+    proc = _undo(world)
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world)[0] == src
+    assert all(_rows(world["dest"], t) == [] for t in FIVE) and "restored" not in [x["state"] for x in _journal(world)]
+
+
+_VANISH = """import sqlite3, sys
+sys.path.insert(0, {lib!r})
+import qi_transfer_apply as qa
+real = qa._restore
+def restore(mv, lines, pre):  # another writer takes the row out of the source between the two undo steps
+    rid = real(mv, lines, pre)
+    sqlite3.connect({src!r}, isolation_level=None).execute("DELETE FROM success_patterns")
+    return rid
+qa._restore = restore
+sys.exit(qa.main(sys.argv[1:]))
+"""
+
+
+def test_a_row_that_leaves_the_source_after_undo_step_1_keeps_the_copy_until_the_retry(world):
+    before = _snapshot(world)
+    assert _apply(world).returncode == 0
+    dest = _snapshot(world)[1]
+    proc = _undo(world, code=_VANISH.format(lib=str(LIB), src=str(world["src"])))
+    assert proc.returncode == 1 and _outcomes(proc) == ["source_missing"] and _snapshot(world)[1] == dest
+    assert _rows(world["src"], "success_patterns") == [] and _journal(world)[-1]["state"] == "source_missing"
+    proc = _undo(world)  # the restore line names a row that is gone: put back again, then the copy goes
+    assert proc.returncode == 0 and _outcomes(proc) == ["undone"] and _snapshot(world) == before
+
+
+_JUNCTION_CREATED = [lambda x, v=v: {**x, "junction": [j[:2] + ([] if v == "missing" else [v]) for j in x["junction"]]}
+                     for v in ("missing", None, "true", 1)]
+_UNDECODABLE = [_pre(junction=lambda j, kv=kv: {**j, "pattern_usage": [{**j["pattern_usage"][0], **kv}]})
+                for kv in ({"no_such_column": "x"}, {"pattern_title": ["x"]}, {"pattern_hash": {"__bytes_hex__": "zz"}})]
+
+
+@pytest.mark.parametrize("line,field,edit", [("copied", f"valid {f}", {f: v}) for f, v in _MALFORMED]
+                         + [("copied", "valid junction", e) for e in _JUNCTION_CREATED]
+                         + [("planned", f"valid {f}", e) for f, e in _PLANNED]
+                         + [("planned", "no value of a column the source has", e) for e in _UNDECODABLE]
+                         + [("restored", "valid restored_id", {"restored_id": v}) for v in ("1", True, None, "missing")])
+def test_undo_reads_no_journal_field_before_it_passed_and_the_retry_refuses_too(world, line, field, edit):
+    assert _apply(world).returncode == 0
+    if line == "restored":  # the undo committed both files, its undone line is gone: the retry reads restored
+        assert _undo(world).returncode == 0
+    _rewrite(world, line, edit, 0 if line == "restored" else 9)
+    before, lines = _snapshot(world), _journal(world)
+    for _ in range(2):
+        proc = _undo(world)
+        assert proc.returncode == 1 and field in _outcomes(proc)[0], proc.stdout + proc.stderr
+        assert _snapshot(world) == before and _journal(world) == lines
