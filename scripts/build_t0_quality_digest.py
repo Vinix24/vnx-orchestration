@@ -223,6 +223,29 @@ def build_operational_defects(
 
 # ── Section 2: Prompt/Config Tuning ──────────────────────────────────────────
 
+def _fetch_injectable_prevention_rules(
+    db: sqlite3.Connection,
+    state_dir: Path,
+    limit: int,
+) -> List[tuple]:
+    """Top prevention rules that pass the activation predicate, best first.
+
+    sqlite3.OperationalError propagates to the caller, which logs and skips the section.
+    """
+    guard_sql, guard_params = injectable_clause(db, state_dir)
+    cursor = db.execute(
+        f"""
+        SELECT id, tag_combination, rule_type, recommendation, confidence
+        FROM prevention_rules
+        WHERE {guard_sql}
+        ORDER BY confidence DESC, triggered_count DESC
+        LIMIT ?
+        """,
+        (*guard_params, limit),
+    )
+    return cursor.fetchall()
+
+
 def build_prompt_config_tuning(
     db: Optional[sqlite3.Connection],
     state_dir: Path,
@@ -268,18 +291,7 @@ def build_prompt_config_tuning(
     if db:
         remaining = MAX_PER_SECTION - len(recs)
         try:
-            guard_sql, guard_params = injectable_clause(db, state_dir)
-            cursor = db.execute(
-                f"""
-                SELECT id, tag_combination, rule_type, recommendation, confidence
-                FROM prevention_rules
-                WHERE {guard_sql}
-                ORDER BY confidence DESC, triggered_count DESC
-                LIMIT ?
-                """,
-                (*guard_params, remaining),
-            )
-            for row in cursor.fetchall():
+            for row in _fetch_injectable_prevention_rules(db, state_dir, remaining):
                 rule_id, tags_raw, rule_type, recommendation, confidence = row
                 try:
                     tags = json.loads(tags_raw) if isinstance(tags_raw, str) else tags_raw
