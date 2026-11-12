@@ -73,6 +73,8 @@ def load_plan(path: Path) -> Dict[str, Any]:
         raise PlanError("planned_moves is not a list of complete moves on a pattern table")
     body = {k: plan.get(k) for k in ("plan_version", "user_versions", "journal_states", "schema_gap_rows",
                                      "unplanned_rows", "listed_rows")}
+    # collision_rows and no_project_column (L3a-c) are part of the hash when the plan carries them
+    body.update({k: plan[k] for k in ("collision_rows", "no_project_column") if isinstance(plan, dict) and k in plan})
     body["planned_moves"] = [{k: v for k, v in m.items() if k != "journal_path"} for m in moves]
     digest = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()[:16]
     if body["plan_version"] != PLAN_VERSION or digest != plan.get("plan_id"):

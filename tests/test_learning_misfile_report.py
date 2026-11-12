@@ -240,3 +240,39 @@ def test_verify_changes_no_database_file(world):
     assert _verify(path).returncode == 0
     assert _snapshot(world["tmp"]) == before
 
+
+
+def test_report_counts_a_destination_collision_under_collision_not_moves(world):
+    # Red run: on origin/main the row stays under moves and there is no collision category.
+    _sql(world["dest"], "CREATE UNIQUE INDEX ux_sp_natural ON success_patterns (project_id, pattern_type, title)")
+    _insert_success_pattern(world["dest"], project_id="beta", source_dispatch_ids=None, title="misrouted")
+    proc = _cli("report", "--all", "--json", "--vnx-data-root", str(world["root"]))
+    assert proc.returncode == 0, proc.stderr
+    counts = json.loads(proc.stdout)["databases"][str(world["src"].resolve())]
+    assert counts["collision"] == 1 and counts["moves"] == 0
+
+
+def test_report_without_collision_has_zero_collision_and_keeps_moves(world):
+    counts = json.loads(_cli("report", "--all", "--json", "--vnx-data-root", str(world["root"])).stdout)
+    counts = counts["databases"][str(world["src"].resolve())]
+    assert counts["collision"] == 0 and counts["moves"] == 1 and counts["no_project_column"] == 0
+
+
+def test_report_names_a_table_without_project_id_and_exits_0(world):
+    # Red run: on origin/main the database lands in errors ("no such column: project_id") and the exit is 1.
+    legacy = world["tmp"] / "legacy" / "state" / "quality_intelligence.db"
+    legacy.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(legacy))
+    conn.execute("CREATE TABLE success_patterns (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE antipatterns (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO success_patterns (title) VALUES ('old'), ('older')")
+    conn.commit()
+    conn.close()
+    proc = _cli("report", "--db", str(legacy), "--json", "--vnx-data-root", str(world["root"]))
+    out = json.loads(proc.stdout)
+    assert proc.returncode == 0, proc.stdout
+    assert out["errors"] == {}
+    counts = out["databases"][str(legacy.resolve())]
+    assert counts["no_project_column"] == 2
+    assert counts["no_project_column_tables"] == ["antipatterns", "success_patterns"]
+    assert counts["moves"] == 0 and counts["collision"] == 0

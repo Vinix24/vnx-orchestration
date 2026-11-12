@@ -224,3 +224,79 @@ def test_out_in_the_directory_of_a_source_database_is_refused(world):
     assert proc.returncode == 2
     assert proc.stdout == ""
     assert not out.exists()
+
+
+_NATURAL_KEY = "CREATE UNIQUE INDEX ux_sp_natural ON success_patterns (project_id, pattern_type, title)"
+
+
+def test_destination_row_on_a_unique_index_is_a_collision_not_a_move(world):
+    # Red run: on origin/main r1 is planned as a move although beta already holds the same natural key.
+    _sql(world["dest"], _NATURAL_KEY)
+    held = _insert_success_pattern(world["dest"], project_id="beta", source_dispatch_ids=None, title="one")
+    plan = _plan(world)
+    assert plan["moves"] == 0 and plan["collision"] == 1
+    row = plan["collision_rows"][0]
+    assert row["source_id"] == world["r1"] and row["destination_row_id"] == held
+    assert row["index_columns"] == ["project_id", "pattern_type", "title"]
+    assert row["destination_project_id"] == "beta"
+    assert all(m["source_id"] != world["r1"] for m in plan["planned_moves"])
+
+
+def test_other_destination_project_or_title_is_no_collision(world):
+    _sql(world["dest"], _NATURAL_KEY)
+    _insert_success_pattern(world["dest"], project_id="gamma", source_dispatch_ids=None, title="one")
+    _insert_success_pattern(world["dest"], project_id="beta", source_dispatch_ids=None, title="other")
+    plan = _plan(world)
+    assert plan["moves"] == 1 and plan["collision"] == 0 and plan["collision_rows"] == []
+
+
+def test_a_null_in_the_unique_index_never_collides(world):
+    _sql(world["dest"], "CREATE UNIQUE INDEX ux_sp_used ON success_patterns (project_id, title, last_used)")
+    _insert_success_pattern(world["dest"], project_id="beta", source_dispatch_ids=None, title="one")
+    assert _plan(world)["collision"] == 0
+
+
+def test_an_unevaluable_unique_index_is_unplanned_never_a_move(world):
+    _sql(world["dest"], "CREATE UNIQUE INDEX ux_sp_partial ON success_patterns (project_id, title) WHERE title <> ''")
+    plan = _plan(world)
+    assert plan["moves"] == 0
+    assert any(u["reason"].startswith("unique_index_unevaluable") for u in plan["unplanned_rows"])
+
+
+def test_a_plan_without_collisions_differs_only_by_the_new_empty_keys(world):
+    plan = _plan(world)
+    assert plan["collision"] == 0 and plan["collision_rows"] == [] and plan["no_project_column"] == {}
+    body = {k: v for k, v in plan.items()
+            if k not in ("plan_id", "moves", "schema_gap", "collision", "unplanned", "listed")}
+    for move in body["planned_moves"]:
+        move.pop("journal_path")
+    old = {k: v for k, v in body.items() if k not in ("collision_rows", "no_project_column")}
+    assert set(body) - set(old) == {"collision_rows", "no_project_column"}
+    assert plan["moves"] == len(old["planned_moves"]) == 1
+
+
+def _legacy_db(root: Path) -> Path:
+    db = root / "legacy" / "state" / "quality_intelligence.db"
+    db.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE success_patterns (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("CREATE TABLE antipatterns (id INTEGER PRIMARY KEY, title TEXT)")
+    conn.execute("INSERT INTO success_patterns (title) VALUES ('old')")
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_table_without_project_id_is_counted_not_a_crash(world):
+    # Red run: on origin/main this raises sqlite3.OperationalError: no such column: project_id.
+    legacy = _legacy_db(world["root"])
+    plan = qtp.build_plan([legacy, world["src"]], qtp.build_attribution_index(world["root"]))
+    assert plan["no_project_column"] == {str(legacy): {"success_patterns": 1, "antipatterns": 0}}
+    assert plan["moves"] == 1
+    assert all(m["source_db"] != str(legacy) for m in plan["planned_moves"] + plan["listed_rows"])
+
+
+def test_unopenable_database_still_raises(world):
+    world["src"].write_bytes(b"not a sqlite file at all, just bytes" * 20)
+    with pytest.raises(sqlite3.Error):
+        qtp.build_plan([world["src"]], qtp.build_attribution_index(world["root"]))
