@@ -66,11 +66,14 @@ class Supervisor:
             work, mine = (next((r for r in table or [] if r["pid"] == p), None) for p in (proc.pid, self.getpid()))
             lease.update(
                 owner_kind="run", parent_lease=parent, owner_uid=os.getuid(),
-                session_id=work["session"] if work else None, owner_pid=proc.pid,
-                owner_start_time=work["start_time"] if work else None,
+                # start_new_session makes the child its own session leader: sid == pid, known without a
+                # snapshot, so a workload that ends before the first read still ends in GONE.
+                session_id=str(proc.pid), owner_pid=proc.pid,
+                owner_start_time=work["start_time"] if work else None,   # unknown when it already exited
                 supervisor_pid=self.getpid(), supervisor_start_time=mine["start_time"] if mine else None)
-            if parent is not None:
-                self.log(_event(state, "nested", self.clock(), lease))
+            # These identities drive the release decisions: the ledger line comes before their commit.
+            self.log(_event(state, "nested" if parent is not None else "admitted", self.clock(), lease,
+                            reasons=[], max_slots=lease["max_slots"]))
         return proc
 
     def tick(self, lease_id: str, token: int) -> None:
@@ -84,10 +87,11 @@ class Supervisor:
 
     def try_release(self, lease_id: str, token: int) -> bool:
         """Release the lease and its child leases only when liveness says GONE; UNKNOWN never does."""
-        table = liveness.snapshot(self.ps)
         with self.store.transaction() as state:
             if not self._fence(state, lease_id, token, check_token(state, lease_id, token)):
                 return False
+            # Under the lock: a child committed before this point is in the table, so it cannot read GONE.
+            table = liveness.snapshot(self.ps)
             holders = state["holders"]
             verdict, _ = liveness.lease_liveness(holders[lease_id], table, holders)
             if verdict != liveness.GONE:

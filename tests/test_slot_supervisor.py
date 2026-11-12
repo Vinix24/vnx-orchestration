@@ -40,6 +40,28 @@ class Store:
         yield work
         self.state = work
 
+class RacingStore(Store):
+    """``before`` runs once, ahead of the next transaction: another supervisor committing in the gap."""
+
+    before = None
+
+    def transaction(self):
+        hook, self.before = self.before, None
+        if hook:
+            hook(self)
+        return super().transaction()
+
+class OrderedStore(Store):
+    def __init__(self, holders, order):
+        super().__init__(holders)
+        self.order = order
+
+    @contextlib.contextmanager
+    def transaction(self):
+        with super().transaction() as work:
+            yield work
+        self.order.append("commit")
+
 def lease(lease_id="L1", token=1, profile="runner", **extra):
     return {"lease_id": lease_id, "token": token, "profile": profile, "project_id": "p", "slots_granted": 1,
             "max_slots": 8, "admitted_at": 1000, "heartbeat_at": 1000, "parent_lease": None, "state": "active",
@@ -182,3 +204,27 @@ def test_a_fenced_run_ends_without_taking_the_lease_over(sup):
     with pytest.raises(PermissionError, match="stale_token"):
         world.supervisor.run("L1", 1, ["x"])
     assert not world.spawned and "L1" in store.state["holders"]
+
+def test_a_child_committed_before_the_transaction_keeps_both_leases(sup):
+    store = RacingStore({"L1": lease(session_id="500")})
+    child = lease("C", parent_lease="L1", session_id="501")
+    store.before = lambda s: s.state["holders"].update(C=child)
+    world = World(store, sup[0], [EMPTY])
+    # the child's session is in the process table from the moment its lease exists
+    world.ps = lambda argv: ps_text((77, 1, 77), (700, 1, 501)) if "C" in store.state["holders"] else EMPTY
+    assert world.supervisor.try_release("L1", 1) is False and set(store.state["holders"]) == {"L1", "C"}
+    assert world.logs == []
+
+def test_a_workload_that_ends_before_the_first_tick_still_ends_in_gone(sup):
+    store = Store({"L1": lease()})
+    world = World(store, sup[0], [EMPTY], proc=Proc(polls=0, code=3))   # not in the first snapshot
+    assert world.supervisor.run("L1", 1, ["x"]) == 3 and "L1" not in store.state["holders"]
+    assert world.logs[-1]["event"] == "released"
+
+def test_a_root_start_logs_before_the_state_commit(sup):
+    order = []
+    store = OrderedStore({"L1": lease()}, order)
+    world = World(store, sup[0], [ALIVE_TABLE])
+    world.supervisor.log = lambda ev: (order.append(ev["event"]), world.logs.append(ev))
+    world.supervisor.start("L1", 1, ["x"])
+    assert order == ["admitted", "commit"] and world.logs[0]["lease_id"] == "L1" and world.logs[0]["parent_lease"] is None
