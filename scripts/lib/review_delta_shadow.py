@@ -40,12 +40,17 @@ def read_shadow(path: Path) -> List[Dict[str, Any]]:
     except OSError:
         return []
     out: List[Dict[str, Any]] = []
-    for raw in rows:
+    for raw in filter(str.strip, rows):
         try:
-            out.append(json.loads(raw))
+            row = json.loads(raw)
         except ValueError:
-            continue
-    return [row for row in out if isinstance(row, dict)]
+            row = None
+        if isinstance(row, dict):
+            out.append(row)
+    skipped = len([r for r in rows if r.strip()]) - len(out)
+    if skipped:  # DR-5 counts pairs from this file: a skipped line is a pair that may be missing
+        logger.warning("review_delta_shadow: %d unreadable line(s) skipped in %s", skipped, path)
+    return out
 
 
 def max_chain() -> int:
@@ -183,8 +188,9 @@ def run_shadow(*, request_payload: Mapping[str, Any], state_dir: Path, project_r
         logger.warning("review_delta_shadow: %s", exc)
         try:
             book(path, {**line, "reasons": [REASON_ERROR], "error": str(exc)[:200]})
-        except Exception:  # vnx-silent-except: booking failed too, the warning above is the trace
-            pass
+        except Exception as booking:  # fail-open: the full round never depends on the shadow booking
+            logger.warning("review_delta_shadow: booking the error line in %s failed: %s: %s", path,
+                           type(booking).__name__, booking)
         return None
     finally:
         if worktree is not None:

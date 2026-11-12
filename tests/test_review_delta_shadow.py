@@ -145,3 +145,23 @@ def test_a_corrupt_shadow_file_changes_nothing_the_ledger_returns(tmp_path, shad
     again = rr.read_ledger(path)
     assert again.lines == clean.lines and not again.bad and rr.codex_rounds(again.lines) == rr.codex_rounds(clean.lines)
     assert shadow(state)["delta_verdict"] == "pass"
+
+
+def test_a_failed_error_booking_is_logged_and_run_shadow_stays_fail_open(tmp_path, shadow, monkeypatch, caplog):
+    state = _ledger(tmp_path)
+    monkeypatch.setattr(ds, "book", lambda path, record: (_ for _ in ()).throw(OSError("disk full")))
+    monkeypatch.setattr(ds, "shadow_eligible", lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    with caplog.at_level("WARNING", logger=ds.logger.name):
+        assert shadow(state) is None
+    booking = [r.getMessage() for r in caplog.records if "OSError" in r.getMessage()]
+    assert booking and "disk full" in booking[0] and "delta.ndjson" in booking[0]
+
+
+def test_corrupt_shadow_lines_are_counted_and_a_clean_file_logs_nothing(tmp_path, caplog):
+    path, clean = tmp_path / "delta.ndjson", tmp_path / "clean.ndjson"
+    path.write_bytes(b'{"a":1}\n{not json\n[1]\n\n{"b":2}\n')
+    clean.write_text('{"a":1}\n')
+    with caplog.at_level("WARNING", logger=ds.logger.name):
+        assert ds.read_shadow(clean) == [{"a": 1}] and ds.read_shadow(tmp_path / "none") == [] and not caplog.records
+        assert ds.read_shadow(path) == [{"a": 1}, {"b": 2}]
+    assert any("2 unreadable" in r.getMessage() for r in caplog.records)
