@@ -1,7 +1,7 @@
 # VNX Documentation
 
 **Status**: Active
-**Last Updated**: 2026-10-18
+**Last Updated**: 2026-11-12
 **Owner**: VNX Maintainer
 **Purpose**: Describe how VNX documentation is organized and where to find the current source of truth.
 
@@ -14,13 +14,14 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 **Most Used**:
 - Index: `DOCS_INDEX.md`
 - Architecture: `core/00_VNX_ARCHITECTURE.md`
+- Provider lanes, review stack and takeover chain: `core/PROVIDER_LANES.md`
 - Quickstart: `QUICKSTART.md`
 - Getting started: `core/00_GETTING_STARTED.md`
 - Dispatch workflow: `DISPATCH_GUIDE.md`
 - Monitoring: `operations/README.md`
 - Scripts: `SCRIPTS_INDEX.md`
 - Product modes: `contracts/PRODUCTIZATION_CONTRACT.md`
-- Roadmap: the tracks database — `vnx horizon queue` for live state (ADR-047); architecture principles and wave history: `manifesto/ROADMAP.md`
+- Roadmap: the tracks database (`vnx horizon queue` for live state, ADR-047); architecture principles and wave history: `manifesto/ROADMAP.md`
 
 ## Directory Overview
 
@@ -29,7 +30,8 @@ Use `DOCS_INDEX.md` for the canonical "one place to look" navigation.
 | `core/` | System architecture, file formats, technical references, and core contracts |
 | `contracts/` | Feature-level and platform contracts that govern runtime behavior |
 | `operations/` | Monitoring, multi-model usage, receipts, rollback, and runtime operations |
-| `intelligence/` | Public intelligence reference docs such as tag taxonomy and cost tracking |
+| `intelligence/` | Public intelligence reference docs: the operator-gated learning loop, tag taxonomy, scout pre-pass and cost tracking |
+| `investigations/` | Dated measurements that back a claim in the docs |
 | `manifesto/` | Public narrative docs: architecture story, roadmap, limitations, open method |
 | `onboarding/` | New-user orientation and first-run setup guidance |
 | `examples/` | Example orchestration flows for coding, research, and content work |
