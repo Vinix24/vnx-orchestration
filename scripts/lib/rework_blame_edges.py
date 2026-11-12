@@ -78,12 +78,34 @@ def _load_registry(rc_conn: Optional[sqlite3.Connection]) -> Tuple[Dict[str, str
     return by_commit, by_pr
 
 
-def _task_class(rc_conn: sqlite3.Connection, dispatch_id: str) -> Optional[str]:
+def _class_sources(rc_conn: sqlite3.Connection) -> frozenset:
+    """Columns of ``dispatches`` that can hold the task class, read once per run; none at all stops the run."""
     try:
-        row = rc_conn.execute("SELECT task_class FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+        columns = {row[1] for row in rc_conn.execute("PRAGMA table_info(dispatches)").fetchall()}
     except sqlite3.Error as exc:
         raise BlameRunError(f"dispatch ledger unreadable: {exc}") from exc
-    return (row[0] or None) if row else None
+    if not columns:
+        raise BlameRunError("dispatch ledger unreadable: the dispatches table is missing")
+    sources = frozenset(columns & {"task_class", "metadata_json"})
+    if not sources:
+        raise BlameRunError("dispatch ledger unreadable: dispatches has neither a task_class nor a metadata_json column")
+    return sources
+
+
+def _task_class(rc_conn: sqlite3.Connection, dispatch_id: str, sources: frozenset) -> Optional[str]:
+    """Class of a dispatch: the ``task_class`` column when set, else ``$.task_class`` in ``metadata_json``."""
+    parts = []
+    if "task_class" in sources:
+        parts.append("NULLIF(task_class, '')")
+    if "metadata_json" in sources:
+        parts.append("json_extract(metadata_json, '$.task_class')")
+    expr = parts[0] if len(parts) == 1 else f"COALESCE({', '.join(parts)})"
+    try:
+        row = rc_conn.execute(f"SELECT {expr} FROM dispatches WHERE dispatch_id = ?", (dispatch_id,)).fetchone()
+    except sqlite3.Error as exc:
+        raise BlameRunError(f"dispatch ledger unreadable: {exc}") from exc
+    value = row[0] if row else None
+    return value if isinstance(value, str) and value else None  # no row or no class = None, as before
 
 
 def _resolve(sha: str, subject: str, registry: Tuple[Dict[str, str], Dict[int, str]]) -> Optional[str]:
@@ -107,7 +129,7 @@ def _new_summary() -> dict:
     }
 
 
-def _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summary, git) -> None:
+def _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summary, git, sources) -> None:
     subject = git(repo_root, ["show", "-s", "--format=%s", sha]).strip()
     summary["scanned"] += 1
     if commit_type(subject) is None:
@@ -116,7 +138,7 @@ def _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summ
     if rework_did is None:
         summary["unattributed"] += 1
         return
-    edge_class = classify(subject, _task_class(rc_conn, rework_did))
+    edge_class = classify(subject, _task_class(rc_conn, rework_did, sources))
     per_origin: Dict[str, dict] = defaultdict(lambda: {"lines": 0, "files": set()})
     for origin_sha, detail in _origins(repo_root, sha, git).items():
         origin_did = _resolve(origin_sha, git(repo_root, ["show", "-s", "--format=%s", origin_sha]).strip(), registry)
@@ -175,9 +197,11 @@ def run_blame_edges(
         start = _start_point(wm_path, since)
         summary["watermark"] = start
         registry = _load_registry(rc_conn)
+        # _load_registry above already stopped the run on a missing connection, so None never reaches a real read
+        sources = _class_sources(rc_conn) if rc_conn is not None else frozenset()
         commits = git(repo_root, ["rev-list", "--reverse", "--first-parent", f"{start}..{ref}"]).split()
         for sha in commits:
-            _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summary, git)
+            _process_commit(repo_root, sha, rc_conn, qi_conn, project_id, registry, summary, git, sources)
             if persist:
                 qi_conn.commit()
                 _write_watermark(wm_path, sha)
