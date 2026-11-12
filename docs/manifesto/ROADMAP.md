@@ -243,7 +243,7 @@ ADR-007 composite-key compliance is enforced: every central table keys over `pro
 
 ## 4-Gate Enforcement Framework
 **Status**: `Next`
-**Why**: The review-gate stack that this item builds on has since changed: the default stack is `codex_gate,kimi_gate` (both subscription reviewers). When one is out, the takeover chain `codex_gate,kimi_gate,deepseek_gate` reads its seat, with each seat filled by its own reviewer. `glm_gate` left the default chain on 2026-10-17 (#2100). Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
+**Why**: The review-gate stack that this item builds on has since changed: the default stack is `codex_gate,deepseek_gate` since the operator decision of 2026-11-11 (the Kimi subscription is cancelled). When one is out, the takeover chain `codex_gate,deepseek_gate,claude_gate` reads its seat, with each seat filled by its own reviewer. `glm_gate` left the default chain on 2026-10-17 (#2100). Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
 
 **Goals**
 - Specify and implement the 4th gate (shift-left pre-dispatch quality signal)
