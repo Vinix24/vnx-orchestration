@@ -32,6 +32,7 @@
 **State and reconciliation**
 - State aggregator (write-path for multi-project state, per-project facet files): `STATE_AGGREGATOR.md`
 - Objective reconcile (`vnx objective reconcile`, batch git-grounded auto-close loop): `OBJECTIVE_RECONCILE.md`
+- Daily metrics (opt-in daily lead-time measurement, `report --check`, the zero-for-unknown scanner, ADR-063): `DAILY_METRICS.md`
 
 **Install, build, and migration**
 - Central install runbook (multi-project shared system install): `install-central-runbook.md`

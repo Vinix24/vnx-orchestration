@@ -194,3 +194,51 @@ def test_report_metric_without_a_measured_value_is_unknown_never_0(tmp_path, met
 def test_report_usage_errors_exit_2(tmp_path, args):
     code, out, err = _report(tmp_path, *args)
     assert (code, out) == (2, None) and "invalid choice: 'report'" not in err and err.strip()
+
+
+ZERO_ENTRY = {"kind": "keyed", "source": "t", "entries": {"codex_gate": _scalar(0, (), "x")}}
+
+
+@pytest.mark.parametrize("metric, record, flagged", [
+    ("merges", _scalar(0, (), "x"), "merges"), ("merges", _scalar(5.0, (), "x"), "merges"),
+    ("gate_duration_seconds_by_seat", ZERO_ENTRY, "gate_duration_seconds_by_seat:codex_gate"),
+])
+def test_scanner_flags_a_value_next_to_an_unknown_reason_and_passes_a_clean_store(
+        tmp_path, metric, record, flagged):
+    _write(tmp_path, _docs())
+    assert _report(tmp_path, "--scan-zero-for-unknown")[:2] == (0, {
+        "files_scanned": 7, "violations": 0, "records": [], "unreadable_files": [], "store_empty": False})
+    docs = _docs()
+    docs[WINDOW[2]]["metrics"][metric] = record
+    _write(tmp_path, docs)
+    code, out, _ = _report(tmp_path, "--scan-zero-for-unknown")
+    assert (code, out["violations"], [item["metric"] for item in out["records"]]) == (1, 1, [flagged])
+    assert out["records"][0]["file"] == f"{WINDOW[2].isoformat()}.json"
+
+
+def test_scanner_reads_every_revision_and_check_fails_on_it(tmp_path):
+    _write(tmp_path, _docs())
+    old = _doc(date(2026, 11, 1))
+    old["metrics"]["merges"] = _scalar(0, (), "x")
+    (tmp_path / "store" / "2026-11-01.r2.json").write_text(json.dumps(old), encoding="utf-8")
+    assert _report(tmp_path, "--scan-zero-for-unknown")[1]["records"][0]["file"] == "2026-11-01.r2.json"
+    code, out, _ = _report(tmp_path, "--check")
+    assert (code, out["unmet"]) == (1, ["zero_for_unknown"])
+
+
+@pytest.mark.parametrize("make_dir", [False, True])
+def test_scanner_on_an_empty_or_absent_store_exit_1(tmp_path, make_dir):
+    if make_dir:
+        (tmp_path / "store").mkdir()
+    code, out, _ = _report(tmp_path, "--scan-zero-for-unknown")
+    assert (code, out["store_empty"], out["files_scanned"]) == (1, True, 0)
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"[]", b'{"metrics": []}', b"{}", b"\xff\xfe"])
+def test_unreadable_day_file_fails_scanner_and_check(tmp_path, content):
+    _write(tmp_path, _docs())
+    (tmp_path / "store" / "2026-11-01.json").write_bytes(content)
+    code, out, _ = _report(tmp_path, "--scan-zero-for-unknown")
+    assert (code, out["unreadable_files"]) == (1, ["2026-11-01.json"])
+    code, out, _ = _report(tmp_path, "--check")
+    assert (code, out["unmet"]) == (1, ["unreadable_files"])
