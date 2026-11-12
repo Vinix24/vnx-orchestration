@@ -2143,6 +2143,7 @@ def _emit_receipt(
     review_seats: Optional[Dict[str, Any]] = None,
     shadow_seat_rule: Optional[Dict[str, Any]] = None,
     door_check: Optional[Dict[str, Any]] = None,
+    merge_tree: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Write pr_merged receipt to t0_receipts.ndjson with dual-scheme linkage.
 
@@ -2182,6 +2183,14 @@ def _emit_receipt(
     ``door_check`` (deur D4, ADR-061 contract (c)) is written always, like
     ``preflight_gates``: a caller without the door records ``not_evaluated``.
     This receipt follows a confirmed merge only, so ``merge_outcome`` is ``merged``.
+
+    ``merge_tree`` (DR-7, requirement 9) is the merge-tree record
+    ``_merge_tree_record`` computed after the merge: ``merge_sha``,
+    ``merged_tree``, ``tested_head``, ``tested_tree``, ``tree_equal`` and, when
+    something could not be read, ``merge_tree_unavailable``. The five are
+    optional fields on this same receipt — no new ``event_type``, no new
+    receipt kind — and a caller that passes nothing (backfill, a direct
+    ``_emit_receipt``) writes exactly the keys it wrote before.
     """
     kwargs: Dict[str, Any] = {
         "pr_number": pr_number,
@@ -2203,6 +2212,8 @@ def _emit_receipt(
     kwargs["review_seats"] = review_seats or _unjudged_seats_record(pr_number, "", "not_evaluated")
     if shadow_seat_rule is not None:
         kwargs["shadow_seat_rule"] = shadow_seat_rule
+    if merge_tree:
+        kwargs.update(merge_tree)
     door = door_check or _door_check_block(DOOR_STATE_NOT_EVALUATED, "")
     kwargs["door_check"] = dict(door, merge_outcome=MERGE_MERGED)
     return emit_governance_receipt(
@@ -2512,7 +2523,9 @@ def merge_pr(
     callers that never ran a gate.
 
     Returns a dict with keys: success, pr_number, dispatch_id, merge_method,
-    pr_title, branch, receipt_status, receipt_ok, register_ok, error.
+    pr_title, branch, receipt_status, receipt_ok, register_ok, error, and —
+    after a confirmed merge — ``merge_tree`` (DR-7: what landed on main versus
+    what the gates tested; never a refusal, see ``_merge_tree_record``).
 
     ``success`` means "the merge happened on GitHub" — it is NOT the CLI
     verdict. A merge whose receipt could not be written has ``success=True``
@@ -2570,6 +2583,11 @@ def merge_pr(
     if on_merged is not None:
         on_merged()  # deur D4: confirmed before any bookkeeping, so nothing below can revoke the permit
 
+    # DR-7 (requirement 9): which commit and which tree landed on main, next to
+    # the head the gates tested. Evidence only — it can never refuse a merge
+    # that already happened, and every unreadable part is named on the record.
+    result["merge_tree"] = _merge_tree_record(pr_number, head_sha)
+
     # Derive internal PR-N label from title for dual-scheme receipt
     pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
     if not dispatch_id:
@@ -2587,6 +2605,7 @@ def merge_pr(
         preflight_gates=preflight_gates,
         review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
         shadow_seat_rule=shadow_seat_rule, door_check=door_check,
+        merge_tree=result["merge_tree"],
     )
 
     # Emit event to dispatch_register.ndjson (best-effort)
