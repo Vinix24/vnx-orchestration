@@ -109,9 +109,11 @@ def _cmd_report(args: argparse.Namespace) -> int:
     report = report_lib.build_report(state_dir, projects_root, since, until)
     report_lib.write_report(state_dir, report)
     problem = _source_problem(report)
-    if report["status"] != "ok" or any(b["state"] == "error" for b in report["bronstaat"].values()):
-        print(problem or f"bron {report['status']}", file=sys.stderr)
+    if problem:
+        print(problem, file=sys.stderr)
         return 2
+    if report["status"] == "low_coverage":
+        print(f"low_coverage: dekking {report['dekking']}, het rapport is geldig maar een deel van de prompts is niet geclassificeerd", file=sys.stderr)
     texts = None
     if args.show:
         prompts, _turns = _live_texts(state_dir, projects_root)
@@ -136,8 +138,9 @@ def _cmd_show_case(args: argparse.Namespace) -> int:
         return 2
     state_dir, projects_root = _state_dir(args), Path(args.projects_root)
     report = report_lib.build_report(state_dir, projects_root, since, until)
-    if report["status"] != "ok" or any(b["state"] != "ok" for b in report["bronstaat"].values()):
-        print(_source_problem(report) or f"bron {report['status']}", file=sys.stderr)
+    problem = _source_problem(report)
+    if problem:
+        print(problem, file=sys.stderr)
         return 1
     case = next((c for c in report["gevallen"] if c["case_id"] == args.case), None)
     if case is None:

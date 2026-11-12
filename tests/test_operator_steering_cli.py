@@ -167,3 +167,44 @@ def test_learning_route_reaches_the_same_output(env, capsys, monkeypatch):
     assert json.loads(routed)["gevallen"] == json.loads(direct)["gevallen"]
     bad = parse(["learning", "steering"])
     assert vnx_learning(bad) == 2
+
+
+def _low_coverage_env(env):
+    _, _, tdir = env
+    rows = [_user(f"lc{n}", "alfa beta gamma delta", 400 + n, "slc") for n in range(20)]
+    (tdir / "slc.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+
+def test_low_coverage_is_a_report_not_an_error(env, capsys):
+    _low_coverage_env(env)
+    code, out, err = run(env, capsys, "report", "--since", "3d", "--json")
+    report = json.loads(out)
+    assert code == 0 and report["status"] == "low_coverage" and "low_coverage" in err
+    case = report["gevallen"][0]["case_id"]
+    code, out, _ = run(env, capsys, "show", "--case", case, "--since", "3d")
+    assert code == 0 and out.startswith(f"case {case}")
+
+
+@pytest.mark.parametrize("command", [("report", "--since", "3d", "--json"), ("show", "--case", "x", "--since", "3d")])
+def test_a_vanished_memory_dir_refuses_both_commands(env, capsys, command):
+    import shutil
+
+    shutil.rmtree(env[2] / "memory")
+    code, out, err = run(env, capsys, *command)
+    assert code == (2 if command[0] == "report" else 1) and "memory absent" in err and out == ""
+
+
+def test_learning_route_honours_global_project_dir(env, capsys, tmp_path, monkeypatch):
+    import argparse
+
+    from vnx_cli.main import _register_learning_subparser
+    from vnx_cli.commands.learning import vnx_learning
+
+    state = env[0]
+    monkeypatch.setattr("vnx_cli.commands.learning._resolve_state_dir", lambda project_dir: state if project_dir == tmp_path / "proj" else tmp_path / "elders")
+    monkeypatch.chdir(tmp_path)
+    parser = argparse.ArgumentParser(prog="vnx")
+    _register_learning_subparser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["learning", "--project-dir", str(tmp_path / "proj"), "steering", "--", "--projects-root", str(env[1]), "report", "--since", "3d", "--json"])
+    assert vnx_learning(args) == 0
+    assert json.loads(capsys.readouterr().out)["status"] in ("ok", "low_coverage")

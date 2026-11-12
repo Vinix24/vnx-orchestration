@@ -795,6 +795,9 @@ def _cmd_steering(args) -> int:
     if not any(word in ("report", "show") for word in forwarded):
         print("Usage: vnx learning steering {report|show} ...", file=sys.stderr)
         return 2
+    if not any(word == "--state-dir" or word.startswith("--state-dir=") for word in forwarded):
+        # global --project-dir, like every other `vnx learning` subcommand; an explicit --state-dir wins
+        forwarded = ["--state-dir", str(_resolve_state_dir(Path(getattr(args, "project_dir", ".")))), *forwarded]
     return operator_steering.main(forwarded)
 
 
