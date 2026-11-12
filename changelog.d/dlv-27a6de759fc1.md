@@ -1,0 +1,1 @@
+- Rekenslot RS-7: `scripts/lib/slot/slot_shadow.py` simulates `enforce` admission on the shadow state in observe mode (`shadow_admit`, `shadow_release`) and returns a `would_wait` record with reasons and an `estimated_wait_s` that is `estimate: true` and `null` without a known hold time; the real holders and queue are never touched (dlv-27a6de759fc1).
