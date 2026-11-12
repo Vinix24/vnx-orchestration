@@ -98,6 +98,10 @@ class HygieneRunner:
                 """)
                 result = cursor.fetchone()
 
+                if result['total'] == 0:
+                    logger.info("Pattern quality: 0 patterns")
+                    return
+
                 logger.info(
                     f"Pattern quality: {result['total']} total, "
                     f"{result['avg_quality']:.1f} avg quality, "

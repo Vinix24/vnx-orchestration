@@ -1,1 +1,0 @@
-- The provider family of a review gate now comes from the `family` column of its `GATE_LANE_ROWS` row, so `gate_is_available` follows a newly registered row (review-lane P9a, OI-2654).

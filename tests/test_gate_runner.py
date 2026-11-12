@@ -1484,7 +1484,7 @@ class TestHarnessLaneDelegation:
 
         assert len(calls) == 1
         assert calls[0]["provider"] == "deepseek-harness"
-        assert calls[0]["model"] == "deepseek-flash"
+        assert calls[0]["model"] == "deepseek-v4-pro"
         instruction = calls[0]["instruction"]
         assert "BEGIN PR DIFF: UNTRUSTED DATA" in instruction
         assert TRUNCATION_NOTICE in instruction
@@ -1493,16 +1493,16 @@ class TestHarnessLaneDelegation:
 
         result_file = gate_env["results_dir"] / "pr-3-deepseek_gate.json"
         saved = json.loads(result_file.read_text(encoding="utf-8"))
-        assert saved["model"] == "deepseek-flash"
+        assert saved["model"] == "deepseek-v4-pro"
         depth = saved["execution_depth"]
         assert depth["diff_truncated"] is True
         assert depth["diff_limit"] == deepseek_cap
         assert depth["diff_chars"] == len(big_diff.strip())
 
-    def test_deepseek_gate_default_model_is_flash_and_env_override_wins(
+    def test_deepseek_gate_default_model_is_v4_pro_and_env_override_wins(
         self, gate_env, monkeypatch,
     ):
-        """OI-1939: default ``deepseek-flash``; ``VNX_DEEPSEEK_GATE_MODEL`` still wins,
+        """Default ``deepseek-v4-pro`` since 2026-11-11; ``VNX_DEEPSEEK_GATE_MODEL`` still wins,
         in the dispatcher call and in the saved record."""
         report_text = (
             "Reviewed the diff.\nRan the tests.\nNo blocking findings.\n\n"
@@ -1513,7 +1513,7 @@ class TestHarnessLaneDelegation:
         monkeypatch.setattr(
             GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda pr: "diff --git a/x b/x\n+x = 1\n"),
         )
-        for pr, env_value, expected in ((4, None, "deepseek-flash"), (5, "deepseek-v4-pro", "deepseek-v4-pro")):
+        for pr, env_value, expected in ((4, None, "deepseek-v4-pro"), (5, "deepseek-flash", "deepseek-flash")):
             factory, calls = self._fake_dispatcher(report_text)
             monkeypatch.setattr("plan_gate_panel._make_default_dispatcher", factory)
             if env_value is None:

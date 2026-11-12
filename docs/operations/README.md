@@ -13,7 +13,7 @@
 - Receipt pipeline: `RECEIPT_PIPELINE.md`
 - Event streams: `EVENT_STREAMS.md`
 - Runtime rollback (broker + canonical lease + tmux adapter cutover): `RUNTIME_CORE_ROLLBACK.md`
-- Subprocess adapter flag (per-terminal adapter selection): `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
+- Subprocess adapter flag (T1-T3 always take the subprocess lane, only T0 opts in with `VNX_ADAPTER_T0=subprocess`; `scripts/lib/terminal_lane.py`): `SUBPROCESS_ADAPTER_FEATURE_FLAG.md`
 - tmux-spawn lane (removed 2026-09-18, kept as history): `TMUX_SPAWN_LANE.md`
 - Provider API keys (non-Claude lanes via the LiteLLM bridge, ADR-015): `PROVIDER_API_KEYS.md`
 - Forge gate runbook (gate-enforcement-to-forge; GitHub refuses a merge to `main` without a published gate verdict on the PR head): `FORGE_GATE.md`
@@ -27,6 +27,7 @@
 - Unified supervisor (auto-respawn, lease sweep, runtime supervision): `UNIFIED_SUPERVISOR.md`
 - Elastic worker pool management (`vnx pool`): `POOL_OPERATIONS.md`
 - Producer freshness monitor (silent-failure detection): `PRODUCER_FRESHNESS_MONITOR.md`
+- Intelligence corpus quarantine (move, never delete; permit, seal, restore, exit codes): `INTELLIGENCE_CORPUS_QUARANTINE.md`
 
 **State and reconciliation**
 - State aggregator (write-path for multi-project state, per-project facet files): `STATE_AGGREGATOR.md`

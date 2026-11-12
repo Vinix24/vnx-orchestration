@@ -20,6 +20,7 @@ are pinned — the same seams ``tests/test_k7_active_readers.py`` patches.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -36,6 +37,7 @@ SCRIPT_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 sys.path.insert(0, str(SCRIPT_DIR / "lib"))
 
+import coordination_db  # noqa: E402
 import crash_recovery_sweep as crs  # noqa: E402
 import dispatch_exit  # noqa: E402
 import dispatch_lifecycle  # noqa: E402
@@ -124,10 +126,39 @@ def spec_file(tmp_path: Path) -> Path:
 # Helpers: real hand-over, real finalizer, real manifests, real git repo
 # ---------------------------------------------------------------------------
 
+def _store_shape_report(state_dir: Path) -> str:
+    """Everything that tells a worker-order failure from a code failure (OI-2590, OI-2712)."""
+    db_path = coordination_db.db_path_from_state_dir(state_dir)
+    with coordination_db.get_connection(state_dir) as conn:
+        columns = [tuple(row)[1:3] for row in conn.execute("PRAGMA table_info(dispatches)")]
+    origins = {name: getattr(sys.modules.get(name), "__file__", None)
+               for name in ("coordination_db", "dispatch_start", "dispatch_lifecycle")}
+    return (f"db_path={db_path} table_info(dispatches)={columns} origins={origins} "
+            f"cwd={os.getcwd()} VNX_HOME={os.environ.get('VNX_HOME')!r}")
+
+
+def _assert_store_has_project_id(state_dir: Path) -> None:
+    """If hand-over left a ``dispatches`` table in the tmp store it must carry ``project_id``.
+
+    No store at all is the normal state here (the ledger is a file). A store with the table
+    but without the column is the E1 risk of runs 42987664639 and 42880626128: the failure
+    then names the database, the DDL it came from and the process state, instead of a bare
+    ``no such column`` three calls later.
+    """
+    if coordination_db.store_state(coordination_db.db_path_from_state_dir(state_dir)) != coordination_db.STORE_PRESENT:
+        return
+    with coordination_db.get_connection(state_dir) as conn:
+        names = {row[1] for row in conn.execute("PRAGMA table_info(dispatches)")}
+    assert not names or "project_id" in names, (
+        "the tmp store's dispatches table has no project_id: " + _store_shape_report(state_dir))
+
+
 def _begin(state_dir: Path, spec_file: Path, dispatch_id: str) -> dispatch_start.Handover:
-    return dispatch_start.begin(
+    handover = dispatch_start.begin(
         project_id=PROJECT, dispatch_id=dispatch_id, role=ROLE, base_sha=BASE_SHA,
         spec_file=spec_file, target_slot="T1", state_dir=state_dir)
+    _assert_store_has_project_id(state_dir)
+    return handover
 
 
 def _end(state_dir: Path, handover: dispatch_start.Handover, end_state: str) -> None:
@@ -508,6 +539,32 @@ def test_a_foreign_environment_does_not_move_the_v3_lifecycle_out_of_its_own_sto
     assert sorted(str(p.relative_to(foreign_env)) for p in foreign_env.rglob("*")) == before
 
 
+def test_a_v3_lifecycle_spawns_no_background_state_rebuild(
+        data_dir: Path, state_dir: Path, spec_file: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lifecycle lines fire ``build_t0_state.py`` detached; that child runs ``init_schema``
+    on whatever ``VNX_STATE_DIR`` names and races the finalizer's own read of the tmp store.
+
+    That is the k7b flake of OI-2590, OI-2712 and OI-2729: the child lays down the base DDL
+    (a ``dispatches`` table without ``project_id``) while the parent is projecting. The spy
+    passes every other command through and refuses only the rebuild.
+    """
+    spawned: List[Any] = []
+    real_popen = subprocess.Popen
+
+    def _spy(cmd: Any, *args: Any, **kwargs: Any) -> Any:
+        if any("build_t0_state" in str(part) for part in (cmd if isinstance(cmd, (list, tuple)) else [cmd])):
+            spawned.append(cmd)
+            raise OSError("the rebuild child is refused in this test")
+        return real_popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _spy)
+
+    _v3(state_dir, spec_file, "d-v3-no-rebuild", end_state="completed")
+
+    assert spawned == []
+    assert not (state_dir / "runtime_coordination.db").exists()
+
+
 def test_a_present_but_schemaless_store_stays_blocking_for_the_finalizer(
         data_dir: Path, state_dir: Path, spec_file: Path) -> None:
     """Fail closed: a database file without ``dispatches`` is never read as "no store"."""
@@ -524,3 +581,25 @@ def test_a_present_but_schemaless_store_stays_blocking_for_the_finalizer(
     (state_dir / "runtime_coordination.db").unlink()
     _end(state_dir, handover, "completed")
     assert attempt_verdict(state_dir, PROJECT, "d-v3-schemaless").kind == "ended"
+
+
+def test_the_store_shape_check_names_the_store_when_project_id_is_missing(
+        state_dir: Path) -> None:
+    """The diagnostic fires on a dispatches table without project_id, and says where."""
+    import sqlite3
+    db = coordination_db.db_path_from_state_dir(state_dir)
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("CREATE TABLE dispatches (dispatch_id TEXT)")
+    with pytest.raises(AssertionError, match=r"no project_id.*db_path=.*table_info.*origins.*cwd="):
+        _assert_store_has_project_id(state_dir)
+
+
+@pytest.mark.parametrize("ddl", [None, "CREATE TABLE dispatches (dispatch_id TEXT, project_id TEXT)",
+                                 "CREATE TABLE other (x TEXT)"])
+def test_the_store_shape_check_passes_without_a_store_or_with_the_column(
+        state_dir: Path, ddl: Optional[str]) -> None:
+    import sqlite3
+    if ddl is not None:
+        with sqlite3.connect(str(coordination_db.db_path_from_state_dir(state_dir))) as conn:
+            conn.execute(ddl)
+    _assert_store_has_project_id(state_dir)

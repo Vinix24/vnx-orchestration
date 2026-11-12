@@ -36,6 +36,53 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _emit_stamp_failed(conn, result, project_id, has_ab_arm: bool, has_ab_window: bool) -> None:
+    """Record that an active arm could not be written. Never raises: a measurement must not fail a dispatch."""
+    try:
+        from runtime_coordination import _append_event
+        _append_event(
+            conn, event_type="ab_stamp_failed", entity_type="dispatch",
+            entity_id=result.dispatch_id, actor="intelligence_injection",
+            reason="injection row written without arm: intelligence_injections lacks the arm columns",
+            metadata={"ab_arm": result.ab_arm, "ab_window": result.ab_window,
+                      "has_ab_arm_column": has_ab_arm, "has_ab_window_column": has_ab_window},
+            project_id=project_id,
+        )
+    except Exception as exc:
+        logger.warning("ab_stamp_failed event not written for %s: %s", result.dispatch_id, exc)
+
+
+# The one literal column list for the table. The schema-drift guard reads it from
+# the source; the INSERT below is built from it, so the two cannot disagree.
+_INJECTION_INSERT_HEAD = (
+    "INSERT INTO intelligence_injections (injection_id, dispatch_id, injection_point, "
+    "task_class, items_injected, items_suppressed, payload_chars, items_json, "
+    "suppressed_json, project_id, ab_arm, ab_window)"
+)
+_INJECTION_HEAD_END = _INJECTION_INSERT_HEAD.index("(") + 1
+_INJECTION_BASE_COLUMNS: Tuple[str, ...] = tuple(  # the nine columns every store shape has
+    c.strip() for c in _INJECTION_INSERT_HEAD[_INJECTION_HEAD_END:-1].split(",")
+)[:9]
+
+
+def _insert_injection_row(
+    conn, base: tuple, project_id, ab_arm, ab_window,
+    has_project: bool, has_ab_arm: bool, has_ab_window: bool,
+) -> None:
+    """INSERT one intelligence_injections row in the shape the store supports.
+
+    Column names come only from the fixed literal above; values are bound parameters.
+    """
+    optional = (("project_id", project_id, has_project), ("ab_arm", ab_arm, has_ab_arm),
+                ("ab_window", ab_window, has_ab_window))
+    columns = _INJECTION_BASE_COLUMNS + tuple(c for c, _, on in optional if on)
+    conn.execute(
+        _INJECTION_INSERT_HEAD[:_INJECTION_HEAD_END] + ", ".join(columns)
+        + ") VALUES (" + ", ".join("?" * len(columns)) + ")",
+        base + tuple(v for _, v, on in optional if on),
+    )
+
+
 def record_injection_audit(
     result: "InjectionResult",
     state_dir: object,
@@ -56,6 +103,7 @@ def record_injection_audit(
     items_json = json.dumps([item.to_dict() for item in result.items])
     suppressed_json = json.dumps([s.to_dict() for s in result.suppressed])
     ab_arm = getattr(result, "ab_arm", None)
+    ab_window = getattr(result, "ab_window", None)
     try:
         from coordination_retry import CoordinationLockError, DEFAULT_LOCK_TIMEOUT_SECONDS, deadline_for_timeout, is_lock_timeout_error, rearm_busy_timeout
     except ImportError:
@@ -72,51 +120,21 @@ def record_injection_audit(
         with get_connection(state_dir, timeout=DEFAULT_LOCK_TIMEOUT_SECONDS) as conn:
             has_project = _table_has_column(conn, "intelligence_injections", "project_id")
             has_ab_arm = _table_has_column(conn, "intelligence_injections", "ab_arm")
+            has_ab_window = _table_has_column(conn, "intelligence_injections", "ab_window")
             rearm_busy_timeout(conn, deadline)
-            if has_project and has_ab_arm:
-                conn.execute(
-                    """INSERT INTO intelligence_injections
-                        (injection_id, dispatch_id, injection_point, task_class,
-                         items_injected, items_suppressed, payload_chars,
-                         items_json, suppressed_json, project_id, ab_arm)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (injection_id, result.dispatch_id, result.injection_point,
-                     result.task_class, result.items_injected, result.items_suppressed,
-                     result.payload_chars, items_json, suppressed_json, project_id, ab_arm),
-                )
-            elif has_project:
-                conn.execute(
-                    """INSERT INTO intelligence_injections
-                        (injection_id, dispatch_id, injection_point, task_class,
-                         items_injected, items_suppressed, payload_chars,
-                         items_json, suppressed_json, project_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (injection_id, result.dispatch_id, result.injection_point,
-                     result.task_class, result.items_injected, result.items_suppressed,
-                     result.payload_chars, items_json, suppressed_json, project_id),
-                )
-            elif has_ab_arm:
-                conn.execute(
-                    """INSERT INTO intelligence_injections
-                        (injection_id, dispatch_id, injection_point, task_class,
-                         items_injected, items_suppressed, payload_chars,
-                         items_json, suppressed_json, ab_arm)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (injection_id, result.dispatch_id, result.injection_point,
-                     result.task_class, result.items_injected, result.items_suppressed,
-                     result.payload_chars, items_json, suppressed_json, ab_arm),
-                )
-            else:
-                conn.execute(
-                    """INSERT INTO intelligence_injections
-                        (injection_id, dispatch_id, injection_point, task_class,
-                         items_injected, items_suppressed, payload_chars,
-                         items_json, suppressed_json)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (injection_id, result.dispatch_id, result.injection_point,
-                     result.task_class, result.items_injected, result.items_suppressed,
-                     result.payload_chars, items_json, suppressed_json),
-                )
+            # An active window needs both columns. Without them the row is written
+            # without the arm and the loss is an event, never a failed dispatch;
+            # the cohort command counts the row as unstamped_after_open.
+            if ab_window is not None and not (has_ab_arm and has_ab_window):
+                _emit_stamp_failed(conn, result, project_id, has_ab_arm, has_ab_window)
+                has_ab_arm = has_ab_window = False
+            _insert_injection_row(
+                conn,
+                (injection_id, result.dispatch_id, result.injection_point,
+                 result.task_class, result.items_injected, result.items_suppressed,
+                 result.payload_chars, items_json, suppressed_json),
+                project_id, ab_arm, ab_window, has_project, has_ab_arm, has_ab_window,
+            )
             rearm_busy_timeout(conn, deadline)
             conn.commit()
     except CoordinationLockError:

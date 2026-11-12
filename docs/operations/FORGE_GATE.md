@@ -220,7 +220,7 @@ Herken dus `vnx-gate/review` in een `SKIPPED_UNVERIFIED`-regel als "publiceer he
 
 ## 6. Werkgevolg voor iedereen, na OP-B3
 
-Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait. Dat geldt ook voor een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaard review-stack `codex_gate,kimi_gate` (een uitgevallen stoel gaat via de overnameketen codex → kimi → claude → deepseek, zie "Welke stoelen vereist zijn" hieronder) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
+Elke push naar een PR-branch **na** een poortrun maakt de PR onmergebaar totdat de poort opnieuw draait. Dat geldt ook voor een triviale docs-fixup na een groene poort. De volgorde wordt: `request` → `execute` → de standaard review-stack `codex_gate,deepseek_gate` (een uitgevallen stoel gaat via de overnameketen codex → deepseek → claude, zie "Welke stoelen vereist zijn" hieronder) → publicatie → merge. Wat vóór OP-B3 nog kon (een groene poort, dan nog een klein commit, dan mergen) kan daarna niet meer zonder de poort opnieuw te draaien.
 
 ### Wie publiceert wat, en wanneer
 
@@ -253,13 +253,13 @@ Een afwijzing blijft bij elke klasse blokkeren. Een FAIL of blokkerende bevindin
 
 ### De overnameketen
 
-Een stoel die zijn eigen reviewer niet kan draaien, wordt gevuld door de volgende gate in de overnameketen. De standaard is `codex_gate,kimi_gate,claude_gate,deepseek_gate` (`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, `scripts/lib/gate_request_handler.py:106`). `claude_gate` staat sinds R7 (operatorbesluit 2026-10-22, #2172, eerste tag `v1.7.6`) tussen `kimi_gate` en `deepseek_gate`: eerst de reviewers op het abonnement, dan de eindschakel op API-krediet. Een stoel krijgt nooit een reviewer van de vendor van de bouwer (`review_vendor`). Zo'n reviewer wordt overgeslagen alsof hij uitgevallen was.
+Een stoel die zijn eigen reviewer niet kan draaien, wordt gevuld door de volgende gate in de overnameketen. De standaard is `codex_gate,deepseek_gate,claude_gate` (operatorbesluit 2026-11-11, Kimi opgezegd; `gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`). `claude_gate` kwam met R7 in de keten (operatorbesluit 2026-10-22, #2172, eerste tag `v1.7.6`) en is sinds 2026-11-11 de laatste schakel, omdat zijn ijkrun zakte; `kimi_gate` staat sinds die dag niet meer in de keten. Een stoel krijgt nooit een reviewer van de vendor van de bouwer (`review_vendor`). Zo'n reviewer wordt overgeslagen alsof hij uitgevallen was.
 
-`glm_gate` staat sinds 2026-10-17 niet meer in de standaardketen (commentaar op regel 85-87 van hetzelfde bestand). Het blijft een geregistreerde gate: wie `VNX_REVIEW_GATE_TAKEOVER_CHAIN` zelf zet, bereikt hem nog. De standaard review-stack zelf, `VNX_DEFAULT_REVIEW_STACK`, is `codex_gate,kimi_gate` (`scripts/lib/config_registry.py:117`).
+`glm_gate` staat sinds 2026-10-17 niet meer in de standaardketen (commentaar op regel 85-87 van hetzelfde bestand). Het blijft een geregistreerde gate: wie `VNX_REVIEW_GATE_TAKEOVER_CHAIN` zelf zet, bereikt hem nog. De standaard review-stack zelf, `VNX_DEFAULT_REVIEW_STACK`, is `codex_gate,deepseek_gate` (`scripts/lib/config_registry.py`, operatorbesluit 2026-11-11).
 
 ### Het signaalregime (`VNX_REVIEW_SEAT_RULE`)
 
-`VNX_REVIEW_SEAT_RULE` kiest de stoelregel (`review_seat_evaluation.SEAT_RULE_KEY`, `active_seat_rule`, #2365, eerste tag `v1.8.0`). Standaard is de sleutel leeg en geldt `first_seat_or_every_seat_by_risk`, de regel van R3b hierboven. Met de waarde `first_seat_or_every_seat_on_signal` vraagt de regel na een zuivere PASS van stoel 1 alleen dan een tweede stoel als een signaal afgaat (`seats_for_signals`). Een onbekende waarde valt terug op de risicoregel en logt een waarschuwing.
+`VNX_REVIEW_SEAT_RULE` kiest de stoelregel (`review_seat_evaluation.SEAT_RULE_KEY`, `active_seat_rule`, #2365, eerste tag `v1.8.0`). Voor elk project zonder rij is de sleutel leeg en geldt `first_seat_or_every_seat_by_risk`, de regel van R3b hierboven. vnx-dev beslist sinds 2026-11-09 met `first_seat_or_every_seat_on_signal`, gezet als een `project_config`-rij met een approval-id. Met die waarde vraagt de regel na een zuivere PASS van stoel 1 alleen dan een tweede stoel als een signaal afgaat (`seats_for_signals`). Een onbekende waarde valt terug op de risicoregel en logt een waarschuwing. Terugdraaien: zet de rij terug op `first_seat_or_every_seat_by_risk`, of gebruik `VNX_OVERRIDE_REVIEW_SEAT_RULE` als de onmiddellijke noodrem; meet opnieuw na 50 merges en draai terug zodra de misratio boven 10 procent van de steekproef komt.
 
 `review_verdict` leest de sleutel via dezelfde `active_seat_rule` als de merge-deur. De gepubliceerde check en de deur beslissen dus met dezelfde regel op dezelfde invoer. Staat de sleutel uit, dan krijgt `evaluate_review_seats` geen regelargument en is de aanroep dezelfde als zonder de sleutel.
 

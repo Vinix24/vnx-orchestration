@@ -23,6 +23,12 @@ sys.path.insert(0, str(LIB_DIR))
 import state_rebuild_trigger as srt
 
 
+@pytest.fixture(autouse=True)
+def _trigger_switch_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """tests/conftest.py sets VNX_STATE_REBUILD_TRIGGER=0 for the suite; these tests prove the spawn."""
+    monkeypatch.delenv("VNX_STATE_REBUILD_TRIGGER", raising=False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -493,3 +499,55 @@ def test_critical_event_waits_for_lock(tmp_path: Path) -> None:
         f"expected both to fire, got {results}"
     )
     assert len(fired) == 2, f"expected 2 Popen calls, got {len(fired)}"
+
+
+# ---------------------------------------------------------------------------
+# Off switch: VNX_STATE_REBUILD_TRIGGER=0 (the suite-wide default in conftest)
+# ---------------------------------------------------------------------------
+
+def test_switch_zero_returns_false_and_never_spawns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VNX_STATE_REBUILD_TRIGGER", "0")
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen") as mock_p:
+        for event_type in ("", "task_complete", "dispatch_finished"):
+            assert srt.maybe_trigger_state_rebuild(event_type=event_type) is False
+    mock_p.assert_not_called()
+    assert not (tmp_path / ".last_state_rebuild_ts").exists()
+
+
+@pytest.mark.parametrize("value", ["", "1", "false", "00", " 0", "off"])
+def test_any_other_switch_value_keeps_the_spawn(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("VNX_STATE_REBUILD_TRIGGER", value)
+    with mock.patch.object(srt, "_resolve_state_dir", return_value=tmp_path), \
+         mock.patch("state_rebuild_trigger.subprocess.Popen", return_value=_mock_popen()) as mock_p:
+        assert srt.maybe_trigger_state_rebuild(event_type="task_complete") is True
+    mock_p.assert_called_once()
+
+
+def test_a_cli_child_inherits_the_switch_and_starts_no_rebuild(tmp_path: Path) -> None:
+    """A subprocess is not reached by an in-process monkeypatch; the env var is."""
+    import os
+    import subprocess as sp
+    code = (
+        "import sys, subprocess\n"
+        "sys.path.insert(0, %r)\n"
+        "import state_rebuild_trigger as srt\n"
+        "real = subprocess.Popen\n"
+        "calls = []\n"
+        "def spy(*a, **k):\n"
+        "    calls.append(a)\n"
+        "    return real(['true'])\n"
+        "srt.subprocess.Popen = spy\n"
+        "srt._resolve_state_dir = lambda: __import__('pathlib').Path(%r)\n"
+        "ok = srt.maybe_trigger_state_rebuild(event_type='dispatch_finished')\n"
+        "print(ok, len(calls))\n"
+    ) % (str(Path(__file__).resolve().parents[1] / "scripts" / "lib"), str(tmp_path))
+    env = {**os.environ, "VNX_STATE_REBUILD_TRIGGER": "0"}
+    out = sp.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["False", "0"]
+    env.pop("VNX_STATE_REBUILD_TRIGGER")
+    out = sp.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.split() == ["True", "1"]

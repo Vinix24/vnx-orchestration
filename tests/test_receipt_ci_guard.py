@@ -22,6 +22,9 @@ APPROVED_WRITERS = {
     # planning_cli.py: books a state_mutation receipt before the retarget DB write
     # (ADR-005 amendment 2026-09-26, track deliverable-retarget-withdraw).
     "planning_cli.py",
+    # capture_audit.py: books a state_mutation receipt via append_receipt_payload before
+    # `bind` writes its JSON (ADR-005, track learning-capture-fragmentation, capture PR-2 split 3).
+    "capture_audit.py",
 }
 
 APPEND_HELPER_MARKERS = (

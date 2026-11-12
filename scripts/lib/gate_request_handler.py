@@ -118,7 +118,9 @@ class ReviewGateTakeoverConfigError(ValueError):
 # vendor (review_vendor): such a reviewer is passed over like an unavailable one,
 # so a DeepSeek-built head with kimi out reads claude, and a claude-built head
 # with kimi out passes claude over and reads deepseek.
-_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+# 2026-11-11 (Kimi cancelled): kimi_gate leaves the default chain, deepseek_gate holds
+# seat 2 and claude_gate is the end-link, so a deepseek-v4-pro build reads claude_gate.
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,deepseek_gate,claude_gate"
 
 
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:
@@ -1094,7 +1096,14 @@ class GateRequestHandlerMixin:
         slot, and neither of those is a request. A later rewrite reads the record back from disk
         (executor, ``commit_gate_outcome``) and so keeps the field.
         """
-        stamped = {**payload, "origin": REQUEST_ORIGIN_DOOR}
+        from review_rounds import PARENT_CHAIN_STRING_FIELDS, parent_chain_record
+
+        # ADR-064 besluit 4: the parent-chain keys go on the record only when the caller set them.
+        unset = {*PARENT_CHAIN_STRING_FIELDS, "finding_ids"}
+        stamped = {
+            **{k: v for k, v in payload.items() if k not in unset},
+            **parent_chain_record(payload), "origin": REQUEST_ORIGIN_DOOR,
+        }
         with slot_lock(path):
             atomic_write_json(path, stamped)
 

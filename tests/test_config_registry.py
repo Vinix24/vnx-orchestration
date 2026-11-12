@@ -125,6 +125,24 @@ def test_db_resolver_error_falls_through(monkeypatch):
     assert cr.get("VNX_SCOUT_PREPASS") == "0"
 
 
+def test_strict_resolver_surfaces_a_db_error_as_a_source():
+    def _boom(pid, key):
+        raise RuntimeError("db down")
+    cr.set_db_resolver(_boom)
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == (
+        None, "project_config_error")
+    # The default stays lenient for every existing caller.
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS") == ("0", "default")
+
+
+def test_strict_resolver_does_not_change_a_healthy_chain(monkeypatch):
+    cr.set_db_resolver(lambda pid, key: "1")
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == (
+        "1", "project_config")
+    cr.set_db_resolver(lambda pid, key: None)
+    assert cr.resolve_with_source("VNX_SCOUT_PREPASS", strict_resolver=True) == ("0", "default")
+
+
 def test_unknown_key_returns_none():
     assert cr.get("VNX_NOT_A_REAL_FLAG") is None
 
@@ -568,3 +586,30 @@ def test_fleet_pin_max_lag_reads_through_the_precedence_chain(monkeypatch):
     assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "7"
     monkeypatch.setenv("VNX_OVERRIDE_FLEET_PIN_MAX_LAG_RELEASES", "9")
     assert cr.get("VNX_FLEET_PIN_MAX_LAG_RELEASES") == "9"
+
+
+def test_intel_ab_window_keys_registered_off_and_not_canonical():
+    # intelligence-effect-measurable PR-1: the A/B window is registered configuration, every
+    # default off or empty, and the single canonical flag of the subsystem stays the WHY flag.
+    sub = "injection-effectiveness-eval-loop"
+    for key, default in (("VNX_INTEL_AB_TEST", "0"), ("VNX_INTEL_PLACEBO_ARM", "0"),
+                         ("VNX_INTEL_AB_WINDOW", "")):
+        entry = cr.CONFIG_REGISTRY[key]
+        assert entry.subsystem == sub
+        assert entry.default == default
+        assert cr.get(key) == default
+        assert not entry.cockpit_canonical
+    assert cr.CONFIG_REGISTRY["VNX_INJECTION_WHY_ENABLED"].cockpit_canonical
+    assert not cr.get_bool("VNX_INTEL_AB_TEST")
+
+
+def test_injection_effectiveness_ledger_flag_stays_why_enabled():
+    """The SUBSYSTEMS.md ledger takes the last-inserted entry of a subsystem; for
+    injection-effectiveness-eval-loop that must stay VNX_INJECTION_WHY_ENABLED (the wired,
+    cockpit-canonical flag), not an unwired A/B key added after it."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from vnx_cli.commands.subsystems import _canonical_flags
+
+    sub = "injection-effectiveness-eval-loop"
+    assert _canonical_flags(cr)[sub] == "VNX_INJECTION_WHY_ENABLED"
+    assert cr.canonical_flags()[sub] == "VNX_INJECTION_WHY_ENABLED"

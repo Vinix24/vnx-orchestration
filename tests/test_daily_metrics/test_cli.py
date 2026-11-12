@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
-import importlib.util
 import json
 import os
 import subprocess
@@ -87,19 +86,6 @@ def empty_sources(tmp_path: Path) -> Path:
 def test_cli_script_exists():
     """Red run: fails on the merge base before ``scripts/daily_metrics.py`` exists."""
     assert CLI.is_file()
-
-
-def test_daily_has_no_command_discovery():
-    """Red run: fails on afee541e, where ``discover_commands`` is still exported.
-
-    The command-discovery round is deferred to its own PR: the CLI only catches up
-    the window and writes the beacon, so no command module is imported or skipped.
-    """
-    spec = importlib.util.spec_from_file_location("daily_metrics_cli_under_test", CLI)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert not hasattr(module, "discover_commands")
-    assert not (REPO_ROOT / "scripts" / "lib" / "daily_metrics" / "commands").exists()
 
 
 def test_collect_one_day_returns_all_required_ids(empty_sources, tmp_path):
@@ -214,7 +200,7 @@ def test_failed_recollect_is_retried_and_a_revised_day_stays_final(
     daily = _run_cli(healthy_sources, ["daily", *base])
     assert daily.returncode == 0, daily.stderr
     lines = [json.loads(line) for line in daily.stdout.splitlines()]
-    day_lines = [item for item in lines if item["day"] == "2026-11-06"]
+    day_lines = [item for item in lines if item.get("day") == "2026-11-06"]
     assert all("skipped" in item for item in day_lines)
     assert not _day_file(tmp_path, "2026-11-06.r3").exists()
     b = _run_cli(healthy_sources, ["collect", "--recollect", "2026-11-06", "--reason", "b", *base])

@@ -1,7 +1,6 @@
 # VNX Self-Learning Loop — Operator-Gated Intelligence
 
-**Status**: Active (D1–D6 shipped on main, 2026-07-04). Verified against code again 2026-07-05
-(PRs #1001–#1018 drift-sweep).
+**Status**: Verified against `origin/main` at f0c113253 on 2026-11-12. The loop is a proposal tier: shadow mode is the default and every activation is a separate operator step. Work merged after the 1.8.0 release is marked "on main, not yet released".
 **Related doc**: [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md) covers the scout pre-pass and rank-then-budget
 selection in depth — this doc summarizes rank-then-budget below and defers detail there.
 **Ground truth**: the code modules cited throughout this doc (`scripts/learning_loop.py`,
@@ -24,13 +23,29 @@ The loop is deliberate about signal starvation: when autonomous dispatching is p
 
 The daily learning cycle mines `t0_receipts.ndjson` and produces three classes of output, all pending operator review:
 
-| Output | File | Activated by |
-|--------|------|--------------|
-| Prevention-rule proposals | `state/pending_rules.json` | `vnx learning run` |
+| Output | File | Written by |
+|--------|------|-----------|
+| Prevention-rule proposals | `state/pending_rules.json` | `vnx learning run`, in queue or persist mode only |
 | Archival / supersede candidates | `state/pending_archival.json` | `vnx learning run` |
 | Skill-body refinement diffs | `state/pending_skill_refinements.json` | `vnx learning skill-refine` |
 
 None of these files are consumed automatically. Ingestion into the live DB (`prevention_rules` table) requires operator approval — see the review ritual below.
+
+---
+
+## Modes
+
+`daily_learning_cycle()` runs in one of three modes. Both switches are environment variables (`scripts/learning_loop.py`), not config-registry flags.
+
+| Mode | Switch | Default | Effect |
+|---|---|---|---|
+| shadow | none | on | Computes and reports. No database row, no metric, no queue. The report lists `steps_not_run`. |
+| queue | `VNX_LEARNING_LOOP_QUEUE=1` | off | Shadow plus proposals in `pending_rules.json`, also when the probe gate is degraded. No database row, no activation. |
+| persist | `VNX_LEARNING_LOOP_PERSIST=1` | off | Writes patterns, confidence and the archival queue and ingests approved rules. |
+
+Persist mode adds two gates. `VNX_LEARNING_LOOP_ENABLED` (default `0`) makes the cycle a no-op; at `1` it needs `VNX_INJECTION_FEEDBACK_ENABLED=1` and an `ok` injection-effectiveness probe, else the cycle is degraded and updates no pattern. The pattern write itself needs an approval record bound to the exact rows (below). Queue and persist mode both read `ledger_verdict/1` first and stop with `ledger_source_check: <reason_code>` on `refused` ([ADR-065](../governance/decisions/ADR-065-leren-is-voorstellen.md)).
+
+Which failures become proposals: a class in `ELIGIBLE_CLASSES` (`scripts/lib/learning_failure_class.py`) seen in at least two dispatches, or an open-item class spanning three distinct origin dispatches. Receipts before `VNX_LEARNING_LOOP_CUTOFF` (default `2026-09-28T16:41:11Z`) never count, also with `--from-history`. A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
 
 ---
 
@@ -44,19 +59,22 @@ vnx learning skill-refine [--threshold 0.3]
 vnx learning skill-review [--show-diff]
 vnx learning tagger-ab [--sample 20]
 vnx learning grounding-shadow [--limit 50]
+vnx learning decide-rule --rule-id ID [--rule-id ID ...] --decision approved|rejected --reason TEXT --by WHO
+                         [--effect-criterion TEXT --stop-condition TEXT]
+vnx learning approve|dismiss PATTERN_ID --approval-id ID --reason TEXT [--source-table T]
 ```
 
 ### `vnx learning run`
 
-Runs `LearningLoop.daily_learning_cycle()` (`scripts/learning_loop.py:990`). Steps:
+Runs `LearningLoop.daily_learning_cycle()` (`scripts/learning_loop.py`) in the mode set above. Steps:
 
 1. Read patterns used/ignored in the last 24 h from `pattern_usage` (or full history with `--from-history`).
 2. Boost/decay in-memory confidence scores (10% boost, 5% decay; unclamped accumulator, clamps at write boundary).
-3. Extract failure patterns from `t0_receipts.ndjson`; propose prevention rules → **`pending_rules.json`** (status=pending, G-L1 enforced — `learning_loop.py:496–541`).
-4. Write unused-pattern archival candidates → **`pending_archival.json`** (status=pending — `learning_loop.py:712–770`).
+3. Extract failure patterns from `t0_receipts.ndjson`; propose prevention rules → **`pending_rules.json`** (status=pending, G-L1 enforced: `_propose_rules`, queue or persist mode only).
+4. Write unused-pattern archival candidates → **`pending_archival.json`** (status=pending, `archive_unused_patterns`).
 5. Flush in-memory metrics to `pattern_usage` table.
 5.5. Persist high-confidence used patterns and recurring failures to `success_patterns` / `antipatterns` (off-switchable via `VNX_LEARN_PERSIST=0`).
-5.6. Queue stale low-confidence patterns for operator-gated supersede → **`pending_archival.json`** with `action=supersede` (`learning_loop.py:883`). No `valid_until` is written without operator approval (D3 gate — closes the prior ungated bypass).
+5.6. Queue stale low-confidence patterns for operator-gated supersede → **`pending_archival.json`** with `action=supersede` (`_supersede_stale_patterns`). No `valid_until` is written without operator approval (D3 gate: closes the prior ungated bypass).
 5.7. Reconcile `success_patterns.confidence_score` via Beta-Laplace (`confidence_reconcile.reconcile_pattern_confidence`).
 6. Save `learning_report_<ts>.json` to state dir.
 
@@ -128,18 +146,26 @@ Read-only shadow run (`vnx_cli/commands/learning.py:531`). Compares V1 (substrin
 Prevention rules follow this path:
 
 ```
-vnx learning run
+VNX_LEARNING_LOOP_QUEUE=1 vnx learning run
   → pending_rules.json  (status="pending")
 
 Operator: vnx learning review --mode rules
   → inspect pattern, prevention text, confidence, occurrences
+  → each rule shows its Terminal: and Agent: scope ("alle" = every agent)
 
-Operator: edit pending_rules.json — set status="approved" for accepted rules
+Operator: vnx learning decide-rule --rule-id <id> --decision approved ...
+  → one bundle record in prevention_rule_decisions.ndjson with a minted approval_id
+  → an approval needs --effect-criterion (how the effect is measured) and
+    --stop-condition (when the rule is switched off again)
+  → the queue file is never edited by hand; an identical repeat writes nothing
 
-vnx learning run  (next cycle)
-  → ingest_approved_rules() reads approved rows → inserts into prevention_rules table
-  → accepted rules are now live in the selector
+VNX_LEARNING_LOOP_PERSIST=1 vnx learning run  (persist mode)
+  → ingest_approved_rules() activates a rule only if its decision is for this project,
+    its proposal is unchanged since the decision and the ledger verdict is fresh ok/pending
+  → it writes a pattern_activation record; a repeat never switches it back on
 ```
+
+Writing patterns in persist mode needs one more human step: `python3 scripts/lib/qi_learning_approval.py approve --proposal-id learn-<sha256> --reason TEXT` (refuses without an interactive terminal). The record binds to the SHA-256 of the rows about to be written, `VNX_LEARNING_LOOP_APPROVED` selects it, and one cycle consumes it.
 
 Archival / supersede candidates:
 
@@ -150,8 +176,9 @@ vnx learning run
 Operator: vnx learning review --mode archival
   → inspect title, confidence, age, reason
 
-Operator: set status="approved" on accepted candidates
-  → next cycle applies valid_until = now (supersede) or hard-deletes (archive)
+Operator: vnx learning approve <pattern_id> --approval-id <id> --reason <text>
+  → sets valid_until (supersede) or removes the pattern_usage row (archive),
+    audited in intelligence_usage.ndjson; vnx learning dismiss changes nothing
   → pattern excluded from selector
 ```
 
@@ -183,9 +210,9 @@ implemented, activation is **manual only**: apply the unified diff from
 
 | Gate | What it protects | Code location |
 |------|-----------------|---------------|
-| **G-L1** | New prevention rules never auto-activate | `learning_loop.py:647–710` — `ingest_approved_rules()` skips `status != "approved"` |
-| **G-L4 (archival)** | Pattern archival candidates require approval | `learning_loop.py:712–770` — writes pending only |
-| **G-L4 (supersede)** | Stale pattern suppression requires approval | `learning_loop.py:883` — queues to `pending_archival.json`; `valid_until` NOT written automatically (D3 fix) |
+| **G-L1** | New prevention rules never auto-activate | `ingest_approved_rules()` in `learning_loop.py` needs a decision record for this project |
+| **G-L4 (archival)** | Pattern archival candidates require approval | `archive_unused_patterns()` writes pending only |
+| **G-L4 (supersede)** | Stale pattern suppression requires approval | `_supersede_stale_patterns()` queues to `pending_archival.json`; `valid_until` NOT written automatically (D3 fix) |
 
 Prior to D3, `_supersede_stale_patterns()` wrote `valid_until` directly, silently removing low-confidence patterns from the selector. D3 closed this bypass: suppression candidates now land in `pending_archival.json` and wait for operator approval before `valid_until` is set.
 
@@ -241,8 +268,8 @@ All intelligence flags default OFF (feature-dark until explicitly enabled). Prec
 | Flag | Default | What it controls | Code location |
 |------|---------|-----------------|---------------|
 | `VNX_LEARNING_ENABLED` | `0` (off) | Supervisor tick that invokes the daily learning cycle automatically. Requires `VNX_SUPERVISOR_MODE=unified`. When unset, the cycle only runs when explicitly invoked via `vnx learning run`. | `scripts/lib/dispatcher_supervisor_ticks.sh:100` |
-| `VNX_LEARN_PERSIST` | `1` (on) | Step 5.5 of the daily cycle — persists high-confidence used patterns and recurring failures to `success_patterns`/`antipatterns`. Set to `0` to run the cycle without writing to the intelligence DB (observation-only mode). | `scripts/learning_loop.py:1043` |
-| `VNX_LEARN_SUPERSEDE` | `1` (on) | Step 5.6 — queues stale low-confidence patterns to `pending_archival.json`. Set to `0` to skip the supersede-candidate scan entirely. | `scripts/learning_loop.py:897` |
+| `VNX_LEARN_PERSIST` | `1` (on) | Step 5.5 of the daily cycle: persists high-confidence used patterns and recurring failures to `success_patterns`/`antipatterns`. Set to `0` to run the cycle without writing to the intelligence DB (observation-only mode). | `scripts/learning_loop.py` `daily_learning_cycle` |
+| `VNX_LEARN_SUPERSEDE` | `1` (on) | Step 5.6: queues stale low-confidence patterns to `pending_archival.json`. Set to `0` to skip the supersede-candidate scan entirely. | `scripts/learning_loop.py` `_supersede_stale_patterns` |
 | `VNX_SCOUT_PREPASS` | `0` (off) | Cheap-model scout recon pre-pass in the door, before the permit (see [`SCOUT_PREPASS.md`](SCOUT_PREPASS.md)). Fail-open. | `scripts/lib/scout_prepass.py:268-272`, `config_registry.py:51` |
 | `VNX_INTEL_RANK_THEN_BUDGET` | `0` (off) | Replaces class-priority intelligence eviction with a composite-score knapsack (confidence × tag-overlap × recency × class-weight). | `scripts/lib/intelligence_selector.py:109-146`, `config_registry.py:60` |
 | `VNX_TAGGER_ENABLED` | `0` (off) | LLM tagger enrichment at persist-time. When on, enriches `success_patterns.tags` and `antipatterns.tags` with closed-vocabulary tags via the configured provider (default: DeepSeek-Flash), and writes a `tagging_events` audit row per enrichment. The selector works without it via deterministic `derive_tags()`. | `scripts/lib/vnx_tagger.py:43`, `config_registry.py:54` |
@@ -278,7 +305,7 @@ code change; `VNX_INTEL_RANK_THEN_BUDGET` and `VNX_OUTCOME_GROUNDING_V2` remain 
 
 The selector reads `success_patterns.confidence_score`. The authoritative writer is `confidence_reconcile.reconcile_pattern_confidence()` (Beta-Laplace from `pattern_usage.success_count/failure_count`). It fires in two places:
 
-- Step 5.7 of the daily cycle (`learning_loop.py:1061`).
+- Step 5.7 of the daily cycle (`daily_learning_cycle`).
 - At every proven-pattern query via `maybe_reconcile()` (TTL=300 s safety-net, `confidence_reconcile.py:183–220`).
 
 The internal accumulator `pattern_usage.confidence` can exceed 1.0 (learning loop boosts to 2.0 cap). The reconcile clamps to 1.0 on write to `confidence_score`. Do not read `pattern_usage.confidence` as a selector-ready score.
@@ -362,6 +389,18 @@ The shadow command is read-only and never writes to the DB or sets the flag.
 
 ---
 
+## Effect Window
+
+Whether injected intelligence changes outcomes is measured by an A/B window ([ADR-069](../governance/decisions/ADR-069-intelligence-effectmeting.md)). It is opt-in and nothing opens it by default.
+
+- `VNX_INTEL_AB_TEST` (default `0`) and the frozen `VNX_INTEL_AB_WINDOW` (default empty) open it. The arm is `sha256(window_id:salt:project_id:dispatch_id)` against `control_fraction`. A missing or invalid window assigns no arm and is never read as treatment. `VNX_INTEL_PLACEBO_ARM` (default `0`) gives the control arm a placebo section.
+- `python3 scripts/intel_injection_join.py cohort|effect|secondary` read the stores. `cohort` counts and never gives a verdict. `effect` gives a stratified risk difference with a 95% interval. `secondary` reports the falsifications F1-F3, each `fired`, `clear` or `not_evaluable`.
+- A dispatch counts once it is resolved and 72 hours past its injection.
+- A verdict exists only at `MIN_PER_ARM = 200` resolved dispatches per arm (`scripts/lib/intel_effect_cohort.py`). No flag, variable or config row lowers it. Below it `effect` exits 3 with `below_floor` and no verdict. At or above it the verdict is `treatment_better`, `control_better`, `equivalent_within_5pp` or `inconclusive`.
+- No window has produced a verdict, so no effect of injection on outcomes has been measured. A verdict would be input for an operator decision and changes no rule by itself.
+
+---
+
 ## Signal Starvation Warning
 
 The loop runs against whatever is in `t0_receipts.ndjson`. As of 2026-07-04, autonomous dispatching was paused and new receipts arrived only from manual dispatches; that has since resumed, but a project that has gone quiet again hits the same starvation case. The historical trail provides a useful baseline in either case — run with `--from-history` on the first cycle.
@@ -374,12 +413,12 @@ Value grows as governed builds resume. The proposal tier is not a no-op even aga
 
 | Claim | File:line |
 |-------|-----------|
-| G-L1: rules land in pending_rules.json | `scripts/learning_loop.py:496–541` |
-| G-L1: ingest skips non-approved rules | `scripts/learning_loop.py:647–710` |
-| G-L4: archival candidates land in pending | `scripts/learning_loop.py:712–770` |
-| G-L4 supersede gated (D3) | `scripts/learning_loop.py:883–930` |
-| `VNX_LEARN_SUPERSEDE=0` off-switch | `scripts/learning_loop.py:897–899` |
-| `VNX_LEARN_PERSIST=0` off-switch | `scripts/learning_loop.py:1043–1046` |
+| G-L1: rules land in pending_rules.json (queue mode) | `scripts/learning_loop.py` `_propose_rules` |
+| G-L1: ingest needs an approval decision | `scripts/learning_loop.py` `ingest_approved_rules` |
+| G-L4: archival candidates land in pending | `scripts/learning_loop.py` `archive_unused_patterns` |
+| G-L4 supersede gated (D3) | `scripts/learning_loop.py` `_supersede_stale_patterns` |
+| `VNX_LEARN_SUPERSEDE=0` off-switch | `scripts/learning_loop.py` `_supersede_stale_patterns` |
+| `VNX_LEARN_PERSIST=0` off-switch | `scripts/learning_loop.py` `daily_learning_cycle`, step 5.5 |
 | `VNX_TAGGER_ENABLED` default "0" | `scripts/lib/config_registry.py:54–56` |
 | Tagger call site (persist-time) | `scripts/intelligence_daemon.py:236–247` |
 | `VNX_HAIKU_CLASSIFY` default "0" | `scripts/lib/config_registry.py:66–68` |
@@ -395,9 +434,14 @@ Value grows as governed builds resume. The proposal tier is not a no-op even aga
 | REWORK_THRESHOLD = 0.3 | `scripts/lib/skill_refinement.py:27` |
 | Rework attribution: git-churn blame → origin dispatch | `scripts/lib/rework_attribution.py:137–181` |
 | Rework-prone role filter | `scripts/lib/skill_refinement.py:71–79` |
+| Modes: queue and persist default off | `scripts/learning_loop.py` `persist_enabled`, `queue_enabled` |
+| Activation gate `VNX_LEARNING_LOOP_ENABLED` | `scripts/learning_loop.py` `evaluate_activation_gate` |
+| decide-rule bundle with effect criterion and stop condition | `vnx_cli/commands/learning.py` `_cmd_decide_rule`, `_decide_rule_usage_error` |
+| Persist approval record | `scripts/lib/qi_learning_approval.py` |
+| Effect floor `MIN_PER_ARM = 200` | `scripts/lib/intel_effect_cohort.py` |
 | Beta-Laplace authority | `scripts/lib/confidence_reconcile.py:76–83, 127–180` |
 | maybe_reconcile safety-net (TTL=300s) | `scripts/lib/confidence_reconcile.py:183–220` |
-| pattern_usage.confidence cap 2.0 | `scripts/learning_loop.py:283–297` |
+| pattern_usage.confidence cap 2.0 | `scripts/learning_loop.py` `update_confidence_scores` |
 | confidence_score range assert at write boundary | `scripts/lib/confidence_reconcile.py:164–167` |
 | Subprocess-lane fixed-delta path (+0.05/-0.10) | `scripts/lib/subprocess_dispatch_internals/pattern_confidence.py:104–159, 187–236` |
 | D2: success_rate column dropped (reversible) | `scripts/quality_db_init.py:994–1044` |
@@ -407,8 +451,3 @@ Value grows as governed builds resume. The proposal tier is not a no-op even aga
 | Composite relevance score | `scripts/lib/intelligence_selector.py:131–146` |
 | `tagging_events` audit table | `scripts/lib/vnx_tagger.py:52–65` |
 | Tagger closed-vocab floor + snap-to-vocab | `scripts/lib/vnx_tag_vocabulary.py:72–95` |
-
----
-
-*Doc written 2026-07-05 for D7; updated 2026-07-05 for the docs-intelligence sweep (PRs #1001–#1018).*
-*Dispatch-ID: D-docs-intelligence (update); originally D-selfimprove-d7-docs.*

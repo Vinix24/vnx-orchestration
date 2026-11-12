@@ -1,6 +1,6 @@
 # ADR-008 — Dual-LLM Adversarial Review (`codex_gate` + `gemini_review`) with `contract_hash` Binding
 
-**Status:** Accepted, amended 2026-09-26 (second reviewer: kimi_gate)
+**Status:** Accepted, amended 2026-09-26 (second reviewer: kimi_gate), amended 2026-11-11 (second reviewer: deepseek_gate)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Mandatory triple-gate policy (codex + gemini + CI green); review-gate evidence model
@@ -135,6 +135,31 @@ This amendment is written before the rule is active. The key `VNX_REVIEW_SEAT_RU
 - **Rollback criterion.** The key goes back to `first_seat_or_every_seat_by_risk` as soon as, on the sample of clean heads, 2 or more FAILs that the T0 judges real fall in the first 10, or more than 10 percent after at least 20. The sample runs about 1 in 5, so 20 heads asks about 100 clean heads. The repeat measurement after 50 merges also counts what codex-only merges received as fix-forward afterwards.
 - **Accepted cost.** The rule misses 3 of the 16 faults on the measurement set, and #2184 sat on a `gate-merge` path without a warning. The sample and the repeat measurement keep the miss ratio visible; a miss ratio above 10 percent of the sample sends the key back.
 
+### Activering 2026-11-09
+
+**Status:** uitgevoerd (dispatch dlv-375fc3998a77, track tweede-stoel-op-signaal, PR 5). Bron: `claudedocs/2026-11-07-naar-1-9/metingen/schaduwtoets-tweede-stoel-2026-11-09.md`.
+
+De schaduwtoets uit dit amendement is gehaald. De T0 zet vnx-dev daarna op de signaalregel met een `project_config`-rij (`VNX_REVIEW_SEAT_RULE` = `first_seat_or_every_seat_on_signal`) die hij met een approval-id schrijft; die rij is geen deel van PR 5. Elk ander project heeft geen rij en houdt `first_seat_or_every_seat_by_risk`.
+
+**De vier eisen en hun meting.**
+
+| Eis | Gemeten | Uitkomst |
+|---|---|---|
+| Minstens 20 merges in schaduw | 213 merges, van 03-11 12:22Z tot 09-11 15:24Z | gehaald |
+| Elk receipt draagt regelnaam en signalen | 0 van 213 zonder `rule` of `signals` | gehaald |
+| Nul keer minder stoelen bij `unknown` | 6 merges met een `unknown`-veld, alle 6 met de hele stapel | gehaald |
+| Elk verschil nagelezen | 77 verschillen, hieronder per soort | gehaald, met één bevinding |
+
+**De twee soorten verschil.** 136 merges kregen onder beide regels dezelfde stoelen. 40 keer vroeg de schaduw meer stoelen (stoel 2 bij een medium-PR), door de signalen `sample` en `real_warning`, soms samen. 37 keer vroeg de schaduw minder stoelen (alleen codex waar de risicoregel er twee eiste): 34 keer was de enige reden voor `high` een pad in de categorie `gate-merge`, 3 keer (#2433, #2497, #2554) hoogde de T0 zelf een afgeleide `medium` op met `--risk-class high`. Alle 37 hebben stoel-2-regels in `rounds.ndjson`, en geen enkele is een FAIL: op deze steekproef had de smallere regel geen blokkerende bevinding gemist.
+
+**De bevinding (OI-2697).** `seats_for_signals` kent een vrijwillige ophoging door de aanroeper niet als signaal, dus een plan dat bewust twee stoelen vraagt zonder dat de diff of de spec dat afdwingt krijgt na activering één stoel. Tijdelijke regel tot OI-2697 dicht is: een vrijwillig verhoogde levering draagt `irreversible: true` in haar spec, want dat is wel een signaal.
+
+**Verwachte belasting van stoel 2.** Onder de risicoregel vroegen 37 van de 213 merges stoel 2 (17 procent); onder de signaalregel zijn dat er 40 (19 procent), op andere PR's. De belasting blijft dus gelijk en verschuift van gate-merge-paden naar PR's met een echte waarschuwing of een steekproef.
+
+**Een overname die stoel 1 volledig vult (OI-2701, operatorbesluit 09-11, optie a).** De sleutel `VNX_REVIEW_TAKEOVER_FULL_FILL` noemt per project de reviewers waarvan een overname van stoel 1 als stoel 1 telt, als komma-lijst van `gate:model`-paren (bijvoorbeeld `deepseek_gate:deepseek-v4-pro`). De sleutel is standaard leeg en keurt dan niemand goed; een item dat geen `gate:model` is wordt gelogd en keurt ook niemand goed. Een goedgekeurde overname met PASS, nul blokkerende bevindingen en beide tellingen bekend op exact de kop wordt beoordeeld als een directe PASS van stoel 1: haar eigen tellingen, uit haar eigen rapport, en elk ander signaal beslissen. Een overname buiten de lijst houdt elke stoel, zoals hierboven. Het besluit noemt het paar dat telde (`takeover_full_fill`).
+
+**Terugdraaien en criterium.** Zet de rij terug op `first_seat_or_every_seat_by_risk` (of gebruik `VNX_OVERRIDE_REVIEW_SEAT_RULE` als de onmiddellijke noodrem) zodra het terugdraaicriterium van dit amendement geldt: een misratio boven 10 procent van de steekproef; de herhaalmeting na 50 merges telt ook mee wat codex-alleen-merges daarna als fix-forward kregen.
+
 ## Amendement 4 (08-11-2026): poortprofiel en veiligheidsondergrens
 
 **Status:** Accepted (dispatch dlv-eec805d0fb3e, track gate-profiel-per-project, levering P0)
@@ -153,7 +178,7 @@ Eén sleutel, `VNX_GOVERNANCE_PROFILE`, zet in één beweging de zwaarte van de 
 | `takeover_chain` | `VNX_REVIEW_GATE_TAKEOVER_CHAIN` (`scripts/lib/config_registry.py:141-143`) | `codex_gate,kimi_gate,claude_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` | `codex_gate,kimi_gate,claude_gate,deepseek_gate` |
 | `plan_gate_seats` (vanaf de start) | `configs/plan_gate_panel.yaml:47-48` | `1` | `1` | `2` |
 | `required_stack` (wat `vnx gate` verifieert) | enforcement-laag op `review_stack` | uit `review_stack` + enforcement | idem | idem |
-| zetelregel (`VNX_REVIEW_SEAT_RULE`) | `scripts/lib/review_seat_evaluation.py:112` | niet gezet | niet gezet | niet gezet |
+| zetelregel (`VNX_REVIEW_SEAT_RULE`) | `scripts/lib/review_seat_evaluation.py:112` | niet gezet | `first_seat_or_every_seat_by_risk` voor elk project zonder rij; vnx-dev: `first_seat_or_every_seat_on_signal` sinds 2026-11-09, een `project_config`-rij met een approval-id | niet gezet |
 
 `standard` draagt niets bij: elke lezer valt door naar de keten van vandaag. De gemeten "vandaag"-kolom is de registry-default — `codex_gate,kimi_gate` (`scripts/lib/config_registry.py:116-117`), cap `3` (`:190-191`), vier ketennamen (`:141-143`) — zodat "standaard is het gedrag van vandaag" een constructie-eigenschap is en geen belofte. `ci_gate` is orthogonaal: de bestaande keten voegt hem toe wanneer `VNX_CI_GATE_REQUIRED` waar is, nooit het profiel.
 
@@ -217,3 +242,14 @@ Het activeert `light` niet (dat is P5), het zet `VNX_REVIEW_SEAT_RULE` niet (de 
 - ADR-030, amendement 2026-10-25 (de tweede plan-gate-zetel vanaf de start bij schema, security, outside-repo en irreversible)
 - ADR-041 (de tiebreaker bij de review-cap; de plan-gate van 08-11 en haar bindende voorwaarde)
 - `claudedocs/2026-11-07-naar-1-9/plannen/gate-profiel-per-project.md` (revisie 2; de profieltabel, B5, B13 en B14)
+
+## Amendment (2026-11-11): seat 2 is DeepSeek v4-pro, "subscription first" holds for seat 1 only
+
+**Decided by:** Operator (Vincent van Deth). Decision of 2026-11-11, about 16:50Z: the Kimi subscription is cancelled and not renewed; it runs to the end of the invoice period. Measurement: `claudedocs/2026-11-10-kimi-vs-deepseek-oordeel.md`.
+
+- **What changed.** The default review stack is `codex_gate,deepseek_gate` (`scripts/lib/config_registry.py:117-118`). The default takeover chain is `codex_gate,deepseek_gate,claude_gate` (`:141-143`, equal to `gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`). `deepseek_gate` runs `deepseek-v4-pro` by default. The `light`, `standard` and `heavy` profiles name no `kimi_gate` (`scripts/lib/gate_profile.py:66-84`). The project dial for seat 2 is `deepseek_gate_required` (`.vnx/governance_enforcement.yaml:20`).
+- **Why.** DeepSeek v4-pro costs $0.16 per review (n=64, measured 2026-11-10) and flash $0.12 (n=19). At 107 Kimi reviews a month, the subscription only saved money below about $17 a month. Its price is not recorded in the repo, so no Kimi cost per review is stated here. Since 2026-11-09 vnx-dev requests seat 2 only on a signal or in a 1-in-5 sample, so the review count, and with it the break-even, falls. Kimi also stops at its weekly limit, and a stopped seat 2 stops the merge door. With the subscription gone, the reason for "subscription first" at seat 2 is gone too. Source: `claudedocs/2026-11-10-kimi-vs-deepseek-oordeel.md`, section "Kosten", a local operator note and not a tracked file.
+- **What it supersedes.** From the 2026-09-26 amendment: the bullet "`codex_gate` and `kimi_gate` on subscription" and the sentence that `deepseek_gate` is never a default seat. "Subscription first" now holds for seat 1 only: `tests/test_review_stack_subscription_first.py` fails when seat 1 of a default stack is not a subscription gate, and when a default stack, chain or profile names `kimi_gate`. Seat 2 and the chain may be metered.
+- **What it gives up.** Seat 2 runs on API credit. A `deepseek-flash` build is reviewed by the same vendor on a different model (R7b, `deepseek-v4-pro`). A `deepseek-v4-pro` build passes `deepseek_gate` over, and seat 2 goes to `claude_gate`, which failed its calibration run and is therefore the last link of the chain.
+- **What stays.** `kimi_gate` is a registered gate and the kimi lane stays: an explicit stack, chain or build choice can still name them. A `project_config` row beats the new default, so a project that pinned `kimi_gate` keeps it until an operator changes the row. The `contract_hash` binding, the three evidence surfaces per gate and the signal rule of 2026-10-30 are unchanged.
+- **Reading older amendments.** The defaults in the 2026-10-23 and 2026-10-30 amendments and in the profile table of amendment 4 (2026-11-08) are the defaults of their date. Read them with this amendment.

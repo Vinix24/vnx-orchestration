@@ -1,12 +1,8 @@
 # VNX Intelligence System - Technical Reference
-**Last Updated**: 2026-09-27
-**Owner**: T-MANAGER
-**Purpose**: Documentation for VNX Intelligence System - Technical Reference.
 
-**Version**: 5.0.0
-**Date**: 2026-09-27
-**Status**: Active
-**Maintainer**: T-MANAGER
+Verified against `origin/main` at f0c113253 on 2026-11-12. Work merged after the 1.8.0 release is marked "on main, not yet released" (see `CHANGELOG.md`).
+
+This page describes how a dispatch gets its intelligence, how the store is fed, and how the learning loop proposes changes that an operator decides on. Nothing on this page changes agent behaviour without an operator step.
 
 ## Table of Contents
 1. [Overview](#overview)
@@ -29,13 +25,13 @@
 The VNX Intelligence System provides automated intelligence gathering for the VNX orchestration system. It enriches dispatches with relevant code patterns and prevention rules to improve task execution quality across T1/T2/T3 terminals.
 
 ### Key Capabilities
-- **Pattern Matching**: Queries code patterns + doc sections with relevance scoring (60-80% relevance)
+- **Pattern Matching**: Queries code patterns + doc sections with relevance scoring
 - **Documentation Ingestion**: Indexes markdown documentation into FTS5 alongside code patterns
 - **Language-Aware Filtering**: Routes doc tasks to markdown sections, code tasks to Python snippets
 - **Prevention Rules**: Generates 1-4 context-aware prevention rules per task
-- **Tag Intelligence**: Extracts 50+ specific tags for precise matching
-- **Learning Loop**: Adjusts confidence scores based on real-world effectiveness
-- **Performance Caching**: Sub-100ms query response with 80%+ cache hit rate
+- **Tag Intelligence**: Extracts specific tags across 12 categories for precise matching
+- **Learning Loop**: Proposes prevention rules, archival candidates and confidence changes from receipts. An operator decides; shadow mode is the default
+- **Performance Caching**: A TTL cache layer (`scripts/cached_intelligence.py`) in front of the pattern queries
 
 ### Intelligence Database
 - **Location**: `$VNX_STATE_DIR/quality_intelligence.db`
@@ -69,13 +65,13 @@ The VNX Intelligence System provides automated intelligence gathering for the VN
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐ │
 │  │   Agent     │  │   Pattern    │  │  Prevention   │ │
 │  │ Validation  │  │   Matching   │  │    Rules      │ │
-│  │   (PR #1)   │  │   (PR #2)    │  │   (PR #3)     │ │
+│  │             │  │              │  │               │ │
 │  └─────────────┘  └──────────────┘  └───────────────┘ │
 │                                                         │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────────┐ │
 │  │    Tag      │  │   Learning   │  │    Caching    │ │
 │  │Intelligence │  │     Loop     │  │    Layer      │ │
-│  │   (PR #4)   │  │   (PR #7)    │  │   (PR #6)     │ │
+│  │             │  │              │  │               │ │
 │  └─────────────┘  └──────────────┘  └───────────────┘ │
 └────────────────────┬────────────────────────────────────┘
                      │
@@ -122,7 +118,7 @@ The VNX Intelligence System provides automated intelligence gathering for the VN
 ## Pattern Matching Engine
 
 ### Purpose
-Connects 1,143 existing code patterns from the quality intelligence database to dispatch creation, providing terminals with relevant code examples and solutions.
+Connects the code patterns in the quality intelligence database to dispatch creation, providing terminals with relevant code examples and solutions.
 
 ### Implementation
 
@@ -287,15 +283,6 @@ python3 scripts/gather_intelligence.py patterns "implement browser cleanup"
 MAX_CODE_LENGTH = 1000  # Increased from 500
 ```
 
-**Impact**: Terminals now receive more complete code examples with proper context, improving pattern usability by ~233%.
-
-### Performance Metrics
-
-- **Query Speed**: <10ms for 5 patterns from 1,143
-- **Memory Usage**: Minimal (SQLite connection only)
-- **Pattern Coverage**: All 1,143 patterns searchable
-- **Relevance Accuracy**: 60-80% (improved from 20-40%)
-- **Code Completeness**: 100% (improved from ~30%)
 
 ---
 
@@ -584,10 +571,9 @@ Extracts specific, compound tags from task descriptions for precise pattern matc
 ### Implementation
 
 **Version**: 2.0 (PR-3, Self-Learning Pipeline)
-**Tag Extraction**: `scripts/gather_intelligence.py` (lines 448-597)
-**Tag Combinations**: `scripts/tag_intelligence.py` (943 lines)
+**Tag Extraction**: `scripts/gather_intelligence.py`
+**Tag Combinations**: `scripts/tag_intelligence.py`
 **Recommendation Manager**: `scripts/tag_intelligence.py` (RecommendationManager class)
-**Tag Count**: 50+ specific tags across 12 categories + 23 standardized compound tags
 
 ### Tag Categories & Patterns
 
@@ -691,8 +677,10 @@ def generate_tag_subsets(tag_tuple: Tuple[str, ...]) -> List[Tuple[str, ...]]:
 2. Occurrence count incremented in tag_combinations table
 3. At 2+ occurrences: prevention rule generated
 4. Rule confidence: min(occurrence_count / 10.0, 1.0)
-5. Rules queued in pending_rules.json (G-L1: never auto-activated)
-6. Operator reviews and accepts/rejects
+5. Queue mode or persist mode only: rules queued in pending_rules.json through prevention_rule_store (G-L1: never auto-activated)
+6. Operator records a decision as a bundle: `vnx learning decide-rule` appends to prevention_rule_decisions.ndjson
+7. A loop rule is injected only with an active row in `pattern_activation` and a fresh `ok`/`pending` ledger verdict
+   (`injectable_clause`); `scripts/deactivate_pattern_activation.py` switches it off and it stays off
 ```
 
 ### Recommendation Manager
@@ -783,6 +771,49 @@ python3 scripts/gather_intelligence.py gather \
 #   "production-safety"
 # ]
 ```
+
+---
+
+## Learning Loop
+
+The loop proposes. The operator decides. Each feature below is marked shipped, opt-in (default off) or not on main.
+
+### Modes
+
+`LearningLoop.daily_learning_cycle()` (`scripts/learning_loop.py`) runs in one of three modes. Both switches are environment variables and are not in the config registry.
+
+| Mode | Switch | Default | What the cycle does |
+|---|---|---|---|
+| shadow | none | on | Computes and reports. No database row, no metric, no queue. The report carries `mode: shadow` and the steps it did not run. |
+| queue | `VNX_LEARNING_LOOP_QUEUE=1` | off | Shadow plus proposals in the operator queue `pending_rules.json`, also when the probe gate is degraded. No database row, no activation. |
+| persist | `VNX_LEARNING_LOOP_PERSIST=1` | off | Writes patterns, confidence and the archival queue, and ingests approved rules. |
+
+Persist mode is further gated by `VNX_LEARNING_LOOP_ENABLED` (default `0`, a no-op), by a healthy injection-effectiveness probe and by an approval record bound to the exact rows. In queue and persist mode the cycle reads `ledger_verdict/1` first (`scripts/lib/learning_ledger_gate.py`) and stops with `ledger_source_check: <reason_code>` on `refused` ([ADR-065](../../governance/decisions/ADR-065-leren-is-voorstellen.md)).
+
+### The human gate
+
+`vnx learning decide-rule` records an operator decision on queued rules as one bundle in `prevention_rule_decisions.ndjson`, with a minted `approval_id`; an approval also needs an effect criterion and a stop condition. In persist mode `ingest_approved_rules` activates only a rule whose decision is recorded for this project and whose proposal is unchanged since. `scripts/deactivate_pattern_activation.py` switches an activation off and it stays off. Which failures qualify, the approval record and the archival verbs are in [SELF_LEARNING_LOOP.md](../../intelligence/SELF_LEARNING_LOOP.md).
+
+### Where a lesson goes, and who owns a pattern
+
+- One home per lesson: [ADR-067](../../governance/decisions/ADR-067-learning-capture-routing.md), [LEARNING_CAPTURE_ROUTING.md](../LEARNING_CAPTURE_ROUTING.md). `scripts/capture_audit.py` (`bind`, `sources`, `audit`, `report`, `dismiss`) counts a lesson that sits in two homes.
+- Signal reattribution ([ADR-068](../../governance/decisions/ADR-068-learning-signaal-attributie.md)): `scripts/lib/pattern_reattribution.py` votes over body, store and report path. `scripts/lib/qi_transfer_plan.py` plans a move between databases without running it. `scripts/lib/qi_transfer_apply.py` runs `apply`, `resume` and `undo` of a plan with a journal. `undo` puts the source row back first and drops only the copy that move created.
+
+### Effect measurement ([ADR-069](../../governance/decisions/ADR-069-intelligence-effectmeting.md))
+
+The A/B window is opt-in (`VNX_INTEL_AB_TEST` and `VNX_INTEL_AB_WINDOW`, both off). `scripts/intel_injection_join.py cohort|effect|secondary` count per arm, and a verdict exists only at `MIN_PER_ARM = 200` resolved dispatches per arm. No window has produced a verdict, so no effect of injection on outcomes has been measured. Detail: [SELF_LEARNING_LOOP.md](../../intelligence/SELF_LEARNING_LOOP.md#effect-window).
+
+### Corpus quarantine
+
+`scripts/vnx_intelligence_corpus_quarantine.py` takes `baseline`, `quarantine`, `rehearse`, `verify`, `restore` and `purge`. `quarantine` writes the corpus to a sealed artifact with a manifest; `restore` brings it back.
+
+### Operator steering ([ADR-072](../../governance/decisions/ADR-072-operator-bijsturing-leert.md))
+
+On main, not yet released, and not wired into the nightly run: `scripts/operator_steering.py bind` binds a transcript source to a project and `show --prompt` prints a prompt to the terminal. `scripts/lib/operator_steering_class.py` classifies a prompt deterministically with a closed class table. `scripts/lib/steering_proposal_store.py` keeps proposals as an append-only decision file with the projection `steering_proposals.json`. A rejected proposal reopens only on a prompt newer than the rejection, `approved` applies nothing, and `applied` needs an `applied_ref`. The root-cause step is not on main.
+
+### Dream
+
+`vnx dream install-scheduler` installs `com.vnx.auto-dream` and `com.vnx.dream-watch`. The watch runs `scripts/dream_liveness_probe.py` and `vnx doctor` reads the same `dream_liveness/1` ([ADR-066](../../governance/decisions/ADR-066-dream-liveness-watch.md)). Auto-dream stays in a burn-in period until a run of measured nights.
 
 ---
 
@@ -903,10 +934,10 @@ sqlite3 $VNX_STATE_DIR/quality_intelligence.db \
   "SELECT pattern_id, used_count, ignored_count, confidence FROM pattern_usage WHERE used_count > 0 ORDER BY confidence DESC LIMIT 10"
 
 # View pending archival queue (G-L4)
-cat $VNX_STATE_DIR/pending_archival.json | jq '.patterns | length'
+cat $VNX_STATE_DIR/pending_archival.json | jq '.pending_archival | length'
 
 # View pending rules queue (G-L1)
-cat $VNX_STATE_DIR/pending_rules.json | jq '.rules | length'
+cat $VNX_STATE_DIR/pending_rules.json | jq '.pending_rules | length'
 ```
 
 ---
@@ -994,11 +1025,7 @@ Replaces self-reported terminal status with objective, calculated quality scores
 
 ### Why This Exists
 
-Analysis of dispatch data revealed three fundamental measurement problems:
-
-1. **166 unique self-reported status values** — no standardization, terminals define own success
-2. **Rework invisible** — re-dispatched "successful" tasks counted as multiple successes
-3. **System timeouts pollute metrics** — 30% of dispatches timeout (receipt processing issue), inflating failure rates
+Self-reported terminal status has no standard values, a re-dispatched "successful" task counts as several successes, and a system timeout looks like a failure. The CQS, the control limits and the nightly aggregation replace that with one calculated score per dispatch.
 
 ### Composite Quality Score (CQS)
 
@@ -1008,7 +1035,7 @@ Weighted 0-100 score computed from 7 independent signals:
 CQS = Status(25%) + Completion(20%) + Effort(15%) + ErrorDensity(10%)
     + Rework(10%) + T0Advisory(10%) + OIDelta(10%)
 
-Status:       166 raw values -> 5 categories (success=100, partial=60, failure=0)
+Status:       raw status values -> 5 categories (success=100, partial=60, failure=0)
               timeout/unknown -> excluded from all metrics
 
 Completion:   Has report? + PR merged? + Gate passed? -> 0-100
@@ -1097,8 +1124,8 @@ Optimize intelligence query performance through multi-layer caching and intellig
 
 ### Implementation
 
-**Version**: 1.0 (PR #6)
-**File**: `scripts/cached_intelligence.py` (276 lines)
+**Version**: 1.0        
+**File**: `scripts/cached_intelligence.py`
 **Integration**: Transparent caching layer for `gather_intelligence.py`
 
 ### Cache Architecture
@@ -1130,7 +1157,7 @@ Optimize intelligence query performance through multi-layer caching and intellig
                    ▼
 ┌─────────────────────────────────────────────┐
 │    quality_intelligence.db (SQLite)          │
-│    • code_snippets (1,143 patterns)          │
+│    • code_snippets                           │
 │    • pattern_usage (learning data)           │
 │    • FTS5 indexes                            │
 └─────────────────────────────────────────────┘
@@ -1142,46 +1169,29 @@ Optimize intelligence query performance through multi-layer caching and intellig
 - **Size**: 100 items
 - **TTL**: 15 minutes
 - **Purpose**: Cache frequent pattern queries
-- **Hit Rate Target**: 80%+
 
 #### 2. Report Cache
 - **Size**: 50 items
 - **TTL**: 30 minutes
 - **Purpose**: Cache report mining results
-- **Hit Rate Target**: 70%+
 
 #### 3. Keyword Cache
 - **Size**: 200 items
 - **TTL**: 60 minutes
 - **Purpose**: Cache keyword extraction
-- **Hit Rate Target**: 90%+
 
 #### 4. Prevention Cache
 - **Size**: 75 items
 - **TTL**: 20 minutes
 - **Purpose**: Cache prevention rule generation
-- **Hit Rate Target**: 75%+
 
-### Performance Metrics
+### Commands
 
 ```bash
-# Benchmark cache performance
-python3 cached_intelligence.py benchmark
-
-# Expected output:
-# Pattern Query (cached): 12ms
-# Pattern Query (uncached): 156ms
-# Cache Hit Rate: 87%
-# Memory Usage: 8.4 MB
-
-# View cache statistics
-python3 cached_intelligence.py stats
-
-# Expected output:
-# Pattern Cache: 87 items, 82% hit rate
-# Report Cache: 34 items, 71% hit rate
-# Keyword Cache: 156 items, 93% hit rate
-# Prevention Cache: 52 items, 78% hit rate
+python3 scripts/cached_intelligence.py benchmark   # timed run, cold against warm
+python3 scripts/cached_intelligence.py stats       # hits, misses, evictions per cache
+python3 scripts/cached_intelligence.py preload     # warm the hot patterns
+python3 scripts/cached_intelligence.py clear
 ```
 
 ### Cache Optimization Strategies
@@ -1190,17 +1200,14 @@ python3 cached_intelligence.py stats
 - Short TTL (15-20m) for frequently changing data
 - Long TTL (60m) for stable data (keywords)
 
-#### 2. LRU Eviction
-- Least Recently Used patterns evicted first
-- Maintains hot patterns in cache
+#### 2. Eviction
+- At capacity the entry with the lowest value is evicted (confidence boost weighed against hit count)
 
 #### 3. Confidence Boosting
-- Cached patterns receive small confidence boost
-- Encourages reuse of successful patterns
+- A cache hit raises the entry's boost by 5%, capped at 2.0
 
-#### 4. Query Result Preloading
-- Common queries preloaded during daemon startup
-- Reduces cold start latency
+#### 4. Preloading
+- `preload_hot_patterns()` warms common queries
 
 ---
 
@@ -1289,22 +1296,9 @@ python3 scripts/gather_intelligence.py patterns \
 
 ### Intelligence Daemon Integration
 
-The intelligence daemon runs the learning loop daily:
+The intelligence daemon runs the learning loop daily (`daily_hygiene_hour = 18`, `intelligence_daemon.py`). Without `VNX_LEARNING_LOOP_PERSIST=1` the cycle is a shadow run: it computes, reports and changes no row. The nightly phase `scripts/learning_loop_nightly.py` runs the same cycle and writes a beacon per run.
 
-```python
-# intelligence_daemon.py integration
-def run_learning_cycle():
-    """Run daily learning cycle at 18:00."""
-    learning_loop = LearningLoop()
-    report = learning_loop.run()
-
-    # Update dashboard with learning metrics
-    update_dashboard({
-        "learning_cycle_last_run": datetime.now(),
-        "patterns_adjusted": report['adjustments_made'],
-        "patterns_archived": report['patterns_archived']
-    })
-```
+`IntelligenceDaemon.run_learning_cycle()` calls `LearningLoop.daily_learning_cycle()` and keeps the report statistics in its health status. The mode rules of the Learning Loop section apply: a daemon without the persist switch runs a shadow cycle.
 
 ---
 
@@ -1314,28 +1308,13 @@ def run_learning_cycle():
 
 #### Check Intelligence Health
 ```bash
-# View dashboard status
 cat $VNX_STATE_DIR/dashboard_status.json | jq '.intelligence'
-
-# Expected output:
-# {
-#   "pattern_count": 1143,
-#   "agent_validation": "active",
-#   "learning_loop_last_run": "2026-01-26T18:00:00Z",
-#   "cache_hit_rate": 0.87,
-#   "query_latency_ms": 12
-# }
 ```
 
 #### Monitor Dispatcher Integration
 ```bash
 # Check dispatcher logs for intelligence calls
 tail -f $VNX_LOGS_DIR/dispatcher.log | grep "Intelligence"
-
-# Expected output:
-# [2026-01-26 12:30:00] Intelligence: Gathered 5 patterns for task
-# [2026-01-26 12:30:00] Intelligence: Generated 3 prevention rules
-# [2026-01-26 12:30:00] Intelligence: Agent validated successfully
 ```
 
 #### Check Pattern Usage
@@ -1370,7 +1349,7 @@ print(f'Patterns in DB: {cursor.fetchone()[0]}')
 ```
 
 **Solutions**:
-1. Verify database exists and has 1,143 patterns
+1. Verify the database exists and `code_snippets` has rows
 2. Check FTS5 index: `PRAGMA index_list(code_snippets_fts)`
 3. Test with broader keywords
 
@@ -1398,27 +1377,11 @@ python3 scripts/gather_intelligence.py validate "problem-agent"
 
 #### Problem: Low cache hit rate
 
-**Symptoms**:
-```bash
-python3 cached_intelligence.py stats
-# Cache Hit Rate: 23% (target: 80%+)
-```
-
-**Diagnosis**:
-```bash
-# Check cache configuration
-python3 -c "
-from cached_intelligence import CachedIntelligence
-cache = CachedIntelligence()
-print(f'Pattern Cache: {cache.pattern_cache.maxsize} items')
-print(f'TTL: {cache.pattern_cache_ttl} seconds')
-"
-```
+**Diagnosis**: `python3 scripts/cached_intelligence.py stats` shows hits and misses per cache.
 
 **Solutions**:
-1. Increase cache size: `PATTERN_CACHE_SIZE = 200`
-2. Increase TTL: `PATTERN_CACHE_TTL = 1800` (30 min)
-3. Check if queries are too unique (cache can't help)
+1. Queries that are mostly unique cannot hit the cache.
+2. The sizes and TTLs are set in `CachedIntelligence.__init__` (`scripts/cached_intelligence.py`).
 
 ---
 
@@ -1449,16 +1412,6 @@ python3 tests/test_pattern_matching.py
 # Run with coverage
 python3 -m pytest tests/ --cov=scripts --cov-report=html
 ```
-
-### Test Coverage
-
-**Target Coverage**: ≥85%
-
-Current coverage:
-- `gather_intelligence.py`: 92%
-- `learning_loop.py`: 88%
-- `cached_intelligence.py`: 85%
-- `intelligence_daemon.py`: 79%
 
 ### Integration Testing
 
@@ -1496,31 +1449,3 @@ python3 -m pytest tests/test_intelligence_pipeline_e2e.py tests/integration/test
 - `$VNX_LOGS_DIR/dispatcher.log` - Dispatcher intelligence calls
 - `$VNX_STATE_DIR/learning_report_*.json` - Daily learning reports
 - `$VNX_STATE_DIR/archive/patterns/` - Archived patterns
-
-### Performance Benchmarks
-
-| Metric | Target | Current | Status |
-|--------|--------|---------|--------|
-| Pattern Query (cached) | <100ms | 12ms | ✅ |
-| Pattern Query (uncached) | <200ms | 156ms | ✅ |
-| Agent Validation | <10ms | 3ms | ✅ |
-| Prevention Rule Generation | <50ms | 28ms | ✅ |
-| Tag Extraction | <20ms | 8ms | ✅ |
-| Cache Hit Rate | >80% | 87% | ✅ |
-| Memory Usage | <50MB | 8.4MB | ✅ |
-| Learning Cycle Duration | <60s | 42s | ✅ |
-
-### Version History
-
-- **v5.0.0** (2026-03-28) - Self-Learning Pipeline: usage signal tracking (PR-0), session analytics fix (PR-1), task-relevant injection for all terminals (PR-2), pairwise/triple tag subsets + recommendation manager (PR-3), 3-section quality digest + consolidated 11-phase nightly pipeline (PR-4)
-- **v3.0.0** (2026-03-02) - Documentation ingestion (`doc_section_extractor.py`), language-aware filtering, `VNX_DOCS_DIRS` config
-- **v2.0.0** (2026-01-26) - Enhanced relevance scoring, prevention rules, tag intelligence
-- **v1.1.0** (2026-01-19) - Pattern matching engine (PR #2), dispatcher integration (PR #8)
-- **v1.0.0** (2026-01-18) - Agent validation (PR #1)
-
----
-
-**Document Version**: 5.0.0
-**Last Updated**: 2026-03-28
-**Maintained by**: T-MANAGER
-**Status**: Production Active

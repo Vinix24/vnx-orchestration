@@ -62,24 +62,24 @@ Value = Union[str, int]
 # test pins it to those defaults. ``light.review_stack`` is ``codex_gate`` alone (P5): the
 # one value that weakens a review. It lands in the same change that refuses ``light`` on a
 # signal path (B2, ``review_seat_evaluation.light_floor_refusal``, ADR-008 amendment), so the
-# stack and its floor cannot be separated.
+# stack and its floor cannot be separated. Since 2026-11-11 (Kimi cancelled) no profile names kimi_gate.
 PROFILE_TABLE: Mapping[str, Mapping[str, Value]] = MappingProxyType({
     "light": MappingProxyType({
         "review_stack": "codex_gate",
         "round_cap": 2,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 1,
     }),
     "standard": MappingProxyType({
-        "review_stack": "codex_gate,kimi_gate",
+        "review_stack": "codex_gate,deepseek_gate",
         "round_cap": 3,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate,deepseek_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 1,
     }),
     "heavy": MappingProxyType({
-        "review_stack": "codex_gate,kimi_gate,claude_gate",
+        "review_stack": "codex_gate,deepseek_gate,claude_gate",
         "round_cap": 5,
-        "takeover_chain": "codex_gate,kimi_gate,claude_gate,deepseek_gate",
+        "takeover_chain": "codex_gate,deepseek_gate,claude_gate",
         "plan_gate_seats": 2,
     }),
 })

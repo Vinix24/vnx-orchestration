@@ -10,8 +10,9 @@ origin. The dominant origin becomes the dispatch's ``parent_dispatch`` (an exist
 making the "rework → original dispatch" edge persistent and auditable.
 
 Forward-looking by construction: only commits stamped with a token (governed lanes, post-#969) carry
-the link, so edges accrue as governed dispatches land. No new table (ADR-007-free); rework-by-role is a
-self-join over ``parent_dispatch``. Read-git + a single fill-once UPDATE; best-effort, never raises.
+the link, so edges accrue as governed dispatches land. Declared edges live in ``rework_edges``
+(ADR-071, ADR-007 key); rework-by-role is a self-join over ``parent_dispatch``. Read-git + a
+single fill-once UPDATE; best-effort, never raises.
 
 DBs (central per-project store):
   - provenance_registry  -> runtime_coordination.db   (commit_sha -> dispatch_id)
@@ -20,6 +21,7 @@ DBs (central per-project store):
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import subprocess
@@ -45,14 +47,14 @@ def _run_git(repo_root: "str | Path", args: List[str], *, timeout: int = 20) -> 
     return result.stdout
 
 
-def _changed_regions(repo_root: "str | Path", commit: str) -> "Dict[str, List[tuple]]":
+def _changed_regions(repo_root: "str | Path", commit: str, *, git=None) -> "Dict[str, List[tuple]]":
     """Pre-image file -> list of (old_start, old_count) regions this commit replaced.
 
     old_count == 0 (a pure insertion) reworks nothing and is skipped. New files (--- /dev/null) have
     no pre-image and are skipped. -M lets git follow renames so blame targets the right pre-image path.
     """
     # core.quotepath=false keeps non-ASCII paths literal (otherwise git octal-quotes them and blame misses).
-    out = _run_git(repo_root, ["-c", "core.quotepath=false", "show", commit, "--unified=0", "--format=", "-M"])
+    out = (git or _run_git)(repo_root, ["-c", "core.quotepath=false", "show", commit, "--unified=0", "--format=", "-M"])
     regions: "Dict[str, List[tuple]]" = defaultdict(list)
     if not out:
         return regions
@@ -75,15 +77,18 @@ def _changed_regions(repo_root: "str | Path", commit: str) -> "Dict[str, List[tu
     return regions
 
 
-def _blame_origin_counts(
-    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]"
-) -> "Dict[str, int]":
-    """Blame the replaced regions against ``commit``'s parent; count lines per origin commit SHA."""
-    counts: "Dict[str, int]" = defaultdict(int)
+def _blame_origin_detail(
+    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]", *, git=None
+) -> "Dict[str, dict]":
+    """Blame the replaced regions against ``commit``'s parent: origin SHA -> {"lines": n, "files": set}.
+
+    ``git`` replaces the fail-open runner; a strict one raises instead of reading a failure as "no lines"."""
+    run = git or _run_git
+    detail: "Dict[str, dict]" = defaultdict(lambda: {"lines": 0, "files": set()})
     parent = f"{commit}^"
     for pre_file, spans in regions.items():
         for old_start, old_count in spans:
-            out = _run_git(
+            out = run(
                 repo_root,
                 ["blame", "-L", f"{old_start},+{old_count}", "--porcelain", parent, "--", pre_file],
             )
@@ -92,8 +97,16 @@ def _blame_origin_counts(
             for line in out.splitlines():
                 m = _SHA_RE.match(line)
                 if m:
-                    counts[m.group(1)] += 1
-    return counts
+                    detail[m.group(1)]["lines"] += 1
+                    detail[m.group(1)]["files"].add(pre_file)
+    return detail
+
+
+def _blame_origin_counts(
+    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]"
+) -> "Dict[str, int]":
+    """Blame the replaced regions against ``commit``'s parent; count lines per origin commit SHA."""
+    return {sha: d["lines"] for sha, d in _blame_origin_detail(repo_root, commit, regions).items()}
 
 
 def load_commit_dispatch_map(rc_conn: sqlite3.Connection) -> "Dict[str, str]":
@@ -118,6 +131,78 @@ def load_dispatch_roles(qi_conn: sqlite3.Connection, project_id: str) -> "Dict[s
     except sqlite3.Error:
         return {}
     return {did: role for did, role in rows if did}
+
+
+EDGE_KINDS = ("round", "oi_fix", "pr_fix", "blame")
+EDGE_CLASSES = ("rework", "churn")
+EDGE_SOURCES = ("spec", "receipt", "blame")
+
+
+def record_edge(
+    qi_conn: sqlite3.Connection,
+    project_id: str,
+    rework_dispatch_id: str,
+    origin_dispatch_id: str,
+    kind: str,
+    edge_class: str,
+    *,
+    source: str,
+    evidence: Optional[dict] = None,
+) -> bool:
+    """Insert one rework edge into ``rework_edges``; fill-once on the ADR-007 key.
+
+    Returns True when a row was written and False when the key already existed (the stored
+    edge is never changed). An unknown ``kind``, ``edge_class`` or ``source``, or an empty id,
+    raises ValueError before any write. The caller owns the transaction.
+    """
+    if kind not in EDGE_KINDS:
+        raise ValueError(f"unknown edge kind {kind!r}; expected one of {EDGE_KINDS}")
+    if edge_class not in EDGE_CLASSES:
+        raise ValueError(f"unknown edge class {edge_class!r}; expected one of {EDGE_CLASSES}")
+    if source not in EDGE_SOURCES:
+        raise ValueError(f"unknown edge source {source!r}; expected one of {EDGE_SOURCES}")
+    for name, value in (
+        ("project_id", project_id),
+        ("rework_dispatch_id", rework_dispatch_id),
+        ("origin_dispatch_id", origin_dispatch_id),
+    ):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{name} must be a non-empty string")
+    cur = qi_conn.execute(
+        "INSERT INTO rework_edges "
+        "(project_id, rework_dispatch_id, origin_dispatch_id, kind, class, evidence_json, source) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (project_id, rework_dispatch_id, origin_dispatch_id, kind) DO NOTHING",
+        (
+            project_id, rework_dispatch_id, origin_dispatch_id, kind, edge_class,
+            json.dumps(evidence or {}, sort_keys=True), source,
+        ),
+    )
+    return cur.rowcount > 0
+
+
+def load_edges(qi_conn: sqlite3.Connection, project_id: str) -> List[dict]:
+    """All edges of one project.
+
+    Empty only on a store without the `rework_edges` table (not yet migrated). Every other
+    `sqlite3.OperationalError` (a lock, a missing column, a malformed query) is raised.
+    """
+    try:
+        rows = qi_conn.execute(
+            "SELECT rework_dispatch_id, origin_dispatch_id, kind, class, source, evidence_json "
+            "FROM rework_edges WHERE project_id = ? "
+            "ORDER BY rework_dispatch_id, origin_dispatch_id, kind",
+            (project_id,),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if message.startswith("no such table") and "rework_edges" in message:
+            return []
+        raise
+    return [
+        {"rework": r[0], "origin": r[1], "kind": r[2], "class": r[3], "source": r[4], "evidence_json": r[5]}
+        for r in rows
+    ]
 
 
 def _persist_parent(qi_conn: sqlite3.Connection, project_id: str, rework_did: str, origin_did: str) -> bool:

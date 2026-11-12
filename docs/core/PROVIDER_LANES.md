@@ -12,22 +12,25 @@ subscription token through a provider SDK has gotten accounts banned (the
 opencode and openclaw precedent). VNX stays CLI-driven so my production Claude
 account is never the thing that pays for an SDK shortcut.
 
-The trade is real and worth stating up front: subprocess workers are harder to
-instrument than in-process SDK calls. I recover observability through receipts,
-event streams, and a captured conversation log instead of SDK callbacks. The
-rest of this doc is the map of which lane runs which work, and where the lanes
-do not yet behave identically.
+The trade-off: subprocess workers are harder to instrument than in-process SDK
+calls. I recover observability through receipts, event streams, and a captured
+conversation log instead of SDK callbacks. The rest of this doc is the map of
+which lane runs which work, and where the lanes do not yet behave identically.
+
+Verified against `origin/main` at `c41411fea` on 2026-11-12. `VERSION` says 1.8.0.
+Work merged after that release is marked "on main, not yet released".
 
 ## The lanes
 
 | Lane | Binary / transport | Auth | Primary use | Module |
 |---|---|---|---|---|
 | claude-headless | `claude -p` headless, via the door | OAuth subscription (an own `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` switches billing) | the only Claude worker lane (code + commit) | `scripts/lib/dispatch_envelope.py` (`run_envelope_headless_plan`) |
-| claude-subprocess | `claude -p` headless, terminal-pinned | same auth as claude-headless | terminal-pinned single-worker PRs, opt-in per terminal | `scripts/lib/subprocess_dispatch.py` |
-| codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
-| gemini | gemini CLI | Google CLI auth | analysis / non-review work (not a reviewer) | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
-| kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
-| deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model; takeover reviewer (`deepseek_gate`) | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
+| claude-subprocess | `claude -p` headless, terminal-pinned | same auth as claude-headless | terminal-pinned single-worker PRs; the worker terminals T1-T3 always take it, T0 opts in | `scripts/lib/subprocess_dispatch.py` |
+| codex | `codex exec` CLI | OpenAI CLI auth | strict diff-mode review (first seat of the default review stack); also a build lane | `scripts/lib/provider_dispatch.py` (`_dispatch_codex`) |
+| gemini | gemini CLI | Google CLI auth | analysis / non-review work (not a reviewer; the door refuses a build dispatch on it) | `scripts/lib/provider_dispatch.py` (`_dispatch_gemini`) |
+| kimi | Kimi CLI (`kimi login` OAuth) | Kimi CLI OAuth | synthesis / operational review; an explicit choice (build lane, or a stack or chain that names `kimi_gate`), in no default review stack since 2026-11-11 | `scripts/lib/provider_dispatch.py` (`_dispatch_kimi`) |
+| claude_gate | `claude -p` headless, read-only (`Read`, `Grep`, `Glob`), MCP off | OAuth subscription, no `ANTHROPIC_*` variable in its environment | review seat, last link of the default takeover chain (after `deepseek_gate`) | `scripts/lib/claude_gate_lane.py` |
+| deepseek-harness | `claude` CLI pointed at DeepSeek's Anthropic-compatible endpoint | own `DEEPSEEK_API_KEY`, key-auth | analysis / implementation on a non-Claude model; second seat of the default review stack (`deepseek_gate`, `deepseek-v4-pro`) | `scripts/lib/provider_dispatch.py` (`_dispatch_deepseek_harness`) |
 | glm-harness | `claude` CLI pointed at a local litellm proxy (`:4141`) fronting OpenRouter | own OpenRouter key, key-auth (`zai-via-openrouter-only`, `glm-via-harness-only`) | review seat reached through an explicit takeover chain or stack (not in the default chain) | `scripts/lib/provider_dispatch.py` (`_dispatch_glm_harness`) |
 | ollama | local Ollama resolver | none (local) | privacy-sensitive work, resolver layer | routed via litellm `ollama` sub-provider |
 
@@ -57,12 +60,14 @@ operator opt-in. See `DISPATCH_RULES.md` §6.
 ### claude-subprocess
 
 The terminal-pinned headless lane. `claude -p` runs via `subprocess_dispatch.py`,
-enriched with skill context, intelligence injection, and the repo map. It has the
-most receipts behind it and is the bar the other lanes are measured against.
+enriched with skill context, intelligence injection, and the repo map. The worker
+terminals T1, T2 and T3 always take this path: their `VNX_ADAPTER_T{n}` selector
+is gone since T-G1 (`scripts/lib/terminal_lane.py`). Only T0 still opts in, with
+`VNX_ADAPTER_T0=subprocess`, until T-B2 removes that.
 
 Billing follows the auth, not the lane: it runs on the subscription unless the
 environment carries an own `ANTHROPIC_API_KEY` or `ANTHROPIC_BASE_URL`
-(`DISPATCH_RULES.md` §7 and §8). Opt in per terminal with `VNX_ADAPTER_T{n}=subprocess`.
+(`DISPATCH_RULES.md` §7 and §8).
 
 ### codex
 
@@ -76,8 +81,8 @@ dispatch leaves the same NDJSON trail as a Claude dispatch.
 A provider lane for non-review work. Gemini is not a reviewer: the operator
 retired it as one on 2026-09-26, after a measurement of one `gemini_review`
 record ever and no verdict among them (its binary was never on PATH). The
-review stack is codex plus kimi on subscription, with deepseek as takeover
-fallback and glm outside the default chain (see "Takeover chain" below). `gemini_review` is no longer a registered gate name
+review stack is codex first and deepseek_gate on API credit second, with claude as the
+last link of the takeover chain (see "Review stack and takeover chain" below). `gemini_review` is no longer a registered gate name
 (`dispatch_spec.RETIRED_GATE_NAMES`): a `VNX_DEFAULT_REVIEW_STACK` that still
 carries it drops the name with a warning, while a takeover chain or a
 dispatch spec's declared gate that names it is refused outright. Existing
@@ -90,7 +95,9 @@ Moonshot API for this lane (`kimi-via-cli-only`, blocking). Using the CLI keeps
 cost attribution and rate-limit behavior in one place instead of split across an
 API key and a CLI session. Kimi is the synthesis and operational-angle lane:
 where codex finds diff-level defects, kimi reasons about whether the change
-makes operational sense.
+makes operational sense. The Kimi subscription was cancelled on 2026-11-11, so
+no default review stack, takeover chain or gate profile names `kimi_gate`. The
+lane and the gate stay registered for an explicit choice.
 
 ### deepseek-harness
 
@@ -139,22 +146,44 @@ it. This is code behaviour; no ADR records it.
 Local Ollama for the resolver layer and privacy-sensitive work, where no data
 leaves the machine. Routed through the litellm `ollama` sub-provider.
 
-## Takeover chain
+## Review stack and takeover chain
+
+The default review stack is `codex_gate,deepseek_gate` (`VNX_DEFAULT_REVIEW_STACK`,
+`scripts/lib/config_registry.py`). Seat 1 is a subscription reviewer (codex); seat 2
+is `deepseek_gate` on API credit with `deepseek-v4-pro`. A project picks a gate
+profile with `vnx gate-profile` (`scripts/lib/gate_profile.py`, ADR-060, on main,
+not yet released):
+
+| Profile | Review stack | Round cap | Takeover chain |
+|---|---|---|---|
+| `light` | `codex_gate` | 2 | codex, deepseek, claude |
+| `standard` (default) | `codex_gate,deepseek_gate` | 3 | codex, deepseek, claude |
+| `heavy` | `codex_gate,deepseek_gate,claude_gate` | 5 | codex, deepseek, claude |
+
+How many seats a merge needs depends on the rule the project runs. By default the
+risk class of the PR head decides: the first seat at `low` and `medium`, every
+seat at `high` and `critical`. A project can switch to the signal rule
+(`VNX_REVIEW_SEAT_RULE=first_seat_or_every_seat_on_signal`, off by default), which
+asks the second seat only when a signal holds. Only vnx-dev runs the signal rule
+today; every other project keeps the risk rule. Both rules and their fail-closed
+inputs are in `DISPATCH_RULES.md` section 2.
 
 A review seat that cannot read a PR hands it to the next gate in the takeover
-chain. The default is `codex_gate,kimi_gate,deepseek_gate`
-(`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`). Both subscription
-gates come first and the API-credit gate follows. `glm_gate` is not in the default
-chain: it stays a registered gate, and an explicit `VNX_REVIEW_GATE_TAKEOVER_CHAIN`
-or review stack that names it still reaches it. A takeover record of
+chain. The default is `codex_gate,deepseek_gate,claude_gate`
+(`gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`, equal to the registry
+default at `config_registry.py:141-143`). The API-credit gate `deepseek_gate` comes
+second and the subscription gate `claude_gate` ends the chain. `kimi_gate` and
+`glm_gate` are not in the default chain: both stay registered gates, and an
+explicit `VNX_REVIEW_GATE_TAKEOVER_CHAIN` or review stack that names them still
+reaches them. A reviewer never runs the builder's model: such a gate is passed over
+like an unavailable one (`scripts/lib/review_vendor.py`). A takeover record of
 `deepseek_gate` signs the seat it took over at the merge door, because
 `deepseek_gate` is a `Gate` enum member and a review peer in the closure verifier.
 A chain that runs out ends as `chain_exhausted`, never as a silent re-dispatch.
-The default chain and the removal of `glm_gate` from it are on main, not yet released.
-The chain, the seat rule and the merge-door checks are described once, in
-`DISPATCH_RULES.md` (section 2 and the review-stack bullet) and
-`docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`. The decisions behind them:
-ADR-008 (amended 2026-09-26) and ADR-037.
+
+The chain, the seat rules and the merge-door checks are described once, in
+`DISPATCH_RULES.md` (section 2) and `docs/core/45_HEADLESS_REVIEW_EVIDENCE_CONTRACT.md`.
+The decisions behind them: ADR-008 (amended 2026-09-26 and 2026-10-30) and ADR-037.
 
 ## Provider switch
 
@@ -190,8 +219,9 @@ a host the map does not know is refused. The write verbs are live: they refuse o
 from a linked worktree or from inside a dispatch. `vnx providers list` prints the
 enforcement state. The door books a refused fire as a `provider_switched_off`
 receipt; the dry-run writes nothing. Review gates and the intelligence
-callers honor the switch (see `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`). On
-main, not yet released. The full reference is `PROVIDER_SWITCH.md`; the decision is ADR-044.
+callers honor the switch (see `DISPATCH_AND_INTELLIGENCE_ARCHITECTURE.md`). The
+switch and its census-enforced form have shipped since v1.7.2 and v1.7.4. The
+full reference is `PROVIDER_SWITCH.md`; the decision is ADR-044.
 
 ## Report-writing divergence
 
@@ -208,9 +238,9 @@ report existed. `govern()` itself stays in `dispatch_govern.py`.
 default off).** `dispatch_govern.py`'s own module docstring names the tmux lane
 (removed) and the subprocess lane as its intended callers. Behind the flag,
 `deliver_with_recovery` routes both the success and the
-budget-exhausted-failure path through `govern()` — including
+budget-exhausted-failure path through `govern()`, including
 git-diff synthesis (`base_sha` = the pre-dispatch commit SHA) and schema-complete
-frontmatter — instead of the legacy stub-only `_ensure_unified_report` (success) or
+frontmatter, instead of the legacy stub-only `_ensure_unified_report` (success) or
 no report at all (final failure). `govern()`'s authored-report lookup also checks
 the legacy subprocess worker filename (`<dispatch_id>_report.md`, from
 `receipt_writer._ensure_unified_report`'s docstring convention) as a fallback
@@ -226,7 +256,7 @@ document the worker chose to write. This lane (and the `claude_headless` lane
 in `dispatch_envelope.py`, which prepares and governs through `envelope_prepare.py`
 and `envelope_govern.py` rather than the shared `dispatch_prepare`/`dispatch_govern`
 modules) remain
-un-migrated — tracked as follow-up slices of the same Option B parity work.
+un-migrated: tracked as follow-up slices of the same Option B parity work.
 
 **The known gap.** An analysis-only dispatch on a provider_dispatch lane (review,
 audit, no commit) can yield an empty report body. The synthesized report is
@@ -247,27 +277,27 @@ before concluding the dispatch did nothing.
 | Code change that commits | claude-headless (the only Claude lane) | Subscription-billed; report gate binds before the receipt |
 | Terminal-pinned single-worker PR | claude-subprocess (opt-in per terminal) | Lease management, Wave-5 smart-context |
 | Strict diff review | codex (`codex exec`) | Reads the diff, reports defects against it |
-| Synthesis / operational review | kimi | Reasons about whether the change makes sense, not just diff defects |
+| Synthesis / operational review (explicit choice) | kimi | Reasons about whether the change makes sense, not just diff defects; in no default stack |
+| Subscription reviewer, last link of the chain | claude_gate | Read-only `claude -p`; passed over when the builder ran a claude model |
 | Analysis or implementation on a non-Claude model | deepseek-harness | Governed, own-key, account-safe; never on the OAuth subscription |
 | Privacy-sensitive work, resolver layer | ollama | Local; no data leaves the machine |
 
 Code-and-commit work goes to a Claude lane because that is where report
 authorship and receipt quality are strongest. The only Claude lane is
-claude-headless (subscription-billed). Review work goes to codex-exec or
-kimi (deepseek-harness only as takeover fallback), and analysis work also to
-gemini, with the report-divergence caveat above in mind for analysis-only
-dispatches.
+claude-headless (subscription-billed). Review work goes to codex first and deepseek_gate second, with
+claude_gate as the last link of the takeover chain.
+Analysis work also goes to gemini. The report-divergence note above applies to
+analysis-only dispatches.
 
 ## Lane maturity
 
 I do not claim parity that is not measured.
 
-- **claude-subprocess** has the most receipts and is the bar the others are held
-  to. It is opt-in per terminal.
 - **claude-headless** is the only Claude lane since 2026-09-18. Its isolation and
   report-gate status is in `DISPATCH_RULES.md` §8.
-- **codex / kimi** are the review lanes. **gemini** is a non-review provider lane.
-  They emit receipts, reports, and an event trail. The synthesized-report
+- **claude-subprocess** is the terminal-pinned path for T1-T3.
+- **codex / deepseek_gate / claude_gate** are the default review lanes; kimi stays a review lane for an explicit choice. **gemini** is a non-review
+  provider lane. They emit receipts, reports, and an event trail. The synthesized-report
   thinness on analysis-only dispatches is the open gap.
 - **deepseek-harness** is governed and account-safe with the own key. Its
   effectiveness was operator-measured on coding and tool tasks; that measurement
@@ -278,6 +308,26 @@ The receipt format and the intelligence layer are uniform across all lanes
 today. Per-lane parity on the full PREPARE/GOVERN envelope, and the synthesized-
 report parity for analysis-only dispatches, is the dispatch-unification work
 that is still open.
+
+## The orchestrator role on other harnesses
+
+The T0 orchestrator is a role file, not a Claude-only feature. The canonical role
+is `.claude/terminals/T0/role-orchestrator.md`. `vnx role sync --apply`
+(`bin/vnx`, `cmd_role_sync`) refreshes it in a project and writes the same text as
+a marked block into `AGENTS.md` (Codex) and `GEMINI.md` (Gemini) in the
+same T0 folder. The block is byte-identical to the canonical role, a second sync
+changes nothing, and `scripts/fleet_role_drift.py` fails when a mirror diverges
+(measured 2026-10-27: `docs/investigations/2026-10-27-provider-agnostic-role-nameting.md`).
+Agents are folders: each role under `agents/<role>/` carries its own `CLAUDE.md`
+and `config.yaml`, resolved by `scripts/lib/agent_resolver.py`. The skills of a
+role land at the provider's native destination under `VNX_AGENT_LAYOUT=on`
+(off by default, ADR-050 and ADR-059, on main, not yet released).
+
+That is the extent of it. The role text reaches another harness, and the lanes
+above run workers on codex, kimi, gemini, deepseek and glm. A live T0 session on
+another harness has not been run on this project, so I do not claim that VNX works
+with any harness. The coupling points that remain are mapped in
+`docs/investigations/2026-10-28-oss-harness-orchestrator.md` and decided in ADR-042.
 
 ## Single-entry door (default lane)
 
@@ -291,7 +341,7 @@ rollback to the legacy per-lane paths described above. Every dispatch now goes
 through the door.
 
 At the door, GLM is normalized to a claude-CLI harness lane (`glm-harness`, the
-local litellm proxy in front of OpenRouter) — the plain `litellm:zai` runner is
+local litellm proxy in front of OpenRouter): the plain `litellm:zai` runner is
 normalized to `glm-harness` at the bridge, backed by the `glm-via-harness-only`
 constraint. A phantom-guard rejects evidence-free GATE-GREEN receipts. All of
 this is on `main`.

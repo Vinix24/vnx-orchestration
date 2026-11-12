@@ -800,59 +800,28 @@ def _build_dream_reviews(state_dir: Path, project_id: str) -> Dict[str, Any]:
       - ``oldest_age_seconds``: age of the oldest waiting review, or None
         when the queue is empty.
       - ``pending_reviews``: per-cycle summary (cycle_id, input_count,
-        created_at, age_seconds).
+        created_at, age_seconds, created_at_source).
+      - ``unreadable_count``: review files that did not parse; a zero queue
+        only counts as measured while this is 0.
     """
     empty: Dict[str, Any] = {
         "available": False,
         "pending_count": 0,
         "oldest_age_seconds": None,
+        "unreadable_count": 0,
         "pending_reviews": [],
     }
     pid = (project_id or "").strip()
     if not pid:
         return empty
     try:
-        if str(_SCRIPT_DIR) not in sys.path:
-            sys.path.insert(0, str(_SCRIPT_DIR))
-        from dream.review_gate import list_pending_reviews
+        lib_dir = str(_SCRIPT_DIR / "lib")
+        if lib_dir not in sys.path:
+            sys.path.insert(0, lib_dir)
+        from dream_liveness import read_reviews
+        return read_reviews(_resolve_dream_data_root(state_dir), pid, now=_now_utc())
     except Exception:
         return empty
-    try:
-        pending = list_pending_reviews(pid, _resolve_dream_data_root(state_dir)) or []
-    except Exception:
-        return empty
-    if not pending:
-        return {**empty, "available": True}
-
-    now = _now_utc()
-    reviews: List[Dict[str, Any]] = []
-    oldest_age: Optional[float] = None
-    for r in pending:
-        created_raw = (r.get("created_at") or "").strip()
-        age: Optional[float] = None
-        if created_raw:
-            try:
-                dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                age = max(0.0, (now - dt).total_seconds())
-            except ValueError:
-                age = None
-        reviews.append({
-            "cycle_id": r.get("cycle_id"),
-            "input_count": r.get("input_count"),
-            "created_at": created_raw,
-            "age_seconds": age,
-        })
-        if age is not None and (oldest_age is None or age > oldest_age):
-            oldest_age = age
-
-    return {
-        "available": True,
-        "pending_count": len(reviews),
-        "oldest_age_seconds": oldest_age,
-        "pending_reviews": reviews,
-    }
 
 
 # ---------------------------------------------------------------------------

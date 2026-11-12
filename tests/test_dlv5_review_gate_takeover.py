@@ -45,6 +45,7 @@ VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS_DIR))
 sys.path.insert(0, str(SCRIPTS_DIR / "lib"))
+from review_stack_support import pin_kimi_era_review_config
 
 # OI-1569 tak 1+2: _classify_review_seat_failure now recency-gates a
 # lane_exhausted classification (TTL 3600s) -- the fixtures below must carry
@@ -77,6 +78,7 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
+    pin_kimi_era_review_config(monkeypatch)
     return {
         "project_root": project_root,
         "state_dir": state_dir,
@@ -341,11 +343,10 @@ class TestKimiTakeoverToTheNextLink:
         assert seat["status"] == "not_executable"
 
     def test_kimi_and_deepseek_exhausted_default_chain_ends_exhausted(self, manager_env, monkeypatch):
-        """On the default chain (codex, kimi, claude, deepseek; R4, operator
+        """On the pre-2026-11-11 default chain (codex, kimi, claude, deepseek; R4, operator
         decision 2026-10-17, and R7, 2026-10-22) kimi, claude and deepseek
         exhausted leave no successor: the seat is booked chain_exhausted, never
         a pass and never re-dispatched to glm."""
-        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
         monkeypatch.chdir(manager_env["project_root"])
         manager = _make_manager()

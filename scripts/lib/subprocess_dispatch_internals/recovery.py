@@ -485,6 +485,20 @@ def _handle_final_failure(
     )
 
 
+def _stamp_subprocess_start(
+    dispatch_id: str, terminal_id: str, model: str, role: "str | None",
+    pr_id: "str | None", parent_dispatch: "str | None",
+) -> None:
+    """ADR-071 besluit 2: the subprocess lane's one ``dispatch_metadata`` row, at the start."""
+    import subprocess_dispatch as _sd
+    from dispatch_metadata_db import stamp_lane_start
+    stamp_lane_start(
+        _sd._default_state_dir(), dispatch_id=dispatch_id, terminal=terminal_id,
+        provider="claude", model=model, role=role, pr_id=pr_id,
+        parent_dispatch=parent_dispatch,
+    )
+
+
 def _init_recovery_state(
     dispatch_id: str,
     instruction: str,
@@ -493,6 +507,8 @@ def _init_recovery_state(
     role: "str | None",
     repo_map: "str | None",
     dispatch_paths: "list[str] | None" = None,
+    pr_id: "str | None" = None,
+    parent_dispatch: "str | None" = None,
 ) -> tuple[str, str, "frozenset | set | list", "list[str] | None"]:
     """Capture dispatch_start_ts, commit_hash, pre-dispatch dirty files, manifest paths.
 
@@ -506,6 +522,7 @@ def _init_recovery_state(
     # This call's attempts start a fresh list: an earlier call for the same id
     # in this process already had its receipt.
     _dispatch_cost_records.pop(dispatch_id, None)
+    _stamp_subprocess_start(dispatch_id, terminal_id, model, role, pr_id, parent_dispatch)
     dispatch_start_ts = datetime.now(timezone.utc).isoformat()
     commit_hash_before = _sd._get_commit_hash()
     repo_cwd = Path(__file__).resolve().parents[3]
@@ -643,6 +660,7 @@ def deliver_with_recovery(
     pr_id: "str | None" = None,
     mandate_id: "str | None" = None,
     skill: "str | None" = None,
+    parent_dispatch: "str | None" = None,
 ) -> bool:
     """Deliver with automatic retry; success -> "done" receipt, final fail -> "failed".
 
@@ -657,15 +675,16 @@ def deliver_with_recovery(
 
     skill (OI-2372): the spec-bound skill, forwarded to the prompt assembly seam
     on every attempt. None = no skill, the prompt unchanged.
+
+    parent_dispatch (ADR-071 besluit 2): written fill-once to the dispatch's
+    ``dispatch_metadata`` row at the start; None leaves any existing parent alone.
     """
     import subprocess_dispatch as _sd
     chunk_timeout, total_deadline = apply_runtime_overrides(chunk_timeout, total_deadline)
 
-    dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = (
-        _init_recovery_state(
-            dispatch_id, instruction, terminal_id, model, role, repo_map,
-            dispatch_paths=dispatch_paths,
-        )
+    dispatch_start_ts, commit_hash_before, pre_dispatch_dirty, manifest_paths = _init_recovery_state(
+        dispatch_id, instruction, terminal_id, model, role, repo_map,
+        dispatch_paths=dispatch_paths, pr_id=pr_id, parent_dispatch=parent_dispatch,
     )
     pre_sha = commit_hash_before
     monitor = _sd.WorkerHealthMonitor(terminal_id, dispatch_id)

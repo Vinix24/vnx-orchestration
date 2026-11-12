@@ -1,8 +1,8 @@
 # VNX Roadmap
 
-> **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in the maintainer's tracks database (the `vnx objective` CLI); the repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan. Some milestone stamps below are historical (written April–May 2026) and may lag the current tree; trust the README and the tracks database (`vnx horizon queue`) for what is actually shipped.
+> **This file is the architecture-principles + wave-history roadmap.** Live, per-feature status lives in my tracks database (the `vnx objective` CLI), which is not public. The repo-root [`ROADMAP.yaml`](../../ROADMAP.yaml) is a generic example of the machine-readable roadmap format, not the live plan.
 
-**Status**: Public roadmap, statuses checked against `main` on 2026-10-18  
+**Status**: Public roadmap, checked against `origin/main` at c41411fea on 2026-11-12. `VERSION` is 1.8.0.  
 **Planning Horizon**: 2026 (rolling)  
 **Principle**: Governance-first, model-agnostic, local-first
 
@@ -138,6 +138,24 @@ Releases after 1.0.0 are listed in [`CHANGELOG.md`](../../CHANGELOG.md) and tagg
 
 pip-installable, 5-provider production, governance receipts, elastic pool, smart routing (opt-in), roadmap-autopilot gate hardening (RA-1..5 active, RA-6 dark), auto-dream self-learning loop runnable. See [1.0 Sprint section](#10-sprint--roadmap-autopilot-n-scaling-foundation-auto-dream) for full capability list.
 
+### 1.9: on main, not yet released
+**Status**: `On main`, not released. `CHANGELOG.md` `[Unreleased]` and `changelog.d/` list the work per PR.
+
+- The merge door permit: a sixth preflight, `door`, pins the merge to the head it permitted (ADR-061).
+- The learning wave: failure classes, a proposal queue and a signal attribution rule (ADR-065, ADR-068). Shadow by default and proposal-only.
+- Operator steering: classes of my corrections and a proposal store with a decision record (ADR-072).
+- The dream-liveness probe (ADR-066) and the intelligence effect instrument, an A/B window off by default (ADR-069). No effect is claimed yet.
+- One permission policy digest per role (`scripts/lib/permission_policy.py`, ADR-057).
+
+Learning and dreaming propose. I decide.
+
+### 2.0: designed, not built
+**Status**: `Designed`. Nothing here is on main.
+
+- Agent collaboration: a register of agents, an inbox per role, managers, a light audit trail and a CLI/API per lane. It builds on agents as folders (`agents/<role>/`).
+- A live T0 on a non-Claude harness, shown end to end. Today `vnx role sync --apply` mirrors the role into `AGENTS.md` and `GEMINI.md`, and that is all that is proven.
+- Parallel multi-track execution (ADR-020, Tier 3).
+
 ### Headless T0 Production
 **Status**: `Planned`
 
@@ -225,7 +243,7 @@ ADR-007 composite-key compliance is enforced: every central table keys over `pro
 
 ## 4-Gate Enforcement Framework
 **Status**: `Next`
-**Why**: The review-gate stack that this item builds on has since changed: the default stack is `codex_gate,kimi_gate` (both subscription reviewers). When one is out, the takeover chain `codex_gate,kimi_gate,deepseek_gate` reads its seat, with each seat filled by its own reviewer. `glm_gate` left the default chain on 2026-10-17 (#2100). Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
+**Why**: The review-gate stack that this item builds on has since changed: the default stack is `codex_gate,deepseek_gate` since the operator decision of 2026-11-11 (the Kimi subscription is cancelled). When one is out, the takeover chain `codex_gate,deepseek_gate,claude_gate` reads its seat, with each seat filled by its own reviewer. `glm_gate` left the default chain on 2026-10-17 (#2100). Gemini is no longer a review gate. Extending to a 4th deterministic gate with shift-left enforcement remains open.
 
 **Goals**
 - Specify and implement the 4th gate (shift-left pre-dispatch quality signal)
@@ -360,13 +378,14 @@ It wakes a headless T0 only. An interactive T0 is not woken by it (`docs/manifes
 - 24/7 headless content worker execution.
 
 ### Model-Agnostic Dispatch Flow
-**Status**: `Next`
-**Why**: Current dispatch bundles are Claude Code–specific (CLAUDE.md). Multi-provider workers need provider-aware delivery without changing dispatch creation.
+**Status**: Partly `Completed`
+**Why**: Dispatch bundles were specific to Claude Code (CLAUDE.md). Multi-provider workers need provider-aware delivery without changing dispatch creation.
 
-**Goals**
-- Tri-file format: `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` auto-generated from canonical dispatch.
-- Converter layer in dispatcher — provider detected from terminal profile, correct file served.
-- No change to T0 dispatch authoring workflow.
+**Done**: `vnx role sync --apply` mirrors the canonical orchestrator role into `AGENTS.md` and `GEMINI.md` (`tests/test_role_sync.py`).
+
+**Open**
+- A converter layer in the dispatcher: provider detected from the terminal profile, the correct file served.
+- A live T0 on another harness, shown end to end.
 
 ---
 

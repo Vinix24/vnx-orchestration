@@ -20,7 +20,7 @@ returned here is read by exactly one caller, ``review_seats.
 resolve_review_seats``, which keeps the seats at the project's
 ``VNX_DEFAULT_REVIEW_STACK`` and takes only the profile's non-seat entries
 (``ci_gate``) as extra gates. The built-in profiles name a fixed reviewer pair
-(``codex_gate, kimi_gate``) or none at all (``light``, ``minimal``), so a profile
+(``codex_gate, deepseek_gate``) or none at all (``light``, ``minimal``), so a profile
 that decided seats would review a project with other reviewers than its stack
 names, or with none while the merge door still requires them.
 

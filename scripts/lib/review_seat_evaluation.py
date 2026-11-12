@@ -46,6 +46,10 @@ resolved stack with :func:`seats_for_signals`, and an unknown value fails
 closed to the risk rule and is recorded by name. A receipt is judged under the
 rule its own record names, never under the key.
 
+**A takeover that fully fills seat 1 (OI-2701).** A takeover of seat 1 keeps
+every seat, unless :func:`approved_full_fill_pairs` (``VNX_REVIEW_TAKEOVER_FULL_FILL``,
+empty by default) approves its ``gate:model``: see :func:`takeover_full_fill`.
+
 **Which seat a record answers for** (:func:`seat_for`). The ``seat`` its own
 request on this head states (stamped since R5a), else ``takeover_path[0]``
 (the seat the takeover walk started from), else its own gate.
@@ -110,6 +114,8 @@ REVIEW_STACK_OVERRIDE_KEY = "VNX_OVERRIDE_DEFAULT_REVIEW_STACK"
 TAKEOVER_CHAIN_KEY = "VNX_REVIEW_GATE_TAKEOVER_CHAIN"
 #: The one key that switches the seat rule (track ``tweede-stoel-op-signaal``, PR 4).
 SEAT_RULE_KEY = "VNX_REVIEW_SEAT_RULE"
+#: The ``gate:model`` reviewers whose takeover of seat 1 counts as seat 1 (OI-2701).
+TAKEOVER_FULL_FILL_KEY = "VNX_REVIEW_TAKEOVER_FULL_FILL"
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +180,29 @@ def active_seat_rule() -> ActiveSeatRule:
         SEAT_RULE_KEY, raw, RISK_SEAT_RULE,
     )
     return ActiveSeatRule(RISK_SEAT_RULE, value, False)
+
+
+def approved_full_fill_pairs() -> Tuple[Tuple[str, str], ...]:
+    """The ``(gate, model)`` pairs :data:`TAKEOVER_FULL_FILL_KEY` approves, read through ``config_runtime.get``."""
+    import config_runtime
+
+    return parse_full_fill_pairs(config_runtime.get(TAKEOVER_FULL_FILL_KEY))
+
+
+def parse_full_fill_pairs(raw: Any) -> Tuple[Tuple[str, str], ...]:
+    """The pairs of a comma-separated ``gate:model`` list. Unset (``None``, ``""``) approves nobody; an entry
+    without exactly one ``:`` and a non-empty gate and model is logged and approves nobody (fail-closed)."""
+    pairs: List[Tuple[str, str]] = []
+    for entry in (raw if isinstance(raw, str) else "").split(","):
+        gate, _sep, model = (part.strip() for part in entry.partition(":"))
+        if not entry.strip():
+            continue  # an empty entry (a trailing comma) names nobody
+        if entry.count(":") != 1 or not gate or not model:
+            logger.warning("review takeover full fill: %s entry %r is not gate:model; it approves nobody (fail-closed)",
+                           TAKEOVER_FULL_FILL_KEY, entry)
+            continue
+        pairs.append((gate, model))
+    return tuple(pairs)
 
 
 _KNOWN_CLASSES = frozenset({"low", "medium", "high", "critical"})
@@ -385,6 +414,7 @@ class SeatSignalInput:
     a path would fire cannot be told, so the rule keeps every seat. ``head_sha``
     is the exact 40-character head the outcome is bound to, and the sha the
     sample is drawn from; a sha that is not one is :data:`UNKNOWN`.
+    The last three fields only decide :func:`takeover_full_fill` (OI-2701); they are no contract field.
     """
 
     stack: Tuple[str, ...] = ()
@@ -398,6 +428,9 @@ class SeatSignalInput:
     path_signal: str = ""
     irreversible: Optional[bool] = None
     head_sha: str = UNKNOWN
+    seat1_reviewer_model: str = ""
+    seat1_blocking_count: Optional[int] = None
+    full_fill_pairs: Tuple[Tuple[str, str], ...] = ()
 
     def unknown_fields(self) -> Tuple[str, ...]:
         """The contract fields whose value is :data:`UNKNOWN`, by name, in contract order."""
@@ -423,13 +456,18 @@ class SignalSeatDecision:
     seats: Tuple[str, ...]
     signals: Tuple[str, ...]
     unknown: Tuple[str, ...]
+    #: The ``gate:model`` approval that made a takeover count as seat 1 (OI-2701); ``""`` otherwise.
+    takeover_full_fill: str = ""
 
     def to_record(self) -> Dict[str, Any]:
-        """The shape the door's ``shadow_seat_rule`` carries."""
-        return {
+        """The shape the door's ``shadow_seat_rule`` carries; ``takeover_full_fill`` only when one counted."""
+        record: Dict[str, Any] = {
             "rule": self.rule, "seats": list(self.seats),
             "signals": list(self.signals), "unknown": list(self.unknown),
         }
+        if self.takeover_full_fill:
+            record["takeover_full_fill"] = self.takeover_full_fill
+        return record
 
 
 def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
@@ -438,20 +476,35 @@ def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
     Seat 1 only after a clean PASS of seat 1 on the exact head and no signal;
     every seat of the stack when a signal fired. Fail-closed: every seat when
     any contract field is :data:`UNKNOWN`, when seat 1 gave no outcome or a
-    FAIL, when seat 1 was filled through a takeover, or when the risk class is
-    unknown. A ``gate-merge`` path on its own is not a signal. Pure: no I/O here
-    — the caller reads the store and hands the result in.
+    FAIL, when a takeover filled seat 1 and is no :func:`takeover_full_fill`, or
+    when the risk class is unknown. A ``gate-merge`` path on its own is not a
+    signal. Pure: no I/O here — the caller reads the store and the key.
     """
     stack = _seat_names(list(signal_input.stack))
     signals = _fired_signals(signal_input)
     unknown = signal_input.unknown_fields()
+    full_fill = takeover_full_fill(signal_input)
     fail_closed = (
         bool(unknown)
         or signal_input.seat1_outcome != _PASS
-        or bool(signal_input.seat1_takeover_from)
+        or (bool(signal_input.seat1_takeover_from) and not full_fill)
     )
     seats = stack if fail_closed or signals else stack[:1]
-    return SignalSeatDecision(SIGNAL_SEAT_RULE, seats, signals, unknown)
+    return SignalSeatDecision(SIGNAL_SEAT_RULE, seats, signals, unknown, full_fill)
+
+
+def takeover_full_fill(signal_input: SeatSignalInput) -> str:
+    """The approving ``gate:model`` when a takeover fully fills seat 1, else ``""``: a known takeover whose
+    reviewer and model are a pair in ``full_fill_pairs``, a PASS with a known zero blocking count, and both
+    warning counts known. Only then is it judged like a direct seat-1 PASS, by its counts and every signal."""
+    if signal_input.seat1_takeover_from in ("", UNKNOWN):
+        return ""
+    pair = (signal_input.seat1_reviewer, signal_input.seat1_reviewer_model)
+    if not all(part and part != UNKNOWN for part in pair) or pair not in tuple(signal_input.full_fill_pairs):
+        return ""
+    blocking, counts = signal_input.seat1_blocking_count, (signal_input.real_warning_count, signal_input.prescan_count)
+    clean = signal_input.seat1_outcome == _PASS and _is_count(blocking) and blocking == 0
+    return f"{pair[0]}:{pair[1]}" if clean and all(map(_is_count, counts)) else ""
 
 
 def signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
@@ -516,7 +569,7 @@ def signal_input_for(
     field the store cannot answer stays :data:`UNKNOWN`. A deciding path the
     classifier could not read makes the path signal :data:`UNKNOWN`: whether it
     fires a security or schema signal cannot be told, so the rule keeps every
-    seat instead of reading "no signal".
+    seat instead of reading "no signal". The full-fill key is read only for a takeover (OI-2701).
     """
     stack = tuple(required.stack)
     seat = stack[0] if stack else ""
@@ -530,6 +583,7 @@ def signal_input_for(
         fill = next((item for item in fills if item.seat == seat), None)
         route = fill.route if fill is not None else ""
         takeover = accepted.takeover_from or ("" if route == ROUTE_DIRECT else (route or UNKNOWN))
+    pairs = approved_full_fill_pairs() if takeover not in ("", UNKNOWN) else ()
     return SeatSignalInput(
         stack=stack,
         seat1_outcome=next(iter(verdicts)) if len(verdicts) == 1 else UNKNOWN,
@@ -542,6 +596,9 @@ def signal_input_for(
         path_signal=path_signal,
         irreversible=risk.get("irreversible") if isinstance(risk.get("irreversible"), bool) else None,
         head_sha=head_sha or UNKNOWN,
+        seat1_reviewer_model=accepted.reviewer_model if accepted is not None else "",
+        seat1_blocking_count=accepted.blocking_count if accepted is not None else None,
+        full_fill_pairs=pairs,
     )
 
 
@@ -1669,7 +1726,10 @@ class SeatEvaluation:
         if self.required.rule == SIGNAL_SEAT_RULE and self.signal is not None:
             signals = ", ".join(self.signal.signals) or "geen"
             unknown = ", ".join(self.signal.unknown)
-            parts.insert(0, f"signaalregel: signalen {signals}" + (f"; onbekend: {unknown}" if unknown else ""))
+            text = f"signaalregel: signalen {signals}" + (f"; onbekend: {unknown}" if unknown else "")
+            if self.signal.takeover_full_fill:
+                text += f"; overname telt als stoel 1: {self.signal.takeover_full_fill} ({TAKEOVER_FULL_FILL_KEY})"
+            parts.insert(0, text)
         if self.required.note:
             parts.append(self.required.note)
         if self.rounds is not None and self.rounds.override and self.rounds.capped:
@@ -1743,6 +1803,8 @@ class SeatEvaluation:
                 "unknown": list(decision.unknown) if decision is not None else [],
                 "risk_class": risk.get("risk_class") or "high",
             })
+            if decision is not None and decision.takeover_full_fill:
+                record["takeover_full_fill"] = decision.takeover_full_fill
         if self.rounds is not None:
             record["round_ledger"] = self.rounds.to_record()
         return record
