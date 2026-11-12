@@ -6,8 +6,11 @@ re-checked on the path of its open file descriptor. Nothing read is logged or wr
 from __future__ import annotations
 
 import fcntl
+import getpass
+import hashlib
 import json
 import os
+import re
 import stat
 from collections import Counter
 from dataclasses import dataclass, field
@@ -20,8 +23,16 @@ from vnx_paths import project_id_from_state_dir
 
 SCHEMA = "steering_sources/1"
 BINDING_FILE = "steering_sources.json"
+LEDGER_FILE = "steering_sources.ndjson"
+LOCK_FILE = "steering_sources.lock"
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 FORBIDDEN_SLUG_PARTS = ("clients", "business", "salesminds")
+SYSTEM_TAGS = (("<task-notification", "task_notification"), ("<system-reminder", "system_reminder"),
+               ("<command-", "system_tag"), ("<local-command-", "system_tag"), ("<bash-", "system_tag"))
+# Typed by scripts/t0_rotate_spawn.sh (FIRST_MESSAGE) and t0_rotation_state.goal_followup_text.
+AUTOMATIC_PREFIXES = ("/kickoff rotatie ", "Je bent de verse T0")
+GOAL_MARKER = ", hervat na context-rotatie"
+PASTED = re.compile(r"<pasted_content\b[^>]*>.*?(?:</pasted_content[^>]*>|\Z)", re.DOTALL)
 
 
 class BindingError(ValueError):
@@ -38,6 +49,16 @@ class SourceResult:
     reason: str = ""
     refused: Dict[str, int] = field(default_factory=dict)
     refused_files: List[str] = field(default_factory=list)
+    prompts: List["Prompt"] = field(default_factory=list)
+    excluded: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class Prompt:
+    prompt_id: str
+    text: str
+    source_file: str
+    line: int
 
 
 def _under(path: Path, root: Path) -> bool:
@@ -71,8 +92,39 @@ def bind(state_dir: Path, projects_root: Path, slugs: List[str], memory_dir: Pat
     record = {"schema": SCHEMA, "project_id": project_id, "transcript_dirs": list(slugs),
               "memory_dir": str(memory), "bound_at": datetime.now(timezone.utc).isoformat()}
     state_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(state_dir / BINDING_FILE, record)
+    with open(state_dir / LOCK_FILE, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            previous = _last_ledger(state_dir)
+            entry = {**record, "previous_transcript_dirs": (previous or {}).get("transcript_dirs"),
+                     "previous_memory_dir": (previous or {}).get("memory_dir"), "actor": getpass.getuser()}
+            _append_ledger(state_dir, entry)
+            atomic_write_json(state_dir / BINDING_FILE, record)
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
     return record
+
+
+def _last_ledger(state_dir: Path) -> Optional[dict]:
+    """Last ledger line, or None when there is none or it is not a valid object."""
+    try:
+        lines = (state_dir / LEDGER_FILE).read_text(encoding="utf-8").splitlines()
+        last = json.loads(lines[-1])
+    except (OSError, ValueError, IndexError):
+        return None
+    return last if isinstance(last, dict) else None
+
+
+def _append_ledger(state_dir: Path, entry: dict) -> None:
+    """Under the bind lock: a last line without its newline never joins the new one."""
+    payload = (json.dumps(entry, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")
+    with open(state_dir / LEDGER_FILE, "ab+") as handle:  # vnx-atomic-write: append-only ledger, fsynced
+        end = os.fstat(handle.fileno()).st_size
+        if end and os.pread(handle.fileno(), 1, end - 1) != b"\n":
+            payload = b"\n" + payload
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def load_binding(state_dir: Path, projects_root: Path) -> Tuple[Optional[dict], str]:
@@ -86,6 +138,9 @@ def load_binding(state_dir: Path, projects_root: Path) -> Tuple[Optional[dict], 
     project_id = project_id_from_state_dir(state_dir)
     if not project_id or record.get("project_id") != project_id:
         return None, "project_id komt niet overeen"
+    last = _last_ledger(state_dir)
+    if last is None or any(last.get(k) != record.get(k) for k in ("project_id", "transcript_dirs", "memory_dir")):
+        return None, "bindingsbestand komt niet overeen met het bindingsledger"
     slugs, memory, root = record.get("transcript_dirs"), record.get("memory_dir"), projects_root.resolve()
     if not isinstance(slugs, list) or not slugs:
         return None, "transcript_dirs ongeldig"
@@ -163,3 +218,80 @@ def read_sources(state_dir: Path, projects_root: Path, consume: Callable[[TextIO
     if not present:
         return SourceResult("absent", "transcript-map ontbreekt")
     return SourceResult("ok")
+
+
+def _text_of(message: object) -> Optional[str]:
+    """Prompt text, or None when the message carries a tool_result or no usable text."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") == "tool_result":
+            return None
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts)
+
+
+def _automatic(text: str) -> bool:
+    return text.startswith(AUTOMATIC_PREFIXES) or (text.startswith("/goal ") and GOAL_MARKER in text)
+
+
+def classify_line(obj: object) -> Tuple[Optional[str], str]:
+    """(None, own words) for an operator prompt, else (exclusion reason, "")."""
+    if not isinstance(obj, dict):
+        return "malformed", ""
+    if obj.get("type") != "user":
+        return "not_user", ""
+    if obj.get("isMeta") is True:
+        return "is_meta", ""
+    if obj.get("isCompactSummary") is True:
+        return "compact_summary", ""
+    message = obj.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+        return "tool_result", ""
+    text = _text_of(message)
+    if text is None or not text.strip():
+        return "no_text", ""
+    own = PASTED.sub("", text).strip()
+    if not own:
+        return "pasted_content", ""
+    for tag, reason in SYSTEM_TAGS:
+        if own.startswith(tag):
+            return reason, ""
+    return ("automatic", "") if _automatic(own) else (None, own)
+
+
+def _prompt_id(session: str, uuid: str) -> str:
+    return hashlib.sha256(f"{session}|{uuid}".encode("utf-8")).hexdigest()[:16]
+
+
+def read_prompts(state_dir: Path, projects_root: Path) -> SourceResult:
+    """Operator prompts of the bound transcripts; prompts are handed out only when the source is `ok`."""
+    prompts: List[Prompt] = []
+    excluded: Counter = Counter()
+
+    def consume(handle: TextIO, name: str) -> None:
+        for number, raw in enumerate(handle, 1):
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = None
+            reason, text = classify_line(obj)
+            uuid = obj.get("uuid") if isinstance(obj, dict) else None
+            if reason is None and not (isinstance(uuid, str) and uuid):
+                reason = "no_uuid"  # identity absent: never a prompt
+            if reason:
+                excluded[reason] += 1
+                continue
+            session = obj.get("sessionId") or Path(name).stem
+            prompts.append(Prompt(_prompt_id(str(session), uuid), text, name, number))
+
+    result = read_sources(state_dir, projects_root, consume)
+    if result.state == "ok":
+        result.prompts, result.excluded = prompts, dict(excluded)
+    return result
