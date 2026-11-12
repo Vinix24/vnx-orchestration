@@ -1,7 +1,8 @@
 """Changekind of a follow-up head against its parent head (ADR-064 besluit 2 and 3, eisen 1 to 3).
 
 Proof is git facts only (own diff, patch-id, interdiff, seat input set, security-path
-table), never ``contract_hash``. Whatever cannot be proven is ``REWORK``/``cannot_prove``.
+table), never ``contract_hash``. The patch-id is whitespace-sensitive (``--verbatim``):
+the default mode strips whitespace and would call ``'a b'`` and ``'ab'`` equal. Whatever cannot be proven is ``REWORK``/``cannot_prove``.
 """
 from __future__ import annotations
 
@@ -69,14 +70,14 @@ def own_diff(repo: Path, base_ref: str, head: str, run: Runner = _run_git, path:
 def _patch_id_of(diff: str, repo: Path, run: Runner) -> str:
     if not diff.strip():
         return EMPTY_PATCH_ID
-    out = run(repo, ["patch-id", "--stable"], stdin=diff).split()
+    out = run(repo, ["patch-id", "--verbatim"], stdin=diff).split()
     if not out or len(out[0]) < 40:
         raise ChangeKindError("git patch-id returned no id for a non-empty diff")
     return out[0]
 
 
 def patch_id(repo: Path, base_ref: str, head: str, run: Runner = _run_git) -> str:
-    """``git patch-id --stable`` over the own diff; ``EMPTY_PATCH_ID`` for an empty one."""
+    """``git patch-id --verbatim`` (whitespace-sensitive) over the own diff; ``EMPTY_PATCH_ID`` for an empty one."""
     return _patch_id_of(own_diff(repo, base_ref, head, run), repo, run)
 
 
@@ -88,10 +89,12 @@ class Interdiff:
 
 def _scope_sources(source: str) -> Dict[str, List[str]]:
     tree = ast.parse(source)
+    lines = source.splitlines()
     out: Dict[str, List[str]] = {MODULE_LEVEL: [ast.dump(n) for n in tree.body if not isinstance(n, _SCOPES)]}
     for node in ast.walk(tree):
         if isinstance(node, _SCOPES):
-            out.setdefault(node.name, []).append(ast.get_source_segment(source, node) or "")
+            first = min([node.lineno] + [d.lineno for d in node.decorator_list])  # decorators belong to the scope
+            out.setdefault(node.name, []).append("\n".join(lines[first - 1:node.end_lineno]))
     return out
 
 

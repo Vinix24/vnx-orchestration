@@ -82,6 +82,23 @@ def test_changed_line_in_own_diff_is_rework_and_reports_symbols(repo):
     assert inter.symbols["scripts/lib/feature.py"] == {("feature", "feature")}
 
 
+def test_whitespace_only_change_in_a_string_is_rework_with_the_function_named(repo):
+    parent = commit(repo, {"scripts/lib/feature.py": "def feature():\n    return 'a b'\n"}, "feature")
+    head = commit(repo, {"scripts/lib/feature.py": "def feature():\n    return 'ab'\n"}, "squash space")
+    rec = rc.classify_change(repo, "main", parent, head, set())
+    assert rec.changekind == rc.REWORK and rec.parent_patch_id != rec.head_patch_id
+    inter = rc.interdiff(repo, "main", parent, head)
+    assert inter.symbols == {"scripts/lib/feature.py": {("feature", "feature")}}
+
+
+def test_decorator_only_change_marks_the_function_as_changed(repo):
+    src = "@{}\ndef feature():\n    return 1\n\n\ndef other():\n    return 2\n"
+    parent = commit(repo, {"scripts/lib/feature.py": src.format("allow")}, "feature")
+    head = commit(repo, {"scripts/lib/feature.py": src.format("deny")}, "swap decorator")
+    inter = rc.interdiff(repo, "main", parent, head)
+    assert inter.symbols["scripts/lib/feature.py"] == {("feature", "feature")}
+
+
 def test_interdiff_on_security_path_names_path_kind_and_rule_version(repo):
     parent = parent_on_pr(repo)
     head = commit(repo, {".github/workflows/ci.yml": "name: ci\n"}, "workflow")
