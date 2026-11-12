@@ -684,6 +684,16 @@ def generate_tag_subsets(tag_tuple: Tuple[str, ...]) -> List[Tuple[str, ...]]:
 
 **Hierarchical matching**: If a pair matches, check if any triple containing those tags also matches for more specific rules.
 
+### State on main: measured, not promised
+
+- **Proposal only.** The loop writes proposals; the decision is an operator record. The rule format and the queue are in [ADR-065](../../governance/decisions/ADR-065-leren-is-voorstellen.md). In persist mode `ingest_approved_rules` (`scripts/learning_loop.py`) activates only a rule whose operator decision is recorded for this project and whose proposal is unchanged since that decision, and only under a fresh `ok` or `pending` ledger verdict of this project. It writes an activation record (`pattern_activation`), reuses an existing rule row only when its content equals the approved proposal, and never switches a repeated activation back on. Without persist mode the ingest does not run.
+- **Ledger stop.** In queue mode (`VNX_LEARNING_LOOP_QUEUE=1`, off by default) and persist mode the cycle reads `ledger_verdict/1` first (`scripts/lib/learning_ledger_gate.py`) and stops with `ledger_source_check: <reason_code>` on `refused`.
+- **Provider filter.** A failure receipt with a sentinel `provider` is skipped only when its `model` is also a sentinel and it has no `report_path`.
+- **Where a lesson goes:** [ADR-067](../../governance/decisions/ADR-067-learning-capture-routing.md), [LEARNING_CAPTURE_ROUTING.md](../LEARNING_CAPTURE_ROUTING.md). **Who owns a pattern:** [ADR-068](../../governance/decisions/ADR-068-learning-signaal-attributie.md); `scripts/lib/pattern_reattribution.py` votes over body, store and report path, and `scripts/lib/qi_transfer_apply.py` runs `apply`, `resume` and `undo` of a plan with a journal; `undo` puts the source row back first and drops only the copy that move created.
+- **Effect.** `scripts/intel_injection_join.py effect` and `secondary` measure per arm and refuse a verdict below 200 resolved dispatches per arm ([ADR-069](../../governance/decisions/ADR-069-intelligence-effectmeting.md)). No effect has been measured.
+- **Corpus.** `scripts/vnx_intelligence_corpus_quarantine.py` (`baseline`, `quarantine`, `rehearse`, `verify`, `restore`, `purge`) moves a corpus out of the live store into a sealed artifact with a manifest; `restore` brings it back.
+- **Dream.** `vnx dream install-scheduler` installs `com.vnx.auto-dream` and `com.vnx.dream-watch`; the watch runs `scripts/dream_liveness_probe.py` and `vnx doctor` reads the same `dream_liveness/1` ([ADR-066](../../governance/decisions/ADR-066-dream-liveness-watch.md)). It stays burning in until a run of measured nights.
+
 ### Prevention Rule Lifecycle
 
 ```
@@ -691,8 +701,10 @@ def generate_tag_subsets(tag_tuple: Tuple[str, ...]) -> List[Tuple[str, ...]]:
 2. Occurrence count incremented in tag_combinations table
 3. At 2+ occurrences: prevention rule generated
 4. Rule confidence: min(occurrence_count / 10.0, 1.0)
-5. Rules queued in pending_rules.json (G-L1: never auto-activated)
-6. Operator reviews and accepts/rejects
+5. Rules queued in pending_rules.json through prevention_rule_store (G-L1: never auto-activated)
+6. Operator records a decision: `vnx learning decide-rule` appends to prevention_rule_decisions.ndjson
+7. A loop rule is injected only with an active row in `pattern_activation` and a fresh `ok`/`pending` ledger verdict
+   (`injectable_clause`); `scripts/deactivate_pattern_activation.py` switches it off and it stays off
 ```
 
 ### Recommendation Manager
@@ -903,10 +915,10 @@ sqlite3 $VNX_STATE_DIR/quality_intelligence.db \
   "SELECT pattern_id, used_count, ignored_count, confidence FROM pattern_usage WHERE used_count > 0 ORDER BY confidence DESC LIMIT 10"
 
 # View pending archival queue (G-L4)
-cat $VNX_STATE_DIR/pending_archival.json | jq '.patterns | length'
+cat $VNX_STATE_DIR/pending_archival.json | jq '.pending_archival | length'
 
 # View pending rules queue (G-L1)
-cat $VNX_STATE_DIR/pending_rules.json | jq '.rules | length'
+cat $VNX_STATE_DIR/pending_rules.json | jq '.pending_rules | length'
 ```
 
 ---
@@ -1289,14 +1301,14 @@ python3 scripts/gather_intelligence.py patterns \
 
 ### Intelligence Daemon Integration
 
-The intelligence daemon runs the learning loop daily:
+The intelligence daemon runs the learning loop daily (`daily_hygiene_hour = 18`, `intelligence_daemon.py`). Without `VNX_LEARNING_LOOP_PERSIST=1` the cycle is a shadow run: it computes, reports and changes no row. The nightly phase `scripts/learning_loop_nightly.py` runs the same cycle and writes a beacon per run.
 
 ```python
 # intelligence_daemon.py integration
 def run_learning_cycle():
     """Run daily learning cycle at 18:00."""
     learning_loop = LearningLoop()
-    report = learning_loop.run()
+    report = learning_loop.daily_learning_cycle()
 
     # Update dashboard with learning metrics
     update_dashboard({
