@@ -57,10 +57,11 @@ from governance_receipts import dispatch_identity_fields, emit_governance_receip
 # CQS threshold: dispatches below this score get a HOLD
 CQS_THRESHOLD = 50.0
 
-# Maximum diff size (lines added+removed) before triggering a size warning.
-# 450 per the 2026-11-09 operator decision (300-450 target, hard cap 450).
-PR_SIZE_WARN = 450
-PR_SIZE_HOLD = 600
+# The PR-size thresholds (lines added+removed) are the registry keys VNX_PR_SIZE_WARN and
+# VNX_PR_SIZE_HOLD, resolved per project in _pr_size_thresholds; the registry carries the
+# only copy of the defaults (450 and 600).
+PR_SIZE_WARN_KEY = "VNX_PR_SIZE_WARN"
+PR_SIZE_HOLD_KEY = "VNX_PR_SIZE_HOLD"
 
 # Maximum files completely deleted before triggering net-deletion warning/hold
 DELETION_FILE_WARN = 5
@@ -564,11 +565,82 @@ def _diff_numstat_totals(project_root: Path, base_ref: str, head_ref: str) -> Op
     return total_added, total_removed
 
 
+def _positive_int(raw: Any) -> Optional[int]:
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _pr_size_thresholds(
+    project_id: Optional[str], state_dir: Optional[Path]
+) -> Dict[str, Any]:
+    """``{"warn", "hold", "warn_source", "hold_source", "invalid"}`` for one project.
+
+    A configured WARN above HOLD is invalid; a HOLD set below the default WARN alone simply
+    lowers WARN to HOLD. Each key goes through the registry's precedence chain (override, project_config row of
+    ``state_dir``, environment, default). Fail-closed: a value that is not a positive
+    integer, or a WARN above HOLD, puts BOTH thresholds back on the registry defaults and
+    names the key in ``invalid``. The check is never disabled.
+    """
+    import config_registry as cr
+    import config_store_db
+
+    resolver = None
+    if project_id and state_dir is not None:
+        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir)
+    resolved = {}
+    for key in (PR_SIZE_WARN_KEY, PR_SIZE_HOLD_KEY):
+        raw, source = cr.resolve_with_source(
+            key, project_id, resolver, use_default_resolver=False, strict_resolver=True)
+        resolved[key] = (raw, source)
+    defaults = {k: int(cr.CONFIG_REGISTRY[k].default) for k in resolved}
+    values, invalid = {}, []
+    for key, (raw, source) in resolved.items():
+        values[key] = _positive_int(raw)
+        if values[key] is None:
+            invalid.append(f"invalid {key}: {raw!r}, default {defaults[key]}")
+    warn_set = resolved[PR_SIZE_WARN_KEY][1] != "default"
+    if not invalid and not warn_set and values[PR_SIZE_WARN_KEY] > values[PR_SIZE_HOLD_KEY]:
+        # Only HOLD is configured below the default WARN: HOLD is the limit, no warn band.
+        values[PR_SIZE_WARN_KEY] = values[PR_SIZE_HOLD_KEY]
+    if not invalid and values[PR_SIZE_WARN_KEY] > values[PR_SIZE_HOLD_KEY]:
+        invalid.append(
+            f"invalid {PR_SIZE_WARN_KEY}: {values[PR_SIZE_WARN_KEY]} above "
+            f"{PR_SIZE_HOLD_KEY} {values[PR_SIZE_HOLD_KEY]}, defaults "
+            f"{defaults[PR_SIZE_WARN_KEY]}/{defaults[PR_SIZE_HOLD_KEY]}")
+    if invalid:
+        return {"warn": defaults[PR_SIZE_WARN_KEY], "hold": defaults[PR_SIZE_HOLD_KEY],
+                "warn_source": "default", "hold_source": "default", "invalid": invalid}
+    return {"warn": values[PR_SIZE_WARN_KEY], "hold": values[PR_SIZE_HOLD_KEY],
+            "warn_source": resolved[PR_SIZE_WARN_KEY][1],
+            "hold_source": resolved[PR_SIZE_HOLD_KEY][1], "invalid": []}
+
+
+def _pr_size_verdict(total: int, base: str, th: Dict[str, Any]) -> "tuple[str, str]":
+    if total > th["hold"]:
+        status = "HOLD"
+        detail = f"{total} lines changed vs {base} (>{th['hold']} hold threshold, {th['hold_source']})"
+    elif total > th["warn"]:
+        status = "GO"
+        detail = (f"{total} lines changed vs {base} (>{th['warn']} warn threshold, "
+                  f"{th['warn_source']} — large but not blocking)")
+    else:
+        status = "GO"
+        detail = f"{total} lines changed vs {base}"
+    if th["invalid"]:
+        detail += "; " + "; ".join(th["invalid"])
+    return status, detail
+
+
 def check_pr_size(
     project_root: Path,
     *,
     base_ref: Optional[str] = None,
     head_ref: str = "HEAD",
+    project_id: Optional[str] = None,
+    state_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Check PR diff size (lines added + removed) against the merge-base with the base branch.
 
@@ -624,15 +696,8 @@ def check_pr_size(
     total_added, total_removed = totals
     total = total_added + total_removed
 
-    if total > PR_SIZE_HOLD:
-        status = "HOLD"
-        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_HOLD} hold threshold)"
-    elif total > PR_SIZE_WARN:
-        status = "GO"
-        detail = f"{total} lines changed vs {resolved_base_ref} (>{PR_SIZE_WARN} — large but not blocking)"
-    else:
-        status = "GO"
-        detail = f"{total} lines changed vs {resolved_base_ref}"
+    status, detail = _pr_size_verdict(
+        total, resolved_base_ref, _pr_size_thresholds(project_id, state_dir))
 
     return {
         "check": "pr_size",
@@ -644,6 +709,15 @@ def check_pr_size(
         "head_ref": head_ref,
         "merge_base": merge_base,
     }
+
+
+def _check_pr_size_for_project(project_root: Path, head_ref: str, state_dir: Path) -> Dict[str, Any]:
+    """check_pr_size with the thresholds of the project this gate runs for."""
+    from vnx_paths import _resolve_state_project_id
+
+    return check_pr_size(
+        project_root, head_ref=head_ref,
+        project_id=_resolve_state_project_id(project_root), state_dir=state_dir)
 
 
 def check_artifacts(
@@ -1616,7 +1690,7 @@ def run_gate_checks(
     checks.append(check_git_cleanliness(project_root))
     checks.append(check_contract_verification(pr_id, dispatch_dir, project_root, state_dir))
     checks.append(check_quality_advisory(project_root))
-    checks.append(check_pr_size(project_root, head_ref=head_ref))
+    checks.append(_check_pr_size_for_project(project_root, head_ref, state_dir))
     checks.extend([check_artifacts(pr_id, dispatch_dir, project_root), check_permission_policy(pr_id, project_root, dispatch_dir, pr_head, state_dir=state_dir)])
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root, head_ref=head_ref))

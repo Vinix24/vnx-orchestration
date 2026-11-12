@@ -47,7 +47,7 @@ ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKP
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
-    type: str  # "bool" | "string" | "enum"
+    type: str  # "bool" | "string" | "enum" | "integer"
     default: str
     category: str  # "intelligence" | "dispatch" | "gate"
     description: str
@@ -232,6 +232,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
+    # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
+    # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of 450 and 600; a value that is
+    # not a positive integer, or a WARN above HOLD, falls back to both defaults and is named
+    # in the gate's detail line. It never disables the check.
+    "VNX_PR_SIZE_WARN": _e(
+        "VNX_PR_SIZE_WARN", "integer", "450", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate reports a large PR. Not "
+        "blocking. A value that is not a positive integer, or above VNX_PR_SIZE_HOLD, falls "
+        "back to 450 and is named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_PR_SIZE_HOLD": _e(
+        "VNX_PR_SIZE_HOLD", "integer", "600", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate holds the merge. A value "
+        "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 600 and is "
+        "named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
     # default: no project approves a takeover, so every project keeps today's behaviour.
     "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
