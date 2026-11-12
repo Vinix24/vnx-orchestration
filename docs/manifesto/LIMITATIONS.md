@@ -7,7 +7,7 @@
 **Default lane** (single-entry dispatch door, ephemeral per-dispatch workers):
 - The dispatch door (`vnx dispatch`) as the single entry point for every dispatch (ADR-024).
 - `claude_headless` (`claude -p` via envelope, own git worktree per dispatch) as the only Claude worker lane, subscription-preserving.
-- Review seats: the default stack `codex_gate,kimi_gate`, one distinct reviewer per seat, a rejection from any reviewer blocks the merge (ADR-008, ADR-037). Takeover chain `codex_gate,kimi_gate,deepseek_gate`, with DeepSeek on API credit; `glm_gate` is outside the default chain.
+- Review seats: the default stack `codex_gate,deepseek_gate` (since 2026-11-11), one distinct reviewer per seat, a rejection from any reviewer blocks the merge (ADR-008, ADR-037). Takeover chain `codex_gate,deepseek_gate,claude_gate`, with DeepSeek on API credit; `glm_gate` is outside the default chain.
 - Horizon (`vnx horizon`) as the roadmap, tracks and deliverables planning layer, with the plan-first gate: one seat, a second only on BLOCK (`docs/core/HORIZON_LIFECYCLE.md`).
 - Open outcomes: a dispatch is finished only with an accept or reject from a T0 (`docs/core/DISPATCH_RULES.md` section 13).
 - Receipt-based cost observability with git provenance per receipt, and a start line and end line per dispatch (ADR-043, ADR-045).

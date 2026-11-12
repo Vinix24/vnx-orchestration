@@ -884,8 +884,8 @@ per-project central store (ADR-026), not a fixed repo-relative path.
 ## Review Seats
 
 A review seat is an entry of the project's review stack (`VNX_DEFAULT_REVIEW_STACK`,
-default `codex_gate,kimi_gate`; `vnx gate-profile` selects `light`, `standard` or
-`heavy`, ADR-060, on main, not yet released) that names a review peer and is not optional
+default `codex_gate,deepseek_gate` since the operator decision of 2026-11-11; `vnx gate-profile` selects `light`, `standard` or
+`heavy`, ADR-060, release 1.9.0) that names a review peer and is not optional
 (`scripts/lib/review_seats.py`). `ci_gate` checks CI, `wiring_gate` is not a review
 peer and `claude_github_optional` is optional by name, so none of the three is a seat.
 An unknown or retired gate name in a stack is refused by name, never dropped quietly.
@@ -905,9 +905,9 @@ Each required seat gets its own reviewer: one reviewer gate fills at most one se
 When a seat's reviewer is out, the next gate in the takeover chain reads it
 (`docs/core/PROVIDER_LANES.md`, "Takeover chain"; the seat rule itself is
 `docs/core/DISPATCH_RULES.md` section 2). The default chain is
-`codex_gate,kimi_gate,claude_gate,deepseek_gate`
-(`scripts/lib/gate_request_handler.py:121`). `claude_gate` stands before the
-API-credit end-link `deepseek_gate`, and a seat never gets a reviewer of the
+`codex_gate,deepseek_gate,claude_gate` (operator decision 2026-11-11, Kimi cancelled;
+`_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN` in `scripts/lib/gate_request_handler.py`).
+`claude_gate` is the last link, and a seat never gets a reviewer of the
 builder's vendor (R7): such a reviewer is passed over like an unavailable one.
 A chain that runs out ends as `chain_exhausted`.
 

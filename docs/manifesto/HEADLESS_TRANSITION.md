@@ -75,7 +75,7 @@ VNX_ADAPTER_T0=subprocess VNX_ADAPTER_T1=subprocess VNX_ADAPTER_T2=subprocess VN
 ### What stays identical across modes
 
 - Receipt schema (append-only NDJSON)
-- Quality gate enforcement (codex + gemini + CI at the time; `gemini_review` was later retired from the review stack — the current default is `codex_gate,kimi_gate`)
+- Quality gate enforcement (codex + gemini + CI at the time; `gemini_review` was later retired from the review stack; the default since 2026-11-11 is `codex_gate,deepseek_gate`)
 - Provenance chain (instruction_sha256 → manifest → receipt → audit)
 - Open items lifecycle
 - Pattern intelligence DB
@@ -136,7 +136,7 @@ Workers wrote to per-terminal NDJSON ring buffers (`.vnx-data/events/T{n}.ndjson
 
 Codex and Gemini review gates moved from manual operator review to headless subprocess execution. The operator no longer read gate output and made a pass/fail judgment — the gate runner did it autonomously, wrote a result JSON, and the closure verifier acted on it.
 
-Triple-gate enforcement: codex pass + gemini pass + CI green = merge. All three conditions enforced in code, not memory. (Historical for F39/April 2026 — `gemini_review` has since been retired from the review stack; the current default is `codex_gate,kimi_gate`, enforced the same way.)
+Triple-gate enforcement: codex pass + gemini pass + CI green = merge. All three conditions enforced in code, not memory. (Historical for F39/April 2026: `gemini_review` has since been retired from the review stack; the default since 2026-11-11 is `codex_gate,deepseek_gate`, enforced the same way.)
 
 **What improved**: Chains of 10+ PRs could land without the operator making 30+ individual gate decisions. The operator's role shifted from decision-maker to exception handler.
 
