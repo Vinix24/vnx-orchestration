@@ -1685,6 +1685,47 @@ def _register_dream_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_daily_metrics_subparser(subparsers: argparse.Action) -> None:
+    """``vnx daily-metrics``: install the job, pass every other verb through.
+
+    Removal of the job follows as its own verb in a later change (PR-13b); this
+    text names no command that does not exist yet.
+
+    The handler is bound with ``set_defaults(func=...)`` instead of growing the
+    ``elif`` chain in ``_dispatch_command``: that function is already at the
+    70-line ratchet limit (``scripts/ci/check_function_size_ratchet.py``), and
+    ``main()`` runs a bound handler before the chain — the same route
+    ``pool`` takes.
+    """
+    daily_metrics_parser = subparsers.add_parser(
+        "daily-metrics",
+        help=(
+            "daily metrics: install the opt-in 04:10 job, every other "
+            "verb passes through to scripts/daily_metrics.py"
+        ),
+        description=(
+            "Daily metrics. `install --project-id ID` installs the opt-in "
+            "per-project launchd job (04:10 local). Removal of that job follows "
+            "as a verb in a later change. Every other verb (collect, daily, "
+            "propose, approve, verdict, report) is passed to "
+            "scripts/daily_metrics.py unchanged."
+        ),
+    )
+    daily_metrics_parser.add_argument(
+        "daily_metrics_args",
+        nargs=argparse.REMAINDER,
+        metavar="ARGS",
+        help="verb and its arguments, passed through unchanged",
+    )
+    daily_metrics_parser.set_defaults(func=_run_daily_metrics_command)
+
+
+def _run_daily_metrics_command(args: argparse.Namespace) -> int:
+    from vnx_cli.commands.daily_metrics import vnx_daily_metrics
+
+    return vnx_daily_metrics(args)
+
+
 def _register_attest_subparser(subparsers: argparse.Action) -> None:
     attest_parser = subparsers.add_parser(
         "attest",
@@ -1969,6 +2010,7 @@ def main() -> None:
     _register_handoff_subparser(subparsers)
     _register_learning_subparser(subparsers)
     _register_dream_subparser(subparsers)
+    _register_daily_metrics_subparser(subparsers)
     _register_migrate_subparser(subparsers)
     _register_attest_subparser(subparsers)
     _register_horizon_subparser(subparsers)
