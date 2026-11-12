@@ -44,7 +44,6 @@ import dispatch_lifecycle  # noqa: E402
 import dispatch_start  # noqa: E402
 import dispatch_worktree_isolation  # noqa: E402
 import orphan_sweep as osweep  # noqa: E402
-import state_rebuild_trigger  # noqa: E402
 import tmux_worktree  # noqa: E402
 from ledger_attempt_state import attempt_verdict  # noqa: E402
 
@@ -64,18 +63,6 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VNX_LEDGER_LIFECYCLE", "1")
     monkeypatch.delenv("VNX_USE_CENTRAL_DB", raising=False)
     monkeypatch.delenv("VNX_CURRENT_DISPATCH_ID", raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _no_background_state_rebuild(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every lifecycle line fires ``build_t0_state.py`` as a detached child that inherits this
-    store's ``VNX_STATE_DIR`` and runs ``init_schema`` on it, while the test reads the same
-    store. Under load the child lands between the hand-over and the finalizer: the store
-    appears with the base DDL (no ``project_id``) or half-created, which is the k7b flake
-    (OI-2590, OI-2712, OI-2729). No test here asserts on that rebuild, so it does not run.
-    """
-    monkeypatch.setattr(state_rebuild_trigger, "maybe_trigger_state_rebuild",
-                        lambda *args, **kwargs: False)
 
 
 @pytest.fixture(autouse=True)
