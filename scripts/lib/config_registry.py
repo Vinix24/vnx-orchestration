@@ -309,10 +309,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # pre-existing last-wins winner now that canonical_flags() no longer picks by dict
         # order. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
+    "VNX_DREAM_PROVIDER": _e(
+        "VNX_DREAM_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider that runs the dream consolidation: deepseek or kimi. Any other value skips the cycle.",
+        subsystem="dream-consolidation", status="ACTIVATE"),
     "VNX_DREAM_SCHEDULER_ENABLED": _e(
         "VNX_DREAM_SCHEDULER_ENABLED", "bool", "0", "intelligence",
         "Nightly memory consolidation + pending review dispatch.",
-        subsystem="dream-consolidation", status="ACTIVATE"),
+        subsystem="dream-consolidation", status="ACTIVATE", cockpit_canonical=True),
     "VNX_INJECTION_FEEDBACK_ENABLED": _e(
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",

@@ -1,12 +1,12 @@
 """Auto-dream memory consolidator (ADR-019).
 
 Reads success_patterns + antipatterns + intelligence_injections for a project,
-dispatches kimi K2.6 cheap-lane for consolidation, emits NDJSON event, and writes
+consolidates on the provider VNX_DREAM_PROVIDER names (default deepseek, or kimi), emits NDJSON event, and writes
 a pending-review.json for T0 approval.
 
 Per ADR-005: NDJSON emit BEFORE any DB write.
 Per ADR-007: project_id required on all DB operations.
-Per ADR-003: kimi via CLI subprocess only, no Anthropic SDK.
+Per ADR-003: providers via CLI subprocess only, no Anthropic SDK.
 
 Injection-probe gate (PR-17, revised): the injection-effectiveness probe decides
 whether a cycle may run. ``ok`` runs a normal cycle. ``degraded`` runs the cycle
@@ -39,8 +39,21 @@ from uuid import uuid4
 # proceed with consolidation. Below this threshold the cycle is skipped cleanly.
 _MIN_PATTERN_THRESHOLD: int = 1
 
-# Default kimi subprocess timeout in seconds; override via VNX_DREAM_KIMI_TIMEOUT.
-_DEFAULT_KIMI_TIMEOUT: int = 180
+# Default timeout in seconds of one consolidation call, whichever provider runs it;
+# override via VNX_DREAM_TIMEOUT.
+_DEFAULT_TIMEOUT: int = 180
+
+# The provider that runs the consolidation is the config key VNX_DREAM_PROVIDER. An explicit
+# allow-list: any other value skips the cycle, it never falls back to kimi.
+_PROVIDER_KEY: str = "VNX_DREAM_PROVIDER"
+_DEFAULT_PROVIDER: str = "deepseek"
+_PROVIDERS: frozenset[str] = frozenset({"deepseek", "kimi"})
+_REASON_PROVIDER_UNKNOWN: str = "dream_provider_unknown"
+
+# Output-token ceiling handed to the DeepSeek provider. The prompt asks for one decision per
+# pattern (about 40 tokens each) over at most 50_000 payload characters, which is a few
+# hundred rows at worst: 8_000 tokens covers that with room for the summary.
+_DEEPSEEK_MAX_TOKENS: int = 8_000
 
 # Probe statuses that let a cycle run. An explicit allow-set, not a deny-set: a
 # new or misspelled status must fail closed rather than pass by not being listed.
@@ -52,10 +65,11 @@ _PROBE_HEALTH_RUNNABLE: frozenset[str] = frozenset(
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
 import vnx_paths as _vnx_paths
+import config_registry
 import content_class
 import provider_switch
 
-# Character budget for the serialized pattern JSON inside one kimi prompt. Input
+# Character budget for the serialized pattern JSON inside one consolidation prompt. Input
 # that does not fit is split over several prompts, never cut off (OI-1821).
 _PROMPT_PAYLOAD_BUDGET: int = 50_000
 
@@ -266,8 +280,26 @@ def _skip_cycle(
     )
 
 
-def _content_boundary_skip(
+def _provider_or_skip(
     cycle_id: str, project_id: str, data_root: Path
+) -> "tuple[str, dict[str, Any] | None]":
+    """The provider ``VNX_DREAM_PROVIDER`` names for this project, or a fail-closed skip.
+
+    A value outside ``_PROVIDERS`` (empty included) skips the cycle with a reason that names
+    it. No provider is called and kimi is not the fallback.
+    """
+    raw = config_registry.get_for_project(_PROVIDER_KEY, project_id, data_root / "state")
+    provider = (raw or "").strip().lower()
+    if provider in _PROVIDERS:
+        return provider, None
+    return provider, _skip_cycle(
+        cycle_id, project_id, data_root, _REASON_PROVIDER_UNKNOWN,
+        f"{_PROVIDER_KEY}={raw!r} is not one of {sorted(_PROVIDERS)}", provider=raw,
+    )
+
+
+def _content_boundary_skip(
+    cycle_id: str, project_id: str, data_root: Path, provider: str
 ) -> "tuple[content_class.Boundary, dict[str, Any] | None]":
     """Load the content boundary and return it with a skipped result when it forbids the cycle.
 
@@ -279,10 +311,11 @@ def _content_boundary_skip(
         return boundary, _skip_cycle(cycle_id, project_id, data_root,
                                      "content_boundary_unconfigured", boundary.reason)
     if (project_id in boundary.client_project_ids
-            and "kimi" not in content_class.allowed_exception_providers(project_id, boundary)):
+            and provider not in content_class.allowed_exception_providers(project_id, boundary)):
         return boundary, _skip_cycle(cycle_id, project_id, data_root,
                                      "content_restricted_project",
-                                     "client project without a kimi exception")
+                                     f"client project without a {provider} exception",
+                                     provider=provider)
     return boundary, None
 
 
@@ -303,15 +336,15 @@ def _unrestricted_patterns(
     return patterns, dropped, None
 
 
-def _pre_kimi_skip(
+def _pre_consolidation_skip(
     patterns: dict[str, list[dict]], cycle_id: str, project_id: str, data_root: Path,
-    restricted_rows_dropped: dict[str, int],
+    restricted_rows_dropped: dict[str, int], provider: str,
 ) -> "dict[str, Any] | None":
-    """Skipped result for the guards that sit directly before the kimi call, else None.
+    """Skipped result for the guards that sit directly before the provider call, else None.
 
     Insufficient-data guard: skip cleanly when there are no core patterns to consolidate
     (e.g. freshly-bootstrapped DB). Then the switch, which decides after the content
-    boundary; both must allow, neither widens the other. Kimi is NOT invoked. (GAP-7)
+    boundary; both must allow, neither widens the other. The provider is NOT invoked. (GAP-7)
     """
     core_count = len(patterns.get("success_patterns", [])) + len(
         patterns.get("antipatterns", [])
@@ -323,13 +356,14 @@ def _pre_kimi_skip(
             data_root,
             "insufficient_data",
             f"core_count={core_count} below threshold={_MIN_PATTERN_THRESHOLD}",
+            event_extra={"provider": provider},
             result_extra={"detail": f"core_count={core_count}"},
         )
-    decision = provider_switch.decide("kimi", consumer="dream", project_id=project_id)
+    decision = provider_switch.decide(provider, consumer="dream", project_id=project_id)
     if not decision.allowed:
         return _skip_cycle(
             cycle_id, project_id, data_root, provider_switch.REASON_SWITCHED_OFF,
-            decision.detail(), restricted_rows_dropped=restricted_rows_dropped,
+            decision.detail(), restricted_rows_dropped=restricted_rows_dropped, provider=provider,
         )
     return None
 
@@ -353,16 +387,16 @@ def _extract_kimi_text(stdout: str) -> str:
     return "".join(parts)
 
 
-def _parse_kimi_response(output: str) -> dict:
-    """Extract JSON object from kimi text output (skips preamble / postamble)."""
+def _parse_json_response(output: str) -> dict:
+    """Extract JSON object from provider text output (skips preamble / postamble)."""
     start = output.find("{")
     end = output.rfind("}")
     if start == -1 or end == -1:
-        raise ValueError(f"No JSON found in kimi output: {output[:300]!r}")
+        raise ValueError(f"No JSON found in model output: {output[:300]!r}")
     try:
         return json.loads(output[start : end + 1])
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON in kimi output: {exc}") from exc
+        raise ValueError(f"Invalid JSON in model output: {exc}") from exc
 
 
 def _compact_json(obj: Any) -> str:
@@ -480,8 +514,29 @@ def _book_kimi_call(
     )
 
 
+def _merge_batches(patterns_input: dict, project_id: str, run_batch: Any) -> dict:
+    """Split the patterns, run ``run_batch(prompt)`` per batch and merge the parsed results.
+
+    ``run_batch`` returns the parsed JSON object of one batch; it raises when the provider
+    fails or answers without one, and that raise ends the consolidation.
+    """
+    batches, shrunk_rows = _split_patterns(patterns_input)
+    merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
+    summaries: list[str] = []
+    for index, batch in enumerate(batches, start=1):
+        result = run_batch(_build_consolidation_prompt(batch, project_id, (index, len(batches))))
+        for key in merged:
+            merged[key].extend(result.get(key) or [])
+        if result.get("summary"):
+            summaries.append(str(result["summary"]))
+    merged["summary"] = " ".join(summaries)
+    merged["input_batches"] = len(batches)
+    merged["rows_shrunk_to_fit"] = shrunk_rows
+    return merged
+
+
 def _dispatch_kimi_consolidation(
-    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_KIMI_TIMEOUT,
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_TIMEOUT,
     data_root: "Path | None" = None,
 ) -> dict:
     """Dispatch the kimi cheap-lane for pattern consolidation and parse the result.
@@ -497,12 +552,9 @@ def _dispatch_kimi_consolidation(
     """
     from kimi_wrapper import kimi_exec  # noqa: PLC0415
 
-    batches, shrunk_rows = _split_patterns(patterns_input)
-    merged: dict[str, Any] = {"merged": [], "dropped": [], "archived": [], "flagged": []}
-    summaries: list[str] = []
     ref = f"dream-{project_id}"
-    for index, batch in enumerate(batches, start=1):
-        prompt = _build_consolidation_prompt(batch, project_id, (index, len(batches)))
+
+    def run_batch(prompt: str) -> dict:
         started = datetime.now(timezone.utc)
         try:
             stdout = kimi_exec(prompt, dispatch_id=ref, project_id=project_id, timeout=timeout)
@@ -514,15 +566,78 @@ def _dispatch_kimi_consolidation(
             raise
         _book_kimi_call(stdout, ref=ref, project_id=project_id, started=started,
                         ended=datetime.now(timezone.utc), data_root=data_root)
-        result = _parse_kimi_response(_extract_kimi_text(stdout) or stdout)
-        for key in merged:
-            merged[key].extend(result.get(key) or [])
-        if result.get("summary"):
-            summaries.append(str(result["summary"]))
-    merged["summary"] = " ".join(summaries)
-    merged["input_batches"] = len(batches)
-    merged["rows_shrunk_to_fit"] = shrunk_rows
-    return merged
+        return _parse_json_response(_extract_kimi_text(stdout) or stdout)
+
+    return _merge_batches(patterns_input, project_id, run_batch)
+
+
+def _dispatch_deepseek_consolidation(
+    patterns_input: dict, project_id: str, timeout: float = _DEFAULT_TIMEOUT,
+) -> dict:
+    """Run the consolidation through the key-auth DeepSeek provider and parse the result.
+
+    The provider books its own ledger line, so nothing is booked here. A result with
+    ``error`` raises (a provider timeout as ``subprocess.TimeoutExpired``, anything else as
+    ``RuntimeError``), and so does a result without a JSON object.
+    """
+    from classifier_providers import get_provider  # noqa: PLC0415
+
+    provider = get_provider("deepseek", project_id=project_id)
+    provider.timeout_seconds = int(timeout)
+
+    def run_batch(prompt: str) -> dict:
+        result = provider.classify(prompt, _max_tokens=_DEEPSEEK_MAX_TOKENS)
+        if result.error:
+            if result.error.startswith("timeout after "):
+                raise subprocess.TimeoutExpired("deepseek", timeout)
+            raise RuntimeError(f"deepseek consolidation failed: {result.error}")
+        if isinstance(result.parsed_json, dict):
+            return result.parsed_json
+        return _parse_json_response(result.raw_response or "")
+
+    return _merge_batches(patterns_input, project_id, run_batch)
+
+
+def _dispatch_consolidation(
+    patterns_input: dict, project_id: str, provider: str, timeout: float,
+    data_root: "Path | None" = None,
+) -> dict:
+    """Run the consolidation on ``provider``, one of ``_PROVIDERS``; anything else raises."""
+    if provider == "deepseek":
+        return _dispatch_deepseek_consolidation(patterns_input, project_id, timeout=timeout)
+    if provider == "kimi":
+        return _dispatch_kimi_consolidation(
+            patterns_input, project_id, timeout=timeout, data_root=data_root)
+    raise ValueError(f"unknown dream provider {provider!r}")
+
+
+def _run_consolidation(
+    patterns: dict, cycle_id: str, project_id: str, provider: str, timeout: float,
+    data_root: Path,
+) -> "tuple[dict | None, dict[str, Any] | None]":
+    """``(consolidation, None)``, or ``(None, timeout result)``; any other failure re-raises.
+
+    A failure writes ``dream_cycle_failed`` and a timeout ``dream_cycle_timeout``, both with
+    the provider. The timeout reason names the provider (``deepseek_timeout``, ``kimi_timeout``).
+    """
+    try:
+        return _dispatch_consolidation(
+            patterns, project_id, provider, timeout, data_root=data_root), None
+    except subprocess.TimeoutExpired:
+        _emit_dream_event(
+            {"event_type": "dream_cycle_timeout", "cycle_id": cycle_id, "project_id": project_id,
+             "provider": provider, "timeout_seconds": int(timeout)},
+            data_root,
+        )
+        return None, {"status": "timeout", "cycle_id": cycle_id, "reason": f"{provider}_timeout",
+                      "provider": provider, "timeout_seconds": int(timeout)}
+    except Exception as exc:
+        _emit_dream_event(
+            {"event_type": "dream_cycle_failed", "cycle_id": cycle_id, "project_id": project_id,
+             "provider": provider, "error": str(exc)[:500]},
+            data_root,
+        )
+        raise
 
 
 def _write_pending_review(
@@ -596,8 +711,11 @@ def run_dream_cycle(
             result_extra={"detail": detail},
         )
 
-    # Content boundary, before any kimi call.
-    boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root)
+    # The provider, then the content boundary for it; both before any provider call.
+    provider, skipped = _provider_or_skip(cycle_id, project_id, _data_root)
+    if skipped is not None:
+        return skipped
+    boundary, skipped = _content_boundary_skip(cycle_id, project_id, _data_root, provider)
     if skipped is not None:
         return skipped
 
@@ -624,14 +742,13 @@ def run_dream_cycle(
             "event_type": "dream_cycle_started",
             "cycle_id": cycle_id,
             "project_id": project_id,
+            "provider": provider,
             "probe_health": probe_health,
         },
         _data_root,
     )
 
-    kimi_timeout = float(
-        os.environ.get("VNX_DREAM_KIMI_TIMEOUT", str(_DEFAULT_KIMI_TIMEOUT))
-    )
+    timeout = float(os.environ.get("VNX_DREAM_TIMEOUT", str(_DEFAULT_TIMEOUT)))
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
@@ -640,42 +757,16 @@ def run_dream_cycle(
             conn, project_id, boundary, cycle_id, _data_root
         )
         if skipped is None:
-            skipped = _pre_kimi_skip(patterns, cycle_id, project_id, _data_root, restricted_rows_dropped)
+            skipped = _pre_consolidation_skip(
+                patterns, cycle_id, project_id, _data_root, restricted_rows_dropped, provider)
         if skipped is not None:
             return skipped
         total_input = sum(len(v) for v in patterns.values())
 
-        try:
-            consolidation = _dispatch_kimi_consolidation(
-                patterns, project_id, timeout=kimi_timeout, data_root=_data_root
-            )
-        except subprocess.TimeoutExpired:
-            _emit_dream_event(
-                {
-                    "event_type": "dream_cycle_timeout",
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "timeout_seconds": int(kimi_timeout),
-                },
-                _data_root,
-            )
-            return {
-                "status": "timeout",
-                "cycle_id": cycle_id,
-                "reason": "kimi_timeout",
-                "timeout_seconds": int(kimi_timeout),
-            }
-        except Exception as exc:
-            _emit_dream_event(
-                {
-                    "event_type": "dream_cycle_failed",
-                    "cycle_id": cycle_id,
-                    "project_id": project_id,
-                    "error": str(exc)[:500],
-                },
-                _data_root,
-            )
-            raise
+        consolidation, timed_out = _run_consolidation(
+            patterns, cycle_id, project_id, provider, timeout, _data_root)
+        if timed_out is not None:
+            return timed_out
 
         review_path = _write_pending_review(
             _data_root, cycle_id, project_id, total_input,
@@ -692,6 +783,7 @@ def run_dream_cycle(
                 "event_type": "dream_cycle_completed",
                 "cycle_id": cycle_id,
                 "project_id": project_id,
+                "provider": provider,
                 "probe_health": probe_health,
                 "input_count": total_input,
                 "restricted_rows_dropped": restricted_rows_dropped,
@@ -711,12 +803,13 @@ def run_dream_cycle(
                     (cycle_id, project_id, completed_at, status, provider,
                      insights_input, merged_count, dropped_count, archived_count,
                      flagged_count, report_path)
-                VALUES (?, ?, ?, 'completed', 'kimi', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cycle_id,
                     project_id,
                     _utc_timestamp(),
+                    provider,
                     total_input,
                     merged_count,
                     dropped_count,

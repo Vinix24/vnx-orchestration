@@ -55,7 +55,8 @@ _REVIEW_TYPES = {"dream_cycle_approved", "dream_cycle_rejected"}
 _OUTPUT_KEYS = ("merged_count", "dropped_count", "archived_count", "flagged_count")
 _ALLOWED_REASONS = {"insufficient_data", "content_restricted_project",
                     "content_restricted_all_rows"}
-_BLOCKED_REASONS = {"scheduler_disabled", "probe_not_ok", "provider_switched_off"}
+_BLOCKED_REASONS = {"scheduler_disabled", "probe_not_ok", "provider_switched_off",
+                    "dream_provider_unknown"}
 
 # ADR-066 line 85: `deviation` only for severity `error`. D11: an unexplained reason
 # or silence is never a pass; D13: a `blocked` skip is no allowed skip. Ids of later
