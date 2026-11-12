@@ -1,1 +1,1 @@
-- Docs: new `docs/intelligence/DREAMING.md` (what a dream cycle does and does not do, scheduling, liveness watch, human review) and `SCOUT_PREPASS.md`, `TAG_TAXONOMY.md`, `COST_TRACKING_GUIDE.md` corrected to main (cost ledger first, no line-number citations, legacy tag engine described as it is). Docs only.
+- Docs: new `docs/intelligence/DREAMING.md` (what a dream cycle does and does not do, scheduling, liveness watch, human review) and `SCOUT_PREPASS.md`, `TAG_TAXONOMY.md` corrected to main (no line-number citations, legacy tag engine described as it is). Docs only.
