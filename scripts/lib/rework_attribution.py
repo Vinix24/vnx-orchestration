@@ -171,7 +171,11 @@ def record_edge(
 
 
 def load_edges(qi_conn: sqlite3.Connection, project_id: str) -> List[dict]:
-    """All edges of one project; empty on a store without the table (not yet migrated)."""
+    """All edges of one project.
+
+    Empty only on a store without the `rework_edges` table (not yet migrated). Every other
+    `sqlite3.OperationalError` (a lock, a missing column, a malformed query) is raised.
+    """
     try:
         rows = qi_conn.execute(
             "SELECT rework_dispatch_id, origin_dispatch_id, kind, class, source, evidence_json "
@@ -179,8 +183,11 @@ def load_edges(qi_conn: sqlite3.Connection, project_id: str) -> List[dict]:
             "ORDER BY rework_dispatch_id, origin_dispatch_id, kind",
             (project_id,),
         ).fetchall()
-    except sqlite3.OperationalError:
-        return []
+    except sqlite3.OperationalError as exc:
+        message = str(exc)
+        if message.startswith("no such table") and "rework_edges" in message:
+            return []
+        raise
     return [
         {"rework": r[0], "origin": r[1], "kind": r[2], "class": r[3], "source": r[4], "evidence_json": r[5]}
         for r in rows

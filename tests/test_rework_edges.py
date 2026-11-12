@@ -104,6 +104,26 @@ def test_load_edges_on_a_store_without_the_table_is_empty(tmp_path):
         assert ra.load_edges(conn, PID) == []
 
 
+def test_load_edges_on_a_half_migrated_table_raises(tmp_path):
+    with closing(sqlite3.connect(tmp_path / "half.db")) as conn:
+        conn.execute(
+            "CREATE TABLE rework_edges (project_id TEXT, rework_dispatch_id TEXT, "
+            "origin_dispatch_id TEXT, kind TEXT, class TEXT, source TEXT)"
+        )
+        with pytest.raises(sqlite3.OperationalError, match="evidence_json"):
+            ra.load_edges(conn, PID)
+
+
+class _LockedConnection:
+    def execute(self, *_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+
+def test_load_edges_on_a_locked_database_raises():
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        ra.load_edges(_LockedConnection(), PID)
+
+
 def test_init_leaves_every_existing_table_unchanged(tmp_path, monkeypatch):
     monkeypatch.setattr(qdi, "MIGRATIONS", {k: v for k, v in qdi.MIGRATIONS.items() if k < 36})
     old = _tables(_bootstrap(tmp_path / "old.db"))
