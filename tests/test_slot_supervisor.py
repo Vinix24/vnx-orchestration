@@ -211,7 +211,7 @@ def test_a_child_committed_before_the_transaction_keeps_both_leases(sup):
     store.before = lambda s: s.state["holders"].update(C=child)
     world = World(store, sup[0], [EMPTY])
     # the child's session is in the process table from the moment its lease exists
-    world.ps = lambda argv: ps_text((77, 1, 77), (700, 1, 501)) if "C" in store.state["holders"] else EMPTY
+    world.supervisor.ps = lambda argv: ps_text((77, 1, 77), (700, 1, 501)) if "C" in store.state["holders"] else EMPTY
     assert world.supervisor.try_release("L1", 1) is False and set(store.state["holders"]) == {"L1", "C"}
     assert world.logs == []
 
