@@ -1,11 +1,7 @@
-"""Origin of a staged dispatch: ``origin_oi`` / ``origin_pr`` and the declared rework edge (ADR-071 besluit 3).
+"""Origin of a staged dispatch (ADR-071 besluit 3): ``origin_oi`` / ``origin_pr`` fill ``parent_dispatch``
+and staging records the declared edge through ``rework_attribution.record_edge``.
 
-Staging names the origin instead of guessing it. ``origin_oi="OI-n"`` takes the dispatch the
-open item points at; ``origin_pr=n`` takes ``<id>`` from the PR's head branch ``dispatch/<id>``.
-The resolved origin fills ``parent_dispatch``; after the bundle is written the declared edge goes
-into ``rework_edges`` through ``rework_attribution.record_edge`` (fill-once, ADR-007 key).
-
-Resolution refuses (ValueError with the reason) and never yields an empty edge. The edge write is
+Resolution refuses with the reason (ValueError), never an empty edge. The edge write is
 best-effort: a missing store or a SQLite error is logged and never blocks staging.
 """
 
@@ -125,11 +121,9 @@ def record_declared_edge(
     kind: Optional[str],
     evidence: dict,
 ) -> bool:
-    """Write the declared edge of a staged spec; best-effort, True only when a row was written.
+    """Write the declared edge (``oi_fix``/``pr_fix``, else ``round``; all herwerk, ADR-071 besluit 4); best-effort.
 
-    ``kind`` is ``oi_fix`` / ``pr_fix`` for a named origin and ``None`` for a plain predecessor
-    (``work_ref`` or ``parent_dispatch``), which is a ``round``. All three are herwerk (ADR-071
-    besluit 4). No predecessor writes nothing. The store is never created here.
+    No predecessor writes nothing; the store is never created here.
     """
     if not predecessor or predecessor == dispatch_id:
         return False

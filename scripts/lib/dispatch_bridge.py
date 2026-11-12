@@ -239,13 +239,8 @@ def _stage_lineage(
     origin_pr: Optional[int],
     root: Path,
 ) -> "tuple[Optional[str], Optional[str], dict]":
-    """``(parent_dispatch, edge_kind, evidence)`` for a bundle about to be staged.
-
-    Resolves the named origin (``origin_oi`` / ``origin_pr``, ADR-071 besluit 3) first, then lets
-    ``resolve_parent_dispatch`` apply its one rule against ``work_ref``. ``edge_kind`` is
-    ``oi_fix`` / ``pr_fix`` for a named origin and ``None`` otherwise; ``evidence`` names the OI,
-    the PR, the ``work_ref`` or the explicit ``parent_dispatch`` the predecessor came from.
-    """
+    """``(parent_dispatch, edge_kind, evidence)``: the named origin (ADR-071 besluit 3) first, then
+    ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin."""
     from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
 
     origin, kind, evidence = resolve_origin(
