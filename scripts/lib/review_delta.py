@@ -28,6 +28,8 @@ _ADVISORY_SEVERITIES = ("warning", "info", "advisory", "nit")
 _BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 REASON_EXTRA_BLOCK = "extra_block"
 REASON_TRAILING = "trailing_content"
+REASON_DUPLICATE_KEY = "duplicate_key"
+REASON_INVALID_STATUS = "invalid_status"
 
 
 class DeltaRefused(ValueError):
@@ -36,6 +38,18 @@ class DeltaRefused(ValueError):
     def __init__(self, full_review_reason: str) -> None:
         super().__init__(f"delta review refused: {full_review_reason}")
         self.full_review_reason = full_review_reason
+
+
+class _DuplicateKey(ValueError):
+    """The verdict block names one JSON key twice in the same object."""
+
+
+def _no_duplicate_keys(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """``object_pairs_hook`` for every object level: json.loads would keep the last value of a repeated key silently."""
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise _DuplicateKey(REASON_DUPLICATE_KEY)
+    return dict(pairs)
 
 
 @dataclass(frozen=True)
@@ -139,6 +153,10 @@ def _failed(reason: str, sent_ids: Sequence[str]) -> DeltaVerdict:
     return DeltaVerdict(FAIL, {i: STATUS_OPEN for i in sent_ids}, (), (), (reason,))
 
 
+class _InvalidStatus(ValueError):
+    """A sent id carries a status that is not one of the answers a seat may give."""
+
+
 def _statuses(rows: Any, sent: FrozenSet[str]) -> Tuple[Dict[str, str], Tuple[str, ...]]:
     given: Dict[str, str] = {}
     ignored: List[str] = []
@@ -146,10 +164,13 @@ def _statuses(rows: Any, sent: FrozenSet[str]) -> Tuple[Dict[str, str], Tuple[st
         if not isinstance(row, Mapping) or not isinstance(row.get("id"), str):
             raise ValueError("findings entry without a string id")
         rid = row["id"]
-        answer = row.get("status") if row.get("status") in _ANSWERS else STATUS_OPEN
         if rid not in sent:
             ignored.append(rid)
-        elif given.get(rid, answer) != answer:
+            continue
+        answer = row.get("status")
+        if not isinstance(answer, str) or answer not in _ANSWERS:  # missing, non-string or unknown: never read as an answer
+            raise _InvalidStatus(f"{REASON_INVALID_STATUS}: {rid}")
+        if given.get(rid, answer) != answer:
             given[rid] = STATUS_OPEN  # two different answers for one id: the finding stays open
         else:
             given[rid] = answer
@@ -174,7 +195,7 @@ def parse_delta_verdict(text: str, sent_ids: Sequence[str], blocker_ids: Sequenc
     if raw[blocks_found[0].end():].strip():
         return _failed(REASON_TRAILING, sent)
     try:
-        data = json.loads(blocks_found[0].group(2))
+        data = json.loads(blocks_found[0].group(2), object_pairs_hook=_no_duplicate_keys)
         if not isinstance(data, dict) or data.get("verdict") not in (PASS, FAIL):
             raise ValueError("verdict is not pass or fail")
         if not isinstance(data.get("findings"), list) or not isinstance(data.get("new_findings"), list):
@@ -182,6 +203,8 @@ def parse_delta_verdict(text: str, sent_ids: Sequence[str], blocker_ids: Sequenc
         given, ignored = _statuses(data["findings"], frozenset(sent))
         if not all(isinstance(f, dict) for f in data["new_findings"]):
             raise ValueError("new_findings entry is not an object")
+    except (_DuplicateKey, _InvalidStatus) as exc:  # a named reason, no partial reading of the block
+        return _failed(str(exc), sent)
     except ValueError as exc:  # json.JSONDecodeError is a ValueError
         return _failed(f"unreadable {FENCE} block: {exc}", sent)
     statuses = {i: given.get(i, STATUS_OPEN) for i in sent}

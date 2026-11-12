@@ -182,3 +182,83 @@ def test_prose_before_block_is_parsed():
 
 def test_prompt_states_the_one_block_rule():
     assert "exactly one fenced block in the whole answer and nothing after it" in rd.build_delta_prompt(record())
+
+
+def _raw(body: str) -> str:
+    return f"```{rd.FENCE}\n{body}\n```\n"
+
+
+def _dup_case(body: str):
+    return rd.parse_delta_verdict(_raw(body), SENT, (BLOCKER.id,))
+
+
+def _assert_duplicate_fail(result):
+    assert result.verdict == rd.FAIL and result.reasons == (rd.REASON_DUPLICATE_KEY,)
+    assert set(result.statuses.values()) == {"open"} and result.new_findings == ()
+
+
+def test_duplicate_status_in_a_finding_fails_even_when_the_last_one_is_fixed():
+    f1, f2 = BLOCKER.id, ADVISORY.id
+    body = ('{"verdict": "pass", "findings": [{"id": "%s", "status": "open", "status": "fixed"}, '
+            '{"id": "%s", "status": "fixed"}], "new_findings": []}' % (f1, f2))
+    _assert_duplicate_fail(_dup_case(body))
+
+
+def test_duplicate_id_key_in_a_finding_fails():
+    body = ('{"verdict": "pass", "findings": [{"id": "zz", "id": "%s", "status": "fixed"}], "new_findings": []}'
+            % BLOCKER.id)
+    _assert_duplicate_fail(_dup_case(body))
+
+
+def test_duplicate_verdict_at_the_top_fails():
+    _assert_duplicate_fail(_dup_case('{"verdict": "fail", "verdict": "pass", "findings": [], "new_findings": []}'))
+
+
+def test_duplicate_severity_in_a_new_finding_fails():
+    body = '{"verdict": "pass", "findings": [], "new_findings": [{"severity": "high", "severity": "info"}]}'
+    _assert_duplicate_fail(_dup_case(body))
+
+
+def test_duplicate_key_in_a_nested_object_fails():
+    body = ('{"verdict": "pass", "findings": [], "new_findings": [{"severity": "info", "meta": {"a": 1, "a": 2}}]}')
+    _assert_duplicate_fail(_dup_case(body))
+
+
+def test_block_without_duplicates_parses_as_before():
+    body = ('{"verdict": "pass", "findings": [{"id": "%s", "status": "fixed"}, {"id": "%s", "status": "fixed"}], '
+            '"new_findings": [{"severity": "info", "meta": {"a": 1}}]}' % (BLOCKER.id, ADVISORY.id))
+    result = _dup_case(body)
+    assert result.verdict == rd.PASS and result.reasons == ()
+
+
+@pytest.mark.parametrize("row", [
+    {"id": BLOCKER.id},
+    {"id": BLOCKER.id, "status": None},
+    {"id": BLOCKER.id, "status": 1},
+    {"id": BLOCKER.id, "status": ["fixed"]},
+    {"id": BLOCKER.id, "status": {"fixed": True}},
+    {"id": BLOCKER.id, "status": "waived"},
+])
+def test_sent_id_with_a_status_that_is_not_an_answer_fails_with_named_reason(row):
+    for rows in ([row], [row, {"id": ADVISORY.id, "status": "fixed"}]):
+        result = rd.parse_delta_verdict(answer("pass", rows), SENT, ())
+        assert result.verdict == rd.FAIL and result.reasons == (f"{rd.REASON_INVALID_STATUS}: {BLOCKER.id}",)
+        assert set(result.statuses.values()) == {"open"}
+
+
+@pytest.mark.parametrize("rid", [None, 7, ["f1"], {"id": 1}])
+def test_non_string_id_fails_closed(rid):
+    result = rd.parse_delta_verdict(answer("pass", ids_ok() + [{"id": rid, "status": "fixed"}]), SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and result.reasons and "string id" in result.reasons[0]
+
+
+@pytest.mark.parametrize("new", ["x", [None], [["a"]], {"severity": "info"}])
+def test_malformed_new_findings_fail_closed(new):
+    body = json.dumps({"verdict": "pass", "findings": ids_ok(), "new_findings": new})
+    assert rd.parse_delta_verdict(_raw(body), SENT, (BLOCKER.id,)).verdict == rd.FAIL
+
+
+@pytest.mark.parametrize("severity", [None, 0, ["info"], {"a": "info"}, ""])
+def test_non_string_severity_in_a_new_finding_blocks(severity):
+    result = rd.parse_delta_verdict(answer("pass", ids_ok(), [{"severity": severity}]), SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and "blocking severity" in result.reasons[-1]
