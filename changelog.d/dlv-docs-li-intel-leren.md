@@ -1,0 +1,1 @@
+- Intelligence and learning docs describe the learning loop as it is on main: shadow, queue and persist modes with their defaults, the `decide-rule` approval bundle, the persist approval record, the A/B effect window with its `MIN_PER_ARM = 200` floor, signal reattribution, the corpus quarantine and operator steering; stale benchmark, coverage and count claims are removed.
