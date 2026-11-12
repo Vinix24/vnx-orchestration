@@ -118,7 +118,9 @@ class ReviewGateTakeoverConfigError(ValueError):
 # vendor (review_vendor): such a reviewer is passed over like an unavailable one,
 # so a DeepSeek-built head with kimi out reads claude, and a claude-built head
 # with kimi out passes claude over and reads deepseek.
-_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+# 2026-11-11 (Kimi cancelled): kimi_gate leaves the default chain, deepseek_gate holds
+# seat 2 and claude_gate is the end-link, so a deepseek-v4-pro build reads claude_gate.
+_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN = "codex_gate,deepseek_gate,claude_gate"
 
 
 def _parse_review_gate_takeover_chain(raw: str) -> Dict[str, str]:

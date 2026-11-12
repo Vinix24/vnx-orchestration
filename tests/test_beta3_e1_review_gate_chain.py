@@ -59,6 +59,7 @@ for _p in (str(SCRIPTS_DIR), str(LIB_DIR)):
         sys.path.insert(0, _p)
 
 import config_registry as cr  # noqa: E402
+from review_stack_support import pin_kimi_era_review_config
 
 # OI-1569 tak 1+2: _classify_review_seat_failure now recency-gates a
 # lane_exhausted classification (gate_request_handler._lane_exhausted_or_expired,
@@ -118,6 +119,7 @@ def manager_env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PIDS_DIR", str(data_dir / "pids"))
     monkeypatch.setenv("VNX_LOCKS_DIR", str(data_dir / "locks"))
     monkeypatch.setenv("VNX_DB_DIR", str(data_dir / "database"))
+    pin_kimi_era_review_config(monkeypatch)
     return {
         "project_root": project_root,
         "data_dir": data_dir,
@@ -807,25 +809,10 @@ def test_registry_default_matches_module_constant():
     assert cr.CONFIG_REGISTRY["VNX_REVIEW_GATE_TAKEOVER_CHAIN"].default == _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
 
 
-def test_codex_gate_added_with_kimi_gate_as_first_fallback():
+def test_codex_gate_added_with_deepseek_gate_as_first_fallback():
     from gate_request_handler import _parse_review_gate_takeover_chain, _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
     chain = _parse_review_gate_takeover_chain(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
-    assert chain["codex_gate"] == "kimi_gate", (
-        "codex_gate must be the entry point; kimi_gate is the first fallback"
-    )
-    assert chain["kimi_gate"] == "claude_gate", (
-        "R7 (operator decision 2026-10-22): claude_gate, a subscription seat, follows kimi_gate"
-    )
-    assert chain["claude_gate"] == "deepseek_gate", (
-        "OI-1984 (operator decision 2026-10-04): deepseek_gate is the API-credit fallback, "
-        "behind every subscription seat"
-    )
-    assert "deepseek_gate" not in chain, (
-        "R4 (operator decision 2026-10-17): deepseek_gate is the last link of the default chain"
-    )
-    assert "glm_gate" not in chain and "glm_gate" not in chain.values(), (
-        "R4 (operator decision 2026-10-17): glm_gate is not in the default chain"
-    )
+    assert chain == {"codex_gate": "deepseek_gate", "deepseek_gate": "claude_gate"}, "Kimi is cancelled (2026-11-11)"
 
 
 def test_an_explicit_chain_that_names_glm_gate_still_reaches_it():

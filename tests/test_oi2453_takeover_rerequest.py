@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 import review_stack_support  # puts scripts/ and scripts/lib on sys.path
-from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
+from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry, pin_kimi_era_review_config
 
 CLEAN_REPORT = "## Findings\n\nBlocking count: 0\nAdvisory count: 0\n"
 _FRESH_RECORDED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -65,6 +65,7 @@ def env(tmp_path, monkeypatch):
     store["ledger"] = store["state_dir"] / "review_gates" / "rounds.ndjson"
     store["headless"] = store["reports_dir"] / "headless"
     store["headless"].mkdir(parents=True, exist_ok=True)
+    pin_kimi_era_review_config(monkeypatch)
     return store
 
 

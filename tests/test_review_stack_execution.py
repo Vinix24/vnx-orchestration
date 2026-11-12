@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 import review_stack_support  # noqa: F401  (puts scripts/ and scripts/lib on sys.path)
-from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
+from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry, pin_kimi_era_review_config
 
 import gate_recorder
 from gate_recorder import GATE_PROVIDERS
@@ -106,7 +106,9 @@ def _clean_config_registry(monkeypatch):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    return build_project_store(tmp_path, monkeypatch)
+    store = build_project_store(tmp_path, monkeypatch)
+    pin_kimi_era_review_config(monkeypatch)
+    return store
 
 
 @pytest.fixture(autouse=True)

@@ -1,17 +1,14 @@
-"""Review stack: subscription reviewers first (codex, kimi), API credit only as fallback.
+"""Review stack: seat 1 is a subscription reviewer; seat 2 and the takeover chain may be metered.
 
-Operator decision 2026-09-26: a review gate ALWAYS chooses codex or kimi first,
-because both run on a subscription (codex CLI, kimi CLI OAuth). glm (OpenRouter
-credit) and deepseek (API credit) read a seat only when a subscription reviewer
-is out. Every seat gets its own reviewer (OI-2058, R5a): with codex alone out,
-kimi reads codex's seat and deepseek reads kimi's; with both out, deepseek and
-glm read them.
+Operator decision 2026-11-11: the Kimi subscription is cancelled. Seat 2 is deepseek_gate on
+deepseek-v4-pro (API credit), the default chain codex_gate,deepseek_gate,claude_gate; no default
+names kimi_gate, which stays registered for an explicit stack or chain. Seat 1 stays codex.
 
 Two things are pinned here, each against the real code. Nothing starts a kimi,
 codex, glm or deepseek process.
 
-1. Guard: no API-credit gate stands before a subscription gate in the registry
-   default stack or in the takeover chain. Classification comes from ONE place,
+1. Guard: seat 1 of every default stack is a subscription gate and no default
+   names kimi_gate. Classification comes from ONE place,
    ``gate_billing_table.GATE_BILLING`` (imported by ``gate_recorder``, which is
    where this file reads it).
 2. The obligation the door declares follows the same order (``_primary_review_gate``).
@@ -112,37 +109,25 @@ class TestOrderPredicate:
             metered_before_subscription(["codex_gate", "some_future_gate"])
 
 
+def _defaults():
+    import gate_profile
+    import governance_profiles
+    from gate_request_handler import _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN as handler_chain
+    rows, reg = gate_profile.PROFILE_TABLE.values(), cr.CONFIG_REGISTRY
+    stacks = [reg["VNX_DEFAULT_REVIEW_STACK"].default] + [row["review_stack"] for row in rows]
+    others = [reg["VNX_REVIEW_GATE_TAKEOVER_CHAIN"].default, handler_chain] + [row["takeover_chain"] for row in rows]
+    return [_split(v) for v in stacks], [_split(v) for v in others] + [
+        p.required_gates for p in governance_profiles.DEFAULT_PROFILES.values()]
+
+
 class TestRegistryDefaultsKeepTheOrder:
-    def test_default_review_stack_has_no_api_credit_gate_before_a_subscription_gate(self):
-        stack = _split(cr.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default)
-        violation = metered_before_subscription(stack)
-        assert violation is None, (
-            f"VNX_DEFAULT_REVIEW_STACK={stack} puts API-credit gate {violation[0]} before "
-            f"subscription gate {violation[1]}: codex and kimi read first, glm and deepseek "
-            "only as a fallback (operator decision 2026-09-26)"
-        )
+    def test_seat_1_of_every_default_stack_is_a_subscription_gate(self):
+        for stack in _defaults()[0]:
+            assert gate_billing(stack[0]) == GATE_BILLING_SUBSCRIPTION, f"{stack}: seat 1 (2026-11-11)"
 
-    def test_default_review_stack_is_codex_then_kimi(self):
-        assert _split(cr.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default) == ["codex_gate", "kimi_gate"]
-
-    def test_default_review_stack_has_no_standing_api_credit_seat(self):
-        stack = _split(cr.CONFIG_REGISTRY["VNX_DEFAULT_REVIEW_STACK"].default)
-        assert [g for g in stack if gate_billing(g) == GATE_BILLING_METERED] == [], (
-            "an API-credit gate is a takeover fallback, never a standing seat on every PR"
-        )
-
-    def test_takeover_chain_has_no_api_credit_gate_before_a_subscription_gate(self):
-        from gate_request_handler import _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
-        for source, value in (
-            ("registry", cr.CONFIG_REGISTRY["VNX_REVIEW_GATE_TAKEOVER_CHAIN"].default),
-            ("gate_request_handler", _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN),
-        ):
-            chain = _split(value)
-            violation = metered_before_subscription(chain)
-            assert violation is None, (
-                f"{source} takeover chain {chain} puts API-credit gate {violation[0]} before "
-                f"subscription gate {violation[1]}"
-            )
+    def test_no_default_stack_chain_or_profile_names_kimi_gate(self):
+        stacks, others = _defaults()
+        assert [g for g in stacks + others if "kimi_gate" in g] == [], "Kimi is cancelled (2026-11-11)"
 
     def test_takeover_chain_starts_with_the_subscription_seats_of_the_default_stack(self):
         from gate_request_handler import _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
@@ -153,27 +138,17 @@ class TestRegistryDefaultsKeepTheOrder:
         # claude_gate, and it reads before every API-credit gate.
         assert [g for g in chain[len(stack):] if gate_billing(g) == GATE_BILLING_SUBSCRIPTION] == ["claude_gate"]
 
-    def test_claude_gate_is_a_subscription_seat_right_after_kimi(self):
+    def test_claude_gate_is_the_subscription_end_link_after_deepseek(self):
         from gate_request_handler import _DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN
         chain = _split(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
-        assert chain == ["codex_gate", "kimi_gate", "claude_gate", "deepseek_gate"]
+        assert chain == ["codex_gate", "deepseek_gate", "claude_gate"]
         assert gate_billing("claude_gate") == GATE_BILLING_SUBSCRIPTION
-        billing = [gate_billing(g) for g in chain]
-        assert billing == sorted(billing, key=lambda b: b != GATE_BILLING_SUBSCRIPTION), (
-            f"every subscription gate reads before every API-credit gate: {list(zip(chain, billing))}"
-        )
 
-    def test_the_resolved_default_stack_is_the_registry_default(self, env):
+    def test_an_empty_project_config_resolves_the_new_stack_and_chain(self, env):
         import review_gate_manager
-        assert review_gate_manager._build_default_review_stack()[:2] == ["codex_gate", "kimi_gate"]
-
-    def test_the_guard_would_fail_on_the_previous_default(self):
-        """RED-on-main proof for the guard itself: the default this dispatch replaced
-        (``codex_gate,glm_gate``) is fine by order, but the chain with glm ahead of
-        kimi is exactly what the predicate must reject."""
-        assert metered_before_subscription(_split("codex_gate,glm_gate,kimi_gate,deepseek_gate")) == (
-            "glm_gate", "kimi_gate",
-        )
+        from gate_request_handler import review_gate_takeover_chain_raw
+        assert review_gate_manager._build_default_review_stack()[:2] == ["codex_gate", "deepseek_gate"]
+        assert review_gate_takeover_chain_raw() == ("codex_gate,deepseek_gate,claude_gate", "default")
 
 
 # ---------------------------------------------------------------------------

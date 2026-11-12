@@ -283,10 +283,10 @@ class TestControls:
 
 class TestDeepseekGateDefault:
 
-    def test_the_default_model_is_flash_41(self):
-        """OI-1939."""
+    def test_the_default_model_is_v4_pro(self):
+        """Seat 2 since 2026-11-11; deepseek-flash before (OI-1939)."""
         assert gate_lane_contract.MODEL_DEFAULTS["deepseek_gate"] == (
-            "VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash",
+            "VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro",
         )
 
     def test_the_build_lane_default_is_untouched(self):

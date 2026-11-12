@@ -512,6 +512,6 @@ def test_model_defaults_exist_in_wave7_registry():
     )
 
 
-def test_deepseek_gate_default_is_flash_41():
-    """OI-1939 (operator decision 2026-09-30): Flash 4.1 under its existing name."""
-    assert gate_lane_contract.MODEL_DEFAULTS["deepseek_gate"] == ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
+def test_deepseek_gate_default_is_v4_pro():
+    """Seat 2 since 2026-11-11 (Kimi cancelled); Flash 4.1 before that (OI-1939)."""
+    assert gate_lane_contract.MODEL_DEFAULTS["deepseek_gate"] == ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro")

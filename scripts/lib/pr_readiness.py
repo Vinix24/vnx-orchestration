@@ -100,16 +100,16 @@ GATE_COST: Dict[str, GateCost] = {
     Gate.DEEPSEEK_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py execute --gate deepseek_gate --pr {pr}",
         lane="deepseek-harness → DeepSeek API",
-        usd="API credit, 0.30 in / 1.20 out per Mtok",
+        usd="API credit, 1.32 in / 3.96 out per Mtok",
         note="governed lane entry (OI-1984); request --review-stack deepseek_gate first; "
-             "deepseek-flash (V4.1-Flash) peak tariff per wave7_models.yaml; takes over after kimi, before glm",
+             "deepseek-v4-pro peak tariff per wave7_models.yaml; seat 2 of the default stack since 2026-11-11",
     ),
     Gate.CLAUDE_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py execute --gate claude_gate --pr {pr}",
         lane="claude CLI headless (claude_gate_lane), operator's subscription",
         usd="subscription",
         note="R7 (2026-10-22); request --review-stack claude_gate first; sonnet, no ANTHROPIC_BASE_URL "
-             "and no ANTHROPIC_API_KEY in its env; takes over after kimi, before deepseek",
+             "and no ANTHROPIC_API_KEY in its env; last link of the default chain, after deepseek",
     ),
     Gate.KIMI_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py execute --gate kimi_gate --pr {pr}",
@@ -123,7 +123,7 @@ GATE_COST: Dict[str, GateCost] = {
         lane="codex CLI",
         usd="subscription",
         note="rate-limited; operator policy A1 is to wait for the reset rather than fall back to an "
-             "API-credit gate. kimi_gate, also a subscription, is the seat that takes over",
+             "API-credit gate. deepseek_gate is the seat that takes over",
     ),
     Gate.CI_GATE.value: GateCost(
         command="python3 scripts/review_gate_manager.py request-and-execute --gate ci_gate --pr {pr}",

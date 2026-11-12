@@ -115,17 +115,16 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,kimi_gate", "gate",
-        "Comma-separated default review-gate stack. Operator decision 2026-09-26: a review "
-        "gate always chooses a SUBSCRIPTION reviewer first (codex_gate on the codex CLI, "
-        "kimi_gate on the kimi CLI OAuth). glm_gate (OpenRouter credit) and deepseek_gate "
-        "(API credit) are not standing seats: they read a seat only when a subscription "
-        "reviewer is out, through VNX_REVIEW_GATE_TAKEOVER_CHAIN. Since OI-2058 (R5a) every "
-        "seat gets its own reviewer: when kimi_gate takes codex_gate's seat, kimi_gate's own "
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
+        "Comma-separated default review-gate stack. Operator decision 2026-11-11: the Kimi "
+        "subscription is cancelled, so seat 2 is deepseek_gate (API credit, deepseek-v4-pro); "
+        "seat 1 stays a SUBSCRIPTION reviewer (codex_gate on the codex CLI). kimi_gate stays "
+        "registered and an explicit stack may still name it. Since OI-2058 (R5a) every "
+        "seat gets its own reviewer: when deepseek_gate takes codex_gate's seat, its own "
         "seat walks on to the next distinct gate in the chain. Since R5b the merge door "
-        "requires every seat of this stack, each filled by a distinct reviewer. Do not "
-        "put an API-credit gate before a subscription gate here or in the chain "
-        "(gate_billing_table.GATE_BILLING classifies every gate; a guard test pins both). "
+        "requires every seat of this stack, each filled by a distinct reviewer. Seat 1 is a "
+        "subscription gate (gate_billing_table.GATE_BILLING classifies every gate; a guard "
+        "test pins it); seat 2 and the takeover chain may be metered. "
         "History: the default was gemini_review,codex_gate,claude_github_optional until "
         "20260914, when gemini_review (binary never on PATH) and claude_github_optional "
         "(never configured) were dropped and glm_gate was added as a second standing seat "
@@ -141,16 +140,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,claude_gate,deepseek_gate", "gate",
+        "codex_gate,deepseek_gate,claude_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
-        "changed 2026-10-04, OI-1984, and 2026-10-22, R7). On lane_exhausted a seat rolls "
-        "over to the NEXT gate named here. The order is subscription reviewers first "
-        "(codex_gate, kimi_gate, claude_gate on the operator's claude subscription), then "
-        "deepseek_gate (API credit), the last link of the default chain. glm_gate left "
-        "the default chain on 2026-10-17 (operator decision); it stays registered and can "
-        "still be named explicitly here, always behind every subscription gate. The "
-        "API-credit gates are a fallback only, never a project default reviewer; a guard "
-        "test fails when an API-credit gate is placed before a subscription gate. A seat "
+        "changed 2026-10-04, OI-1984, 2026-10-22, R7, and 2026-11-11). On lane_exhausted a "
+        "seat rolls over to the NEXT gate named here. Since 2026-11-11 (Kimi cancelled) the "
+        "default is codex_gate, deepseek_gate (deepseek-v4-pro), then claude_gate as the last "
+        "link: claude_gate failed its calibration run on sonnet and on opus, so it reads "
+        "only when deepseek is out or passed over. kimi_gate and glm_gate left the default "
+        "chain; both stay registered and can still be named explicitly here. A seat "
         "never gets a reviewer of the builder's vendor (R7): such a reviewer is passed over "
         "like an unavailable one (review_vendor). Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
