@@ -1,0 +1,1 @@
+- Operator steering (ADR-072, OB-3): seven tests for `scripts/lib/operator_steering_match.py` that left #2719 for the size cap are back in `tests/test_operator_steering_match.py` (dlv-d8e782277aef-b).
