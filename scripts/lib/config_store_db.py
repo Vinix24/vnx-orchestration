@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 import config_registry
+import review_scope
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS project_config (
@@ -130,9 +131,23 @@ def _emit_config_event_best_effort(
             pass
 
 
+def _state_dir_of(conn: sqlite3.Connection) -> Path:
+    """The directory of the database ``conn`` is open on (the state dir of a project store)."""
+    path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
+    if not path:
+        raise PermissionError("the connection is not on a database file: the shadow measurement cannot be read")
+    return Path(path).parent
+
+
+def _project_root() -> Path:
+    from project_root import resolve_project_root
+
+    return resolve_project_root(__file__)
+
+
 def set_config(
     conn: sqlite3.Connection, project_id: str, key: str, value: Any, *,
-    actor: str, approval_id: Optional[str] = None,
+    actor: str, approval_id: Optional[str] = None, planted_manifest: Optional[Path] = None,
 ) -> dict:
     """Persist an operator config change, atomically writing the value + a mandatory audit row.
 
@@ -150,6 +165,8 @@ def set_config(
         raise PermissionError(f"{key} requires an approval_id")
 
     coerced = _coerce(entry.type, value)
+    if key == review_scope.SCOPE_KEY and coerced == review_scope.DELTA:
+        review_scope.require_activation(_state_dir_of(conn), planted_manifest, _project_root())
     ensure_config_tables(conn)  # DDL, idempotent — commits any pending txn, so BEGIN below is clean
     event_id = str(uuid.uuid4())
 
