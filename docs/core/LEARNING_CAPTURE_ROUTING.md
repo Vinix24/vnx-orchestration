@@ -50,6 +50,10 @@ De nachtelijke beacon draait de audit na de leerlus, ook als de lus faalde. Faal
 
 De audit leest alleen via `state/capture_sources.json`, geschreven door `python3 scripts/capture_audit.py bind`. Het bevat het `project_id`, de geheugenmap (onder `~/.claude/projects/`), de bucketmap en de bucketslug. Zonder dat bestand, of bij een afwijkend `project_id`, is de bak `unbound` en is `open_pairs` `null`. Entries van een andere slug worden geteld en niet gelezen.
 
+## De leerlus als bron
+
+De lus schrijft voorstellen en nooit records. Standaard is hij een schaduwrun. `VNX_LEARNING_LOOP_QUEUE=1` (uit) zet voorstellen in `pending_rules.json`. `VNX_LEARNING_LOOP_PERSIST=1` (uit) laat hem patronen schrijven, elk onder een operatorbesluit en een goedkeuringsrecord. `vnx learning decide-rule` legt het besluit vast als één bundel. Goedkeuren via `ingest_approved_rules` zet een preventieregel in dispatches, en daarom gaat een les nooit rechtstreeks naar deze bak. Modi, vlaggen en de poort: [SELF_LEARNING_LOOP.md](../intelligence/SELF_LEARNING_LOOP.md).
+
 ## Waarom
 
 - **Open item**: alleen daar staat een status die sluit, en een les zonder status leest als actueel terwijl het probleem dicht kan zijn.
