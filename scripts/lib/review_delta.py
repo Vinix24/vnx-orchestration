@@ -106,8 +106,8 @@ def full_review_reason(record: DeltaInput) -> Optional[str]:
 
 
 def disarm(text: Any) -> str:
-    """Input embedded in the prompt as one line with no triple backtick, so it cannot close or open an answer fence (OI-2203)."""
-    return " ".join(str(text).split()).replace("```", "`` `")
+    """Input embedded in the prompt as one line with no two adjacent backticks, whatever the run length, so it cannot close or open an answer fence (OI-2203)."""
+    return re.sub(r"`(?=`)", "` ", " ".join(str(text).split()))
 
 
 def _interdiff_block(diff: Interdiff) -> List[str]:
