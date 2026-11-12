@@ -1,1 +1,0 @@
-- Gate profile P6 round 2: `stamp_request_identity` copies `profile`, `profile_source` and `profile_error` from the request (top level, else its `review_seats` record) onto the result, so the `review_gate_result` receipt names the profile on the production path; a request from before P6 leaves the keys absent.

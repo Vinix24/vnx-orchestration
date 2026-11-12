@@ -1,1 +1,0 @@
-- The README, the architecture overview and the intelligence system doc now describe the learning loop, the effect measurement, the corpus quarantine and auto-dream as they stand on main, and say that no injection effect has been measured.

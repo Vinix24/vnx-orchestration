@@ -1,1 +1,0 @@
-- `select_intelligence` and `build_intelligence_context` stamp `ab_window` on the row and record the arm decision (ledger line, event, then row) through the same helper as the live path; a failed record writes no row and never fails the dispatch. A deduplicated ledger line is compared on arm, window and project before it counts as recorded (OI-2721).

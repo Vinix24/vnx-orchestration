@@ -1,1 +1,0 @@
-- Dream liveness (ADR-066, PR-2 split 2): the night window and progress over the last seven closed nights (5 of 7 with output, failures and timeouts inside a window are blocked).

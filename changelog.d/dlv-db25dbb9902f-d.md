@@ -1,1 +1,0 @@
-- `qi_transfer_apply.py undo` journals one fsynced `undo_started` line for a move before it changes either database, and from that line on `apply` and `resume` never advance the move again, so a crash between undo's destination COMMIT and its outcome line no longer lets `resume` copy the move back and remove the restored source row (reattr L3b-d).

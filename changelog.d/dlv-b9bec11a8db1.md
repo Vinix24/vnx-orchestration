@@ -1,1 +1,0 @@
-- `vnx doctor` carries the three dream checks `dream:liveness`, `dream:job` and `dream:reviews`, projections of one `assess()` call per run (ADR-066): PASS only on measured, clean evidence; an unimportable `dream_liveness` module reports all three as `unmeasured` (dream PR-6).
