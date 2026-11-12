@@ -13,6 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import operator_steering as steering_cli
 import operator_steering_cases as ledger_lib
 import operator_steering_report as report_lib
 import operator_steering_source as source
@@ -47,11 +48,11 @@ def _stageable(state_dir: Path, report: dict, now: datetime) -> List[str]:
 
 def _stage_all(state_dir: Path, projects_root: Path, report: dict, now: datetime) -> None:
     for cid in _stageable(state_dir, report, now):
-        if ledger_lib.week_used(ledger_lib.read_ledger(state_dir, report["project_id"]), ledger_lib.iso_week(now)) >= ledger_lib.WEEKLY_CAP:
-            return  # the ledger enforces the cap too; asking for a sixth only to be refused books nothing
         try:
             ledger_lib.stage_case(state_dir, report, cid, now, lambda case, entry, dispatch_id, snapshot: rca.publish_bundle(
                 state_dir, projects_root, report, case, entry, dispatch_id, snapshot))
+        except ledger_lib.WeeklyCapReached:
+            return  # the ledger decides the cap per case (a staged case without a bundle is still resumed, within its slot)
         except ledger_lib.StageRefused:
             continue  # an open RCA with a published spec, or a case twice in the window: not staged now, the others go on
 
@@ -64,7 +65,7 @@ def run_steering_step(state_dir: Path, now: Optional[datetime] = None, projects_
     try:
         report = report_lib.build_report(state_dir, root, stamp - timedelta(days=WINDOW_DAYS), stamp, now=stamp)
         report_lib.write_report(state_dir, report)
-        if report["bronstaat"]["transcripts"]["state"] == "ok" and report["project_id"]:
+        if report["project_id"] and not steering_cli._source_problem(report):  # the manual stage's rule: every source ok
             _stage_all(state_dir, root, report, stamp)
         return report
     except Exception as exc:  # the step must never fail dream: the failure is written as status error, below

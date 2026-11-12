@@ -33,6 +33,10 @@ class StageRefused(Exception):
     """This case is not staged now; the message names why. Nothing was staged."""
 
 
+class WeeklyCapReached(StageRefused):
+    """The week already holds WEEKLY_CAP ``rca_staged`` events; no further case can be staged this week."""
+
+
 @dataclass
 class LedgerCase:
     case_id: str
@@ -182,7 +186,7 @@ def stage_case(state_dir: Path, report: dict, wanted: str, now: datetime,
             return case, case.open_dispatch
         used = week_used(ledger, week)
         if used >= WEEKLY_CAP:
-            raise StageRefused(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
+            raise WeeklyCapReached(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
         dispatch_id = f"steering-rca-{case.case_id[:12]}-{week.lower().replace('-', '')}-{len(case.staged) + 1}"
         snapshot = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
         staged = event("rca_staged", case.case_id, project_id, now, dispatch_id=dispatch_id, snapshot_sha256=snapshot, iso_week=week)

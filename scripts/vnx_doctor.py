@@ -849,9 +849,12 @@ def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
 
 def check_steering_report(paths: Dict[str, str]) -> List[CheckResult]:
     """The steering report's own consumer (ADR-072 decision 17): stale, absent or `status: "error"` is a WARN, never a FAIL."""
-    import operator_steering_dream
+    try:
+        import operator_steering_dream
 
-    fresh, message = operator_steering_dream.assess_report(Path(paths["VNX_DATA_DIR"]) / "state")
+        fresh, message = operator_steering_dream.assess_report(Path(paths["VNX_DATA_DIR"]) / "state")
+    except Exception as exc:  # fail-closed: an unmeasurable report is a WARN, never a PASS and never a crash
+        return [CheckResult("steering", WARN, f"unmeasured: {exc}", "The steering step could not be loaded")]
     return [CheckResult("steering", PASS if fresh else WARN, message, "" if fresh else "The nightly `vnx dream run` writes state/steering_report.json")]
 
 

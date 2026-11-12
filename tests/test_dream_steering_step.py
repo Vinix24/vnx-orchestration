@@ -186,3 +186,39 @@ def test_both_doctors_warn_and_never_fail(tmp_path, monkeypatch, status, hours, 
     legacy = vnx_doctor.check_steering_report({"VNX_DATA_DIR": str(data_root)})[0]
     cli = cli_doctor._check_steering(data_root)
     assert legacy.status.upper() == cli.status.upper() == expected and legacy.status.upper() != "FAIL" and cli.name == "steering:report"
+
+
+def test_a_staged_case_without_a_published_bundle_is_resumed_with_the_week_full(tmp_path, monkeypatch):
+    _, state, projects = _env(tmp_path, monkeypatch, TEXTS)
+    _run(state, projects)
+    first = _staged(state)
+    assert len(first) == 5
+    import shutil
+    shutil.rmtree(state.parent / "dispatches" / "pending" / first[0])  # a crash after the rca_staged event, before the bundle
+    _run(state, projects, now=NOW + timedelta(hours=3))
+    assert _staged(state) == first and sum(len(c.staged) for c in cl.read_ledger(state, PID).values()) == 5  # same ids, no new slot
+
+
+def test_absent_memory_with_ok_transcripts_stages_nothing_like_the_manual_stage(tmp_path, monkeypatch):
+    _, state, projects = _env(tmp_path, monkeypatch, TEXTS[:2])
+    import shutil
+    shutil.rmtree(projects / SLUG / "memory")
+    report = _run(state, projects)
+    assert report["bronstaat"]["transcripts"]["state"] == "ok" and report["bronstaat"]["memory"]["state"] != "ok"
+    assert _staged(state) == [] and _report(state)["schema"] == "steering_report/1"
+
+
+def test_a_broken_dream_import_is_a_warn_in_the_legacy_doctor(tmp_path, monkeypatch):
+    import vnx_doctor
+    monkeypatch.setitem(sys.modules, "operator_steering_dream", None)  # import raises ImportError
+    result = vnx_doctor.check_steering_report({"VNX_DATA_DIR": str(tmp_path)})[0]
+    assert result.status.upper() == "WARN" and "unmeasured" in result.message
+
+
+def test_the_cap_refusal_stops_the_loop_after_the_fifth(tmp_path, monkeypatch):
+    _, state, projects = _env(tmp_path, monkeypatch, TEXTS)
+    calls = []
+    real = cl.stage_case
+    monkeypatch.setattr(cl, "stage_case", lambda *a, **k: calls.append(a[2]) or real(*a, **k))
+    _run(state, projects)
+    assert len(_staged(state)) == 5 and len(calls) == 6  # the sixth ask is refused by the ledger and ends the loop
