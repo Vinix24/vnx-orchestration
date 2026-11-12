@@ -1,1 +1,0 @@
-- Daily metrics (doorloop PR-2): the day calendar decides which UTC days the job may write — a day settles two hours after its end, catch-up covers the last 14 settled days oldest first, and a collection later than 30 hours after the day's end is marked backfilled.

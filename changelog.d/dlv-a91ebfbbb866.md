@@ -1,1 +1,0 @@
-- Dream liveness (ADR-066, PR-2 split 1): `scripts/lib/dream_liveness.py` reads the dream event stream and the installed plist into the `dream_liveness/1` document. `state` is `deviation` on a finding with severity `error`, `unmeasured` when a source is missing, else `ok`; an unexplained skip reason, an unknown event type and 26 hours without an attempt are errors, never a pass.

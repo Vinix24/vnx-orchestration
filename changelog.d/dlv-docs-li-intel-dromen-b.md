@@ -1,1 +1,0 @@
-- Docs: `docs/intelligence/COST_TRACKING_GUIDE.md` rewritten around the cost ledger (ADR-043, `vnx costs`) with the receipt-based `cost-report` as the narrower reader; invented sample outputs and the unbuilt session manager removed. Docs only.

@@ -1,1 +1,0 @@
-- Eight dream-provider tests return to `tests/test_dream_consolidation_provider.py`: the shared JSON parser, the client-project exception, no-JSON failure, deepseek and kimi timeout reasons, the provider on every event, the registry default and the blocked unknown-provider skip (dlv-kimi-afbouw-dream-b).

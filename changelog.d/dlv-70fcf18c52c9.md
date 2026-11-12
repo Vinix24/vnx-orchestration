@@ -1,1 +1,0 @@
-- ADR-072 (`docs/governance/decisions/ADR-072-operator-bijsturing-leert.md`) records decisions 1 to 18 of track `operator-bijsturing-leert`: a bound steering source, a closed class table, a proposal queue with its own identity, a root-cause analysis that keeps no prompt text, and the rule that learning stays proposing (OB-0).

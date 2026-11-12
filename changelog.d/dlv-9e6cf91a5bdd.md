@@ -1,1 +1,0 @@
-- The dead `script_runner` gate-provider kind is removed from `gate_recorder`, `gate_runner` and `gate_result_parser`; the registry keeps its three kinds (review-lane P5).

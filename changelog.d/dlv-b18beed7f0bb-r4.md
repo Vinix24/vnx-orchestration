@@ -1,1 +1,0 @@
-- `probe_agent_layout.sh` reads a successful Write (no `is_error` on claude 2.1.319) and an ancestor `CLAUDE.md` under a `$TMPDIR` that ends in `/` correctly, never gives `ja` after a failed call, names the real reason a Write gave no proof, and records the failure class of cell C; the measurement document carries the T0 run of 08-11-2026.

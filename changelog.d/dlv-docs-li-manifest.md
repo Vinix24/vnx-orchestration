@@ -1,1 +1,0 @@
-- docs: the manifesto pages (`ARCHITECTURE.md`, the diagram, `ARCHITECTURAL_DECISIONS.md` with an index of all 70 ADRs, `LIMITATIONS.md`, `ROADMAP.md`, `README.md`) now match `origin/main`.

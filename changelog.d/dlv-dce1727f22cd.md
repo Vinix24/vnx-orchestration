@@ -1,1 +1,0 @@
-- The plan-gate seat count comes from the gate profile (`heavy` seats two from the start, the path floor stays); `gov_trace` names `profile=<name> (<source>)` and a malformed profile refuses the run (gate-profiel P4).

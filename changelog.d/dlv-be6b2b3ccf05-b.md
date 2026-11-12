@@ -1,1 +1,0 @@
-- Herwerk H3-b: `scripts/backfill_rework_edges.py` fills the declared `round`, `oi_fix` and `pr_fix` edges from the spec bundles and receipts of one project into `rework_edges` through `record_edge`; `--dry-run` is the default, `--apply` writes, a second run adds nothing. No other table is touched.

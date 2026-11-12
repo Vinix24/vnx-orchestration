@@ -1,1 +1,0 @@
-- Gate profile P6 (gateprof): the effective gate profile and its source (`profile`, `profile_source`, `profile_error`, `required_error`, `stack_source`) travel in the seat record, the request record, the `review_gate_result` receipt and the `plan_gate_pass` evidence; a refused value never reads as `standard`.
