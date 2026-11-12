@@ -173,7 +173,7 @@ def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> Froz
     paths = set(own_diff_paths)
     try:
         graph = build_import_graph(repo, head)
-        listing = _run_git(repo, ["ls-tree", "-r", "--name-only", head]).split()
+        listing = _run_git(repo, ["ls-tree", "-r", "--name-only", "-z", head]).split("\0")
     except ReanchorError as exc:
         raise ChangeKindError(str(exc)) from exc
     if graph.unresolved:
@@ -228,7 +228,7 @@ def classify_change(repo: Path, base_ref: str, parent_head: str, head: str,
         cmp = compare(repo, base_ref, parent_head, head, run)
     except ChangeKindError:
         return ChangeKindRecord(REWORK, parent_pid, head_pid, {}, rule, REASON_CANNOT_PROVE)
-    security = {p: k for p in sorted(cmp.changed_paths) if (k := security_path_kind(p)) is not None}
+    security = {p: k for p in sorted(cmp.changed_paths | cmp.base_move_paths) if (k := security_path_kind(p)) is not None}
     kind, reason = decide(cmp.merge_base_equal, cmp.tree == cmp.head_tree, cmp.replay_clean,
                           cmp.base_move_paths, seat_input_set, security)
     return ChangeKindRecord(kind, parent_pid, head_pid, security, rule, reason)

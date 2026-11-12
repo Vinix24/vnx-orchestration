@@ -231,7 +231,7 @@ def changed_symbols(project_root: Path, old_base: str, new_base: str) -> Set[Sym
     out: Set[Symbol] = set()
     revs = _git(project_root, "rev-list", f"{old_base}..{new_base}").split()
     for commit in revs:
-        names = _git(project_root, "diff", "--name-only", f"{commit}^..{commit}").split()
+        names = _git(project_root, "diff", "--name-only", "-z", f"{commit}^..{commit}").split("\0")
         for path in names:
             if not path.endswith(".py") or path.startswith("tests/"):
                 continue
@@ -277,7 +277,7 @@ def _module_source(project_root: Path, ref: str, module: str, tree_files: Dict[s
 def _tree_modules(project_root: Path, ref: str) -> Dict[str, str]:
     """module_stem -> path, for the non-test Python files in the tree at ``ref``."""
     out: Dict[str, str] = {}
-    for path in _git(project_root, "ls-tree", "-r", "--name-only", ref).split():
+    for path in _git(project_root, "ls-tree", "-r", "--name-only", "-z", ref).split("\0"):
         if path.endswith(".py") and not path.startswith("tests/"):
             out.setdefault(Path(path).stem, path)
     return out
@@ -436,7 +436,7 @@ def build_import_graph(project_root: Path, ref: str) -> ImportGraph:
     walking the closure has to know the difference.
     """
     paths = [
-        p for p in _git(project_root, "ls-tree", "-r", "--name-only", ref).split()
+        p for p in _git(project_root, "ls-tree", "-r", "--name-only", "-z", ref).split("\0")
         if p.endswith(".py") and not p.startswith("tests/")
     ]
     known = {Path(p).stem for p in paths}
