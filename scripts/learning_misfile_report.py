@@ -3,7 +3,8 @@
 
 Measures, never writes: every database is opened ``mode=ro`` (ADR-068).
 
-``report``: per database the L2 category counts and the L3a ``schema_gap`` count.
+``report``: per database the L2 category counts, the L3a ``schema_gap`` and ``collision`` counts
+(a collision is no longer a move) and the rows of tables without ``project_id`` (``no_project_column``).
 An unreadable database is named under ``errors`` and the exit code is 1.
 
 ``verify --plan PLAN.json``: exit 0 only when every planned row stands once in the
@@ -59,8 +60,13 @@ def report_database(db: Path, index: Any) -> Dict[str, int]:
     finally:
         conn.close()
     planned, _ = plan_database(db, index)
-    out = {key: counts.get(status, 0) for key, status in CATEGORIES.items()}
+    out: Dict[str, Any] = {key: counts.get(status, 0) for key, status in CATEGORIES.items()}
     out["schema_gap"] = len(planned["schema_gap"])
+    # A collision is a row L2 decided as a move that the destination already holds: not a move.
+    out["collision"] = len(planned["collision"])
+    out["moves"] -= out["collision"]
+    out["no_project_column"] = sum(planned["no_project_column"].values())
+    out["no_project_column_tables"] = sorted(planned["no_project_column"])
     return out
 
 

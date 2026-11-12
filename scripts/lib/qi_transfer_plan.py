@@ -8,7 +8,8 @@ besluit 13-17).
 Only L2 ``moves`` rows become moves (13: full row plus junction rows keyed on
 ``pattern_id``); ``content_key`` is sha256 over all columns but ``id`` and
 ``project_id`` (14); a non-NULL value the destination has no column for is
-``schema_gap`` (15); the journal path and states are defined, not written (17).
+``schema_gap`` (15); a row the destination already holds on a UNIQUE index is a ``collision``,
+and a table without ``project_id`` is counted under ``no_project_column`` (68 amendment); the journal path and states are defined, not written (17).
 
 CLI: python3 scripts/lib/qi_transfer_plan.py --db PATH [--all --vnx-data-root DIR] [--out PLAN.json] --json
 """
@@ -125,11 +126,24 @@ def _entry(d: ReattributionDecision) -> Dict[str, Any]:
     }
 
 
+def no_project_column_tables(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Row count per existing pattern table that has no ``project_id`` column (an older schema).
+
+    Such a row has no project to be misfiled under, so it is never a move."""
+    found: Dict[str, int] = {}
+    for table in TABLES:
+        cols = _columns(conn, table)
+        if cols is not None and "project_id" not in cols:
+            found[table] = int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+    return found
+
+
 def _scan_rows(conn: sqlite3.Connection, db_path: Path, index: AttributionIndex) -> List[ReattributionDecision]:
     """L2's decision for every row of one database, read on the caller's snapshot."""
     decisions: List[ReattributionDecision] = []
+    skipped = no_project_column_tables(conn)
     for table in TABLES:
-        if _columns(conn, table) is None:
+        if _columns(conn, table) is None or table in skipped:
             continue
         for r in conn.execute(f"SELECT id, title, project_id, source_dispatch_ids FROM {table} ORDER BY id"):
             decisions.append(decide_row(
@@ -143,6 +157,36 @@ def _user_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
+class UnevaluableIndex(Exception):
+    """A UNIQUE index whose collisions cannot be checked here (partial or expression)."""
+
+
+def unique_collision(dest: sqlite3.Connection, table: str, row: Dict[str, Any], dest_project: str) -> Optional[Dict[str, Any]]:
+    """The destination row that a copy of ``row`` under ``dest_project`` would collide with, or None.
+
+    Every UNIQUE index of the destination table counts, with ``project_id`` replaced by the
+    destination project. An index holding ``id`` is row identity: the copy gets a fresh id, so
+    it never collides. A NULL in an indexed value never collides (SQLite allows many NULLs).
+    """
+    for idx in dest.execute(f"PRAGMA index_list({table})").fetchall():
+        if not idx["unique"]:
+            continue
+        cols = [r["name"] for r in dest.execute(f"PRAGMA index_info({idx['name']})")]
+        if idx["partial"] or any(c is None for c in cols):  # cannot be evaluated: never a pass
+            raise UnevaluableIndex(f"{table}.{idx['name']}")
+        if "id" in cols:
+            continue
+        values = [dest_project if c == "project_id" else row.get(c) for c in cols]
+        if any(v is None for v in values):
+            continue
+        hit = dest.execute(
+            f"SELECT rowid AS id FROM {table} WHERE " + " AND ".join(f"{c} = ?" for c in cols), values,
+        ).fetchone()
+        if hit is not None:
+            return {"columns": cols, "destination_id": hit["id"]}
+    return None
+
+
 def _plan_move(src: sqlite3.Connection, src_db: Path, src_version: int, d: ReattributionDecision) -> Dict[str, Any]:
     """One decided move: a planned move, a schema_gap or an unplannable entry."""
     pre = read_pre_image(src, d.table, d.row_id)
@@ -153,10 +197,13 @@ def _plan_move(src: sqlite3.Connection, src_db: Path, src_version: int, d: Reatt
         try:
             gaps = schema_gaps(dest, pre)
             dest_version = _user_version(dest)
+            clash = unique_collision(dest, d.table, pre["row"], d.new_project_id)
         finally:
             dest.close()
     except sqlite3.Error as exc:  # an unreadable destination is never a plan
         return {"kind": "unplanned", "reason": f"destination_unreadable: {exc}", **_entry(d)}
+    except UnevaluableIndex as exc:
+        return {"kind": "unplanned", "reason": f"unique_index_unevaluable: {exc}", **_entry(d)}
     base = {
         **_entry(d), "pattern_id": pre["pattern_id"], "source_db": str(src_db),
         "destination_db": d.destination_db, "destination_project_id": d.new_project_id,
@@ -164,27 +211,32 @@ def _plan_move(src: sqlite3.Connection, src_db: Path, src_version: int, d: Reatt
     }
     if gaps:
         return {"kind": "schema_gap", "columns": gaps, **base}
+    if clash is not None:  # the destination already holds it: for the operator, never a move
+        return {"kind": "collision", "index_columns": clash["columns"],
+                "destination_row_id": clash["destination_id"], **base}
     return {
         "kind": "move", **base, "content_key": content_key(pre["row"]),
         "pre_image": {"row": pre["row"], "junction": pre["junction"]},
     }
 
 
-def plan_database(db_path: Path, index: AttributionIndex) -> Tuple[Dict[str, List[Dict[str, Any]]], int]:
-    """Moves, schema gaps, unplannable moves and listed rows for one source database,
-    plus its ``user_version``: all read inside ONE read transaction (one snapshot)."""
-    out: Dict[str, List[Dict[str, Any]]] = {"moves": [], "schema_gap": [], "unplanned": [], "listed": []}
+def plan_database(db_path: Path, index: AttributionIndex) -> Tuple[Dict[str, Any], int]:
+    """Moves, schema gaps, collisions, unplannable moves and listed rows for one source database,
+    plus its ``user_version``: all read inside ONE read transaction (one snapshot).
+    ``no_project_column`` maps each table without a ``project_id`` column to its row count."""
+    out: Dict[str, Any] = {"moves": [], "schema_gap": [], "collision": [], "unplanned": [], "listed": []}
     src = open_readonly(db_path)
     try:
         src.execute("BEGIN")
         version = _user_version(src)  # the first read pins the snapshot
+        out["no_project_column"] = no_project_column_tables(src)
         for d in _scan_rows(src, db_path, index):
             if d.status != STATUS_MOVES:
                 if d.status != "positive_own":
                     out["listed"].append({**_entry(d), "source_db": str(db_path)})
                 continue
             item = _plan_move(src, db_path, version, d)
-            key = {"move": "moves", "schema_gap": "schema_gap"}.get(item["kind"], "unplanned")
+            key = {"move": "moves", "schema_gap": "schema_gap", "collision": "collision"}.get(item["kind"], "unplanned")
             out[key].append(item)
         src.rollback()
     finally:
@@ -194,16 +246,20 @@ def plan_database(db_path: Path, index: AttributionIndex) -> Tuple[Dict[str, Lis
 
 def build_plan(db_paths: List[Path], index: AttributionIndex) -> Dict[str, Any]:
     """The whole plan; ``plan_id`` is the sha256 of its own content, so it is reproducible."""
-    parts: Dict[str, List[Dict[str, Any]]] = {"moves": [], "schema_gap": [], "unplanned": [], "listed": []}
+    parts: Dict[str, List[Dict[str, Any]]] = {"moves": [], "schema_gap": [], "collision": [], "unplanned": [], "listed": []}
     versions: Dict[str, int] = {}
+    no_project_column: Dict[str, Dict[str, int]] = {}
     for db in db_paths:
         planned, versions[str(db)] = plan_database(db, index)
-        for key, items in planned.items():
-            parts[key].extend(items)
+        if planned["no_project_column"]:
+            no_project_column[str(db)] = planned["no_project_column"]
+        for key in parts:
+            parts[key].extend(planned[key])
     body = {
         "plan_version": PLAN_VERSION, "user_versions": versions,
         "journal_states": list(JOURNAL_STATES),
         "planned_moves": parts["moves"], "schema_gap_rows": parts["schema_gap"],
+        "collision_rows": parts["collision"], "no_project_column": no_project_column,
         "unplanned_rows": parts["unplanned"], "listed_rows": parts["listed"],
     }
     plan_id = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()[:16]
@@ -211,7 +267,7 @@ def build_plan(db_paths: List[Path], index: AttributionIndex) -> Dict[str, Any]:
         move["journal_path"] = str(journal_path(Path(move["source_db"]), plan_id))
     return {
         "plan_id": plan_id, "moves": len(parts["moves"]), "schema_gap": len(parts["schema_gap"]),
-        "unplanned": len(parts["unplanned"]), "listed": len(parts["listed"]), **body,
+        "collision": len(parts["collision"]), "unplanned": len(parts["unplanned"]), "listed": len(parts["listed"]), **body,
     }
 
 
