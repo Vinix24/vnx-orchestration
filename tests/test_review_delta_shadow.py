@@ -167,17 +167,17 @@ def test_corrupt_shadow_lines_are_counted_and_a_clean_file_logs_nothing(tmp_path
     assert any("2 unreadable" in r.getMessage() for r in caplog.records)
 
 
-def _stream(*messages: str, usage=None) -> str:
+def _stream(*messages: str) -> str:
     events = [{"type": "thread.started", "thread_id": "t"}]
     events += [{"type": "item.completed", "item": {"id": f"i{n}", "type": "agent_message", "text": m}}
                for n, m in enumerate(messages)]
-    events.append({"type": "turn.completed", "usage": usage} if usage is not None else {"type": "turn.completed"})
+    events.append({"type": "turn.completed"})
     return "".join(json.dumps(e) + "\n" for e in events)
 
 
 def test_the_final_message_of_a_codex_stream_is_the_answer(tmp_path, shadow):
     line = shadow(_ledger(tmp_path), answer=_stream(_answer("fixed")))
-    assert line["delta_verdict"] == "pass" and "tokens" not in line
+    assert line["delta_verdict"] == "pass"
 
 
 def test_an_earlier_fenced_message_does_not_spoil_the_final_answer(tmp_path, shadow):
@@ -192,13 +192,6 @@ def test_text_after_the_block_in_the_final_message_is_a_fail(tmp_path, shadow):
 
 def test_plain_text_that_is_not_a_stream_is_parsed_as_it_is(tmp_path, shadow):
     assert shadow(_ledger(tmp_path), answer=_answer("fixed"))["delta_verdict"] == "pass"
-
-
-def test_usage_is_booked_when_present_and_left_out_when_malformed(tmp_path, shadow):
-    line = shadow(_ledger(tmp_path), answer=_stream(_answer("fixed"), usage={"input_tokens": 120, "output_tokens": 7}))
-    assert line["tokens"] == {"input": 120, "output": 7}
-    bad = shadow(_ledger(tmp_path / "b"), answer=_stream(_answer("fixed"), usage={"input_tokens": "x", "output_tokens": None}))
-    assert "tokens" not in bad
 
 
 def test_the_full_round_unwrap_still_joins_every_message():

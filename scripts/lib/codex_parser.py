@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 # C6 step 3 + OI-1767 + OI-1938: one source, not a fourth literal copy.
 # VALID_VERDICTS stays importable from here: tests/test_gate_lane_contract.py pins its identity.
@@ -86,20 +86,6 @@ def extract_final_agent_message(stdout: str) -> str:
         if isinstance(text, str) and text:
             last = text
     return last.strip() if last else stdout.strip()
-
-
-def extract_usage_tokens(stdout: str) -> Optional[Dict[str, int]]:
-    """Input and output tokens summed over the ``turn.completed`` events; ``None`` when the stream reports none."""
-    totals: Dict[str, int] = {}
-    for payload in _stream_events(stdout):
-        usage = payload.get("usage") if payload.get("type") == "turn.completed" else None
-        if not isinstance(usage, dict):
-            continue
-        for key, name in (("input_tokens", "input"), ("output_tokens", "output")):
-            value = usage.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                totals[name] = totals.get(name, 0) + value
-    return totals or None
 
 
 def _extract_codex_verdict(text: str) -> Dict[str, Any]:
