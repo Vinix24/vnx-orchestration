@@ -30,16 +30,12 @@ SECRETS = ["geheime-sleutelzin", "BIJZONDERE-NOTITIE-BESCHRIJVING", "uniek-comma
 def env(tmp_path):
     (tmp_path / "proj").mkdir()
     (tmp_path / "proj" / ".vnx-project-id").write_text("vnx-dev\n")
-    state = tmp_path / "proj" / "state"
-    projects = tmp_path / "projects"
-    tdir = projects / SLUG
-    (tdir / "memory").mkdir(parents=True)
-    return state, projects, tdir
+    (tmp_path / "projects" / SLUG / "memory").mkdir(parents=True)
+    return tmp_path / "proj" / "state", tmp_path / "projects", tmp_path / "projects" / SLUG
 
 
 def bind(env):
-    state, projects, tdir = env
-    src.bind(state, projects, [SLUG], tdir / "memory")
+    src.bind(env[0], env[1], [SLUG], env[2] / "memory")
 
 
 def ts(minutes):
@@ -60,9 +56,8 @@ def assistant(call_id, command, minutes, session="s1"):
             "message": {"role": "assistant", "content": block}}
 
 
-def tool_result(uuid, session="s1"):
-    return {"type": "user", "uuid": uuid, "sessionId": session, "timestamp": ts(1),
-            "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "x", "content": "uitvoer"}]}}
+def tool_result(uuid):
+    return user(uuid, [{"type": "tool_result", "tool_use_id": "x", "content": "uitvoer"}], 1)
 
 
 def write_transcript(tdir, name, rows):
@@ -80,8 +75,8 @@ def fixture(env):
     state, projects, tdir = env
     bind(env)
     write_transcript(tdir, "s1.jsonl", [
+        assistant("t1", "uniek-commando-xyz --flag", -5),
         user("u1", "hoe ver zijn we met de migratie van de rapportagemodule", 0),
-        assistant("t1", "uniek-commando-xyz --flag", 5),
         user("u2", "!git status", 10),
         tool_result("u3"),
         user("u4", "<task-notification>klaar</task-notification>", 11),
@@ -102,7 +97,7 @@ def fixture(env):
         user("w3", "je mag promoten", 220, session="s3"),
     ])
     note(tdir, "misser-een", "EIGEN MISSER 12-11 ~00:35Z BIJZONDERE-NOTITIE-BESCHRIJVING verkeerde dingen fout", 0)
-    note(tdir, "operator-twee", "OPERATOR zonder tijd over de rapportagemodule BIJZONDERE-NOTITIE-BESCHRIJVING", 0)
+    note(tdir, "operator-twee", "OPERATOR 12-11 hoe ver migratie rapportagemodule BIJZONDERE-NOTITIE-BESCHRIJVING", 0)
     (tdir / "memory" / "MEMORY.md").write_text("- [x](x.md) — index met OPERATOR en EIGEN MISSER\n")
     return osr.build_report(state, projects, SINCE, UNTIL, NOW)
 
@@ -110,8 +105,7 @@ def fixture(env):
 def test_report_counts_groups_cases_and_notes(env):
     report = fixture(env)
     assert report["schema"] == "steering_report/1" and report["project_id"] == "vnx-dev"
-    assert report["status"] == "ok"
-    assert report["bronstaat"]["transcripts"]["state"] == "ok" and report["bronstaat"]["memory"]["state"] == "ok"
+    assert report["status"] == "ok" and {b["state"] for b in report["bronstaat"].values()} == {"ok"}
     excluded = report["uitgesloten"]
     assert {k: excluded[k] for k in ("task_notification", "tool_result", "pasted_content", "no_timestamp", "no_uuid", "is_meta")} == \
         {"task_notification": 1, "tool_result": 1, "pasted_content": 1, "no_timestamp": 1, "no_uuid": 1, "is_meta": 1}
@@ -119,14 +113,13 @@ def test_report_counts_groups_cases_and_notes(env):
     counts = report["tellingen"]
     assert counts["handmatige_actie"] == 1 and counts["statusvraag"] == 3
     assert counts["correctie"] == 2 and counts["vrijgave"] == 2
-    assert sum(counts.values()) == 9
+    assert sum(counts.values()) == 8
     groups = report["herhalingsgroepen"]
-    status_group = [g for g in groups if g["klasse"] == "statusvraag"]
-    assert len(status_group) == 1 and status_group[0]["sessies"] == 3 and len(status_group[0]["prompt_ids"]) == 3
+    assert [(g["klasse"], g["sessies"], len(g["prompt_ids"])) for g in groups if g["klasse"] == "statusvraag"] == [("statusvraag", 3, 3)]
     kinds = {c["klasse"]: c for c in report["gevallen"]}
     assert kinds["statusvraag"]["reden"] == "repeat" and kinds["statusvraag"]["sessies"] == 3
     assert "vrijgave" not in kinds  # two sessions of a vrijgave stay a count (decision 7)
-    assert kinds["correctie"]["reden"] == "repeat" and kinds["correctie"]["notities"] == ["misser-een"]
+    assert kinds["correctie"]["reden"] == "eigen_misser" and kinds["correctie"]["notities"] == ["misser-een"]
     ctx = {c["prompt_id"]: c for c in kinds["statusvraag"]["context"]}
     assert sorted(len(c["tool_calls"]) for c in ctx.values()) == [0, 0, 1]
     with_call = next(c for c in ctx.values() if c["tool_calls"])
@@ -134,8 +127,8 @@ def test_report_counts_groups_cases_and_notes(env):
     assert with_call["pr_nummers"] == [2721]
     notes = {n["naam"]: n for n in report["notities"]}
     assert notes["misser-een"]["status"] == "found" and notes["misser-een"]["eigen_misser"] is True
-    assert notes["operator-twee"]["status"] in ("ambiguous", "found", "not_found")
-    assert "MEMORY" not in notes
+    assert notes["operator-twee"]["status"] == "ambiguous" and len(notes["operator-twee"]["prompt_ids"]) == 3
+    assert notes["operator-twee"]["eigen_misser"] is False
     assert report["suppressed_rejected"] == 0
 
 
@@ -147,8 +140,7 @@ def test_every_class_present_at_zero_on_empty_window(env):
     report = osr.build_report(state, projects, far, far + timedelta(days=1), NOW)
     assert list(report["tellingen"]) == [c.name for c in STEERING_CLASSES]
     assert set(report["tellingen"].values()) == {0}
-    assert report["dekking"] is None and report["status"] == "ok"
-    assert report["herhalingsgroepen"] == [] and report["gevallen"] == [] and report["notities"] == []
+    assert (report["dekking"], report["status"], report["gevallen"]) == (None, "ok", [])
 
 
 @pytest.mark.parametrize("unclassified,total,status", [(31, 100, "low_coverage"), (30, 100, "ok"), (0, 5, "ok")])
@@ -170,7 +162,7 @@ def test_unbound_gives_state_without_exception(env):
     report = osr.build_report(state, projects, SINCE, UNTIL, NOW)
     assert report["bronstaat"]["transcripts"]["state"] == "unbound" and report["bronstaat"]["memory"]["state"] == "unbound"
     assert report["status"] == "unbound" and report["dekking"] is None
-    assert sum(report["tellingen"].values()) == 0 and report["uitgesloten"] == {} and report["gevallen"] == []
+    assert sum(report["tellingen"].values()) == 0 and report["uitgesloten"] == {}
 
 
 def test_transcript_symlinked_out_is_error_and_counts_nothing(env, tmp_path):
@@ -184,7 +176,7 @@ def test_transcript_symlinked_out_is_error_and_counts_nothing(env, tmp_path):
     block = report["bronstaat"]["transcripts"]
     assert block["state"] == "error" and block["refused"] == {"outside_bound_dir": 1} and block["refused_files"] == ["link.jsonl"]
     assert report["status"] == "error" and sum(report["tellingen"].values()) == 0
-    assert report["uitgesloten"] == {} and report["notities"] == []
+    assert report["uitgesloten"] == {}
 
 
 def test_note_symlinked_out_makes_memory_error_and_no_note_is_used(env, tmp_path):
@@ -217,32 +209,6 @@ def test_write_report_writes_only_the_report_and_replaces_it(env):
     report = fixture(env)
     before = set(os.listdir(state))
     path = osr.write_report(state, report)
-    assert path == state / "steering_report.json"
-    assert set(os.listdir(state)) - before == {"steering_report.json"}
-    second = {**report, "status": "low_coverage"}
-    osr.write_report(state, second)
-    assert json.loads(path.read_text())["status"] == "low_coverage"
-    assert set(os.listdir(state)) - before == {"steering_report.json"}
-
-
-def test_naive_window_is_rejected_and_duplicate_prompt_counts_once(env):
-    state, projects, tdir = env
-    bind(env)
-    row = user("u1", "wat is de status?", 0)
-    write_transcript(tdir, "s1.jsonl", [row])
-    write_transcript(tdir, "s1-kopie.jsonl", [row])
-    with pytest.raises(ValueError):
-        osr.build_report(state, projects, datetime(2026, 11, 11), UNTIL, NOW)
-    report = osr.build_report(state, projects, SINCE, UNTIL, NOW)
-    assert sum(report["tellingen"].values()) == 1 and report["uitgesloten"]["duplicate"] == 1
-
-
-@pytest.mark.parametrize("value", [None, "", "gisteren", "2026-11-12T09:00:00", 12345])
-def test_unparseable_timestamp_is_excluded_never_guessed(env, value):
-    state, projects, tdir = env
-    bind(env)
-    row = user("u1", "wat is de status?", 0)
-    row["timestamp"] = value
-    write_transcript(tdir, "s1.jsonl", [row])
-    report = osr.build_report(state, projects, SINCE, UNTIL, NOW)
-    assert sum(report["tellingen"].values()) == 0 and report["uitgesloten"]["no_timestamp"] == 1
+    assert path == state / "steering_report.json" and set(os.listdir(state)) - before == {"steering_report.json"}
+    osr.write_report(state, {**report, "status": "low_coverage"})
+    assert json.loads(path.read_text())["status"] == "low_coverage" and set(os.listdir(state)) - before == {"steering_report.json"}

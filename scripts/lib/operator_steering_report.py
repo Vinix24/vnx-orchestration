@@ -1,9 +1,7 @@
 """Operator-steering report: the ``steering_report/1`` document as a library (ADR-072, OB-4a).
 
-Composes OB-1 (bound, contained reading), OB-2 (class table) and OB-3 (groups, notes, cases): one pass
-over the bound transcripts keeps session, time and the assistant turn before each operator prompt, one
-pass over the bound memory dir keeps the notes. The report holds ids, classes, counts and note names
-only (decision 11): no prompt text, no note description, no tool command. No model, no network.
+Composes OB-1 (bound, contained reading), OB-2 (classes) and OB-3 (groups, notes, cases). Ids, classes,
+counts and note names only (decision 11): no prompt text, note description or tool command. No model, no network.
 """
 from __future__ import annotations
 
@@ -27,10 +25,8 @@ from vnx_paths import project_id_from_state_dir
 SCHEMA = "steering_report/1"
 REPORT_FILE = "steering_report.json"
 LOW_COVERAGE_PERCENT = 30
-TURN_TEXT_KEEP = 8000
-MAX_NOTE_BYTES = 1_000_000
-MEMORY_INDEX = "MEMORY.md"
-NOTE_KEYS = ("name", "description")
+TURN_TEXT_KEEP, MAX_NOTE_BYTES = 8000, 1_000_000
+MEMORY_INDEX, NOTE_KEYS = "MEMORY.md", ("name", "description")
 
 
 @dataclass
@@ -42,19 +38,17 @@ class _Collected:
 
 def _parse_ts(value: object) -> Optional[datetime]:
     """UTC time of an ISO timestamp that names its zone; None for anything else (never guessed)."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    text = value.strip()
+    text = value.strip() if isinstance(value, str) else ""
     text = text[:-1] + "+00:00" if text.endswith("Z") else text
     try:
-        parsed = datetime.fromisoformat(text)
+        parsed = datetime.fromisoformat(text)  # "" raises ValueError: no stamp, no prompt
     except ValueError:
         return None
     return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
 
 
 class _TurnBuilder:
-    """The assistant lines since the last operator prompt of one file: tool_use blocks and text, never a result."""
+    """Assistant lines since the last operator prompt of one file: tool_use blocks and text, never a result."""
 
     def __init__(self) -> None:
         self.calls: Deque[ToolCall] = deque(maxlen=MAX_CONTEXT_CALLS)
@@ -87,20 +81,16 @@ class _TurnBuilder:
         return turn
 
 
-def _loads(raw: str) -> object:
-    try:
-        return json.loads(raw)
-    except ValueError:
-        return None
-
-
 def _consumer(collected: _Collected) -> Callable[[TextIO, str], None]:
     seen: set = set()
 
     def consume(handle: TextIO, name: str) -> None:
         builder = _TurnBuilder()
         for raw in handle:
-            obj = _loads(raw)
+            try:
+                obj = json.loads(raw)
+            except ValueError:
+                obj = None
             reason, text = classify_line(obj)
             if reason == "not_user" and isinstance(obj, dict) and obj.get("type") == "assistant":
                 builder.feed(obj)
@@ -136,9 +126,7 @@ def _frontmatter(body: str) -> Dict[str, str]:
             break
         key, sep, value = line.partition(":")
         if sep and key in NOTE_KEYS:
-            value = value.strip()
-            quoted = len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'"
-            found[key] = value[1:-1] if quoted else value
+            found[key] = value.strip().strip("\"'")
     return found
 
 
@@ -172,9 +160,8 @@ def read_notes(binding: dict) -> Tuple[SourceResult, List[MemoryNote]]:
     return SourceResult("ok"), notes
 
 
-def _source_block(result: SourceResult) -> dict:
-    return {"state": result.state, "reason": result.reason, "refused": dict(result.refused),
-            "refused_files": list(result.refused_files)}
+def _source_block(r: SourceResult) -> dict:
+    return {"state": r.state, "reason": r.reason, "refused": dict(r.refused), "refused_files": list(r.refused_files)}
 
 
 def _aware_utc(value: object, label: str) -> datetime:
@@ -183,12 +170,8 @@ def _aware_utc(value: object, label: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
-def _class_names() -> List[str]:
-    return [c.name for c in STEERING_CLASSES]
-
-
 def _coverage(counts: Dict[str, int]) -> Tuple[Optional[float], str]:
-    """(dekking, status): no prompts means coverage is unknown (None), never 0 or 1."""
+    """(dekking, status); no prompts means unknown (None), never 0 or 1."""
     total = sum(counts.values())
     if not total:
         return None, "ok"
@@ -198,16 +181,14 @@ def _coverage(counts: Dict[str, int]) -> Tuple[Optional[float], str]:
 
 
 def _case_json(case: Case) -> dict:
-    return {"klasse": case.klasse, "reden": case.reason, "group_id": case.group_id,
-            "anker_prompt_id": case.anchor_prompt_id, "sessies": case.sessions,
-            "prompt_ids": list(case.prompt_ids), "notities": list(case.notes),
+    return {"klasse": case.klasse, "reden": case.reason, "group_id": case.group_id, "sessies": case.sessions,
+            "anker_prompt_id": case.anchor_prompt_id, "prompt_ids": list(case.prompt_ids), "notities": list(case.notes),
             "context": [{"prompt_id": c.prompt_id, "tool_calls": [{"id": t.call_id, "naam": t.name} for t in c.tool_calls],
-                         "dispatch_ids": list(c.dispatch_ids), "pr_nummers": list(c.pr_numbers)}
-                        for c in case.contexts]}
+                         "dispatch_ids": list(c.dispatch_ids), "pr_nummers": list(c.pr_numbers)} for c in case.contexts]}
 
 
 def _analysis(prompts: List[SteeringPrompt], notes: List[MemoryNote], turns: Dict[str, AssistantTurn]) -> dict:
-    counts = {name: 0 for name in _class_names()}
+    counts = {c.name: 0 for c in STEERING_CLASSES}
     for p in prompts:
         counts[p.klasse] = counts.get(p.klasse, 0) + 1
     groups = build_groups(prompts)
@@ -225,11 +206,7 @@ def _analysis(prompts: List[SteeringPrompt], notes: List[MemoryNote], turns: Dic
 
 def build_report(state_dir: Path, projects_root: Path, since: datetime, until: datetime,
                  now: Optional[datetime] = None) -> dict:
-    """The ``steering_report/1`` dict for prompts with ``since <= timestamp < until``.
-
-    A source that is not `ok` gives its state as ``status`` with empty counts and ``dekking`` None
-    (unknown is not a number, ADR-063); the exceptions are the caller's invalid window only.
-    """
+    """The ``steering_report/1`` dict for ``since <= timestamp < until``; a source that is not `ok` is the ``status``."""
     start, end = _aware_utc(since, "since"), _aware_utc(until, "until")
     stamp = _aware_utc(now, "now") if now is not None else datetime.now(timezone.utc)
     collected = _Collected()
