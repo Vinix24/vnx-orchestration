@@ -940,6 +940,44 @@ def run_envelope_plan(
         _exit.close(result)
 
 
+def _prepare_with_data_dir(spec: "EnvelopeSpec") -> str:
+    """Run ``_prepare(spec)`` under the ambient data-dir contract, then restore it.
+
+    A-bis-2: _prepare() (via _inject_skill_context -> PromptAssembler.assemble())
+    fills base_worker.md's REPORT_PATH_PLACEHOLDER from dispatch_metadata["data_dir"]
+    when present, else the ambient VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 two-key
+    contract already used fleet-wide (plan_gate_panel._resolve_data_dir). The
+    headless lane's dispatch_metadata carries no data_dir key, so the ambient
+    contract is set here, scoped and restored so a resolved data_dir never leaks
+    into an unrelated dispatch processed later in the same orchestrator process.
+    """
+    _prev_vnx_data_dir = os.environ.get("VNX_DATA_DIR")
+    _prev_vnx_data_dir_explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT")
+    os.environ["VNX_DATA_DIR"] = str(spec.data_dir)
+    os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
+    try:
+        return _prepare(spec)
+    finally:
+        if _prev_vnx_data_dir is None:
+            os.environ.pop("VNX_DATA_DIR", None)
+        else:
+            os.environ["VNX_DATA_DIR"] = _prev_vnx_data_dir
+        if _prev_vnx_data_dir_explicit is None:
+            os.environ.pop("VNX_DATA_DIR_EXPLICIT", None)
+        else:
+            os.environ["VNX_DATA_DIR_EXPLICIT"] = _prev_vnx_data_dir_explicit
+
+
+def _stamp_headless_start(plan: "ExecutionPlan", spec: "EnvelopeSpec", state_dir: Path) -> None:
+    """ADR-071 besluit 2: the headless lane's one ``dispatch_metadata`` row, at the start."""
+    from dispatch_metadata_db import stamp_lane_start  # noqa: PLC0415
+    stamp_lane_start(
+        state_dir, dispatch_id=spec.dispatch_id, terminal=spec.terminal_id,
+        provider=spec.provider, model=spec.model, role=spec.role, pr_id=spec.pr_id,
+        parent_dispatch=plan.parent_dispatch,
+    )
+
+
 def run_envelope_headless_plan(
     plan: "ExecutionPlan",
     permit: "ExecutionPermit",
@@ -1035,28 +1073,8 @@ def run_envelope_headless_plan(
         dispatch_paths=_dispatch_paths_raw,
     )
 
-    # A-bis-2: _prepare() (via _inject_skill_context -> PromptAssembler.assemble())
-    # fills base_worker.md's REPORT_PATH_PLACEHOLDER from dispatch_metadata["data_dir"]
-    # when present, else the ambient VNX_DATA_DIR + VNX_DATA_DIR_EXPLICIT=1 two-key
-    # contract already used fleet-wide (plan_gate_panel._resolve_data_dir). The
-    # headless lane's dispatch_metadata carries no data_dir key, so the ambient
-    # contract is set here — scoped and restored so a resolved data_dir never leaks
-    # into an unrelated dispatch processed later in the same orchestrator process.
-    _prev_vnx_data_dir = os.environ.get("VNX_DATA_DIR")
-    _prev_vnx_data_dir_explicit = os.environ.get("VNX_DATA_DIR_EXPLICIT")
-    os.environ["VNX_DATA_DIR"] = str(spec.data_dir)
-    os.environ["VNX_DATA_DIR_EXPLICIT"] = "1"
-    try:
-        enriched_instruction = _prepare(spec)
-    finally:
-        if _prev_vnx_data_dir is None:
-            os.environ.pop("VNX_DATA_DIR", None)
-        else:
-            os.environ["VNX_DATA_DIR"] = _prev_vnx_data_dir
-        if _prev_vnx_data_dir_explicit is None:
-            os.environ.pop("VNX_DATA_DIR_EXPLICIT", None)
-        else:
-            os.environ["VNX_DATA_DIR_EXPLICIT"] = _prev_vnx_data_dir_explicit
+    enriched_instruction = _prepare_with_data_dir(spec)
+    _stamp_headless_start(plan, spec, state_dir)
     enriched_spec = EnvelopeSpec(
         dispatch_id=spec.dispatch_id,
         terminal_id=spec.terminal_id,
