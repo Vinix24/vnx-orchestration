@@ -128,14 +128,14 @@ A refusal is never a reachability fact. It is not booked as `auth_rejected`, `cr
 | Deliberation panel (`scripts/panel.py`) | The roster drops switched-off seats with a named line. The seats that remain are counted against the existing `synthesis_min_seats` floor (`configs/plan_gate_panel.yaml`); below it the run stops unless `--allow-degraded` is given. |
 | Tagger, scout, receipt classifier | `get_provider` raises `ProviderDisabledError`. The call is skipped with one WARNING and counted where stats are kept. The receipt classifier decides per receipt by the receipt's own project. |
 | Nightly deep analysis | A switched-off lane makes no attempt and is counted as outcome `provider_switched_off` (`deep_disabled_skips`); the beacon is `degraded` with that reason when every non-restricted attempt was skipped. |
-| Dream | The consolidation cycle is skipped with reason `provider_switched_off` when kimi is off. |
+| Dream | The consolidation cycle is skipped with reason `provider_switched_off` when the provider it runs on (`VNX_DREAM_PROVIDER`, default `deepseek`) is off. |
 | Any launch function | `ProviderDisabledError` before a command or request is built. |
 
 Nothing is rerouted behind the operator's back. An explicit request for a switched-off provider is refused. Rerouting happens only where the operator already configured an order: the review takeover chain, and the router for provider AUTO.
 
 ## The switch and the takeover chain
 
-`VNX_REVIEW_GATE_TAKEOVER_CHAIN` says which seat takes over when another cannot answer. The switch says which seats may be called. The chain walk asks the switch for every candidate, fresh each time. `claude_gate` belongs to the non-switchable `claude` family, so switching off kimi, deepseek and glm still leaves the default chain `codex_gate,kimi_gate,claude_gate,deepseek_gate` with a second reader. That reader is passed over when the builder ran a claude model (`DISPATCH_RULES.md` section 2), and then the seat ends as `chain_exhausted`. A chain without `claude_gate` whose later gates are all off leaves codex alone, and `vnx providers off` prints that consequence at write time (`_review_chain_consequence` in `scripts/providers_cli.py`), and the `chain_exhausted` record names `provider_switched_off` per hop so it reads differently from quota exhaustion. The merge door is not changed.
+`VNX_REVIEW_GATE_TAKEOVER_CHAIN` says which seat takes over when another cannot answer. The switch says which seats may be called. The chain walk asks the switch for every candidate, fresh each time. `claude_gate` belongs to the non-switchable `claude` family, so switching off deepseek, kimi and glm still leaves the default chain `codex_gate,deepseek_gate,claude_gate` with a second reader. That reader is passed over when the builder ran a claude model (`DISPATCH_RULES.md` section 2), and then the seat ends as `chain_exhausted`. A chain without `claude_gate` whose later gates are all off leaves codex alone, and `vnx providers off` prints that consequence at write time (`_review_chain_consequence` in `scripts/providers_cli.py`), and the `chain_exhausted` record names `provider_switched_off` per hop so it reads differently from quota exhaustion. The merge door is not changed.
 
 ## The census and the guard
 
