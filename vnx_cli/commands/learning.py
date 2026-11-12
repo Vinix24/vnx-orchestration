@@ -785,20 +785,122 @@ def _cmd_decide_rule(args) -> int:
     return 0
 
 
+_STATUS_ORDER = ("pending", "approved", "applied", "rejected")
+_STEERING_ACTIONS = {"approve": "approved", "reject": "rejected", "apply": "applied"}
+
+
+def _proposal_view(entry: dict) -> dict:
+    """One proposal as the operator sees it: ids and classification only, never a prompt text."""
+    latest = entry["revisions"][-1] if entry["revisions"] else {}
+    return {
+        "proposal_id": entry["proposal_id"], "status": entry["status"], "revision": len(entry["revisions"]),
+        "oorzaak": entry["oorzaak"], "artefact_soort": entry["artefact_soort"], "doelpad": entry["doelpad"],
+        "bewijs": list(latest.get("evidence_prompt_ids") or []), "applied_ref": entry.get("applied_ref"),
+    }
+
+
+def _cmd_steering_proposals(args, rest: list) -> int:
+    """`vnx learning steering proposals [--status S] [--json]`: the proposals of this project, pending first."""
+    import argparse
+
+    import steering_proposal_store as store  # type: ignore[import]
+
+    parser = argparse.ArgumentParser(prog="vnx learning steering proposals")
+    parser.add_argument("--status", choices=_STATUS_ORDER, default=None)
+    parser.add_argument("--json", dest="as_json", action="store_true")
+    parser.add_argument("--state-dir", default=None)
+    opts = parser.parse_args(rest)
+    project_dir = Path(getattr(args, "project_dir", "."))
+    state_dir = Path(opts.state_dir) if opts.state_dir else _resolve_state_dir(project_dir)
+    project_id = _engine.derive_project_id(project_dir)
+    try:
+        entries = store.proposals(state_dir, project_id)
+    except store.StoreUnreadable as exc:
+        print(f"error: StoreUnreadable: {exc}", file=sys.stderr)
+        return 3
+    views = [_proposal_view(e) for e in entries if opts.status in (None, e["status"])]
+    views.sort(key=lambda v: (_STATUS_ORDER.index(v["status"]), v["proposal_id"]))
+    if opts.as_json:
+        print(json.dumps({"schema": "steering_proposals_list/1", "project_id": project_id, "proposals": views},
+                         indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    for v in views:
+        ref = f" applied_ref={v['applied_ref']}" if v["applied_ref"] else ""
+        print(f"{v['proposal_id']} {v['status']} r{v['revision']} oorzaak={v['oorzaak']} "
+              f"artefact={v['artefact_soort']} doelpad={v['doelpad']} bewijs={','.join(v['bewijs'])}{ref}")
+    if not views:
+        print("no steering proposals")
+    return 0
+
+
 def _cmd_steering(args) -> int:
-    """`vnx learning steering report|show ...`: the same code as scripts/operator_steering.py."""
+    """`vnx learning steering report|show|proposals ...`: report and show are scripts/operator_steering.py."""
     import operator_steering  # type: ignore[import]
 
     forwarded = list(getattr(args, "steering_args", None) or [])
     if forwarded[:1] == ["--"]:  # argparse REMAINDER cannot start with an option; `--` lets global options lead
         forwarded = forwarded[1:]
+    if forwarded[:1] == ["proposals"]:
+        return _cmd_steering_proposals(args, forwarded[1:])
     if not any(word in ("report", "show") for word in forwarded):
-        print("Usage: vnx learning steering {report|show} ...", file=sys.stderr)
+        print("Usage: vnx learning steering {report|show|proposals} ...", file=sys.stderr)
         return 2
     if not any(word == "--state-dir" or word.startswith("--state-dir=") for word in forwarded):
         # global --project-dir, like every other `vnx learning` subcommand; an explicit --state-dir wins
         forwarded = ["--state-dir", str(_resolve_state_dir(Path(getattr(args, "project_dir", ".")))), *forwarded]
     return operator_steering.main(forwarded)
+
+
+def _decide_steering_usage_error(args, action: str) -> str:
+    """The first usage problem of a decide-steering call, "" when there is none."""
+    if action not in _STEERING_ACTIONS:
+        return f"action must be approve, reject or apply, got {action!r}"
+    for name in ("approval_id", "reason"):
+        if not (getattr(args, name, "") or "").strip():
+            return f"--{name.replace('_', '-')} must not be empty"
+    ref = (getattr(args, "applied_ref", "") or "").strip()
+    if action == "apply" and not ref:
+        return "apply needs --applied-ref (a PR number or commit)"
+    if action != "apply" and ref:
+        return "--applied-ref is only for apply"
+    return ""
+
+
+def _cmd_decide_steering(args) -> int:
+    """Record an operator decision on a steering proposal (ADR-072 decision 9).
+
+    Exit 0 recorded, 1 unknown proposal id, 2 usage error or a decision the store refuses,
+    3 unreadable store. `approved` changes nothing by itself.
+    """
+    import steering_proposal_store as store  # type: ignore[import]
+
+    action = getattr(args, "action", "") or ""
+    problem = _decide_steering_usage_error(args, action)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    project_dir = Path(getattr(args, "project_dir", "."))
+    reason = f"{args.reason.strip()} [approval_id={args.approval_id.strip()}]"  # the store has no approval field
+    try:
+        record = store.decide(
+            _resolve_state_dir(project_dir), _engine.derive_project_id(project_dir), args.proposal_id,
+            _STEERING_ACTIONS[action], reason=reason, decided_by="operator",
+            applied_ref=(getattr(args, "applied_ref", "") or ""),
+        )
+    except store.ProposalNotFound:
+        print(f"error: unknown proposal {args.proposal_id}", file=sys.stderr)
+        return 1
+    except (store.DecisionRefused, store.ProposalInvalid) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    except store.StoreUnreadable as exc:
+        print(f"error: StoreUnreadable: {exc}", file=sys.stderr)
+        return 3
+    print(f"{record['decision']}: proposal_id={record['proposal_id']} revision={record['revision']} "
+          f"approval_id={args.approval_id.strip()}")
+    if record["decision"] == "approved":
+        print("approved changes nothing by itself: applying it is a separate dispatch or operator action")
+    return 0
 
 
 def vnx_learning(args) -> int:
@@ -815,8 +917,9 @@ def vnx_learning(args) -> int:
         "dismiss": _cmd_dismiss,
         "decide-rule": _cmd_decide_rule,
         "steering": _cmd_steering,
+        "decide-steering": _cmd_decide_steering,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|approve|dismiss|decide-rule|steering|grounding-shadow|tagger-ab|skill-refine|skill-review}")
+    print("Usage: vnx learning {run|status|review|approve|dismiss|decide-rule|steering|decide-steering|grounding-shadow|tagger-ab|skill-refine|skill-review}")
     return 1

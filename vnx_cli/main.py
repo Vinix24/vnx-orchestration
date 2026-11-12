@@ -1445,12 +1445,27 @@ def _register_learning_decide_rule(learning_subs: argparse.Action) -> None:
 def _register_learning_operator_tier(learning_subs: argparse.Action) -> None:
     _register_learning_decide_rule(learning_subs)
     _register_learning_steering(learning_subs)
+    _register_learning_decide_steering(learning_subs)
+
+
+def _register_learning_decide_steering(learning_subs: argparse.Action) -> None:
+    lr_ds = learning_subs.add_parser(
+        "decide-steering",
+        help="record an operator decision on a steering proposal (approve|reject|apply); approve changes nothing by itself",
+        epilog="exit codes: 0 recorded, 1 unknown proposal id, 2 usage error or decision refused, 3 unreadable store",
+    )
+    lr_ds.add_argument("proposal_id", metavar="PROPOSAL_ID", help="id from `vnx learning steering proposals`")
+    lr_ds.add_argument("action", choices=["approve", "reject", "apply"])
+    lr_ds.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_ds.add_argument("--approval-id", dest="approval_id", required=True, help="operator approval token (REQUIRED)")
+    lr_ds.add_argument("--reason", dest="reason", required=True, help="non-empty rationale (REQUIRED)")
+    lr_ds.add_argument("--applied-ref", dest="applied_ref", default="", help="PR number or commit (REQUIRED with apply)")
 
 
 def _register_learning_steering(learning_subs: argparse.Action) -> None:
     lr_steer = learning_subs.add_parser(
         "steering",
-        help="operator steering (ADR-072): `report` and `show --case`; arguments go to scripts/operator_steering.py",
+        help="operator steering (ADR-072): `report`, `show --case` and `proposals [--status S] [--json]`",
     )
     lr_steer.add_argument("steering_args", nargs=argparse.REMAINDER, metavar="ARGS")
 
