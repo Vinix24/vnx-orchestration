@@ -47,14 +47,14 @@ def _run_git(repo_root: "str | Path", args: List[str], *, timeout: int = 20) -> 
     return result.stdout
 
 
-def _changed_regions(repo_root: "str | Path", commit: str) -> "Dict[str, List[tuple]]":
+def _changed_regions(repo_root: "str | Path", commit: str, *, git=None) -> "Dict[str, List[tuple]]":
     """Pre-image file -> list of (old_start, old_count) regions this commit replaced.
 
     old_count == 0 (a pure insertion) reworks nothing and is skipped. New files (--- /dev/null) have
     no pre-image and are skipped. -M lets git follow renames so blame targets the right pre-image path.
     """
     # core.quotepath=false keeps non-ASCII paths literal (otherwise git octal-quotes them and blame misses).
-    out = _run_git(repo_root, ["-c", "core.quotepath=false", "show", commit, "--unified=0", "--format=", "-M"])
+    out = (git or _run_git)(repo_root, ["-c", "core.quotepath=false", "show", commit, "--unified=0", "--format=", "-M"])
     regions: "Dict[str, List[tuple]]" = defaultdict(list)
     if not out:
         return regions
@@ -77,15 +77,18 @@ def _changed_regions(repo_root: "str | Path", commit: str) -> "Dict[str, List[tu
     return regions
 
 
-def _blame_origin_counts(
-    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]"
-) -> "Dict[str, int]":
-    """Blame the replaced regions against ``commit``'s parent; count lines per origin commit SHA."""
-    counts: "Dict[str, int]" = defaultdict(int)
+def _blame_origin_detail(
+    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]", *, git=None
+) -> "Dict[str, dict]":
+    """Blame the replaced regions against ``commit``'s parent: origin SHA -> {"lines": n, "files": set}.
+
+    ``git`` replaces the fail-open runner; a strict one raises instead of reading a failure as "no lines"."""
+    run = git or _run_git
+    detail: "Dict[str, dict]" = defaultdict(lambda: {"lines": 0, "files": set()})
     parent = f"{commit}^"
     for pre_file, spans in regions.items():
         for old_start, old_count in spans:
-            out = _run_git(
+            out = run(
                 repo_root,
                 ["blame", "-L", f"{old_start},+{old_count}", "--porcelain", parent, "--", pre_file],
             )
@@ -94,8 +97,16 @@ def _blame_origin_counts(
             for line in out.splitlines():
                 m = _SHA_RE.match(line)
                 if m:
-                    counts[m.group(1)] += 1
-    return counts
+                    detail[m.group(1)]["lines"] += 1
+                    detail[m.group(1)]["files"].add(pre_file)
+    return detail
+
+
+def _blame_origin_counts(
+    repo_root: "str | Path", commit: str, regions: "Dict[str, List[tuple]]"
+) -> "Dict[str, int]":
+    """Blame the replaced regions against ``commit``'s parent; count lines per origin commit SHA."""
+    return {sha: d["lines"] for sha, d in _blame_origin_detail(repo_root, commit, regions).items()}
 
 
 def load_commit_dispatch_map(rc_conn: sqlite3.Connection) -> "Dict[str, str]":
