@@ -1,1 +1,0 @@
-- The door fills `permission_policy_digest` on every staged spec from the composed role policy and refuses to stage (non-zero, no spec) when the policy evidence cannot be proven; at fire time a changed digest is a plan warning, and a refusal only under enforcement (permissions P5).

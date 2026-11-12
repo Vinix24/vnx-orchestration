@@ -1,1 +1,0 @@
-- Agents (track `agents-als-map-fase-1`, PR-2b): `ClaudeSubprocessAdapter.run` calls the skill materializer before `spawn_claude` under `VNX_AGENT_LAYOUT=shadow` (role config via the resolver, fail-open with one WARNING); under `off` neither resolver nor materializer runs.

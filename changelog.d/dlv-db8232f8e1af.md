@@ -1,1 +1,0 @@
-- `vnx role sync` now writes a `T0-PLAYBOOK` pointer block (path, source_id, sha256) next to the ROLE block in the T0 `AGENTS.md` and `GEMINI.md`, and the playbook source resolver is one module, `scripts/lib/t0_playbook.py` (skills-port SP-3, ADR-058).

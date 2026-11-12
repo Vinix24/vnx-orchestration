@@ -1,1 +1,0 @@
-- Learning capture (PR-4): `capture_audit report` and `dismiss`, and the nightly beacon carries `duplicate_capture_open` and `capture_audit_bins` (`capture_audit_error` when the audit itself fails).

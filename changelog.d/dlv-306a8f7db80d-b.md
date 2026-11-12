@@ -1,1 +1,0 @@
-- `tests/test_rework_metrics.py` regains the H6 cases that left #2709 for the size cap: 14-day boundary, model conflict cell, n rule at 19 and 20, exclusions per reason, malformed GitHub facts, rounds folding into a delivery, seat deduplication and an unreadable rounds ledger (dlv-306a8f7db80d-b).
