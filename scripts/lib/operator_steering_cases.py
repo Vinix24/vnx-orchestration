@@ -33,6 +33,10 @@ class StageRefused(Exception):
     """This case is not staged now; the message names why. Nothing was staged."""
 
 
+class WeeklyCapReached(StageRefused):
+    """The week already holds WEEKLY_CAP ``rca_staged`` events; no further case can be staged this week."""
+
+
 @dataclass
 class LedgerCase:
     case_id: str
@@ -48,6 +52,11 @@ def iso_week(now: datetime) -> str:
         raise ValueError("now moet een tijdzone-bewuste datetime zijn")
     year, week, _ = now.astimezone(timezone.utc).isocalendar()
     return f"{year}-W{week:02d}"
+
+
+def week_used(ledger: Dict[str, LedgerCase], week: str) -> int:
+    """``rca_staged`` lines of this ISO week over all cases: the number the weekly cap is counted from."""
+    return sum(1 for c in ledger.values() for s in c.staged if s["iso_week"] == week)
 
 
 def event(kind: str, cid: str, project_id: str, now: datetime, **fields: object) -> dict:
@@ -175,9 +184,9 @@ def stage_case(state_dir: Path, report: dict, wanted: str, now: datetime,
         if case.open_dispatch:  # booked, never published: the same ids again, no event, so the week count stays
             stage_fn(case, entries[0], case.open_dispatch, case.staged[-1]["snapshot_sha256"])
             return case, case.open_dispatch
-        used = sum(1 for c in ledger.values() for s in c.staged if s["iso_week"] == week)
+        used = week_used(ledger, week)
         if used >= WEEKLY_CAP:
-            raise StageRefused(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
+            raise WeeklyCapReached(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
         dispatch_id = f"steering-rca-{case.case_id[:12]}-{week.lower().replace('-', '')}-{len(case.staged) + 1}"
         snapshot = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
         staged = event("rca_staged", case.case_id, project_id, now, dispatch_id=dispatch_id, snapshot_sha256=snapshot, iso_week=week)

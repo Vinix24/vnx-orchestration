@@ -66,6 +66,14 @@ def instruction(case_id: str, entry: dict, venster: dict, dispatch_id: str, snap
             f"```json\n{json.dumps(block, indent=2, ensure_ascii=False)}\n```\n")
 
 
+def publish_bundle(state_dir: Path, projects_root: Path, report: dict, case: ledger_lib.LedgerCase, entry: dict,
+                   dispatch_id: str, snapshot: str) -> Path:
+    text = instruction(case.case_id, entry, report["venster"], dispatch_id, snapshot, state_dir, projects_root)
+    return stage_spec_bundle(instruction_text=text, dispatch_id=dispatch_id, role=ROLE, target_slot=SLOT, project_id=report["project_id"],
+                             provider=PROVIDER, model=MODEL, data_dir=state_dir.parent,
+                             tags=("steering-rca", f"steering_case:{case.case_id}", f"snapshot_sha256:{snapshot}"))
+
+
 def _resolve_state_dir(args: argparse.Namespace) -> Path:
     state_dir = Path(args.state_dir) if args.state_dir else (
         resolve_central_data_dir(args.project_id) / "state" if args.project_id else steering_cli._state_dir(args))
@@ -87,11 +95,11 @@ def _cmd_stage(args: argparse.Namespace, now: datetime) -> int:
         return 1
 
     def stage_fn(case: ledger_lib.LedgerCase, entry: dict, dispatch_id: str, snapshot: str) -> None:
-        text = instruction(case.case_id, entry, report["venster"], dispatch_id, snapshot, state_dir, Path(args.projects_root))
-        print(text if args.dry_run else "gestaged: " + str(stage_spec_bundle(
-            instruction_text=text, dispatch_id=dispatch_id, role=ROLE, target_slot=SLOT, project_id=report["project_id"],
-            provider=PROVIDER, model=MODEL, data_dir=state_dir.parent,
-            tags=("steering-rca", f"steering_case:{case.case_id}", f"snapshot_sha256:{snapshot}"))) + "; vuren doet de T0")
+        if args.dry_run:
+            print(instruction(case.case_id, entry, report["venster"], dispatch_id, snapshot, state_dir, Path(args.projects_root)))
+        else:
+            print("gestaged: " + str(publish_bundle(state_dir, Path(args.projects_root), report, case, entry, dispatch_id, snapshot))
+                  + "; vuren doet de T0")
 
     try:
         ledger_lib.stage_case(state_dir, report, args.case, now, stage_fn, dry_run=args.dry_run)

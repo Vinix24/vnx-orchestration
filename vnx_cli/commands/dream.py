@@ -53,9 +53,19 @@ def _cmd_run(args) -> int:
     dry_run = getattr(args, "dry_run", False)
     root, db_path = _resolve_paths(project_dir)
     import consolidator  # type: ignore[import]
-    result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
+    try:
+        result = consolidator.run_dream_cycle(project_id, db_path, dry_run=dry_run)
+    finally:
+        if not dry_run:  # ADR-072 decision 17: after the consolidation, whether it succeeded, skipped or raised
+            _run_steering_step(project_dir)
     print(json.dumps(result, indent=2))
     return 0
+
+
+def _run_steering_step(project_dir: Path) -> None:
+    """The ``steering`` step: report plus staging. It never raises, never writes a dream event, never changes the exit code."""
+    import operator_steering_dream  # type: ignore[import]
+    operator_steering_dream.run_steering_step(_resolve_data_root(project_dir) / "state")
 
 
 def _cmd_status(args) -> int:
