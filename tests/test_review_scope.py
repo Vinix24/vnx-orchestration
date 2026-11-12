@@ -1,7 +1,9 @@
 """Deltareview DR-6 part 1: ``VNX_REVIEW_SCOPE`` reads fail-closed to ``full`` and ``delta`` is refused without evidence."""
 from __future__ import annotations
 
+import contextlib
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -154,9 +156,49 @@ def test_main_ci_is_green_only_on_success(monkeypatch, payload):
     assert rs.main_ci_green(Path(".")) is True
 
 
-def test_dr7_is_not_on_main_without_the_reconstruction_test(monkeypatch):
-    monkeypatch.setattr(rs, "_run", lambda cmd, cwd: "")
-    assert rs.dr7_on_main(Path(".")) is False
+WIRED = ("def merge_pr(n):\n    rec = _merge_tree_record(n)\n    _emit_receipt(n, merge_tree=rec)\n"
+         "def _merge_tree_record(n):\n    return {}\n")
+TEST_OK = "def test_six_questions_answerable_from_receipt_and_rounds():\n    pass\n"
+
+
+def _main_repo(tmp_path, files):
+    root = tmp_path / "repo"
+    for rel, text in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    git = ["git", "-c", "user.email=t@t", "-c", "user.name=t"]
+    for cmd in ("init -q -b main", "add .", "commit -qm x", "update-ref refs/remotes/origin/main HEAD"):
+        subprocess.run([*git, *cmd.split()], cwd=root, check=True)
+    return root
+
+
+@pytest.mark.parametrize("files", [
+    {"tests/unimplemented.txt": "TODO: reconstruct pr_merged from merged_tree; implementation and test missing."},
+    {rs.DR7_IMPL_FILE: "def merge_pr(n):\n    pass\ndef _merge_tree_record(n):\n    return {}\n", rs.DR7_TEST_FILE: TEST_OK},
+    {rs.DR7_IMPL_FILE: WIRED, rs.DR7_TEST_FILE: "def test_other():\n    pass\n"},
+    {rs.DR7_IMPL_FILE: WIRED, "tests/test_elsewhere.py": TEST_OK},
+    {rs.DR7_IMPL_FILE: WIRED.replace("merge_tree=rec", "x=rec"), rs.DR7_TEST_FILE: TEST_OK},
+    {rs.DR7_IMPL_FILE: "# merge_pr calls _merge_tree_record( and _emit_receipt(merge_tree=\n", rs.DR7_TEST_FILE: TEST_OK},
+])
+def test_dr7_is_not_on_main_without_all_of_its_evidence(tmp_path, files):
+    root = _main_repo(tmp_path, files)
+    with contextlib.suppress(RuntimeError):  # a file absent on main cannot be read: the check refuses
+        assert rs.dr7_on_main(root) is False
+
+
+def test_dr7_is_on_main_with_the_call_the_keyword_and_the_test(tmp_path):
+    assert rs.dr7_on_main(_main_repo(tmp_path, {rs.DR7_IMPL_FILE: WIRED, rs.DR7_TEST_FILE: TEST_OK})) is True
+
+
+def test_the_planted_manifest_is_read_from_main_not_from_the_worktree(tmp_path):
+    manifest = '{"schema": "delta_planted/1", "cases": [{"head": "abc"}]}'
+    root = _main_repo(tmp_path, {"m.json": manifest})
+    assert rs._manifest_on_main(Path("m.json"), root) == [{"head": "abc"}]
+    (root / "fresh.json").write_text(manifest)  # written after main, so not on main
+    with pytest.raises(RuntimeError):
+        rs._manifest_on_main(Path("fresh.json"), root)
+    with pytest.raises(PermissionError, match="outside the project"):
+        rs._manifest_on_main(tmp_path / "elsewhere.json", root)
 
 
 def test_full_and_delta_shadow_need_no_measurement(store):

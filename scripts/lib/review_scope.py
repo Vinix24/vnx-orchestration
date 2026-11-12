@@ -7,6 +7,7 @@ round. ``delta`` may only be written after a passed DR-5 measurement, a merged D
 """
 from __future__ import annotations
 
+import ast
 import json
 import sqlite3
 import subprocess
@@ -20,6 +21,10 @@ SCOPE_KEY = "VNX_REVIEW_SCOPE"
 FULL, DELTA_SHADOW, DELTA = "full", "delta_shadow", "delta"
 CI_WORKFLOW = "VNX CI"
 MAIN_REF = "origin/main"
+DR7_IMPL_FILE, DR7_TEST_FILE = "scripts/pr_merge.py", "tests/test_pr_merge_merged_tree.py"
+DR7_MERGE_FUNCTION, DR7_RECORD_HELPER = "merge_pr", "_merge_tree_record"
+DR7_RECEIPT_FUNCTION, DR7_RECEIPT_KWARG = "_emit_receipt", "merge_tree"
+DR7_TEST_FUNCTION = "test_six_questions_answerable_from_receipt_and_rounds"
 
 
 class ReviewScope(NamedTuple):
@@ -65,12 +70,24 @@ def active_review_scope(state_dir: Path) -> ReviewScope:
         return ReviewScope(FULL, f"unreadable: {type(exc).__name__}")
 
 
+def _manifest_on_main(manifest: Path, project_root: Path) -> List[dict]:
+    """The planted cases as committed on main. A manifest the writer has just written (or one outside the repo) is not read."""
+    import review_delta_compare as rdc
+
+    root = Path(project_root).resolve()
+    path = (root / Path(manifest)).resolve()
+    if not path.is_relative_to(root):
+        raise PermissionError(f"planted manifest {manifest} is outside the project")
+    rel = path.relative_to(root).as_posix()
+    return rdc.load_planted(Path(f"{MAIN_REF}:{rel}"), _run(["git", "show", f"{MAIN_REF}:{rel}"], root))
+
+
 def measurement_outcome(state_dir: Path, manifest: Path, project_root: Path) -> str:
-    """The DR-5 outcome over every shadow line of the project, with the planted manifest the writer names."""
+    """The DR-5 outcome over every shadow line of the project, computed from the store, with the planted manifest as committed on main."""
     import review_delta_compare as rdc
 
     result = rdc.compare(Path(state_dir), since=datetime.fromtimestamp(0, timezone.utc),
-                         source_of=rdc.git_source_of(project_root), planted=rdc.load_planted(Path(manifest)))
+                         source_of=rdc.git_source_of(project_root), planted=_manifest_on_main(manifest, project_root))
     return result.outcome
 
 
@@ -81,11 +98,29 @@ def _run(cmd: List[str], cwd: Path) -> str:
     return done.stdout
 
 
+def _top_level_function(source: str, name: str) -> Optional[ast.AST]:
+    found = [n for n in ast.parse(source).body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    return found[0] if len(found) == 1 else None
+
+
+def _callee(call: ast.Call) -> str:
+    func = call.func
+    return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
+
+
 def dr7_on_main(project_root: Path) -> bool:
-    """DR-7 is merged when a test on main reconstructs the merge from the ``pr_merged`` receipt's merged tree."""
-    out = _run(["git", "grep", "-l", "--all-match", "-e", "pr_merged", "-e", "merged_tree", "-e", "reconstruct",
-                MAIN_REF, "--", "tests"], project_root)
-    return bool(out.strip())
+    """DR-7 is merged when, on main (parsed with ``ast``), ``merge_pr`` calls the record helper and passes ``merge_tree=`` to the
+    receipt and the reconstruction test is defined in its own file. A comment, an uncalled ``def`` or another file proves nothing."""
+    merge_pr = _top_level_function(_run(["git", "show", f"{MAIN_REF}:{DR7_IMPL_FILE}"], project_root), DR7_MERGE_FUNCTION)
+    if merge_pr is None:
+        return False
+    calls = [n for n in ast.walk(merge_pr) if isinstance(n, ast.Call)]
+    if not any(_callee(c) == DR7_RECORD_HELPER for c in calls):
+        return False
+    if not any(_callee(c) == DR7_RECEIPT_FUNCTION and any(k.arg == DR7_RECEIPT_KWARG for k in c.keywords) for c in calls):
+        return False
+    test_source = _run(["git", "show", f"{MAIN_REF}:{DR7_TEST_FILE}"], project_root)
+    return _top_level_function(test_source, DR7_TEST_FUNCTION) is not None
 
 
 def main_ci_green(project_root: Path) -> bool:

@@ -235,12 +235,9 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
     # Deltareview DR-6 (ADR-064 "De schakelaar", ADR-060 amendment). Read by review_scope.active_review_scope.
     "VNX_REVIEW_SCOPE": _e(
         "VNX_REVIEW_SCOPE", "string", "", "gate",
-        "Review scope. full (the default while the key is unset): every round is a full review. "
-        "delta_shadow: the full round decides and the shadow delta runs next to it, booked in "
-        "review_gates/shadow/delta.ndjson. delta: the delta is the deciding round; writing it is refused "
-        "without a passed DR-5 measurement (planted manifest), a merged DR-7 and a green main CI. An "
-        "unset, empty, unknown or unreadable value, and a delta row without an approval id, read as "
-        "full. Rollback is the key on full or the row removed.", approval=True,
+        "Review scope. full (default): every round is a full review. delta_shadow: the shadow delta runs next to "
+        "the full round. delta: the delta decides; writing it is refused without a passed DR-5 measurement, a merged "
+        "DR-7 and a green main CI. Unset, unknown or unreadable reads as full.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
     # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as

@@ -146,10 +146,10 @@ class Comparison:
                 "not_pairs": self.not_pairs, "planted": self.planted}
 
 
-def load_planted(path: Path) -> List[Dict[str, Any]]:
+def load_planted(path: Path, text: Optional[str] = None) -> List[Dict[str, Any]]:
     import json
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8") if text is None else text)
     except (OSError, ValueError) as exc:
         raise CompareError(f"planted manifest {path} cannot be read: {exc}") from exc
     cases = data.get("cases") if isinstance(data, dict) else None

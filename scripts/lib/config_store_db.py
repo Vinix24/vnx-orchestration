@@ -132,17 +132,10 @@ def _emit_config_event_best_effort(
 
 
 def _state_dir_of(conn: sqlite3.Connection) -> Path:
-    """The directory of the database ``conn`` is open on (the state dir of a project store)."""
     path = next((row[2] for row in conn.execute("PRAGMA database_list") if row[1] == "main"), "")
     if not path:
         raise PermissionError("the connection is not on a database file: the shadow measurement cannot be read")
     return Path(path).parent
-
-
-def _project_root() -> Path:
-    from project_root import resolve_project_root
-
-    return resolve_project_root(__file__)
 
 
 def set_config(
@@ -166,7 +159,9 @@ def set_config(
 
     coerced = _coerce(entry.type, value)
     if key == review_scope.SCOPE_KEY and coerced == review_scope.DELTA:
-        review_scope.require_activation(_state_dir_of(conn), planted_manifest, _project_root())
+        from project_root import resolve_project_root
+
+        review_scope.require_activation(_state_dir_of(conn), planted_manifest, resolve_project_root(__file__))
     ensure_config_tables(conn)  # DDL, idempotent — commits any pending txn, so BEGIN below is clean
     event_id = str(uuid.uuid4())
 
