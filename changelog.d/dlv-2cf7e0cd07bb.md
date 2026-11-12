@@ -1,0 +1,1 @@
+- Review rounds (deltareview DR-3): `RoundLine` and the gate request record take the optional parent-chain fields `scope`, `parent_head_sha`, `parent_round_ref`, `delta_base`, `finding_ids`, `changekind`, `patch_id` and `full_review_reason`, written only when set; a line without them is unchanged and a reader that ignores them behaves as today (dlv-2cf7e0cd07bb).

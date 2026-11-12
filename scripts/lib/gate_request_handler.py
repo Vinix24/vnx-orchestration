@@ -1096,7 +1096,14 @@ class GateRequestHandlerMixin:
         slot, and neither of those is a request. A later rewrite reads the record back from disk
         (executor, ``commit_gate_outcome``) and so keeps the field.
         """
-        stamped = {**payload, "origin": REQUEST_ORIGIN_DOOR}
+        from review_rounds import PARENT_CHAIN_STRING_FIELDS, parent_chain_record
+
+        # ADR-064 besluit 4: the parent-chain keys go on the record only when the caller set them.
+        unset = {*PARENT_CHAIN_STRING_FIELDS, "finding_ids"}
+        stamped = {
+            **{k: v for k, v in payload.items() if k not in unset},
+            **parent_chain_record(payload), "origin": REQUEST_ORIGIN_DOOR,
+        }
         with slot_lock(path):
             atomic_write_json(path, stamped)
 
