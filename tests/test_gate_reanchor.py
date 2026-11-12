@@ -735,3 +735,13 @@ def test_a_commit_changing_the_same_file_the_pr_edits_refuses(repo):
     )
     assert not decision.allowed
     assert ("consumer", "run") in decision.blocking_symbols
+
+
+@pytest.mark.parametrize("name", ["a b.py", "üser.py"])
+def test_import_graph_and_module_listing_keep_a_path_with_a_space_or_a_quoted_character(repo, name):
+    root, base = repo
+    (root / "scripts" / name).write_text("from lib_a import helper\n\n\ndef run(x):\n    return helper(x)\n")
+    head = _commit(root, "awkward path")
+    stem = Path(name).stem
+    assert "lib_a" in gr.build_import_graph(root, head).edges[stem]
+    assert gr._tree_modules(root, head)[stem] == f"scripts/{name}"
