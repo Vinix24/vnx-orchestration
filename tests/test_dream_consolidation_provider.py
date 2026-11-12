@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -180,3 +181,65 @@ def test_deepseek_error_writes_dream_cycle_failed_with_provider_and_error(world)
     failed = [e for e in world.events() if e["event_type"] == "dream_cycle_failed"]
     assert len(failed) == 1
     assert failed[0]["provider"] == "deepseek" and "exit 1: boom" in failed[0]["error"]
+
+
+def test_deepseek_json_in_raw_response_is_parsed_with_the_shared_parser(world):
+    world.deepseek.result = SimpleNamespace(
+        error=None, parsed_json=None, cost_usd=None,
+        raw_response="Here it is:\n" + json.dumps(VALID) + "\nDone.")
+    assert world.run()["dropped_count"] == 1
+
+
+def test_client_project_with_a_deepseek_exception_runs(world):
+    document = {"version": 1, "client_project_ids": [PROJECT],
+                "provider_exceptions": {PROJECT: ["deepseek"]}}
+    world.boundary.write_text(json.dumps(document), encoding="utf-8")
+    world.run()
+    assert len(world.deepseek.prompts) == 1
+
+
+def test_deepseek_without_a_json_object_fails_the_cycle(world):
+    world.deepseek.result = SimpleNamespace(error=None, parsed_json=None,
+                                            raw_response="no braces", cost_usd=None)
+    with pytest.raises(ValueError, match="No JSON found"):
+        world.run()
+    failed = [e for e in world.events() if e["event_type"] == "dream_cycle_failed"]
+    assert failed[0]["provider"] == "deepseek"
+
+
+def test_deepseek_timeout_reports_deepseek_timeout(world, monkeypatch):
+    monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
+    world.deepseek.result = SimpleNamespace(error="timeout after 42s: x", parsed_json=None,
+                                            raw_response="", cost_usd=None)
+    result = world.run()
+    assert result["status"] == "timeout" and result["reason"] == "deepseek_timeout"
+    assert result["timeout_seconds"] == 42 and world.deepseek.timeout_seconds == 42
+    timeout = [e for e in world.events() if e["event_type"] == "dream_cycle_timeout"]
+    assert timeout[0]["provider"] == "deepseek"
+
+
+def test_kimi_timeout_keeps_its_reason(world, monkeypatch):
+    monkeypatch.setenv("VNX_DREAM_PROVIDER", "kimi")
+
+    def slow(prompt, **kwargs):
+        raise subprocess.TimeoutExpired("kimi", 1)
+
+    monkeypatch.setattr(kimi_wrapper, "kimi_exec", slow)
+    assert world.run()["reason"] == "kimi_timeout"
+
+
+def test_every_event_of_an_attempt_carries_the_provider(world):
+    world.run()
+    attempt = [e for e in world.events() if e["event_type"].startswith("dream_cycle_")]
+    assert attempt and all(e.get("provider") == "deepseek" for e in attempt)
+
+
+def test_registry_default_is_deepseek_in_the_intelligence_category():
+    import config_registry
+    entry = config_registry.CONFIG_REGISTRY["VNX_DREAM_PROVIDER"]
+    assert (entry.default, entry.category, entry.type) == ("deepseek", "intelligence", "string")
+
+
+def test_the_unknown_provider_skip_is_a_blocked_skip_for_the_liveness_watch():
+    import dream_liveness
+    assert dream_liveness.classify_skip("dream_provider_unknown", "x") == (dream_liveness.BLOCKED, True)
