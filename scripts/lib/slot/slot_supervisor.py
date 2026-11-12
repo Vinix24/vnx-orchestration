@@ -1,12 +1,10 @@
 """Supervisor of one ``vnx slot run`` workload (RS-6, ADR-062 besluiten 2, 9, 11 and 13).
 
-Starts the workload in its own session, books the identities on the lease, keeps the
-heartbeat, takes the host-wide memory samples and releases only on positive evidence:
-the session is ``GONE`` and every child lease is ``GONE``. Nothing here frees a lease
-because a heartbeat expired or a supervisor died. Everything impure is injected.
-
-``store`` needs ``read_policy()`` and ``transaction()``, a context manager that yields the
-ADR-062 state dict and writes it back under the control lock when the block ends normally.
+Runs the workload in its own session, books the identities on the lease, keeps the heartbeat
+and the memory samples, and releases only when the session and every child lease are ``GONE``;
+an expired heartbeat or a dead supervisor frees nothing. Everything impure is injected.
+``store`` needs ``read_policy()`` and ``transaction()``, which yields the ADR-062 state under
+the control lock and writes it back when the block ends normally.
 """
 
 from __future__ import annotations
@@ -66,14 +64,12 @@ class Supervisor:
             work, mine = (next((r for r in table or [] if r["pid"] == p), None) for p in (proc.pid, self.getpid()))
             lease.update(
                 owner_kind="run", parent_lease=parent, owner_uid=os.getuid(),
-                # start_new_session makes the child its own session leader: sid == pid, known without a
-                # snapshot, so a workload that ends before the first read still ends in GONE.
+                # a new session's id is the child's pid: known even when it exits before the first snapshot
                 session_id=str(proc.pid), owner_pid=proc.pid,
-                owner_start_time=work["start_time"] if work else None,   # unknown when it already exited
+                owner_start_time=work["start_time"] if work else None,
                 supervisor_pid=self.getpid(), supervisor_start_time=mine["start_time"] if mine else None)
-            # These identities drive the release decisions: the ledger line comes before their commit.
-            self.log(_event(state, "nested" if parent is not None else "admitted", self.clock(), lease,
-                            reasons=[], max_slots=lease["max_slots"]))
+            # the identities drive release decisions: the ledger line comes before their commit
+            self.log(_event(state, "nested" if parent is not None else "admitted", self.clock(), lease, reasons=[]))
         return proc
 
     def tick(self, lease_id: str, token: int) -> None:
