@@ -50,6 +50,11 @@ def iso_week(now: datetime) -> str:
     return f"{year}-W{week:02d}"
 
 
+def week_used(ledger: Dict[str, LedgerCase], week: str) -> int:
+    """``rca_staged`` lines of this ISO week over all cases: the number the weekly cap is counted from."""
+    return sum(1 for c in ledger.values() for s in c.staged if s["iso_week"] == week)
+
+
 def event(kind: str, cid: str, project_id: str, now: datetime, **fields: object) -> dict:
     return {"event": kind, "case_id": cid, "project_id": project_id, "ts": now.astimezone(timezone.utc).isoformat(), **fields}
 
@@ -175,7 +180,7 @@ def stage_case(state_dir: Path, report: dict, wanted: str, now: datetime,
         if case.open_dispatch:  # booked, never published: the same ids again, no event, so the week count stays
             stage_fn(case, entries[0], case.open_dispatch, case.staged[-1]["snapshot_sha256"])
             return case, case.open_dispatch
-        used = sum(1 for c in ledger.values() for s in c.staged if s["iso_week"] == week)
+        used = week_used(ledger, week)
         if used >= WEEKLY_CAP:
             raise StageRefused(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
         dispatch_id = f"steering-rca-{case.case_id[:12]}-{week.lower().replace('-', '')}-{len(case.staged) + 1}"

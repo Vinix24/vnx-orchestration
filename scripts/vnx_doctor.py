@@ -847,6 +847,14 @@ def check_dream_cycle(paths: Dict[str, str]) -> List[CheckResult]:
     )]
 
 
+def check_steering_report(paths: Dict[str, str]) -> List[CheckResult]:
+    """The steering report's own consumer (ADR-072 decision 17): stale, absent or `status: "error"` is a WARN, never a FAIL."""
+    import operator_steering_dream
+
+    fresh, message = operator_steering_dream.assess_report(Path(paths["VNX_DATA_DIR"]) / "state")
+    return [CheckResult("steering", PASS if fresh else WARN, message, "" if fresh else "The nightly `vnx dream run` writes state/steering_report.json")]
+
+
 def _dream_completed_degradation(event: dict, data_root: Path) -> str:
     """Reason a completed dream cycle was degraded, or "" when it ran healthy.
 
@@ -1187,6 +1195,7 @@ def run_doctor(paths: Dict[str, str], *,
     results.extend(check_contamination(paths))
     results.extend(check_state_root_location(paths))
     results.extend(check_dream_cycle(paths))
+    results.extend(check_steering_report(paths))
     results.extend(check_learning_loop_beacon(paths))
     results.extend(check_cost_ledger_files(paths))
     results.extend(check_t0_state_freshness(paths))
