@@ -376,6 +376,7 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
     (dream_liveness_spec,) = [s for s in reg if s.name == "dream_liveness"]
     assert (dream_liveness_spec.source_file, dream_liveness_spec.event_driven) == ("scripts/dream_liveness_probe.py", False)
     assert "dream_liveness" in br.expected_component_names()
+    assert "rework_attribution" in br.expected_component_names()  # periodic (90000): absent until the job has run once
     assert names == {
         "t0_state_builder",
         "conversation_analyzer",
@@ -393,4 +394,5 @@ def test_real_scripts_tree_gives_the_nine_measured_writers() -> None:
         "door_audit",
         "daily_metrics",
         "dream_liveness",
+        "rework_attribution",
     }

@@ -323,6 +323,7 @@ Commands:
   release publish|verify  Publish a tag as an immutable version / verify it against its tag
   preflight [--project <id>] [--json]  Measure rollout readiness against the pinned
                      release (read-only; exit 1 blocking, 2 unmeasurable)
+  rework-attribution run|install|uninstall|status  Nightly rework attribution job (05:30 launchd; install --dry-run prints the plist)
   patch-agent-files  Insert/update VNX marked block in CLAUDE.md / AGENTS.md
   suggest <sub>      Human-in-the-loop system tuning (review/accept/reject/apply/history)
                        review --weekly  Aggregate last 7d suggestions by target file
@@ -2776,6 +2777,9 @@ main() {
       ;;
     dream)
       PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main dream "$@"
+      ;;
+    rework-attribution)
+      PYTHONPATH="$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.commands.rework_attribution "$@"
       ;;
     learning)
       PYTHONPATH="$VNX_HOME:$VNX_HOME/scripts/lib:${PYTHONPATH:-}" exec "$VNX_PYTHON" -m vnx_cli.main learning "$@"
