@@ -1,0 +1,1 @@
+- The codex seat answers a shadow delta prompt on a follow-up head of a medium PR, booked next to the full round in `review_gates/shadow/delta.ndjson`; the full round still decides and no ledger, result or obligation changes (deltareview DR-4b).

@@ -40,6 +40,7 @@ import provider_costs
 import provider_switch
 import vertex_ai_runner as _vtx
 import gate_dispatch_table
+import review_delta_shadow
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -1093,13 +1094,20 @@ class GateRunner:
                 result=result, request_payload=request_payload,
                 requests_dir=self._requests_dir, results_dir=self._results_dir,
             )
-        return _art.materialize_artifacts(
+        record = _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
             stdout=result["stdout"], request_payload=request_payload,
             duration_seconds=result["duration_seconds"],
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,
         )
+        if gate == "codex_gate":  # DR-4b: shadow delta next to the full round; never changes ``record`` (fail-open)
+            review_delta_shadow.run_shadow(
+                request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
+                run=lambda delta_prompt, cwd: self._run_with_stall_detection(
+                    gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
+                    stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))
+        return record
 
     def _run_vertex_path(
         self,
