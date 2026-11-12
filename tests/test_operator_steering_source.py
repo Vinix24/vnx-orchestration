@@ -121,3 +121,87 @@ def test_binding_with_wrong_project_or_schema_is_unbound(env):
     for bad in ({"project_id": "other"}, {"schema": "x/9"}, {"transcript_dirs": []}, {"memory_dir": "/etc"}):
         path.write_text(json.dumps({**record, **bad}))
         assert _read(state, projects)[0].state == "unbound"
+
+
+# --- OB-1b: ledger, filter of decision 3, CLI -------------------------------------------------
+
+GOAL = "/goal KLAAR als de PR gemerged is, hervat na context-rotatie; resterend: zie ## Actief /goal in x.md"
+
+
+def _line(uuid, content, **extra):
+    return json.dumps({"type": "user", "uuid": uuid, "sessionId": "s1", "message": {"role": "user", "content": content}, **extra})
+
+
+def _fixture(tdir):
+    lines = [
+        _line("u1", "pas de tests aan, dit klopt niet"),
+        _line("u2", "<task-notification>klaar</task-notification>"),
+        _line("u3", [{"type": "tool_result", "content": "uitvoer"}]),
+        _line("u4", "<system-reminder>x</system-reminder>"),
+        _line("u5", "<pasted_content id=ab12>PLAKTEKST</pasted_content id=ab12>"),
+        _line("u6", "/kickoff rotatie 20261111-abc"),
+        _line("u7", GOAL),
+        _line("u8", "mijn woorden <pasted_content id=cd34>GEPLAKT GEHEIM</pasted_content id=cd34>"),
+        _line("u9", "<pasted_content id=ef56>nooit gesloten GEPLAKT"),
+    ]
+    (tdir / "s1.jsonl").write_text("\n".join(lines) + "\n")
+
+
+def test_filter_passes_operator_prompts_and_counts_each_reason(env):
+    state, projects, tdir = env
+    _bind(state, projects)
+    _fixture(tdir)
+    result = src.read_prompts(state, projects)
+    assert result.state == "ok"
+    assert [p.text for p in result.prompts] == ["pas de tests aan, dit klopt niet", "mijn woorden"]
+    assert result.excluded == {"task_notification": 1, "tool_result": 1, "system_reminder": 1,
+                               "pasted_content": 2, "automatic": 2}
+    assert all("GEPLAKT" not in p.text and "PLAKTEKST" not in p.text for p in result.prompts)
+
+
+def test_unknown_or_missing_identity_is_never_a_prompt(env):
+    state, projects, tdir = env
+    _bind(state, projects)
+    (tdir / "s1.jsonl").write_text("niet json\n" + json.dumps({"type": "user", "message": {"content": "zonder uuid"}}) + "\n"
+                                   + json.dumps({"type": "user", "uuid": "u", "isMeta": None, "message": {"content": 5}}) + "\n")
+    result = src.read_prompts(state, projects)
+    assert result.prompts == [] and result.excluded == {"malformed": 1, "no_uuid": 1, "no_text": 1}
+
+
+def test_bind_twice_gives_two_ledger_lines_and_a_hand_edited_snapshot_is_unbound(env):
+    state, projects, tdir = env
+    _bind(state, projects)
+    _bind(state, projects)
+    ledger = [json.loads(x) for x in (state / src.LEDGER_FILE).read_text().splitlines()]
+    assert len(ledger) == 2 and ledger[1]["previous_transcript_dirs"] == [SLUG] and ledger[0]["previous_transcript_dirs"] is None
+    snapshot = json.loads((state / src.BINDING_FILE).read_text())
+    assert all(snapshot[k] == ledger[1][k] for k in ("transcript_dirs", "memory_dir", "project_id"))
+    (tdir / "other").mkdir()
+    (state / src.BINDING_FILE).write_text(json.dumps({**snapshot, "transcript_dirs": ["other"]}))
+    result = src.read_prompts(state, projects)
+    assert result.state == "unbound" and "ledger" in result.reason
+    (state / src.LEDGER_FILE).unlink()
+    _bind_only_snapshot = json.dumps(snapshot)
+    (state / src.BINDING_FILE).write_text(_bind_only_snapshot)
+    assert src.read_prompts(state, projects).state == "unbound"
+
+
+def _cli(env, *args):
+    from operator_steering import main
+    state, projects, _ = env
+    return main(["--state-dir", str(state), "--projects-root", str(projects), *args])
+
+
+def test_cli_bind_and_show_never_prints_an_excluded_line(env, capsys):
+    state, projects, tdir = env
+    assert _cli(env, "bind", f"--transcript-dir={SLUG}", "--memory-dir", str(tdir / "memory")) == 0
+    assert _cli(env, "bind", "--transcript-dir=clients-x", "--memory-dir", str(tdir / "memory")) == 2
+    _fixture(tdir)
+    passed = src.read_prompts(state, projects).prompts[0]
+    capsys.readouterr()
+    assert _cli(env, "show", "--prompt", passed.prompt_id) == 0
+    assert capsys.readouterr().out == f"s1.jsonl:1\n{passed.text}\n"
+    excluded_id = src._prompt_id("s1", "u2")
+    assert _cli(env, "show", "--prompt", excluded_id) == 1
+    out = capsys.readouterr()
+    assert "klaar" not in out.out + out.err and out.out == ""
