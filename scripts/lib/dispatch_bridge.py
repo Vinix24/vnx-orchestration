@@ -58,6 +58,7 @@ from dispatch_spec import (  # noqa: E402
     retired_gate_hint,
 )
 from skill_prefix import resolve_skill_dir, skill_search_paths  # noqa: E402
+from stage_origin import record_declared_edge  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -230,6 +231,33 @@ def resolve_parent_dispatch(
     return explicit
 
 
+def _stage_lineage(
+    dispatch_id: str,
+    work_ref: Optional[str],
+    parent_dispatch: Optional[str],
+    origin_oi: Optional[str],
+    origin_pr: Optional[int],
+    root: Path,
+) -> "tuple[Optional[str], Optional[str], dict]":
+    """``(parent_dispatch, edge_kind, evidence)`` for a bundle about to be staged.
+
+    Resolves the named origin (``origin_oi`` / ``origin_pr``, ADR-071 besluit 3) first, then lets
+    ``resolve_parent_dispatch`` apply its one rule against ``work_ref``. ``edge_kind`` is
+    ``oi_fix`` / ``pr_fix`` for a named origin and ``None`` otherwise; ``evidence`` names the OI,
+    the PR, the ``work_ref`` or the explicit ``parent_dispatch`` the predecessor came from.
+    """
+    from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
+
+    origin, kind, evidence = resolve_origin(
+        origin_oi, origin_pr, state_dir=root / "state", project_root=_project_root(),
+    )
+    explicit = merge_origin_into_parent(dispatch_id, origin, parent_dispatch)
+    parent = resolve_parent_dispatch(dispatch_id, work_ref, explicit)
+    if parent and not evidence:
+        evidence = {"parent_dispatch": parent} if explicit else {"work_ref": (work_ref or "").strip()}
+    return parent, kind, evidence
+
+
 class UnknownSkillError(ValueError):
     """A staged spec named a skill that exists in neither of the two skill trees.
 
@@ -365,6 +393,8 @@ def stage_spec_bundle(
     # stays default OFF (advisory-only absence) at the door; this parameter only
     # fixes the OVERDRACHT (transfer) so a caller who HAS a track_id can hand it off.
     track_id: Optional[str] = None,
+    origin_oi: Optional[str] = None,
+    origin_pr: Optional[int] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -388,12 +418,6 @@ def stage_spec_bundle(
     # Rule 11 enforces, from the same constants (dispatch_spec).
     _require_deadline_in_range(deadline_seconds)
 
-    # 1a-bis. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf): a
-    # fix-forward's work_ref already names the dispatch it continues, so derive
-    # parent_dispatch from it when the caller didn't supply one, and refuse a
-    # conflicting explicit value loud here rather than staging two lineages.
-    parent_dispatch = resolve_parent_dispatch(dispatch_id, work_ref, parent_dispatch)
-
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
@@ -409,6 +433,12 @@ def stage_spec_bundle(
     # 2. resolve the data root the SAME way the door does — anchored on the tenant.
     root = (data_dir or _data_dir(effective_project_id)).resolve()
     pending = root / "dispatches" / "pending"
+
+    # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
+    # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
+    parent_dispatch, edge_kind, edge_evidence = _stage_lineage(
+        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root,
+    )
 
     # 3. anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
     if pending.exists() and not pending.resolve().is_relative_to(root):
@@ -478,9 +508,15 @@ def stage_spec_bundle(
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
+        **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+        **({"origin_pr": origin_pr} if origin_pr else {}),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
+    record_declared_edge(
+        data_root=root, project_id=effective_project_id, dispatch_id=dispatch_id,
+        predecessor=spec_payload["parent_dispatch"], kind=edge_kind, evidence=edge_evidence,
+    )
     return spec_file
 
 
@@ -809,6 +845,8 @@ def _main_stage(argv: list) -> int:
     # required by this command; the door's _check_track_link_verdict is the one place
     # that enforces existence/format, exactly as for a track_id staged any other way.
     parser.add_argument("--track", default=None, dest="track_id")
+    parser.add_argument("--origin-oi", default=None, dest="origin_oi")
+    parser.add_argument("--origin-pr", default=None, dest="origin_pr", type=int)
     parser.add_argument("--data-dir", default=None, dest="data_dir", type=Path)
     args = parser.parse_args(argv)
 
@@ -848,6 +886,8 @@ def _main_stage(argv: list) -> int:
             deadline_seconds=args.deadline_seconds,
             tags=tuple(args.tags),
             track_id=args.track_id,
+            origin_oi=args.origin_oi,
+            origin_pr=args.origin_pr,
             data_dir=args.data_dir,
         )
     except (ValueError, OSError) as exc:
