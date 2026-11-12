@@ -5,6 +5,7 @@ counts and note names only (decision 11): no prompt text, note description or to
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections import Counter, deque
@@ -180,14 +181,20 @@ def _coverage(counts: Dict[str, int]) -> Tuple[Optional[float], str]:
     return round(1 - unclassified / total, 4), status
 
 
-def _case_json(case: Case) -> dict:
-    return {"klasse": case.klasse, "reden": case.reason, "group_id": case.group_id, "sessies": case.sessions,
+def case_id(project_id: Optional[str], klasse: str, anchor_prompt_id: str) -> str:
+    """ADR-072 decision 16: sha256 (hex) of ``project_id | klasse | anchor_prompt_id``; the one definition."""
+    return hashlib.sha256(f"{project_id or ''}|{klasse}|{anchor_prompt_id}".encode("utf-8")).hexdigest()
+
+
+def _case_json(case: Case, project_id: Optional[str]) -> dict:
+    return {"case_id": case_id(project_id, case.klasse, case.anchor_prompt_id), "klasse": case.klasse, "reden": case.reason, "group_id": case.group_id, "sessies": case.sessions,
             "anker_prompt_id": case.anchor_prompt_id, "prompt_ids": list(case.prompt_ids), "notities": list(case.notes),
             "context": [{"prompt_id": c.prompt_id, "tool_calls": [{"id": t.call_id, "naam": t.name} for t in c.tool_calls],
                          "dispatch_ids": list(c.dispatch_ids), "pr_nummers": list(c.pr_numbers)} for c in case.contexts]}
 
 
-def _analysis(prompts: List[SteeringPrompt], notes: List[MemoryNote], turns: Dict[str, AssistantTurn]) -> dict:
+def _analysis(prompts: List[SteeringPrompt], notes: List[MemoryNote], turns: Dict[str, AssistantTurn],
+              project_id: Optional[str]) -> dict:
     counts = {c.name: 0 for c in STEERING_CLASSES}
     for p in prompts:
         counts[p.klasse] = counts.get(p.klasse, 0) + 1
@@ -201,7 +208,7 @@ def _analysis(prompts: List[SteeringPrompt], notes: List[MemoryNote], turns: Dic
                                "prompt_ids": list(g.prompt_ids)} for g in groups],
         "notities": [{"naam": m.name, "status": m.status, "prompt_ids": list(m.prompt_ids),
                       "eigen_misser": m.eigen_misser} for m in matches],
-        "gevallen": [_case_json(c) for c in cases]}
+        "gevallen": [_case_json(c, project_id) for c in cases]}
 
 
 def build_report(state_dir: Path, projects_root: Path, since: datetime, until: datetime,
@@ -215,8 +222,9 @@ def build_report(state_dir: Path, projects_root: Path, since: datetime, until: d
     memory, notes = read_notes(binding) if binding else (SourceResult("unbound", result.reason), [])
     usable = result.state == "ok"
     prompts = [p for p in collected.prompts if start <= p.ts < end] if usable else []
-    analysis = _analysis(prompts, notes if usable else [], collected.turns)
-    report = {"schema": SCHEMA, "project_id": project_id_from_state_dir(state_dir) or None,
+    project_id = project_id_from_state_dir(state_dir) or None
+    analysis = _analysis(prompts, notes if usable else [], collected.turns, project_id)
+    report = {"schema": SCHEMA, "project_id": project_id,
               "venster": {"since": start.isoformat(), "until": end.isoformat()}, "gegenereerd": stamp.isoformat(),
               "bronstaat": {"transcripts": _source_block(result), "memory": _source_block(memory)},
               "uitgesloten": dict(sorted(collected.excluded.items())) if usable else {},

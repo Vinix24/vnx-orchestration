@@ -785,6 +785,22 @@ def _cmd_decide_rule(args) -> int:
     return 0
 
 
+def _cmd_steering(args) -> int:
+    """`vnx learning steering report|show ...`: the same code as scripts/operator_steering.py."""
+    import operator_steering  # type: ignore[import]
+
+    forwarded = list(getattr(args, "steering_args", None) or [])
+    if forwarded[:1] == ["--"]:  # argparse REMAINDER cannot start with an option; `--` lets global options lead
+        forwarded = forwarded[1:]
+    if not any(word in ("report", "show") for word in forwarded):
+        print("Usage: vnx learning steering {report|show} ...", file=sys.stderr)
+        return 2
+    if not any(word == "--state-dir" or word.startswith("--state-dir=") for word in forwarded):
+        # global --project-dir, like every other `vnx learning` subcommand; an explicit --state-dir wins
+        forwarded = ["--state-dir", str(_resolve_state_dir(Path(getattr(args, "project_dir", ".")))), *forwarded]
+    return operator_steering.main(forwarded)
+
+
 def vnx_learning(args) -> int:
     sub = getattr(args, "learning_subcommand", None)
     dispatch = {
@@ -798,8 +814,9 @@ def vnx_learning(args) -> int:
         "approve": _cmd_approve,
         "dismiss": _cmd_dismiss,
         "decide-rule": _cmd_decide_rule,
+        "steering": _cmd_steering,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|approve|dismiss|decide-rule|grounding-shadow|tagger-ab|skill-refine|skill-review}")
+    print("Usage: vnx learning {run|status|review|approve|dismiss|decide-rule|steering|grounding-shadow|tagger-ab|skill-refine|skill-review}")
     return 1

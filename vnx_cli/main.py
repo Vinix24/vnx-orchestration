@@ -1442,6 +1442,19 @@ def _register_learning_decide_rule(learning_subs: argparse.Action) -> None:
     )
 
 
+def _register_learning_operator_tier(learning_subs: argparse.Action) -> None:
+    _register_learning_decide_rule(learning_subs)
+    _register_learning_steering(learning_subs)
+
+
+def _register_learning_steering(learning_subs: argparse.Action) -> None:
+    lr_steer = learning_subs.add_parser(
+        "steering",
+        help="operator steering (ADR-072): `report` and `show --case`; arguments go to scripts/operator_steering.py",
+    )
+    lr_steer.add_argument("steering_args", nargs=argparse.REMAINDER, metavar="ARGS")
+
+
 def _register_learning_subparser(subparsers: argparse.Action) -> None:
     learning_parser = subparsers.add_parser(
         "learning",
@@ -1614,7 +1627,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         choices=["success_patterns", "prevention_rules"],
         help="disambiguate when the same id appears in two tables",
     )
-    _register_learning_decide_rule(learning_subs)
+    _register_learning_operator_tier(learning_subs)
 
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:
