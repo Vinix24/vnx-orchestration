@@ -1,7 +1,5 @@
 """DR-2: changekind of a follow-up head, on real temporary git repos (plan "Klaar per levering" 3)."""
 
-from __future__ import annotations
-
 import subprocess
 import sys
 from pathlib import Path
@@ -32,113 +30,125 @@ def commit(repo: Path, files: dict, msg: str) -> str:
 
 LIB = "def helper():\n    return 1\n\n\ndef other():\n    return 2\n"
 USER = "from lib import helper\n\n\ndef use():\n    return helper()\n"
+FEAT, APP, UNRELATED = "scripts/lib/feature.py", "scripts/lib/app.py", "scripts/lib/unrelated.py"
 FEATURE = "def feature():\n    return 'a'\n"
+BLOCK = "".join(f"    x{i} = {i}\n" for i in range(10)) + "    return x5\n"
+APP_SRC = "def first():\n" + BLOCK + "\n\ndef second():\n" + BLOCK
+CUT, EDIT = APP_SRC.index("def second"), ("x5 = 5", "x5 = 50")  # the same one-line edit, in first() or in second()
+IN_FIRST, IN_SECOND = APP_SRC[:CUT].replace(*EDIT) + APP_SRC[CUT:], APP_SRC[:CUT] + APP_SRC[CUT:].replace(*EDIT)
+OID, CANNOT = "a" * 40, (rc.REWORK, rc.REASON_CANNOT_PROVE)
 
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
     git(tmp_path, "init", "-q", "-b", "main")
-    commit(tmp_path, {"scripts/lib/lib.py": LIB, "scripts/lib/user.py": USER, "scripts/lib/unrelated.py": "X = 1\n"}, "base")
+    commit(tmp_path, {"scripts/lib/lib.py": LIB, "scripts/lib/user.py": USER, UNRELATED: "X = 1\n", APP: APP_SRC}, "base")
     git(tmp_path, "checkout", "-q", "-b", "pr")
     return tmp_path
 
 
-def parent_on_pr(repo: Path) -> str:
-    return commit(repo, {"scripts/lib/feature.py": FEATURE}, "feature")
-
-
-def rebase_onto_new_main(repo: Path, main_files: dict) -> str:
+def move_main(repo: Path, main_files: dict, pick: str = "") -> str:
+    """Main moves; HEAD is left detached on the new main, with ``pick`` cherry-picked (a rebase of one commit)."""
     git(repo, "checkout", "-q", "main")
     commit(repo, main_files, "main moves")
-    git(repo, "checkout", "-q", "pr")
-    git(repo, "rebase", "-q", "main")
+    git(repo, "checkout", "-q", "--detach")
+    if pick:
+        git(repo, "cherry-pick", pick)
     return git(repo, "rev-parse", "HEAD")
 
 
-def test_rebase_without_content_change_is_trivial_rebase(repo):
-    parent = parent_on_pr(repo)
-    head = rebase_onto_new_main(repo, {"scripts/lib/unrelated.py": "X = 2\n"})
-    rec = rc.classify_change(repo, "main", parent, head, {"scripts/lib/feature.py"})
-    assert rec.changekind == rc.TRIVIAL_REBASE and rec.full_review_reason is None
-    assert rec.parent_patch_id == rec.head_patch_id != rc.EMPTY_PATCH_ID
-    assert rc.patch_id(repo, "main", "main") == rc.EMPTY_PATCH_ID
+@pytest.mark.parametrize("main_files,want", [({UNRELATED: "X = 2\n"}, (rc.TRIVIAL_REBASE, None)),
+                                              ({"scripts/lib/üser.py": "Y = 1\n"}, (rc.REWORK, rc.REASON_INPUT_SET))])  # unquoted path
+def test_clean_rebase_is_trivial_rebase_unless_the_base_move_touches_the_input_set(repo, main_files, want):
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
+    head = move_main(repo, main_files, pick=parent)
+    rec = rc.classify_change(repo, "main", parent, head, {FEAT, "scripts/lib/üser.py"})
+    assert (rec.changekind, rec.full_review_reason) == want
+    assert rec.parent_patch_id == rec.head_patch_id != rc.EMPTY_PATCH_ID == rc.patch_id(repo, "main", "main")
+    assert rc.interdiff(repo, "main", parent, head).paths == frozenset()
 
 
-def test_rebase_that_moves_a_file_of_the_input_set_is_rework(repo):
-    parent = parent_on_pr(repo)
-    head = rebase_onto_new_main(repo, {"scripts/lib/user.py": USER + "\nY = 1\n"})
-    rec = rc.classify_change(repo, "main", parent, head, {"scripts/lib/feature.py", "scripts/lib/user.py"})
-    assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, rc.REASON_INPUT_SET)
+@pytest.mark.parametrize("base_moves,reason", [(False, None), (True, rc.REASON_REBASE_REWORK)])
+def test_relocated_edit_is_rework_and_interdiff_names_both_functions(repo, base_moves, reason):
+    parent = commit(repo, {APP: IN_FIRST}, "edit first")
+    if base_moves:
+        move_main(repo, {UNRELATED: "X = 2\n"})
+    head = commit(repo, {APP: IN_SECOND}, "the same edit, in second")
+    rec = rc.classify_change(repo, "main", parent, head, {APP})
+    assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, reason)
+    assert rec.parent_patch_id == rec.head_patch_id  # one identity of the diff, two different codes
+    assert rc.interdiff(repo, "main", parent, head).symbols == {APP: {("app", "first"), ("app", "second")}}
 
 
-def test_changed_line_in_own_diff_is_rework_and_reports_symbols(repo):
-    parent = parent_on_pr(repo)
-    head = commit(repo, {"scripts/lib/feature.py": FEATURE.replace("'a'", "'b'")}, "fix")
+@pytest.mark.parametrize("old,new", [
+    ("def feature():\n    return 'a b'\n", "def feature():\n    return 'ab'\n"),  # whitespace inside a string
+    ("@allow\ndef feature():\n    return 1\n", "@deny\ndef feature():\n    return 1\n"),  # decorator only
+])
+def test_whitespace_or_decorator_change_is_rework_with_the_function_named(repo, old, new):
+    parent = commit(repo, {FEAT: old}, "feature")
+    head = commit(repo, {FEAT: new}, "change")
     rec = rc.classify_change(repo, "main", parent, head, set())
     assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, None)
-    assert rec.parent_patch_id != rec.head_patch_id
-    inter = rc.interdiff(repo, "main", parent, head)
-    assert inter.paths == {"scripts/lib/feature.py"}
-    assert inter.symbols["scripts/lib/feature.py"] == {("feature", "feature")}
+    assert rc.interdiff(repo, "main", parent, head).symbols == {FEAT: {("feature", "feature")}}
 
 
-def test_whitespace_only_change_in_a_string_is_rework_with_the_function_named(repo):
-    parent = commit(repo, {"scripts/lib/feature.py": "def feature():\n    return 'a b'\n"}, "feature")
-    head = commit(repo, {"scripts/lib/feature.py": "def feature():\n    return 'ab'\n"}, "squash space")
+def test_replay_with_a_conflict_is_rework_and_names_the_conflicted_path(repo):
+    parent = commit(repo, {UNRELATED: "X = 2\n"}, "parent edit")
+    move_main(repo, {UNRELATED: "X = 3\n"})
+    head = commit(repo, {UNRELATED: "X = 2\n"}, "conflict resolved to the parent's side")
     rec = rc.classify_change(repo, "main", parent, head, set())
-    assert rec.changekind == rc.REWORK and rec.parent_patch_id != rec.head_patch_id
-    inter = rc.interdiff(repo, "main", parent, head)
-    assert inter.symbols == {"scripts/lib/feature.py": {("feature", "feature")}}
+    assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, rc.REASON_REBASE_REWORK)
+    assert rc.interdiff(repo, "main", parent, head).paths == {UNRELATED}
 
 
-def test_decorator_only_change_marks_the_function_as_changed(repo):
-    src = "@{}\ndef feature():\n    return 1\n\n\ndef other():\n    return 2\n"
-    parent = commit(repo, {"scripts/lib/feature.py": src.format("allow")}, "feature")
-    head = commit(repo, {"scripts/lib/feature.py": src.format("deny")}, "swap decorator")
-    inter = rc.interdiff(repo, "main", parent, head)
-    assert inter.symbols["scripts/lib/feature.py"] == {("feature", "feature")}
+@pytest.mark.parametrize("cmd,result", [("merge-tree", r) for r in (
+    "", "not-a-tree\0", f"{OID}\0{UNRELATED}\0", (None, ""), (128, ""), (1, f"{OID}\0"), (1, f"bad\0{UNRELATED}\0")
+)] + [("patch-id", (128, "")), ("merge-base", "\n"), ("rev-parse", "not-a-tree\n")])
+def test_git_without_positive_evidence_is_rework_cannot_prove(repo, cmd, result):
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
+    head = move_main(repo, {UNRELATED: "X = 2\n"}, pick=parent)
+
+    def run(r, args, stdin=None):
+        if args[0] == cmd and isinstance(result, tuple):
+            raise rc.ChangeKindError(cmd, *result)
+        return result if args[0] == cmd else rc._run_git(r, args, stdin)
+    rec = rc.classify_change(repo, "main", parent, head, {FEAT}, run=run)
+    assert (rec.changekind, rec.full_review_reason) == CANNOT
 
 
 def test_interdiff_on_security_path_names_path_kind_and_rule_version(repo):
-    parent = parent_on_pr(repo)
-    head = commit(repo, {".github/workflows/ci.yml": "name: ci\n"}, "workflow")
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
+    head = commit(repo, {".github/workflows/cî.yml": "name: ci\n"}, "workflow")
     rec = rc.classify_change(repo, "main", parent, head, set())
     assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, rc.REASON_SECURITY_PATH)
-    assert rec.security_paths == {".github/workflows/ci.yml": "ci-workflows"}
+    assert rec.security_paths == {".github/workflows/cî.yml": "ci-workflows"}  # a non-ASCII path, unquoted
     assert rec.plan_scope_rule_version == plan_scope_rule_version()
 
 
-def test_merge_commit_only_change_is_no_code_change(repo):
-    parent = parent_on_pr(repo)
+def test_identical_head_after_a_no_op_merge_commit_is_no_code_change(repo):
+    parent = commit(repo, {FEAT: FEATURE}, "feature")
     head = git(repo, "commit-tree", f"{parent}^{{tree}}", "-p", parent, "-p", git(repo, "rev-parse", "main"), "-m", "merge")
-    rec = rc.classify_change(repo, "main", parent, head, {"scripts/lib/feature.py"})
+    rec = rc.classify_change(repo, "main", parent, head, {FEAT})
     assert (rec.changekind, rec.full_review_reason) == (rc.NO_CODE_CHANGE, None)
 
 
-def test_seat_input_set_adds_importers_of_a_changed_module(repo):
-    got = rc.seat_input_set(repo, "main", {"scripts/lib/lib.py"})
-    assert got == {"scripts/lib/lib.py", "scripts/lib/user.py"}
-
-
-def test_seat_input_set_fails_when_an_import_edge_is_unknown(repo):
+def test_seat_input_set_adds_importers_and_fails_on_an_unknown_import_edge(repo):
+    assert rc.seat_input_set(repo, "main", {"scripts/lib/lib.py"}) == {"scripts/lib/lib.py", "scripts/lib/user.py"}
     commit(repo, {"scripts/lib/broken.py": "def (:\n"}, "broken")
     with pytest.raises(rc.ChangeKindError):
         rc.seat_input_set(repo, "pr", {"scripts/lib/lib.py"})
 
 
-def test_git_failure_is_rework_cannot_prove_never_trivial_rebase(repo):
-    parent = parent_on_pr(repo)
-    rec = rc.classify_change(repo, "main", parent, "0" * 40, set())
-    assert (rec.changekind, rec.full_review_reason) == (rc.REWORK, rc.REASON_CANNOT_PROVE)
-
-
-@pytest.mark.parametrize("pids,equal,moved,kind", [
-    (("a", "a"), True, [], rc.NO_CODE_CHANGE),
-    (("a", "a"), False, ["x.py"], rc.TRIVIAL_REBASE),
-    (("a", "b"), False, [], rc.REWORK),
+@pytest.mark.parametrize("facts,security,want", [
+    ((True, True, True), {}, (rc.NO_CODE_CHANGE, None)), ((True, False, True), {}, (rc.REWORK, None)),
+    ((False, True, True), {}, (rc.TRIVIAL_REBASE, None)), ((False, False, True), {}, (rc.REWORK, rc.REASON_REBASE_REWORK)),
+    ((False, True, False), {}, (rc.REWORK, rc.REASON_REBASE_REWORK)),  # tree equal, yet not merged cleanly
+    ((True, True, True), {"ci.yml": "ci-workflows"}, (rc.REWORK, rc.REASON_SECURITY_PATH)),
+    ((True, None, True), {}, CANNOT), ((None, True, True), {}, CANNOT), ((True, 1, True), {}, CANNOT),
+    ((False, True, "yes"), {}, CANNOT), ((True, True, True), None, CANNOT),
 ])
-def test_decide_pure(pids, equal, moved, kind):
-    assert rc.decide(*pids, equal, moved, {"in.py"}, {})[0] == kind
+def test_decide_pure_and_fail_closed_on_unknown_facts(facts, security, want):
+    assert rc.decide(*facts, ["x.py"], {"in.py"}, security) == want
 
 
 def test_vanished_function_is_unverifiable_and_forces_full_review(repo):
