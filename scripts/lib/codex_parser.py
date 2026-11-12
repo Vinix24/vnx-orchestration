@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterator, List, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 # C6 step 3 + OI-1767 + OI-1938: one source, not a fourth literal copy.
 # VALID_VERDICTS stays importable from here: tests/test_gate_lane_contract.py pins its identity.
@@ -55,6 +55,51 @@ def _extract_codex_text(stdout: str) -> str:
             if text:
                 texts.append(text)
     return "\n".join(texts).strip() if texts else stdout.strip()
+
+
+_AGENT_MESSAGE_TYPES = frozenset({"agent_message", "assistant_message", "output_text"})
+
+
+def _stream_events(stdout: str) -> Iterator[Dict[str, Any]]:
+    for line in stdout.splitlines():
+        try:
+            payload = json.loads(line.strip()) if line.strip() else None
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            yield payload
+
+
+def extract_final_agent_message(stdout: str) -> str:
+    """The text of the LAST agent message of a ``codex exec --json`` stream.
+
+    Same message shapes as :func:`_extract_codex_text`, which joins them all; a reader that wants the seat's final
+    answer (the delta shadow) must not see the earlier messages. A stream with no agent message is plain text and is
+    returned as it is.
+    """
+    last = ""
+    for payload in _stream_events(stdout):
+        item = payload.get("item") if isinstance(payload.get("item"), dict) else None
+        source = item if item and item.get("type") in _AGENT_MESSAGE_TYPES else (
+            payload if payload.get("type") in _AGENT_MESSAGE_TYPES else None)
+        text = (source.get("text") if source else None) or ""
+        if isinstance(text, str) and text:
+            last = text
+    return last.strip() if last else stdout.strip()
+
+
+def extract_usage_tokens(stdout: str) -> Optional[Dict[str, int]]:
+    """Input and output tokens summed over the ``turn.completed`` events; ``None`` when the stream reports none."""
+    totals: Dict[str, int] = {}
+    for payload in _stream_events(stdout):
+        usage = payload.get("usage") if payload.get("type") == "turn.completed" else None
+        if not isinstance(usage, dict):
+            continue
+        for key, name in (("input_tokens", "input"), ("output_tokens", "output")):
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                totals[name] = totals.get(name, 0) + value
+    return totals or None
 
 
 def _extract_codex_verdict(text: str) -> Dict[str, Any]:

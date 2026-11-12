@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import review_rounds
-from codex_parser import extract_verdict_block
+from codex_parser import extract_final_agent_message, extract_usage_tokens, extract_verdict_block
 from gate_worktree import create_gate_worktree, remove_gate_worktree
 from review_changekind import ChangeKindError, Interdiff, anchors_present, classify_change, interdiff, seat_input_set
 from review_delta import (Caller, DeltaInput, DeltaRefused, OpenFinding, _blocking_new, build_delta_prompt,
@@ -179,9 +179,13 @@ def run_shadow(*, request_payload: Mapping[str, Any], state_dir: Path, project_r
         result = run(prompt, worktree)
         if result.get("status") == "failed":
             raise RuntimeError(f"codex delta run failed: {result.get('reason')}")
-        parsed = parse_delta_verdict(str(result.get("stdout") or ""), [f.id for f in record.open_findings], blockers)
+        stdout = str(result.get("stdout") or "")
+        parsed = parse_delta_verdict(extract_final_agent_message(stdout), [f.id for f in record.open_findings], blockers)
+        tokens = extract_usage_tokens(stdout)
         line.update(delta_verdict=parsed.verdict, statuses=dict(parsed.statuses), new_findings=list(parsed.new_findings),
                     ignored_ids=list(parsed.ignored_ids), reasons=list(parsed.reasons), duration_seconds=result.get("duration_seconds"))
+        if tokens:  # absent stays absent: DR-5 reads a missing field as unknown, never 0
+            line["tokens"] = tokens
         book(path, line)
         return line
     except Exception as exc:  # fail-open: the full round's outcome never depends on the shadow step
