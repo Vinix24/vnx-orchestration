@@ -8,7 +8,6 @@ stops the run: the watermark stays at the last fully processed commit and only i
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 import subprocess
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import rework_attribution as ra
+from atomic_io import atomic_write_json
 
 WATERMARK_FILE = "rework_attribution_watermark.json"
 REWORK_TYPES = ("fix", "revert")
@@ -145,9 +145,7 @@ def _read_watermark(path: Path) -> Optional[str]:
 
 
 def _write_watermark(path: Path, sha: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps({"commit": sha}), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, {"commit": sha})
 
 
 def _start_point(watermark_path: Path, since: Optional[str]) -> str:
