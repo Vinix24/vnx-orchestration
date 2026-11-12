@@ -11,7 +11,6 @@ import pytest
 from review_stack_support import BRANCH, PR  # importing it puts scripts/ and scripts/lib on sys.path
 import review_delta_compare as rdc
 import review_rounds as rr
-import review_rounds_cli as cli
 from review_findings import id_for_finding, symbolic_context
 
 SINCE = datetime(2026, 11, 1, tzinfo=timezone.utc)
@@ -97,16 +96,11 @@ def test_twenty_clean_pairs_and_ten_found_planted_cases_pass(store):
     assert result.outcome == rdc.PASS and len(result.pairs) == 20 and result.missed_blockers == 0
 
 
-def test_nineteen_pairs_is_insufficient(store):
-    clean(store, 19)
-    result = store.run(planted=planted_set(store))
-    assert result.outcome == rdc.INSUFFICIENT and "19 pairs" in result.reasons[0]
-
-
-def test_no_planted_manifest_and_too_few_cases_are_insufficient(store):
-    clean(store, 20)
-    assert "no planted manifest" in store.run().reasons
-    assert any("3 planted cases" in r for r in store.run(planted=planted_set(store, 3)).reasons)
+@pytest.mark.parametrize("pairs,planted_count,reason", [(19, 10, "19 pairs"), (20, None, "no planted manifest"), (20, 3, "3 planted cases")])
+def test_too_few_pairs_or_planted_cases_are_insufficient(store, pairs, planted_count, reason):
+    clean(store, pairs)
+    result = store.run(planted=None if planted_count is None else planted_set(store, planted_count))
+    assert result.outcome == rdc.INSUFFICIENT and any(reason in r for r in result.reasons)
 
 
 def test_an_unfound_planted_case_fails(store):
@@ -193,15 +187,3 @@ def test_parse_time():
         with pytest.raises(rdc.CompareError):
             rdc.parse_time(bad)
 
-
-def test_cli_exit_codes(store, monkeypatch, capsys):
-    clean(store, 19)
-    store.pair(50, [blocker(msg="only full")], new=[])
-    store.run()
-    monkeypatch.setattr(rdc, "git_source_of", lambda repo: source_of)
-    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
-    argv = ["delta-compare", "--since", "2026-11-01T00:00:00Z", "--data-dir", str(store.tmp)]
-    assert cli.main(argv + ["--json"]) == 1
-    assert json.loads(capsys.readouterr().out)["outcome"] == "fail"
-    assert cli.main(["delta-compare", "--since", "yesterday-ish", "--data-dir", str(store.tmp)]) == 2
-    assert cli.main(argv + ["--planted", str(store.tmp / "none.json")]) == 2

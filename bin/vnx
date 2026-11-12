@@ -377,8 +377,6 @@ Gate commands (pre-merge verification):
   gate-reanchor --pr <N> --gate <G>
                         Move an existing gate verdict onto the PR's current head when
                         the reviewed input is provably identical (read-only; --apply writes)
-  review delta-compare --since <time|Nd> [--planted <manifest>]
-                        The shadow delta against the full codex round, per pair (DR-5)
   review rounds open --pr <N> --reason "..."
                         Open PR N, reviewed before the round ledger, as the operator:
                         an attested line in review_gates/rounds.ndjson plus a receipt;
