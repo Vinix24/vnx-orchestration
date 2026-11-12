@@ -2,6 +2,8 @@
 
 The operator's one place to turn model providers on and off. It covers every call the VNX engine makes to a non-claude, non-codex provider, in every project whose engine knows the switch. Code: `scripts/lib/provider_switch.py` (the library), `scripts/providers_cli.py` (the `vnx providers` command). Decision record: `docs/governance/decisions/ADR-044-provider-schakelaar.md`.
 
+Verified against `origin/main` at `c41411fea` on 2026-11-12. The switch has shipped since v1.7.2; every launch function enforces it since v1.7.4.
+
 The switch decides whether a provider may be called at all. The content boundary (`scripts/lib/content_class.py`) decides whether given content may go to it. Both must allow; neither widens the other.
 
 ## Operator use
@@ -41,7 +43,7 @@ A family names the model maker, so one switch covers every route to it. Switchab
 | `local` | `local`, `ollama`, `ollama:*`, `local-gemma`, `local_gemma`, `gemma-*-local`, `litellm:ollama/*` |
 | `openrouter` | `openrouter`, and any `litellm:openrouter/<maker>/*` or `openrouter/<maker>/*` whose maker is not named above |
 
-Not switchable, always allowed: `claude` (`claude`, `claude_headless`, `anthropic`, `claude-*`, `opus*`, `sonnet*`, `haiku*`, `fable*`), `codex` (`codex`, `codex_gate`, `openai`, `gpt-*`), `tooling` (`gh`, `ci_gate`, `wiring_gate`, `claude_github_optional`) and `unresolved` (`auto`, which the router resolves to a lane that is then checked). `vnx providers off claude` exits 2 with the reason.
+Not switchable, always allowed: `claude` (`claude`, `claude_headless`, `claude_gate`, `anthropic`, `claude-*`, `opus*`, `sonnet*`, `haiku*`, `fable*`), `codex` (`codex`, `codex_gate`, `openai`, `gpt-*`), `tooling` (`gh`, `ci_gate`, `wiring_gate`, `claude_github_optional`) and `unresolved` (`auto`, which the router resolves to a lane that is then checked). `vnx providers off claude` exits 2 with the reason.
 
 A harness lane that redirects a claude launch (`deepseek-harness`, `glm-harness`) is decided on the family it reaches, not on `claude`. Hosts map the same way: `api.deepseek.com` is `deepseek`, `api.z.ai` and `open.bigmodel.cn` are `glm`, `api.moonshot.*` is `kimi`, the Google AI hosts are `gemini`, `openrouter.ai` is the maker of the model when known else `openrouter`. On a loopback host, port 11434 is `local` and port 4141 is `glm` (the litellm proxy that fronts GLM). The same ports on any other host are not in the map.
 
@@ -133,7 +135,7 @@ Nothing is rerouted behind the operator's back. An explicit request for a switch
 
 ## The switch and the takeover chain
 
-`VNX_REVIEW_GATE_TAKEOVER_CHAIN` says which seat takes over when another cannot answer. The switch says which seats may be called. The chain walk asks the switch for every candidate, fresh each time. Switching off kimi, deepseek and glm leaves codex alone, so a PR cannot get a second review seat under the T0 rule. `vnx providers off` prints that consequence at write time, and the `chain_exhausted` record names `provider_switched_off` per hop so it reads differently from quota exhaustion. The merge door is not changed.
+`VNX_REVIEW_GATE_TAKEOVER_CHAIN` says which seat takes over when another cannot answer. The switch says which seats may be called. The chain walk asks the switch for every candidate, fresh each time. `claude_gate` belongs to the non-switchable `claude` family, so switching off kimi, deepseek and glm still leaves the default chain `codex_gate,kimi_gate,claude_gate,deepseek_gate` with a second reader. That reader is passed over when the builder ran a claude model (`DISPATCH_RULES.md` section 2), and then the seat ends as `chain_exhausted`. A chain without `claude_gate` whose later gates are all off leaves codex alone, and `vnx providers off` prints that consequence at write time (`_review_chain_consequence` in `scripts/providers_cli.py`), and the `chain_exhausted` record names `provider_switched_off` per hop so it reads differently from quota exhaustion. The merge door is not changed.
 
 ## The census and the guard
 
