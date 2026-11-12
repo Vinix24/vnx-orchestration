@@ -35,8 +35,8 @@ PR_ID = str(PR_NUMBER)
 BRANCH = "dispatch/20261004-keten-codex-kimi-deepseek"
 HEAD = "a" * 40
 OTHER_HEAD = "b" * 40
-# R7 (2026-10-22): claude_gate, a subscription seat, stands between kimi and deepseek.
-NEW_CHAIN = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+# 2026-11-11 (Kimi cancelled): deepseek_gate is seat 2, claude_gate the last link.
+NEW_CHAIN = "codex_gate,deepseek_gate,claude_gate"
 CLEAN_REPORT = "# Gate report\n\nAll findings reviewed, nothing blocking.\n"
 
 

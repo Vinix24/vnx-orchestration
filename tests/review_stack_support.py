@@ -48,6 +48,14 @@ def isolate_config_registry(monkeypatch):
     cr.set_default_project_id(None)
 
 
+def pin_kimi_era_review_config(monkeypatch):
+    """The stack, chain and deepseek model of every project until 2026-11-11 (mission-control still sets
+    them): a seat or takeover test written against that default keeps testing the mechanism."""
+    monkeypatch.setenv("VNX_DEFAULT_REVIEW_STACK", "codex_gate,kimi_gate")
+    monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,claude_gate,deepseek_gate")
+    monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
+
+
 def build_project_store(tmp_path, monkeypatch):
     """A throwaway project store, with the PR head and every provider edge fixed."""
     project_root = tmp_path / "project"

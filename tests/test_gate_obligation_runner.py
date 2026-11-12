@@ -533,10 +533,8 @@ def _seed_stuck_gate_result(state_dir: Path, gate: str, pr_number: int) -> None:
 class TestTakeoverChainEvidence:
     @pytest.fixture(autouse=True)
     def _clean_takeover_chain_env(self, monkeypatch):
-        # Hermetic: the default chain (codex_gate,kimi_gate,deepseek_gate,
-        # glm_gate) must come from the registry default, never from
-        # whatever happens to be set in the ambient shell/CI environment.
-        monkeypatch.delenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
+        # Hermetic: the chain these kimi-seat cases were written against (default until 2026-11-11).
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,claude_gate,deepseek_gate")
         monkeypatch.delenv("VNX_OVERRIDE_VNX_REVIEW_GATE_TAKEOVER_CHAIN", raising=False)
 
     def test_fulfilled_via_takeover_successor_evidence(self, tmp_path, monkeypatch):
@@ -2636,6 +2634,7 @@ class TestHeadMovedDuringGateRunIsNotBooked:
         """Requirement 3, takeover path: the declared gate stays stuck while
         the takeover successor carries a current verdict on the NEW head —
         the post-run re-resolution must still book it via the takeover walk."""
+        monkeypatch.setenv("VNX_REVIEW_GATE_TAKEOVER_CHAIN", "codex_gate,kimi_gate,claude_gate,deepseek_gate")
         state_dir = _make_state_dir(tmp_path)
         dispatch_id = "20260930-ffrace-takeover-new-head"
         self._register(state_dir, dispatch_id, 54004)

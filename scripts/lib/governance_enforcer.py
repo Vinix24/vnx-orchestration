@@ -603,6 +603,12 @@ class GovernanceEnforcer:
         """Codex gate result must exist with non-empty contract_hash."""
         return self._check_review_gate_required(cfg, ctx, "codex_gate")
 
+    def _check_deepseek_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
+        """Seat 2 since 2026-11-11 (Kimi cancelled), read like the kimi seat below. That
+        one stays: without it :meth:`check` would pass a consumer's ``kimi_gate_required``
+        as "No implementation — skipped"."""
+        return self._check_review_gate_required(cfg, ctx, "deepseek_gate")
+
     def _check_kimi_gate_required(self, cfg: CheckConfig, ctx: Dict[str, Any]) -> EnforcementResult:
         """Kimi gate result must exist with non-empty contract_hash (or its
         seat was read by a takeover successor — see

@@ -33,7 +33,7 @@ from typing import Any, Callable, Dict, List
 import pytest
 
 import review_stack_support  # noqa: F401  (puts scripts/ and scripts/lib on sys.path)
-from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry
+from review_stack_support import BRANCH, HEAD_SHA, PR, build_project_store, isolate_config_registry, pin_kimi_era_review_config
 from review_seat_support import open_pr_in_ledger
 
 _FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -74,6 +74,7 @@ def _clean_config_registry(monkeypatch):
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     store = build_project_store(tmp_path, monkeypatch)
+    pin_kimi_era_review_config(monkeypatch)
     import gate_request_handler
     import review_gate_manager
 
