@@ -72,6 +72,12 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# Every lifecycle line starts a detached `build_t0_state.py` (state_rebuild_trigger) that
+# inherits the test's VNX_STATE_DIR and runs init_schema on it while the test reads the same
+# store: "no such table: dispatches" / "no such column: project_id" under load (OI-2590,
+# OI-2712, OI-2729). Set here, it reaches every test and every subprocess a test starts;
+# a test of the trigger itself removes it with monkeypatch.delenv.
+os.environ["VNX_STATE_REBUILD_TRIGGER"] = "0"
 # VNX_PROJECT_ID is the operator's own project (every operator shell and worker here
 # exports vnx-dev). Left in the environment it outranks the project a test's fixture
 # derives: init/migrate backfills refuse with an ADR-007 project_id conflict, and

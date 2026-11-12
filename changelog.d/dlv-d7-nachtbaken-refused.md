@@ -1,0 +1,1 @@
+- Learning loop: the nightly beacon now records a refused cycle as `status=refused` with its `reason` (a degraded one carries its reason too), so `vnx doctor` warns instead of passing a night in which the ledger verdict was refused.

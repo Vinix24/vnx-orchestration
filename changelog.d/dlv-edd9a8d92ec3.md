@@ -1,0 +1,1 @@
+- ADR-071 records the rework per builder model and review seat: the `rework_edges` table with four edge kinds, rework against churn, three measures with the 14-day window and the n-rule, and proposals only (track herwerk-per-model-en-reviewer, H0).

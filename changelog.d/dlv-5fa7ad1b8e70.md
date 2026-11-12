@@ -1,0 +1,1 @@
+- `scripts/intelligence_ab_report.py` computes nothing itself any more: `weekly_ab_lift(qi_db, rc_db, project_id)` delegates to the cohort and the estimator, so a row without an arm never counts as treatment and a refused cohort gives no pairs (effect PR-9). The flags are now `--qi`, `--rc`, `--project-id` and `--as-of`.

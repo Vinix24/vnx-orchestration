@@ -53,7 +53,7 @@ UNREADABLE_SQL = "unreadable_sql"
 ALLOWED_WRITES = {
     "load_pattern_metrics": "CREATE TABLE IF NOT EXISTS pattern_usage, the loop's own bookkeeping table, on the in-memory shadow copy unless persist mode; it writes no intelligence row",
     "update_confidence_scores": "UPDATE pattern_usage bookkeeping counters; no intelligence table row",
-    "ingest_approved_rules": "INSERT prevention_rules only for rules the operator already marked status='approved' in pending_rules.json; persist mode only, pre-L4 operator gate",
+    "_ingest_rule": "INSERT prevention_rules (source='learning_loop', project_id stamped) only for a rule whose latest record in the store is an approval of this project and its unchanged proposal, with its activation in the same transaction; persist mode and a fresh ok or pending ledger verdict only (loop D9)",
     "save_pattern_metrics": "INSERT OR REPLACE pattern_usage bookkeeping rows; persist mode only",
     "_apply_supersede": "operator-approved archival disposition: apply_archival_decision validates approval_id, reason and approver before valid_until is set",
     "_apply_archive": "operator-approved archival disposition: only the DELETE of one pattern_usage row after the same validation",

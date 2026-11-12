@@ -31,6 +31,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("VNX_PROJECT_ID", "vnx-dev")
     monkeypatch.delenv(ll.QUEUE_ENV, raising=False)
     monkeypatch.delenv(ll.PERSIST_ENV, raising=False)
+    # queue mode reads ledger_source_check first (D7, tests/test_learning_loop_ledger_gate.py)
+    monkeypatch.setattr(ll, "_ledger_verdict", lambda *_: {"status": "ok", "reason_code": "ok"})
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
     (tmp_path / "repo").mkdir()

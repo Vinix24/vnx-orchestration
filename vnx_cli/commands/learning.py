@@ -29,6 +29,15 @@ def _resolve_state_dir(project_dir: Path) -> Path:
     return _engine.resolve_data_root(project_dir) / "state"
 
 
+def _print_inventory(state_dir: Path, project_dir: Path) -> None:
+    """The four loop-D4 status blocks: corpus, the three queues, access, decisions."""
+    from learning_inventory import print_status_blocks  # type: ignore[import]
+
+    print_status_blocks(
+        state_dir, project_dir, project_id=_engine.derive_project_id(project_dir)
+    )
+
+
 def _cmd_run(args) -> int:
     """Run the daily learning cycle and write pending proposals for operator review."""
     project_dir = Path(getattr(args, "project_dir", "."))
@@ -116,6 +125,7 @@ def _cmd_status(args) -> int:
         except (json.JSONDecodeError, OSError):
             pass
     print(f"  Pending skill refinements:                  {pending_refinements}")
+    _print_inventory(state_dir, project_dir)
     print()
     print("To review proposals: vnx learning review")
     print("To approve a candidate:   vnx learning approve <id> --approval-id <id> --reason <text>")
@@ -718,6 +728,63 @@ def _cmd_dismiss(args) -> int:
     return _cmd_disposition(args, "dismiss")
 
 
+def _decide_rule_usage_error(args, decision: str, rule_ids: list) -> str:
+    """The first usage problem of a decide-rule call, "" when there is none."""
+    if decision not in ("approved", "rejected"):
+        return f"--decision must be approved or rejected, got {decision!r}"
+    if not rule_ids or not all(isinstance(r, str) and r.strip() for r in rule_ids):
+        return "at least one non-empty --rule-id is required"
+    for name in ("reason", "by"):
+        if not (getattr(args, name, "") or "").strip():
+            return f"--{name.replace('_', '-')} must not be empty"
+    if decision == "approved":
+        for name in ("effect_criterion", "stop_condition"):
+            if not (getattr(args, name, "") or "").strip():
+                return f"--{name.replace('_', '-')} is required with --decision approved"
+    return ""
+
+
+def _cmd_decide_rule(args) -> int:
+    """Record an operator decision on one or more queued prevention rules as one bundle.
+
+    The decision is a record in prevention_rule_decisions.ndjson with a minted
+    approval_id (and bundle_ref for an approval), never a flag in the queue file.
+    Exit 2 on a usage error, 1 when a rule is unknown or the decision conflicts,
+    0 on success and on an identical repeat (which writes nothing).
+    """
+    from datetime import datetime, timezone
+
+    import prevention_rule_store as store  # type: ignore[import]
+
+    decision = getattr(args, "decision", "") or ""
+    rule_ids = list(getattr(args, "rule_ids", None) or [])
+    problem = _decide_rule_usage_error(args, decision, rule_ids)
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    project_dir = Path(getattr(args, "project_dir", "."))
+    state_dir = _resolve_state_dir(project_dir)
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        records = store.decide(
+            state_dir, rule_ids, decision,
+            reason=args.reason, decided_by=args.by,
+            project_id=_engine.derive_project_id(project_dir), now=now,
+            effect_criterion=getattr(args, "effect_criterion", None),
+            stop_condition=getattr(args, "stop_condition", None),
+        )
+    except (store.RuleNotFound, store.DecisionRefused, store.QueueUnreadable, store.DecisionsUnreadable) as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if not records:
+        print(f"unchanged: {', '.join(rule_ids)} already {decision}")
+        return 0
+    for record in records:
+        bundle = f" bundle_ref={record['bundle_ref']}" if "bundle_ref" in record else ""
+        print(f"{decision}: rule_id={record['rule_id']} approval_id={record['approval_id']}{bundle}")
+    return 0
+
+
 def vnx_learning(args) -> int:
     sub = getattr(args, "learning_subcommand", None)
     dispatch = {
@@ -730,8 +797,9 @@ def vnx_learning(args) -> int:
         "skill-review": _cmd_skill_review,
         "approve": _cmd_approve,
         "dismiss": _cmd_dismiss,
+        "decide-rule": _cmd_decide_rule,
     }
     if sub in dispatch:
         return dispatch[sub](args)
-    print("Usage: vnx learning {run|status|review|approve|dismiss|grounding-shadow|tagger-ab|skill-refine|skill-review}")
+    print("Usage: vnx learning {run|status|review|approve|dismiss|decide-rule|grounding-shadow|tagger-ab|skill-refine|skill-review}")
     return 1

@@ -1,0 +1,1 @@
+- Tests: `VNX_STATE_REBUILD_TRIGGER=0` (set once in `tests/conftest.py`) stops every lifecycle line from starting a detached state rebuild that raced the test stores (OI-2590, OI-2712, OI-2729).

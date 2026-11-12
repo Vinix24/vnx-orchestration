@@ -1,0 +1,1 @@
+- Test: `test_k7b_manifest_readers.py` no longer races the detached `build_t0_state.py` rebuild that every lifecycle line fires on the tmp store, the cause of the k7b flake (OI-2590, OI-2712, OI-2729).

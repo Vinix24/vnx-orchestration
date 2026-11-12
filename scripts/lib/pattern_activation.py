@@ -5,7 +5,8 @@ only producer of ``approval_id`` and ``bundle_ref``) and asks for nothing the re
 does not carry. It is written only from the latest record of its rule in the store.
 ``activation_id`` is deterministic over ``(project_id, approval_id, rule_id)``: a repeat
 hits the same key and never switches a deactivated row back on; only a new approval
-gives a new activation. Deactivation lands with its decision (D9).
+gives a new activation. ``deactivate`` (D9) switches one off only from a ``deactivated``
+record the store wrote for it; it never takes a decision from its caller (ADR-005).
 
 The table comes from ``_migrate_v35`` in ``scripts/quality_db_init.py``, keyed
 ``(project_id, activation_id)`` (ADR-007); every read filters on ``project_id``. A
@@ -22,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Mapping, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
 import prevention_rule_store as store
 from learning_ledger_gate import STATUS_OK, STATUS_PENDING, read_verdict
@@ -148,6 +149,51 @@ def record_activation(conn: sqlite3.Connection, decision: Any, *, state_dir: Pat
     conn.execute(f"INSERT INTO {TABLE} ({', '.join(names)}) VALUES ({', '.join('?' for _ in names)})",
                  [row[name] for name in names])
     return activation_id
+
+
+def _is_store_deactivation(record: Any, row: Mapping[str, Any]) -> bool:
+    """True only for a ``deactivated`` record the store minted for exactly this activation row."""
+    if not isinstance(record, Mapping) or record.get("decision") != "deactivated":
+        return False
+    keys = [record.get(n) for n in ("project_id", "rule_id", "decision", "decided_at", "decided_by")]
+    return (all(_is_text(k) for k in keys) and _is_text(record.get("reason"))
+            and record.get("approval_id") == store.mint_approval_id(*keys)
+            and (record["project_id"], record["rule_id"]) == (row["project_id"], row["rule_id"])
+            and record.get("activation_id") == row["activation_id"]
+            and record.get("deactivates_approval_id") == row["approval_id"])
+
+
+def deactivate(conn: sqlite3.Connection, state_dir: Path, activation_id: str, *, project_id: str) -> bool:
+    """Switch ``activation_id`` off from the store's record; True when this call switched it off.
+
+    The latest record of the activation's rule in ``state_dir`` must be a ``deactivated`` decision
+    the store wrote for this activation in ``project_id``: ``ValueError`` and no UPDATE otherwise.
+    An activation that is already off is a no-op (False). ``LookupError`` when ``project_id`` has
+    no such activation (also one of another project). Never commits."""
+    row = activation_for(conn, project_id, activation_id)
+    if row is None:
+        raise LookupError(f"{activation_id}: no activation in project {project_id!r}")
+    if row["active"] != 1:
+        return False
+    record = store.latest_decision(Path(state_dir), row["rule_id"])
+    if not _is_store_deactivation(record, row):
+        raise ValueError(f"{activation_id}: the latest record of {row['rule_id']} is no store deactivation of it")
+    conn.execute(f"UPDATE {TABLE} SET active = 0, deactivated_at = ?, deactivation_reason = ?, "
+                 "deactivation_approval_id = ? WHERE project_id = ? AND activation_id = ? AND active = 1",
+                 (record["decided_at"], record["reason"], record["approval_id"], project_id, activation_id))
+    return True
+
+
+def orphaned_activations(conn: sqlite3.Connection, project_id: str) -> List[Dict[str, Any]]:
+    """The active activations of ``project_id`` whose rule row is no loop row of that project any
+    more (deleted, rewritten): what the ingest switches off with reason ``rule_row_missing``."""
+    _project(project_id)
+    if not _has_table(conn):
+        return []
+    rows = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM {TABLE} AS pa WHERE pa.project_id = ? AND pa.active = 1 "
+                        "AND NOT EXISTS (SELECT 1 FROM prevention_rules AS pr WHERE pr.id = pa.rule_row_id "
+                        "AND pr.project_id = pa.project_id AND pr.source = ?)", (project_id, LOOP_SOURCE))
+    return [dict(zip(COLUMNS, row)) for row in rows]
 
 
 def state_dir_of(conn: sqlite3.Connection) -> Optional[Path]:

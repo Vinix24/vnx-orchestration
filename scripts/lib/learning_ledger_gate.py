@@ -7,7 +7,9 @@ the reason, never ``ok`` and never a raise. A ``legacy`` dispatch is no evidence
 reason to refuse. The verdict file ``state/learning_ledger_verdict.json`` is part of the module:
 ``write_verdict`` stores it atomically, ``read_verdict`` returns it or a ``refused`` dict
 (``verdict_unreadable`` for any defect incl. a future ``evaluated_at``, ``verdict_stale`` when
-older than 36h) and never raises.
+older than 36h) and never raises. Every verdict is appended to
+``state/learning_ledger_verdict.ndjson`` before the snapshot is written (ADR-005); the
+snapshot is a projection of the last line.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from atomic_io import atomic_write_json
+from atomic_io import atomic_write_json, audit_event_append
 from dispatch_lifecycle import _as_utc
 from ledger_attempt_state import (ATTEMPT_KINDS, KIND_DEAD_NO_END, KIND_ENDED, KIND_LEGACY,
                                   LEDGER_FILENAME, MODE_V3, attempt_verdict, read_ledger)
@@ -28,6 +30,7 @@ from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
 
 SCHEMA = "ledger_verdict/1"
 VERDICT_FILENAME = "learning_ledger_verdict.json"
+LEDGER_EVENT_TYPE = "learning_ledger_verdict"
 ACTIVATION_ENV = "VNX_LEDGER_ACTIVATION_COMMIT"
 STATUS_OK, STATUS_PENDING, STATUS_REFUSED = "ok", "pending", "refused"
 STATUSES = frozenset({STATUS_OK, STATUS_PENDING, STATUS_REFUSED})
@@ -212,7 +215,10 @@ def _is_verdict(verdict: Any) -> bool:
         return False
 
 def write_verdict(state_dir, verdict: Dict[str, Any]) -> Path:
-    """Write ``state/learning_ledger_verdict.json`` atomically; a write failure raises ``OSError``."""
+    """Append the verdict to ``state/learning_ledger_verdict.ndjson``, then write
+    ``state/learning_ledger_verdict.json`` atomically. A failing append raises before the
+    snapshot is touched: a verdict that is in no ledger may not drive the cycle."""
+    audit_event_append(Path(state_dir), LEDGER_EVENT_TYPE, verdict)
     path = Path(state_dir) / VERDICT_FILENAME
     atomic_write_json(path, verdict)
     return path
