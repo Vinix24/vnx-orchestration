@@ -1,0 +1,1 @@
+- Rekenslot RS-6: `scripts/lib/slot/slot_supervisor.py` runs a workload in its own session, books it on the lease, keeps the heartbeat and the 30-second memory samples, and releases only when the session and every child lease are positively gone (dlv-e9918dddd494).
