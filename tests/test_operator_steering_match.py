@@ -83,6 +83,24 @@ def test_same_session_pair_and_other_class_do_not_group():
     assert osm.build_groups(mixed) == ()
 
 
+def test_short_text_is_only_related_to_the_same_normalised_form():
+    assert osm.build_groups([P("a", "s1", 0, "akkoord"), P("b", "s2", 0, "akkoord, ga door")]) == ()
+    assert osm.build_groups([P("a", "s1", 0, "go"), P("b", "s2", 0, "go")])[0].sessions == 2
+
+
+def test_component_is_transitive():
+    chain = [P("a", "s1", 0, "dat klopt niet de release branch pakte je verkeerd gisteren"),
+             P("b", "s2", 0, "dat klopt niet de release branch pakte je verkeerd gisteren morgen"),
+             P("c", "s3", 0, "dat klopt niet de release branch pakte je verkeerd gisteren morgen weer")]
+    groups = osm.build_groups(chain)
+    assert len(groups) == 1 and groups[0].prompt_ids == ("a", "b", "c") and groups[0].sessions == 3
+
+
+def test_prompt_without_session_never_groups():
+    prompts = [P("a", "", 0, "akkoord"), P("b", "", 0, "akkoord")]
+    assert osm.build_groups(prompts) == ()
+
+
 def test_notes_found_ambiguous_not_found_and_same_day():
     matches = {m.name: m for m in osm.find_notes(NOTES, fixture())}
     assert (matches["note-a.md"].status, matches["note-a.md"].prompt_ids) == ("found", ("p05",))
@@ -100,12 +118,28 @@ def test_window_is_45_minutes_before_and_not_after():
     assert (found.status, found.prompt_ids) == ("found", ("in",))
 
 
+def test_one_shared_word_is_not_enough():
+    note = MemoryNote("n.md", "12-11 ~09:20Z OPERATOR: deploy gisteren mislukt", BASE)
+    assert osm.find_notes([note], [P("a", "s1", 5, "waarom faalt de deploy")])[0].status == "not_found"
+
+
 def test_year_rule_uses_mtime_and_a_later_date_means_last_year():
     mtime = datetime(2026, 1, 5, 12, 0)
     note = MemoryNote("n.md", "28-12 OPERATOR: deploy nachtjob faalt", mtime)
     last_year = SteeringPrompt("a", "s1", datetime(2025, 12, 28, 8, 0, tzinfo=timezone.utc), "vraag", "deploy nachtjob faalt")
     this_year = SteeringPrompt("b", "s2", datetime(2026, 12, 28, 8, 0, tzinfo=timezone.utc), "vraag", "deploy nachtjob faalt")
     assert osm.find_notes([note], [last_year, this_year])[0].prompt_ids == ("a",)
+
+
+def test_unreadable_dates_and_naive_times_stay_not_found():
+    text = "waarom faalt de deploy van de nachtjob"
+    bad = [MemoryNote(f"n{i}.md", d, BASE) for i, d in enumerate(
+        ["31-02 ~09:00Z OPERATOR: deploy nachtjob faalt", "12-11 ~25:00Z OPERATOR: deploy nachtjob faalt",
+         "OPERATOR: deploy nachtjob faalt zonder datum", "2026-11-12 OPERATOR: deploy nachtjob faalt"])]
+    naive = SteeringPrompt("n", "s1", datetime(2026, 11, 12, 9, 0), "vraag", text)
+    assert [m.status for m in osm.find_notes(bad, [P("a", "s1", 0, text), naive])] == ["not_found"] * 4
+    assert osm.find_notes([MemoryNote("x.md", "geen markering hier 12-11", BASE)], fixture()) == ()
+    assert osm.find_notes([MemoryNote("y.md", None, BASE)], fixture()) == ()
 
 
 def cases_for(prompts, notes=(), turns=None):
@@ -135,6 +169,13 @@ def test_eigen_misser_note_makes_a_case_but_operator_note_does_not():
     assert "vraag" not in {c.klasse for c in cases_for(fixture(), [vraag_misser])}
 
 
+def test_misser_note_merges_into_a_repeat_group_case():
+    note = MemoryNote("m.md", "12-11 ~09:20Z EIGEN MISSER: release branch verkeerd gekozen", BASE)
+    cases = [c for c in cases_for(fixture(), [note]) if c.klasse == "correctie"]
+    assert len(cases) == 1 and cases[0].reason == "repeat" and cases[0].notes == ("m.md",)
+    assert cases[0].anchor_prompt_id == "p05"
+
+
 def test_context_keeps_five_calls_and_only_the_first_bash_line():
     calls = tuple(ToolCall(f"t{i}", "Bash" if i % 2 else "Read", f"gh pr view {i}\nSECOND-LINE-OUTPUT {i}") for i in range(1, 8))
     turn = AssistantTurn(calls, "dispatch dlv-aaaaaaaaaaaa is gemerged als #2717")
@@ -145,6 +186,14 @@ def test_context_keeps_five_calls_and_only_the_first_bash_line():
     assert "SECOND-LINE" not in json.dumps(asdict(ctx))
     assert ctx.dispatch_ids == ("20261112-101500-feature-x", "dlv-aaaaaaaaaaaa")
     assert ctx.pr_numbers == (2700, 2717)
+
+
+def test_context_without_a_turn_is_empty_and_carried_by_the_case():
+    assert osm.prompt_context(P("p", "s1", 0, "akkoord"), None) == osm.PromptContext("p", (), (), ())
+    turns = {"p05": AssistantTurn((ToolCall("t1", "Bash", "git branch"),), "")}
+    case = [c for c in cases_for(fixture(), turns=turns) if c.klasse == "correctie"][0]
+    assert [c.prompt_id for c in case.contexts] == ["p05", "p06"]
+    assert case.contexts[0].tool_calls[0].first_line == "git branch" and case.contexts[1].tool_calls == ()
 
 
 def test_no_prompt_text_in_any_return_value():
