@@ -40,13 +40,13 @@ python3 scripts/vnx_intelligence_corpus_quarantine.py quarantine --db "$DB" --ou
 python3 scripts/vnx_intelligence_corpus_quarantine.py verify --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART" --human &&
 # 4. Dezelfde vijf stadia op een kopie van de live store
 python3 scripts/vnx_intelligence_corpus_quarantine.py rehearse --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART" &&
-# 5. Leegmaken in één transactie, daarna wal_checkpoint(TRUNCATE) en VACUUM
+# 5. Leegmaken in één transactie, daarna wal_checkpoint(TRUNCATE), FTS5 optimize en VACUUM
 python3 scripts/vnx_intelligence_corpus_quarantine.py purge --db "$DB" --manifest "$Q/manifest.json" --quarantine "$ART"
 ```
 
 `purge` gaat alleen na een `rehearse` met exit 0 en `"ok": true`; bij elke andere exit stopt de keten en wordt niets leeggemaakt. Er staat bewust geen `set -e` of `exit` in: een geplakte `exit` sluit je terminal.
 
-De volgorde in `purge` is vast: `DELETE` in één transactie, `COMMIT`, `wal_checkpoint(TRUNCATE)`, `VACUUM`, de na-meting en de auditregel `vacuumed` (`scripts/lib/intelligence_corpus_quarantine/purge.py:124-136`). Er draait geen FTS5 `optimize`; de winst in bestandsgrootte komt van `VACUUM` en wordt in clausule 4 gemeten.
+De volgorde in `purge` is vast: `DELETE` in één transactie, `COMMIT`, `wal_checkpoint(TRUNCATE)`, FTS5 `optimize` op de corpustabellen die FTS5-tabellen zijn, `VACUUM`, de na-meting en de auditregel `vacuumed` (`scripts/lib/intelligence_corpus_quarantine/purge.py:154-158`). Een `DELETE` op een FTS5-tabel laat de indexsegmenten staan en `VACUUM` kan die zonder de samenvoeging niet vrijgeven. De na-meting begrenst `<t>_data` op 4 pagina's (`FTS_DATA_PAGES_MAX`). Het hervatpad (`purge` na een onderbroken run) draait dezelfde stappen.
 
 **Een extra `verify` hoort vóór `purge`**, bijvoorbeeld als zegelcontrole (B4) na een pauze tussen stap 3 en stap 5. Na `purge` weigert `verify` bewust met exit 3 (`code_snippets live rows differ from the artefact`, want de live tabellen zijn leeg) en voegt het een `verified`-regel met `"status":"refused"` toe aan `$AUDIT`. Dat is geen fout. Elk commando dat de laatste `verified`-regel leest kiest daarom de `ok`-regel, zie clausule 3.
 
@@ -104,7 +104,7 @@ shasum -a 256 "$SNAP"
 
 Klaar als: exit 0; het manifest heeft `db`, `snapshot`, `tables`, `corpus` en `invariants.session_analytics` (met `columns` van 40 namen en `digest_sha256`); `snapshot.integrity_check == "ok"`; `snapshot.bytes > 0`; en `shasum -a 256` geeft dezelfde hash als `snapshot.sha256`.
 
-**Clausule 2 - verplaatst, verwijderd in één transactie, checkpoint en `VACUUM` gedraaid.**
+**Clausule 2 - verplaatst, verwijderd in één transactie, checkpoint, FTS5 `optimize` en `VACUUM` gedraaid.**
 
 ```bash
 sqlite3 -readonly "$DB" "SELECT (SELECT COUNT(*) FROM code_snippets), (SELECT COUNT(*) FROM snippet_metadata), (SELECT freelist_count FROM pragma_freelist_count());"
@@ -132,4 +132,4 @@ ls -l "$DB"
 python3 -c "import json,os,sys; m=json.load(open(sys.argv[1])); print(m['corpus']['dbstat_bytes'], os.path.getsize(sys.argv[2]))" "$Q/manifest.json" "$DB"
 ```
 
-Klaar als: de corpus-familie in `dbstat` na de purge op of onder 2 MB staat, de bestandsgrootte meetbaar is gedaald en de vergelijking met `manifest.corpus.dbstat_bytes` de winst in bytes toont. Referentie, gemeten op 11-11 op een kopie van de live store: bestand 36,2 MB, corpus-familie 0,04 MB.
+Klaar als: de corpus-familie in `dbstat` na de purge op of onder 2 MB staat, de bestandsgrootte meetbaar is gedaald en de vergelijking met `manifest.corpus.dbstat_bytes` de winst in bytes toont. Referentie, gemeten op 11-11 om 22:02Z op de live store met `purge` (hervat, rc 0): bestand 152.412.160 naar 36.155.392 bytes, corpus-familie in `dbstat` 116,18 MB naar 0,04 MB, auditregel `vacuumed` `ok` met `corpus_family_bytes_after: 40960`.

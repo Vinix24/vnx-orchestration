@@ -9,7 +9,7 @@
 
 ## Context
 
-**1. Het corpus is groot en het is een verplaatsing, geen verwijdering.** Op 08-11-2026 zijn `code_snippets` en `snippet_metadata` samen 192.495 rijen in een store van 442 MB; de corpus-familie (tabellen, indexen en de FTS5-schaduwtabellen) is circa 415 MB. Besluit 3 van de operator vraagt om het corpus omkeerbaar uit de weg te ruimen: verplaatsen, nooit wissen, en met één commando terug.
+**1. Het corpus is groot en het is een verplaatsing, geen verwijdering.** Op 08-11-2026 bevatten `code_snippets` en `snippet_metadata` elk 192.495 rijen (samen 384.990) in een store van 442 MB; de corpus-familie (tabellen, indexen en de FTS5-schaduwtabellen) is circa 415 MB. Besluit 3 van de operator vraagt om het corpus omkeerbaar uit de weg te ruimen: verplaatsen, nooit wissen, en met één commando terug.
 
 **2. De regels bestonden alleen in het plan.** Q1 tot en met Q6 hebben `scripts/vnx_intelligence_corpus_quarantine.py` gebouwd met `baseline`, `quarantine`, `restore`, `verify`, `purge` en `rehearse`, en de module `scripts/lib/intelligence_corpus_quarantine/`. De policy erachter - het manifest, de permit met zijn negen eisen, de sessie-invariant, de exitcodes, de auditregel, het zegel en het fail-closed gedrag - stond nergens waar de vloot hem leest. Een operator die het commando morgen draait, zou de regels uit de code moeten reconstrueren.
 
