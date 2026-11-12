@@ -1,400 +1,106 @@
 # VNX Cost Tracking Guide
 
-**Last Updated**: 2026-09-27
-**Status**: Active (Phase 2 Complete)
-**Owner**: T-MANAGER
+**Verified against `origin/main`** at c41411fea on 2026-11-12.
+**Status**: shipped. The cost ledger is the system of record. The receipt-based `cost-report` is an older, narrower reader that still runs.
 
-## Overview
+## Two surfaces
 
-The VNX cost tracking system aggregates token usage and estimates costs across all worker terminals (T1, T2, T3) by analyzing receipt data and session transcripts. This enables:
+| Surface | Command | Reads | Use it for |
+|---|---|---|---|
+| Cost ledger ([ADR-043](../governance/decisions/ADR-043-het-kostengrootboek.md)) | `vnx costs report` | `<central store>/events/provider_costs.ndjson` | Spend per model, role, day or provider across dispatches, gates, panels and intelligence calls |
+| Receipt report | `./bin/vnx cost-report` (`scripts/cost_tracker.py`) | `t0_receipts.ndjson` plus session transcripts | Tokens and a price estimate per receipt, for the models in its price table |
 
-- **Budget Management**: Track AI usage costs across the project
-- **Resource Optimization**: Identify high-cost operations and optimize workflows
-- **Audit Trail**: Complete usage history correlated with git commits via receipts
-- **Provider Agnostic**: Works with Claude Code, Gemini CLI, and Codex CLI
+Cost is never invented. A price that is not known is `null` or `unavailable:<reason>`, listed apart and never summed as 0.
 
-## Architecture
+## The cost ledger
 
-### Data Flow
+One line per run, in the shape `provider_cost_run/1`. A run is one start of one model for one purpose: a dispatch attempt, a gate run, a plan-gate seat, a panel leg, an intelligence call. A refire is a new attempt and so a new run.
 
-```
-Worker Report → Receipt Processor → Receipt (with session metadata)
-                                            ↓
-                                    cost_tracker.py
-                                            ↓
-                         ┌──────────────────┴──────────────────┐
-                         ↓                                      ↓
-                 Phase 2: Transcript Resolution        Fallback: Receipt Extraction
-                 (session_id → transcript.jsonl)       (token fields in receipt payload)
-                         ↓                                      ↓
-                    Usage Data                             Usage Data
-                         ↓                                      ↓
-                         └──────────────────┬──────────────────┘
-                                            ↓
-                                    Cost Estimation
-                                    (model pricing)
-                                            ↓
-                                    Metrics Output
-                                (JSON + Human Report)
-```
+Properties that matter to a reader:
 
-### Phase 2: Transcript Resolution
-
-**Key Innovation**: Instead of storing usage data in receipts, `cost_tracker.py` reads session transcripts on-demand based on `session_id` embedded in receipts.
-
-**Benefits**:
-- Model-agnostic (works with Claude/Gemini/Codex)
-- No receipt format changes required
-- Access to complete session usage history
-- Backwards compatible with old receipts
-
-## Usage
-
-### Basic Cost Report
+- **Append-only, one lock.** Every writer and reader takes `events/provider_costs.lock` first (`provider_costs.ledger_lock`). A write that cannot reach the ledger goes to a spool (`events/provider_costs.spool/`) and `vnx costs replay` brings it back.
+- **Unknown is not zero.** Token fields are an integer or `null`. `cost_usd` carries a `cost_source`: `provider_reported`, `price_table@<version>` or `unavailable:<reason>`.
+- **Prices come from the model registry** (`scripts/lib/providers/wave7_models.yaml`, [ADR-040](../governance/decisions/ADR-040-price-versions-in-the-model-registry.md)), not from a table in the reader. A model without a price books `unavailable:no_price:<model>`.
+- **Subscription is not metered spend.** A run on a subscription books `cost_usd: 0` with its list price in `api_equivalent_usd`. A run on an own API key books `billing: metered` and real dollars.
+- **Corrections replace, never edit.** A `correction` line names the `record_id` it supersedes. Per `run_id` only the last line counts.
 
 ```bash
-# Generate cost report from default receipts file
-python3 scripts/cost_tracker.py
-# or: ./bin/vnx cost-report
+vnx costs report [--by model|role|day|provider] [--since YYYY-MM-DD] [--json] [--ledger PATH]
+vnx costs replay [--json]            # bring the spool back into the ledger
+vnx costs observe [--json]           # measure each provider's balance (a calibration, never a spend)
+vnx costs backfill [--since YYYY-MM-DD] [--harness-root PATH ...] [--dry-run | --apply]
+```
 
-# Specify custom receipts file
-python3 scripts/cost_tracker.py \
-    --receipts $VNX_STATE_DIR/t0_receipts.ndjson
+`backfill` defaults to `--dry-run`. `report` exits 0 with a report (an incomplete one says so), 1 for an unreadable ledger and 2 for a usage error. The command surface is `vnx_cli/commands/costs.py`; the machinery is `scripts/cost_ledger_{report,replay,observe,backfill}.py`.
 
-# Save metrics to custom output file
+## The receipt report
+
+```bash
+./bin/vnx cost-report --human                      # human-readable
+python3 scripts/cost_tracker.py                    # JSON on stdout, also written to cost_metrics.json
 python3 scripts/cost_tracker.py \
+    --receipts $VNX_STATE_DIR/t0_receipts.ndjson \
     --output /tmp/my_metrics.json
 ```
 
-### Output Format
+Without `--human` the output is JSON. The default output file is `$VNX_STATE_DIR/cost_metrics.json`.
 
-#### Human-Readable Report
+### What it counts
 
-```
-VNX Cost Report
-Generated: 2026-02-15T10:30:00Z
-Receipts source: $VNX_STATE_DIR/t0_receipts.ndjson
+Only completion lines book tokens, and one witness per dispatch attempt (`_cost_lines`, OI-2468): the legacy `task_complete` and the v3 `dispatch_finished` of the same attempt are booked once. A `dispatch_finished` carries no usage, so its tokens come from the governance record of the same attempt. No such record means unknown tokens, never zero.
 
-Totals
-- Task complete events analyzed: 42
-- Estimated cost (USD): $0.012345
-- Receipts with estimated cost: 40
-- Receipts with unknown cost: 2
-- Input tokens (known): 123456
-- Output tokens (known): 45678
-- Total tokens (known): 169134
-- Receipts with unknown tokens: 2
+For each line the reader tries the session transcript first and falls back to token fields already in the receipt.
 
-Resolution Statistics (Phase 2 - Transcript Usage)
-- Successfully resolved from transcripts: 38 (90.5%)
-- No session_id in receipt: 2
-- Transcript not found: 1
-- No usage data in transcript: 0
-- Resolution errors: 0
-- Fallback to receipt extraction: 1
+| Status | Meaning |
+|---|---|
+| `resolved` | usage extracted from the transcript |
+| `no_session_id` | the receipt carries no session id |
+| `transcript_not_found` | `find_transcript` found no `<session_id>.jsonl` under `~/.claude/sessions/`, `~/.gemini/sessions/` or `~/.codex/sessions/` |
+| `no_usage_data` | the transcript has no usage entries |
+| `error` | parsing the transcript raised |
+| `fallback_to_receipt` | token fields already in the receipt were used |
 
-By Model
-- claude-sonnet-4.6: events=35, cost=$0.010500, known_tokens=35, unknown_tokens=0
-- claude-opus-4.6: events=5, cost=$0.001500, known_tokens=5, unknown_tokens=0
-- unknown: events=2, cost=$0.000000, known_tokens=0, unknown_tokens=2
+`extract_usage_from_transcript` reads three shapes: `usage.input_tokens` / `usage.output_tokens` (Claude Code), `usage.prompt_tokens` / `usage.completion_tokens` (Codex) and `usageMetadata.promptTokenCount` / `usageMetadata.candidatesTokenCount` (Gemini).
 
-By Worker (terminal|provider)
-- T1|claude_code: events=20, cost=$0.006000, unknown_cost=0
-- T2|claude_code: events=15, cost=$0.004500, unknown_cost=1
-- T3|claude_code: events=7, cost=$0.001845, unknown_cost=1
+### Price table and its limit
 
-Limitations
-- Cost estimates are approximate based on standard pricing
-- Actual costs may vary with provider-specific pricing
-```
-
-#### JSON Metrics
-
-```json
-{
-  "generated_at_utc": "2026-02-15T10:30:00Z",
-  "source": {
-    "receipts_path": "$VNX_STATE_DIR/t0_receipts.ndjson"
-  },
-  "totals": {
-    "events_analyzed": 42,
-    "estimated_cost_usd": 0.012345,
-    "receipts_with_estimated_cost": 40,
-    "receipts_with_unknown_cost": 2,
-    "input_tokens": 123456,
-    "output_tokens": 45678,
-    "total_tokens": 169134,
-    "receipts_with_unknown_tokens": 2,
-    "resolution_stats": {
-      "resolved": 38,
-      "no_session_id": 2,
-      "transcript_not_found": 1,
-      "no_usage_data": 0,
-      "error": 0,
-      "fallback_to_receipt": 1
-    }
-  },
-  "by_model": {
-    "claude-sonnet-4.6": {
-      "events": 35,
-      "estimated_cost_usd": 0.010500,
-      "receipts_with_known_tokens": 35,
-      "receipts_with_unknown_tokens": 0
-    }
-  },
-  "by_worker": {
-    "T1|claude_code": {
-      "events": 20,
-      "estimated_cost_usd": 0.006000,
-      "receipts_with_unknown_cost": 0
-    }
-  },
-  "notes": [
-    "Cost estimates are approximate based on standard pricing"
-  ]
-}
-```
-
-## Resolution Statistics Explained
-
-### Resolution Status Values
-
-| Status | Meaning | Action |
-|--------|---------|--------|
-| `resolved` | Successfully extracted usage from transcript | ✅ Optimal path |
-| `no_session_id` | Receipt has no `session.session_id` field | Workers should include session_id in reports |
-| `transcript_not_found` | Session transcript file doesn't exist | Check transcript retention, session may be old |
-| `no_usage_data` | Transcript exists but has no usage metadata | Transcript corrupted or incomplete |
-| `error` | Exception during transcript parsing | Check logs, may indicate format incompatibility |
-| `fallback_to_receipt` | Used token fields already present in receipt | Old receipts or non-transcript-compatible flows |
-
-### Improving Resolution Rate
-
-**Target**: ≥90% resolution from transcripts
-
-**Common Issues**:
-
-1. **Low resolution rate (<50%)**
-   - **Cause**: Workers not including `session_id` in reports
-   - **Fix Option A** (Recommended): Update worker report templates to include `**Session**: <id>`
-   - **Fix Option B**: Set `CLAUDE_SESSION_ID` environment variable at session start
-   - **Fix Option C** (Future): Implement VNX session manager to write `current_session` file
-
-2. **High `transcript_not_found` rate**
-   - **Cause**: Transcripts deleted or session IDs incorrect
-   - **Fix**: Check transcript retention policy, verify session ID extraction in `report_parser.py`
-
-3. **`no_usage_data` errors**
-   - **Cause**: Transcript format incompatibility or corruption
-   - **Fix**: Verify transcript JSONL format matches expected schema (see Transcript Format section)
-
-## Transcript Format
-
-### Claude Code Transcript
-
-```jsonl
-{"role":"user","content":"Hello"}
-{"role":"assistant","content":"Hi!","usage":{"input_tokens":10,"output_tokens":5}}
-{"role":"user","content":"What time is it?"}
-{"role":"assistant","content":"I don't have access to the current time.","usage":{"input_tokens":15,"output_tokens":12}}
-```
-
-**Key Fields**: `usage.input_tokens`, `usage.output_tokens`
-
-### Gemini CLI Transcript
-
-```jsonl
-{"role":"user","parts":[{"text":"Hello"}]}
-{"role":"model","parts":[{"text":"Hi!"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}
-```
-
-**Key Fields**: `usageMetadata.promptTokenCount`, `usageMetadata.candidatesTokenCount`
-
-### Codex CLI Transcript
-
-```jsonl
-{"role":"user","content":"Hello"}
-{"role":"assistant","content":"Hi!","usage":{"prompt_tokens":10,"completion_tokens":5}}
-```
-
-**Key Fields**: `usage.prompt_tokens`, `usage.completion_tokens`
-
-## Model Pricing
-
-Default pricing (USD per 1M tokens) mirrors `MODEL_PRICING` in `cost_tracker.py`:
+`MODEL_PRICING` in `scripts/cost_tracker.py` (USD per 1M tokens, dated 2026-03-23):
 
 | Model | Input | Output |
 |-------|-------|--------|
-| claude-opus-4.6 | $15.00 | $75.00 |
-| claude-sonnet-4.6 | $3.00 | $15.00 |
-| claude-opus-4.5 (historical) | $15.00 | $75.00 |
-| claude-sonnet-4.5 (historical) | $3.00 | $15.00 |
-| gpt-5.3-codex | $2.00 | $16.00 |
-| gpt-5.2-codex | $1.75 | $14.00 |
-| gpt-5.1-codex | $1.25 | $10.00 |
-| gpt-5.1-codex-mini | $0.25 | $2.00 |
-| gemini-pro | $0.50 | $1.50 |
-| gemini-flash | $0.10 | $0.30 |
+| claude-opus-4.6, claude-opus-4.5 | 15.00 | 75.00 |
+| claude-sonnet-4.6, claude-sonnet-4.5 | 3.00 | 15.00 |
+| gpt-5.3-codex | 2.00 | 16.00 |
+| gpt-5.2-codex | 1.75 | 14.00 |
+| gpt-5.1-codex | 1.25 | 10.00 |
+| gpt-5.1-codex-mini | 0.25 | 2.00 |
+| gemini-pro | 0.50 | 1.50 |
+| gemini-flash | 0.10 | 0.30 |
 
-**Note**: Prices are estimates and may vary. Update `MODEL_PRICING` in `cost_tracker.py` for accurate costs.
+A model that is not in this table gets an unknown cost (`_estimate_cost` returns `None`), and its receipts count under "unknown cost". The table has no Claude 5 entries, no Kimi, no DeepSeek and no GLM. For those, read the ledger.
 
-## Session Resolution Strategy
+## Session resolution
 
-**Design Principle**: DETERMINISTIC ONLY - No heuristics to ensure correct attribution in parallel terminal scenarios.
+Deterministic only. A heuristic such as "the latest transcript" mis-attributes work when two terminals finish within a second of each other. `_resolve_session_id` (`scripts/lib/append_receipt_internals/session_resolver.py`) takes the first of:
 
-### Resolution Priority Chain
+1. A session id in the report or receipt (`**Session**: <id>` or a `Session: <id>` line, parsed by `scripts/report_parser.py`).
+2. The per-terminal file `$VNX_STATE_DIR/current_session_<terminal>`.
+3. The provider environment variable (`CLAUDE_SESSION_ID`, `GEMINI_SESSION_ID`, `CODEX_SESSION_ID`, `KIMI_SESSION_ID`). A hit is written to the per-terminal file.
+4. The provider's `~/.<provider>/sessions/current` file.
+5. `unknown`.
 
-**Priority Order** (first available wins):
-1. **Worker Report** → Explicit `**Session**: <id>` in markdown (RECOMMENDED)
-2. **Environment Variable** → `$CLAUDE_SESSION_ID`, `$GEMINI_SESSION_ID`, `$CODEX_SESSION_ID`
-3. **"Current" Session Files** → `~/.codex/sessions/current`, `~/.gemini/sessions/current`
-4. **Fallback** → "unknown"
-
-### Recommended Production Setup
-
-**Option 1: Explicit in Reports** (Best)
-Workers include session_id in report metadata:
-
-```markdown
-# Task Report
-
-**Session**: abc-def-123-456
-**Terminal**: T1
-**Status**: success
-...
-```
-
-**Option 2: Environment Variables** (Good)
-Set at terminal/session initialization:
-
-```bash
-export CLAUDE_SESSION_ID="abc-def-123-456"
-export GEMINI_SESSION_ID="xyz-789-012-345"
-```
-
-**Option 3: VNX Session Manager** (Future)
-If you need a deterministic fallback without provider-managed "current" files, implement a VNX-managed per-terminal current file (avoid a single global file to prevent parallel mis-attribution):
-
-```bash
-# On session start
-echo "abc-def-123-456" > $VNX_STATE_DIR/current_session_T1
-
-# Session resolver can read it (if you implement this hook in your terminal wrapper/session resolver)
-```
-
-### Why No Auto-Detect?
-
-**Problem**: Heuristic methods (e.g., "latest transcript") can fail in parallel terminal scenarios:
-- Terminal T1 finishes task at 10:00:00
-- Terminal T2 finishes task at 10:00:01
-- T1's receipt processor runs at 10:00:02
-- Finds T2's transcript as "latest" → **WRONG ATTRIBUTION!**
-
-**Solution**: Use only deterministic methods that can't be confused by parallel execution.
-
-## Integration with Receipt System
-
-### Receipt Schema (Phase 1B)
-
-Receipts include session metadata for usage resolution:
-
-```json
-{
-  "event_type": "task_complete",
-  "task_id": "A3-2_receipt_upgrade",
-  "status": "success",
-  "session": {
-    "session_id": "abc-def-123-456",
-    "terminal": "T1",
-    "model": "claude-sonnet-4.6",
-    "provider": "claude_code",
-    "captured_at": "2026-02-15T10:30:00Z"
-  }
-}
-```
-
-### Worker Report Template
-
-Workers should include session metadata in markdown reports:
-
-```markdown
-# Task A3-2: Receipt Upgrade
-
-**Session**: abc-def-123-456
-**Status**: success
-**Terminal**: T1
-
-## Summary
-Implemented git provenance and session metadata capture...
-```
-
-The `report_parser.py` extracts `session_id` from these patterns:
-- `**Session**: <session_id>` (markdown bold)
-- `Session: <session_id>` (plain text)
+A receipt carries `session_id`, `model` and `provider` at the top level ([ADR-035](../governance/decisions/ADR-035-receipt-v2.md) section 4). The cost report still reads the nested `session{}` object of a pre-cutover receipt as a fallback.
 
 ## Troubleshooting
 
-### Cost Tracker Errors
+- **`receipts file not found`**: check that `$VNX_STATE_DIR/t0_receipts.ndjson` exists or pass `--receipts`.
+- **Invalid NDJSON lines**: skipped and counted in `invalid_receipt_lines`.
+- **High `no_session_id`**: the report carried no session id and steps 2 to 4 above found none. Add `**Session**: <id>` to the report.
+- **High `transcript_not_found`**: the transcript is not at the path `find_transcript` searches. Check it with `ls ~/.claude/sessions/<session_id>.jsonl`.
+- **`jq` check on a receipt file**: `jq -c 'select(.session_id) | {dispatch_id, session_id}' $VNX_STATE_DIR/t0_receipts.ndjson | head -5`.
 
-**Error**: `FileNotFoundError: receipts file not found`
-- **Cause**: Receipt file doesn't exist or wrong path
-- **Fix**: Check `$VNX_STATE_DIR/t0_receipts.ndjson` exists, or specify `--receipts` path
+## Related
 
-**Error**: `JSONDecodeError: Expecting value`
-- **Cause**: Corrupted NDJSON in receipts file
-- **Fix**: Validate receipts file format, check for malformed JSON lines
-
-**Error**: `KeyError: 'session'`
-- **Cause**: Receipt missing session metadata (old format)
-- **Fix**: Expected for old receipts, will use fallback extraction (normal)
-
-### Low Resolution Rate
-
-**Symptom**: Resolution rate <50%, high `no_session_id` count
-
-**Diagnosis**:
-```bash
-# Check if receipts have session metadata
-jq -c 'select(.session) | {task_id, session_id: .session.session_id}' \
-    $VNX_STATE_DIR/t0_receipts.ndjson | head -5
-```
-
-**Fix**: Update workers to include session_id in reports (see Worker Report Template)
-
-**Symptom**: High `transcript_not_found` rate
-
-**Diagnosis**:
-```bash
-# Check transcript directory
-ls -lh ~/.claude/sessions/*.jsonl | wc -l
-
-# Check specific session
-cat ~/.claude/sessions/abc-def-123-456.jsonl | head -5
-```
-
-**Fix**: Verify transcripts exist and session_id extraction is correct
-
-## Future Enhancements (Phases 3-4)
-
-**Phase 3**: Context Monitoring
-- Real-time session context size tracking
-- Proactive alerts when approaching limits
-- Auto-refresh triggers based on thresholds
-
-**Phase 4**: Auto Context Refresh
-- Mid-session summarization
-- Clean context restoration
-- Uninterrupted session continuation
-
-See `RECEIPT_UPGRADE_PLAN.md` for complete roadmap.
-
-## Related Documentation
-
-- **RECEIPT_UPGRADE_PLAN.md** - Complete implementation roadmap
-- **11_RECEIPT_FORMAT.md** - Receipt schema specification
-- **receipt_processor.sh** - Receipt processing implementation
-- **report_parser.py** - Report parsing and session extraction
-
----
-
-*For questions or issues, consult T-MANAGER terminal.*
+- [ADR-043](../governance/decisions/ADR-043-het-kostengrootboek.md): the ledger. [ADR-040](../governance/decisions/ADR-040-price-versions-in-the-model-registry.md): prices in the registry.
+- [RECEIPT_PIPELINE.md](../operations/RECEIPT_PIPELINE.md) and [11_RECEIPT_FORMAT.md](../core/11_RECEIPT_FORMAT.md): receipts.
+- `scripts/report_parser.py`: session extraction from reports.
