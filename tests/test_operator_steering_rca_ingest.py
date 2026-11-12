@@ -23,11 +23,14 @@ SLUG, PID, LONG_ID = "-proj-vnx", "vnx-dev", "20261114-080000-herindeling-factur
 PLAIN = "hoe ver zijn we met de herindeling van het facturatiedashboard voor de klantportalen"
 TEXT, BASE, NOW = f"{PLAIN} zie {LONG_ID}", datetime(2026, 11, 14, 8, 0, tzinfo=timezone.utc), datetime(2026, 11, 15, 23, 30, tzinfo=timezone.utc)
 PROPOSAL = store.proposal_id(PID, "ontbrekend_overzicht", "feature", "scripts/voortgang.py")
+QUOTED = f'{PLAIN}, met de "weergave per kwartaal" uit C:\\vnx\\facturen\nen\tdaarna de stand van zaken per klant'
+FULL = f"{QUOTED} zie {LONG_ID}"  # each 40-character window around " \\ \n \t differs from its JSON-escaped form
 
 
 @pytest.fixture
-def env(tmp_path, capsys):
-    """(state dir, projects root, transcript dir, the case block of one staged RCA)."""
+def env(tmp_path, capsys, request):
+    """(state dir, projects root, transcript dir, the case block of one staged RCA, the prompt text without its id)."""
+    plain = getattr(request, "param", PLAIN)
     (tmp_path / "proj").mkdir()
     (tmp_path / "proj" / ".vnx-project-id").write_text(PID + "\n")
     tdir, state, projects = tmp_path / "projects" / SLUG, tmp_path / "proj" / "state", tmp_path / "projects"
@@ -37,8 +40,8 @@ def env(tmp_path, capsys):
         turn = [{"type": "text", "text": "zie #2721"}, {"type": "tool_use", "id": f"toolu_{n}", "name": "Bash", "input": {"command": "ls"}}]
         (tdir / f"s{n}.jsonl").write_text("".join(json.dumps({"type": k, "uuid": f"{k}{n}", "sessionId": f"s{n}", "message": {"role": k, "content": c},
                                           "timestamp": (BASE + timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%SZ")}) + "\n"
-                                          for k, m, c in (("assistant", n * 100, turn), ("user", n * 100 + 1, TEXT))))
-    return state, projects, tdir, staged(state, projects, capsys)
+                                          for k, m, c in (("assistant", n * 100, turn), ("user", n * 100 + 1, f"{plain} zie {LONG_ID}"))))
+    return state, projects, tdir, staged(state, projects, capsys), plain
 
 
 def staged(state, projects, capsys):
@@ -65,7 +68,7 @@ def ingest(env, capsys, *blocks, prose="", dry=False, snap=None, did=None):
                     + ["--dry-run"] * dry, now=NOW)
     out = capsys.readouterr()
     written = out.out + out.err + "".join(p.read_text() for p in env[0].glob("steering_*") if p.is_file())
-    assert not [PLAIN[i:i + 20] for i in range(len(PLAIN) - 19) if PLAIN[i:i + 20] in written]
+    assert not [env[4][i:i + 20] for i in range(len(env[4]) - 19) if env[4][i:i + 20] in written]
     return code, out.out + out.err
 
 
@@ -118,7 +121,8 @@ _REFUSED = [([{"bewijs": ["f" * 16]}], "bewijs_buiten_snapshot", "f" * 16), ([{"
             ([{"case_id": "0" * 64}], "case_id_onjuist", ""), ([{"case_id": None}], "case_id_onjuist", ""),
             ([{"oorzaak": "onbekend"}], "oorzaak_onbekend", "onbekend"), ([{"oorzaak": None}], "oorzaak_onbekend", ""),
             ([{"schema": "steering_rca/2"}], "schema_onbekend", ""), ([{}, {}], "meerdere_blokken", ""), (["case"], "geen_blok", ""),
-            ([], "geen_blok", ""), ([{}, "{niet json"], "blok_onleesbaar", ""), ([{"artefact_soort": "script"}], "artefact_soort_onbekend", ""),
+            ([], "geen_blok", ""), ([{}, "{niet json"], "blok_onleesbaar", ""), ([{}, "[" * 100000], "blok_onleesbaar", ""),
+            ([{"artefact_soort": "script"}], "artefact_soort_onbekend", ""),
             ([{"oorzaak": "insufficient_evidence", "artefact_soort": "", "voorstel": ""}], "insufficient_evidence_niet_leeg", ""),
             ([{"artefact_soort": None}], "artefact_soort_onbekend", ""), ([{"voorstel": " "}], "voorstel_onvolledig", ""),
             ([{"doelpad": None}], "voorstel_onvolledig", ""), ([{"bewijs": "f" * 16}], "bewijs_ongeldig", ""),
@@ -144,3 +148,20 @@ def test_a_quote_a_failing_live_read_or_a_changed_snapshot_is_refused_never_pass
     if damage:  # the last one: a fired bundle settles in completed/ and still counts
         damage(env)
     assert ingest(env, capsys, answer(env[3]), prose=prose)[0] == (4 if reason else 0) and last(env).get("reden") == reason
+
+
+def _win(ch):
+    return QUOTED[QUOTED.index(ch) - 20:][:40]
+
+
+@pytest.mark.parametrize("env", [QUOTED], indirect=True, ids=["quoted"])
+@pytest.mark.parametrize("over, prose, reason", [  # decision 12 holds for every decoded string, not only for the raw report
+    ({"voorstel": FULL}, "", "citaat"), ({"voorstel": _win('"')}, "", "citaat"), ({"voorstel": _win("\\")}, "", "citaat"),
+    ({"voorstel": _win("\n")}, "", "citaat"), ({"doelpad": _win("\t")}, "", "citaat"), ({_win('"'): 1}, "", "citaat"),
+    ({"extra": [[1, {"k": [_win("\\")]}]]}, "", "citaat"), ({}, QUOTED[:40].replace(" ", "\n"), "citaat"),
+    ({}, QUOTED[:40].replace(" ", "  "), "citaat"), ({"extra": [QUOTED[:20], QUOTED[20:40]], QUOTED[:20]: QUOTED[20:40]}, "", None),
+    ({}, "", None)])  # above: two halves of one window are no citation; here: a report without any quote is ingested as before
+def test_a_quote_in_any_decoded_string_or_in_rewrapped_prose_is_refused(env, capsys, over, prose, reason):
+    block = json.dumps(answer(env[3], **over)).replace(json.dumps(FULL), '"' + "".join(f"\\u{ord(c):04x}" for c in FULL) + '"')
+    assert ingest(env, capsys, block, prose=prose)[0] == (4 if reason else 0) and last(env).get("reden") == reason
+    assert (env[0] / store.DECISIONS_FILENAME).exists() == (reason is None)

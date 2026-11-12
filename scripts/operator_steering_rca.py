@@ -14,6 +14,7 @@ import json
 import re
 import shlex
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -109,7 +110,7 @@ def _safe(value: object) -> str:
 def _json(body: str) -> object:
     try:
         return json.loads(body)
-    except ValueError:  # _BROKEN: the caller refuses it, never skips it
+    except (ValueError, RecursionError):  # _BROKEN: the caller refuses it, never skips it; also nesting deeper than the decoder
         return _BROKEN
 
 
@@ -157,12 +158,29 @@ def _live(state_dir: Path, projects_root: Path, prompt_ids: List[str]) -> Dict[s
     return {pid: found[pid] for pid in prompt_ids}
 
 
+def _strings(value: object) -> List[str]:
+    """Every string of a decoded JSON value, keys included, through objects and lists; a stack, so no depth recurses."""
+    found, stack = [], [value]
+    while stack:
+        item = stack.pop()
+        stack += [*item, *item.values()] if isinstance(item, dict) else item if isinstance(item, list) else []
+        found += [item] if isinstance(item, str) else []
+    return found
+
+
+def _variants(text: str) -> List[str]:
+    """As written and as NFC with each whitespace run one space, ids masked in both; keeping both, the refusal only grows."""
+    plain = text.replace(MASK, " ")
+    return [_IDS.sub(MASK, t) for t in (plain, re.sub(r"\s+", " ", unicodedata.normalize("NFC", plain)))]
+
+
 def _cited(prompts: Dict[str, object], report: str) -> Optional[str]:
-    """The first prompt id with a 40-character window free of masked ids that the masked report also holds (decision 12)."""
-    masked = [_IDS.sub(MASK, t.replace(MASK, " ")) for t in (report, *(p.text for p in prompts.values()))]
-    seen = {masked[0][i:i + WINDOW] for i in range(len(masked[0]) - WINDOW + 1)}
-    return next((pid for pid, t in zip(prompts, masked[1:]) if any(
-        MASK not in w and w in seen for w in (t[i:i + WINDOW] for i in range(len(t) - WINDOW + 1)))), None)
+    """The first prompt id with a 40-character window free of masked ids that the prose or a decoded string of any JSON block of
+    the report also holds (decision 12); each on its own, joined by MASK, so no window spans two of them."""
+    side = MASK.join(v for t in (report, *(s for b in map(_json, _FENCE.findall(report)) for s in _strings(b))) for v in _variants(t))
+    seen = {side[i:i + WINDOW] for i in range(len(side) - WINDOW + 1)}
+    return next((pid for pid, p in prompts.items() if any(MASK not in w and w in seen for t in _variants(p.text)
+                                                           for w in (t[i:i + WINDOW] for i in range(len(t) - WINDOW + 1)))), None)
 
 
 def _validate(answer: dict, snap: dict, allowed: set) -> List[str]:
