@@ -109,6 +109,22 @@ def _log_tenant_stamp_skip(
 DEFAULT_LOCK_TIMEOUT_SECONDS = 5.0
 
 
+def _probe_columns(conn: sqlite3.Connection) -> tuple:
+    """Which optional ``dispatch_metadata`` columns this store has.
+
+    Order: provider, model, project_id, outcome_report_path, outcome_status,
+    completed_at, session_id, parent_dispatch. A column-less (old) store reads
+    False for the missing ones and is left untouched.
+    """
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    return tuple(
+        name in cols for name in (
+            "provider", "model", "project_id", "outcome_report_path",
+            "outcome_status", "completed_at", "session_id", "parent_dispatch",
+        )
+    )
+
+
 def upsert_dispatch_provider_row(
     db_path: Path | str,
     *,
@@ -124,6 +140,7 @@ def upsert_dispatch_provider_row(
     report_path: Optional[str] = None,
     project_id: Optional[str] = None,
     session_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
     timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
     """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
@@ -139,6 +156,10 @@ def upsert_dispatch_provider_row(
                may omit it.
         session_id: Pre-assigned worker session UUID (F1.1). Stamped when the
                ``session_id`` column exists. Optional — ignored when absent/None.
+        parent_dispatch: The dispatch this one continues (ADR-071 besluit 2).
+               Fill-once: ``COALESCE(parent_dispatch, ?)`` never overwrites an
+               existing parent, and a write without a parent never clears one.
+               Ignored when the column is absent.
         timeout: Total seconds to wait for sqlite locks before giving up on the
                whole write. Passed to ``sqlite3.connect`` as the initial busy
                timeout, then re-armed via ``PRAGMA busy_timeout`` before every
@@ -236,16 +257,8 @@ def upsert_dispatch_provider_row(
 
         if not _rearm_busy_timeout(conn):
             return _bail("schema probe")
-        table_cols = {
-            row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()
-        }
-        has_provider = "provider" in table_cols
-        has_model = "model" in table_cols
-        has_project = "project_id" in table_cols
-        has_report_path = "outcome_report_path" in table_cols
-        has_outcome = "outcome_status" in table_cols
-        has_completed = "completed_at" in table_cols
-        has_session_id = "session_id" in table_cols
+        (has_provider, has_model, has_project, has_report_path, has_outcome,
+         has_completed, has_session_id, has_parent) = _probe_columns(conn)
 
         # Tenant-stamp only when the column exists (old column-less stores are
         # left untouched). Fail-closed: an unresolvable tenant logs + skips the
@@ -271,6 +284,9 @@ def upsert_dispatch_provider_row(
         if has_session_id and session_id:
             insert_cols.append("session_id")
             insert_vals.append(session_id)
+        if has_parent and parent_dispatch:
+            insert_cols.append("parent_dispatch")
+            insert_vals.append(parent_dispatch)
         if has_project:
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
@@ -309,6 +325,9 @@ def upsert_dispatch_provider_row(
         if has_session_id and session_id:
             set_clauses.append("session_id = COALESCE(session_id, ?)")
             params.append(session_id)
+        if has_parent and parent_dispatch:
+            set_clauses.append("parent_dispatch = COALESCE(parent_dispatch, ?)")
+            params.append(parent_dispatch)
         set_clauses.append("role = COALESCE(role, ?)")
         params.append(role or None)
         set_clauses.append("gate = COALESCE(gate, ?)")
@@ -379,3 +398,46 @@ def upsert_dispatch_provider_row(
                     "upsert_dispatch_provider_row: connection close failed "
                     "for dispatch=%s (non-fatal)", dispatch_id, exc_info=True,
                 )
+
+
+_TERMINAL_TRACK = {"T1": "A", "T2": "B", "T3": "C"}
+
+
+def stamp_lane_start(
+    state_dir: Path | str,
+    *,
+    dispatch_id: str,
+    terminal: str,
+    provider: str,
+    model: Optional[str] = None,
+    role: Optional[str] = None,
+    pr_id: Optional[str] = None,
+    parent_dispatch: Optional[str] = None,
+    gate: Optional[str] = None,
+) -> bool:
+    """Write the dispatch's ``dispatch_metadata`` row at the start of a lane.
+
+    ADR-071 besluit 2: the claude-headless lane and the subprocess lane each call
+    this once, before the worker runs. Best-effort exactly like the writer it
+    wraps: a missing DB, a sqlite error, an unresolvable tenant or an empty
+    required field returns ``False`` and never raises into the dispatch.
+    """
+    try:
+        return upsert_dispatch_provider_row(
+            Path(state_dir) / "quality_intelligence.db",
+            dispatch_id=dispatch_id,
+            terminal=terminal,
+            provider=provider,
+            model=model or None,
+            track=_TERMINAL_TRACK.get(terminal, "headless"),
+            role=role,
+            gate=gate or None,
+            pr_id=pr_id,
+            parent_dispatch=(parent_dispatch or "").strip() or None,
+        )
+    except Exception as exc:  # vnx-silent-except: the lane start must never fail on a metadata write
+        logger.warning(
+            "stamp_lane_start: failed for dispatch=%s provider=%s (non-fatal): %s",
+            dispatch_id, provider, exc,
+        )
+        return False
