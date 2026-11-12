@@ -10,7 +10,7 @@
 
 A dream cycle reads the `success_patterns`, `antipatterns` and `intelligence_injections` of one project from `quality_intelligence.db`. It asks one model to sort every pattern into merge, drop, archive or flag. The answer is written to a review file. Nothing else changes.
 
-The model is kimi, called through the kimi CLI (`_dispatch_kimi_consolidation`). There is no Anthropic SDK in the path. The prompt carries at most 50,000 characters of pattern JSON; larger input is split over several prompts, never cut off (`_PROMPT_PAYLOAD_BUDGET`).
+The model is the provider `VNX_DREAM_PROVIDER` names (`_PROVIDER_KEY`, `scripts/dream/consolidator.py:48`). The default is `deepseek`: the key-auth DeepSeek provider with an output ceiling of 8,000 tokens (`_dispatch_deepseek_consolidation`). `kimi` still works behind the same key, through the kimi CLI (`_dispatch_kimi_consolidation`). There is no Anthropic SDK in the path. The prompt carries at most 50,000 characters of pattern JSON; larger input is split over several prompts, never cut off (`_PROMPT_PAYLOAD_BUDGET`).
 
 ## What a cycle does not do
 
@@ -31,7 +31,8 @@ A cycle skips, with a `dream_cycle_skipped` event and a named reason, when:
 | `probe_not_ok` | the injection-effectiveness probe is neither `ok` nor `degraded` |
 | `incomplete_data` | the receipt ledger is absent, empty or has no receipt in the last 48 hours |
 | `insufficient_data` | no core patterns to consolidate |
-| `provider_switched_off` | the operator switched the kimi family off (`vnx providers`) |
+| `provider_switched_off` | the operator switched the family of the chosen provider off (`vnx providers`; `deepseek` by default) |
+| `dream_provider_unknown` | `VNX_DREAM_PROVIDER` is empty or neither `deepseek` nor `kimi`; no provider is called and kimi is not the fallback |
 
 A `degraded` probe runs the cycle in proposal-only mode (`mode=proposal_only` in the review file). Anything else outside `ok` and `degraded` skips (`_PROBE_HEALTH_RUNNABLE`).
 
@@ -80,7 +81,7 @@ python3 scripts/dream_liveness_probe.py --project-id ID --json [--strict]
 | Review proposal | `<data root>/state/dream/<cycle_id>-pending-review.json` |
 | Cycle row and archive records | `dream_cycles`, `dream_pattern_archives` (migration `0025_dream_consolidation.sql`) |
 | Job logs | `<data root>/events/dream/launchd.out.log`, `launchd.err.log` |
-| Kimi call cost | the cost ledger, producer `dream` (see [COST_TRACKING_GUIDE.md](COST_TRACKING_GUIDE.md)) |
+| Kimi call cost (only when `VNX_DREAM_PROVIDER=kimi`) | the cost ledger, producer `dream` (see [COST_TRACKING_GUIDE.md](COST_TRACKING_GUIDE.md)) |
 
 The data root is the central store of the project (`resolve_central_data_dir`), never the repository's `.vnx-data`.
 
