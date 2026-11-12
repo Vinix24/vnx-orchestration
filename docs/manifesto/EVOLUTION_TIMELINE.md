@@ -378,7 +378,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - The plan-gate runs one seat, a second seat on BLOCK, and counts rounds per plan version (#2104).
 
 **Outcome**
-- The merge door (`scripts/pr_merge.py`) runs five preflights and writes a `pr_merged` receipt that records who filled which seat. The seat rule, the takeover chain and the one-seat plan-gate are on main, not yet released. Summary: `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §10.
+- The merge door (`scripts/pr_merge.py`) runs six preflights (`PREFLIGHT_ORDER` in `scripts/pr_merge.py`) and writes a `pr_merged` receipt that records who filled which seat. The seat rule, the takeover chain and the one-seat plan-gate are released in v1.8.0. Summary: `docs/manifesto/GOVERNANCE_ARCHITECTURE.md` §10.
 
 ---
 
@@ -402,7 +402,7 @@ Skills are just prompts. Worker skills and manager skills use the identical mech
 - The context-rotation plugin in `packages/claude-code-toolkit/context-rotation/`: skeleton, hook boundary and warn band (#2064), state, detector, injection and the rotate skill (#2080), force and hard bands (#2090), the automatic `/clear` in tmux (#2093), documentation and install test (#2095), with fix-forwards (#2091, #2092, #2094, #2096).
 
 **Outcome**
-- A long session rotates on a handover note that is checked, not on auto-compaction. On main, not yet released.
+- A long session rotates on a handover note that is checked, not on auto-compaction. Released in v1.8.0.
 
 ---
 

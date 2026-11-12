@@ -1,0 +1,1 @@
+- Docs: the merge door is described with its six preflights, context rotation and the seat rule as released in v1.8.0, ADR-066 is accepted, ADR-019 notes that its auto-apply is not implemented, and the dream review and scout comments say what the code does (`dlv-docs-li-staart`).
