@@ -11,6 +11,7 @@ import pytest
 from review_stack_support import BRANCH, PR  # importing it puts scripts/ and scripts/lib on sys.path
 import review_delta_compare as rdc
 import review_rounds as rr
+import review_rounds_cli as cli
 from review_findings import id_for_finding, symbolic_context
 
 SINCE = datetime(2026, 11, 1, tzinfo=timezone.utc)
@@ -187,3 +188,15 @@ def test_parse_time():
         with pytest.raises(rdc.CompareError):
             rdc.parse_time(bad)
 
+
+def test_cli_exit_codes(store, monkeypatch, capsys):
+    clean(store, 19)
+    store.pair(50, [blocker(msg="only full")], new=[])
+    store.run()
+    monkeypatch.setattr(rdc, "git_source_of", lambda repo: source_of)
+    monkeypatch.delenv("VNX_STATE_DIR", raising=False)
+    argv = ["delta-compare", "--since", "2026-11-01T00:00:00Z", "--data-dir", str(store.tmp)]
+    assert cli.main(argv + ["--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["outcome"] == "fail"
+    assert cli.main(["delta-compare", "--since", "yesterday-ish", "--data-dir", str(store.tmp)]) == 2
+    assert cli.main(argv + ["--planted", str(store.tmp / "none.json")]) == 2
