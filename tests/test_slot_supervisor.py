@@ -91,7 +91,7 @@ ALIVE_TABLE = ps_text((77, 1, 77), (500, 77, 500), (600, 500, 500))
 SESSION_ONLY = ps_text((77, 1, 77), (600, 500, 500))
 EMPTY = ps_text((77, 1, 77))
 
-def test_start_uses_a_new_session_and_books_identities(sup):
+def test_start_uses_a_new_session_books_identities_and_refuses_a_second_start(sup):
     mod = sup[0]
     store = Store({"L1": lease()})
     store.order = order = []
@@ -104,19 +104,30 @@ def test_start_uses_a_new_session_and_books_identities(sup):
     rec = store.state["holders"]["L1"]
     assert (rec["session_id"], rec["owner_pid"], rec["owner_start_time"]) == ("500", 500, LSTART)
     assert (rec["supervisor_pid"], rec["supervisor_start_time"], rec["parent_lease"]) == (77, LSTART, None)
+    world.proc = Proc(pid=501)
+    with pytest.raises(PermissionError, match="owner_mismatch"):   # same lease, same token: refused before the spawn
+        world.supervisor.start("L1", 1, ["y"])
+    assert order == ["admitted", "commit", "refused"] and store.state["holders"]["L1"] is rec and len(world.spawned) == 1
 
-def test_nested_run_records_parent_lease_and_checks_the_profile(sup):
-    mod, _, adm = sup
-    store = Store({"P": lease("P", token=3, slots_granted=8), "L1": lease(profile="seo-gate")})
-    world = World(store, mod, [ALIVE_TABLE], env={mod.PARENT_ENV: "P"})
+def test_a_nested_child_that_exactly_fills_the_parent_grant_with_a_sibling_starts(sup):
+    store = Store({"P": lease("P", slots_granted=2), "S": lease("S", parent_lease="P"), "L1": lease(profile="seo-gate")})
+    world = World(store, sup[0], [ALIVE_TABLE], env={sup[0].PARENT_ENV: "P"})
     world.supervisor.start("L1", 1, ["x"])
-    assert store.state["holders"]["L1"]["parent_lease"] == "P"
-    assert [e["event"] for e in world.logs] == ["nested"] and world.logs[0]["parent_lease"] == "P"
-    other = Store({"P": lease("P", slots_granted=8), "L1": lease(profile="runner")})
-    refused = World(other, mod, [ALIVE_TABLE], env={mod.PARENT_ENV: "P"})
-    with pytest.raises(adm.AdmissionInvalid, match="profile_not_allowed_under_parent"):
-        refused.supervisor.start("L1", 1, ["x"])
-    assert other.state["holders"]["L1"]["parent_lease"] is None and not refused.spawned
+    assert store.state["holders"]["L1"]["parent_lease"] == "P" and len(world.spawned) == 1
+    assert [(e["event"], e["parent_lease"]) for e in world.logs] == [("nested", "P")]
+
+@pytest.mark.parametrize("fields,parent_slots,reason,code", [
+    ({}, 8, "profile_not_allowed_under_parent", 78), ({"profile": "seo-gate", "slots_granted": 2}, 1, "budget_full", 75),
+    ({"session_id": ""}, 0, "owner_mismatch", 78), ({"owner_pid": 9}, 0, "owner_mismatch", 78),
+    ({"owner_kind": "acquire"}, 0, "owner_mismatch", 78), ({"owner_kind": None}, 0, "owner_mismatch", 78),
+    ({"parent_lease": "P"}, 0, "owner_mismatch", 78)])
+def test_a_start_that_may_not_run_is_refused_before_the_spawn(sup, fields, parent_slots, reason, code):
+    store = Store({"P": lease("P", slots_granted=parent_slots or 1), "L1": lease(**fields)})
+    world, state = World(store, sup[0], [ALIVE_TABLE], env={sup[0].PARENT_ENV: "P"} if parent_slots else {}), store.state
+    with pytest.raises(PermissionError, match=reason):   # budget_full: the plan says top_up and nobody granted it
+        world.supervisor.start("L1", 1, ["x"])
+    assert store.state is state and not world.spawned   # raised inside the transaction: nothing committed
+    assert [(e["event"], e["reasons"], e["exit_code"]) for e in world.logs] == [("refused", [reason], code)]
 
 def test_killed_supervisor_keeps_the_slots_until_the_session_is_empty(sup):
     mod, live, _ = sup
@@ -159,18 +170,17 @@ def test_samples_land_in_the_bucket_of_now_and_a_second_writer_writes_nothing(su
     assert store.state["holders"]["L1"]["heartbeat_at"] == 1025.0   # the heartbeat carries the token
 
 @pytest.mark.parametrize("token", [2, None, "1", True])
-def test_token_mismatch_stops_the_heartbeat_and_never_releases(sup, token):
+def test_token_mismatch_fences_every_later_call_even_with_the_current_token(sup, token):
     store = Store({"L1": lease(session_id="500")})
     world = World(store, sup[0], [EMPTY])
     world.supervisor.tick("L1", token)
-    assert world.supervisor.fenced is True and store.state["holders"]["L1"]["heartbeat_at"] == 1000
-    assert world.logs[0]["event"] == "refused" and world.logs[0]["reasons"] == ["stale_token"]
-    world.supervisor.tick("L1", 1)   # fenced for good: not even the right token heartbeats again
-    assert store.state["holders"]["L1"]["heartbeat_at"] == 1000
-    assert world.supervisor.try_release("L1", token) is False and "L1" in store.state["holders"]
-    with pytest.raises(PermissionError, match="stale_token"):   # a fenced start spawns nothing
-        world.supervisor.start("L1", token, ["x"])
-    assert not world.spawned
+    world.supervisor.tick("L1", 1)   # fenced for good: the current token neither heartbeats, releases nor starts
+    state = store.state
+    assert state["holders"]["L1"]["heartbeat_at"] == 1000 and world.supervisor.try_release("L1", 1) is False
+    with pytest.raises(PermissionError, match="stale_token"):
+        world.supervisor.start("L1", 1, ["x"])
+    assert not world.spawned and store.state is state and world.supervisor.fenced is True   # no write-back either
+    assert [(e["event"], e["reasons"]) for e in world.logs] == [("refused", ["stale_token"])]   # one ledger line
 
 def test_a_child_committed_before_the_transaction_keeps_both_leases(sup):
     store = Store({"L1": lease(session_id="500")})
