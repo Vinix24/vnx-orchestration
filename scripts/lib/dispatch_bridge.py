@@ -347,6 +347,25 @@ def policy_digest_for_role(role: str) -> Optional[str]:
         ) from exc
 
 
+def _make_bundle_dir(root: Path, staging_id: str) -> Path:
+    """Create ``<root>/dispatches/pending/<staging_id>``, refusing any symlink escape."""
+    pending = root / "dispatches" / "pending"
+    # anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
+    if pending.exists() and not pending.resolve().is_relative_to(root):
+        raise ValueError(
+            f"refusing to stage: pending root {pending} resolves outside data root "
+            f"{root} (symlink escape) — possible forged-promotion attempt"
+        )
+    bundle_dir = pending / staging_id
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    # bundle_dir itself must resolve inside pending (catch a pre-planted symlinked id dir).
+    if not bundle_dir.resolve().is_relative_to(pending.resolve()):
+        raise ValueError(
+            f"refusing to stage: bundle dir {bundle_dir} escapes pending root"
+        )
+    return bundle_dir
+
+
 def stage_spec_bundle(
     *,
     instruction_text: str,
@@ -432,7 +451,6 @@ def stage_spec_bundle(
 
     # 2. resolve the data root the SAME way the door does — anchored on the tenant.
     root = (data_dir or _data_dir(effective_project_id)).resolve()
-    pending = root / "dispatches" / "pending"
 
     # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
     # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
@@ -440,20 +458,8 @@ def stage_spec_bundle(
         dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root,
     )
 
-    # 3. anchor the pending root BEFORE writing (defense-in-depth vs symlink escape).
-    if pending.exists() and not pending.resolve().is_relative_to(root):
-        raise ValueError(
-            f"refusing to stage: pending root {pending} resolves outside data root "
-            f"{root} (symlink escape) — possible forged-promotion attempt"
-        )
-
-    bundle_dir = pending / staging_id
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    # bundle_dir itself must resolve inside pending (catch a pre-planted symlinked id dir).
-    if not bundle_dir.resolve().is_relative_to(pending.resolve()):
-        raise ValueError(
-            f"refusing to stage: bundle dir {bundle_dir} escapes pending root"
-        )
+    # 3. anchor the pending root and create the bundle dir (symlink-escape guards).
+    bundle_dir = _make_bundle_dir(root, staging_id)
 
     # 4. write the instruction as a fresh regular file inside the bundle.
     instruction_file = bundle_dir / "instruction.md"
