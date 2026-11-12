@@ -711,6 +711,15 @@ def check_pr_size(
     }
 
 
+def _check_pr_size_for_project(project_root: Path, head_ref: str, state_dir: Path) -> Dict[str, Any]:
+    """check_pr_size with the thresholds of the project this gate runs for."""
+    from vnx_paths import _resolve_state_project_id
+
+    return check_pr_size(
+        project_root, head_ref=head_ref,
+        project_id=_resolve_state_project_id(project_root), state_dir=state_dir)
+
+
 def check_artifacts(
     pr_id: str, dispatch_dir: Path, project_root: Path
 ) -> Dict[str, Any]:
@@ -1681,10 +1690,7 @@ def run_gate_checks(
     checks.append(check_git_cleanliness(project_root))
     checks.append(check_contract_verification(pr_id, dispatch_dir, project_root, state_dir))
     checks.append(check_quality_advisory(project_root))
-    from vnx_paths import _resolve_state_project_id
-    checks.append(check_pr_size(
-        project_root, head_ref=head_ref,
-        project_id=_resolve_state_project_id(project_root), state_dir=state_dir))
+    checks.append(_check_pr_size_for_project(project_root, head_ref, state_dir))
     checks.extend([check_artifacts(pr_id, dispatch_dir, project_root), check_permission_policy(pr_id, project_root, dispatch_dir, pr_head, state_dir=state_dir)])
     checks.append(check_shell_syntax(project_root))
     checks.append(check_net_deletion(project_root, head_ref=head_ref))
