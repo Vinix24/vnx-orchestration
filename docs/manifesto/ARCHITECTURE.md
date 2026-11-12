@@ -2,8 +2,9 @@
 
 **Author**: Vincent van Deth
 **Date**: February 2026
-**Status**: Reference Architecture — released to PyPI 2026-07-02 (`pip install vnx-orchestration`)
-**Usage**: extended daily use on a local system · governed receipts accumulate in the audit trail · ephemeral per-dispatch workers (the old fixed 4-terminal model is now opt-in)
+**Status**: Reference Architecture, released to PyPI (`pip install vnx-orchestration`), last release 1.8.0. Work merged after 1.8.0 is marked "on main, not yet released".
+**Verified against `origin/main` at c41411fea on 2026-11-12.**
+**Usage**: extended daily use on a local system · governed receipts accumulate in the audit trail · ephemeral per-dispatch workers (the fixed 4-terminal layout is only the rollback route)
 
 ---
 
@@ -71,7 +72,7 @@ The staged bundle is the staging gate (ADR-006). An older PR-queue path (`FEATUR
 
 Both paths enforce the same principle: **nothing executes without human approval**. The gate prevents the **"Cascade of Doom"**: one hallucinated output triggering a chain of downstream agent actions, each compounding the error.
 
-Review is gated the same way. A pull request needs one distinct reviewer per **review seat** of the project's review stack (default `codex_gate,kimi_gate`), and a rejection from any reviewer blocks the merge. A reviewer that is out is absence, not a vote (ADR-037), and the seat passes along the takeover chain (`codex_gate,kimi_gate,deepseek_gate`). The merge happens only through `scripts/pr_merge.py`. See `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats) and `docs/core/PROVIDER_LANES.md` (Takeover chain). The seat rule and the takeover chain are on main, not yet released.
+Review is gated the same way. A pull request needs one distinct reviewer per **review seat** of the project's review stack (default `codex_gate,kimi_gate`), and a rejection from any reviewer blocks the merge. A reviewer that is out is absence, not a vote (ADR-037), and the seat passes along the takeover chain (`codex_gate,kimi_gate,deepseek_gate`). The merge happens only through `scripts/pr_merge.py`. See `docs/core/00_VNX_ARCHITECTURE.md` (Review Seats) and `docs/core/PROVIDER_LANES.md` (Takeover chain).
 
 **A critical design constraint**: T0 (the orchestrator) plans, reviews and dispatches, and does not write code. Workers (T1/T2/T3 are role labels on dispatches) do the file changes in isolated worktrees under the governance layer's oversight. A hook also blocks T0 from spawning subagents, and `vnx guard install` registers a context guard for T0 sessions (`docs/operations/T0_CONTEXT_ROTATION.md`). This separation keeps the orchestrator from bypassing its own gates.
 
@@ -116,6 +117,26 @@ Screenshot pointer: `SCREENSHOTS.md` (S5: Quality Advisory).
 
 ---
 
+## The Components As Main Has Them
+
+Each line says whether it is shipped (in 1.8.0), on main and not yet released, or opt-in. The mechanism lives in the linked file.
+
+- **The door and its lanes.** `vnx dispatch` is the single entry. A `claude` dispatch resolves to `claude_headless` (`resolve_claude_lane` in `scripts/lib/dispatch_plan.py`), kimi, glm and deepseek go through `provider_dispatch.py`. A CI audit fails a new file that starts a lane outside the door (`scripts/lib/dispatch_sidedoor_audit.py`). Shipped. `docs/core/DISPATCH_RULES.md`.
+- **Worktree isolation.** Every headless dispatch runs in its own git worktree, removed after the push and PR obligation is checked (`scripts/lib/dispatch_envelope.py`). Shipped.
+- **Review gates and the merge door.** Seats, takeover chain and `scripts/pr_merge.py` as described above. On main, not yet released: the sixth preflight `door`, a `vnx-gate/door` check that permits one exact head and pins the merge to it (`--match-head-commit`). It says "allowed by the door", not "executed by the door" (ADR-061).
+- **Receipts.** NDJSON with a start line and an end line per dispatch (`VNX_LEDGER_LIFECYCLE`, default on, ADR-045). The hash chain is opt-in per project and the main ledger is unchained (ADR-023).
+- **State fabric.** Past is the receipts, current is `runtime_coordination.db`, future is the tracks database. State is rebuilt from receipts and a per-project store, not hand-edited (`docs/core/STATE_FABRIC.md`, ADR-026).
+- **Horizon and tracks.** `vnx horizon` holds roadmap, tracks and deliverables. A track is born plan-gated (`docs/core/HORIZON_LIFECYCLE.md`, ADR-030, ADR-047). Shipped.
+- **Agents as folders.** `agents/<role>/` carries a role with its own `CLAUDE.md`. `vnx role sync --apply` mirrors the canonical orchestrator role into `AGENTS.md` and `GEMINI.md` as well (`tests/test_role_sync.py`). Whether a live T0 runs on another harness is not proven (see `LIMITATIONS.md`).
+- **The learning loop.** It reads receipts, classifies failures with a fixed table (`scripts/lib/learning_failure_class.py`) and proposes prevention rules. Shadow by default, a queue when `VNX_LEARNING_LOOP_QUEUE=1`, never an activation (ADR-065). On main, not yet released.
+- **Operator steering.** A bound reader classifies my own corrections in a session (`scripts/lib/operator_steering_class.py`) and a proposal store keeps the decision record (`scripts/lib/steering_proposal_store.py`, ADR-072). `approved` applies nothing. Not yet released.
+- **Dreaming.** Nightly memory consolidation (`scripts/dream/`, ADR-019), off by default (`VNX_DREAM_SCHEDULER_ENABLED=0`). A read-only probe reports whether a night produced output (`scripts/dream_liveness_probe.py`, ADR-066). A consolidation is a proposal for review.
+- **Intelligence injection and its effect.** The dispatch gets context chosen from past receipts (`scripts/lib/intelligence_selector.py`). An A/B window assigns an arm by hash and compares outcomes (`scripts/lib/intel_effect_estimator.py`, ADR-069). Off by default (`VNX_INTEL_AB_TEST=0`). The instrument is on main, not yet released. I claim no effect size from it.
+
+The diagram of these parts is `ARCHITECTURE_DIAGRAM.mermaid`.
+
+---
+
 ## Keeping the Future State Honest
 
 The four pillars govern work that has happened. The hardest part of a planning
@@ -153,7 +174,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **State Format** | Chat context (opaque) | JSONL events | JSONL + SHA-256 chain | BPMN audit logs | **NDJSON ledger** |
 | **Governance Gates** | None (lead-agent model) | Approval policies | Deny-by-default gating | BPMN/DMN gateways | **Staged bundle, human fires** |
-| **Model-Agnostic** | No (provider-locked) | Yes (via Agno) | Limited (OpenClaw) | Yes | **Yes (watcher pattern)** |
+| **Model-Agnostic** | No (provider-locked) | Yes (via Agno) | Limited (OpenClaw) | Yes | **Provider lanes, watcher pattern; see limits** |
 | **Quality Gates** | None | Not documented | Not documented | DMN rules | **Lint/size/dead code** |
 | **External Watcher** | No | No | No | Service tasks | **Yes (first-class)** |
 | **Recovery** | Session resume | Event replay | Hash chain replay | Process replay | **Ledger replay** |
@@ -165,7 +186,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 ## What This Is (and What It Isn't)
 
 **This is:**
-- A reference architecture validated by extended daily use on a local system (the fixed 4-terminal model described above is now opt-in, not the default)
+- A reference architecture validated by extended daily use on a local system (the fixed 4-terminal layout is the rollback route, not the default)
 - A working Python/Bash prototype used to build real software
 - An opinionated stance: governance belongs in the architecture, not as an afterthought
 - MIT-licensed and open for inspection
@@ -179,7 +200,7 @@ For the precise rule, the lifecycle diagram, and the loop, see
 
 - The tmux-spawn worker lane was removed on 2026-09-18; `claude_headless` (`claude -p` via envelope) is the only Claude worker lane and runs on the Max subscription, not API credits. Tmux remains only as an injection path for interactive codex/kimi/gemini terminals.
 - Gemini is a non-review provider lane: `gemini_review` was retired from the review stack. Build workers default to Sonnet (`workers-kimi-pinned` in `provider_constraints.yaml`); a dispatch spec that names a model, kimi-k3 for example, wins over that default.
-- **T0 runs on Claude Opus** (via Claude Code). Other models may work as T0, but this is less tested.
+- **T0 runs on Claude Opus** (via Claude Code). The orchestrator role is mirrored for Codex and Gemini/Kimi sessions by `vnx role sync --apply`, but a live T0 on another harness is not proven.
 - Per-dispatch git worktree isolation is unconditional in the headless envelope lane; the older subprocess-adapter lane gates it behind `VNX_ISOLATED_WORKTREE=1`. Parallel multi-track execution is Tier 3, designed and not shipped (ADR-020).
 - The receipt hash chain is available per project and off by default (ADR-023), so the ledger is append-only but not tamper-evident unless a project turns the chain on.
 - The content boundary is read by the conversation analyzer and the dream consolidation only, not by the receipt classifier, the tagger or the scout (OI-2172), so it is not a general guarantee about what reaches a non-claude provider.

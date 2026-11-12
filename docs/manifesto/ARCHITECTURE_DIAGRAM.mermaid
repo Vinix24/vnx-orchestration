@@ -1,38 +1,66 @@
+%% Verified against origin/main at c41411fea on 2026-11-12. Dashed edges are opt-in or default-off.
 graph TD
-    subgraph "Control Plane (The Brain)"
-        T0[T0 Orchestrator - Opus]
-        INTEL[Intelligence Aggregator]
+    subgraph PLAN["Planning (tracks DB, vnx horizon)"]
+        TRACKS[Tracks and deliverables]
+        PG{Plan gate: one seat, a second on BLOCK}
     end
 
-    subgraph "Governance Layer (The Gates)"
-        STAGE[Staging Area: dispatches/staging/]
-        PROMOTE{Human Review & Promote}
-        QUEUE[Active Queue: dispatches/queue/]
+    subgraph CTRL["Control plane"]
+        T0[T0 orchestrator role - interactive session]
+        HUMAN{Human: stage, dry-run, fire}
     end
 
-    subgraph "Execution Layer (The Workers)"
-        T1[Worker T1 - Sonnet]
-        T2[Worker T2 - Sonnet]
-        T3[Worker T3 - Opus/Kimi]
+    subgraph DOOR["Single-entry door: vnx dispatch"]
+        PLANX[Compiled plan and permit]
+        LANE{Lane by provider}
+        HEAD[claude_headless: claude -p, own worktree]
+        PROV[provider_dispatch: kimi, glm, deepseek]
     end
 
-    subgraph "Audit Layer (The Ledger)"
-        BUS[(state/t0_receipts.ndjson)]
-        PROV[SLSA Provenance: Git Refs & Transcripts]
+    subgraph REVIEW["Review and merge"]
+        SEATS[Review seats: codex_gate, kimi_gate]
+        TAKE[Takeover: deepseek_gate]
+        MERGE{pr_merge.py preflights: ci, review, adr, contract_invalid, branch_protection, door}
     end
 
-    %% Flow
-    T0 -->|1. Draft Plan| STAGE
-    STAGE --> PROMOTE
-    PROMOTE -->|2. Approved| QUEUE
-    QUEUE -->|3. Claim Task| T1 & T2 & T3
-    
-    T1 & T2 & T3 -->|4. Generate Report| BUS
-    BUS --> PROV
-    BUS -->|5. Compress & Digest| INTEL
-    INTEL -->|6. Updated Context| T0
+    subgraph LEDGER["Audit layer"]
+        REPORT[Unified report per dispatch]
+        RECEIPTS[(t0_receipts.ndjson, append-only)]
+        STORE[(Per-project store and runtime DB)]
+    end
 
-    %% Styling
-    style BUS fill:#f96,stroke:#333,stroke-width:2px
-    style PROMOTE fill:#bbf,stroke:#333,stroke-width:2px
-    style T0 font-weight:bold
+    subgraph LEARN["Learning (proposals only)"]
+        INJECT[Intelligence injection into the dispatch]
+        LOOP[Learning loop: shadow, queue]
+        DREAM[Dream consolidation]
+        STEER[Operator steering proposals]
+        OPERATOR{Operator decides}
+    end
+
+    TRACKS --> PG --> T0
+    T0 -->|stage| HUMAN
+    HUMAN -->|fire| PLANX --> LANE
+    LANE --> HEAD
+    LANE --> PROV
+    INJECT --> PLANX
+    HEAD --> REPORT
+    PROV --> REPORT
+    REPORT -->|receipt processor| RECEIPTS
+    RECEIPTS --> STORE
+    HEAD -->|PR| SEATS
+    PROV -->|PR| SEATS
+    SEATS -.->|reviewer out| TAKE
+    SEATS --> MERGE
+    TAKE --> MERGE
+    RECEIPTS --> LOOP
+    RECEIPTS -.-> DREAM
+    STEER -.-> OPERATOR
+    LOOP --> OPERATOR
+    DREAM -.-> OPERATOR
+    OPERATOR -->|approved rule| INJECT
+    STORE --> T0
+
+    style RECEIPTS fill:#f96,stroke:#333,stroke-width:2px
+    style HUMAN fill:#bbf,stroke:#333,stroke-width:2px
+    style OPERATOR fill:#bbf,stroke:#333,stroke-width:2px
+    style MERGE fill:#bbf,stroke:#333,stroke-width:2px
