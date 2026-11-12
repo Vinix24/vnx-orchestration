@@ -26,7 +26,7 @@ _ENV = {
 _RC = """
 CREATE TABLE provenance_registry (dispatch_id TEXT PRIMARY KEY, commit_sha TEXT, pr_number INTEGER,
     registered_at TEXT NOT NULL DEFAULT '2026-01-01');
-CREATE TABLE dispatches (dispatch_id TEXT PRIMARY KEY, task_class TEXT);
+CREATE TABLE dispatches (dispatch_id TEXT PRIMARY KEY, metadata_json TEXT);
 """
 
 
@@ -55,7 +55,8 @@ class Fixture:
         sha = _git(self.repo, "rev-parse", "HEAD")
         if dispatch:
             self.rc.execute("INSERT OR IGNORE INTO provenance_registry (dispatch_id, commit_sha) VALUES (?, ?)", (dispatch, sha))
-            self.rc.execute("INSERT OR IGNORE INTO dispatches (dispatch_id, task_class) VALUES (?, ?)", (dispatch, task_class))
+            meta = json.dumps({"task_class": task_class} if task_class else {})
+            self.rc.execute("INSERT OR IGNORE INTO dispatches (dispatch_id, metadata_json) VALUES (?, ?)", (dispatch, meta))
             self.rc.commit()
         return sha
 
@@ -108,6 +109,58 @@ def test_debugging_task_class_and_revert_are_rework(fx):
     fx.run()
     assert [e[3] for e in fx.edges()] == ["rework"]
     assert rbe.classify('Revert "feat: a"', None) == "rework" and rbe.classify("docs: a", None) == "churn"
+
+
+def test_live_shape_debugging_class_in_metadata_json_is_rework(fx):
+    """OI-2761: the live dispatches table has no task_class column; the class sits in metadata_json."""
+    _origin_then(fx, "chore: tweak", task_class="05_debugging")
+    summary = fx.run()
+    assert summary["stopped"] is None and [e[3] for e in fx.edges()] == ["rework"]
+
+
+def test_live_shape_without_a_class_in_metadata_json_is_churn(fx):
+    _origin_then(fx, "chore: tweak")
+    summary = fx.run()
+    assert summary["stopped"] is None and [e[3] for e in fx.edges()] == ["churn"]
+
+
+def test_column_shape_works_and_the_column_wins_over_metadata(fx):
+    fx.rc.execute("ALTER TABLE dispatches ADD COLUMN task_class TEXT")
+    fx.commit("feat: origin", "a.txt", "one\ntwo\nthree\n", dispatch="O")
+    fx.commit("chore: tweak", "a.txt", "one\nTWO\nthree\n", dispatch="R")
+    fx.rc.execute("UPDATE dispatches SET task_class = '05_debugging', metadata_json = ? WHERE dispatch_id = 'R'",
+                  (json.dumps({"task_class": "01_feature"}),))
+    fx.rc.commit()
+    fx.run()
+    assert [e[3] for e in fx.edges()] == ["rework"]
+
+
+def test_empty_column_falls_back_to_metadata_json(fx):
+    fx.rc.execute("ALTER TABLE dispatches ADD COLUMN task_class TEXT")
+    _origin_then(fx, "chore: tweak", task_class="05_debugging")
+    fx.run()
+    assert [e[3] for e in fx.edges()] == ["rework"]
+
+
+@pytest.mark.parametrize("ddl", ["CREATE TABLE dispatches (dispatch_id TEXT PRIMARY KEY, state TEXT)", None])
+def test_ledger_with_neither_class_source_stops_the_run(fx, ddl):
+    _origin_then(fx, "fix: repair")
+    fx.rc.execute("DROP TABLE dispatches")
+    if ddl:
+        fx.rc.execute(ddl)
+    summary = fx.run()
+    assert summary["stopped"] and "dispatches" in summary["stopped"]
+    assert fx.edges() == [] and not fx.wm.exists()
+
+
+def test_neither_source_keeps_an_existing_watermark_unchanged(fx):
+    _origin_then(fx, "fix: repair")
+    fx.wm.write_text(json.dumps({"commit": fx.base}))
+    fx.rc.execute("DROP TABLE dispatches")
+    fx.rc.execute("CREATE TABLE dispatches (dispatch_id TEXT PRIMARY KEY)")
+    before = fx.wm.read_text()
+    summary = fx.run()
+    assert "task_class" in summary["stopped"] and fx.edges() == [] and fx.wm.read_text() == before
 
 
 def test_second_run_changes_nothing(fx):
