@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Operator-steering RCA (ADR-072 decisions 8, 12, 16): ``stage --case <id>`` stages one RCA bundle and never fires.
 
-Spec and instruction carry ids, note names, candidate paths and ``snapshot_sha256``, never prompt text.
+Spec and instruction carry ids, note names, candidate paths and ``snapshot_sha256``, never prompt text. Order: the ledger
+books ``rca_staged`` first, the bundle is published second; a staging a crash cut off is published again, booking nothing.
 Exit codes: 0 staged (or printed by --dry-run), 1 refused (source, ledger, case, open RCA, cap), 2 usage.
 """
 from __future__ import annotations
@@ -81,7 +82,7 @@ def main(argv: Optional[List[str]] = None, now: Optional[datetime] = None) -> in
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state-dir", help="project state dir (default: central store of this project)")
     parser.add_argument("--projects-root", default=str(source.DEFAULT_PROJECTS_ROOT))
-    stage = parser.add_subparsers(dest="command", required=True).add_parser("stage", help="stage one RCA bundle; never fires")
+    stage = parser.add_subparsers(dest="command", required=True).add_parser("stage", help="book the ledger first, then the bundle; never fires")
     stage.add_argument("--case", required=True, help="case id from the ledger or from steering_report/1 gevallen")
     stage.add_argument("--project-id", help="project whose central store is read and staged into")
     stage.add_argument("--since", default="7d", help="window start: <N>d or an ISO time with zone (default 7d); the end is now")

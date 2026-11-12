@@ -78,6 +78,41 @@ def test_after_rca_refused_the_case_may_be_staged_again(env, capsys):
     assert stage(env, capsys, "--case", cid)[0] == 0 and pending(env[0]) == [first, first[:-1] + "2"]
 
 
+def _lines(state):
+    return [json.loads(line) for line in (state / cl.LEDGER_FILE).read_text().splitlines()]
+
+
+def test_rca_staged_is_in_the_ledger_before_stage_fn_publishes(env):
+    rep, seen = report(env), []  # stage_fn records the last ledger line it sees and the ids it was handed
+    _case, did = cl.stage_case(env[0], rep, rep["gevallen"][0]["case_id"], NOW, lambda _c, _e, d, s: seen.append((_lines(env[0])[-1], d, s)))
+    assert [(r["event"], r.get("dispatch_id"), r.get("snapshot_sha256")) == ("rca_staged", d, s) for r, d, s in seen] == [True] and seen[0][1] == did
+
+
+@pytest.mark.parametrize("published", [False, True])
+def test_a_failed_publish_exits_non_zero_and_books_stage_failed_unless_its_spec_is_on_disk(env, capsys, monkeypatch, published):
+    cid, real = report(env)["gevallen"][0]["case_id"], rca.stage_spec_bundle  # published: the real bundle is written, then the raise
+    monkeypatch.setattr(rca, "stage_spec_bundle", lambda **kw: (_ for _ in ()).throw(OSError(f"schijf vol ({published and real(**kw)})")))
+    code, _, err = stage(env, capsys, "--case", cid)
+    did = next(r["dispatch_id"] for r in _lines(env[0]) if r["event"] == "rca_staged")
+    refused = [(r["dispatch_id"], r["reden"]) for r in _lines(env[0]) if r["event"] == "rca_refused"]
+    assert code == 1 and "schijf vol" in err and pending(env[0]) == [did] * published and refused == [(did, "stage_failed")] * (not published)
+    monkeypatch.undo()  # without a spec the case is stageable again; with one it is the open RCA
+    assert stage(env, capsys, "--case", cid)[0] == int(published) and pending(env[0]) == [did[:-1] + ("1" if published else "2")]
+
+
+def test_an_interrupted_staging_is_published_again_with_the_same_ids_and_books_nothing(env, capsys):
+    rep, ledger = report(env), env[0] / cl.LEDGER_FILE
+    with pytest.raises(SystemExit):  # the process dies between the ledger append and the publish
+        cl.stage_case(env[0], rep, rep["gevallen"][0]["case_id"], NOW, lambda *_: sys.exit("crash"))
+    before, (staged,) = ledger.read_text(), [s for c in cl.read_ledger(env[0], PID).values() for s in c.staged]
+    did, cid = staged["dispatch_id"], staged["case_id"]
+    assert pending(env[0]) == [] and stage(env, capsys, "--case", cid)[0] == 0 and ledger.read_text() == before
+    spec = json.loads(cl.bundle_spec(env[0], did).read_text())
+    assert (spec["dispatch_id"], pending(env[0]), spec["tags"][-1]) == (did, [did], f"snapshot_sha256:{staged['snapshot_sha256']}")
+    code, _, err = stage(env, capsys, "--case", cid)
+    assert code == 1 and f"al een open RCA {did}" in err and ledger.read_text() == before
+
+
 def test_sixth_case_in_an_iso_week_is_refused_and_the_next_utc_week_resets(env, capsys):
     assert (cl.iso_week(NOW), cl.iso_week(NEXT_WEEK)) == ("2026-W46", "2026-W47")
     assert cl.iso_week(NEXT_WEEK.replace(tzinfo=timezone(timedelta(hours=1)))) == "2026-W46"

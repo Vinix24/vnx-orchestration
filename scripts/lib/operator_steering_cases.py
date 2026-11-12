@@ -2,6 +2,7 @@
 
 A case keeps its id when a later component holds its anchor or a member; an open ``rca_staged`` is not staged again;
 five ``rca_staged`` per project per ISO week (UTC) is the cap. A bad line fails the read with its line number (ADR-063).
+Order: ``rca_staged`` in the ledger first, the bundle second; ``stage`` resumes a staging a crash cut off in between.
 """
 from __future__ import annotations
 
@@ -151,10 +152,15 @@ def book(state_dir: Path, project_id: str, events: List[dict]) -> None:
         append(events)
 
 
+def bundle_spec(state_dir: Path, dispatch_id: str) -> Path:  # where stage_spec_bundle(data_dir=state_dir.parent) writes it
+    return Path(state_dir).parent / "dispatches" / "pending" / dispatch_id / "dispatch-spec.json"
+
+
 def stage_case(state_dir: Path, report: dict, wanted: str, now: datetime,
                stage_fn: Callable[[LedgerCase, dict, str, str], None], dry_run: bool = False) -> Tuple[LedgerCase, str]:
-    """Fold, refuse an open RCA or a full week, ``stage_fn(case, entry, dispatch_id, snapshot)``, book ``rca_staged``: one
-    lock around all of it, so a repeated or parallel run never stages a sixth. ``dry_run`` takes no lock and books nothing."""
+    """One lock: fold, refuse a full week or an open RCA whose spec is published, book ``rca_staged``, then ``stage_fn(case,
+    entry, dispatch_id, snapshot)`` publishes; a raise before the spec exists books ``rca_refused`` ``stage_failed``. An open
+    ``rca_staged`` without spec (a crash in between) is published again with its ids, booking nothing. Dry run: no lock or book."""
     project_id, week = report.get("project_id"), iso_week(now)
     with nullcontext(lambda _events: None) if dry_run else _locked(state_dir) as append:
         ledger = read_ledger(state_dir, project_id)
@@ -164,15 +170,23 @@ def stage_case(state_dir: Path, report: dict, wanted: str, now: datetime,
         entries = [e for e, c in pairs if c is case]
         if case is None or len(entries) != 1:
             raise StageRefused(f"case {wanted} staat {len(entries)} keer in het venster van het rapport, niet één keer")
-        if case.open_dispatch:
+        if case.open_dispatch and bundle_spec(state_dir, case.open_dispatch).exists():
             raise StageRefused(f"case {case.case_id} heeft al een open RCA {case.open_dispatch}: gestaged, nog niet ingenomen of geweigerd")
+        if case.open_dispatch:  # booked, never published: the same ids again, no event, so the week count stays
+            stage_fn(case, entries[0], case.open_dispatch, case.staged[-1]["snapshot_sha256"])
+            return case, case.open_dispatch
         used = sum(1 for c in ledger.values() for s in c.staged if s["iso_week"] == week)
         if used >= WEEKLY_CAP:
             raise StageRefused(f"weekplafond bereikt: {used} van {WEEKLY_CAP} rca_staged in {week}")
         dispatch_id = f"steering-rca-{case.case_id[:12]}-{week.lower().replace('-', '')}-{len(case.staged) + 1}"
         snapshot = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
-        stage_fn(case, entries[0], dispatch_id, snapshot)
         staged = event("rca_staged", case.case_id, project_id, now, dispatch_id=dispatch_id, snapshot_sha256=snapshot, iso_week=week)
         _step(ledger, staged, project_id)
         append([staged])
+        try:
+            stage_fn(case, entries[0], dispatch_id, snapshot)
+        except Exception:
+            if not bundle_spec(state_dir, dispatch_id).exists():  # not published: close it, so the case is stageable again
+                append([event("rca_refused", case.case_id, project_id, now, dispatch_id=dispatch_id, reden="stage_failed")])
+            raise
     return case, dispatch_id
