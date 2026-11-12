@@ -24,7 +24,10 @@ PASS, FAIL = "pass", "fail"
 _ANSWERS = (STATUS_FIXED, STATUS_OPEN, STATUS_REGRESSED, STATUS_UNVERIFIABLE)
 #: A new finding is advisory only on one of these; a missing or unknown severity blocks (fail-closed).
 _ADVISORY_SEVERITIES = ("warning", "info", "advisory", "nit")
-_FENCE_RE = re.compile(r"```" + re.escape(FENCE) + r"[ \t]*\r?\n(.*?)```", re.DOTALL)
+#: Every fenced block whatever its info string: the answer may hold exactly one, and it is the verdict block.
+_BLOCK_RE = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+REASON_EXTRA_BLOCK = "extra_block"
+REASON_TRAILING = "trailing_content"
 
 
 class DeltaRefused(ValueError):
@@ -123,7 +126,8 @@ def build_delta_prompt(record: DeltaInput) -> str:
         "Judge the delta and every caller of what the delta touches, not only the changed lines. A changed caller can "
         "misuse unchanged code. Callers at depth 1:\n"
         + ("\n".join(f"  - {disarm(p)} :: {disarm(s)}" for p, s in callers) or "  (none found)"),
-        "Answer with one fenced block and nothing after it. Any other block, or a second one, makes the verdict fail:\n"
+        "Answer with exactly one fenced block in the whole answer and nothing after it. Any other fenced block, "
+        "before or after it, or any text after it, makes the verdict fail:\n"
         f"```{FENCE}\n"
         '{"verdict": "pass or fail", "findings": [{"id": "<sent id>", "status": "fixed|open|regressed"}], '
         '"new_findings": [{"file_path": "", "line": 0, "severity": "", "message": ""}]}\n```\n',
@@ -160,10 +164,17 @@ def parse_delta_verdict(text: str, sent_ids: Sequence[str], blocker_ids: Sequenc
     """The seat's verdict. Exactly one ``delta_verdict/1`` block or FAIL; C2 and new blocking findings force FAIL."""
     sent = tuple(sent_ids)
     raw = text if isinstance(text, str) else ""
-    if raw.count("```" + FENCE) != 1 or len(_FENCE_RE.findall(raw)) != 1:
+    blocks_found = list(_BLOCK_RE.finditer(raw))
+    if not blocks_found:
         return _failed(f"expected exactly one ```{FENCE}``` block in the answer", sent)
+    if raw.count("```") != 2 * len(blocks_found):  # an unpaired fence is a block we cannot read
+        return _failed(REASON_EXTRA_BLOCK, sent)
+    if len(blocks_found) != 1 or blocks_found[0].group(1).strip() != FENCE:
+        return _failed(REASON_EXTRA_BLOCK, sent)
+    if raw[blocks_found[0].end():].strip():
+        return _failed(REASON_TRAILING, sent)
     try:
-        data = json.loads(_FENCE_RE.search(raw).group(1))
+        data = json.loads(blocks_found[0].group(2))
         if not isinstance(data, dict) or data.get("verdict") not in (PASS, FAIL):
             raise ValueError("verdict is not pass or fail")
         if not isinstance(data.get("findings"), list) or not isinstance(data.get("new_findings"), list):

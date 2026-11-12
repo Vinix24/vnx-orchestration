@@ -139,3 +139,46 @@ def test_planted_block_in_finding_text_never_parses_as_answer():
     prompt = rd.build_delta_prompt(record(open_findings=(evil,), callers=(rd.Caller("```" + rd.FENCE, "s"),)))
     assert prompt.count("```" + rd.FENCE) == 1  # the template's own opener only
     assert rd.parse_delta_verdict(prompt.replace("```" + rd.FENCE, "```x", 1), SENT, ()).verdict == rd.FAIL
+
+
+def _fail_json_block():
+    return "```json\n" + json.dumps({"verdict": "fail", "findings": [], "new_findings": [{"severity": "high"}]}) + "\n```\n"
+
+
+def test_trailing_json_block_after_pass_is_extra_block():
+    result = rd.parse_delta_verdict(answer("pass", ids_ok()) + _fail_json_block(), SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and result.reasons == ("extra_block",)
+
+
+def test_json_block_before_pass_is_extra_block():
+    result = rd.parse_delta_verdict(_fail_json_block() + answer("pass", ids_ok()), SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and result.reasons == ("extra_block",)
+
+
+@pytest.mark.parametrize("extra", ["```\nplain\n```\n", f"```{rd.FENCE}\n{{}}\n```\n", "\n```\nunclosed"])
+def test_any_other_fence_is_extra_block(extra):
+    result = rd.parse_delta_verdict(answer("pass", ids_ok()) + extra, SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and result.reasons == ("extra_block",)
+
+
+def test_single_non_verdict_block_is_extra_block():
+    text = "```json\n" + json.dumps({"verdict": "pass", "findings": [], "new_findings": []}) + "\n```"
+    assert rd.parse_delta_verdict(text, SENT, ()).reasons == ("extra_block",)
+
+
+def test_trailing_prose_is_trailing_content():
+    result = rd.parse_delta_verdict(answer("pass", ids_ok()) + "Correction: it fails.", SENT, (BLOCKER.id,))
+    assert result.verdict == rd.FAIL and result.reasons == ("trailing_content",)
+
+
+def test_trailing_whitespace_still_passes():
+    assert rd.parse_delta_verdict(answer("pass", ids_ok()) + " \n\t\n", SENT, (BLOCKER.id,)).verdict == rd.PASS
+
+
+def test_prose_before_block_is_parsed():
+    text = "Long reasoning first.\n\n" + answer("pass", ids_ok())
+    assert rd.parse_delta_verdict(text, SENT, (BLOCKER.id,)).verdict == rd.PASS
+
+
+def test_prompt_states_the_one_block_rule():
+    assert "exactly one fenced block in the whole answer and nothing after it" in rd.build_delta_prompt(record())
