@@ -12,6 +12,7 @@ import re
 import sqlite3
 import shutil
 import sys
+from contextlib import closing
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Callable
@@ -31,7 +32,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 34
+HIGHEST_QI_VERSION = 36
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1722,6 +1723,93 @@ def _migrate_v34(conn: sqlite3.Connection) -> None:
         log('INFO', "Migrated: added origin_class column to improvement_suggestions (v34)")
 
 
+_PATTERN_ACTIVATION_DDL = """
+CREATE TABLE IF NOT EXISTS pattern_activation (
+    project_id TEXT NOT NULL,
+    activation_id TEXT NOT NULL,
+    rule_row_id INTEGER NOT NULL,
+    rule_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    bundle_ref TEXT NOT NULL,
+    rollout_scope TEXT NOT NULL,
+    baseline_metric TEXT NOT NULL,
+    baseline_value INTEGER NOT NULL,
+    effect_criterion TEXT NOT NULL,
+    stop_condition TEXT NOT NULL,
+    recovery_path TEXT NOT NULL,
+    activated_at TEXT NOT NULL,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    deactivated_at TEXT,
+    deactivation_reason TEXT,
+    deactivation_approval_id TEXT,
+    PRIMARY KEY (project_id, activation_id)
+)
+"""
+
+
+def _migrate_v35(conn: sqlite3.Connection) -> None:
+    """V35: pattern_activation, one row per activation of an approved prevention rule (loop D5).
+
+    Keyed ``(project_id, activation_id)`` (ADR-007); carries the decision record, the
+    ``prevention_rules.id`` it switches on and the recovery path. Only writer:
+    ``scripts/lib/pattern_activation.py``. Purely additive. A table of that name with
+    another shape is never adopted: the migration raises and ``user_version`` stays 34.
+    """
+    shape = "PRAGMA table_info(pattern_activation)"
+    with closing(sqlite3.connect(":memory:")) as reference:
+        reference.execute(_PATTERN_ACTIVATION_DDL)
+        expected = reference.execute(shape).fetchall()
+    conn.execute(_PATTERN_ACTIVATION_DDL)
+    actual = conn.execute(shape).fetchall()
+    if actual != expected:
+        raise RuntimeError(f"pattern_activation exists with another shape {actual}; v35 not applied")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pattern_activation_rule_active "
+        "ON pattern_activation (project_id, rule_row_id, active)"
+    )
+    log('INFO', "Migrated: pattern_activation table keyed (project_id, activation_id) (v35)")
+
+
+_REWORK_EDGES_DDL = """
+CREATE TABLE IF NOT EXISTS rework_edges (
+    project_id TEXT NOT NULL,
+    rework_dispatch_id TEXT NOT NULL,
+    origin_dispatch_id TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('round', 'oi_fix', 'pr_fix', 'blame')),
+    class TEXT NOT NULL CHECK (class IN ('rework', 'churn')),
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    detected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    source TEXT NOT NULL CHECK (source IN ('spec', 'receipt', 'blame')),
+    PRIMARY KEY (project_id, rework_dispatch_id, origin_dispatch_id, kind)
+)
+"""
+
+
+def _migrate_v36(conn: sqlite3.Connection) -> None:
+    """V36: rework_edges, one row per rework -> origin edge (herwerk H3, ADR-071 decision 1).
+
+    Keyed ``(project_id, rework_dispatch_id, origin_dispatch_id, kind)`` (ADR-007). Writers:
+    ``scripts/lib/rework_attribution.record_edge`` (fill-once) and
+    ``scripts/backfill_rework_edges.py``. Purely additive: no existing table, column or row
+    changes. A table of that name with another shape is never adopted: the migration raises
+    and ``user_version`` stays 35.
+    """
+    shape = "PRAGMA table_info(rework_edges)"
+    with closing(sqlite3.connect(":memory:")) as reference:
+        reference.execute(_REWORK_EDGES_DDL)
+        expected = reference.execute(shape).fetchall()
+    conn.execute(_REWORK_EDGES_DDL)
+    actual = conn.execute(shape).fetchall()
+    if actual != expected:
+        raise RuntimeError(f"rework_edges exists with another shape {actual}; v36 not applied")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rework_edges_origin "
+        "ON rework_edges (project_id, origin_dispatch_id)"
+    )
+    log('INFO', "Migrated: rework_edges table keyed (project_id, rework, origin, kind) (v36)")
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1758,6 +1846,8 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     32: _migrate_v32,
     33: _migrate_v33,
     34: _migrate_v34,
+    35: _migrate_v35,
+    36: _migrate_v36,
 }
 
 
@@ -1864,6 +1954,8 @@ def verify_database_structure() -> bool:
             'dream_cycles',
             'dream_pattern_archives',
             'pattern_injection_outcome',
+            'pattern_activation',
+            'rework_edges',
         ]
 
         # Expected views

@@ -1,1 +1,0 @@
-- A repo-side UserPromptSubmit hook (`scripts/hooks/log_prompt_time.py`) and the attribution module `scripts/lib/prompt_attribution.py` ship in this change, but the hook is inert until PR-8c registers it in the settings; once registered it records each prompt with its derived class and, only when unambiguous, its delivery key, never the prompt text (ADR-056, zelfst PR-8b).

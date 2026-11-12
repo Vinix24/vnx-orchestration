@@ -3,7 +3,7 @@
 Operator decision 2026-10-22 (evening), refining R7: a seat never gets a
 reviewer that runs the same model as the builder. A reviewer of the same
 vendor on a different model may take the seat, so a ``deepseek-flash`` build can
-be read by ``deepseek_gate`` on ``deepseek-v4-pro`` while kimi is out.
+be read by ``deepseek_gate`` on ``deepseek-v4-pro`` (seat 2 since 2026-11-11).
 
 The decision code runs for real: specs are files on disk, the reviewer's model
 comes from ``gate_lane_contract.gate_model`` (env var, else default), the
@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,12 +27,6 @@ import gate_lane_contract
 import review_vendor
 from providers import model_normalizer, provider_registry
 
-_FRESH = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-_KIMI_WEEKLY_LIMIT = (
-    "governed kimi dispatch failed: Error code: 403 - You've reached your weekly (7-day) usage "
-    "limit. Your quota will reset when the current 7-day window ends"
-)
-_CLAUDE_EXHAUSTED = "claude seat: Error code: 403 - {'error': {'type': 'access_terminated_error'}}"
 _MODEL_ENVS = (
     "VNX_DEEPSEEK_GATE_MODEL", "VNX_CLAUDE_GATE_MODEL", "VNX_KIMI_GATE_MODEL", "VNX_GLM_GATE_MODEL",
     "VNX_CODEX_HEADLESS_MODEL", "VNX_CODEX_MODEL",
@@ -71,7 +64,7 @@ def _builder(
 
 class TestGateModel:
     @pytest.mark.parametrize("gate,default", [
-        ("deepseek_gate", "deepseek-flash"), ("claude_gate", "sonnet"),
+        ("deepseek_gate", "deepseek-v4-pro"), ("claude_gate", "sonnet"),
         ("kimi_gate", "kimi-k3"), ("glm_gate", "glm-5.2"),
     ])
     def test_the_default_comes_from_model_defaults(self, gate, default):
@@ -248,13 +241,14 @@ class TestModelMatchHop:
         assert review_vendor.vendor_match_hop("deepseek_gate", builder) is None
 
     def test_same_vendor_same_model_is_passed_over(self, tmp_path):
-        builder = _builder(tmp_path, "deepseek-harness", "deepseek-flash")
+        builder = _builder(tmp_path, "deepseek-harness", "deepseek-v4-pro")
         hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
         assert hop is not None
         assert hop["reason"] == "model_matches_builder"
-        assert hop["builder_model"] == "deepseek-flash" and hop["reviewer_model"] == "deepseek-flash"
+        assert hop["builder_model"] == "deepseek-v4-pro" and hop["reviewer_model"] == "deepseek-v4-pro"
 
-    def test_the_phased_out_name_is_the_same_model(self, tmp_path):
+    def test_the_phased_out_name_is_the_same_model(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash")
         builder = _builder(tmp_path, "deepseek-harness", "deepseek-v4-flash")
         hop = review_vendor.vendor_match_hop("deepseek_gate", builder)
         assert hop is not None and hop["reason"] == "model_matches_builder"
@@ -447,18 +441,11 @@ def store(tmp_path, monkeypatch):
             "results": state_dir / "review_gates" / "results"}
 
 
-def _exhausted(results: Path, pr: int, gate: str, text: str) -> None:
-    (results / f"pr-{pr}-{gate}.json").write_text(json.dumps({
-        "gate": gate, "pr_number": pr, "pr_id": str(pr), "status": "unavailable",
-        "reason": "dispatch_error", "residual_risk": text, "recorded_at": _FRESH,
-        "contract_hash": "", "report_path": "", "branch": "fix/r7b", "commit_sha": "a" * 40,
-    }), encoding="utf-8")
-
-
 def _request(pr: int, stack: list, dispatch_id: str) -> dict:
     import review_gate_manager as rgm
 
-    with patch("governance_receipts.emit_governance_receipt"):
+    with patch("governance_receipts.emit_governance_receipt"), \
+            patch.object(rgm.ReviewGateManager, "_codex_headless_available", return_value=True):
         return rgm.ReviewGateManager().request_reviews(
             pr_number=pr, branch="fix/r7b", review_stack=stack, risk_class="medium",
             changed_files=["scripts/lib/gate_request_handler.py"], mode="per_pr",
@@ -467,17 +454,14 @@ def _request(pr: int, stack: list, dispatch_id: str) -> dict:
 
 
 class TestModelRuleInTheWalk:
-    def test_kimi_seat_lands_on_deepseek_gate_on_another_model_for_a_deepseek_flash_build(self, store, monkeypatch):
+    def test_a_deepseek_flash_build_keeps_seat_2_on_deepseek_gate_on_v4_pro(self, store):
         pr = 2301
-        monkeypatch.setenv("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro")
         _builder(store["data_dir"], "deepseek-harness", "deepseek-flash", "dlv-ds-flash")
-        _exhausted(store["results"], pr, "kimi_gate", _KIMI_WEEKLY_LIMIT)
-        _exhausted(store["results"], pr, "claude_gate", _CLAUDE_EXHAUSTED)
 
-        seat = _request(pr, ["kimi_gate"], "dlv-ds-flash")["requested"][0]
+        seat = _request(pr, None, "dlv-ds-flash")["requested"][1]
 
         assert seat["gate"] == "deepseek_gate"
-        assert seat["seat"] == "kimi_gate"
+        assert seat["seat"] == "deepseek_gate"
         assert seat["builder_vendor"]["vendor"] == "deepseek"
         assert seat["builder_vendor"]["rule"] == "model_differs"
         assert seat["builder_vendor"]["builder_model"] == "deepseek-flash"
@@ -486,15 +470,13 @@ class TestModelRuleInTheWalk:
         assert on_disk["builder_vendor"]["rule"] == "model_differs"
         assert on_disk["builder_vendor"]["reviewer_model"] == "deepseek-v4-pro"
 
-    def test_the_same_build_with_deepseek_gate_on_its_default_is_passed_over(self, store):
+    def test_a_deepseek_v4_pro_build_gives_seat_2_to_claude_gate_through_the_chain(self, store):
         pr = 2302
-        _builder(store["data_dir"], "deepseek-harness", "deepseek-flash", "dlv-ds-flash")
-        _exhausted(store["results"], pr, "kimi_gate", _KIMI_WEEKLY_LIMIT)
-        _exhausted(store["results"], pr, "claude_gate", _CLAUDE_EXHAUSTED)
+        _builder(store["data_dir"], "deepseek-harness", "deepseek-v4-pro", "dlv-ds-pro")
 
-        seat = _request(pr, ["kimi_gate"], "dlv-ds-flash")["requested"][0]
+        seat = _request(pr, None, "dlv-ds-pro")["requested"][1]
 
-        assert seat["status"] == "chain_exhausted"
+        assert (seat["seat"], seat["gate"], seat["status"]) == ("deepseek_gate", "claude_gate", "requested")
         assert seat["takeover_path"][-1]["gate"] == "deepseek_gate"
         assert seat["takeover_path"][-1]["reason"] == "model_matches_builder"
         assert not (store["requests"] / f"pr-{pr}-deepseek_gate.json").exists()

@@ -711,6 +711,22 @@ def _review_cap_verdicts() -> TableInvariant:
     )
 
 
+# v38 (0038, schemas/migrations/0038_intelligence_injections_ab_arm.sql): ab_arm and ab_window
+# (TEXT, nullable: a row without them is "not assigned") and the index that starts with
+# project_id (ADR-007). The table stays conditional, as in v34.
+_V38_INJECTION_COLS = _cols(("ab_arm", "TEXT", False), ("ab_window", "TEXT", False))
+_V38_INJECTION_INDEX = IndexInvariant("idx_injection_window_arm", ("project_id", "ab_window", "ab_arm"))
+
+
+def _tables_v38(v37_tables: Tuple[TableInvariant, ...]) -> Tuple[TableInvariant, ...]:
+    return tuple(
+        replace(tbl, columns={**tbl.columns, **_V38_INJECTION_COLS},
+                indexes=(*tbl.indexes, _V38_INJECTION_INDEX))
+        if tbl.name == "intelligence_injections" else tbl
+        for tbl in v37_tables
+    )
+
+
 def _build_manifest() -> Dict[int, VersionManifest]:
     base_children_v24 = (_tph_v24(), _td_v24())
     manifest = {
@@ -775,6 +791,8 @@ def _build_manifest() -> Dict[int, VersionManifest]:
     manifest[36] = VersionManifest(36, manifest[35].tables, (_DELIVERABLES_VIEW_V36,))
     # v37 (0037): same tables, the deliverables view replaced again (done on a completed round).
     manifest[37] = VersionManifest(37, manifest[36].tables, (_DELIVERABLES_VIEW_V37,))
+    # v38 (0038): intelligence_injections carries the arm and the window it was served in.
+    manifest[38] = VersionManifest(38, _tables_v38(manifest[37].tables), manifest[37].views)
     return manifest
 
 

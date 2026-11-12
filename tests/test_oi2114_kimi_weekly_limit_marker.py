@@ -194,7 +194,7 @@ class TestTheWalkPassesKimiOver:
 
     def test_the_walk_from_kimis_seat_reaches_the_next_link(self, store):
         _write_kimi_result(store, _kimi_record())
-        chain = _parse_review_gate_takeover_chain(_DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN)
+        chain = _parse_review_gate_takeover_chain("codex_gate,kimi_gate,claude_gate,deepseek_gate")  # the default until 2026-11-11
         assert chain["kimi_gate"] == "claude_gate", "R7 (2026-10-22): claude_gate follows kimi_gate"
 
         reader, path, refusal = _manager()._walk_takeover_chain(

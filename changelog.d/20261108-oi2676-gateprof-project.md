@@ -1,1 +1,0 @@
-- `vnx gate-profile show` and `--value` take `--project-id <pid>` and read that project's profile; `show` names the project it read (`project_id`). With `--json` every config error, not only an invalid profile, prints a JSON error record on stdout and exits 2. `--csv` is documented as the default format that only `gate.sh` passes (OI-2676, OI-2674).

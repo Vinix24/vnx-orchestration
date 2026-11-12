@@ -46,7 +46,7 @@ from gate_billing_table import GATE_BILLING_SUBSCRIPTION, gate_billing
 from unified_report_schema import parse_frontmatter
 
 GATE = "claude_gate"
-NEW_CHAIN = "codex_gate,kimi_gate,claude_gate,deepseek_gate"
+NEW_CHAIN = "codex_gate,deepseek_gate,claude_gate"  # since 2026-11-11 (Kimi cancelled)
 
 
 # ---------------------------------------------------------------------------
@@ -132,21 +132,13 @@ class TestProviderSwitch:
 
 
 class TestChain:
-    def test_the_default_chain_has_claude_between_kimi_and_deepseek(self):
+    def test_the_default_chain_ends_on_claude_after_deepseek(self):
         assert gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN == NEW_CHAIN
         assert config_registry.CONFIG_REGISTRY["VNX_REVIEW_GATE_TAKEOVER_CHAIN"].default == NEW_CHAIN
 
-    def test_every_subscription_gate_reads_before_every_api_credit_gate(self):
-        chain = NEW_CHAIN.split(",")
-        billing = [gate_billing(g) for g in chain]
-        first_metered = next(i for i, b in enumerate(billing) if b != GATE_BILLING_SUBSCRIPTION)
-        assert all(b == GATE_BILLING_SUBSCRIPTION for b in billing[:first_metered])
-        assert all(b != GATE_BILLING_SUBSCRIPTION for b in billing[first_metered:])
-        assert chain[:first_metered] == ["codex_gate", "kimi_gate", "claude_gate"]
-
     def test_the_registry_text_states_the_policy(self):
         text = config_registry.CONFIG_REGISTRY["VNX_REVIEW_GATE_TAKEOVER_CHAIN"].description
-        assert "claude_gate" in text and "fallback only" in text and "vendor" in text
+        assert "claude_gate" in text and "last link" in text and "vendor" in text
 
 
 # ---------------------------------------------------------------------------

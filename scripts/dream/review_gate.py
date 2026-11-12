@@ -85,9 +85,11 @@ def _load_review(state_dir: Path, cycle_id: str, project_id: str) -> dict:
 def _file_created_iso(path: Path) -> str | None:
     """ISO-8601 UTC timestamp of when the pending-review file was written.
 
-    The pending-review.json carries no timestamp field (consolidator.py writes
-    cycle_id/project_id/consolidation only), so the review age is the file's
-    mtime — the moment the cycle completed and started waiting for T0.
+    The pending-review.json carries a ``created_at`` field that the consolidator
+    stamps (``_write_pending_review``). This helper does not read it: it returns the
+    file's mtime, the moment the cycle completed and started waiting for T0.
+    ``dream_liveness`` reads ``created_at`` from the content first and falls back to
+    the mtime.
     """
     try:
         return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -99,7 +101,8 @@ def list_pending_reviews(project_id: str, data_root: Path | None = None) -> list
     """Return pending dream cycles awaiting operator review.
 
     Each returned dict is the pending-review payload plus an additive
-    ``created_at`` key (UTC ISO from the file mtime) so readers can report the
+    ``created_at`` key (UTC ISO from the file mtime, which replaces the
+    ``created_at`` the consolidator wrote into the file) so readers can report the
     age of the oldest waiting review without re-globbing the state dir.
     """
     dr = _resolve_data_root(data_root)

@@ -28,7 +28,7 @@ import learning_loop as ll  # noqa: E402
 
 
 @pytest.fixture
-def loop_env(tmp_path):
+def loop_env(tmp_path, approve_learning_persist):
     """LearningLoop bound to a tmp state dir via patched ensure_env."""
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -40,6 +40,7 @@ def loop_env(tmp_path):
         "VNX_HOME": str(vnx_home),
         "VNX_DATA_DIR": str(state_dir.parent),
     }
+    approve_learning_persist(state_dir)
     with patch.object(ll, "ensure_env", return_value=fake):
         loop = ll.LearningLoop()
         loop.conn.commit()
@@ -175,5 +176,7 @@ class TestEvaluateActivationGateDirect:
 
 @pytest.fixture(autouse=True)
 def _persist_mode(monkeypatch):
-    """These tests cover what the loop persists; shadow mode (the default) persists nothing."""
+    """These tests cover what the loop persists; shadow mode (the default) persists nothing.
+    The ledger verdict is green: tests/test_learning_loop_ledger_gate.py covers the gate."""
     monkeypatch.setenv("VNX_LEARNING_LOOP_PERSIST", "1")
+    monkeypatch.setattr(ll, "_ledger_verdict", lambda *_: {"status": "ok", "reason_code": "ok"})

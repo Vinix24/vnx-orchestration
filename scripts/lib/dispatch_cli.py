@@ -79,6 +79,7 @@ from runtime_coordination import (  # noqa: E402
     transition_dispatch as _rc_transition_dispatch,
     transition_dispatch_idempotent as _rc_transition_dispatch_idempotent,
     update_attempt as _rc_update_attempt,
+    DuplicateTransitionError as _RcDuplicateTransitionError,
     InvalidStateError as _RcInvalidStateError,
     InvalidTransitionError as _RcInvalidTransitionError,
 )
@@ -1447,11 +1448,39 @@ def _record_bookkeeping_failure(
         )
 
 
+#: A refired row in one of these states walks through ``recovered`` into a new claim
+#: (OI-1814). Both have ``recovered`` as an allowed successor in DISPATCH_TRANSITIONS.
+_REFIRE_RECOVERABLE_STATES = frozenset({"failed_delivery", "timed_out"})
+
+
+def _recover_for_refire(conn, row: dict, refire_reason: Optional[str]) -> None:
+    """OI-1814/OI-2482: move a refired row out of a recoverable failure to ``recovered``.
+
+    Without this the claim below met a ``failed_delivery``/``timed_out`` row, was
+    refused as an idempotent no-op, and every owner hop after it was refused too:
+    the attempt ran and landed, the row stayed on the failure of the attempt before.
+    Only an explicit ``--refire`` reason walks the row; a row in any other state
+    (first fire, in flight, terminal) is left to the claim exactly as before.
+    Uses the register API in the caller's transaction, so the walk and the claim
+    commit together or not at all. Same scope as that claim: ``register_dispatch``
+    has already refused a row registered under another project.
+    """
+    reason = (refire_reason or "").strip()
+    if not reason or row.get("state") not in _REFIRE_RECOVERABLE_STATES:
+        return
+    _rc_transition_dispatch(
+        conn, dispatch_id=row["dispatch_id"], to_state="recovered", actor="door",
+        reason=f"door refire of a {row['state']} row as a new attempt: {reason}",
+        metadata={"refire_reason": reason, "recovered_from": row["state"]},
+    )
+
+
 def _persist_dispatch_row(
     spec: DispatchSpec,
     *,
     state_dir: Path,
     worker_claude_override_reason: Optional[str] = None,
+    refire_reason: Optional[str] = None,
 ) -> Optional[str]:
     """Best-effort: create the dispatches tracker row for a door-accepted
     dispatch AND drive it through the EXISTING dispatch state machine
@@ -1509,7 +1538,10 @@ def _persist_dispatch_row(
     EXPECTED idempotent no-op (no second row, no forced re-claim, no
     bookkeeping-failure fact — this is not a bug), and this call returns None
     (no attempt tracking for that particular re-fire; the dispatch itself
-    still runs for real). Every OTHER failure (missing/locked DB, schema
+    still runs for real). The one exception is a ``--refire`` of a row in
+    ``failed_delivery``/``timed_out``: ``_recover_for_refire`` first walks it
+    to ``recovered``, so the claim is a real new attempt (OI-1814).
+    Every OTHER failure (missing/locked DB, schema
     error, etc.) is a genuine bookkeeping failure: never raises, records a
     durable ``door_bookkeeping_failed`` fact via _record_bookkeeping_failure,
     and returns None — tracker bookkeeping must never block the door.
@@ -1519,7 +1551,7 @@ def _persist_dispatch_row(
     try:
         _rc_init_schema(state_dir)
         with _rc_get_connection(state_dir) as conn:
-            _rc_register_dispatch(
+            row = _rc_register_dispatch(
                 conn,
                 dispatch_id=spec.dispatch_id,
                 project_id=spec.project_id,
@@ -1535,6 +1567,7 @@ def _persist_dispatch_row(
                 },
                 actor="door",
             )
+            _recover_for_refire(conn, row, refire_reason)
             try:
                 _rc_transition_dispatch(
                     conn,
@@ -3649,6 +3682,11 @@ def _owner_transition(
     no-op path; missing DB; unreachable transition) is recorded via
     _record_bookkeeping_failure and swallowed, exactly like every other
     door-bookkeeping site in this module.
+
+    The one exception is a row already in a terminal state (completed, expired,
+    dead_letter, withdrawn): a ``--refire`` of such a row does not own it, and a
+    transition out of a terminal state cannot exist. That is no bookkeeping
+    failure (OI-2482), so it is named on stderr and not booked as a fact.
     """
     try:
         with _rc_get_connection(state_dir) as conn:
@@ -3657,6 +3695,9 @@ def _owner_transition(
                 actor="door", reason=reason, metadata=metadata,
             )
             conn.commit()
+    except _RcDuplicateTransitionError as exc:  # vnx-silent-except: a terminal row is not the door's to move (OI-2482)
+        print(f"[dispatch_cli] dispatch {dispatch_id} is terminal ({exc.current_state}); "
+              f"the door leaves the row there ({to_state} not applied)", file=sys.stderr)
     except Exception as exc:  # vnx-silent-except: owner-state transition is best-effort; door must never block on it
         _record_bookkeeping_failure(
             f"_owner_transition:{to_state}", dispatch_id, exc, state_dir=state_dir,
@@ -4238,8 +4279,7 @@ def run_dispatch(
             # the door. attempt_id (or None) is used below to close out the
             # matching dispatch_attempts row once the lane executor returns.
             attempt_id = _persist_dispatch_row(
-                vspec.spec,
-                state_dir=state_dir,
+                vspec.spec, state_dir=state_dir, refire_reason=refire_reason,
                 worker_claude_override_reason=snapshot.worker_claude_override_reason,
             )
 

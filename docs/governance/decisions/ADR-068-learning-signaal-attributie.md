@@ -122,3 +122,11 @@ Het aantal moves is dat van het goedgekeurde plan, geen vast getal. Op de live-D
 ## Wat dit ADR niet doet
 
 Het bevat geen code en wijzigt geen database. Het bouwt de overdracht, de CLI en de goedkeuringspoort niet; L2 tot en met L6 doen dat, elk tegen het contract hierboven. Het poort de andere QI-schrijvers niet (besluit 10), repareert de bronbug van de gedefaulte `project_id` niet verder dan de deur al doet en maakt geen receipt, grootboekregel of hash-chain ongeldig (besluit 12).
+
+## Amendement 2026-11-12 (L3a-c): `collision` en `no_project_column`
+
+De repetitie op kopieën van de live databases (12-11, code `c41411fe`) liet twee fouten zien.
+
+- **`collision`.** 14 geplande moves naar vnx-dev, waarvan `apply` er 3 weigerde op `UNIQUE (project_id, pattern_type, title)` (seocrawler-v2 `success_patterns` 2, 187 en 201). `verify` gaf `planned 14, present 11` en `report` bleef die 3 onder `moves` tellen, zodat `moves == 0` nooit kon halen. De planner leest nu de UNIQUE-indexen van de bestemmingstabel. Een bestemming die al een rij met dezelfde indexwaarden onder het bestemmingsproject heeft, geeft een `collision` (lijst `collision_rows`, telling `collision`) en nooit een move. `report` telt die rij onder `collision` en niet onder `moves`. Een index op `id` is rij-identiteit en telt niet mee; een partiële of expressie-index die niet te toetsen is, geeft `unplanned`.
+- **`no_project_column`.** Een tabel zonder `project_id` (pacompany-engine, 0 rijen, ouder schema) liet planner en `report --all` crashen. Die tabel wordt nu geteld per database onder `no_project_column` en nooit een move. Een database die niet te openen is blijft een fout.
+- Een `collision` is voor de operator per rij, zoals `ambiguous`: niets voegt haar samen of verwijdert haar automatisch (besluit 2: het leren stelt voor, de mens beslist). `collision_rows` en `no_project_column` zitten in het `plan_id`; `apply` hasht ze mee wanneer het plan ze draagt.

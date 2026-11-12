@@ -65,7 +65,7 @@ TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
     "smoke", "package-check", "fabric-audit", "subsystems",
     "dispatch", "gate", "gate-reanchor", "review", "dream",
     "snapshot", "restore", "quiesce-check", "pause", "resume",
-    "pool", "release", "slot",
+    "pool", "release", "learning", "rework-attribution", "slot",
 })
 
 # Mode -> allowed command sets

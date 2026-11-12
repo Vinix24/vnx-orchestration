@@ -1,7 +1,7 @@
 """Gate profile P3 (track gate-profiel-per-project): the takeover chain comes from the profile.
 
-Unset and ``standard`` give today's chain from the source ``default``; ``light`` gives three
-names without ``deepseek_gate`` from the source ``profile``; an explicit chain (override or
+Unset and ``standard`` give today's chain from the source ``default``; ``light`` gives the same
+three names from the source ``profile`` (no profile names kimi_gate since 2026-11-11); an explicit chain (override or
 ``project_config`` row) wins; a malformed profile raises ``GateProfileConfigError``.
 """
 from __future__ import annotations
@@ -17,8 +17,7 @@ import config_registry
 import gate_request_handler as grh
 from gate_profile import GateProfileConfigError
 
-TODAY = {"codex_gate": "kimi_gate", "kimi_gate": "claude_gate", "claude_gate": "deepseek_gate"}
-LIGHT = {"codex_gate": "kimi_gate", "kimi_gate": "claude_gate"}
+TODAY = LIGHT = {"codex_gate": "deepseek_gate", "deepseek_gate": "claude_gate"}
 
 
 @pytest.fixture(autouse=True)
@@ -51,11 +50,10 @@ def test_standard_leaves_an_env_chain_alone(monkeypatch):
     assert grh.review_gate_takeover_chain_raw() == ("codex_gate,kimi_gate", "env")
 
 
-def test_light_is_three_names_without_deepseek_from_the_profile(monkeypatch):
+def test_light_is_the_three_names_of_the_default_from_the_profile(monkeypatch):
     monkeypatch.setenv("VNX_GOVERNANCE_PROFILE", "light")
     raw, source = grh.review_gate_takeover_chain_raw()
-    assert (raw, source) == ("codex_gate,kimi_gate,claude_gate", "profile")
-    assert "deepseek_gate" not in raw
+    assert (raw, source) == ("codex_gate,deepseek_gate,claude_gate", "profile")
     assert grh._build_review_gate_takeover_chain() == LIGHT
 
 
@@ -112,7 +110,7 @@ def test_providers_cli_reports_cap_and_chain_with_their_source(monkeypatch):
     review = providers_cli.review_settings(None)
     assert (review["round_cap"], review["round_cap_source"]) == (2, "profile")
     assert (review["takeover_chain"], review["takeover_chain_source"]) == (
-        "codex_gate,kimi_gate,claude_gate", "profile")
+        "codex_gate,deepseek_gate,claude_gate", "profile")
     monkeypatch.delenv("VNX_GOVERNANCE_PROFILE")
     review = providers_cli.review_settings(None)
     assert (review["round_cap"], review["round_cap_source"], review["takeover_chain_source"]) == (3, "default", "default")
@@ -134,7 +132,7 @@ def test_review_settings_reports_the_chain_of_the_named_project(monkeypatch):
     review = providers_cli.review_settings("proj-b")
     assert review["profile"] == "light"
     assert (review["takeover_chain"], review["takeover_chain_source"]) == (
-        "codex_gate,kimi_gate,claude_gate", "profile")
+        "codex_gate,deepseek_gate,claude_gate", "profile")
     other = providers_cli.review_settings("proj-a")
     assert (other["takeover_chain"], other["takeover_chain_source"]) == (
         grh._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN, "default")

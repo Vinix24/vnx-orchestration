@@ -451,7 +451,8 @@ def test_migration_0037_goes_up_and_down_without_touching_a_row(store):
     assert _view(store, f"pr:{base}") == "failed"  # v36 knows no superseded base
 
     assert apply_0037.apply_migration(db, SQL_0037) is True
-    assert _user_version(store) == schema_manifest.TERMINAL_VERSION == 37
+    assert _user_version(store) == 37  # 0037 stamps 37
+    assert _user_version(store) <= schema_manifest.TERMINAL_VERSION  # later migrations may raise the terminal
     assert _view(store, f"pr:{base}") == "done"
     assert _sql(store, "SELECT * FROM dispatches ORDER BY dispatch_id") == rows_before
     assert apply_0037.apply_migration(db, SQL_0037) is False

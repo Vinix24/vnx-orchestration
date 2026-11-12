@@ -260,6 +260,7 @@ class TestDreamCycleConsolidatesSeededPatterns:
         consolidation mechanics, so arm the scheduler and stub the probe to 'ok' —
         the same posture as test_dream_consolidator.py's autouse fixture."""
         monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+        monkeypatch.setenv("VNX_DREAM_PROVIDER", "kimi")  # these tests patch the kimi dispatch
         import consolidator
         monkeypatch.setattr(
             consolidator, "_injection_probe_health", lambda state_dir: "ok"

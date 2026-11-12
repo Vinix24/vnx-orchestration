@@ -35,6 +35,7 @@ dedicated flag (e.g. ``phantom_guard``, ``dispatch-plan``) are not represented h
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
@@ -46,7 +47,7 @@ ALLOWED_STATUSES = frozenset(("LIVE", "PARK", "CUT", "ACTIVATE", "SCOPE", "COCKP
 @dataclass(frozen=True)
 class ConfigEntry:
     key: str
-    type: str  # "bool" | "string" | "enum"
+    type: str  # "bool" | "string" | "enum" | "integer"
     default: str
     category: str  # "intelligence" | "dispatch" | "gate"
     description: str
@@ -114,17 +115,16 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
     "VNX_DEFAULT_REVIEW_STACK": _e(
-        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,kimi_gate", "gate",
-        "Comma-separated default review-gate stack. Operator decision 2026-09-26: a review "
-        "gate always chooses a SUBSCRIPTION reviewer first (codex_gate on the codex CLI, "
-        "kimi_gate on the kimi CLI OAuth). glm_gate (OpenRouter credit) and deepseek_gate "
-        "(API credit) are not standing seats: they read a seat only when a subscription "
-        "reviewer is out, through VNX_REVIEW_GATE_TAKEOVER_CHAIN. Since OI-2058 (R5a) every "
-        "seat gets its own reviewer: when kimi_gate takes codex_gate's seat, kimi_gate's own "
+        "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
+        "Comma-separated default review-gate stack. Operator decision 2026-11-11: the Kimi "
+        "subscription is cancelled, so seat 2 is deepseek_gate (API credit, deepseek-v4-pro); "
+        "seat 1 stays a SUBSCRIPTION reviewer (codex_gate on the codex CLI). kimi_gate stays "
+        "registered and an explicit stack may still name it. Since OI-2058 (R5a) every "
+        "seat gets its own reviewer: when deepseek_gate takes codex_gate's seat, its own "
         "seat walks on to the next distinct gate in the chain. Since R5b the merge door "
-        "requires every seat of this stack, each filled by a distinct reviewer. Do not "
-        "put an API-credit gate before a subscription gate here or in the chain "
-        "(gate_billing_table.GATE_BILLING classifies every gate; a guard test pins both). "
+        "requires every seat of this stack, each filled by a distinct reviewer. Seat 1 is a "
+        "subscription gate (gate_billing_table.GATE_BILLING classifies every gate; a guard "
+        "test pins it); seat 2 and the takeover chain may be metered. "
         "History: the default was gemini_review,codex_gate,claude_github_optional until "
         "20260914, when gemini_review (binary never on PATH) and claude_github_optional "
         "(never configured) were dropped and glm_gate was added as a second standing seat "
@@ -140,16 +140,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         subsystem="governance-enforcement-stack", status="LIVE"),
     "VNX_REVIEW_GATE_TAKEOVER_CHAIN": _e(
         "VNX_REVIEW_GATE_TAKEOVER_CHAIN", "string",
-        "codex_gate,kimi_gate,claude_gate,deepseek_gate", "gate",
+        "codex_gate,deepseek_gate,claude_gate", "gate",
         "Ordered review-gate takeover chain (BETA3-E1, 26-08 operator decision; order "
-        "changed 2026-10-04, OI-1984, and 2026-10-22, R7). On lane_exhausted a seat rolls "
-        "over to the NEXT gate named here. The order is subscription reviewers first "
-        "(codex_gate, kimi_gate, claude_gate on the operator's claude subscription), then "
-        "deepseek_gate (API credit), the last link of the default chain. glm_gate left "
-        "the default chain on 2026-10-17 (operator decision); it stays registered and can "
-        "still be named explicitly here, always behind every subscription gate. The "
-        "API-credit gates are a fallback only, never a project default reviewer; a guard "
-        "test fails when an API-credit gate is placed before a subscription gate. A seat "
+        "changed 2026-10-04, OI-1984, 2026-10-22, R7, and 2026-11-11). On lane_exhausted a "
+        "seat rolls over to the NEXT gate named here. Since 2026-11-11 (Kimi cancelled) the "
+        "default is codex_gate, deepseek_gate (deepseek-v4-pro), then claude_gate as the last "
+        "link: claude_gate failed its calibration run on sonnet and on opus, so it reads "
+        "only when deepseek is out or passed over. kimi_gate and glm_gate left the default "
+        "chain; both stay registered and can still be named explicitly here. A seat "
         "never gets a reviewer of the builder's vendor (R7): such a reviewer is passed over "
         "like an unavailable one (review_vendor). Since "
         "OI-1714/OI-1838 deepseek_gate is a real harness-lane gate (available by "
@@ -234,6 +232,23 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
+    # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
+    # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of 450 and 600; a value that is
+    # not a positive integer, or a WARN above HOLD, falls back to both defaults and is named
+    # in the gate's detail line. It never disables the check.
+    "VNX_PR_SIZE_WARN": _e(
+        "VNX_PR_SIZE_WARN", "integer", "450", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate reports a large PR. Not "
+        "blocking. A value that is not a positive integer, or above VNX_PR_SIZE_HOLD, falls "
+        "back to 450 and is named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_PR_SIZE_HOLD": _e(
+        "VNX_PR_SIZE_HOLD", "integer", "600", "gate",
+        "PR size (lines added + removed) above which pre_merge_gate holds the merge. A value "
+        "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 600 and is "
+        "named in the gate detail.", approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
     # default: no project approves a takeover, so every project keeps today's behaviour.
     "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
@@ -308,14 +323,41 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         # pre-existing last-wins winner now that canonical_flags() no longer picks by dict
         # order. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
+    "VNX_DREAM_PROVIDER": _e(
+        "VNX_DREAM_PROVIDER", "string", "deepseek", "intelligence",
+        "Provider that runs the dream consolidation: deepseek or kimi. Any other value skips the cycle.",
+        subsystem="dream-consolidation", status="ACTIVATE"),
     "VNX_DREAM_SCHEDULER_ENABLED": _e(
         "VNX_DREAM_SCHEDULER_ENABLED", "bool", "0", "intelligence",
         "Nightly memory consolidation + pending review dispatch.",
-        subsystem="dream-consolidation", status="ACTIVATE"),
+        subsystem="dream-consolidation", status="ACTIVATE", cockpit_canonical=True),
     "VNX_INJECTION_FEEDBACK_ENABLED": _e(
         "VNX_INJECTION_FEEDBACK_ENABLED", "bool", "0", "intelligence",
         "Instrument why intelligence injections are ignored before tuning generation.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE"),
+    # intelligence-effect-measurable PR-1: the A/B window as registered, audited configuration
+    # (project_config rows) instead of a plist edit. Every default is off or empty: registering
+    # these keys opens no window. They sit BEFORE VNX_INJECTION_WHY_ENABLED on purpose: the
+    # SUBSYSTEMS.md ledger generator takes the last-inserted entry of a subsystem, and that
+    # must stay VNX_INJECTION_WHY_ENABLED (also the cockpit_canonical flag).
+    "VNX_INTEL_AB_TEST": _e(
+        "VNX_INTEL_AB_TEST", "bool", "0", "intelligence",
+        "Open the intelligence-injection A/B window: dispatches are assigned a treatment or "
+        "control arm. Off = no assignment, every dispatch injects as before.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_PLACEBO_ARM": _e(
+        "VNX_INTEL_PLACEBO_ARM", "bool", "0", "intelligence",
+        "Give the control arm of the A/B window a placebo section instead of nothing. "
+        "Off = the control arm receives no intelligence section.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
+    "VNX_INTEL_AB_WINDOW": _e(
+        "VNX_INTEL_AB_WINDOW", "string", "", "intelligence",
+        "The frozen A/B window configuration (window id, salt, bounds) as one JSON document. "
+        "Empty = no window is open.",
+        subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
+        read_site_wired=False),
     "VNX_INJECTION_WHY_ENABLED": _e(
         "VNX_INJECTION_WHY_ENABLED", "bool", "0", "intelligence",
         "Persist a per-offer used/ignored-reason row (pattern_injection_outcome) at delivery "
@@ -325,7 +367,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "activate the learning loop.",
         subsystem="injection-effectiveness-eval-loop", status="ACTIVATE",
         # Explicit canonical pick (OI-1385): preserves the pre-existing last-wins winner for
-        # this subsystem's 2 flags. Not re-audited by this dispatch — out of scope.
+        # this subsystem's 5 entries. Not re-audited by this dispatch — out of scope.
         cockpit_canonical=True),
     "VNX_PLAN_GATE_COMPLEX_ONLY": _e(
         "VNX_PLAN_GATE_COMPLEX_ONLY", "bool", "0", "gate",
@@ -694,7 +736,7 @@ def _bare(key: str) -> str:
 
 def resolve_with_source(
     key: str, project_id: Optional[str] = None, resolver: Optional[DbResolver] = None,
-    *, use_default_resolver: bool = True,
+    *, use_default_resolver: bool = True, strict_resolver: bool = False,
 ) -> "tuple[Optional[str], str]":
     """``(value, source)`` through the one precedence chain :func:`_resolve` is built on.
 
@@ -703,6 +745,12 @@ def resolve_with_source(
     ``unset`` (an unknown key with no value anywhere). With no ``resolver`` and
     ``use_default_resolver`` the process's wired store and default project are used, as
     :func:`get` does.
+
+    ``strict_resolver`` (default ``False``) changes what a raising DB resolver means. Off, it is
+    treated as "no row" and the chain falls through to env/default, as :func:`get` always did.
+    On, the chain stops there and returns ``(None, "project_config_error")``: the DB state is
+    unknown, so a caller whose safe answer is "off" can tell that apart from "no row". The
+    override is still read first, before the DB is consulted.
     """
     entry = CONFIG_REGISTRY.get(key)
     override = os.environ.get(f"VNX_OVERRIDE_{_bare(key)}")
@@ -714,7 +762,12 @@ def resolve_with_source(
     if resolver is not None:
         try:
             db_val = resolver(project_id, key)
-        except Exception:
+        except Exception as exc:
+            if strict_resolver:
+                logging.getLogger(__name__).warning(
+                    "config_registry: project_config resolver failed for %s (%s: %s)",
+                    key, type(exc).__name__, exc)
+                return None, "project_config_error"
             db_val = None
         if db_val is not None:
             return db_val, "project_config"

@@ -747,7 +747,7 @@ def test_default_review_stack_control_case_codex_kimi_combo_unchanged(monkeypatc
     monkeypatch.delenv("VNX_DEFAULT_REVIEW_STACK", raising=False)
     import review_gate_manager as rgm
     stack = rgm._build_default_review_stack()
-    assert stack == ["codex_gate", "kimi_gate"]
+    assert stack == ["codex_gate", "deepseek_gate"]  # seat 2 since 2026-11-11 (Kimi cancelled)
 
 
 def test_default_review_stack_excludes_gates_that_are_never_configured(monkeypatch):

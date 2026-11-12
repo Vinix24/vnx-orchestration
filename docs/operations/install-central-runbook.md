@@ -285,6 +285,11 @@ Four steps stay operator actions. VNX does not do them for you:
 1. **The release itself.** `vnx release publish --tag <tag>` materializes the tag into
    `~/.vnx-system/versions/<tag>/`. Publishing is refused for a tag outside the default
    branch unless `--allow-unmerged-tag "<reason>"` names a non-empty reason.
+   After the tag is pushed, create the GitHub Release page:
+   `gh release create v<X.Y.Z> --title "VNX <X.Y.Z>" --notes-file <notes> --latest`.
+   The notes are the intro paragraphs of that version's section in `CHANGELOG.md`, plus a
+   link to the full section. Releases 1.1.0 to 1.8.0 were tagged without a release page;
+   their notes live in [CHANGELOG.md](../../CHANGELOG.md).
 2. **The `current` flip.** Publishing does not flip `current` by default. The flip is
    `--set-current` on publish, or `vnx update`. Consumers with a tracked `.vnx-version`
    pin do not follow `current`; they need their pin updated.
@@ -304,6 +309,14 @@ Four steps stay operator actions. VNX does not do them for you:
    `docs/operations/T0_CONTEXT_ROTATION.md`.
 
 ## Rollback procedure
+
+### Migrations in release v1.9.0
+
+Release 1.9.0 migrates two stores: `runtime_coordination.db` (migration 0038) and
+`quality_intelligence.db`. The migrations, the way back and what is not established as safe
+when a pin moves back to 1.8.0 are in the "Migrations and rollback" paragraph of the
+[1.9.0 section of the CHANGELOG](../../CHANGELOG.md). That paragraph is the source; it is not
+copied here.
 
 ### Migrations 0036 and 0037 (release v1.8.0)
 

@@ -1413,6 +1413,48 @@ def _register_migrate_subparser(subparsers: argparse.Action) -> None:
     )
 
 
+def _register_learning_decide_rule(learning_subs: argparse.Action) -> None:
+    lr_decide = learning_subs.add_parser(
+        "decide-rule",
+        help=(
+            "record an operator decision on queued prevention rules as one bundle "
+            "(approved|rejected); writes a record with a minted approval_id"
+        ),
+    )
+    lr_decide.add_argument("--project-dir", default=".", metavar="DIR")
+    lr_decide.add_argument(
+        "--rule-id", dest="rule_ids", action="append", required=True, metavar="ID",
+        help="queued rule id (repeat for one bundle)",
+    )
+    lr_decide.add_argument(
+        "--decision", dest="decision", required=True, choices=["approved", "rejected"],
+        help="the decision to record",
+    )
+    lr_decide.add_argument("--reason", dest="reason", required=True, help="non-empty rationale")
+    lr_decide.add_argument("--by", dest="by", required=True, help="who decides")
+    lr_decide.add_argument(
+        "--effect-criterion", dest="effect_criterion", default=None,
+        help="how the effect is measured (REQUIRED with --decision approved)",
+    )
+    lr_decide.add_argument(
+        "--stop-condition", dest="stop_condition", default=None,
+        help="when the rule is switched off again (REQUIRED with --decision approved)",
+    )
+
+
+def _register_learning_operator_tier(learning_subs: argparse.Action) -> None:
+    _register_learning_decide_rule(learning_subs)
+    _register_learning_steering(learning_subs)
+
+
+def _register_learning_steering(learning_subs: argparse.Action) -> None:
+    lr_steer = learning_subs.add_parser(
+        "steering",
+        help="operator steering (ADR-072): `report` and `show --case`; arguments go to scripts/operator_steering.py",
+    )
+    lr_steer.add_argument("steering_args", nargs=argparse.REMAINDER, metavar="ARGS")
+
+
 def _register_learning_subparser(subparsers: argparse.Action) -> None:
     learning_parser = subparsers.add_parser(
         "learning",
@@ -1575,8 +1617,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
     lr_dismiss.add_argument(
         "--reason",
         dest="reason",
-        default="",
-        required=True,
+        default="", required=True,
         help="non-empty rationale for the dismissal (REQUIRED)",
     )
     lr_dismiss.add_argument(
@@ -1586,6 +1627,7 @@ def _register_learning_subparser(subparsers: argparse.Action) -> None:
         choices=["success_patterns", "prevention_rules"],
         help="disambiguate when the same id appears in two tables",
     )
+    _register_learning_operator_tier(learning_subs)
 
 
 def _register_dream_subparser(subparsers: argparse.Action) -> None:

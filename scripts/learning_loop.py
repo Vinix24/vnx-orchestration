@@ -6,7 +6,6 @@ Runs daily at 18:00 to analyze receipts and update pattern effectiveness.
 """
 
 import fcntl
-import hashlib
 import json
 import logging
 import os
@@ -34,9 +33,27 @@ from contract_invalid_window import (
     is_contract_invalid,
     is_stale_contract_invalid,
 )
+from learning_failure_class import (
+    ELIGIBLE_CLASSES,
+    FAILURE_CLASSES,
+    classify_failure,
+    merge_dispatch_group,
+)
+from ledger_attempt_state import (ATTEMPT_KINDS, KIND_ENDED, KIND_LEGACY, MODE_V3,
+                                  attempt_verdict, read_ledger)
+from learning_ledger_gate import (STATUS_OK, STATUS_PENDING, STATUS_REFUSED, VERDICT_FILENAME,
+                                  ledger_verdict, read_verdict, write_verdict)
+from pattern_activation import (LOOP_SOURCE, activation_for, active_row_ids, deactivate, mint_activation_id,
+                                orphaned_activations, record_activation, validate_activation)
 from pattern_upsert import upsert_antipattern, upsert_success_pattern
-from project_scope import resolve_stamp_project_id
+from prevention_rule_store import (QUEUE_FILENAME, QueueUnreadable, approved_decision, load_queue, mark_ingested,
+                                   proposal_hash, queue_rules, reconcile, record_deactivation, rule_id)
+from project_scope import TenantUnresolved, resolve_stamp_project_id
+from qi_learning_approval import LearningApprovalRefused, claim_approval, load_approval, preview
 from receipt_outcome import is_foreign_project
+from receipt_schema import DISPATCH_STARTED_EVENT_TYPE
+
+_PATTERN_WRITERS = {"success_patterns": upsert_success_pattern, "antipatterns": upsert_antipattern}
 
 
 # Failure statuses sampled from the governed receipt stream when mining for
@@ -57,8 +74,18 @@ DEFAULT_RECEIPT_CUTOFF = "2026-09-28T16:41:11Z"
 CUTOFF_ENV = "VNX_LEARNING_LOOP_CUTOFF"
 
 # Persisting is opt-in. Anything but "1" leaves the loop in shadow mode: it
-# computes and reports, it changes no database row, no state file, no metric.
+# computes and reports, it changes no database row, no metric and no queue.
 PERSIST_ENV = "VNX_LEARNING_LOOP_PERSIST"
+
+# Queue mode ("1") is shadow plus the operator queue: proposals go to
+# pending_rules.json through the prevention-rule store, also when the probe gate is
+# degraded. No database row, no activation (ADR-065).
+QUEUE_ENV = "VNX_LEARNING_LOOP_QUEUE"
+UNRESOLVED_PROJECT = "unresolved"
+
+# Queue and persist mode read ledger_source_check first (ADR-065 §6): a refused
+# verdict stops the cycle with "ledger_source_check: <reason_code>".
+LEDGER_REASON_PREFIX = "ledger_source_check: "
 
 # Open items as the second signal source (D5). A class of open items is one
 # normalized title. It counts as recurring when it spans this many DISTINCT
@@ -125,17 +152,10 @@ def _agent_identity(receipt: Dict[str, Any]) -> str:
 
 
 def _rule_id(rule: Dict[str, Any]) -> str:
-    """The one persistent id of a failure-prevention proposal: sha1 over the
-    pattern, the terminal scope and the agent scope, joined by a separator that
-    cannot occur in them, so ("ab", "c") and ("a", "bc") never collide. The
-    grouping key of ``generate_prevention_rules`` holds the same three values:
-    two proposals are one proposal exactly when this id is equal."""
-    parts = (
-        str(rule.get("pattern") or ""),
-        _scope_value(rule.get("terminal_constraint")) or "any",
-        _scope_value(rule.get("agent_constraint")),
-    )
-    return f"rule-{hashlib.sha1(chr(0x1f).join(parts).encode()).hexdigest()[:8]}"
+    """The persistent id of a failure-prevention proposal. The definition lives in
+    ``prevention_rule_store.rule_id`` (pattern, terminal scope, agent scope and
+    failure class): two proposals are one proposal exactly when it is equal."""
+    return rule_id(rule)
 
 
 def normalize_open_item_title(title: Any) -> str:
@@ -178,6 +198,87 @@ def _parse_receipt_timestamp(value) -> Optional[datetime]:
 def persist_enabled() -> bool:
     """True only when the operator set VNX_LEARNING_LOOP_PERSIST=1."""
     return os.environ.get(PERSIST_ENV, "0") == "1"
+
+
+def queue_enabled() -> bool:
+    """Queue mode is opt-in: only the literal "1" turns it on."""
+    return os.environ.get(QUEUE_ENV, "0") == "1"
+
+
+def _is_queueable(rule: Dict[str, Any]) -> bool:
+    """A failure group is queued only for an eligible class seen in at least two
+    dispatches. An open-item proposal has no failure class and passes."""
+    if "failure_class" not in rule:
+        return True
+    count = rule.get("occurrence_count")
+    return (
+        rule["failure_class"] in ELIGIBLE_CLASSES
+        and isinstance(count, int) and not isinstance(count, bool) and count >= 2
+    )
+
+
+def _dispatch_key(receipt: Dict[str, Any]) -> str:
+    """The failure group key of a receipt (ADR-065 §2), or "" when it carries no dispatch id."""
+    raw_id = receipt.get("dispatch_id")
+    return str(raw_id).strip() if isinstance(raw_id, (str, int)) else ""
+
+
+def _ledger_verdict(state_dir: Path, project_id: Optional[str]) -> Dict[str, Any]:
+    """ledger_source_check for one run: the ``ledger_verdict/1`` of the ledger the loop learns
+    from, stored as ``state/learning_ledger_verdict.json`` on every run. A verdict that cannot be
+    stored is a refusal: a reader of the file would otherwise trust the previous one."""
+    verdict = ledger_verdict(state_dir, project_id)
+    try:
+        write_verdict(state_dir, verdict)
+    except OSError as exc:
+        return {**verdict, "status": STATUS_REFUSED, "reason_code": "verdict_unwritable",
+                "reason": f"cannot store {VERDICT_FILENAME}: {exc}"}
+    return verdict
+
+
+def _ledger_status(verdict: Any) -> tuple:
+    """``(status, reason_code)``. Only an exact ``ok``, ``pending`` or ``refused`` with a reason
+    code counts; anything else (no dict, a missing, blank or unknown value) refuses as
+    ``malformed_verdict``."""
+    status = verdict.get("status") if isinstance(verdict, dict) else None
+    code = verdict.get("reason_code") if isinstance(verdict, dict) else None
+    if status in (STATUS_OK, STATUS_PENDING, STATUS_REFUSED) and isinstance(code, str) and code.strip():
+        return status, code.strip()
+    return STATUS_REFUSED, "malformed_verdict"
+
+
+def _ingest_verdict_refusal(verdict: Any, project_id: str) -> str:
+    """The refusal reason of the stored verdict for an ingest in ``project_id``; "" only for exactly ``ok``
+    or ``pending`` of this project (``read_verdict`` makes a missing, unreadable or stale file ``refused``)."""
+    status, code = _ledger_status(verdict)
+    if status not in (STATUS_OK, STATUS_PENDING):
+        return LEDGER_REASON_PREFIX + code
+    if verdict.get("project_id") != project_id:
+        return LEDGER_REASON_PREFIX + "verdict_of_another_project"
+    return ""
+
+
+def _in_flight_dispatch_ids(state_dir: Path, project_id: str) -> frozenset:
+    """This project's failing dispatches whose highest ``v3`` attempt has no end yet (``live``,
+    ``unknown`` or ``dead_no_end`` per ``attempt_verdict``): under a ``pending`` verdict their
+    receipts are no evidence. An unreadable ledger raises ``OSError`` and an attempt kind outside
+    ``ATTEMPT_KINDS`` raises ``ValueError``: neither may read as "nothing in flight"."""
+    records = read_ledger(state_dir)
+    failing = {_dispatch_key(line) for line in records
+               if str(line.get("status", "")).lower() in _FAILURE_STATUSES or is_contract_invalid(line)}
+    failing.discard("")
+    started = {_dispatch_key(line): line["dispatch_id"] for line in records
+               if _dispatch_key(line) in failing and line.get("project_id") == project_id
+               and str(line.get("event_type") or "").strip() == DISPATCH_STARTED_EVENT_TYPE
+               and str(line.get("lifecycle_mode") or "").strip() == MODE_V3}
+    in_flight = set()
+    for key, dispatch_id in sorted(started.items()):
+        kind = attempt_verdict(state_dir, project_id, dispatch_id, records=records).kind
+        if kind not in ATTEMPT_KINDS:
+            raise ValueError(f"{dispatch_id}: unknown attempt kind {kind!r}")
+        if kind not in (KIND_ENDED, KIND_LEGACY):
+            in_flight.add(key)
+    return frozenset(in_flight)
 
 
 def resolve_receipt_cutoff() -> datetime:
@@ -283,6 +384,9 @@ class LearningLoop:
     # via ``__new__`` behaves like a fresh one (env-derived, never AttributeError).
     _persist: Optional[bool] = None
     _cutoff: Optional[datetime] = None
+    queue_error: Optional[str] = None  # why the proposal queue could not be written
+    ledger_verdict: Optional[Dict[str, Any]] = None  # this cycle's ledger_source_check, if read
+    _in_flight: frozenset = frozenset()  # dispatches a pending verdict keeps out of the evidence
 
     @property
     def persist(self) -> bool:
@@ -355,6 +459,9 @@ class LearningLoop:
         self.archive_path = state_dir / "archive" / "patterns"
 
         if self.persist:
+            # ADR-068 besluit 18: no writable connection without a usable approval
+            # record. The hash binding is checked again before the bridge write.
+            load_approval(state_dir, _DISPOSITION_VALID_APPROVERS)
             # Create archive directory if it doesn't exist
             self.archive_path.mkdir(parents=True, exist_ok=True)
             self.conn = sqlite3.connect(self.db_path)
@@ -640,6 +747,7 @@ class LearningLoop:
             start_time = _to_aware_utc(start_time)
 
         failure_patterns: List[Dict] = []
+        kept: List[tuple] = []
 
         if not self.receipts_path.exists():
             return failure_patterns
@@ -725,23 +833,19 @@ class LearningLoop:
                         if ts_dt is None or ts_dt < start_time:
                             continue
 
-                    failure_patterns.append({
-                        "task": str(receipt.get("task_id") or receipt.get("task_description") or ""),
-                        "terminal": _scope_value(receipt.get("terminal")) or _scope_value(receipt.get("terminal_id")),
-                        "agent": _agent_identity(receipt),
-                        "error": self._failure_error_message(receipt),
-                        "timestamp": ts_raw or datetime.now(timezone.utc).isoformat(),
-                    })
+                    kept.append((total_scanned, receipt))
 
         except OSError as e:
             print(f"⚠️ Error reading receipt stream {self.receipts_path}: {e}")
 
+        failure_patterns, merge_stats = self._merge_failure_receipts(kept)
         self.receipt_stats = {
             "read": total_scanned,
             "after_cutoff": total_scanned - before_cutoff,
             "before_cutoff": before_cutoff,
             "no_provider_filtered": no_provider_skipped,
             "foreign_project": foreign_project,
+            **merge_stats,
         }
         post_filter = total_scanned - no_provider_skipped - foreign_project
         print(
@@ -754,6 +858,52 @@ class LearningLoop:
             f"{len(failure_patterns)} failures in window"
         )
         return failure_patterns
+
+    def _merge_failure_receipts(self, kept: List[tuple]) -> tuple:
+        """One failure per dispatch (ADR-065 §2). ``kept`` holds ``(line number,
+        receipt)`` for every receipt that passed the filters. The group key is
+        ``dispatch_id`` alone; a receipt without one is its own group
+        ``receipt:<line number>``. Returns the failure dicts and the count
+        fields of ``receipt_stats``; ``len(patterns) == dispatches +
+        without_dispatch_id`` and ``failure_receipts == len(patterns) +
+        merged_duplicates`` hold by construction. A receipt of a dispatch still
+        in flight under a ``pending`` verdict counts only in ``in_flight_excluded``."""
+        in_flight = sum(1 for _, receipt in kept if _dispatch_key(receipt) in self._in_flight)
+        kept = [item for item in kept if _dispatch_key(item[1]) not in self._in_flight]
+        groups: Dict[str, List[Dict]] = {}
+        without_id = 0
+        for line_no, receipt in kept:
+            dispatch_id = _dispatch_key(receipt)
+            if not dispatch_id:
+                without_id += 1
+                dispatch_id = f"receipt:{line_no}"
+            groups.setdefault(dispatch_id, []).append(receipt)
+
+        class_counts = {name: 0 for name in sorted(FAILURE_CLASSES)}
+        patterns: List[Dict] = []
+        for key, group in groups.items():
+            merged = merge_dispatch_group(group)
+            failure_class = classify_failure(group)
+            class_counts[failure_class] += 1
+            patterns.append({
+                "task": str(merged.get("task_id") or merged.get("task_description") or ""),
+                "terminal": _scope_value(merged.get("terminal")) or _scope_value(merged.get("terminal_id")),
+                "agent": _agent_identity(merged),
+                "error": self._failure_error_message(merged, failure_class),
+                "timestamp": merged.get("timestamp") or datetime.now(timezone.utc).isoformat(),
+                "dispatch_id": None if key.startswith("receipt:") else key,
+                "event_type": str(merged.get("event_type") or merged.get("event") or ""),
+                "failure_class": failure_class,
+            })
+        stats = {
+            "failure_receipts": len(kept),
+            "dispatches": len(groups) - without_id,
+            "without_dispatch_id": without_id,
+            "merged_duplicates": len(kept) - len(patterns),
+            "class_counts": class_counts,
+            "in_flight_excluded": in_flight,
+        }
+        return patterns, stats
 
     def extract_open_item_signals(self) -> List[Dict[str, Any]]:
         """Group this project's unresolved open items into recurring classes.
@@ -833,18 +983,20 @@ class LearningLoop:
             for sig in signals
         ]
 
-    def _failure_error_message(self, receipt: Dict) -> str:
+    def _failure_error_message(self, receipt: Dict, failure_class: str = "") -> str:
         """Derive a stable error string from a failure receipt.
 
         Prefers the structured ``failure_reason`` (e.g. "Exhausted 3 retries"),
-        then summarizes ``contract_violations`` for contract-invalid receipts,
+        then summarizes ``contract_violations`` when the group's class (from
+        ``classify_failure``) is ``contract_invalid``: the merged record keeps the
+        status of the top-ranked receipt, so it cannot decide that itself,
         and finally falls back to scanning any free-text error field.
         """
         reason = receipt.get("failure_reason")
         if reason:
             return str(reason)[:200]
 
-        if is_contract_invalid(receipt):
+        if failure_class == "contract_invalid":
             violations = receipt.get("contract_violations")
             summary = self._summarize_contract_violations(violations)
             if summary:
@@ -894,33 +1046,45 @@ class LearningLoop:
         return "Unknown error"
 
     def generate_prevention_rules(self, failure_patterns: List[Dict]) -> List[Dict]:
-        """Generate new prevention rules from failure patterns"""
+        """Generate new prevention rules from failure patterns.
+
+        One pattern is one dispatch (``extract_failure_patterns`` merges the
+        receipts), so the threshold counts dispatches. A class outside
+        ``ELIGIBLE_CLASSES`` is counted in ``receipt_stats`` and never a rule.
+        """
         new_rules = []
 
-        # Group failures by similar characteristics. The key is the proposal's
-        # identity (error, terminal scope, agent scope); a missing terminal is
-        # "any" and a missing agent is None, never "" or "unknown".
+        # The key is the proposal's identity (class, error, terminal scope, agent
+        # scope); a missing terminal is "any" and a missing agent is None. A
+        # pattern with an unknown class is "unclassified": no evidence, no rule.
+        # A dict with no ``failure_class`` key at all is the pre-class shape of a
+        # hand-built caller; every such dict already passed the failure-status
+        # filter, so it is a plain "failed" (extraction always sets the key).
         failure_groups = defaultdict(list)
         for failure in failure_patterns:
+            failure_class = failure.get('failure_class', 'failed')
             key = (
+                failure_class if failure_class in FAILURE_CLASSES else 'unclassified',
                 str(failure.get('error') or '')[:50],
                 _scope_value(failure.get('terminal')) or 'any',
                 _scope_value(failure.get('agent')) or None,
             )
             failure_groups[key].append(failure)
 
-        # Generate rules for repeated failures
-        for (error, terminal, agent), failures in failure_groups.items():
-            if len(failures) >= 2:  # Only create rule if pattern repeats
-                rule = {
-                    'pattern': f"Error pattern: {error}",
-                    'terminal_constraint': terminal,
-                    'agent_constraint': agent,
-                    'prevention': self.generate_prevention_suggestion(error, failures),
-                    'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
-                    'occurrence_count': len(failures)
-                }
-                new_rules.append(rule)
+        for (failure_class, error, terminal, agent), failures in failure_groups.items():
+            if failure_class not in ELIGIBLE_CLASSES or len(failures) < 2:
+                continue
+            ids = sorted({str(f['dispatch_id']) for f in failures if f.get('dispatch_id')})
+            new_rules.append({
+                'pattern': f"Error pattern: {error}",
+                'terminal_constraint': terminal,
+                'agent_constraint': agent,
+                'prevention': self.generate_prevention_suggestion(error, failures),
+                'confidence': min(len(failures) * 0.2, 0.9),  # Confidence based on frequency
+                'occurrence_count': len(failures),
+                'failure_class': failure_class,
+                'source_dispatch_ids': ids[:20],
+            })
 
         return new_rules
 
@@ -951,8 +1115,10 @@ class LearningLoop:
     def update_terminal_constraints(self, new_rules: List[Dict]):
         """Queue new prevention rules for operator confirmation (G-L1: no auto-activation).
 
-        Rules are written to pending_rules.json for operator review.
-        They are NOT inserted directly into prevention_rules table.
+        Rules are written to pending_rules.json through the prevention-rule store.
+        They are NOT inserted directly into prevention_rules table. Shadow mode
+        writes the queue only when queue mode is on. An unreadable queue raises
+        ``QueueUnreadable`` and the file stays as it was.
         """
         if not new_rules:
             return
@@ -970,54 +1136,29 @@ class LearningLoop:
                 }
                 for rule in new_rules
             )
-            print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+            if not queue_enabled():
+                print(f"👥 Shadow: {len(new_rules)} prevention rules computed, not queued")
+                return
+        queueable = [rule for rule in new_rules if _is_queueable(rule)]
+        if not queueable:
             return
         try:
-            paths = ensure_env()
-            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-            pending_path = state_dir / "pending_rules.json"
-
-            # Load existing pending rules
-            existing: List[Dict] = []
-            if pending_path.exists():
-                try:
-                    data = json.loads(pending_path.read_text(encoding="utf-8"))
-                    existing = data.get("pending_rules", [])
-                except (json.JSONDecodeError, OSError):
-                    existing = []
-
-            now = datetime.now().isoformat()
-            added = 0
-            for rule in new_rules:
-                queued = {
-                    "id": _rule_id(rule),
-                    "created_at": now,
-                    "source": "learning_loop",
-                    "rule_type": "failure_prevention",
-                    "pattern": rule["pattern"],
-                    "terminal_constraint": _scope_value(rule.get("terminal_constraint")) or "any",
-                    "agent_constraint": _scope_value(rule.get("agent_constraint")) or None,
-                    "prevention": rule["prevention"],
-                    "confidence": rule["confidence"],
-                    "occurrence_count": rule.get("occurrence_count", 1),
-                    "status": "pending",
-                    **{k: rule[k] for k in ("signal", "source_oi_ids") if k in rule},
-                }
-                # Deduplicate by id
-                if not any(e.get("id") == queued["id"] for e in existing):
-                    existing.append(queued)
-                    added += 1
-
-            pending_path.write_text(
-                json.dumps({"pending_rules": existing}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            state_dir = Path(ensure_env()["VNX_STATE_DIR"]).expanduser().resolve()
+            counts = queue_rules(
+                state_dir,
+                queueable,
+                # "unresolved" binds to no decision: ``decide`` refuses another project's entry
+                project_id=self._resolve_own_project_id() or UNRESOLVED_PROJECT,
+                now=datetime.now().isoformat(),
             )
-            already = len(new_rules) - added
-            note = f" ({already} already pending)" if already else ""
-            print(f"📋 Queued {added} prevention rules{note} for operator review → {pending_path}")
-
+        except QueueUnreadable:
+            raise
         except Exception as e:
             print(f"❌ Error queuing prevention rules: {e}")
+            return
+        already = counts["merged"] + counts["unchanged"]
+        note = f" ({already} already pending)" if already else ""
+        print(f"📋 Queued {counts['added']} prevention rules{note} for operator review → {state_dir / 'pending_rules.json'}")
 
     def persist_to_intelligence_db(self):
         """Persist high-confidence patterns and failure data to intelligence DB tables.
@@ -1027,8 +1168,12 @@ class LearningLoop:
 
         - Patterns with used_count > 0 and confidence >= 0.6 → success_patterns
         - Failure patterns with occurrence >= 2 → antipatterns
+
+        The rows are planned first. In persist mode ``_write_planned`` refuses
+        before the first write unless an approval record is bound to exactly them.
         """
         now = datetime.now().isoformat()
+        planned: List[tuple] = []
         patterns_written = 0
         antipatterns_written = 0
 
@@ -1045,8 +1190,7 @@ class LearningLoop:
                     title = metric.pattern_title[:120]
                     # Use empty string category so intelligence_selector scope
                     # matching treats these as universal (empty scope = matches all)
-                    upsert_success_pattern(
-                        self.conn,
+                    planned.append(("success_patterns", dict(
                         project_id=project_id,
                         pattern_type="approach",
                         title=title,
@@ -1059,7 +1203,7 @@ class LearningLoop:
                         last_used=now,
                         valid_from=now,
                         counter="max",
-                    )
+                    )))
                     patterns_written += 1
 
             # Write failure patterns with occurrence >= 2 to antipatterns
@@ -1075,14 +1219,13 @@ class LearningLoop:
                 title = f"Recurring failure: {error_key}"[:120]
                 severity = "high" if len(failures) >= 5 else "medium"
                 # len(failures) is recounted over all receipts on every run.
-                upsert_antipattern(
-                    self.conn,
+                planned.append(("antipatterns", dict(
                     project_id=project_id,
                     pattern_type="approach",
                     title=title,
                     category="",
                     description=f"Error seen {len(failures)} times: {error_key}",
-                    pattern_data=json.dumps({"source": "learning_loop", "terminals": list({f['terminal'] for f in failures})}),
+                    pattern_data=json.dumps({"source": "learning_loop", "terminals": sorted({f['terminal'] for f in failures}, key=str)}),
                     why_problematic=error_key,
                     severity=severity,
                     occurrence_count=len(failures),
@@ -1091,19 +1234,19 @@ class LearningLoop:
                     valid_from=now,
                     counter="max",
                     always_update=("severity",),
-                )
+                )))
                 antipatterns_written += 1
 
+            persist_preview = self._write_planned(planned)
             self.conn.commit()
             if self.persist:
                 print(f"💾 Persisted to intelligence DB: {patterns_written} success patterns, {antipatterns_written} antipatterns")
             else:
                 print(f"👥 Shadow: would persist {patterns_written} success patterns, {antipatterns_written} antipatterns (in-memory copy only)")
-            self.shadow["persist_preview"] = {
-                "success_patterns": patterns_written,
-                "antipatterns": antipatterns_written,
-            }
+            self.shadow["persist_preview"] = persist_preview
 
+        except LearningApprovalRefused:
+            raise
         except Exception as e:
             print(f"❌ Error persisting to intelligence DB: {e}")
             try:
@@ -1111,83 +1254,117 @@ class LearningLoop:
             except sqlite3.OperationalError as rb_err:
                 log.debug("Failed to rollback after persist error: %s", rb_err)
 
-    def ingest_approved_rules(self):
-        """Ingest operator-approved prevention rules from pending_rules.json into DB.
+    def _write_planned(self, planned: List[tuple]) -> Dict[str, Any]:
+        """Write the planned (table, row) pairs and return the preview: the counts,
+        the rows, their hash and the proposal id to approve. In persist mode the
+        approval record must be bound to exactly these rows (ADR-068 besluit 18);
+        a refusal raises before the first write."""
+        changes = [dict(row, table=table) for table, row in planned]
+        result = {"success_patterns": sum(t == "success_patterns" for t, _ in planned),
+                  "antipatterns": sum(t == "antipatterns" for t, _ in planned), **preview(changes)}
+        if self.persist:
+            result["approval_record_sha256"] = claim_approval(
+                self.db_path.parent, _DISPOSITION_VALID_APPROVERS, changes)
+        for table, row in planned:
+            _PATTERN_WRITERS[table](self.conn, **row)
+        return result
 
-        Respects G-L1: only rules with status == "approved" are inserted.
-        After ingestion, status is updated to "ingested" in the JSON file.
-        """
+    def ingest_approved_rules(self) -> Dict[str, str]:
+        """Per approved queue rule one ``prevention_rules`` row (``source='learning_loop'``, ``project_id``
+        stamped) plus its activation from the store's record, in one transaction (loop D9). Persist mode
+        and a fresh ``ok``/``pending`` verdict of this project only; no approval in the record, an edited
+        proposal or another project refuses; an existing ``activation_id`` adds nothing and never switches
+        back on. First an activation whose rule row is gone goes off (``rule_row_missing``). Returns
+        ``{rule id or "*": reason}`` per refusal."""
         if not self.persist:
             self.shadow["steps_not_run"].append("ingest_approved_rules")
-            return
+            return {}
+        state_dir, done, refused = self.db_path.parent, {}, {}
+        if not (state_dir / QUEUE_FILENAME).exists():
+            return refused
         try:
-            paths = ensure_env()
-            state_dir = Path(paths["VNX_STATE_DIR"]).expanduser().resolve()
-            pending_path = state_dir / "pending_rules.json"
+            project_id = resolve_stamp_project_id(db_path=str(self.db_path))
+            self._deactivate_missing_rows(state_dir, project_id)
+            verdict_refusal = _ingest_verdict_refusal(read_verdict(state_dir), project_id)
+            if verdict_refusal:
+                refused["*"] = verdict_refusal
+            else:
+                reconcile(state_dir)
+                now = datetime.now(timezone.utc).isoformat()
+                for rule in [r for r in load_queue(state_dir) if r.get("status") == "approved"]:
+                    outcome = self._ingest_rule(state_dir, project_id, rule, now)
+                    if isinstance(outcome, str):
+                        refused[str(rule.get("id"))] = outcome
+                    else:
+                        done[rule["id"]] = outcome
+                if done:
+                    mark_ingested(state_dir, done)
+        # QueueUnreadable, DecisionsUnreadable and DecisionRefused of the store are ValueErrors.
+        except (TenantUnresolved, LookupError, ValueError, OSError, sqlite3.Error) as exc:
+            self.conn.rollback()
+            refused["*"] = f"{type(exc).__name__}: {exc}"
+        for key, reason in refused.items():
+            print(f"⛔ Ingest refused {key}: {reason}")
+        results = [outcome["ingest_result"] for outcome in done.values()]
+        collapsed, repeats = results.count("duplicate_of_existing_row"), results.count("activation_exists")
+        if results:
+            print(f"✅ Ingested {len(results) - collapsed - repeats} approved prevention rules into DB "
+                  f"({collapsed} collapsed onto an existing row, {repeats} already activated)")
+        return refused
 
-            if not pending_path.exists():
-                return
-
-            data = json.loads(pending_path.read_text(encoding="utf-8"))
-            rules = data.get("pending_rules", [])
-
-            approved = [r for r in rules if r.get("status") == "approved"]
-            if not approved:
-                return
-
-            now = datetime.now().isoformat()
-            ingested_count = 0
-            collapsed_count = 0
-
-            for rule in approved:
-                tag_combo = rule.get("terminal_constraint", "any")
-                description = rule.get("pattern", "")[:200]
-                recommendation = rule.get("prevention", "")[:500]
-                confidence = rule.get("confidence", 0.5)
-
-                # Check for duplicate (dedupe key: description + tag_combination)
-                existing = self.conn.execute(
-                    "SELECT id FROM prevention_rules WHERE description = ? AND tag_combination = ?",
-                    (description, tag_combo),
-                ).fetchone()
-
-                if existing:
-                    # B12: a collapse onto an existing row is visible, not silent.
-                    rule["ingest_result"] = "duplicate_of_existing_row"
-                    rule["ingest_row_id"] = existing[0]
-                    collapsed_count += 1
-                else:
-                    cur = self.conn.execute(
-                        "INSERT INTO prevention_rules "
-                        "(tag_combination, rule_type, description, recommendation, "
-                        " confidence, created_at, triggered_count, source_dispatch_id) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                        (tag_combo, "failure_prevention", description,
-                         recommendation, confidence, now, 0,
-                         rule.get("source_dispatch_id") or None),
-                    )
-                    rule["ingest_result"] = "inserted"
-                    rule["ingest_row_id"] = cur.lastrowid
-                    ingested_count += 1
-
-                # Mark as ingested in JSON
-                rule["status"] = "ingested"
-                rule["ingested_at"] = now
-
+    def _ingest_rule(self, state_dir: Path, project_id: str, rule: Dict[str, Any], now: str):
+        """One approved queue rule: its ``prevention_rules`` row and activation, committed together.
+        Returns the queue fields of the outcome, or the refusal reason (rolled back) as a string."""
+        decision = approved_decision(state_dir, rule["id"]) if isinstance(rule.get("id"), str) else None
+        if decision is None:
+            return "approved_without_decision"
+        if proposal_hash(rule) != decision.get("proposal_hash"):
+            return "proposal_changed_since_decision"
+        found = None
+        try:
+            fields = validate_activation(decision)
+            if fields["project_id"] != project_id:
+                return f"decision of project {fields['project_id']!r}, not {project_id!r}"
+            activation_id = mint_activation_id(project_id, fields["approval_id"], fields["rule_id"])
+            existing = activation_for(self.conn, project_id, activation_id)
+            if existing is not None:  # a repeat: the same key, never a second row, never back on
+                return {"ingest_result": "activation_exists", "ingest_row_id": existing["rule_row_id"],
+                        "activation_id": activation_id, "ingested_at": now}
+            description, tag = str(rule.get("pattern") or "")[:200], str(rule.get("terminal_constraint") or "any")
+            recommendation = str(rule.get("prevention") or "")[:500]  # the text that gets injected: part of the key
+            found = self.conn.execute(
+                "SELECT id FROM prevention_rules WHERE project_id = ? AND source = ? "
+                "AND description = ? AND tag_combination = ? AND recommendation = ?",
+                (project_id, LOOP_SOURCE, description, tag, recommendation)).fetchone()
+            if found is not None and found[0] in active_row_ids(self.conn, project_id):
+                # B12: a collapse onto a row another approval keeps active is visible, not silent.
+                return {"ingest_result": "duplicate_of_existing_row", "ingest_row_id": found[0], "ingested_at": now}
+            row_id = found[0] if found is not None else self.conn.execute(
+                "INSERT INTO prevention_rules (tag_combination, rule_type, description, recommendation, "
+                "confidence, created_at, triggered_count, source_dispatch_id, project_id, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (tag, "failure_prevention", description, recommendation,
+                 rule.get("confidence", 0.5), now, 0, rule.get("source_dispatch_id") or None,
+                 project_id, LOOP_SOURCE)).lastrowid
+            record_activation(self.conn, decision, state_dir=state_dir, rule_row_id=row_id, now=now)
             self.conn.commit()
+        except (ValueError, sqlite3.Error) as exc:
+            self.conn.rollback()
+            return f"activation refused: {exc}"
+        return {"ingest_result": "inserted" if found is None else "activated_existing_row",
+                "ingest_row_id": row_id, "activation_id": activation_id, "ingested_at": now}
 
-            # Write back updated JSON
-            pending_path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-
-            if ingested_count or collapsed_count:
-                print(f"✅ Ingested {ingested_count} approved prevention rules into DB "
-                      f"({collapsed_count} collapsed onto an existing row)")
-
-        except Exception as e:
-            print(f"❌ Error ingesting approved rules: {e}")
+    def _deactivate_missing_rows(self, state_dir: Path, project_id: str) -> int:
+        """Switch off each active activation whose loop rule row is gone: the store's record first, then the row."""
+        orphans = orphaned_activations(self.conn, project_id)
+        now = datetime.now(timezone.utc).isoformat()
+        for activation in orphans:
+            record_deactivation(state_dir, activation, reason="rule_row_missing", decided_by="learning_loop", now=now)
+            deactivate(self.conn, state_dir, activation["activation_id"], project_id=project_id)
+        if orphans:
+            self.conn.commit()
+            print(f"🔌 Deactivated {len(orphans)} activation(s): rule_row_missing")
+        return len(orphans)
 
     def archive_unused_patterns(self, threshold_days: int = 30):
         """Queue unused low-confidence patterns for operator confirmation (G-L4: no auto-archival).
@@ -1460,6 +1637,99 @@ class LearningLoop:
             print(f"❌ Error queuing stale patterns for supersede: {e}")
         return total
 
+    def _heartbeat(self, status: str, details: Dict[str, Any]) -> None:
+        """One ``learning_loop`` heartbeat; a beacon failure is logged, never fatal."""
+        try:
+            from health_beacon import HealthBeacon
+            from vnx_paths import ensure_env as _hb_ensure_env
+            _hb_paths = _hb_ensure_env()
+            HealthBeacon(
+                Path(_hb_paths["VNX_DATA_DIR"]),
+                "learning_loop",
+                expected_interval_seconds=86400,
+            ).heartbeat(status=status, details=details)
+        except (ImportError, OSError, KeyError) as e:
+            log.debug("HealthBeacon %s heartbeat skipped: %s", status, e)
+
+    def _propose_rules(self, from_history: bool) -> tuple:
+        """Step 3: extraction, generation and queue. Returns ``(new_rules, receipt_stats)``;
+        an unreadable queue lands in ``queue_error`` and the file stays as it was."""
+        failure_window = (
+            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
+            else datetime.now(timezone.utc) - timedelta(hours=24)
+        )
+        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
+        receipt_stats = dict(self.receipt_stats)
+        self.learning_stats["failure_patterns"] = len(failure_patterns)
+        new_rules = self.generate_prevention_rules(failure_patterns)
+        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
+        new_rules = new_rules + oi_rules
+        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
+        self.learning_stats["open_item_signals"] = len(oi_rules)
+        self.learning_stats["proposal_count"] = len(new_rules)
+
+        if new_rules:
+            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
+            try:
+                self.update_terminal_constraints(new_rules)
+            except QueueUnreadable as exc:
+                self.queue_error = str(exc)
+                print(f"❌ Proposal queue unreadable, nothing written: {exc}")
+        return new_rules, receipt_stats
+
+    def _proposal_only_cycle(self, from_history: bool) -> Dict[str, Any]:
+        """Degraded gate in queue mode: extraction, generation and queue, nothing else."""
+        _, receipt_stats = self._propose_rules(from_history)
+        self.learning_stats["receipts_read"] = receipt_stats["read"]
+        self.learning_stats["receipts_after_cutoff"] = receipt_stats["after_cutoff"]
+        return dict(self.learning_stats)
+
+    def _ledger_gate(self) -> Optional[Dict[str, Any]]:
+        """ledger_source_check before the extraction, in queue and persist mode only: shadow
+        without queue mode writes nothing and reads no verdict. ``ok`` and ``pending`` return
+        None and the cycle runs on, ``pending`` without the dispatches still in flight. Any other
+        verdict is the ``refused`` result, with a degraded heartbeat carrying the reason."""
+        self.ledger_verdict, self._in_flight = None, frozenset()
+        if not (self.persist or queue_enabled()):
+            return None
+        state_dir, project = self.db_path.parent, self._resolve_own_project_id()
+        verdict = self.ledger_verdict = _ledger_verdict(state_dir, project)
+        status, code = _ledger_status(verdict)
+        detail = verdict.get("reason") if isinstance(verdict, dict) else None
+        if status == STATUS_PENDING:
+            try:
+                self._in_flight = _in_flight_dispatch_ids(state_dir, project)
+            except (OSError, ValueError) as exc:
+                status, code, detail = STATUS_REFUSED, "in_flight_unreadable", f"{type(exc).__name__}: {exc}"
+        if status in (STATUS_OK, STATUS_PENDING):
+            return None
+        reason = LEDGER_REASON_PREFIX + code
+        print(f"⛔ Learning loop refused: {reason} ({detail})")
+        self._heartbeat("degraded", {"reason": reason, "detail": detail, "ledger_verdict": verdict})
+        return {"status": STATUS_REFUSED, "reason": reason, "ledger_verdict": verdict,
+                "statistics": {}}
+
+    def _degraded_cycle(self, gate: Dict[str, Any], from_history: bool) -> Dict[str, Any]:
+        """Probe gate degraded: no pattern update; in queue mode the proposals still reach the queue."""
+        print(
+            f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
+            f"({gate['detail']}) — skipping pattern updates"
+        )
+        statistics = self._proposal_only_cycle(from_history) if queue_enabled() else {}
+        reason = self.queue_error or gate["detail"]
+        self._heartbeat("degraded", {"probe_health": gate["probe_health"], "reason": reason})
+        result = {
+            "status": "degraded",
+            "probe_health": gate["probe_health"],
+            "gate": gate,
+            "statistics": statistics,
+        }
+        if self.queue_error:
+            result["reason"] = self.queue_error
+        if self.ledger_verdict is not None:
+            result["ledger_verdict"] = self.ledger_verdict
+        return result
+
     def daily_learning_cycle(self, from_history: bool = False):
         """Run the complete daily learning cycle.
 
@@ -1467,7 +1737,11 @@ class LearningLoop:
             from_history: When True, mine the full receipt history (all-time window)
                 instead of the default 24-hour window. Use for the first run against
                 a historical trail (``vnx learning run --from-history``).
+
+        In queue and persist mode the ledger verdict comes before the probe branch and
+        the extraction (``_ledger_gate``): a refused ledger stops the cycle with its reason.
         """
+        self.queue_error = None  # this cycle's queue failure only, never a previous cycle's
         if self.persist:
             gate = evaluate_activation_gate(state_dir=self.db_path.parent)
         else:
@@ -1479,31 +1753,11 @@ class LearningLoop:
             print("💤 Learning loop dormant (VNX_LEARNING_LOOP_ENABLED=0) — no-op, no beacon")
             return {"status": "dormant", "gate": gate, "statistics": {}}
 
+        refused = self._ledger_gate()
+        if refused is not None:
+            return refused
         if gate["action"] == "degraded":
-            print(
-                f"⛔ Learning loop gated: probe health={gate['probe_health']!r} "
-                f"({gate['detail']}) — skipping pattern updates"
-            )
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="degraded",
-                    details={"probe_health": gate["probe_health"], "reason": gate["detail"]},
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon degraded heartbeat skipped: %s", e)
-            return {
-                "status": "degraded",
-                "probe_health": gate["probe_health"],
-                "gate": gate,
-                "statistics": {},
-            }
+            return self._degraded_cycle(gate, from_history)
 
         mode = "FULL HISTORY" if from_history else "DAILY (24h)"
         mode += " / PERSIST" if self.persist else " / SHADOW"
@@ -1529,22 +1783,7 @@ class LearningLoop:
 
         # 3. Extract and learn from failures
         print("\n🔍 Step 3: Learning from failures...")
-        failure_window = (
-            datetime(2000, 1, 1, tzinfo=timezone.utc) if from_history
-            else datetime.now(timezone.utc) - timedelta(hours=24)
-        )
-        failure_patterns = self.extract_failure_patterns(start_time=failure_window)
-        receipt_stats = dict(self.receipt_stats)
-        self.learning_stats["failure_patterns"] = len(failure_patterns)
-        new_rules = self.generate_prevention_rules(failure_patterns)
-        oi_rules = self.generate_open_item_rules(self.extract_open_item_signals())
-        new_rules = new_rules + oi_rules
-        self.learning_stats["open_items_read"] = self.open_item_stats["read"]
-        self.learning_stats["open_item_signals"] = len(oi_rules)
-
-        if new_rules:
-            print(f"  ✓ Generated {len(new_rules)} new prevention rules")
-            self.update_terminal_constraints(new_rules)
+        new_rules, receipt_stats = self._propose_rules(from_history)
 
         # 4. Archive stale patterns
         print("\n📦 Step 4: Archiving unused patterns...")
@@ -1632,6 +1871,8 @@ class LearningLoop:
         report["statistics"] = self.learning_stats
         if not self.persist:
             report["shadow"] = self.shadow
+        if self.ledger_verdict is not None:
+            report["ledger_verdict"] = self.ledger_verdict
 
         elapsed = time.time() - start_time
         print(f"\n✅ Learning cycle completed in {elapsed:.2f} seconds")
@@ -1641,27 +1882,19 @@ class LearningLoop:
         print(f"  • Patterns archived: {self.learning_stats['patterns_archived']}")
         print("=" * 60)
 
-        if self.persist:
-            try:
-                from health_beacon import HealthBeacon
-                from vnx_paths import ensure_env as _hb_ensure_env
-                _hb_paths = _hb_ensure_env()
-                HealthBeacon(
-                    Path(_hb_paths["VNX_DATA_DIR"]),
-                    "learning_loop",
-                    expected_interval_seconds=86400,
-                ).heartbeat(
-                    status="ok",
-                    details={
-                        "elapsed_seconds": round(elapsed, 2),
-                        "patterns_tracked": len(self.pattern_metrics),
-                        "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
-                        "new_prevention_rules": len(new_rules),
-                        "patterns_archived": self.learning_stats.get("patterns_archived", 0),
-                    },
-                )
-            except (ImportError, OSError, KeyError) as e:
-                log.debug("HealthBeacon heartbeat skipped: %s", e)
+        if self.queue_error:
+            report["status"] = "degraded"
+            report["reason"] = self.queue_error
+            self._heartbeat("degraded", {"reason": self.queue_error})
+        elif self.persist:
+            self._heartbeat("ok", {
+                "elapsed_seconds": round(elapsed, 2),
+                "patterns_tracked": len(self.pattern_metrics),
+                "confidence_adjustments": self.learning_stats.get("confidence_adjustments", 0),
+                "new_prevention_rules": len(new_rules),
+                "patterns_archived": self.learning_stats.get("patterns_archived", 0),
+                "ledger_status": self.ledger_verdict["status"],
+            })
 
         return report
 

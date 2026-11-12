@@ -32,7 +32,7 @@ DEFAULT_CHARS = 800_000
 EXPECTED_MODEL_DEFAULTS = {
     "glm_gate": ("VNX_GLM_GATE_MODEL", "glm-5.2"),
     "kimi_gate": ("VNX_KIMI_GATE_MODEL", "kimi-k3"),
-    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-flash"),
+    "deepseek_gate": ("VNX_DEEPSEEK_GATE_MODEL", "deepseek-v4-pro"),
     "claude_gate": ("VNX_CLAUDE_GATE_MODEL", "sonnet"),
 }
 EXPECTED_TIMEOUT_CONFIG = {

@@ -100,7 +100,7 @@ class _FakePaths:
 
 
 @pytest.fixture
-def loop_env(tmp_path):
+def loop_env(tmp_path, approve_learning_persist):
     """LearningLoop bound to a tmp state dir via patched ensure_env."""
     state_dir = tmp_path / "vnx-data" / "vnx-dev" / "state"
     state_dir.mkdir(parents=True)
@@ -108,6 +108,7 @@ def loop_env(tmp_path):
     vnx_home.mkdir()
 
     fake = _FakePaths(state_dir, vnx_home)
+    approve_learning_persist(state_dir)
     with patch.object(ll, "ensure_env", return_value=fake):
         loop = ll.LearningLoop()
         yield loop, state_dir
@@ -402,7 +403,7 @@ def test_real_history_produces_at_least_one_proposal():
 
     fake = _FakePaths(state_dir, vnx_home)
     with _patch.object(ll, "ensure_env", return_value=fake):
-        loop = ll.LearningLoop()
+        loop = ll.LearningLoop(persist=False)  # reads the live store: never writable
         try:
             failures = loop.extract_failure_patterns(
                 start_time=datetime(2000, 1, 1, tzinfo=timezone.utc)

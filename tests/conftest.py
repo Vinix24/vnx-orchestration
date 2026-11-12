@@ -72,6 +72,12 @@ del _env_key, _subdir
 # already delenv/setenv it themselves (test_data_dir_guard.py,
 # test_path_resolution_regression.py, etc.) and win via monkeypatch.
 os.environ["VNX_DATA_HOME"] = str(Path(_CONFTEST_ISOLATION_TMP) / "account-home")
+# Every lifecycle line starts a detached `build_t0_state.py` (state_rebuild_trigger) that
+# inherits the test's VNX_STATE_DIR and runs init_schema on it while the test reads the same
+# store: "no such table: dispatches" / "no such column: project_id" under load (OI-2590,
+# OI-2712, OI-2729). Set here, it reaches every test and every subprocess a test starts;
+# a test of the trigger itself removes it with monkeypatch.delenv.
+os.environ["VNX_STATE_REBUILD_TRIGGER"] = "0"
 # VNX_PROJECT_ID is the operator's own project (every operator shell and worker here
 # exports vnx-dev). Left in the environment it outranks the project a test's fixture
 # derives: init/migrate backfills refuse with an ADR-007 project_id conflict, and
@@ -967,6 +973,22 @@ def make_vnx_dispatch_bundle(vnx_dispatch_dir: Path):
 
 
 @pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Put back every ``sys.modules`` entry a test removed or replaced.
+
+    A test that pops a module and re-imports it leaves a fresh object behind. A later test
+    file that patched the collection-time object then patches a module the code under test
+    no longer imports (E1: the patch missed and the write hit the real central store). Only
+    removed or replaced entries return; a module first imported during the test stays.
+    """
+    before = dict(sys.modules)
+    yield
+    for name, module in before.items():
+        if sys.modules.get(name) is not module:
+            sys.modules[name] = module
+
+
+@pytest.fixture(autouse=True)
 def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """In-process planning commands run as the operator unless a test says otherwise.
 
@@ -988,3 +1010,24 @@ def _operator_actor_class_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     # Patch the probe, not the stream: derive() resolves _stdin_isatty at call time,
     # and sys.stdin stays what pytest provides for every other code path.
     monkeypatch.setattr(actor_class, "_stdin_isatty", lambda: True)
+
+
+@pytest.fixture()
+def approve_learning_persist(monkeypatch: pytest.MonkeyPatch):
+    """Write an unused learning-loop approval record and select it (ADR-068 besluit 18), the way
+    ``_write_record`` in test_qi_learning_approval.py does until ``write_record`` lands. Without an id
+    it approves the empty change set: a persist-mode loop whose bridge step writes no rows. Returns the path."""
+    import qi_learning_approval as qla
+    from atomic_io import slot_lock
+
+    def _approve(state_dir, proposal_id=None):
+        proposal_id = proposal_id or qla.preview([])["proposal_id"]
+        path = qla.record_path(Path(state_dir), proposal_id)
+        record = {"proposal_id": proposal_id, "changes_sha256": proposal_id[6:], "approved_by": "operator",
+                  "approved_at": "2026-11-10T08:00:00+00:00", "reason": "test approval", "consumed_at": None}
+        with slot_lock(path):
+            path.write_text(json.dumps(record), encoding="utf-8")
+        monkeypatch.setenv(qla.APPROVED_ENV, proposal_id)
+        return path
+
+    return _approve

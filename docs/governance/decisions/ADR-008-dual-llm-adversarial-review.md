@@ -1,6 +1,6 @@
 # ADR-008 — Dual-LLM Adversarial Review (`codex_gate` + `gemini_review`) with `contract_hash` Binding
 
-**Status:** Accepted, amended 2026-09-26 (second reviewer: kimi_gate)
+**Status:** Accepted, amended 2026-09-26 (second reviewer: kimi_gate), amended 2026-11-11 (second reviewer: deepseek_gate)
 **Date:** 2026-05-09
 **Decided by:** Operator (Vincent van Deth)
 **Resolves:** Mandatory triple-gate policy (codex + gemini + CI green); review-gate evidence model
@@ -242,3 +242,14 @@ Het activeert `light` niet (dat is P5), het zet `VNX_REVIEW_SEAT_RULE` niet (de 
 - ADR-030, amendement 2026-10-25 (de tweede plan-gate-zetel vanaf de start bij schema, security, outside-repo en irreversible)
 - ADR-041 (de tiebreaker bij de review-cap; de plan-gate van 08-11 en haar bindende voorwaarde)
 - `claudedocs/2026-11-07-naar-1-9/plannen/gate-profiel-per-project.md` (revisie 2; de profieltabel, B5, B13 en B14)
+
+## Amendment (2026-11-11): seat 2 is DeepSeek v4-pro, "subscription first" holds for seat 1 only
+
+**Decided by:** Operator (Vincent van Deth). Decision of 2026-11-11, about 16:50Z: the Kimi subscription is cancelled and not renewed; it runs to the end of the invoice period. Measurement: `claudedocs/2026-11-10-kimi-vs-deepseek-oordeel.md`.
+
+- **What changed.** The default review stack is `codex_gate,deepseek_gate` (`scripts/lib/config_registry.py:117-118`). The default takeover chain is `codex_gate,deepseek_gate,claude_gate` (`:141-143`, equal to `gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN`). `deepseek_gate` runs `deepseek-v4-pro` by default. The `light`, `standard` and `heavy` profiles name no `kimi_gate` (`scripts/lib/gate_profile.py:66-84`). The project dial for seat 2 is `deepseek_gate_required` (`.vnx/governance_enforcement.yaml:20`).
+- **Why.** DeepSeek v4-pro costs $0.16 per review (n=64, measured 2026-11-10) and flash $0.12 (n=19). At 107 Kimi reviews a month, the subscription only saved money below about $17 a month. Its price is not recorded in the repo, so no Kimi cost per review is stated here. Since 2026-11-09 vnx-dev requests seat 2 only on a signal or in a 1-in-5 sample, so the review count, and with it the break-even, falls. Kimi also stops at its weekly limit, and a stopped seat 2 stops the merge door. With the subscription gone, the reason for "subscription first" at seat 2 is gone too. Source: `claudedocs/2026-11-10-kimi-vs-deepseek-oordeel.md`, section "Kosten", a local operator note and not a tracked file.
+- **What it supersedes.** From the 2026-09-26 amendment: the bullet "`codex_gate` and `kimi_gate` on subscription" and the sentence that `deepseek_gate` is never a default seat. "Subscription first" now holds for seat 1 only: `tests/test_review_stack_subscription_first.py` fails when seat 1 of a default stack is not a subscription gate, and when a default stack, chain or profile names `kimi_gate`. Seat 2 and the chain may be metered.
+- **What it gives up.** Seat 2 runs on API credit. A `deepseek-flash` build is reviewed by the same vendor on a different model (R7b, `deepseek-v4-pro`). A `deepseek-v4-pro` build passes `deepseek_gate` over, and seat 2 goes to `claude_gate`, which failed its calibration run and is therefore the last link of the chain.
+- **What stays.** `kimi_gate` is a registered gate and the kimi lane stays: an explicit stack, chain or build choice can still name them. A `project_config` row beats the new default, so a project that pinned `kimi_gate` keeps it until an operator changes the row. The `contract_hash` binding, the three evidence surfaces per gate and the signal rule of 2026-10-30 are unchanged.
+- **Reading older amendments.** The defaults in the 2026-10-23 and 2026-10-30 amendments and in the profile table of amendment 4 (2026-11-08) are the defaults of their date. Read them with this amendment.

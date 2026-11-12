@@ -269,6 +269,31 @@ def test_codex_gate_required_unresolvable_head_fails(config_file: Path, gate_res
     assert "niet bepalen" in result.message
 
 
+# Check: deepseek_gate_required (seat 2 since 2026-11-11, Kimi cancelled)
+
+@pytest.mark.parametrize("mode, level", [(None, 2), ("strict", 3), ("relaxed", 1), ("off", 0)])
+def test_this_repos_seat_2_dial_is_deepseek_in_every_preset(mode, level):
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(Path(__file__).resolve().parent.parent / ".vnx" / "governance_enforcement.yaml", mode)
+    assert enforcer._checks["deepseek_gate_required"].level == level and "kimi_gate_required" not in enforcer._checks
+
+
+@pytest.mark.parametrize("sha, contract, passed, words", [
+    (None, "", False, "deepseek_gate result not found"), (_HEAD_SHA, "abc", True, "deepseek_gate passed"),
+    (_STALE_SHA, "abc", False, "oudere commit"), (_HEAD_SHA, "", False, "empty contract_hash"),
+])
+def test_deepseek_gate_required_reads_the_deepseek_record_on_the_head(config_file, gate_results_dir, sha, contract, passed, words):
+    config_file.write_text("version: 1\nchecks:\n  deepseek_gate_required:\n    level: 2\n")
+    if sha is not None:
+        record = {"status": "completed", "contract_hash": contract, "commit_sha": sha}
+        gate_results_dir.joinpath("pr-42-deepseek_gate.json").write_text(json.dumps(record))
+    enforcer = GovernanceEnforcer()
+    enforcer.load_config(config_file)
+    with patch("governance_enforcer.GATE_RESULTS_DIR", gate_results_dir):
+        result = enforcer.check("deepseek_gate_required", {"pr_number": 42, "head_sha": _HEAD_SHA})
+    assert (result.passed, words in result.message) == (passed, True), result.message
+
+
 # ---------------------------------------------------------------------------
 # Check: kimi_gate_required (OI-1884: a PASS only counts on the CURRENT head)
 # ---------------------------------------------------------------------------

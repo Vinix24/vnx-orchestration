@@ -28,6 +28,7 @@ if str(LIB_DIR) not in sys.path:
     sys.path.insert(0, str(LIB_DIR))
 
 from agent_directory_loader import load_agent_directory as _load_agent_directory
+from pattern_activation import injectable_clause
 from project_scope import current_project_id
 
 EXIT_OK = 0
@@ -62,9 +63,32 @@ _TOKEN_STOPWORDS = frozenset({
 
 
 def _injection_why_enabled() -> bool:
-    """VNX_INJECTION_WHY_ENABLED — off by default; direct env read (no config_registry
-    DB-precedence round-trip on the receipt-processing hot path)."""
-    return os.environ.get("VNX_INJECTION_WHY_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"}
+    """VNX_INJECTION_WHY_ENABLED through the config_registry precedence chain.
+
+    - ``VNX_OVERRIDE_INJECTION_WHY_ENABLED`` set: its value decides (read before the DB).
+    - DB resolver wired and it raises: ``False``, whatever the environment says, plus a
+      warning naming the key and the exception (window state unknown, so the injection stays off).
+    - DB resolver wired and it returns a row: the row decides.
+    - DB resolver wired, no row, or no resolver wired: the environment, then the registry
+      default (``"0"``).
+    - Any other exception in the reader (import, configuration): ``False`` plus a warning.
+
+    One DB read per call. A value counts as on only for a truthy spelling (1/true/yes/on).
+    """
+    key = "VNX_INJECTION_WHY_ENABLED"
+    try:
+        import config_registry  # scripts/lib is on sys.path (module header)
+        import config_runtime
+
+        config_runtime.autowire()
+        value, source = config_registry.resolve_with_source(key, strict_resolver=True)
+        if source == "project_config_error":
+            return False  # the registry already logged the key and the exception
+        return (value or "").strip().lower() in config_registry._TRUTHY
+    except Exception as exc:
+        log.warning("%s: reader failed (%s: %s), injection WHY stays off", key,
+                    type(exc).__name__, exc)
+        return False
 
 
 def _tokenize(text: str) -> set:
@@ -2112,14 +2136,14 @@ class T0IntelligenceGatherer:
         try:
             keywords = self.extract_keywords(task_description)
             keyword_pattern = '%' + '%'.join(keywords) + '%'
-
-            cursor = self.quality_db.execute('''
+            guard_sql, guard_params = injectable_clause(self.quality_db, self.quality_db_path.parent)
+            cursor = self.quality_db.execute(f'''
                 SELECT description, recommendation, confidence
                 FROM prevention_rules
-                WHERE description LIKE ? OR recommendation LIKE ?
+                WHERE (description LIKE ? OR recommendation LIKE ?) AND {guard_sql}
                 ORDER BY confidence DESC
                 LIMIT 3
-            ''', (keyword_pattern, keyword_pattern))
+            ''', (keyword_pattern, keyword_pattern, *guard_params))
 
             rules = cursor.fetchall()
             if rules:

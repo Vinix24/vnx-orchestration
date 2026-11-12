@@ -5,6 +5,12 @@ to fire build_t0_state.py rebuild without storming the throttle file.
 
 Throttle marker: $VNX_STATE_DIR/.last_state_rebuild_ts (integer epoch seconds).
 Default throttle window: 30 seconds.
+
+Off switch: ``VNX_STATE_REBUILD_TRIGGER=0`` makes ``maybe_trigger_state_rebuild``
+return ``False`` without spawning anything. Any other value, or unset, keeps the
+normal behaviour. ``tests/conftest.py`` sets it for the whole suite so no lifecycle
+line starts a detached ``build_t0_state.py`` that races a test's store; a test that
+exercises the spawn itself removes it with ``monkeypatch.delenv``.
 """
 from __future__ import annotations
 
@@ -21,6 +27,7 @@ from event_outcome_semantics import COMPLETION_EVENT_TYPES
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_THROTTLE_SECONDS = 30
+STATE_REBUILD_TRIGGER_ENV = "VNX_STATE_REBUILD_TRIGGER"
 
 # The completion family (ADR-045 §2: dispatch_finished next to task_complete)
 # plus the legacy literals this trigger has always honoured and the two failure
@@ -97,6 +104,9 @@ def maybe_trigger_state_rebuild(
     - Marker is written ONLY after Popen succeeds (no failure-suppression bug)
     - Atomic write via .tmp + rename
     """
+    if os.environ.get(STATE_REBUILD_TRIGGER_ENV) == "0":
+        return False
+
     bypass_throttle = event_type in CRITICAL_EVENTS
 
     state_dir = _resolve_state_dir()

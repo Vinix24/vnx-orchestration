@@ -1,0 +1,12 @@
+-- 0038_intelligence_injections_ab_arm_down.sql — the way back from v38 to v37.
+--
+-- Documents; apply_0038.revert_migration builds it, in one transaction, and refuses unless
+-- PRAGMA user_version is exactly 38 (Migration0038Error otherwise; at 37 it is a no-op).
+-- Needs SQLite >= 3.35 (ALTER TABLE ... DROP COLUMN); the runner checks that before opening the store.
+--
+-- It removes only what 0038 added: idx_injection_window_arm, the older idx_injection_ab_arm
+-- (SQLite refuses to drop an indexed column), ab_window and ab_arm, then stamps user_version 37.
+-- Every other column and every row stays as it was. runtime_schema_version is not touched.
+-- The arm history is lost on a down; the zero point is a fresh backup right before the up.
+--
+-- Target DB: runtime_coordination.db · Tested by: tests/test_migration_0038_ab_arm.py

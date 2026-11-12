@@ -1,1 +1,0 @@
-- feat(planning): promote and close derive the actor class from the TTY and agent-marker signals and write it as metadata.actor_class on the coordination event (ADR-056, zelfst PR-2)

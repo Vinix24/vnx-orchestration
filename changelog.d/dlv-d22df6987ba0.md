@@ -1,1 +1,0 @@
-- Agent layout (track `agents-als-map-fase-1`, PR-1): `VNX_AGENT_LAYOUT` (default `off`) with `off` and `shadow`; `on` and unknown values read as `off` with one WARNING, via the new `scripts/lib/agent_layout.py`.

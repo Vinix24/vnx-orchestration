@@ -40,11 +40,19 @@ De audit vergelijkt per paar twee records van verschillende bakken: `oi_mem`, `o
 3. Per open paar: voeg `OI-<n>` of `[[naam]]` toe aan het niet-home record, of draai `python3 scripts/capture_audit.py dismiss --pair <id> --reason <tekst>`. Een lege reden wordt geweigerd.
 4. De volgende run toont het paar als `linked` of `dismissed`.
 
-De commando's `report` en `dismiss` landen in PR-4 van het spoor. Tot dan is het leesmodel zelf de enige plek om de open paren te zien.
+`report` leest het geschreven `capture_audit.json` en toont per open paar de id, soort en anker. Is het bestand weg of van een ander schema, dan stopt het met exit 2. Bestaat `capture_dispositions.ndjson` maar is hij onleesbaar, dan zegt `report` dat op een eigen regel: het leesmodel telt dan niets als afgehandeld en de open paren zijn een overschatting. `--show` zet namen alleen in de terminal en kan niet samen met `--json`.
+
+`dismiss` schrijft een regel `{pair_id, reason, at, by}` onder een bestandsslot. Hij past dezelfde regel toe als de lezer (`valid_dismissal`): een paar-id van 16 hexadecimale tekens en een niet-lege reden, tijd en `by`. Wat de lezer zou afwijzen wordt geweigerd met exit 2 en er wordt niets geschreven.
+
+De nachtelijke beacon draait de audit na de leerlus, ook als de lus faalde. Faalt de audit zelf, dan staat de fout in `capture_audit_error`, is `duplicate_capture_open` `null` en verandert de status van de lus niet. Een `null` is geen nul.
 
 ## Bronnen en binding
 
 De audit leest alleen via `state/capture_sources.json`, geschreven door `python3 scripts/capture_audit.py bind`. Het bevat het `project_id`, de geheugenmap (onder `~/.claude/projects/`), de bucketmap en de bucketslug. Zonder dat bestand, of bij een afwijkend `project_id`, is de bak `unbound` en is `open_pairs` `null`. Entries van een andere slug worden geteld en niet gelezen.
+
+## De leerlus als bron
+
+De lus schrijft voorstellen en nooit records. Standaard is hij een schaduwrun. `VNX_LEARNING_LOOP_QUEUE=1` (uit) zet voorstellen in `pending_rules.json`. `VNX_LEARNING_LOOP_PERSIST=1` (uit) laat hem patronen schrijven, elk onder een operatorbesluit en een goedkeuringsrecord. `vnx learning decide-rule` legt het besluit vast als één bundel. Goedkeuren via `ingest_approved_rules` zet een preventieregel in dispatches, en daarom gaat een les nooit rechtstreeks naar deze bak. Modi, vlaggen en de poort: [SELF_LEARNING_LOOP.md](../intelligence/SELF_LEARNING_LOOP.md).
 
 ## Waarom
 

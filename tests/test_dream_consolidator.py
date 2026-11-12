@@ -3,7 +3,7 @@
 Coverage:
 - test_emit_dream_event_writes_ndjson: NDJSON-first emit (ADR-005)
 - test_fetch_patterns_respects_project_id: tenant isolation (ADR-007)
-- test_parse_kimi_response_strict_json: response JSON extraction
+- test_parse_json_response_strict_json: response JSON extraction
 - test_dry_run_no_db_write: dry-run skips dream_cycles INSERT
 - test_run_dream_cycle_happy_path: full cycle with mocked kimi
 - GAP-7 receipt-completeness preflight: stale/empty → skip with warning event
@@ -47,6 +47,7 @@ def _dream_activation_gate_open(monkeypatch):
     covered by TestActivationGate below (which overrides these as needed).
     """
     monkeypatch.setenv("VNX_DREAM_SCHEDULER_ENABLED", "1")
+    monkeypatch.setenv("VNX_DREAM_PROVIDER", "kimi")  # these tests patch the kimi dispatch
     monkeypatch.setattr(consolidator, "_injection_probe_health", lambda state_dir: "ok")
 
 
@@ -208,10 +209,10 @@ class TestFetchPatterns:
 
 
 class TestParseKimiResponse:
-    def test_parse_kimi_response_strict_json(self):
+    def test_parse_json_response_strict_json(self):
         """Extracts first complete JSON object from text with preamble/postamble."""
         text = 'Sure! Here you go:\n{"merged":[],"dropped":[],"archived":[],"flagged":[],"summary":"ok"}\nDone.'
-        result = consolidator._parse_kimi_response(text)
+        result = consolidator._parse_json_response(text)
         assert result == {
             "merged": [],
             "dropped": [],
@@ -220,15 +221,15 @@ class TestParseKimiResponse:
             "summary": "ok",
         }
 
-    def test_parse_kimi_response_no_json_raises(self):
+    def test_parse_json_response_no_json_raises(self):
         """Raises ValueError when no JSON object is found in the output."""
         with pytest.raises(ValueError, match="No JSON found"):
-            consolidator._parse_kimi_response("no braces here at all")
+            consolidator._parse_json_response("no braces here at all")
 
-    def test_parse_kimi_response_invalid_json_raises(self):
+    def test_parse_json_response_invalid_json_raises(self):
         """Raises ValueError on malformed JSON."""
         with pytest.raises(ValueError, match="Invalid JSON"):
-            consolidator._parse_kimi_response("{not: valid json}")
+            consolidator._parse_json_response("{not: valid json}")
 
 
 class TestExtractKimiText:
@@ -672,9 +673,9 @@ class TestKimiTimeout:
         assert timeout_events, "dream_cycle_timeout event not emitted"
 
     def test_timeout_env_override(self, tmp_path, monkeypatch):
-        """VNX_DREAM_KIMI_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
+        """VNX_DREAM_TIMEOUT env var is passed to _dispatch_kimi_consolidation."""
         db_path, data_root = _make_db_with_receipts(tmp_path, with_patterns=True)
-        monkeypatch.setenv("VNX_DREAM_KIMI_TIMEOUT", "42")
+        monkeypatch.setenv("VNX_DREAM_TIMEOUT", "42")
         captured = {}
 
         def _capture_timeout(patterns, project_id, timeout=180.0, data_root=None):

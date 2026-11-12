@@ -41,12 +41,15 @@ from pre_merge_gate import (
     CQS_THRESHOLD,
     DELETION_FILE_WARN,
     DELETION_FILE_HOLD,
-    PR_SIZE_WARN,
-    PR_SIZE_HOLD,
     SKIPPED_UNVERIFIED,
     DEFAULT_CI_WORKFLOW_NAME,
     CI_WORKFLOW_NAME_ENV_VAR,
 )
+import config_registry
+
+# The registry carries the only copy of the PR-size defaults (VNX_PR_SIZE_WARN / _HOLD).
+PR_SIZE_WARN = int(config_registry.CONFIG_REGISTRY["VNX_PR_SIZE_WARN"].default)
+PR_SIZE_HOLD = int(config_registry.CONFIG_REGISTRY["VNX_PR_SIZE_HOLD"].default)
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 

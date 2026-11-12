@@ -1,6 +1,6 @@
 # ADR-066 - De dream-liveness-watch: één contract `dream_liveness/1`, een nacht als eenheid van bewijs, en 30 dagen als nieuwe beleidsdrempel
 
-**Status:** Voorgesteld 10-11-2026 (T0, track `dream-liveness-watch`, rij PR-1); aangenomen zodra de T0 PR-1 merget.
+**Status:** Aangenomen 10-11-2026 (T0, track `dream-liveness-watch`, rij PR-1; PR #2601 is op 10-11-2026 gemerged).
 **Datum:** 2026-11-10
 **Besloten door:** het plan `claudedocs/2026-11-07-naar-1-9/plannen/dream-liveness-watch.md` (revisie 2, 08-11-2026), inclusief de acht bevindingen van de plan-gate van 08-11. Het nummer 066 is door de T0 toegewezen: het plan noemt 056, maar dat is bezet (ADR-064 en ADR-065 zijn door andere tracks geclaimd).
 **Cross-refs:** ADR-005 (NDJSON-grootboek vóór elke databaseschrijfactie), ADR-007 (samengestelde sleutel over `project_id`; hier niet van toepassing, zie §8), ADR-019 (auto-dream-consolidatie; hier gecorrigeerd), ADR-051 (een geplande taak volgt de pin op runtime), ADR-055 (versheid nooit uit een mtime), ADR-063 (de dagelijkse doorloopmeting: hetzelfde contract-denken voor een andere meting).

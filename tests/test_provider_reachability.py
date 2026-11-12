@@ -34,6 +34,7 @@ import pytest
 
 import provider_reachability as pr
 from provider_reachability import ReachabilityState as State
+from review_stack_support import pin_kimi_era_review_config
 
 VNX_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = VNX_ROOT / "scripts"
@@ -647,6 +648,7 @@ def manager(state_dir, tmp_path, monkeypatch):
     monkeypatch.chdir(project_root)
     import review_gate_manager as rgm
 
+    pin_kimi_era_review_config(monkeypatch)
     return rgm.ReviewGateManager()
 
 

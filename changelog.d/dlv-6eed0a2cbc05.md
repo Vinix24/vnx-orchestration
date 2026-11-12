@@ -1,0 +1,1 @@
+- PR-size thresholds per project: `VNX_PR_SIZE_WARN` and `VNX_PR_SIZE_HOLD` in the config registry (defaults 450 and 600, a `project_config` row per project). `pre_merge_gate` reads them for the PR's project and names the threshold and its source in the detail line; an invalid value or a WARN above HOLD falls back to the defaults and is named by key (dlv-6eed0a2cbc05).
