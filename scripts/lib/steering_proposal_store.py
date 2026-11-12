@@ -2,10 +2,13 @@
 
 ``state/steering_proposal_decisions.ndjson`` is the truth: append-only, fsynced, every append on a line
 boundary. ``proposal_id = sha256(project_id | oorzaak | artefact_soort | doelpad)[:16]``; the text is a
-revision under that id. The derived projection and reopening a rejected proposal come with ``reconcile``
-(OB-5a-b). ``approved`` applies nothing; ``applied`` needs an ``applied_ref``. Every read and write is
-scoped by ``project_id`` (ADR-007) and takes an exclusive ``fcntl.flock``. An unreadable record file
-raises ``StoreUnreadable``.
+revision under that id. ``state/steering_proposals.json`` is derived from the records after every commit
+and read, and never read as a source. A rejected proposal reopens (``reopened`` record, status ``pending``)
+only on a prompt whose ``ts`` is after its ``decided_at``; otherwise the revision is kept and counted as
+``suppressed_rejected`` (ADR-072 decision 14). A new revision of an approved or applied proposal is stored
+and the status stays: the approval stays bound to its own revision. ``approved`` applies nothing;
+``applied`` needs an ``applied_ref``. Every read and write is scoped by ``project_id`` (ADR-007) and takes
+an exclusive ``fcntl.flock``. An unreadable record file raises ``StoreUnreadable``.
 """
 
 from __future__ import annotations
@@ -19,11 +22,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence
 
+PROJECTION_FILENAME = "steering_proposals.json"
+SCHEMA = "steering_proposals/1"
 DECISIONS_FILENAME = "steering_proposal_decisions.ndjson"
 LOCK_FILENAME = ".steering_proposals.lock"
-REVISION_DECISIONS = frozenset({"proposed", "revised"})
+REVISION_DECISIONS = frozenset({"proposed", "revised", "reopened"})
 OPERATOR_DECISIONS = frozenset({"approved", "rejected", "applied"})
 RECORD_DECISIONS = REVISION_DECISIONS | OPERATOR_DECISIONS
+OUTCOMES = ("added", "revised", "unchanged", "reopened", "suppressed_rejected")
 _REQUIRED_TEXT = ("oorzaak", "artefact_soort", "doelpad", "voorstel")
 
 
@@ -74,6 +80,13 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo is not None else None
 
 
+def _prompt_ids(value: Any) -> List[str]:
+    """A list of non-empty strings; a bare string or any other item is refused."""
+    if not isinstance(value, list) or not all(isinstance(i, str) and i.strip() for i in value):
+        raise ProposalInvalid("evidence_prompt_ids is a list of non-empty strings")
+    return list(value)
+
+
 def _normalise(project_id: str, proposal: Mapping[str, Any]) -> Dict[str, Any]:
     if not isinstance(proposal, Mapping):
         raise ProposalInvalid("a proposal is a mapping")
@@ -102,6 +115,10 @@ def _validate_record(where: str, record: Any) -> Dict[str, Any]:
         raise StoreUnreadable(f"{where}: decision or revision invalid")
     if _parse_ts(record.get("decided_at")) is None:
         raise StoreUnreadable(f"{where}: decided_at invalid")
+    try:
+        _prompt_ids(record.get("evidence_prompt_ids", []))
+    except ProposalInvalid as exc:
+        raise StoreUnreadable(f"{where}: {exc}") from exc
     if record["decision"] in REVISION_DECISIONS and not all(_text(record.get(n)) for n in _REQUIRED_TEXT):
         raise StoreUnreadable(f"{where}: revision record without content")
     return record
@@ -154,7 +171,11 @@ def _apply(state: Dict[str, Dict[str, Any]], record: Mapping[str, Any]) -> None:
     if entry is None or entry["project_id"] != record["project_id"]:
         raise DecisionRefused("unknown proposal")
     if decision in REVISION_DECISIONS:
+        if decision == "reopened" and entry["status"] != "rejected":
+            raise DecisionRefused("only a rejected proposal reopens")
         _add_revision(entry, record)
+        if decision == "reopened":
+            entry.update(status="pending", decided_at=None, decided_revision=None)
     elif decision in ("approved", "rejected"):
         if entry["status"] != "pending" or not 1 <= record["revision"] <= len(entry["revisions"]):
             raise DecisionRefused(f"cannot {decision} a {entry['status']} proposal or a revision it does not have")
@@ -196,14 +217,39 @@ def _append(state_dir: Path, records: Sequence[Mapping[str, Any]]) -> None:
         os.fsync(handle.fileno())
 
 
-def _commit(state_dir: Path, state: Dict[str, Dict[str, Any]], record: Mapping[str, Any]) -> None:
-    """Validate as the read path does, fold, append; every refusal comes before the write."""
+def _project(state_dir: Path, state: Mapping[str, Mapping[str, Any]]) -> None:
+    """Write the derived projection when it differs from the replayed state (temp file plus replace)."""
+    path = Path(state_dir) / PROJECTION_FILENAME
+    body = json.dumps({"schema": SCHEMA, "proposals": [state[k] for k in sorted(state)]},
+                      indent=2, ensure_ascii=False, sort_keys=True)
     try:
-        _validate_record("new record", dict(record))
-    except StoreUnreadable as exc:
-        raise DecisionRefused(f"record refused: {exc}") from exc
-    _apply(state, record)
-    _append(state_dir, [record])
+        if path.read_text(encoding="utf-8") == body:
+            return
+    except (OSError, ValueError):  # vnx-silent-except: the projection is derived, a missing or unreadable one is rewritten
+        pass
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:  # vnx-atomic-write: temp file, fsync, replace
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _commit(state_dir: Path, state: Dict[str, Dict[str, Any]], records: Sequence[Mapping[str, Any]]) -> None:
+    """Validate as the read path does, fold, append, project; every refusal comes before the write."""
+    for record in records:
+        try:
+            _validate_record("new record", dict(record))
+        except StoreUnreadable as exc:
+            raise DecisionRefused(f"record refused: {exc}") from exc
+        _apply(state, record)
+    if records:
+        _append(state_dir, records)
+    _project(state_dir, state)
 
 
 def _record(project_id: str, pid: str, revision: int, decision: str, now: str, **extra: Any) -> Dict[str, Any]:
@@ -220,6 +266,7 @@ def proposals(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
     project_id = _require_project(project_id)
     with _locked(state_dir):
         state = _replay(_read_records(state_dir))
+        _project(state_dir, state)
         return [state[k] for k in sorted(state) if state[k]["project_id"] == project_id]
 
 
@@ -237,20 +284,24 @@ def decisions(state_dir: Path, project_id: str) -> List[Dict[str, Any]]:
 
 
 def add_revision(state_dir: Path, project_id: str, proposal: Mapping[str, Any], *,
-                 evidence_prompt_ids: Optional[Sequence[str]] = None, now: Optional[str] = None) -> Dict[str, Any]:
-    """Append one revision record: ``proposed`` for a new identity, ``revised`` for a known one.
-    Returns the record. Whether a batch entry deserves a revision is ``reconcile`` (OB-5a-b)."""
+                 evidence_prompt_ids: Optional[Sequence[str]] = None, reopen: bool = False,
+                 now: Optional[str] = None) -> Dict[str, Any]:
+    """Append one revision record: ``proposed`` for a new identity, ``revised`` for a known one,
+    ``reopened`` (``reopen=True``, rejected proposals only). Returns the record. Whether a batch entry
+    deserves a revision is ``reconcile``."""
     project_id = _require_project(project_id)
     item = _normalise(project_id, proposal)
     stamp = _stamp(now)
-    ids = list(evidence_prompt_ids) if evidence_prompt_ids is not None else [e["prompt_id"] for e in item["evidence"]]
+    ids = _prompt_ids(list(evidence_prompt_ids) if isinstance(evidence_prompt_ids, (list, tuple))
+                      else evidence_prompt_ids) if evidence_prompt_ids is not None else [e["prompt_id"] for e in item["evidence"]]
     with _locked(state_dir):
         state = _replay(_read_records(state_dir))
         entry = state.get(item["proposal_id"])
-        decision, revision = ("proposed", 1) if entry is None else ("revised", len(entry["revisions"]) + 1)
+        decision, revision = ("proposed", 1) if entry is None else ("reopened" if reopen else "revised",
+                                                                    len(entry["revisions"]) + 1)
         record = _record(project_id, item["proposal_id"], revision, decision, stamp, evidence_prompt_ids=ids,
                          **{n: item[n] for n in _REQUIRED_TEXT})
-        _commit(state_dir, state, record)
+        _commit(state_dir, state, [record])
     return record
 
 
@@ -270,5 +321,55 @@ def decide(state_dir: Path, project_id: str, pid: str, decision: str, *, reason:
         bound = revision if revision is not None else len(entry["revisions"])
         extra = {"applied_ref": _text(applied_ref)} if decision == "applied" else {}
         record = _record(project_id, pid, bound, decision, stamp, reason=_text(reason), decided_by=_text(decided_by), **extra)
-        _commit(state_dir, state, record)
+        _commit(state_dir, state, [record])
     return record
+
+
+def _fresh_evidence(entry: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]]) -> List[str]:
+    """Prompt ids whose transcript ts is after the rejection; an absent or malformed ts never counts."""
+    decided = _parse_ts(entry["decided_at"])
+    stamps = [(e["prompt_id"], _parse_ts(e.get("ts"))) for e in evidence]
+    return [pid for pid, ts in stamps if decided is not None and ts is not None and ts > decided]
+
+
+def _plan(state: Mapping[str, Mapping[str, Any]], project_id: str, item: Mapping[str, Any], now: str):
+    """The outcome of one batch item and the record it needs (None for no write)."""
+    pid, ids = item["proposal_id"], [e["prompt_id"] for e in item["evidence"]]
+    content = {n: item[n] for n in _REQUIRED_TEXT}
+    entry = state.get(pid)
+    if entry is None:
+        return "added", _record(project_id, pid, 1, "proposed", now, evidence_prompt_ids=ids, **content)
+    revision, changed = len(entry["revisions"]) + 1, item["voorstel"] != entry["revisions"][-1]["voorstel"]
+    fresh = _fresh_evidence(entry, item["evidence"]) if entry["status"] == "rejected" else []
+    if fresh:
+        return "reopened", _record(project_id, pid, revision, "reopened", now, evidence_prompt_ids=fresh,
+                                   reason="new evidence after the rejection", **content)
+    outcome = "suppressed_rejected" if entry["status"] == "rejected" else "revised" if changed else "unchanged"
+    if not changed:
+        return outcome, None
+    return outcome, _record(project_id, pid, revision, "revised", now, evidence_prompt_ids=ids, **content)
+
+
+def reconcile(state_dir: Path, project_id: str, batch: Sequence[Mapping[str, Any]] = (), *,
+              now: Optional[str] = None) -> Dict[str, int]:
+    """Bring a batch of proposals against the store; returns the count per outcome (``OUTCOMES``).
+
+    A new identity is added; a known one gets a revision only when its text changed; a rejected one
+    reopens on evidence after the rejection, otherwise its changed text is kept as a revision and counted
+    ``suppressed_rejected`` (ADR-072 decision 14). The whole batch is validated before any write; an
+    empty batch only rebuilds the projection."""
+    project_id = _require_project(project_id)
+    items = [_normalise(project_id, proposal) for proposal in batch]
+    stamp = _stamp(now)
+    counts = {name: 0 for name in OUTCOMES}
+    with _locked(state_dir):
+        state = _replay(_read_records(state_dir))
+        scratch, records = json.loads(json.dumps(state)), []  # the plan folds into a copy
+        for item in items:
+            outcome, record = _plan(scratch, project_id, item, stamp)
+            counts[outcome] += 1
+            if record is not None:
+                _apply(scratch, record)
+                records.append(record)
+        _commit(state_dir, state, records)
+    return counts

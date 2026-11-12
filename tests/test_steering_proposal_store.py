@@ -156,3 +156,119 @@ def test_a_hand_written_line_approving_a_missing_revision_is_refused_on_read(tmp
     path.write_text(path.read_text() + store.json.dumps(line) + "\n")
     with pytest.raises(store.StoreUnreadable):
         store.proposals(tmp_path, "vnx-dev")
+
+
+T2, T3 = "2026-11-11T10:00:00Z", "2026-11-11T11:00:00Z"
+
+
+def batch_item(voorstel="Voeg een statusoverzicht toe", ts=T0, prompt_id="p1", doelpad="skills/status"):
+    return {**make(voorstel, doelpad=doelpad), "evidence": [{"prompt_id": prompt_id, "ts": ts}]}
+
+
+def reject(tmp_path, pid):
+    store.decide(tmp_path, "vnx-dev", pid, "rejected", reason="nee", decided_by="op", now=T1)
+
+
+def counts(**kw):
+    return {**{name: 0 for name in store.OUTCOMES}, **kw}
+
+
+def test_a_paraphrase_of_a_rejected_proposal_without_new_evidence_is_suppressed(tmp_path):
+    pid = seed(tmp_path)
+    reject(tmp_path, pid)
+    result = store.reconcile(tmp_path, "vnx-dev", [batch_item("Een ander woord", ts=T0, prompt_id="p9")], now=T3)
+    entry = store.get(tmp_path, "vnx-dev", pid)
+    assert result == counts(suppressed_rejected=1) and entry["status"] == "rejected"
+    assert [r["revision"] for r in entry["revisions"]] == [1, 2]  # ADR-072 decision 14: the revision is kept
+    again = store.reconcile(tmp_path, "vnx-dev", [batch_item("Een ander woord", ts=T0, prompt_id="p9")], now=T3)
+    assert again == counts(suppressed_rejected=1) and len(store.get(tmp_path, "vnx-dev", pid)["revisions"]) == 2
+
+
+def test_evidence_after_the_rejection_reopens_with_its_own_record(tmp_path):
+    pid = seed(tmp_path)
+    reject(tmp_path, pid)
+    result = store.reconcile(tmp_path, "vnx-dev", [batch_item("Nieuwe tekst", ts=T2, prompt_id="p2")], now=T3)
+    entry = store.get(tmp_path, "vnx-dev", pid)
+    assert result == counts(reopened=1) and entry["status"] == "pending" and entry["decided_at"] is None
+    kinds = [(r["decision"], r["revision"]) for r in store.decisions(tmp_path, "vnx-dev")]
+    assert kinds == [("proposed", 1), ("rejected", 1), ("reopened", 2)]
+    assert store.decisions(tmp_path, "vnx-dev")[-1]["evidence_prompt_ids"] == ["p2"]
+
+
+@pytest.mark.parametrize("ts", ["geen datum", None, 5, "2026-11-11T10:00:00", T1, T0])
+def test_a_malformed_or_not_later_ts_never_reopens(tmp_path, ts):
+    pid = seed(tmp_path)
+    reject(tmp_path, pid)
+    result = store.reconcile(tmp_path, "vnx-dev", [batch_item("Nieuwe tekst", ts=ts, prompt_id="p2")], now=T3)
+    assert result == counts(suppressed_rejected=1) and store.get(tmp_path, "vnx-dev", pid)["status"] == "rejected"
+
+
+def test_reopen_only_applies_to_a_rejected_proposal(tmp_path):
+    pid = seed(tmp_path)
+    path = tmp_path / store.DECISIONS_FILENAME
+    before = path.read_bytes()
+    with pytest.raises(store.DecisionRefused):
+        store.add_revision(tmp_path, "vnx-dev", make("Nieuwe tekst"), reopen=True, now=T2)
+    assert path.read_bytes() == before
+    reject(tmp_path, pid)
+    store.add_revision(tmp_path, "vnx-dev", make("Nieuwe tekst"), reopen=True, now=T2)
+    assert store.get(tmp_path, "vnx-dev", pid)["status"] == "pending"
+
+
+def test_same_content_twice_is_unchanged_and_changed_content_is_a_revision(tmp_path):
+    first = store.reconcile(tmp_path, "vnx-dev", [batch_item(), batch_item()], now=T0)
+    assert first == counts(added=1, unchanged=1)
+    assert store.reconcile(tmp_path, "vnx-dev", [batch_item()], now=T1) == counts(unchanged=1)
+    assert store.reconcile(tmp_path, "vnx-dev", [batch_item("Gewijzigd")], now=T2) == counts(revised=1)
+    entry = store.proposals(tmp_path, "vnx-dev")[0]
+    assert [r["voorstel"] for r in entry["revisions"]] == ["Voeg een statusoverzicht toe", "Gewijzigd"]
+    assert len(store.decisions(tmp_path, "vnx-dev")) == 2
+
+
+@pytest.mark.parametrize("bad", [{}, make(voorstel=""), {**make(), "evidence": "p1"}, "tekst"])
+def test_one_invalid_item_writes_nothing_of_the_batch(tmp_path, bad):
+    with pytest.raises(store.ProposalInvalid):
+        store.reconcile(tmp_path, "vnx-dev", [batch_item(), bad], now=T0)
+    assert not (tmp_path / store.DECISIONS_FILENAME).exists() and not (tmp_path / store.PROJECTION_FILENAME).exists()
+
+
+def test_the_projection_is_rebuilt_from_the_records_and_never_read(tmp_path):
+    pid = seed(tmp_path)
+    projection = tmp_path / store.PROJECTION_FILENAME
+    good = projection.read_text()
+    assert store.json.loads(good)["proposals"][0]["proposal_id"] == pid
+    for torn in ('{"schema": "steering_proposals/1", "proposals": [', "", '{"proposals": []}'):
+        projection.write_text(torn)
+        assert store.reconcile(tmp_path, "vnx-dev") == counts()
+        assert projection.read_text() == good
+    projection.write_text("kapot")
+    assert store.get(tmp_path, "vnx-dev", pid)["status"] == "pending" and projection.read_text() == good
+    projection.unlink()
+    store.decide(tmp_path, "vnx-dev", pid, "rejected", reason="nee", decided_by="op", now=T1)
+    assert store.json.loads(projection.read_text())["proposals"][0]["status"] == "rejected"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("decision", ["approved", "applied"])
+def test_a_new_revision_of_an_approved_or_applied_proposal_keeps_status_and_binding(tmp_path, decision):
+    pid = seed(tmp_path)
+    store.decide(tmp_path, "vnx-dev", pid, "approved", reason="ok", decided_by="op", now=T1)
+    if decision == "applied":
+        store.decide(tmp_path, "vnx-dev", pid, "applied", reason="ok", decided_by="op", now=T2, applied_ref="PR #1")
+    assert store.reconcile(tmp_path, "vnx-dev", [batch_item("Tweede tekst", ts=T3)], now=T3) == counts(revised=1)
+    entry = store.get(tmp_path, "vnx-dev", pid)
+    assert entry["status"] == decision and entry["decided_revision"] == 1
+    assert [r["revision"] for r in entry["revisions"]] == [1, 2]
+    assert entry["revisions"][0]["voorstel"] == "Voeg een statusoverzicht toe"
+
+
+@pytest.mark.parametrize("ids", ["p1", ["p1", 3], ["p1", ""], ["p1", None], 7, ("p1", 2)])
+def test_evidence_prompt_ids_is_a_list_of_non_empty_strings(tmp_path, ids):
+    with pytest.raises(store.ProposalInvalid):
+        store.add_revision(tmp_path, "vnx-dev", make(), evidence_prompt_ids=ids, now=T0)
+    assert not (tmp_path / store.DECISIONS_FILENAME).exists()
+    seed(tmp_path)
+    path = tmp_path / store.DECISIONS_FILENAME
+    path.write_text(path.read_text().replace('"evidence_prompt_ids": ["p1"]', '"evidence_prompt_ids": "p1"'))
+    with pytest.raises(store.StoreUnreadable):
+        store.proposals(tmp_path, "vnx-dev")
