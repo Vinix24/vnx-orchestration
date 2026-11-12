@@ -1,9 +1,11 @@
-"""``report``: the window read and the done check (ADR-063 besluit 2, 3, 6 and 8).
+"""``report``: the window read, the done check and the scanner (ADR-063 besluit 2, 3, 6, 8).
 
 ``--metric ID[:KEY] --last N --json`` pools the final days of the window the way the
 baseline does; no measured value is ``pooled_value: null`` with a reason, never 0.
 ``--check`` exits 0 only when every condition holds, else 1 with each one named in
 ``unmet``; a loaded job whose newest settled day is not fresh is ``status: "stale"``.
+``--scan-zero-for-unknown`` exits 1 when any day file or revision holds a value next to an
+``unknown_reason``, a file is unreadable or the store is empty; ``--check`` runs it too.
 Missing, malformed or unknown evidence is never a pass. No ``DAILY_STEP``.
 """
 
@@ -11,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import statistics
 import subprocess
 import sys
@@ -34,6 +37,7 @@ UNKNOWN_WINDOW = "no_measured_value_in_window"
 DAY_CONDITIONS = ("missing_ids", "keyed_without_entries", "malformed_records",
                   "unknown_without_reason", "zero_for_unknown")
 _UNREADABLE = "unreadable"
+_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}(\.r\d+)?\.json$")
 
 Runner = Callable[[list[str]], tuple[int, str]]
 
@@ -42,6 +46,7 @@ def register(subparsers: Any) -> None:
     parser = subparsers.add_parser("report", help="read a metric window or check that the measurement is done")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true")
+    mode.add_argument("--scan-zero-for-unknown", dest="scan_zero_for_unknown", action="store_true")
     mode.add_argument("--metric", default=None, metavar="ID[:KEY]")
     parser.add_argument("--last", type=int, default=FRESH_RUN_DAYS, metavar="N")
     parser.add_argument("--json", action="store_true", help="accepted; the output is always JSON")
@@ -101,6 +106,24 @@ def record_findings(doc: Mapping[str, Any]) -> dict[str, list]:
         for key in sorted(entries):
             _scalar_findings(f"{metric_id}:{key}", entries[key], out)
     return out
+
+
+def scan(root: Path) -> dict[str, Any]:
+    """Every day file and revision under ``root``; an empty store is not clean."""
+    files = sorted(path for path in Path(root).glob("*.json") if _FILE_RE.match(path.name))
+    violations: list[dict[str, Any]] = []
+    unreadable: list[str] = []
+    for path in files:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+            doc = None
+        if not isinstance(doc, Mapping) or not isinstance(doc.get("metrics"), Mapping):
+            unreadable.append(path.name)
+            continue
+        violations += [{"file": path.name, **item} for item in record_findings(doc)["zero_for_unknown"]]
+    return {"files_scanned": len(files), "violations": len(violations), "records": violations,
+            "unreadable_files": unreadable, "store_empty": not files}
 
 
 def _day_state(doc: Any, day: date, project_id: str, now: datetime) -> str:
@@ -176,13 +199,17 @@ def check(store: DayStore, project_id: str, now: datetime, runner: Runner | None
         *((name, bool(findings[name])) for name in DAY_CONDITIONS),
         ("ledger_unreadable", approvals is None), ("approval_without_tty", bool(approvals)),
     ) if failed]
+    scanned = scan(store.root)
+    unmet += [name for name, failed in (("zero_for_unknown", scanned["violations"] > 0),
+                                        ("unreadable_files", bool(scanned["unreadable_files"])))
+              if failed and name not in unmet]
     job = job_state(project_id, runner)
     stale = job["loaded"] is True and states[window[-1].isoformat()] != "fresh"
     return {"status": "stale" if stale else ("ok" if not unmet else "unmet"), "unmet": unmet,
             "project_id": project_id, "now": now.isoformat(), "job": job,
             "window": {"from": window[0].isoformat(), "to": window[-1].isoformat()},
             "fresh_days": fresh_run, "days": states, "max_gap_hours": max_gap, **findings,
-            "approvals_without_tty": approvals}
+            "approvals_without_tty": approvals, "scan": scanned}
 
 
 def _day_value(doc: Any, metric_id: str, key: str | None) -> tuple[str | None, Any]:
@@ -244,6 +271,10 @@ def run(args: Any) -> int:
     if args.check:
         result = check(store, project_id, now)
         code = EXIT_OK if result["status"] == "ok" else EXIT_UNMET
+    elif args.scan_zero_for_unknown:
+        result = scan(store.root)
+        clean = not (result["violations"] or result["unreadable_files"] or result["store_empty"])
+        code = EXIT_OK if clean else EXIT_UNMET
     else:
         result, code = window_report(store, args.metric, args.last, now), EXIT_OK
     print(json.dumps(result, sort_keys=True))
