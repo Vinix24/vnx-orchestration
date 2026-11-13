@@ -2017,6 +2017,41 @@
       "symbol": "_map_generic_spawn_result"
     },
     {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 121,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_map_generic_spawn_result"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 139,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 143,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 144,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 155,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
       "file": "tests/test_oi1869_headless_stream_per_run.py",
       "line": 131,
       "mechanism": "direct-call",

@@ -90,7 +90,7 @@ def test_both_mappers_refuse_refusal_only_completion(mapper, refusal):
 
 
 def test_one_refusal_then_real_answer_stays_success(tmp_path, monkeypatch):
-    result, status, returncode, _ = _run_via_door_path(tmp_path, monkeypatch, [CREDIT, REAL_ANSWER])
+    result, status, returncode, _ = _run_via_door_path(tmp_path, monkeypatch, [CREDIT + "\n", REAL_ANSWER])
     assert (result.status, status, returncode) == ("success", "success", 0)
 
 
@@ -107,3 +107,49 @@ def test_short_non_refusal_answer_stays_success():
 def test_empty_completion_still_fails():
     out = eap._map_generic_spawn_result(_spawn_result(""), "x", model="m")
     assert out.status == "failure" and out.returncode != 0
+
+
+FIXTURE_20_09 = (
+    "API Error: 500 Error calling litellm.acompletion for non-Anthropic model: "
+    "litellm.APIError: APIError: OpenrouterException - "
+    '{"error":{"message":"This request requires more credits, or fewer max_tokens. '
+    'You requested up to 32000 tokens, but can only afford 5085.","code":402}}'
+)
+
+
+def _outcome(text):
+    return eap._map_generic_spawn_result(_spawn_result(text), "litellm:zai", model="m")
+
+
+def test_prose_about_a_402_is_a_real_answer():
+    out = _outcome("Fixed the error handling for HTTP 402 insufficient credits; tests pass.")
+    assert out.status == "success" and out.returncode == 0
+
+
+def test_refusal_then_short_summary_is_success():
+    out = _outcome(CREDIT + "\nImplemented the retry in scripts/foo.py; tests pass.")
+    assert out.status == "success" and out.returncode == 0
+
+
+def test_many_repeated_refusals_fail_whatever_the_length():
+    for text in ("\n".join([CREDIT] * 25), CREDIT * 25):
+        assert len(text) >= 1819
+        out = _outcome(text)
+        assert out.status == "failure" and out.returncode != 0
+        assert eap._blocking_refusal_class(text) == "credit_exhausted"
+
+
+def test_single_refusal_lines():
+    assert eap._blocking_refusal_class(CREDIT) == "credit_exhausted"
+    assert eap._blocking_refusal_class(AUTH) == "auth_rejected"
+    assert _outcome(AUTH).status == "failure"
+
+
+def test_ff_intel_3b_fixture_fails():
+    out = _outcome(FIXTURE_20_09)
+    assert out.status == "failure" and out.returncode != 0
+
+
+@pytest.mark.parametrize("text", ["", " \n ", None, "API Error: 418 teapot", "API Error: 500 boom"])
+def test_non_refusal_or_unknown_shapes_are_not_refusal_only(text):
+    assert eap._blocking_refusal_class(text) is None
