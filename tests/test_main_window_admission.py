@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The admission contract of the main window (ADR-073 besluit 3 and 6): the heavy-only
-base, one outcome per run status and the gh adapter's
+base, one outcome per run status, ``admit``, the two registry keys and the gh adapter's
 profile lookups. A fake runner stands in for gh: no real gh, no real git, no network."""
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
+import config_registry  # noqa: E402
 import main_window as mw  # noqa: E402
 
 BASE, M1, M2, M3 = "b" * 40, "1" * 40, "2" * 40, "3" * 40
@@ -193,3 +194,142 @@ def test_a_repeated_sha_costs_one_lookup():
     profile_of = mw.make_profile_reader(runner, ".", "gh")
     assert [profile_of(M1), profile_of(M1)] == [mw.PROFILE_HEAVY] * 2
     assert len(runner.file_calls) == 1
+
+
+# ── admit ────────────────────────────────────────────────────────────────────
+
+
+def _admit(runs, n, commits=(M2, M1, BASE), **kwargs):
+    return mw.admit(_window(list(commits), runs), max_unverified=n, max_age_min=LIMIT, **kwargs)
+
+
+def _running(sha, run_id):
+    return _run(sha, run_id, status="in_progress", conclusion=None)
+
+
+def test_key_unset_is_mode_off_go_and_still_carries_the_window():
+    admission = _admit([_run(BASE, 1), _running(M1, 2), _running(M2, 3)], None)
+    assert (admission.verdict, admission.mode, admission.reason) == (mw.GO, mw.MODE_OFF, "niet geconfigureerd")
+    assert admission.to_dict()["running_shas"] == [M1, M2] and admission.to_dict()["base_sha"] == BASE
+
+
+def test_n_1_with_one_running_entry_is_nogo_unverified_limit():
+    admission = _admit([_run(BASE, 1), _run(M1, 2), _running(M2, 3)], 1)
+    assert (admission.verdict, admission.mode) == (mw.NO_GO, mw.MODE_ON)
+    assert admission.reason.startswith("unverified_limit")
+
+
+def test_n_1_with_an_empty_window_is_go():
+    assert _admit([_run(BASE, 1)], 1, commits=(BASE,)).verdict == mw.GO
+
+
+def test_n_3_with_two_running_is_go_and_with_three_is_nogo():
+    runs = [_run(BASE, 1), _running(M1, 2), _running(M2, 3)]
+    assert _admit(runs, 3).verdict == mw.GO
+    three = runs + [_running(M3, 4)]
+    assert _admit(three, 3, commits=(M3, M2, M1, BASE)).reason.startswith("unverified_limit")
+
+
+def test_a_red_entry_is_nogo_naming_the_probable_cause():
+    admission = _admit([_run(BASE, 1), _run(M1, 2, conclusion="failure"), _running(M2, 3)], 3)
+    assert admission.verdict == mw.NO_GO
+    assert admission.reason.startswith("red_run") and M1 in admission.reason and "vermoedelijk" in admission.reason
+
+
+@pytest.mark.parametrize("conclusion,reason", [("cancelled", "cancelled"), ("brand-new", "brand-new")])
+def test_a_named_nogo_entry_is_nogo_under_its_own_name(conclusion, reason):
+    admission = _admit([_run(BASE, 1), _run(M1, 2, conclusion=conclusion)], 3, commits=(M1, BASE))
+    assert admission.verdict == mw.NO_GO and admission.reason.startswith(reason)
+
+
+def test_an_unmeasurable_window_is_nogo_with_its_reason():
+    window = mw.compute_window([], [], [], profile_of=_profiles(), now=NOW)
+    admission = mw.admit(window, max_unverified=3)
+    assert (admission.verdict, admission.reason) == (mw.NO_GO, "invalid_input")
+
+
+def test_an_unknown_window_verdict_is_nogo():
+    window = mw.MainWindow(verdict="surprise", base_sha=BASE)
+    assert mw.admit(window, max_unverified=3).reason == "unknown_verdict: surprise"
+
+
+def test_an_unreadable_config_store_is_nogo_never_mode_off():
+    admission = _admit([_run(BASE, 1)], None, commits=(BASE,),
+                       invalid_config=(f"{mw.UNVERIFIED_MAX_KEY}: {mw.CONFIG_UNREADABLE}",))
+    assert (admission.verdict, admission.reason) == (mw.NO_GO, "config_unreadable")
+
+
+def test_the_record_is_deterministic_with_sorted_keys():
+    admission = _admit([_run(BASE, 1), _running(M1, 2)], 3, commits=(M1, BASE), invalid_config=("x",))
+    record = admission.to_dict()
+    assert list(record) == sorted(record)
+    assert json.dumps(record) == json.dumps(_admit([_run(BASE, 1), _running(M1, 2)], 3, commits=(M1, BASE),
+                                                    invalid_config=("x",)).to_dict())
+    assert record["max_unverified"] == 3 and record["max_age_min"] == LIMIT and record["invalid_config"] == ["x"]
+
+
+# ── the registry keys ────────────────────────────────────────────────────────
+
+
+def test_the_registry_entries_and_their_defaults():
+    reg = config_registry.CONFIG_REGISTRY
+    for key, default in ((mw.UNVERIFIED_MAX_KEY, ""), (mw.RUN_MAX_AGE_KEY, "40")):
+        entry = reg[key]
+        assert (entry.type, entry.default, entry.category) == ("integer", default, "gate")
+        assert entry.requires_approval is True and entry.read_site_wired is True
+
+
+@pytest.mark.parametrize("n_env,age_env,expected", [
+    (None, None, (None, 40, ())),
+    ("1", "25", (1, 25, ())),
+    ("0", None, (None, 40, (f"invalid_config {mw.UNVERIFIED_MAX_KEY}: '0', read as unset",))),
+    ("-2", None, (None, 40, (f"invalid_config {mw.UNVERIFIED_MAX_KEY}: '-2', read as unset",))),
+    ("three", None, (None, 40, (f"invalid_config {mw.UNVERIFIED_MAX_KEY}: 'three', read as unset",))),
+    (None, "0", (None, 40, (f"invalid_config {mw.RUN_MAX_AGE_KEY}: '0', default 40",))),
+    (None, "soon", (None, 40, (f"invalid_config {mw.RUN_MAX_AGE_KEY}: 'soon', default 40",))),
+])
+def test_read_admission_config(monkeypatch, n_env, age_env, expected):
+    for key, value in ((mw.UNVERIFIED_MAX_KEY, n_env), (mw.RUN_MAX_AGE_KEY, age_env)):
+        if value is None:
+            monkeypatch.delenv(key, raising=False)
+        else:
+            monkeypatch.setenv(key, value)
+    assert mw.read_admission_config(None, None) == expected
+
+
+def _clear_admission_env(monkeypatch):
+    for key in (mw.UNVERIFIED_MAX_KEY, mw.RUN_MAX_AGE_KEY):
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(f"VNX_OVERRIDE_{key}", raising=False)
+
+
+def test_a_corrupt_config_store_reads_as_unreadable_and_admits_nogo(tmp_path, monkeypatch):
+    _clear_admission_env(monkeypatch)
+    (tmp_path / "runtime_coordination.db").write_bytes(b"not a database" * 64)
+    max_n, age, invalid = mw.read_admission_config("vnx-test", tmp_path)
+    assert max_n is None
+    assert f"{mw.UNVERIFIED_MAX_KEY}: {mw.CONFIG_UNREADABLE}" in invalid
+    assert f"{mw.RUN_MAX_AGE_KEY}: {mw.CONFIG_UNREADABLE}" in invalid
+    admission = mw.admit(_window([BASE], [_run(BASE, 1)]), max_unverified=max_n,
+                         max_age_min=age, invalid_config=invalid)
+    assert (admission.verdict, admission.reason) == (mw.NO_GO, "config_unreadable")
+
+
+def test_a_project_without_a_store_is_mode_off(tmp_path, monkeypatch):
+    _clear_admission_env(monkeypatch)
+    assert mw.read_admission_config("vnx-test", tmp_path) == (None, 40, ())
+
+
+def test_a_set_key_in_a_real_store_is_read(tmp_path, monkeypatch):
+    import sqlite3
+    import config_store_db
+    _clear_admission_env(monkeypatch)
+    conn = sqlite3.connect(tmp_path / "runtime_coordination.db")
+    config_store_db.ensure_config_tables(conn)
+    conn.execute(
+        "INSERT INTO project_config (project_id, config_key, config_value, updated_by)"
+        " VALUES (?, ?, ?, ?)",
+        ("vnx-test", mw.UNVERIFIED_MAX_KEY, "2", "test"))
+    conn.commit()
+    conn.close()
+    assert mw.read_admission_config("vnx-test", tmp_path) == (2, 40, ())

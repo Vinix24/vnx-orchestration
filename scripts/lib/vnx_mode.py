@@ -62,6 +62,9 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     # every tier made the fabric gate refuse it as an unknown name (measured,
     # same defect OI-2456 fixed for `preflight`).
     "daily-metrics",
+    # `vnx main-window` (ADR-073 besluit 8) is the read-only probe of the window on main;
+    # in no tier the mode gate refuses it as an unknown name (OI-2456).
+    "main-window",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({
