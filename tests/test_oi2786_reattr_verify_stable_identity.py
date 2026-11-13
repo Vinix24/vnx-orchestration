@@ -165,3 +165,33 @@ def test_two_identities_with_two_destination_rows_are_both_present(moved):
     conn.close()
     result = verify_plan([moved["move"], other])
     assert result["ok"] is True and result["present"] == 2 and result["failures"] == []
+
+
+def _dotted(dest: Path) -> str:
+    return f"{dest.parent}/./{dest.name}"
+
+
+def _linked(dest: Path) -> str:
+    link = dest.parent / "dest-link.db"
+    link.symlink_to(dest)
+    return str(link)
+
+
+@pytest.mark.parametrize("spelling", [_dotted, _linked], ids=["dot-segment", "symlink"])
+def test_equivalent_destination_path_does_not_hide_an_ambiguous_identity(moved, spelling):
+    # Red run: on 1061b4a4 the raw path keyed the groups, so this plan gave ok true, present 2.
+    twin = _variant(moved["move"], confidence_score=0.3)
+    twin["destination_db"] = spelling(moved["dest"])
+    result = verify_plan([moved["move"], twin])
+    assert result["ok"] is False and result["present"] == 0
+    assert _reasons(result) == ["ambiguous_stable_identity"] * 2
+
+
+@pytest.mark.parametrize("spelling", [_dotted, _linked], ids=["dot-segment", "symlink"])
+def test_equivalent_destination_path_does_not_hide_a_reused_row(moved, spelling):
+    other = _variant(moved["move"])
+    del other["pre_image"]["row"]["title"]
+    other["destination_db"] = spelling(moved["dest"])
+    result = verify_plan([moved["move"], other])
+    assert result["ok"] is False and result["present"] == 1
+    assert _reasons(result) == ["destination_row_reused"]

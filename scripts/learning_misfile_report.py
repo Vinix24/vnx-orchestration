@@ -156,6 +156,11 @@ def _mutations(move: Dict[str, Any], dest_row: Dict[str, Any]) -> Dict[str, Dict
             for c in sorted(cols) if c in pre and c in dest_row and pre[c] != dest_row[c]}
 
 
+def _db_key(path: str) -> str:
+    """Comparison key of a database path: two spellings of one file (``./``, a symlink) share it."""
+    return str(Path(path).expanduser().resolve())
+
+
 def verify_move(move: Dict[str, Any], mutated: Optional[List[Dict[str, Any]]] = None,
                 claimed: Optional[Dict[Any, Any]] = None) -> Optional[Dict[str, Any]]:
     """None when the move is proven done, else the failing row with its reason.
@@ -183,7 +188,7 @@ def verify_move(move: Dict[str, Any], mutated: Optional[List[Dict[str, Any]]] = 
     if left:
         return {**named, "reason": "still_in_source", "count": len(left)}
     if claimed is not None:
-        owner_key = (move["destination_db"], move["table"], dest[0].get("id"))
+        owner_key = (_db_key(move["destination_db"]), move["table"], dest[0].get("id"))
         if owner_key in claimed:
             return {**named, "reason": "destination_row_reused", "destination_row_id": dest[0].get("id"),
                     "already_assigned_to": claimed[owner_key]}
@@ -198,7 +203,7 @@ def _ambiguous_moves(moves: List[Dict[str, Any]]) -> Dict[int, List[Any]]:
     """Index of every move sharing its stable identity (table, destination, key) with another, to all source ids."""
     groups: Dict[Any, List[int]] = {}
     for i, m in enumerate(moves):
-        ident = (m["table"], m["destination_db"], m["destination_project_id"],
+        ident = (m["table"], _db_key(m["destination_db"]), m["destination_project_id"],
                  stable_key(m["table"], m["pre_image"]["row"]))
         groups.setdefault(ident, []).append(i)
     return {i: [moves[j].get("source_id") for j in idx] for idx in groups.values() if len(idx) > 1 for i in idx}
