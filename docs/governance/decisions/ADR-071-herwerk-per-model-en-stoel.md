@@ -67,6 +67,8 @@ De koppeling dispatch-PR loopt via de kopbranch `dispatch/<id>`, met het `pr_num
 
 **Voorsteldrempels.** Een bouwervoorstel (bijvoorbeeld een vloer voor een taakklasse naar sonnet) vraagt `n >= 20` in de laag van besluit 14 en een verschil in herwerk binnen 14 dagen van minstens **5 procentpunt**. Dat begin is een startwaarde: de operator past het aan na de eerste vier weken meten. Een stoelvoorstel vraagt `n >= 20` gepaarde koppen. Onder die drempels toont het rapport tellingen en doet het geen voorstel.
 
+**15. De oorzaak van een ronde.** Elke ronde (`-rN` of splitsing) heeft een van vier oorzaken: `review`, `ci`, `grens` of `operator`. De oorzaak wordt bij het stagen gedeclareerd (`--round-cause`) en staat in de `evidence_json` van de `round`-rand; de titelregel (`GRENS` en `CI` in `rework_metrics.py`) geldt alleen als terugval voor historie zonder declaratie, en een ronde zonder leesbare titel is `unknown`. First-pass yield telt alleen rondes met oorzaak `review` of `unknown`; `ci`, `grens` en `operator` verlagen de opbrengst van een bouwer niet.
+
 ## Consequenties
 
 - H1 tot en met H7 bouwen tegen dit ADR. Code die een definitie hier wijzigt, wijzigt eerst dit ADR.

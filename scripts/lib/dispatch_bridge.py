@@ -59,6 +59,7 @@ from dispatch_spec import (  # noqa: E402
 )
 from skill_prefix import resolve_skill_dir, skill_search_paths  # noqa: E402
 from stage_origin import record_declared_edge  # noqa: E402
+from rework_attribution import ROUND_CAUSES  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -253,6 +254,26 @@ def _stage_lineage(
     return parent, kind, evidence
 
 
+def _require_round_cause(raw: Optional[str]) -> Optional[str]:
+    """The round cause (ADR-071), stripped and lowercased; a value outside ROUND_CAUSES is refused."""
+    cause = (raw or "").strip().lower()
+    if not cause:
+        return None
+    if cause not in ROUND_CAUSES:
+        raise ValueError(f"round_cause {raw!r} is not one of {', '.join(ROUND_CAUSES)}")
+    return cause
+
+
+def _edge_predecessor(dispatch_id: str, parent_dispatch: Optional[str]) -> "tuple[Optional[str], dict]":
+    """The predecessor of the declared edge: the spec's parent, else the delivery of a round/split id."""
+    from rework_metrics import delivery_of
+
+    if parent_dispatch:
+        return parent_dispatch, {}
+    delivery = delivery_of(dispatch_id)
+    return (delivery, {"delivery": delivery}) if delivery != dispatch_id else (None, {})
+
+
 class UnknownSkillError(ValueError):
     """A staged spec named a skill that exists in neither of the two skill trees.
 
@@ -409,6 +430,7 @@ def stage_spec_bundle(
     track_id: Optional[str] = None,
     origin_oi: Optional[str] = None,
     origin_pr: Optional[int] = None,
+    round_cause: Optional[str] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -431,6 +453,9 @@ def stage_spec_bundle(
     # [DEADLINE_SECONDS_MIN, DEADLINE_SECONDS_MAX] — the same range validate()
     # Rule 11 enforces, from the same constants (dispatch_spec).
     _require_deadline_in_range(deadline_seconds)
+
+    # 1a-bis. the round cause is checked before any write (ADR-071: review, ci, grens, operator).
+    round_cause = _require_round_cause(round_cause)
 
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
@@ -511,12 +536,15 @@ def stage_spec_bundle(
         "permission_policy_digest": permission_policy_digest,
         **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
         **({"origin_pr": origin_pr} if origin_pr else {}),
+        **({"round_cause": round_cause} if round_cause else {}),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
+    predecessor, suffix_evidence = _edge_predecessor(dispatch_id, spec_payload["parent_dispatch"])
     record_declared_edge(
         data_root=root, project_id=effective_project_id, dispatch_id=dispatch_id,
-        predecessor=spec_payload["parent_dispatch"], kind=edge_kind, evidence=edge_evidence,
+        predecessor=predecessor, kind=edge_kind,
+        evidence={**(edge_evidence or suffix_evidence), **({"round_cause": round_cause} if round_cause else {})},
     )
     return spec_file
 
@@ -848,6 +876,7 @@ def _main_stage(argv: list) -> int:
     parser.add_argument("--track", default=None, dest="track_id")
     parser.add_argument("--origin-oi", default=None, dest="origin_oi")
     parser.add_argument("--origin-pr", default=None, dest="origin_pr", type=int)
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--data-dir", default=None, dest="data_dir", type=Path)
     args = parser.parse_args(argv)
 
@@ -889,6 +918,7 @@ def _main_stage(argv: list) -> int:
             track_id=args.track_id,
             origin_oi=args.origin_oi,
             origin_pr=args.origin_pr,
+            round_cause=args.round_cause,
             data_dir=args.data_dir,
         )
     except (ValueError, OSError) as exc:
@@ -932,6 +962,7 @@ def _main_legacy(argv: Optional[list] = None) -> int:
              "closed (refuses) while the local main checkout lags origin/main.",
     )
     parser.add_argument("--target-id-override", default=None, dest="target_id_override")
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument(
         "--instruction-stdin", action="store_true", dest="instruction_stdin",
@@ -986,6 +1017,7 @@ def _main_legacy(argv: Optional[list] = None) -> int:
         headless_reason=args.headless_reason,
         post_merge_verification=args.post_merge_verification,
         target_id_override=args.target_id_override,
+        round_cause=args.round_cause,
         dry_run=args.dry_run,
     )
 

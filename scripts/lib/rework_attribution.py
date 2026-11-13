@@ -136,6 +136,7 @@ def load_dispatch_roles(qi_conn: sqlite3.Connection, project_id: str) -> "Dict[s
 EDGE_KINDS = ("round", "oi_fix", "pr_fix", "blame")
 EDGE_CLASSES = ("rework", "churn")
 EDGE_SOURCES = ("spec", "receipt", "blame")
+ROUND_CAUSES = ("review", "ci", "grens", "operator")
 
 
 def record_edge(
