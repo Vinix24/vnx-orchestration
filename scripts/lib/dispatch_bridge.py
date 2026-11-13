@@ -35,7 +35,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -274,11 +274,48 @@ def _stage_lineage(
     return parent, kind, ({**evidence, "round_cause": cause} if cause else evidence), edge_parent
 
 
-def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str]) -> dict:
-    """The optional origin and round-cause keys of the spec; each only when set."""
-    return {**({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str],
+                        difficulty: Optional[dict] = None) -> dict:
+    """The optional origin and round-cause keys of the spec (each only when set), and its ``difficulty`` block."""
+    return {"difficulty": difficulty, **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
             **({"origin_pr": origin_pr} if origin_pr else {}),
             **({"round_cause": round_cause} if round_cause else {})}
+
+
+DIFFICULTY_KEYS = ("line_budget", "plan_complexity", "route_reason", "file_count")
+PLAN_COMPLEXITIES = ("low", "medium", "high")
+ROUTE_REASON_MAX = 200
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_difficulty(difficulty: Optional[Mapping[str, Any]], path_count: int, deadline_seconds: int) -> dict:
+    """The spec's ``difficulty`` block (herwerk ADR-071, decision rule part b), validated.
+
+    Every key is present (``None`` for a value not given); ``file_count`` defaults to the number of
+    dispatch paths. An unknown key, a wrong type or a value out of range is refused, never dropped.
+    """
+    _require_deadline_in_range(deadline_seconds)
+    given = dict(difficulty) if difficulty is not None else {}
+    unknown = sorted(str(k) for k in given if k not in DIFFICULTY_KEYS)
+    if unknown:
+        raise ValueError(f"difficulty has unknown keys {unknown}; allowed: {', '.join(DIFFICULTY_KEYS)}")
+    budget, cx = given.get("line_budget"), given.get("plan_complexity")
+    reason, count = given.get("route_reason"), given.get("file_count", path_count)
+    if budget is not None and not (_is_int(budget) and budget > 0):
+        raise ValueError(f"difficulty.line_budget must be an int > 0, got {budget!r}")
+    if cx is not None and cx not in PLAN_COMPLEXITIES:
+        raise ValueError(f"difficulty.plan_complexity must be one of {', '.join(PLAN_COMPLEXITIES)}, got {cx!r}")
+    if reason is not None and not (isinstance(reason, str) and reason.strip() and len(reason) <= ROUTE_REASON_MAX):
+        raise ValueError(f"difficulty.route_reason must be a non-empty str of at most {ROUTE_REASON_MAX} chars")
+    if count is None:
+        count = path_count
+    if not (_is_int(count) and count >= 0):
+        raise ValueError(f"difficulty.file_count must be an int >= 0, got {count!r}")
+    return {"schema": 1, "line_budget": budget, "plan_complexity": cx,
+            "route_reason": reason, "file_count": count}
 
 
 class UnknownSkillError(ValueError):
@@ -524,8 +561,10 @@ def stage_spec_bundle(
     origin_oi: Optional[str] = None,
     origin_pr: Optional[int] = None,
     round_cause: Optional[str] = None,
+    difficulty: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
+    ``difficulty`` is validated and recorded on the spec; staging writes no ``dispatch_metadata`` row (ADR-071 besluit 2: the lane start births it).
 
     Bundle layout: <data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
@@ -534,10 +573,8 @@ def stage_spec_bundle(
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
     staging_id = _require_staging_id(dispatch_id)
 
-    # 1a. deadline bounds validated at the trust boundary (this module is the FIRST writer of a
-    # dispatch-spec.json): the validate() Rule 11 range, from the same constants (dispatch_spec).
-    _require_deadline_in_range(deadline_seconds)
-
+    # 1a. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
+    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths), deadline_seconds)
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
@@ -552,8 +589,7 @@ def stage_spec_bundle(
     instruction_text, style_fields = _apply_doc_style(
         instruction_text, task_class, dispatch_paths, effective_project_id, root)
 
-    # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
-    # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
+    # 2a. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
     parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
         dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
     )
@@ -568,9 +604,7 @@ def stage_spec_bundle(
     # 5. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
     instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
 
-    # 6. assemble + write the spec atomically. instruction_file is the literal
-    #    absolute child path — a real regular file, no symlink.
-    norm_reason = (headless_reason or "").strip() or None
+    # 6. assemble + write the spec atomically; instruction_file is the literal absolute child path.
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
@@ -610,11 +644,11 @@ def stage_spec_bundle(
         "tags": list(tags),
         "instruction_sha256": instruction_sha256,
         "allow_headless": bool(allow_headless),
-        "headless_reason": norm_reason,
+        "headless_reason": (headless_reason or "").strip() or None,
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
-        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause")),
+        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause"), difficulty_block),
         **style_fields,
     }
     spec_file = bundle_dir / "dispatch-spec.json"

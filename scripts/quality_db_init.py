@@ -32,7 +32,7 @@ from db_backup_rotation import parse_backup_keep, rotate_backups_safe
 
 # Highest PRAGMA user_version stamped by bootstrap_qi_db.
 # Increment this constant whenever a new migration block is added.
-HIGHEST_QI_VERSION = 36
+HIGHEST_QI_VERSION = 37
 
 # VNX Base Configuration
 PATHS = ensure_env()
@@ -1810,6 +1810,20 @@ def _migrate_v36(conn: sqlite3.Connection) -> None:
     log('INFO', "Migrated: rework_edges table keyed (project_id, rework, origin, kind) (v36)")
 
 
+def _migrate_v37(conn: sqlite3.Connection) -> None:
+    """V37: dispatch_metadata.difficulty_json (herwerk-per-model-en-reviewer, ADR-071).
+
+    Operator decision 2026-11-13 (storage): a column on ``dispatch_metadata``, no new table. Holds the
+    difficulty recorded at staging (line budget, file count, plan complexity, route reason) so a
+    deliberate escalation stratifies apart from an ordinary dispatch. Written fill-once by
+    ``dispatch_metadata_db``. Purely additive: no existing row changes.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
+    if "difficulty_json" not in cols:
+        conn.execute("ALTER TABLE dispatch_metadata ADD COLUMN difficulty_json TEXT")
+        log('INFO', 'Migrated dispatch_metadata: added difficulty_json column (v37)')
+
+
 # Registry mapping version → migration function.
 # bootstrap_qi_db iterates this in sorted key order after V1.
 MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
@@ -1848,6 +1862,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     34: _migrate_v34,
     35: _migrate_v35,
     36: _migrate_v36,
+    37: _migrate_v37,
 }
 
 
