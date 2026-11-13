@@ -814,14 +814,14 @@
     },
     {
       "file": "tests/test_envelope_claude_adapter_setting_sources.py",
-      "line": 19,
+      "line": 21,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_envelope_claude_adapter_setting_sources.py",
-      "line": 20,
+      "line": 22,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
@@ -2290,6 +2290,69 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 24,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_run_phantom_guard"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 70,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_book_ledger_run"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 71,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_verify_role_application"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 213,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_publish_phantom_verdict"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 214,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_resolve_fix_forward_diff"
+    },
+    {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
       "line": 398,
       "mechanism": "direct-call",
@@ -2585,6 +2648,7 @@
     "envelope_adapters_claude::_carried_user_settings",
     "envelope_adapters_claude::_codex_skill_inputs",
     "envelope_adapters_claude::_materialize_shadow_skills",
+    "envelope_adapters_claude::_memory_excludes",
     "envelope_adapters_claude::_setting_sources",
     "envelope_adapters_claude::_switch_stamps",
     "envelope_adapters_claude::_worker_extra_env",

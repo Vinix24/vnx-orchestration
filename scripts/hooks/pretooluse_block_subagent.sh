@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# PreToolUse Hook: Block subagents (Task tool), with an operator override.
+# PreToolUse Hook: Block subagents (Agent and Task tools), with an operator override.
 #
 # Purpose: Enforce T0 governance rule — all work must route through governed
 #          VNX lanes (tmux-spawn / provider_dispatch), never via subagents.
@@ -14,11 +14,18 @@
 # existed on paper only. Fixed by delegating the whole decision (including
 # the operator-override marker + audit trail) to pretooluse_subagent_guard.py.
 #
+# OI-2798: since Claude Code 2.1.63 the subagent tool is called "Agent"; "Task"
+# survives only as an alias in permission rules and agent definitions. The
+# settings.json matcher was "Task", so the hook never fired for a current
+# subagent call, and this script's fast path plus the Python core also let any
+# tool_name other than "Task" through. The matcher is now "Agent|Task" and both
+# names get the same decision, mirroring pretooluse_t0_no_subagents.py.
+#
 # Claude Code hook contract (2.1+), PreToolUse:
 #   stdin  : JSON {tool_name, tool_input, session_id, cwd, transcript_path}
 #   stdout : {"hookSpecificOutput":{"hookEventName":"PreToolUse",
 #             "permissionDecision":"deny","permissionDecisionReason":"..."}}
-#            to deny; "allow" to allow; empty stdout for non-Task tools.
+#            to deny; "allow" to allow; empty stdout for other tools.
 #   exit   : 0 always — decision is communicated via JSON output
 #
 # Default is deny: no marker, an unreadable marker, an expired marker, or a
@@ -26,8 +33,8 @@
 # (fail-closed) — a broken enforcement mechanism must never silently degrade
 # to "allow everything", which is the exact defect this hook replaces.
 #
-# Token budget: ~40 tokens/call for non-Task tools (fast-path exit below);
-# a Task call spawns python3 once to consult the marker/audit state.
+# Token budget: ~40 tokens/call for other tools (fast-path exit below);
+# an Agent or Task call spawns python3 once to consult the marker/audit state.
 
 set -uo pipefail
 
@@ -37,15 +44,15 @@ CORE="${HOOK_DIR}/pretooluse_subagent_guard.py"
 # ── Read hook payload ─────────────────────────────────────────────────────────
 INPUT="$(cat)"
 
-# ── Fast path: only inspect Task tool calls ───────────────────────────────────
-# settings.json matcher="Task" already filters, but defense-in-depth here
+# ── Fast path: only inspect Agent and Task tool calls ─────────────────────────
+# settings.json matcher="Agent|Task" already filters, but defense-in-depth here
 # avoids spawning python3 for other tools if this hook is ever wired broader.
 TOOL_NAME=""
 if command -v jq >/dev/null 2>&1; then
   TOOL_NAME="$(printf '%s' "$INPUT" | jq -r '.tool_name // ""' 2>/dev/null || echo "")"
 fi
 
-if [[ -n "$TOOL_NAME" && "$TOOL_NAME" != "Task" ]]; then
+if [[ -n "$TOOL_NAME" && "$TOOL_NAME" != "Agent" && "$TOOL_NAME" != "Task" ]]; then
   exit 0
 fi
 
@@ -64,7 +71,7 @@ if [[ $RC -ne 0 ]]; then
   exit 0
 fi
 
-# Empty output means the core decided "not a Task call" (allow silently).
+# Empty output means the core decided "not a subagent call" (allow silently).
 if [[ -n "$OUTPUT" ]]; then
   printf '%s\n' "$OUTPUT"
 fi

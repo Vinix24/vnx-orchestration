@@ -89,6 +89,7 @@ _STAMPED_WHEN_SET = (
     "parent_dispatch", "task_class", "tier_from", "tier_to",
     "permission_posture", "permission_profile", "permission_allow_pattern_count",
     "model_resolved", "cost_ledger_run_ids", "context_manifest",
+    "token_usage_normalized", "start_context_tokens",
 )
 
 
@@ -230,6 +231,11 @@ class ReceiptV2:
     # hash otherwise. None omits the field (VNX_AGENT_LAYOUT=off). Never part of
     # IDEMPOTENCY_FIELDS.
     context_manifest: Optional[Dict[str, Any]] = None
+    # The five ledger token fields of this run beside the raw ``token_usage`` (five None when the lane
+    # reported nothing; ``split_reason`` when an input/cache split stayed unknown), and the context a
+    # claude harness builder started with. None omits either field.
+    token_usage_normalized: Optional[Dict[str, Any]] = None
+    start_context_tokens: Optional[int] = None
 
     def __post_init__(self) -> None:
         # Receipt-quality PR-3: the closed-set lint lives in the contract now

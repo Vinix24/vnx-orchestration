@@ -129,7 +129,9 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
     ),
     "headless-builder-context": (
         "Settings levels a claude_headless builder loads (--setting-sources); "
-        "default project,local, user,project,local restores the old argv."
+        "default project,local, user,project,local restores the old argv; "
+        "carries `cleanupPeriodDays` and `claudeMdExcludes` (walk-up, "
+        "claude-code#87590), never `effortLevel`."
     ),
     "agent-layout": (
         "Agent-as-folder skill layout (track agents-als-map-fase-1): off or "

@@ -291,10 +291,10 @@ def emit_dispatch_receipt(
     parent_dispatch: Optional[str] = None,
     task_class: Optional[str] = None,
     tier_from: Optional[str] = None,
-    tier_to: Optional[str] = None, permission_posture: Optional[str] = None,
+    tier_to: Optional[str] = None, permission_posture: Optional[str] = None, token_usage_normalized: Optional[Dict[str, Any]] = None,
     permission_profile: Optional[str] = None,
     permission_allow_pattern_count: Optional[int] = None, lifecycle_v3: bool = False,
-    model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None,
+    model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None, start_context_tokens: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -411,6 +411,11 @@ def emit_dispatch_receipt(
     the lane wrote for this dispatch before calling here; ``cost_usd`` and
     ``cost_source`` then come from those lines. Stamped only when provided.
 
+    ``token_usage_normalized`` / ``start_context_tokens``: the run's five ledger
+    token fields and the context a claude harness builder started with
+    (``receipt_token_fields``), beside the raw ``token_usage``. Stamped only
+    when not ``None``.
+
     ``lifecycle_v3``: ADR-054 — True when the lane holds a v3 ``Handover``, so the
     same 17-field record is written as ``dispatch_governed`` instead of
     ``task_complete``; a v3 dispatch then has no second end line.
@@ -517,7 +522,7 @@ def emit_dispatch_receipt(
         permission_posture=permission_posture,
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
-        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir),
+        model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir), token_usage_normalized=token_usage_normalized, start_context_tokens=start_context_tokens,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

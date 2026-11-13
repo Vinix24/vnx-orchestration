@@ -28,13 +28,20 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 EXIT_OK, EXIT_ERROR = 0, 1
 MIN_N = 20
-MIN_DIFF_PP = 5.0
+SHOWN_GAPS = 10
 
 
 def _cell_text(row: Dict[str, Any]) -> str:
     """``n`` always; the count with it; the percentage only when the metrics result carries one."""
     text = f"n={row['n']}, telling {row['count']}"
-    return f"{text}, {row['pct']}%" if row.get("pct") is not None else text
+    if row.get("pct") is None:
+        return text
+    ci = row.get("ci95")
+    return f"{text}, {row['pct']}% ({_ci_text(ci)}, n={row['n']})" if ci else f"{text}, {row['pct']}%"
+
+
+def _ci_text(ci: Any) -> str:
+    return f"{round(100 * ci[0])}-{round(100 * ci[1])}%"
 
 
 def _table(title: str, rows: List[Dict[str, Any]], keys: List[str]) -> List[str]:
@@ -62,31 +69,79 @@ def _causes_table(result: Dict[str, Any]) -> List[str]:
     return lines + [""]
 
 
+def _num(value: Any) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+def _review_text(review: Dict[str, Any]) -> str:
+    return "; ".join(f"{seat}: {_num(v['runs_median'])} runs, ${_num(v['api_equivalent_usd_median'])}"
+                     + (f", {v['unavailable_runs']} onbeschikbaar" if v["unavailable_runs"] else "")
+                     for seat, v in review.items()) or "-"
+
+
+def _cost_row(c: Dict[str, Any]) -> str:
+    cols = [c["builder"], c["task_class"], c["risk_class"], c["n"], c["n_complete"],
+            f"${_num(c['build_usd_median'])} / ${_num(c['build_usd_p75'])}",
+            f"${_num(c['build_usd_per_1000_lines_median'])} ({c['per_1000_n']})", _review_text(c["review"]),
+            f"{_num(c['lead_time_median_min'])} ({c['lead_time_n']})", c["quota_share"]["status"],
+            "ja" if c["comparable"] else f"nee (n < {MIN_N})"]
+    return "| " + " | ".join(str(x) for x in cols) + " |"
+
+
+def _cost_section(result: Dict[str, Any]) -> List[str]:
+    cost = result["cost"]
+    lines = ["## Cost per delivery", "",
+             "Kosten in USD uit het kostengrootboek, per geaccepteerde delivery: API-equivalent bij een abonnement, "
+             "de gefactureerde prijs bij een betaalde (metered) run. "
+             f"Quota-aandeel per week: {cost['quota_share']['status']} ({cost['quota_share']['reason']}).", ""]
+    if cost["ledger_error"]:
+        return lines + [f"Geen kostenas: {cost['ledger_error']}.", ""]
+    head = ["builder", "task_class", "risk_class", "n", "compleet", "bouw p50 / p75",
+            "bouw per 1000 regels p50 (n)", "review per stoel", "doorlooptijd p50 min (n)", "quota", "vergelijkbaar"]
+    lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)] + [_cost_row(c) for c in cost["cells"]] + [""]
+    gaps = cost["gaps"]
+    incomplete = gaps["incomplete_deliveries"]
+    named = "".join(f"; {g['delivery']}: {' / '.join(g['why'])}" for g in incomplete[:SHOWN_GAPS])
+    lines += [f"- Incomplete deliveries (buiten de medianen): {len(incomplete)}{named}"
+              + (f"; en {len(incomplete) - SHOWN_GAPS} meer (zie --json)" if len(incomplete) > SHOWN_GAPS else "") + ".",
+              f"- Zonder gewijzigde regels (buiten de per-1000-cijfers): {gaps['no_changed_lines']}; "
+              f"zonder doorlooptijd: {gaps['no_lead_time']}.",
+              "- Reviewruns zonder koppeling aan een delivery (unattributed): "
+              f"{json.dumps(gaps['unattributed_review_runs'], sort_keys=True)}; op een PR buiten de deliveries: "
+              f"{json.dumps(gaps['other_pr_review_runs'], sort_keys=True)}.",
+              f"- Reviewruns zonder prijs (unavailable): {json.dumps(gaps['unavailable_review_runs'], sort_keys=True)}.",
+              f"- Onleesbare run-id's: {gaps['unparseable_runs']}."]
+    return lines + ([f"- Grootboek {cost['ledger_incomplete']}."] if cost["ledger_incomplete"] else []) + [""]
+
+
 def _pct_of(n: int, count: int) -> Optional[float]:
     return round(100.0 * count / n, 1) if n >= MIN_N else None
 
 
 def _builder_proposals(rows: List[Dict[str, Any]]) -> List[str]:
-    """Same task_class and risk class, both builders at n >= 20, difference >= 5 points."""
+    """Same task_class and risk class, both builders at n >= 20, 95% Wilson intervals that do not overlap."""
     strata: Dict[tuple, List[Dict[str, Any]]] = {}
     for row in rows:
-        if row["pct"] is not None and not str(row["builder"]).startswith("model="):
+        # No ci95 means no evidence of separation: the cell stays out (fail-closed).
+        if row["pct"] is not None and row.get("ci95") and not str(row["builder"]).startswith("model="):
             strata.setdefault((row["task_class"], row["risk_class"]), []).append(row)
     out: List[str] = []
     for (task, risk), cells in sorted(strata.items()):
         best = min(cells, key=lambda c: (c["pct"], c["builder"]))
         for other in sorted(cells, key=lambda c: c["builder"]):
-            diff = round(other["pct"] - best["pct"], 1)
-            if other is not best and diff >= MIN_DIFF_PP:
+            if other is not best and best["ci95"][1] < other["ci95"][0]:
                 out.append(
                     f"Bouwer: vloer voor taakklasse {task} (risico {risk}) naar {best['builder']}. "
-                    f"Herwerk binnen 14 dagen {best['pct']}% (n={best['n']}) tegen {other['pct']}% "
-                    f"(n={other['n']}) voor {other['builder']}, verschil {diff} procentpunt.")
+                    f"Herwerk binnen 14 dagen {best['pct']}% ({_ci_text(best['ci95'])}, n={best['n']}) tegen "
+                    f"{other['pct']}% ({_ci_text(other['ci95'])}, n={other['n']}) voor {other['builder']}: "
+                    f"de 95%-intervallen overlappen niet.")
     return out
 
 
 def _seat_proposals(rows: List[Dict[str, Any]]) -> List[str]:
-    """Seats within one risk class, task classes pooled, both at n >= 20 and a difference >= 5 points."""
+    """Seats within one risk class, task classes pooled, both at n >= 20, 95% Wilson intervals not overlapping."""
+    from rework_metrics import wilson_interval
+
     pooled: Dict[tuple, Dict[str, int]] = {}
     for row in rows:
         seat = pooled.setdefault((row["risk_class"], row["reviewer"], row["model"]), {"n": 0, "count": 0})
@@ -95,18 +150,19 @@ def _seat_proposals(rows: List[Dict[str, Any]]) -> List[str]:
     strata: Dict[str, List[tuple]] = {}
     for (risk, reviewer, model), seat in pooled.items():
         pct = _pct_of(seat["n"], seat["count"])
-        if pct is not None and model != "model=unknown":
-            strata.setdefault(risk, []).append((pct, f"{reviewer}/{model}", seat["n"]))
+        ci = wilson_interval(seat["count"], seat["n"])
+        if pct is not None and ci is not None and model != "model=unknown":
+            strata.setdefault(risk, []).append((pct, f"{reviewer}/{model}", seat["n"], ci))
     out: List[str] = []
     for risk, seats in sorted(strata.items()):
         best = min(seats)
         for other in sorted(seats):
-            diff = round(other[0] - best[0], 1)
-            if other is not best and diff >= MIN_DIFF_PP:
+            if other is not best and best[3][1] < other[3][0]:
                 out.append(
                     f"Stoel: in risicoklasse {risk} liet {other[1]} meer door dan {best[1]}: doorgelaten "
-                    f"herwerk {other[0]}% (n={other[2]}) tegen {best[0]}% (n={best[2]}), verschil "
-                    f"{diff} procentpunt. Bovengrens, geen foutenpercentage van de stoel.")
+                    f"herwerk {other[0]}% ({_ci_text(other[3])}, n={other[2]}) tegen {best[0]}% "
+                    f"({_ci_text(best[3])}, n={best[2]}): de 95%-intervallen overlappen niet. "
+                    f"Bovengrens, geen foutenpercentage van de stoel.")
     return out
 
 
@@ -136,6 +192,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
                     ["builder", "task_class", "risk_class"])
     lines += _causes_table(result)
     lines += _table("Herwerk binnen 14 dagen", result["rework_14d"], ["builder", "task_class", "risk_class"])
+    lines += _cost_section(result)
     lines += ["## Per stoel", "", f"Doorgelaten herwerk is een bovengrens: {result['passed_through_note']}.", ""]
     lines += _table("Doorgelaten herwerk", result["passed_through"],
                     ["reviewer", "model", "task_class", "risk_class"])
@@ -144,7 +201,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
     if found:
         lines += [f"- {text}" for text in found]
     else:
-        lines.append(f"Geen laag haalt de drempel (n >= {MIN_N} en {MIN_DIFF_PP} procentpunt verschil): geen voorstel.")
+        lines.append(f"Geen laag haalt de drempel (n >= {MIN_N} en niet-overlappende Wilson-intervallen): geen voorstel.")
     lines += ["", "Een voorstel is tekst. De operator beslist."]
     return "\n".join(lines) + "\n"
 
@@ -177,6 +234,7 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
 
     from project_root import resolve_central_data_dir, resolve_project_id, resolve_project_root
+    from provider_costs import costs_path_in
     from review_rounds import ledger_path
     from rework_metrics import compute_metrics
 
@@ -186,13 +244,15 @@ def main(argv: "list[str] | None" = None) -> int:
     except (RuntimeError, ValueError) as exc:
         print(f"rework_report: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    state = (Path(args.data_dir) if args.data_dir else resolve_central_data_dir(project_id)) / "state"
+    data_dir = Path(args.data_dir) if args.data_dir else resolve_central_data_dir(project_id)
+    state = data_dir / "state"
     receipts, db = state / "t0_receipts.ndjson", state / "quality_intelligence.db"
     missing = [str(p) for p in (receipts, db) if not p.is_file()]
     if missing:
         print(f"rework_report: missing input: {', '.join(missing)}", file=sys.stderr)
         return EXIT_ERROR
-    result = compute_metrics(project_id, receipts, ledger_path(state / "review_gates"), db, as_of)
+    result = compute_metrics(project_id, receipts, ledger_path(state / "review_gates"), db, as_of,
+                             ledger_path=costs_path_in(data_dir))
     text = json.dumps(result, sort_keys=True, indent=2) + "\n" if args.json else render_markdown(result)
     if args.out:
         _write_atomic(Path(args.out), text)
