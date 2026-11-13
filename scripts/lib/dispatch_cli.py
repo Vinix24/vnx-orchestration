@@ -16,6 +16,7 @@ import dataclasses
 import json
 import logging
 import os
+import stat as _stat
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -60,6 +61,7 @@ from dispatch_serialization import LockWaitTimeout, force_release, serialize_lan
 import dispatch_exit  # noqa: E402
 import dispatch_start  # noqa: E402
 from worker_permissions import (  # noqa: E402
+    _registry_role_names,
     resolve_worker_profile,
     role_grants_write,
     worker_permission_enforcement_enabled,
@@ -1962,15 +1964,15 @@ def _discover_valid_roles(agents_dir: Path) -> frozenset[str]:
     file the worker loads as its profile. Missing or unreadable registry → EMPTY
     set, so compile_plan's OI-921 membership check rejects every role (fail-closed):
     an undiscoverable registry must never silently accept an arbitrary role string.
+    Unreadable is decided by an explicit stat, never by ``is_dir``/``is_file``,
+    because those hide the error from Python 3.14 on.
     """
     try:
-        if not agents_dir.is_dir():
+        if not _stat.S_ISDIR(os.stat(agents_dir).st_mode):
             return frozenset()
-        return frozenset(
-            entry.name
-            for entry in agents_dir.iterdir()
-            if entry.is_dir() and (entry / "CLAUDE.md").is_file()
-        )
+        return _registry_role_names(agents_dir)
+    except (FileNotFoundError, NotADirectoryError):
+        return frozenset()
     except OSError:
         return frozenset()
 
