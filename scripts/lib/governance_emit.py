@@ -249,6 +249,32 @@ def _write_manifest_sidecar(
     return _manifest_stamp(manifest["status"], sha256=hashlib.sha256(line.encode("utf-8")).hexdigest())
 
 
+def _backfill_token_usage(
+    dispatch_id: str, provider: str, session_id: Optional[str], token_usage: Dict[str, int],
+) -> Dict[str, int]:
+    """The receipt's ``token_usage``: the caller's, or the transcript's for a claude-harness lane with none.
+
+    Receipt-quality PR-B1: the claude-harness lanes have no live usage API on
+    the subscription, so when the caller has nothing usable (empty or marked
+    ``unavailable``) the local Claude Code session transcript is harvested.
+    Only ever tightens the data: a caller-supplied real ``token_usage`` is never
+    overwritten, and any harvest failure (no session_id, no transcript,
+    non-harness providers) returns ``token_usage`` exactly as passed in.
+    """
+    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
+        try:
+            from token_harvest import harvest_session_tokens  # noqa: PLC0415
+            harvested = harvest_session_tokens(session_id)
+            if harvested and not harvested.get("unavailable"):
+                return harvested
+        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
+            logger.debug(
+                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
+                dispatch_id, session_id, exc,
+            )
+    return token_usage
+
+
 def emit_dispatch_receipt(
     dispatch_id: str,
     terminal_id: str,
@@ -295,6 +321,7 @@ def emit_dispatch_receipt(
     permission_profile: Optional[str] = None,
     permission_allow_pattern_count: Optional[int] = None, lifecycle_v3: bool = False,
     model_resolved: Optional[str] = None, cost_ledger_run_ids: Optional[List[str]] = None,
+    token_usage_normalized: Optional[Dict[str, Any]] = None, start_context_tokens: Optional[int] = None,
 ) -> Path:
     """Atomic-append to t0_receipts.ndjson via the shared append primitive
     (ADR-035 §7.1) — same lock file, hash-chain stamping, and validator Path 2
@@ -411,6 +438,11 @@ def emit_dispatch_receipt(
     the lane wrote for this dispatch before calling here; ``cost_usd`` and
     ``cost_source`` then come from those lines. Stamped only when provided.
 
+    ``token_usage_normalized`` / ``start_context_tokens``: the five ledger token
+    fields of this run and the size of the context a claude harness builder
+    started with (``receipt_token_fields``), beside the raw ``token_usage``,
+    which keeps its own per-lane shape. Stamped only when not ``None``.
+
     ``lifecycle_v3``: ADR-054 — True when the lane holds a v3 ``Handover``, so the
     same 17-field record is written as ``dispatch_governed`` instead of
     ``task_complete``; a v3 dispatch then has no second end line.
@@ -451,17 +483,7 @@ def emit_dispatch_receipt(
     # the data — a caller-supplied real token_usage is never overwritten, and
     # any harvest failure (no session_id, no transcript, non-harness providers)
     # leaves token_usage exactly as passed in.
-    if provider in CLAUDE_HARNESS_PROVIDERS and session_id and (not token_usage or token_usage.get("unavailable")):
-        try:
-            from token_harvest import harvest_session_tokens  # noqa: PLC0415
-            harvested = harvest_session_tokens(session_id)
-            if harvested and not harvested.get("unavailable"):
-                token_usage = harvested
-        except Exception as exc:  # noqa: BLE001 — harvesting must never break receipt emission
-            logger.debug(
-                "emit_dispatch_receipt: token harvest failed for dispatch=%s session_id=%s: %s",
-                dispatch_id, session_id, exc,
-            )
+    token_usage = _backfill_token_usage(dispatch_id, provider, session_id, token_usage)
 
     # Receipt-quality PR-B0: the v2 receipt shape is codified in
     # receipt_schema.ReceiptV2 — the contract validates receipt_kind
@@ -518,6 +540,7 @@ def emit_dispatch_receipt(
         permission_profile=permission_profile,
         permission_allow_pattern_count=permission_allow_pattern_count,
         model_resolved=model_resolved or None, context_manifest=_context_manifest_stamp(dispatch_id, provider, session_id, state_dir),
+        token_usage_normalized=token_usage_normalized, start_context_tokens=start_context_tokens,
     ).to_dict()
 
     receipt_path = Path(state_dir) / "t0_receipts.ndjson"

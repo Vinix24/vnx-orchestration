@@ -1694,6 +1694,43 @@ def _record_dispatch_outcome(
             )
 
 
+def _classify_receipt_failure(
+    args: argparse.Namespace, provider: str, status: str, result: Any, duration: float,
+) -> tuple:
+    """``(failure_reason, failure_class)`` for the receipt; ``(None, None)`` on success.
+
+    OI-866: classify failure so the receipt carries a distinguishable
+    failure_reason + failure_class. classify_failure_safe (dispatch
+    20260816-p9p10-failure-reason-root) never raises and never returns an empty
+    failure_reason for a non-success status: a classify_failure regression can
+    no longer land a receipt with the field silently unset.
+    """
+    if status == "success":
+        return None, None
+    dispatch_id = getattr(args, "dispatch_id", "?")
+    try:
+        from failure_classification import classify_failure_safe  # noqa: PLC0415
+        classification = classify_failure_safe(
+            status=status,
+            error=getattr(result, "error", None),
+            completion_text=getattr(result, "completion_text", None),
+            timed_out=getattr(result, "timed_out", False),
+            provider=provider,
+            duration_seconds=duration,
+            returncode=getattr(result, "returncode", None),
+            dispatch_id=dispatch_id,
+        )
+        return classification.get("failure_reason"), classification.get("failure_class")
+    except Exception as exc:  # noqa: BLE001 — the failure_classification module itself failing to
+        # import is the one thing classify_failure_safe cannot guard against from inside itself;
+        # keep the same never-empty guarantee here.
+        logger.debug(
+            "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
+            dispatch_id, exc_info=True,
+        )
+        return f"failure_classification unavailable: {exc!r} (dispatch={dispatch_id})", "unknown"
+
+
 def _emit_governance(
     args: argparse.Namespace,
     provider: str,
@@ -1733,6 +1770,7 @@ def _emit_governance(
     immediately without retry.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report
+    from receipt_token_fields import receipt_token_fields
 
     state_dir = _resolve_state_dir()
     data_dir = _resolve_data_dir()
@@ -1813,43 +1851,7 @@ def _emit_governance(
 
     for attempt in range(_EMIT_MAX_RETRIES):
         try:
-            # OI-866: classify failure so the receipt carries a distinguishable
-            # failure_reason + failure_class. classify_failure_safe (dispatch
-            # 20260816-p9p10-failure-reason-root) never raises and never
-            # returns an empty failure_reason for a non-success status — a
-            # classify_failure regression can no longer land a receipt with
-            # the field silently unset.
-            _fail_reason: Optional[str] = None
-            _fail_class: Optional[str] = None
-            if status != "success":
-                try:
-                    from failure_classification import classify_failure_safe  # noqa: PLC0415
-                    _classification = classify_failure_safe(
-                        status=status,
-                        error=getattr(result, "error", None),
-                        completion_text=getattr(result, "completion_text", None),
-                        timed_out=getattr(result, "timed_out", False),
-                        provider=provider,
-                        duration_seconds=duration,
-                        returncode=getattr(result, "returncode", None),
-                        dispatch_id=getattr(args, "dispatch_id", "?"),
-                    )
-                    _fail_reason = _classification.get("failure_reason")
-                    _fail_class = _classification.get("failure_class")
-                except Exception as _classify_exc:  # noqa: BLE001 — the failure_classification
-                    # module itself failing to import is the one thing
-                    # classify_failure_safe cannot guard against from inside
-                    # itself; keep the same never-empty guarantee here.
-                    logger.debug(
-                        "_emit_governance: failure_classification unavailable dispatch=%s (non-fatal)",
-                        getattr(args, "dispatch_id", "?"),
-                        exc_info=True,
-                    )
-                    _fail_class = "unknown"
-                    _fail_reason = (
-                        f"failure_classification unavailable: {_classify_exc!r} "
-                        f"(dispatch={getattr(args, 'dispatch_id', '?')})"
-                    )
+            _fail_reason, _fail_class = _classify_receipt_failure(args, provider, status, result, duration)
 
             receipt_path = emit_dispatch_receipt(
                 dispatch_id=args.dispatch_id,
@@ -1864,6 +1866,12 @@ def _emit_governance(
                 duration_seconds=duration,
                 token_usage=token_usage,
                 cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
+                # This lane keeps no ledger record at hand (``_book_dispatch_cost`` hands back
+                # only the cost triple), so the normalized tokens come from the lane's own usage.
+                **receipt_token_fields(
+                    provider=provider, role=vars(args).get("role"), token_usage=token_usage,
+                    session_id=getattr(result, "session_id", None), ledger_record=None,
+                ),
                 state_dir=state_dir,
                 report_path=str(report_path),
                 events_path=events_path,

@@ -2290,6 +2290,69 @@
       "symbol": "ProviderAdapter"
     },
     {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 25,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_claude",
+      "symbol": "ClaudeSubprocessAdapter"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_govern"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 26,
+      "mechanism": "direct-call",
+      "module_target": "envelope_govern",
+      "symbol": "_run_phantom_guard"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 27,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "EnvelopeSpec"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 27,
+      "mechanism": "direct-call",
+      "module_target": "envelope_types",
+      "symbol": "_AdapterResult"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 92,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_book_ledger_run"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 93,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_verify_role_application"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 316,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_publish_phantom_verdict"
+    },
+    {
+      "file": "tests/test_receipt_token_usage_normalized.py",
+      "line": 317,
+      "mechanism": "patch-string",
+      "module_target": "envelope_govern",
+      "symbol": "_resolve_fix_forward_diff"
+    },
+    {
       "file": "tests/test_receipt_v2_pr4_wiring.py",
       "line": 398,
       "mechanism": "direct-call",
@@ -2597,6 +2660,7 @@
     "envelope_adapters_provider::_map_harness_spawn_result",
     "envelope_adapters_provider::_plan_worker_env",
     "envelope_govern::_adopt_stray_report",
+    "envelope_govern::_aggregate_toolcall_signals",
     "envelope_govern::_book_ledger_run",
     "envelope_govern::_check_report_contract",
     "envelope_govern::_clear_archived_event_stream",

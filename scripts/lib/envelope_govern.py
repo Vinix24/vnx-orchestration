@@ -575,6 +575,26 @@ def _check_report_contract(
     return _contract_warnings, _effective_status
 
 
+def _aggregate_toolcall_signals(spec: EnvelopeSpec) -> Dict[str, int]:
+    """This dispatch's PreToolUse-hook signal counts; ``{}`` when there is no signal log or aggregation fails.
+
+    Observability only: an aggregation error must never break receipt emission.
+    """
+    try:
+        signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
+        if not signal_dir:
+            return {}
+        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
+        return aggregate_toolcall_signals(signal_dir) or {}
+    except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
+        logger.debug(
+            "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
+            spec.dispatch_id,
+            exc_info=True,
+        )
+        return {}
+
+
 def _govern(
     spec: EnvelopeSpec,
     adapter_result: _AdapterResult,
@@ -604,6 +624,7 @@ def _govern(
     without a ``Handover`` leaves it False and nothing changes.
     """
     from governance_emit import emit_dispatch_receipt, emit_unified_report  # noqa: PLC0415
+    from receipt_token_fields import receipt_token_fields  # noqa: PLC0415
 
     duration = (end_time - start_time).total_seconds()
     # The model the spawn resolved (falling back to the spec model): it prices
@@ -717,19 +738,7 @@ def _govern(
                 # FAIL-OPEN — an aggregation error or absent signal log must
                 # never break receipt emission; each field simply stays None
                 # (omitted by ReceiptV2).
-                _toolcall_signals: Dict[str, int] = {}
-                try:
-                    _signal_dir = os.environ.get("VNX_TMUX_SIGNAL_DIR")
-                    if _signal_dir:
-                        from toolcall_signals import aggregate_toolcall_signals  # noqa: PLC0415
-                        _toolcall_signals = aggregate_toolcall_signals(_signal_dir) or {}
-                except Exception:  # noqa: BLE001 — observability signal must never break receipt emission
-                    logger.debug(
-                        "envelope._govern: toolcall signal aggregation failed dispatch=%s (non-fatal)",
-                        spec.dispatch_id,
-                        exc_info=True,
-                    )
-                    _toolcall_signals = {}
+                _toolcall_signals = _aggregate_toolcall_signals(spec)
 
                 # ADR-005: the receipt's cost — from this attempt's ledger line on
                 # a harness builder run, else from the old event, emitted here
@@ -787,6 +796,10 @@ def _govern(
                     duration_seconds=duration,
                     token_usage=adapter_result.token_usage,
                     cost_usd=cost_usd, cost_source=cost_source, cost_ledger_run_ids=_run_ids,
+                    **receipt_token_fields(
+                        provider=spec.provider, role=spec.role, session_id=adapter_result.session_id,
+                        token_usage=adapter_result.token_usage, ledger_record=_ledger_record,
+                    ),
                     state_dir=spec.state_dir,
                     report_path=str(report_path) if report_path else None,
                     events_path=events_path,
