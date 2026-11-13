@@ -28,6 +28,7 @@ sys.path.insert(0, str(SCRIPT_DIR))
 
 EXIT_OK, EXIT_ERROR = 0, 1
 MIN_N = 20
+SHOWN_GAPS = 10
 
 
 def _cell_text(row: Dict[str, Any]) -> str:
@@ -66,6 +67,51 @@ def _causes_table(result: Dict[str, Any]) -> List[str]:
     for row in rows:
         lines.append("| " + " | ".join(str(row[k]) for k in keys + causes) + " |")
     return lines + [""]
+
+
+def _num(value: Any) -> str:
+    return "-" if value is None else f"{value:g}"
+
+
+def _review_text(review: Dict[str, Any]) -> str:
+    return "; ".join(f"{seat}: {_num(v['runs_median'])} runs, ${_num(v['api_equivalent_usd_median'])}"
+                     + (f", {v['unavailable_runs']} onbeschikbaar" if v["unavailable_runs"] else "")
+                     for seat, v in review.items()) or "-"
+
+
+def _cost_row(c: Dict[str, Any]) -> str:
+    cols = [c["builder"], c["task_class"], c["risk_class"], c["n"], c["n_complete"],
+            f"${_num(c['build_usd_median'])} / ${_num(c['build_usd_p75'])}",
+            f"${_num(c['build_usd_per_1000_lines_median'])} ({c['per_1000_n']})", _review_text(c["review"]),
+            f"{_num(c['lead_time_median_min'])} ({c['lead_time_n']})", c["quota_share"]["status"],
+            "ja" if c["comparable"] else f"nee (n < {MIN_N})"]
+    return "| " + " | ".join(str(x) for x in cols) + " |"
+
+
+def _cost_section(result: Dict[str, Any]) -> List[str]:
+    cost = result["cost"]
+    lines = ["## Cost per delivery", "",
+             "Kosten in USD uit het kostengrootboek, per geaccepteerde delivery: API-equivalent bij een abonnement, "
+             "de gefactureerde prijs bij een betaalde (metered) run. "
+             f"Quota-aandeel per week: {cost['quota_share']['status']} ({cost['quota_share']['reason']}).", ""]
+    if cost["ledger_error"]:
+        return lines + [f"Geen kostenas: {cost['ledger_error']}.", ""]
+    head = ["builder", "task_class", "risk_class", "n", "compleet", "bouw p50 / p75",
+            "bouw per 1000 regels p50 (n)", "review per stoel", "doorlooptijd p50 min (n)", "quota", "vergelijkbaar"]
+    lines += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)] + [_cost_row(c) for c in cost["cells"]] + [""]
+    gaps = cost["gaps"]
+    incomplete = gaps["incomplete_deliveries"]
+    named = "".join(f"; {g['delivery']}: {' / '.join(g['why'])}" for g in incomplete[:SHOWN_GAPS])
+    lines += [f"- Incomplete deliveries (buiten de medianen): {len(incomplete)}{named}"
+              + (f"; en {len(incomplete) - SHOWN_GAPS} meer (zie --json)" if len(incomplete) > SHOWN_GAPS else "") + ".",
+              f"- Zonder gewijzigde regels (buiten de per-1000-cijfers): {gaps['no_changed_lines']}; "
+              f"zonder doorlooptijd: {gaps['no_lead_time']}.",
+              "- Reviewruns zonder koppeling aan een delivery (unattributed): "
+              f"{json.dumps(gaps['unattributed_review_runs'], sort_keys=True)}; op een PR buiten de deliveries: "
+              f"{json.dumps(gaps['other_pr_review_runs'], sort_keys=True)}.",
+              f"- Reviewruns zonder prijs (unavailable): {json.dumps(gaps['unavailable_review_runs'], sort_keys=True)}.",
+              f"- Onleesbare run-id's: {gaps['unparseable_runs']}."]
+    return lines + ([f"- Grootboek {cost['ledger_incomplete']}."] if cost["ledger_incomplete"] else []) + [""]
 
 
 def _pct_of(n: int, count: int) -> Optional[float]:
@@ -146,6 +192,7 @@ def render_markdown(result: Dict[str, Any]) -> str:
                     ["builder", "task_class", "risk_class"])
     lines += _causes_table(result)
     lines += _table("Herwerk binnen 14 dagen", result["rework_14d"], ["builder", "task_class", "risk_class"])
+    lines += _cost_section(result)
     lines += ["## Per stoel", "", f"Doorgelaten herwerk is een bovengrens: {result['passed_through_note']}.", ""]
     lines += _table("Doorgelaten herwerk", result["passed_through"],
                     ["reviewer", "model", "task_class", "risk_class"])
