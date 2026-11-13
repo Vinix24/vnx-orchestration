@@ -15,9 +15,11 @@ Two layers:
   the core. Whatever it cannot read is ``unmeasurable`` with the reason by
   name, never ``green``.
 
-Two seams are kept single on purpose so a later admission contract can change
-them in one place: ``is_base`` (is this run a base?) and ``classify_run``
-(what is this run?).
+Two seams are kept single on purpose so the admission contract (ADR-073
+besluit 3) changes in one place: ``is_base`` (a green run whose commit has the
+heavy profile) and ``classify_run`` (what is this run, given ``now`` and the
+age limit?). ``admit`` turns a window and the configured N into a GO / NO-GO
+record. Nothing here reads the clock: ``now`` is injected.
 """
 
 from __future__ import annotations
@@ -25,8 +27,10 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -46,11 +50,31 @@ VERDICT_UNMEASURABLE = "unmeasurable"
 RUN_GREEN = "green"
 RUN_RED = "red"
 RUN_RUNNING = "running"
-RUN_UNKNOWN = "unknown"
 
 MAPPING_RECEIPT = "receipt"
 MAPPING_NO_RECEIPT = "no_receipt"
 
+_CI_DIR = Path(__file__).resolve().parent.parent / "ci"
+if str(_CI_DIR) not in sys.path:
+    sys.path.insert(0, str(_CI_DIR))
+
+import classify_ci_profile  # noqa: E402
+
+PROFILE_HEAVY = "heavy"
+PROFILE_LIGHT = "light"
+PROFILE_UNKNOWN = "unknown"
+FILES_PAGE_CAP = 300  # the commits API lists at most 300 files per commit
+MAX_PROFILE_LOOKUPS = 10
+DEFAULT_RUN_MAX_AGE_MIN = 40
+
+RUN_NOGO = "nogo"
+VERDICT_NOGO = "nogo"
+
+# Conclusions that are a named NO-GO; every other non-success, non-failure word is one too.
+NOGO_REASON_STALE = "stale_run"
+NOGO_REASON_NO_RUN = "no_run"
+
+ProfileOf = Callable[[str], str]
 Runner = Callable[..., "subprocess.CompletedProcess"]
 
 
@@ -69,6 +93,7 @@ class WindowEntry:
     pr_number: Optional[int]
     dispatch_id: Optional[str]
     mapping: str
+    reason: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -80,6 +105,7 @@ class WindowEntry:
             "pr_number": self.pr_number,
             "dispatch_id": self.dispatch_id,
             "mapping": self.mapping,
+            "reason": self.reason,
         }
 
 
@@ -92,6 +118,10 @@ class MainWindow:
     first_red: Optional[WindowEntry] = None
     reason: Optional[str] = None
     commits_read: int = 0
+
+    @property
+    def first_nogo(self) -> Optional[WindowEntry]:
+        return next((e for e in self.entries if e.state == RUN_NOGO), None)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -113,25 +143,77 @@ def _unmeasurable(reason: str, commits_read: int = 0) -> MainWindow:
 # ── The two seams ────────────────────────────────────────────────────────────
 
 
-def classify_run(run: Optional[Dict[str, Any]]) -> str:
-    """One place that says what a run is. Positive evidence only: a missing
-    status, or a completed run without a conclusion, is ``unknown``."""
+def _parse_time(value: Any) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _younger_than_limit(started: Any, now: datetime, max_age_min: int) -> bool:
+    """True only on positive evidence: a readable timestamp inside the limit. An
+    unreadable or missing one is not young, so the answer stays NO-GO."""
+    moment = _parse_time(started)
+    return moment is not None and 0 <= (now - moment).total_seconds() < max_age_min * 60
+
+
+def classify_run(
+    run: Optional[Dict[str, Any]], *, now: datetime, max_age_min: int, commit_time: Any = None
+) -> Tuple[str, Optional[str]]:
+    """``(state, reason)``: one place that says what a run is (ADR-073 besluit 3).
+
+    ``run is None`` is a merge commit without a run: running while its committer
+    date is inside the age limit, else NO-GO ``no_run``. A non-completed run is
+    running while its ``createdAt`` is inside the limit, else NO-GO ``stale_run``.
+    A completed run is green on ``success`` and red on ``failure``; every other
+    conclusion word, and a missing status or conclusion, is a NO-GO under its
+    own name. Positive evidence only: nothing unknown is ever green."""
     if run is None:
-        return RUN_RUNNING
+        if _younger_than_limit(commit_time, now, max_age_min):
+            return RUN_RUNNING, None
+        return RUN_NOGO, NOGO_REASON_NO_RUN
     status = run.get("status")
     if not isinstance(status, str) or not status:
-        return RUN_UNKNOWN
+        return RUN_NOGO, "unknown_status"
     if status != "completed":
-        return RUN_RUNNING
+        if _younger_than_limit(run.get("createdAt"), now, max_age_min):
+            return RUN_RUNNING, None
+        return RUN_NOGO, NOGO_REASON_STALE
     conclusion = run.get("conclusion")
     if not isinstance(conclusion, str) or not conclusion:
-        return RUN_UNKNOWN
-    return RUN_GREEN if conclusion == "success" else RUN_RED
+        return RUN_NOGO, "no_conclusion"
+    if conclusion == "success":
+        return RUN_GREEN, None
+    if conclusion == "failure":
+        return RUN_RED, None
+    return RUN_NOGO, conclusion
 
 
-def is_base(run: Optional[Dict[str, Any]]) -> bool:
-    """One place that decides whether a run can be the green base."""
-    return run is not None and classify_run(run) == RUN_GREEN
+def is_base(
+    run: Optional[Dict[str, Any]], sha: str, profile_of: ProfileOf, *, now: datetime, max_age_min: int
+) -> bool:
+    """One place that decides whether a run can be the base: green AND the
+    merge commit has the heavy profile (asked only for a green run, so the
+    adapter looks up green candidates only). A green light or unknown-profile
+    run is a green entry in the window, never a base."""
+    if run is None or classify_run(run, now=now, max_age_min=max_age_min)[0] != RUN_GREEN:
+        return False
+    return profile_of(sha) == PROFILE_HEAVY
+
+
+def profile_from_files(paths: List[str]) -> str:
+    """Heavy only on positive evidence: at least one changed path outside the docs
+    allowlist. Light needs the whole file list, so an empty list is unknown, and
+    so is a list at the API's 300-file page cap with only docs paths (more files
+    may sit beyond the cap): a light run taken for a base can hide a red heavy run."""
+    if any(not classify_ci_profile.is_docs_only_path(p) for p in paths):
+        return PROFILE_HEAVY
+    if not paths or len(paths) >= FILES_PAGE_CAP:
+        return PROFILE_UNKNOWN
+    return PROFILE_LIGHT
 
 
 # ── Pure core ────────────────────────────────────────────────────────────────
@@ -163,17 +245,22 @@ def _receipts_by_sha(merges: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return by_sha
 
 
-def _entry(sha: str, run: Optional[Dict[str, Any]], receipt: Optional[Dict[str, Any]]) -> WindowEntry:
+def _entry(
+    sha: str, run: Optional[Dict[str, Any]], receipt: Optional[Dict[str, Any]], *,
+    now: datetime, max_age_min: int, commit_time: Any,
+) -> WindowEntry:
+    state, reason = classify_run(run, now=now, max_age_min=max_age_min, commit_time=commit_time)
     run = run or {}
     return WindowEntry(
         sha=sha,
         run_id=run.get("databaseId"),
         status=run.get("status"),
         conclusion=run.get("conclusion"),
-        state=classify_run(run or None),
+        state=state,
         pr_number=receipt.get("pr_number") if receipt else None,
         dispatch_id=receipt.get("dispatch_id") if receipt else None,
         mapping=MAPPING_RECEIPT if receipt else MAPPING_NO_RECEIPT,
+        reason=reason,
     )
 
 
@@ -185,26 +272,49 @@ def _inputs_usable(commits: Any, runs: Any, merges: Any) -> bool:
     return all(isinstance(x, list) and all(isinstance(i, dict) for i in x) for x in (runs, merges))
 
 
-def compute_window(commits: List[str], runs: List[Dict[str, Any]], merges: List[Dict[str, Any]]) -> MainWindow:
-    """Commits (newest first) + VNX CI push runs + pr_merged receipts -> window."""
+def compute_window(
+    commits: List[str],
+    runs: List[Dict[str, Any]],
+    merges: List[Dict[str, Any]],
+    *,
+    profile_of: ProfileOf,
+    now: datetime,
+    max_age_min: int = DEFAULT_RUN_MAX_AGE_MIN,
+    commit_times: Optional[Dict[str, str]] = None,
+) -> MainWindow:
+    """Commits (newest first) + VNX CI push runs + pr_merged receipts -> window.
+
+    ``profile_of(sha)`` says ``heavy``, ``light`` or ``unknown``; it is asked only
+    for green candidates, newest first, until the first heavy one."""
     if not _inputs_usable(commits, runs, merges):
         return _unmeasurable("invalid_input", len(commits) if isinstance(commits, list) else 0)
     run_by_sha = _newest_run_per_sha(runs)
     receipt_by_sha = _receipts_by_sha(merges)
-    base_idx = next((i for i, sha in enumerate(commits) if is_base(run_by_sha.get(sha))), None)
+    times = commit_times or {}
+    base_idx = next(
+        (
+            i for i, sha in enumerate(commits)
+            if is_base(run_by_sha.get(sha), sha, profile_of, now=now, max_age_min=max_age_min)
+        ),
+        None,
+    )
     if base_idx is None:
         return _unmeasurable("history_incomplete", len(commits))
     base_sha = commits[base_idx]
     entries = tuple(
-        _entry(sha, run_by_sha.get(sha), receipt_by_sha.get(sha)) for sha in reversed(commits[:base_idx])
+        _entry(sha, run_by_sha.get(sha), receipt_by_sha.get(sha),
+               now=now, max_age_min=max_age_min, commit_time=times.get(sha))
+        for sha in reversed(commits[:base_idx])
     )
-    base_run_id = run_by_sha[base_sha].get("databaseId")
+    common = dict(
+        base_sha=base_sha, base_run_id=run_by_sha[base_sha].get("databaseId"),
+        entries=entries, commits_read=len(commits),
+    )
     first_red = next((e for e in entries if e.state == RUN_RED), None)
-    common = dict(base_sha=base_sha, base_run_id=base_run_id, entries=entries, commits_read=len(commits))
     if first_red is not None:
         return MainWindow(verdict=VERDICT_RED, first_red=first_red, **common)
-    if any(e.state == RUN_UNKNOWN for e in entries):
-        return MainWindow(verdict=VERDICT_UNMEASURABLE, reason="unusable_run", **common)
+    if any(e.state == RUN_NOGO for e in entries):
+        return MainWindow(verdict=VERDICT_NOGO, **common)
     if any(e.state == RUN_RUNNING for e in entries):
         return MainWindow(verdict=VERDICT_RUNNING, **common)
     return MainWindow(verdict=VERDICT_GREEN, **common)
@@ -230,13 +340,46 @@ def _gh_stdout(runner: Runner, argv: List[str], cwd: str) -> Tuple[Optional[str]
     return result.stdout, None
 
 
-def _read_commits(runner: Runner, root: str, gh_bin: str, branch: str, limit: int) -> Tuple[List[str], Optional[str]]:
-    argv = [gh_bin, "api", f"repos/{{owner}}/{{repo}}/commits?sha={branch}&per_page={limit}", "--jq", ".[].sha"]
+def _read_commits(
+    runner: Runner, root: str, gh_bin: str, branch: str, limit: int
+) -> Tuple[List[str], Dict[str, str], Optional[str]]:
+    """``(shas newest first, {sha: committer date}, failure)``. A line without a
+    date keeps the sha and has no date, which a commit without a run reads as old."""
+    argv = [gh_bin, "api", f"repos/{{owner}}/{{repo}}/commits?sha={branch}&per_page={limit}",
+            "--jq", ".[] | [.sha, .commit.committer.date] | @tsv"]
     out, failure = _gh_stdout(runner, argv, root)
     if failure:
-        return [], f"commits_{failure}"
-    commits = [line.strip() for line in (out or "").splitlines() if line.strip()]
-    return (commits, None) if commits else ([], "commits_empty")
+        return [], {}, f"commits_{failure}"
+    commits: List[str] = []
+    times: Dict[str, str] = {}
+    for line in (out or "").splitlines():
+        sha, _, date = line.strip().partition("\t")
+        if sha:
+            commits.append(sha)
+            if date.strip():
+                times[sha] = date.strip()
+    return (commits, times, None) if commits else ([], {}, "commits_empty")
+
+
+def make_profile_reader(runner: Runner, root: str, gh_bin: str) -> ProfileOf:
+    """``profile_of(sha)`` over ``gh api commits/<sha>``: memoized per sha, and at
+    most ``MAX_PROFILE_LOOKUPS`` real lookups per reader. Past the cap, and on any
+    failure, the profile is ``unknown``: so no heavy base is found and the window
+    reads ``history_incomplete``."""
+    memo: Dict[str, str] = {}
+
+    def profile_of(sha: str) -> str:
+        if sha in memo:
+            return memo[sha]
+        if len(memo) >= MAX_PROFILE_LOOKUPS:
+            return PROFILE_UNKNOWN
+        argv = [gh_bin, "api", f"repos/{{owner}}/{{repo}}/commits/{sha}", "--jq", ".files[].filename"]
+        out, failure = _gh_stdout(runner, argv, root)
+        paths = [] if failure else [line for line in (out or "").splitlines() if line.strip()]
+        memo[sha] = profile_from_files(paths)
+        return memo[sha]
+
+    return profile_of
 
 
 def _read_runs(
@@ -290,14 +433,20 @@ def read_window(
     branch: str = DEFAULT_MAIN_BRANCH,
     workflow_name: Optional[str] = None,
     gh_bin: str = "gh",
+    now: Optional[datetime] = None,
+    max_age_min: int = DEFAULT_RUN_MAX_AGE_MIN,
 ) -> MainWindow:
     """Read commits, VNX CI push runs and receipts, then compute the window."""
     run = runner or _subprocess_runner
     root = str(project_root)
-    commits, failure = _read_commits(run, root, gh_bin, branch, limit)
+    commits, times, failure = _read_commits(run, root, gh_bin, branch, limit)
     if failure:
         return _unmeasurable(failure)
     runs, failure = _read_runs(run, root, gh_bin, branch, resolve_ci_workflow_name(workflow_name), limit)
     if failure:
         return _unmeasurable(failure, len(commits))
-    return compute_window(commits, runs, _read_merge_receipts(state_dir))
+    return compute_window(
+        commits, runs, _read_merge_receipts(state_dir),
+        profile_of=make_profile_reader(run, root, gh_bin),
+        now=now or datetime.now(timezone.utc), max_age_min=max_age_min, commit_times=times,
+    )

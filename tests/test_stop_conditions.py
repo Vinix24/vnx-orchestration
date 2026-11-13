@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -51,16 +52,22 @@ def _gh_replies(runs, commits=("c" * 40, "b" * 40, "a" * 40)):
     """A fake subprocess.run for main_window: commits call, then runs call."""
 
     def fake(argv, **_kwargs):
+        if argv[1] == "api" and "/commits/" in argv[2]:
+            return _proc(0, "scripts/lib/x.py\n", "")
         if argv[1] == "api":
-            return _proc(0, "\n".join(commits) + "\n", "")
+            return _proc(0, "".join(f"{sha}\t{_MAIN_RUN_TIME}\n" for sha in commits), "")
         return _proc(0, json.dumps(runs), "")
 
     return fake
 
 
+_MAIN_RUN_TIME = "2026-09-04T08:00:00Z"
+_MAIN_NOW = datetime(2026, 9, 4, 8, 5, tzinfo=timezone.utc)  # inside the 40 minute age limit
+
+
 def _ci_run(sha, run_id, conclusion="success", status="completed"):
     return {"databaseId": run_id, "headSha": sha, "status": status, "conclusion": conclusion,
-            "createdAt": "2026-09-04T08:00:00Z", "attempt": 1}
+            "createdAt": _MAIN_RUN_TIME, "attempt": 1}
 
 
 def _write_receipt_lines(path: Path, records: list[dict]) -> None:
@@ -121,6 +128,7 @@ class TestMainCiRed:
     A, B, C = "a" * 40, "b" * 40, "c" * 40
 
     def _check(self, tmp_path, runs, **kwargs):
+        kwargs.setdefault("now", _MAIN_NOW)
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
              patch("main_window.subprocess.run", side_effect=_gh_replies(runs)):
             return check_main_ci_red(tmp_path, **kwargs)

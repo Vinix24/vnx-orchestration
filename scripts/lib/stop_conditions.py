@@ -278,13 +278,16 @@ def check_main_ci_red(
     workflow_name: Optional[str] = None,
     gh_bin: str = "gh",
     state_dir: Optional[Path] = None,
+    now: Optional[datetime] = None,
 ) -> StopConditionResult:
     """E1: main branch broken after merge.
 
     Reads the window on ``branch`` (the merges since the last green VNX CI
-    run, see ``main_window``). A red run anywhere in the window is TRIGGERED.
-    A window with a run that is still running or missing is UNMEASURABLE ("not
-    yet known"), as is anything the reader could not measure.
+    run, see ``main_window``). A red run anywhere in the window is TRIGGERED, and
+    so is a named NO-GO entry (``stale_run``, ``no_run``, a cancelled or timed-out
+    run, an unknown conclusion), with its reason. A window with a run that is
+    still running is UNMEASURABLE ("not yet known"), as is anything the reader
+    could not measure.
     """
     check_id = "main_ci_red"
     resolved_workflow = main_window.resolve_ci_workflow_name(workflow_name)
@@ -296,11 +299,19 @@ def check_main_ci_red(
         return _unmeasurable(check_id, "gh CLI niet beschikbaar: main-CI-status niet meetbaar", workflow=resolved_workflow)
 
     window = main_window.read_window(
-        root, state_dir=state_dir, branch=branch, workflow_name=resolved_workflow, gh_bin=gh_bin
+        root, state_dir=state_dir, branch=branch, workflow_name=resolved_workflow, gh_bin=gh_bin, now=now
     )
     evidence = dict(workflow=resolved_workflow, branch=branch, window=window.to_dict())
     if window.verdict == main_window.VERDICT_RED:
         return _triggered(check_id, _red_window_message(window, resolved_workflow, branch), **evidence)
+    if window.verdict == main_window.VERDICT_NOGO:
+        nogo = window.first_nogo
+        return _triggered(
+            check_id,
+            f"{resolved_workflow} op '{branch}': {nogo.reason} voor {nogo.sha} (run {nogo.run_id}); "
+            f"het venster telt {len(window.entries)} merge(s) sinds de groene basis {window.base_sha}",
+            **evidence,
+        )
     if window.verdict == main_window.VERDICT_RUNNING:
         return _unmeasurable(
             check_id,
