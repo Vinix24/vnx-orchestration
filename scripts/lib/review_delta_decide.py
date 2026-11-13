@@ -64,7 +64,7 @@ def _verdict_text(ctx: DeltaContext, parsed: DeltaVerdict) -> str:
     findings += [dict(f, severity="error") if shadow._blocking_new(f) and not _classify_findings([dict(f)])[0] else dict(f)
                  for f in parsed.new_findings]
     prose = (f"Delta round on head {ctx.record.head}: verdict {parsed.verdict}; parent round {ctx.record.parent_round_ref} "
-             f"(head {ctx.parent.head_sha}). Statuses (the finding objects below keep their original identity): {json.dumps(dict(parsed.statuses), sort_keys=True)}. Reasons: {"; ".join(parsed.reasons) or "none"}.")
+             f"(head {ctx.parent.head_sha}). Statuses (the finding objects below keep their original identity): {json.dumps(dict(parsed.statuses), sort_keys=True)}. Reasons: {'; '.join(parsed.reasons) or 'none'}.")
     verdict = {"verdict": parsed.verdict if parsed.verdict == PASS else "fail", "findings": findings, "residual_risk": ""}
     return prose + "\n" + json.dumps(verdict)
 
