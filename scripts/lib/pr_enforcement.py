@@ -1113,6 +1113,18 @@ def unpublished_salvage_commit(wt_path: "Path | str") -> "Optional[str]":
     return sha
 
 
+def _is_detached_head(cwd: Path) -> bool:
+    """True only when git positively reports HEAD is not a symbolic ref."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "symbolic-ref", "-q", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except Exception:  # vnx-silent-except: unreadable HEAD keeps the attached push, which fails loudly if wrong
+        return False
+    return proc.returncode == 1
+
+
 def _push_branch(*, branch: str, cwd: Path) -> "_PushOutcome":
     """Push *branch* (``dispatch/<id>``) to origin. Never raises.
 
@@ -1125,10 +1137,16 @@ def _push_branch(*, branch: str, cwd: Path) -> "_PushOutcome":
     dispatch never silently resolves as 'done'.
     """
     push_timeout = _salvage_push_timeout_s()
+    # OI-2716: a detached HEAD has nothing to track and ``push origin HEAD`` is
+    # not a full refname, so it pushes with an explicit refspec and no -u.
+    push_argv = (
+        ["git", "-C", str(cwd), "push", "origin", f"HEAD:refs/heads/{branch}"]
+        if _is_detached_head(cwd)
+        else ["git", "-C", str(cwd), "push", "-u", "origin", branch]
+    )
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), "push", "-u", "origin", branch],
-            capture_output=True, text=True, timeout=push_timeout,
+            push_argv, capture_output=True, text=True, timeout=push_timeout,
         )
     except subprocess.TimeoutExpired:
         return _PushOutcome(
