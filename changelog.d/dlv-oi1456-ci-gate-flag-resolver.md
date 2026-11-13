@@ -1,0 +1,1 @@
+- The unavailable-reason classifier reads `VNX_CI_GATE_REQUIRED` through `config_runtime`, the resolver the availability check uses, so a `ci_gate` parked off in the project DB books `provider_disabled` and the obligation stays pending instead of `provider_not_configured` (OI-1456).
