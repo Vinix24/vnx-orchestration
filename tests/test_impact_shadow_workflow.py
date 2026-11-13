@@ -74,6 +74,29 @@ def test_shadow_job_cannot_turn_a_check_red(jobs):
         assert "impact-shadow" not in ([needs] if isinstance(needs, str) else needs), other
 
 
+def test_shadow_job_runs_only_on_pull_requests(jobs):
+    """The conclusion of VNX CI on main paces the merge chain, so the shadow job must not run there."""
+    assert jobs["impact-shadow"]["if"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_shadow_job_keeps_continue_on_error_no_needs_and_is_in_no_required_list(jobs):
+    job = jobs["impact-shadow"]
+    assert job["continue-on-error"] is True
+    assert "needs" not in job
+    for other, body in jobs.items():
+        needs = body.get("needs") or []
+        assert "impact-shadow" not in ([needs] if isinstance(needs, str) else needs), other
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert text.count("Impact shadow (runs only S, never required)") == 1
+
+
+def test_shadow_step_in_profile_a_has_no_event_condition(jobs):
+    step = step_named(jobs["profile-a"], STEP)
+    assert "github.event_name" not in step["if"]
+    upload = [s for s in jobs["profile-a"]["steps"] if (s.get("with") or {}).get("name") == "impact-shadow"][0]
+    assert "github.event_name" not in upload["if"]
+
+
 def test_shadow_job_steps(jobs):
     job = jobs["impact-shadow"]
     assert job["steps"][0]["with"]["fetch-depth"] == 0
