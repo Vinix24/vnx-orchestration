@@ -140,6 +140,29 @@ def test_a_write_of_delta_is_refused_when_a_check_cannot_be_made(store, monkeypa
         _set(store, "delta", planted_manifest=Path("m.json"))
 
 
+def test_the_activation_check_resolves_the_repo_cwd_first(store, monkeypatch):
+    repo = store["project_root"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    seen = []
+    monkeypatch.setattr(rs, "measurement_outcome", lambda *a: "pass")
+    monkeypatch.setattr(rs, "dr7_on_main", lambda root: seen.append(Path(root).resolve()) or True)
+    monkeypatch.setattr(rs, "main_ci_green", lambda root: True)
+    monkeypatch.chdir(repo)
+    assert Path(config_store_db.__file__).resolve().parent != repo
+    _set(store, "delta", planted_manifest=Path("m.json"))
+    assert seen == [repo.resolve()]
+
+
+def test_a_write_of_delta_is_refused_when_the_root_cannot_be_resolved(store, monkeypatch, tmp_path):
+    import project_root
+
+    _allow(monkeypatch)
+    monkeypatch.setattr(project_root, "resolve_project_root", lambda *a: (_ for _ in ()).throw(RuntimeError("no root")))
+    with pytest.raises(PermissionError, match="project root could not be resolved"):
+        _set(store, "delta", planted_manifest=Path("m.json"))
+    assert rs.active_review_scope(store["state_dir"]).value == "full"
+
+
 def test_an_unreadable_manifest_refuses_the_real_measurement(store, monkeypatch):
     monkeypatch.setattr(rs, "dr7_on_main", lambda root: True)
     monkeypatch.setattr(rs, "main_ci_green", lambda root: True)

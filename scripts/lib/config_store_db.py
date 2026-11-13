@@ -161,7 +161,11 @@ def set_config(
     if key == review_scope.SCOPE_KEY and coerced == review_scope.DELTA:
         from project_root import resolve_project_root
 
-        review_scope.require_activation(_state_dir_of(conn), planted_manifest, resolve_project_root(__file__))
+        try:
+            repo = resolve_project_root()  # CWD-first (OI-1145): the project being configured, not the installed fabric
+        except RuntimeError as exc:
+            raise PermissionError(f"review scope delta refused: the project root could not be resolved: {exc}") from exc
+        review_scope.require_activation(_state_dir_of(conn), planted_manifest, repo)
     ensure_config_tables(conn)  # DDL, idempotent — commits any pending txn, so BEGIN below is clean
     event_id = str(uuid.uuid4())
 
