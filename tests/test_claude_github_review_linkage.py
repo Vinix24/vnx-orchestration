@@ -338,6 +338,9 @@ class TestRequestClaudeGitHubWithContract:
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        # subprocess.run is mocked below; pin the project id so state-root
+        # resolution never runs ``git remote`` through the mock (CI has none set).
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-test")
 
         mock_proc = MagicMock()
         mock_proc.returncode = 1
@@ -667,6 +670,7 @@ class TestRequestClaudeGitHubInvalidPrNumber:
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "1")
         monkeypatch.setattr(rgm.shutil, "which", lambda tool: "/usr/bin/gh" if tool == "gh" else None)
         monkeypatch.setenv("VNX_CLAUDE_GITHUB_REVIEW_TRIGGER", "1")
+        monkeypatch.setenv("VNX_PROJECT_ID", "vnx-test")
 
         gh_calls: list = []
 

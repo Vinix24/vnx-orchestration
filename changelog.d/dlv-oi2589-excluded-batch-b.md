@@ -1,1 +1,1 @@
-- Seven more test files pass on main again and leave the CI exclusion list: the tests now match the current shutdown, skill, task-count, strict-diff, scoped auto-commit and head-sha behavior (OI-2589, batch b).
+- Seven more test files pass on main again: the tests now match the current shutdown, skill, task-count, strict-diff, scoped auto-commit and head-sha behavior, and two review-linkage tests pin their project id so a mocked `subprocess.run` never serves `git remote`. Their CI exclusion lines leave `scripts/ci/test_exclusions.txt` in one closing PR (OI-2589, batch b).
