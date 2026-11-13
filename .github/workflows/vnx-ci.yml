@@ -185,6 +185,32 @@ jobs:
             --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --event "$GITHUB_EVENT_NAME" --ref "$GITHUB_REF_NAME"
 
+      # ADR-074 besluit 15: the impact shadow. It holds the selector's choice
+      # against this run's evidence and decides nothing. It can never turn the
+      # job red: the script exits 0 on every path and the step is
+      # continue-on-error. Not part of any required check.
+      - name: Impact shadow record (never fails the job)
+        id: impact-shadow
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          PROFILE_A_EVIDENCE: ${{ runner.temp }}/profile-a-evidence
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/impact_shadow_step.sh" "$PROFILE_A_EVIDENCE" "$RUNNER_TEMP/impact-shadow"
+
+      - name: Upload the impact shadow record
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: impact-shadow
+          path: ${{ runner.temp }}/impact-shadow/
+          if-no-files-found: warn
+          overwrite: true
+
       # OI-1420: state how much of the tree the sweep skips, non-fatally.
       - name: Test exclusions coverage summary
         if: ${{ always() }}
@@ -314,6 +340,48 @@ jobs:
             "$GITHUB_WORKSPACE/tests/test_status_vocab_drift.py" \
             -p no:cacheprovider \
             --basetemp=/tmp/vnx_pytest_safe
+  # ADR-074 besluit 3, 7c and 15: the saving of the impact selection is a wall
+  # clock, measured here by running only S on the same candidate as Profile A.
+  # It decides nothing: continue-on-error on the job and on the steps, scripts
+  # that exit 0, no `needs` in either direction and no entry in any required
+  # check list.
+  impact-shadow:
+    name: Impact shadow (runs only S, never required)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    # The Profile A bound: the job runs a subset, so it never needs more.
+    timeout-minutes: 38
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Profile A prelude
+        id: prelude
+        uses: ./.github/actions/profile-a-prelude
+
+      - name: Run only S and record the wall clock (never fails the job)
+        if: ${{ steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        env:
+          VNX_HOME: ${{ steps.prelude.outputs.vnx-home }}
+          VNX_DATA_DIR: ${{ steps.prelude.outputs.vnx-data-dir }}
+          VNX_CI_XDIST: ${{ vars.VNX_CI_XDIST }}
+        run: bash "$GITHUB_WORKSPACE/scripts/ci/impact_shadow_job.sh" "$RUNNER_TEMP/impact-shadow-job"
+
+      - name: Upload the impact shadow job record
+        if: ${{ always() && steps.prelude.outputs.profile != 'light' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/upload-artifact@v4
+        with:
+          name: impact-shadow-job
+          path: ${{ runner.temp }}/impact-shadow-job/
+          if-no-files-found: warn
+          overwrite: true
+
   trace-token-check:
     name: Trace Token Validation
     runs-on: ubuntu-24.04
