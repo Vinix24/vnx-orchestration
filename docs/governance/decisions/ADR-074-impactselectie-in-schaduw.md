@@ -119,6 +119,12 @@ Volgt de volle run op main niet binnen de CI-duur plus een marge, dan behandelt 
 - Geen activering: PR 5 wordt pas gebouwd na de meting en het besluit.
 - Geen overname van pytest-testmon, Bazel of Nx. De mechanismen zijn geleend (Bazel en Buck2: change pruning; Nx: gedeclareerde invoer propageert; Turborepo: bij te weinig zekerheid uitbreiden naar alles), de code niet.
 
+### 14. De conftest-variant
+
+De conftest-sluiting is de verzameling repo-modules die transitief door elke `conftest.py` onder `tests/` bereikt wordt, met dezelfde importresolutie als de graaf en functielichamen meegeteld. Autouse-fixtures importeren zulke modules (`pr_merge`, `gate_recorder`) binnen een fixture, dus elke test draait ze, terwijl de graaf er geen kant van een test naar trekt (OI-2788).
+
+De schaduw meet beide varianten naast elkaar: de graaf-alleen-variant (S) en de conftest-variant (S wordt U wanneer een geraakt pad in de sluiting zit). Ze beslist niets. Activering, en met welke variant, blijft het besluit van de operator na de meting.
+
 ## Gevolgen
 
 - Tijdens de schaduw wint de pijp niets. De stap kost seconden, de schaduwjob loopt naast de volle job. Runners wachten niet (0,03 min mediaan op 13-11), dus de job vertraagt niets.

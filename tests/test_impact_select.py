@@ -202,3 +202,34 @@ def test_real_repo_dispatch_serialization_selects_its_tests():
     assert out["scope"] == "impact" and out["selected"]
     on_disk = {f"tests/{p.name}" for p in (REAL_ROOT / "tests").glob("test_dispatch_serialization*.py")}
     assert on_disk and on_disk <= set(out["selected"])
+
+
+CONFTEST_TREE = {
+    **BASE,
+    "scripts/lib/fixture_only.py": "import deep\n",
+    "scripts/lib/deep.py": "Y = 1\n",
+    "tests/conftest.py": "import pytest\n\n@pytest.fixture(autouse=True)\ndef guard():\n    import fixture_only\n",
+}
+
+
+def test_module_imported_only_inside_a_conftest_fixture_is_in_the_closure(tmp_path):
+    root = make_tree(tmp_path, CONFTEST_TREE)
+    assert {"scripts/lib/fixture_only.py", "scripts/lib/deep.py"} <= sel.conftest_closure(sel.build_graph(root))
+    out = run(root, "scripts/lib/deep.py")
+    assert out["conftest_reached"] is True
+    assert run(root, "scripts/lib/core.py")["conftest_reached"] is False
+
+
+def test_conftest_reached_is_also_reported_when_the_selector_expands(tmp_path):
+    root = make_tree(tmp_path, CONFTEST_TREE)
+    out = run(root, "scripts/lib/deep.py", "pyproject.toml")
+    assert out["scope"] == "full" and out["conftest_reached"] is True
+
+
+def test_conftest_closure_version_is_stable_and_follows_the_closure(tmp_path):
+    root = make_tree(tmp_path / "a", CONFTEST_TREE)
+    same = make_tree(tmp_path / "b", CONFTEST_TREE)
+    other = make_tree(tmp_path / "c", {**CONFTEST_TREE, "scripts/lib/more.py": "Z = 1\n", "scripts/lib/deep.py": "import more\n"})
+    version = run(root, "scripts/lib/core.py")["conftest_closure_version"]
+    assert version == run(same, "scripts/lib/core.py")["conftest_closure_version"]
+    assert version != run(other, "scripts/lib/core.py")["conftest_closure_version"]
