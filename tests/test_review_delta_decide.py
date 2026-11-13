@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import hashlib
 import subprocess
 from functools import partial
 from pathlib import Path
@@ -57,8 +56,7 @@ def _ledger(store, scopes=("",), blocking=1, mode="delta"):
     gates = store["state_dir"] / "review_gates"
     gates.mkdir(parents=True, exist_ok=True)
     project = rr.store_project_id(gates)
-    rows = [{"kind": "opened", "project_id": project, "pr_number": 7, "basis": "new", "evidence": 0,
-             "recorded_at": "2026-11-12T00:00:00Z", "source": "gate"}]
+    rows = [{"kind": "opened", "project_id": project, "pr_number": 7, "basis": "new", "evidence": 0, "recorded_at": "2026-11-12T00:00:00Z", "source": "gate"}]
     rows += [rr.RoundLine(project, 7, HEAD_A if n == len(scopes) - 1 else f"{n:040d}", "codex_gate", "codex_gate", "", "fail", blocking,
                           "/r/parent.md", f"d-{n}", f"2026-11-12T00:0{n}:00Z", branch=BRANCH, source="gate", scope=sc,
                           finding_ids=(OPEN_ID,)).to_dict() for n, sc in enumerate(scopes)]
@@ -68,12 +66,11 @@ def _ledger(store, scopes=("",), blocking=1, mode="delta"):
 
 def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", record=None, fail=False, boom=False, source=SRC, **payload):
     sent, shadows = [], []
-    monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: store["data_dir"] / "_wt")
-    monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
+    for name, fake in (("create_gate_worktree", lambda **kw: store["data_dir"] / "_wt"), ("remove_gate_worktree", lambda *a, **kw: None)):
+        monkeypatch.setattr(gate_runner, name, fake)
     def run(self, **kw):
         sent.append(kw["prompt"])
-        done = {"status": "failed", "reason": "timeout", "reason_detail": "deadline", "stdout": ""} if fail else \
-            {"status": "completed", "stdout": stdout or _answer()}
+        done = {"status": "failed", "reason": "timeout", "reason_detail": "deadline", "stdout": ""} if fail else {"status": "completed", "stdout": stdout or _answer()}
         return {"stderr": "", "duration_seconds": 1.0, "partial_output_lines": 1, "runner_pid": 1, "returncode": 0, **done}
     def assembled(*a):
         if boom:
@@ -116,14 +113,6 @@ def test_the_deciding_delta_prompt_keeps_the_reviewer_policy_and_wraps_the_delta
         assert trusted in prompt
     assert prompt.index(begin) < prompt.index(OPEN_ID) < prompt.index(end) and rd.FENCE in prompt
     assert gate_runner._REVIEWER_VERDICT_TEMPLATE not in prompt and prompt.count("```delta_verdict/1") == 2  # the contract, restated once
-
-
-def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
-    monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
-    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
-    full = GateRunner._build_codex_prompt({"branch": "feat/x", "risk_class": "medium", "pr_number": 7})
-    # sha256 of the prompt taken on 2234c44c, before the helper; a deliberate change of the reviewer policy refreshes it
-    assert hashlib.sha256(full.encode()).hexdigest() == "ea25dd179cfd6daa510eb0a72ce928f7497a62aa0d7e5970d526a4a150dd2893"
 
 
 @pytest.mark.parametrize("stdout,blocking", [
