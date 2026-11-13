@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import hashlib
 import subprocess
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from review_stack_support import BRANCH  # importing it puts scripts/ and scripts/lib on sys.path
+import gate_prompt
 import gate_runner
 import review_changekind as ck
 import review_delta as rd
@@ -104,6 +107,25 @@ def test_delta_sends_the_delta_prompt_for_an_eligible_head_and_a_pass_books_one_
     assert all(t in Path(result["report_path"]).read_text() for t in ("Delta round", OPEN_ID, "parent.md"))
 
 
+def test_the_deciding_delta_prompt_keeps_the_reviewer_policy_and_wraps_the_delta_as_untrusted(store, monkeypatch):
+    _ledger(store)
+    _, sent, _ = _fire(store, monkeypatch)
+    prompt, begin, end = sent[0], gate_prompt.BEGIN_DIFF_MARKER, gate_prompt.END_DIFF_MARKER
+    assert prompt == rd.build_delta_prompt(_record(), partial(gate_runner._assemble_reviewer_prompt, "7"))
+    for trusted in ("# Role: Reviewer", "## ADR Compliance", gate_prompt._UNTRUSTED_DATA_RULE, "## Running the PR's tests"):
+        assert trusted in prompt
+    assert prompt.index(begin) < prompt.index(OPEN_ID) < prompt.index(end) and rd.FENCE in prompt
+    assert gate_runner._REVIEWER_VERDICT_TEMPLATE not in prompt and prompt.count("```delta_verdict/1") == 2  # the contract, restated once
+
+
+def test_the_full_codex_prompt_is_unchanged_by_the_shared_assembly(monkeypatch):
+    monkeypatch.setattr(GateRunner, "_fetch_gh_pr_diff", staticmethod(lambda n: "diff --git a/x.py b/x.py\n+++ b/x.py\n+print(1)\n"))
+    monkeypatch.setattr(gate_runner, "resolve_review_interpreter", lambda: "/usr/bin/python3")
+    full = GateRunner._build_codex_prompt({"branch": "feat/x", "risk_class": "medium", "pr_number": 7})
+    # sha256 of the prompt taken on 2234c44c, before the helper; a deliberate change of the reviewer policy refreshes it
+    assert hashlib.sha256(full.encode()).hexdigest() == "ea25dd179cfd6daa510eb0a72ce928f7497a62aa0d7e5970d526a4a150dd2893"
+
+
 @pytest.mark.parametrize("stdout,blocking", [
     (_answer("open"), "broken"), (_answer("regressed"), "broken"), (_answer("unverifiable"), "broken"),
     (_answer(new=[{"file_path": "x.py", "line": 3, "severity": "major", "message": "fresh"}]), "fresh"), (_msg("no fence here"), "broken"), (_msg("```delta_verdict/1\n{not json\n```\n"), "broken"),
@@ -153,6 +175,7 @@ def test_full_and_delta_shadow_decide_with_the_full_round_and_write_no_scope_fie
     _ledger(store, mode=mode)
     result, sent, shadows = _fire(store, monkeypatch, stdout=STREAM)
     assert sent == [FULL_PROMPT] and len(shadows) == shadow_runs and _line(store)[0].scope == ""
+    assert all(s["assemble"]("c", "k", "i") == gate_runner._assemble_reviewer_prompt("7", "c", "k", "i") for s in shadows)  # the shadow builds the prompt the deciding round does
     assert not ({"scope", "full_review_reason", "parent_head_sha"} & set(result))
 
 

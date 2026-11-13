@@ -19,7 +19,7 @@ import review_rounds
 import review_scope
 from codex_parser import extract_final_agent_message
 from gate_artifacts import _classify_findings
-from review_delta import PASS, DeltaInput, DeltaRefused, DeltaVerdict, build_delta_prompt, parse_delta_verdict
+from review_delta import PASS, Assemble, DeltaInput, DeltaRefused, DeltaVerdict, build_delta_prompt, parse_delta_verdict
 from review_findings import blocks, id_for_finding
 
 logger = logging.getLogger(__name__)
@@ -135,7 +135,7 @@ def _eligible_parent(request_payload: Mapping[str, Any], gates_dir: Path, head: 
     return ("max_chain_reached", None) if chain >= shadow.max_chain() else ("", prior[-1])
 
 
-def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path, prompt: str) -> RoundPlan:
+def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path, prompt: str, assemble: Assemble) -> RoundPlan:
     head = str(request_payload.get("commit_sha") or "")
     reason, parent = _eligible_parent(request_payload, gates_dir, head)
     if parent is None:
@@ -153,7 +153,7 @@ def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path,
     if any(not p.endswith(".py") for p in paths):  # symbols and callers are computed for Python only (OI-2784)
         return _full(prompt, "non_python_path")
     try:
-        delta_prompt = build_delta_prompt(record)
+        delta_prompt = build_delta_prompt(record, assemble)
     except DeltaRefused as refused:
         return _full(prompt, refused.full_review_reason)
     lines = _blocker_lines(worktree, head, parent.seat, index, blockers)
@@ -164,12 +164,13 @@ def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path,
     return RoundPlan(delta_prompt, fields, DeltaContext(record, blockers, parent, lines))
 
 
-def plan_round(*, gate: str, prompt: str, request_payload: Mapping[str, Any], state_dir: Path, worktree: Path) -> RoundPlan:
+def plan_round(*, gate: str, prompt: str, request_payload: Mapping[str, Any], state_dir: Path, worktree: Path,
+               assemble: Assemble) -> RoundPlan:
     """The round to run in ``worktree``; only the codex gate under ``delta`` may leave the full prompt."""
     if gate != review_rounds.CODEX_SEAT or review_scope.active_review_scope(state_dir).value != SCOPE_DELTA:
         return RoundPlan(prompt)
     try:
-        return _decide(request_payload, Path(state_dir) / "review_gates", Path(worktree), prompt)
+        return _decide(request_payload, Path(state_dir) / "review_gates", Path(worktree), prompt, assemble)
     except Exception as exc:  # fail-closed: a delta that cannot be proven is a full round that says so
         logger.warning("review_delta_decide: %s: %s", type(exc).__name__, exc)
         return _full(prompt, "delta_input_error")

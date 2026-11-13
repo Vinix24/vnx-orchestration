@@ -18,7 +18,7 @@ import review_rounds
 from codex_parser import extract_final_agent_message, extract_verdict_block
 from gate_worktree import create_gate_worktree, remove_gate_worktree
 from review_changekind import ChangeKindError, Interdiff, anchors_present, classify_change, interdiff, seat_input_set
-from review_delta import (Caller, DeltaInput, DeltaRefused, OpenFinding, _blocking_new, build_delta_prompt,
+from review_delta import (Assemble, Caller, DeltaInput, DeltaRefused, OpenFinding, _blocking_new, build_delta_prompt,
                           parse_delta_verdict)
 from review_findings import id_for_finding, symbolic_context
 
@@ -153,7 +153,7 @@ def assemble_delta_input(repo: Path, base_ref: str, pr_number: int, head: str,
     return record, blockers
 
 
-def run_shadow(*, request_payload: Mapping[str, Any], state_dir: Path, project_root: Path, run: Runner,
+def run_shadow(*, request_payload: Mapping[str, Any], state_dir: Path, project_root: Path, run: Runner, assemble: Assemble,
                seat: str = review_rounds.CODEX_SEAT) -> Optional[Dict[str, Any]]:
     """Run and book the shadow delta for the head just judged; the booked line, ``None`` when not eligible."""
     gates_dir = Path(state_dir) / "review_gates"
@@ -179,7 +179,7 @@ def run_shadow(*, request_payload: Mapping[str, Any], state_dir: Path, project_r
         record, blockers = assemble_delta_input(worktree, str(request_payload.get("base_ref") or "origin/main"),
                                                 pr_number, head, parent)
         try:
-            prompt = build_delta_prompt(record)
+            prompt = build_delta_prompt(record, assemble)
         except DeltaRefused as refused:
             line["full_review_reason"] = refused.full_review_reason
             book(path, line)
