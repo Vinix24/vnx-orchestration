@@ -295,3 +295,41 @@ def test_read_admission_config(monkeypatch, n_env, age_env, expected):
         else:
             monkeypatch.setenv(key, value)
     assert mw.read_admission_config(None, None) == expected
+
+
+def _clear_admission_env(monkeypatch):
+    for key in (mw.UNVERIFIED_MAX_KEY, mw.RUN_MAX_AGE_KEY):
+        monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv(f"VNX_OVERRIDE_{key}", raising=False)
+
+
+def test_a_corrupt_config_store_reads_as_unreadable_and_admits_nogo(tmp_path, monkeypatch):
+    _clear_admission_env(monkeypatch)
+    (tmp_path / "runtime_coordination.db").write_bytes(b"not a database" * 64)
+    max_n, age, invalid = mw.read_admission_config("vnx-test", tmp_path)
+    assert max_n is None
+    assert f"{mw.UNVERIFIED_MAX_KEY}: {mw.CONFIG_UNREADABLE}" in invalid
+    assert f"{mw.RUN_MAX_AGE_KEY}: {mw.CONFIG_UNREADABLE}" in invalid
+    admission = mw.admit(_window([BASE], [_run(BASE, 1)]), max_unverified=max_n,
+                         max_age_min=age, invalid_config=invalid)
+    assert (admission.verdict, admission.reason) == (mw.NO_GO, "config_unreadable")
+
+
+def test_a_project_without_a_store_is_mode_off(tmp_path, monkeypatch):
+    _clear_admission_env(monkeypatch)
+    assert mw.read_admission_config("vnx-test", tmp_path) == (None, 40, ())
+
+
+def test_a_set_key_in_a_real_store_is_read(tmp_path, monkeypatch):
+    import sqlite3
+    import config_store_db
+    _clear_admission_env(monkeypatch)
+    conn = sqlite3.connect(tmp_path / "runtime_coordination.db")
+    config_store_db.ensure_config_tables(conn)
+    conn.execute(
+        "INSERT INTO project_config (project_id, config_key, config_value, updated_by)"
+        " VALUES (?, ?, ?, ?)",
+        ("vnx-test", mw.UNVERIFIED_MAX_KEY, "2", "test"))
+    conn.commit()
+    conn.close()
+    assert mw.read_admission_config("vnx-test", tmp_path) == (2, 40, ())

@@ -549,7 +549,8 @@ def read_admission_config(
 
     resolver = None
     if project_id and state_dir is not None:
-        resolver = config_store_db.make_db_resolver(lambda _pid: state_dir)
+        resolver = config_store_db.make_db_resolver(
+            lambda _pid: state_dir, raise_on_error=True)
     invalid: List[str] = []
     raw_n, source_n = cr.resolve_with_source(
         UNVERIFIED_MAX_KEY, project_id, resolver, use_default_resolver=False, strict_resolver=True)

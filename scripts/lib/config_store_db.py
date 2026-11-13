@@ -74,11 +74,15 @@ def has_config_tables(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
-def read_config(conn: sqlite3.Connection, project_id: str, key: str) -> Optional[str]:
+def read_config(
+    conn: sqlite3.Connection, project_id: str, key: str, *, raise_on_error: bool = False,
+) -> Optional[str]:
     """Return the stored config_value for (project_id, key), or None when unset / table absent.
 
-    This is the DB layer (step 2) of config_registry's precedence chain. Fail-open: any sqlite
-    error (including a missing table) yields None so the runtime falls through to the env/default.
+    This is the DB layer (step 2) of config_registry's precedence chain. Default is fail-open:
+    any sqlite error (including a missing table) yields None so the runtime falls through to the
+    env/default. With ``raise_on_error=True`` a sqlite3.Error propagates (an unreadable store);
+    a missing project_config table and a missing row stay None, since that is "no value".
     """
     try:
         if not has_config_tables(conn):
@@ -88,6 +92,8 @@ def read_config(conn: sqlite3.Connection, project_id: str, key: str) -> Optional
             (project_id, key),
         ).fetchone()
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return None
     return row[0] if row else None
 
@@ -213,11 +219,17 @@ def set_config(
 
 def make_db_resolver(
     state_dir_for_project: Callable[[str], "Optional[Path | str]"],
+    *, raise_on_error: bool = False,
 ) -> config_registry.DbResolver:
     """Build a config_registry DB-resolver (step 2 of the precedence chain) backed by read_config.
 
     ``state_dir_for_project(project_id)`` returns the project's state dir (or None). The resolver
-    opens the per-project runtime_coordination.db READ-ONLY; any miss / error → None (fail-open)."""
+    opens the per-project runtime_coordination.db READ-ONLY; any miss / error → None (fail-open).
+
+    ``raise_on_error=True`` (opt-in) lets a database failure propagate: an error from
+    sqlite3.connect or from read_config. No project id, no state dir and a missing
+    runtime_coordination.db stay None in both modes: there is no store to read, so the key is
+    unset. The default stays fail-open for the existing callers."""
     def _resolver(project_id: Optional[str], key: str) -> Optional[str]:
         if not project_id:
             return None
@@ -230,9 +242,11 @@ def make_db_resolver(
         try:
             conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
         except sqlite3.Error:
+            if raise_on_error:
+                raise
             return None
         try:
-            return read_config(conn, project_id, key)
+            return read_config(conn, project_id, key, raise_on_error=raise_on_error)
         finally:
             conn.close()
     return _resolver
