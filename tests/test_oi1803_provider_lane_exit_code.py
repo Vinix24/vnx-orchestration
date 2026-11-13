@@ -153,3 +153,25 @@ def test_ff_intel_3b_fixture_fails():
 @pytest.mark.parametrize("text", ["", " \n ", None, "API Error: 418 teapot", "API Error: 500 boom"])
 def test_non_refusal_or_unknown_shapes_are_not_refusal_only(text):
     assert eap._blocking_refusal_class(text) is None
+
+
+PREFIXED = 'Failed to authenticate. API Error: 401 {"error":{"message":"invalid x-api-key"}}'
+
+
+def test_prefixed_auth_refusal_alone_fails():
+    assert eap._blocking_refusal_class(PREFIXED) == "auth_rejected"
+    out = _outcome(PREFIXED)
+    assert out.status == "failure" and out.returncode != 0
+
+
+@pytest.mark.parametrize("sep", ["\n", "", " "])
+def test_prefixed_auth_refusal_repeated_fails(sep):
+    text = sep.join([PREFIXED] * 3)
+    assert eap._blocking_refusal_class(text) == "auth_rejected"
+    out = _outcome(text)
+    assert out.status == "failure" and out.returncode != 0
+
+
+def test_auth_prefix_followed_by_prose_is_success():
+    out = _outcome("Failed to authenticate. I fixed the retry loop.")
+    assert out.status == "success" and out.returncode == 0

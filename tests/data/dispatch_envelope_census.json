@@ -2052,6 +2052,20 @@
       "symbol": "_blocking_refusal_class"
     },
     {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 162,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
+      "file": "tests/test_oi1803_provider_lane_exit_code.py",
+      "line": 170,
+      "mechanism": "direct-call",
+      "module_target": "envelope_adapters_provider",
+      "symbol": "_blocking_refusal_class"
+    },
+    {
       "file": "tests/test_oi1869_headless_stream_per_run.py",
       "line": 131,
       "mechanism": "direct-call",
@@ -2738,6 +2752,7 @@
     "envelope_adapters_provider::_map_generic_spawn_result",
     "envelope_adapters_provider::_map_harness_spawn_result",
     "envelope_adapters_provider::_plan_worker_env",
+    "envelope_adapters_provider::_split_api_errors",
     "envelope_govern::_adopt_stray_report",
     "envelope_govern::_book_ledger_run",
     "envelope_govern::_check_report_contract",

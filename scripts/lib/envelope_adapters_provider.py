@@ -39,8 +39,17 @@ from envelope_types import _AdapterResult
 # "API Error: <status> <body>" line (the 20-09 ff-intel-3b response is the fixture); the
 # streamed deltas are joined without a newline, so repeated refusals share one line.
 _API_ERROR_START = r"(?:Failed to authenticate\.\s*)?API Error: \d{3}\b"
-_API_ERROR_SPLIT = re.compile(rf"(?={_API_ERROR_START})")
+_API_ERROR_START_RE = re.compile(_API_ERROR_START)
 _API_ERROR_LINE = re.compile(rf"^{_API_ERROR_START}")
+
+
+def _split_api_errors(line: str) -> list:
+    """Cut a line at each full "[prefix] API Error: <status>" start, never between a prefix and
+    its "API Error" (finditer takes the prefix as part of the leftmost match)."""
+    cuts = [m.start() for m in _API_ERROR_START_RE.finditer(line)]
+    if not cuts or cuts[0] != 0:
+        cuts.insert(0, 0)
+    return [line[a:b] for a, b in zip(cuts, cuts[1:] + [len(line)])]
 
 
 def _blocking_refusal_class(completion_text: str) -> Optional[str]:
@@ -57,7 +66,7 @@ def _blocking_refusal_class(completion_text: str) -> Optional[str]:
     segments = [
         seg.strip()
         for line in (completion_text or "").splitlines()
-        for seg in _API_ERROR_SPLIT.split(line)
+        for seg in _split_api_errors(line)
         if seg.strip()
     ]
     if not segments:
