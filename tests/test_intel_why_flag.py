@@ -22,6 +22,7 @@ import config_runtime  # noqa: E402
 import gather_intelligence as gi  # noqa: E402
 
 KEY = "VNX_INJECTION_WHY_ENABLED"
+_REAL_AUTOWIRE = config_runtime.autowire  # the autouse fixture stubs the module attribute
 WINDOW_KEYS = ("VNX_INTEL_AB_TEST", "VNX_INTEL_PLACEBO_ARM", "VNX_INTEL_AB_WINDOW")
 
 
@@ -150,3 +151,50 @@ def test_window_keys_registered_and_off_or_empty(key):
     entry = cr.CONFIG_REGISTRY[key]
     assert entry.subsystem == "injection-effectiveness-eval-loop"
     assert entry.default in ("0", "")
+
+
+def _wired_store(monkeypatch, tmp_path, *, readable: bool, value: str = "1"):
+    """Wire the process the way config_runtime.autowire does, against a real store file."""
+    import sqlite3
+
+    import config_store_db
+
+    state = tmp_path / "state"
+    state.mkdir()
+    db = state / "runtime_coordination.db"
+    if readable:
+        conn = sqlite3.connect(db)
+        try:
+            config_store_db.ensure_config_tables(conn)
+            config_store_db.set_config(conn, "proj-a", KEY, value, actor="test",
+                                       approval_id="appr-why")
+            conn.commit()
+        finally:
+            conn.close()
+    else:
+        db.write_bytes(b"this is not a sqlite database " * 40)
+    config_runtime._wired_for.clear()
+    assert _REAL_AUTOWIRE(state, "proj-a") is True  # the reader's own autowire() stays stubbed
+    return state
+
+
+def test_unreadable_store_reaches_the_project_config_error_branch(monkeypatch, tmp_path, caplog):
+    _wired_store(monkeypatch, tmp_path, readable=False)
+    monkeypatch.setenv(KEY, "1")  # the environment must not rescue an unknown store
+    with caplog.at_level("WARNING"):
+        assert gi._injection_why_enabled() is False
+    assert any(KEY in r.getMessage() and "project_config resolver failed" in r.getMessage()
+               and "DatabaseError" in r.getMessage() for r in caplog.records)
+    config_runtime._wired_for.clear()
+
+
+def test_readable_store_with_the_key_on_still_enables(monkeypatch, tmp_path):
+    _wired_store(monkeypatch, tmp_path, readable=True)
+    assert gi._injection_why_enabled() is True
+    config_runtime._wired_for.clear()
+
+
+def test_autowire_resolver_stays_non_raising_for_other_callers(monkeypatch, tmp_path):
+    _wired_store(monkeypatch, tmp_path, readable=False)
+    assert cr.get(KEY) == "0"  # cr.get is fail-open: an unreadable store reads as the default
+    config_runtime._wired_for.clear()

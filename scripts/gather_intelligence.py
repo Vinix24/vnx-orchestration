@@ -81,7 +81,14 @@ def _injection_why_enabled() -> bool:
         import config_runtime
 
         config_runtime.autowire()
-        value, source = config_registry.resolve_with_source(key, strict_resolver=True)
+        # autowire's resolver never raises, so the strict mode below would be dead on an
+        # unreadable store: read this one key through a raising resolver for the same store.
+        strict = config_runtime.strict_resolver()
+        if strict is not None:
+            value, source = config_registry.resolve_with_source(
+                key, strict[1], strict[0], use_default_resolver=False, strict_resolver=True)
+        else:
+            value, source = config_registry.resolve_with_source(key, strict_resolver=True)
         if source == "project_config_error":
             return False  # the registry already logged the key and the exception
         return (value or "").strip().lower() in config_registry._TRUTHY

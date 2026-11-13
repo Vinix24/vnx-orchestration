@@ -151,3 +151,50 @@ def test_unreadable_store_is_named_and_falls_back(tmp_path):
     (bad_state / "runtime_coordination.db").write_text("not a database")
     result = _check(601, "proj-a", bad_state)
     assert result["status"] == "HOLD"
+
+
+def _broken_store(tmp_path: Path, kind: str) -> Path:
+    """A state dir whose ``runtime_coordination.db`` cannot be read for project_config."""
+    state = tmp_path / "state"
+    state.mkdir()
+    db = state / "runtime_coordination.db"
+    if kind == "garbage":
+        db.write_bytes(b"this is not a sqlite database " * 40)
+    else:
+        conn = sqlite3.connect(db)
+        try:  # project_config exists but has no config_value column: the query raises
+            conn.execute("CREATE TABLE project_config (project_id TEXT, config_key TEXT)")
+            conn.commit()
+        finally:
+            conn.close()
+    return state
+
+
+@pytest.mark.parametrize("kind", ["garbage", "wrong_schema"])
+def test_unreadable_store_is_named_and_gives_the_defaults(tmp_path, kind):
+    th = pre_merge_gate._pr_size_thresholds("proj-a", _broken_store(tmp_path, kind))
+    assert (th["warn"], th["hold"]) == (450, 600)
+    assert th["warn_source"] == "default" and th["hold_source"] == "default"
+    assert len(th["invalid"]) == 2
+    for key in (WARN, HOLD):
+        assert any("project_config_error" in i and key in i and "could not be read" in i
+                   for i in th["invalid"])
+    assert any("default 600" in i for i in th["invalid"])
+
+
+def test_unreadable_store_still_judges_by_the_defaults_and_says_so(tmp_path):
+    state = _broken_store(tmp_path, "garbage")
+    held = _check(601, state=state)
+    assert held["status"] == "HOLD" and "project_config_error" in held["detail"]
+    ok = _check(100, state=state)
+    assert ok["status"] == "GO" and "project_config_error" in ok["detail"]
+
+
+def test_missing_project_config_table_is_no_value_not_an_error(tmp_path):
+    # read_config's contract: a missing table is "no row", so no project_config_error.
+    state = tmp_path / "state"
+    state.mkdir()
+    sqlite3.connect(state / "runtime_coordination.db").close()
+    th = pre_merge_gate._pr_size_thresholds("proj-a", state)
+    assert (th["warn"], th["hold"], th["invalid"]) == (450, 600, [])
+    assert th["hold_source"] == "default"
