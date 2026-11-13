@@ -74,7 +74,7 @@ def test_mode_off_is_go_and_reads_no_window(door: FakeGitHub, monkeypatch: pytes
     assert reads == []
     assert receipt["main_admission"] == {
         "mode": "off", "verdict": "GO", "reason": "niet geconfigureerd", "max_unverified": None,
-        "overridden": False, "override_reason": None,
+        "overridden": False, "override_reason": None, "lock_wait_s": 0,
     }
     record = _main_record(receipt)
     assert (record["verdict"], record["mode"], record["overridden"]) == ("GO", "off", False)
@@ -230,3 +230,130 @@ def test_a_direct_merge_pr_records_main_admission_not_evaluated(door: FakeGitHub
     result = pr_merge.merge_pr(PR, dispatch_id="dlv-door-d4", head_sha=SHA, pr_data={"title": "t", "headRefName": "b"})
     assert result["success"] is True
     assert _merged(door)["main_admission"] == {"verdict": "not_evaluated"}
+
+
+# --- one lock per project, the window read again under it (part c) -----------------------
+
+
+import fcntl  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+_REAL_SLEEP = time.sleep  # the door fixture turns time.sleep into a no-op
+
+
+def _lock_path(door: FakeGitHub) -> Path:
+    return door.ledger.parent / pr_merge.MAIN_LOCK_FILE
+
+
+def _lock_is_free(door: FakeGitHub) -> bool:
+    with open(_lock_path(door), "a+") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
+
+
+def _receipt_counting_window(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    """N=1; a merge counts the moment its pr_merged receipt exists, the commit list never shows it."""
+    monkeypatch.setattr(pr_merge, "read_admission_config", lambda project_id, state_dir: (1, 40, ()))
+
+    def read(root: Any, **kwargs: Any) -> mw.MainWindow:
+        merged = door.receipts("pr_merged")
+        return _window(*(_entry(RUNNING_SHA, mw.RUN_RUNNING, 11) for _ in merged[:1]))
+
+    monkeypatch.setattr(pr_merge, "read_window", read)
+
+
+def test_two_parallel_doors_at_n1_give_one_merge_and_one_refusal(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    _receipt_counting_window(door, monkeypatch)
+    first_in_merge, second_started = threading.Event(), threading.Event()
+    merges: List[str] = []
+
+    def slow_merge() -> Tuple[bool, str]:
+        merges.append("merge")
+        first_in_merge.set()
+        second_started.wait(5)
+        _REAL_SLEEP(1.0)
+        return True, ""
+
+    door.merge = slow_merge
+    exits: Dict[str, int] = {}
+
+    def first() -> None:
+        exits["a"] = _run()
+
+    def second() -> None:
+        first_in_merge.wait(5)
+        second_started.set()
+        exits["b"] = _run()
+
+    threads = [threading.Thread(target=first), threading.Thread(target=second)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(30)
+    assert sorted(exits.values()) == [pr_merge.EXIT_OK, pr_merge.EXIT_ERROR]
+    assert len(merges) == 1 and len(door.receipts("pr_merged")) == 1
+    admission = _refusal(door)["main_admission"]
+    assert admission["verdict"] == "NO-GO"
+    assert admission["reason"].startswith("main_window_changed_under_lock:")
+    assert _lock_is_free(door)
+
+
+def test_a_holder_past_the_limit_refuses_as_main_lock_timeout(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch, _window())
+    monkeypatch.setattr(pr_merge, "MAIN_LOCK_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(pr_merge, "MAIN_LOCK_POLL_S", 0.02)
+    with open(_lock_path(door), "a+") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        holder.seek(0)
+        holder.truncate()
+        holder.write("pid=4242 pr=7 since=2026-11-13T00:00:00Z\n")
+        holder.flush()
+        assert _run() == pr_merge.EXIT_ERROR
+    admission = _refusal(door)["main_admission"]
+    assert admission["verdict"] == "NO-GO" and admission["reason"].startswith("main_lock_timeout")
+    assert "pid=4242" in admission["reason"]
+    assert _refusal(door)["refused_by"] == "main" and door.receipts("pr_merged") == []
+    assert door.of("POST") == [], "no permit without the lock"
+
+
+def test_mode_off_opens_no_lock_and_reads_the_admission_once(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch, _window(), config=(None, 40, ()))
+    calls: List[str] = []
+    real = pr_merge._read_main_admission
+    monkeypatch.setattr(pr_merge, "_read_main_admission", lambda: calls.append("read") or real())
+    assert _run() == pr_merge.EXIT_OK
+    assert calls == ["read"] and not _lock_path(door).exists()
+    assert _merged(door)["main_admission"]["lock_wait_s"] == 0
+
+
+def test_the_lock_is_released_after_a_merge_a_refusal_and_a_raising_merge(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch, _window())
+    assert _run() == pr_merge.EXIT_OK and _lock_is_free(door)
+    assert "lock_wait_s" in _merged(door)["main_admission"]
+
+    _configure(monkeypatch, _window(_entry(RUNNING_SHA, mw.RUN_RUNNING, 11)))
+    assert _run() == pr_merge.EXIT_ERROR and _lock_is_free(door)
+
+    _configure(monkeypatch, _window())
+
+    def boom() -> Tuple[bool, str]:
+        raise RuntimeError("merge exploded")
+
+    door.merge = boom
+    with pytest.raises(RuntimeError):
+        _run()
+    assert _lock_is_free(door)
+
+
+def test_override_main_applies_to_the_re_read_under_the_lock(door: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pr_merge, "read_admission_config", lambda project_id, state_dir: (1, 40, ()))
+    windows = iter([_window(), _window(_entry(RUNNING_SHA, mw.RUN_RUNNING, 11))])
+    monkeypatch.setattr(pr_merge, "read_window", lambda root, **kw: next(windows))
+    assert _run("--override-main", "operator accepts the second place") == pr_merge.EXIT_OK
+    admission = _merged(door)["main_admission"]
+    assert admission["overridden"] is True and admission["override_reason"] == "operator accepts the second place"
+    assert admission["reason"].startswith("unverified_limit")
