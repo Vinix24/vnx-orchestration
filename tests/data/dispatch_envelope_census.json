@@ -799,6 +799,13 @@
       "symbol": "_govern"
     },
     {
+      "file": "tests/test_dispatch_metadata_parent.py",
+      "line": 299,
+      "mechanism": "direct-call",
+      "module_target": "dispatch_envelope",
+      "symbol": "_stamp_headless_start"
+    },
+    {
       "file": "tests/test_envelope_claude_adapter_report_env.py",
       "line": 27,
       "mechanism": "direct-call",

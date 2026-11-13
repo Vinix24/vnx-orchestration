@@ -20,7 +20,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Optional, Set
+from typing import Any, Mapping, Optional, Set
 
 _LIB_DIR = Path(__file__).resolve().parent
 if str(_LIB_DIR) not in sys.path:
@@ -219,6 +219,15 @@ def _note_removed_lane_keys(raw: dict, spec_file: Path) -> None:
     )
 
 
+def _parse_difficulty(value: Any) -> "Optional[Mapping[str, Any]]":
+    """The spec's ``difficulty`` object as is (staging validated it); absent = None."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"difficulty must be an object, got {type(value).__name__}")
+    return value
+
+
 def load_spec(spec_file: Path) -> DispatchSpec:
     """Parse a DispatchSpec from a JSON dispatch-spec.json file."""
     raw = json.loads(spec_file.read_text(encoding="utf-8"))
@@ -255,6 +264,7 @@ def load_spec(spec_file: Path) -> DispatchSpec:
         parent_dispatch=(raw.get("parent_dispatch") or None),
         tier_from=(raw.get("tier_from") or None),
         tier_to=(raw.get("tier_to") or None),
+        difficulty=_parse_difficulty(raw.get("difficulty")),
         deadline_seconds=int(raw.get("deadline_seconds", 3600)),
         base_ref=str(raw.get("base_ref", "origin/main")),
         isolation=Isolation(raw.get("isolation", "worktree")),
@@ -3099,8 +3109,8 @@ def build_runtime_snapshot(
         valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
         task_class=chain_task_class,
-        tier_from=chain_tier_from,
-        tier_to=chain_tier_to,
+        tier_from=chain_tier_from, tier_to=chain_tier_to,
+        difficulty=spec.difficulty,
         worker_claude_override_reason=worker_claude_override_reason,
         # RS-2: the same root the role registry above came from, so a declared
         # skill is resolved against the checkout the dispatch will run in.

@@ -37,6 +37,7 @@ EventStore wiring and cost emission are open items for later PRs (PR-1 scope: fl
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -975,6 +976,7 @@ def _stamp_headless_start(plan: "ExecutionPlan", spec: "EnvelopeSpec", state_dir
         state_dir, dispatch_id=spec.dispatch_id, terminal=spec.terminal_id,
         provider=spec.provider, model=spec.model, role=spec.role, pr_id=spec.pr_id,
         parent_dispatch=plan.parent_dispatch,
+        difficulty_json=(json.dumps(plan.difficulty, sort_keys=True) if plan.difficulty else None),
     )
 
 
