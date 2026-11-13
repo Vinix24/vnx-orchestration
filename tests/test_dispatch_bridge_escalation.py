@@ -104,6 +104,51 @@ def test_escalation_auth_rejected_refuses_to_stage(tmp_path, monkeypatch):
         _stage_escalation(tmp_path, failure_class="auth_rejected")
 
 
+def test_escalation_paid_lane_budget_refusal_names_the_class_and_the_next_step(tmp_path, monkeypatch):
+    """OI-2783: the no_climb refusal must not carry the auth_rejected explanation."""
+    _force_kimi(monkeypatch, present=True)
+    with pytest.raises(ValueError) as excinfo:
+        _stage_escalation(tmp_path, failure_class="paid_lane_budget_exceeded")
+    message = str(excinfo.value)
+    assert "paid_lane_budget_exceeded" in message
+    assert "subscription lane" in message
+    assert "00:00Z" in message
+    assert "auth_rejected" not in message
+    assert "same auth problem" not in message
+
+
+def test_escalation_auth_rejected_keeps_its_explanation(tmp_path, monkeypatch):
+    _force_kimi(monkeypatch, present=True)
+    with pytest.raises(ValueError) as excinfo:
+        _stage_escalation(tmp_path, failure_class="auth_rejected")
+    assert (
+        "does not climb (auth_rejected — a higher tier has the same auth problem)"
+        in str(excinfo.value)
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_class",
+    ["tool_missing", "local_key_missing", "provider_switched_off"],
+)
+def test_escalation_other_no_climb_classes_do_not_claim_auth_rejected(
+    tmp_path, monkeypatch, failure_class,
+):
+    _force_kimi(monkeypatch, present=True)
+    with pytest.raises(ValueError) as excinfo:
+        _stage_escalation(tmp_path, failure_class=failure_class)
+    message = str(excinfo.value)
+    assert failure_class in message
+    assert "same auth problem" not in message
+
+
+def test_escalation_api_blocked_retries_the_same_tier(tmp_path, monkeypatch):
+    _force_kimi(monkeypatch, present=True)
+    payload = _read_payload(_stage_escalation(tmp_path, failure_class="api_blocked"))
+    assert payload["tier_from"] == "tier-low"
+    assert payload["tier_to"] == "tier-low"
+
+
 def test_escalation_unknown_class_refuses_to_stage(tmp_path, monkeypatch):
     """unknown must not climb, and the refusal names the unknown class loudly."""
     _force_kimi(monkeypatch, present=True)

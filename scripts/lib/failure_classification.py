@@ -48,6 +48,16 @@ provider_switched_off — the operator switched the provider family off
                     (a refusal detail can carry "auth" in the operator's
                     reason), and neither the lane cooldown nor the door's
                     known-rejected check counts it. Provider-schakelaar B.
+api_blocked      — an edge block in front of the provider API (Cloudflare
+                    "Attention Required!" page, answered as HTTP 403). Transient:
+                    the next fire of the same dispatch on the same model works.
+                    Matched before the auth keyword bag, so "authenticate" or
+                    "403" in the same text never makes it auth_rejected.
+                    OI-2796.
+paid_lane_budget_exceeded — a paid lane (deepseek/glm harness) was refused by the
+                    daily spend cap before any API call. Deterministic, with a
+                    known next step: another lane, or a refire after 00:00Z UTC.
+                    OI-2783.
 unknown          — everything else; should be rare after OI-866
 
 Vocabulary note (P3, dispatch 20260821-q3-failure-class-split): this module's
@@ -97,6 +107,8 @@ FAILURE_CLASSES = frozenset({
     "tool_missing",
     "local_key_missing",
     "provider_switched_off",
+    "api_blocked",
+    "paid_lane_budget_exceeded",
     "unknown",
 })
 
@@ -187,6 +199,18 @@ _TOOL_MISSING_MARKER = "cli not found"
 # BEFORE the auth keyword bag so "api_key"/"forbidden" in the same sentence
 # cannot steal the classification back to auth_rejected.
 _LOCAL_KEY_MISSING_MARKER = "local key missing"
+
+# OI-2796, measured 13-11 on dlv-b452a2bd798c and dlv-f121e49516df: the last line of
+# the run was "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare".
+# Both phrases must occur: "cloudflare" alone also names a real, persistent 403 from a
+# provider behind Cloudflare, and "attention required" alone is generic prose.
+_API_BLOCKED_MARKERS = ("attention required", "cloudflare")
+
+_API_BLOCKED_REASON = (
+    "transient block in front of the API (Cloudflare edge, not an auth fact): the work "
+    "is on branch dispatch/<dispatch_id> or in its worktree, refire as a round (-r2) "
+    "after a pause"
+)
 
 # Provider gateways (observed: glm-harness's litellm/OpenRouter proxy) can wrap
 # the real one-line reason inside a multi-KB nested JSON blob carrying dozens
@@ -285,6 +309,33 @@ def _classify_marker_failures(
     return None
 
 
+def _classify_refusal_failures(
+    signal_text: str, error: Optional[str]
+) -> Optional[Dict[str, Optional[str]]]:
+    """Classify a Cloudflare edge block and a paid-lane budget refusal (OI-2796, OI-2783).
+
+    Both are matched before the auth keyword bag: the edge-block text carries
+    "authenticate" and "403", which would otherwise make it auth_rejected, a class
+    that is treated as a persistent auth or quota fact. A budget refusal is only ever
+    the caller-supplied error, never a model's own completion text.
+    """
+    if all(marker in signal_text for marker in _API_BLOCKED_MARKERS):
+        return {"failure_class": "api_blocked", "failure_reason": _API_BLOCKED_REASON}
+    # Lazy: paid_lane_budget pulls the cost ledger, and this module stays stdlib-only at
+    # import time because stop_conditions and gate_recorder import it.
+    from paid_lane_budget import PAID_LANE_BUDGET_REFUSAL_PREFIX  # noqa: PLC0415
+
+    if error and error.lstrip().startswith(PAID_LANE_BUDGET_REFUSAL_PREFIX):
+        return {
+            "failure_class": "paid_lane_budget_exceeded",
+            "failure_reason": (
+                f"{_extract_detail(error)} — refused before any API call: restage on a "
+                "subscription lane, or refire after 00:00Z UTC when the daily budget resets"
+            ),
+        }
+    return None
+
+
 def classify_failure(
     *,
     status: str,
@@ -363,6 +414,11 @@ def classify_failure(
     marker_failure = _classify_marker_failures(signal_text, error, completion)
     if marker_failure is not None:
         return marker_failure
+
+    # ── edge block / paid-lane budget refusal (before the auth bag) ──────
+    refusal_failure = _classify_refusal_failures(signal_text, error)
+    if refusal_failure is not None:
+        return refusal_failure
 
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (

@@ -751,3 +751,28 @@ def test_door_route_canary_same_dispatch_same_group(monkeypatch):
     )
     assert first.decline_reason == second.decline_reason
     assert first.route == second.route
+
+
+# ---------------------------------------------------------------------------
+# OI-2796 / OI-2783: api_blocked retries the same tier, a spent budget never climbs
+# ---------------------------------------------------------------------------
+
+
+def test_api_blocked_retries_the_same_tier_and_notifies_the_operator():
+    from providers.smart_router.tier_routing import escalate_tier
+
+    esc = escalate_tier(TIER_LOW, "d-edge-block", failure_class="api_blocked")
+    assert esc.action == "retry_same_tier"
+    assert esc.tier_to == TIER_LOW
+    assert esc.notify_operator is True
+    assert esc.unknown_class is False
+
+
+def test_paid_lane_budget_exceeded_never_climbs_and_notifies_the_operator():
+    from providers.smart_router.tier_routing import escalate_tier
+
+    esc = escalate_tier(TIER_LOW, "d-budget", failure_class="paid_lane_budget_exceeded")
+    assert esc.action == "no_climb"
+    assert esc.tier_to is None
+    assert esc.notify_operator is True
+    assert esc.unknown_class is False

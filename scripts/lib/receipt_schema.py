@@ -162,7 +162,8 @@ class ReceiptV2:
     # OI-866 failure classification: stamped when status != "success" (omitted on
     # success so pre-feature receipts stay byte-identical).
     # failure_class is a closed-set category (auth_rejected, empty_completion,
-    # timeout, model_error, unknown). failure_reason is the human-readable detail.
+    # timeout, model_error, api_blocked, paid_lane_budget_exceeded, unknown).
+    # failure_reason is the human-readable detail.
     failure_reason: Optional[str] = None
     failure_class: Optional[str] = None
     # dispatch 20260816-p10b-provider-observability: delivery-state field.

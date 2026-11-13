@@ -260,3 +260,31 @@ class TestBudgetEnforcement:
         with caplog.at_level(logging.WARNING, logger="paid_lane_budget"):
             plb.enforce_daily_budget("glm-harness", tmp_path)  # must not raise
         assert any("OVERRIDDEN" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# OI-2783: the refusal prefix is one constant, shared with the classifier
+# ---------------------------------------------------------------------------
+
+class TestRefusalPrefix:
+    def test_the_exception_message_starts_with_the_shared_prefix(self):
+        message = str(plb.PaidLaneBudgetExceededError("deepseek-harness", 6.175145, 5.0))
+        assert message.startswith(plb.PAID_LANE_BUDGET_REFUSAL_PREFIX)
+        assert message.startswith(
+            "paid_lane_daily_budget_exceeded: provider=deepseek-harness "
+            "spent_today_usd=6.175145 daily_budget_usd=5.000000"
+        )
+
+    def test_the_classifier_follows_the_shared_constant(self, monkeypatch):
+        """No second copy of the literal: change the constant and the classifier follows."""
+        import failure_classification as fc
+
+        monkeypatch.setattr(plb, "PAID_LANE_BUDGET_REFUSAL_PREFIX", "budget_spent_elsewhere:")
+        refused = fc.classify_failure(
+            status="failure", error="budget_spent_elsewhere: provider=glm-harness",
+        )
+        assert refused["failure_class"] == "paid_lane_budget_exceeded"
+        old_literal = fc.classify_failure(
+            status="failure", error="paid_lane_daily_budget_exceeded: provider=glm-harness",
+        )
+        assert old_literal["failure_class"] != "paid_lane_budget_exceeded"

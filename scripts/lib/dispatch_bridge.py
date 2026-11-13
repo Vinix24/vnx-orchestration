@@ -549,6 +549,21 @@ def stage_spec_bundle(
     return spec_file
 
 
+# Why a known failure class does not climb, one explanation per class (OI-2783): the
+# refusal used to carry the auth_rejected sentence for every one of them.
+_NO_CLIMB_REASONS = {
+    "auth_rejected": "auth_rejected — a higher tier has the same auth problem",
+    "tool_missing": "tool_missing — the provider CLI is missing on this host, "
+    "another model on the same host does not fix that",
+    "local_key_missing": "local_key_missing — the own provider key is absent on this "
+    "host, a local config error another model does not fix",
+    "provider_switched_off": "provider_switched_off — the operator switched this "
+    "provider family off, a climb would route around that decision",
+    "paid_lane_budget_exceeded": "paid_lane_budget_exceeded — the daily budget of the "
+    "paid lane is spent: restage on a subscription lane, or refire after 00:00Z UTC",
+}
+
+
 def stage_escalation_bundle(
     *,
     rejected_dispatch_id: str,
@@ -615,7 +630,7 @@ def stage_escalation_bundle(
             )
         raise ValueError(
             f"refusing to stage escalation: failure_class={failure_class!r} does "
-            "not climb (auth_rejected — a higher tier has the same auth problem)"
+            f"not climb ({_NO_CLIMB_REASONS.get(failure_class, failure_class)})"
         )
     if escalation.tier_to is None:
         raise ValueError(
