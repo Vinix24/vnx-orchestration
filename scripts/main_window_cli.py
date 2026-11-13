@@ -5,7 +5,8 @@
 
 Reads the window (the merges since the last green heavy VNX CI run) and the
 admission with the two registry keys VNX_MAIN_UNVERIFIED_MAX and
-VNX_MAIN_RUN_MAX_AGE_MIN. Writes nothing.
+VNX_MAIN_RUN_MAX_AGE_MIN. Writes nothing. The probe reads the central store, the same one the
+merge door reads, so it answers what the door will decide.
 
 Exit codes: 0 GO (also mode off), 1 NO-GO, 2 the probe could not run.
 """
@@ -25,7 +26,7 @@ for _path in (SCRIPT_DIR, SCRIPT_DIR / "lib"):
         sys.path.insert(0, str(_path))
 
 import main_window as mw  # noqa: E402
-from project_root import resolve_project_id, resolve_project_root, resolve_state_dir  # noqa: E402
+from project_root import resolve_project_id, resolve_project_root  # noqa: E402
 
 EXIT_GO = 0
 EXIT_NO_GO = 1
@@ -53,8 +54,11 @@ def run_status(
     out: Callable[[str], Any] = print,
 ) -> int:
     root = project_root or resolve_project_root(__file__)
-    state = state_dir or resolve_state_dir(__file__)
-    pid = project_id or resolve_project_id(root)
+    if state_dir is None:
+        state, store_pid = mw.active_store()
+    else:
+        state, store_pid = state_dir, None
+    pid = project_id or store_pid or (resolve_project_id(root) if state_dir is not None else None)
     max_n, max_age, invalid = mw.read_admission_config(pid, state)
     window = mw.read_window(root, state_dir=state, runner=runner, now=now, max_age_min=max_age)
     admission = mw.admit(window, max_unverified=max_n, max_age_min=max_age, invalid_config=invalid)
