@@ -193,6 +193,13 @@ class TestJumpAPI(unittest.TestCase):
         import serve_dashboard
         return serve_dashboard
 
+    def _import_api_operator(self):
+        """Import api_operator (where _jump_terminal runs) with path setup."""
+        if str(DASHBOARD_DIR) not in sys.path:
+            sys.path.insert(0, str(DASHBOARD_DIR))
+        import api_operator
+        return api_operator
+
     def test_jump_valid_terminal_set(self):
         """VALID_TERMINALS contains T0-T3."""
         mod = self._import_serve_dashboard()
@@ -212,7 +219,7 @@ class TestJumpAPI(unittest.TestCase):
 
     def test_jump_terminal_function_calls_tmux(self):
         """_jump_terminal calls tmux has-session, select-window, select-pane."""
-        import api_operator as mod  # _jump_terminal runs in api_operator
+        mod = self._import_api_operator()  # _jump_terminal runs in api_operator
 
         # Mock subprocess.run: first call = has-session (success), rest = select-window/pane (success)
         mock_result = MagicMock()
@@ -232,13 +239,14 @@ class TestJumpAPI(unittest.TestCase):
 
     def test_jump_terminal_no_tmux_session(self):
         """_jump_terminal raises RuntimeError when tmux session doesn't exist."""
-        mod = self._import_serve_dashboard()
+        mod = self._import_api_operator()
 
         mock_result = MagicMock()
         mock_result.returncode = 1
 
-        with patch("serve_dashboard.subprocess") as mock_sub:
+        with patch("api_operator.subprocess") as mock_sub:
             mock_sub.run.return_value = mock_result
+            mock_sub.CalledProcessError = subprocess.CalledProcessError
             with self.assertRaises(RuntimeError) as ctx:
                 mod._jump_terminal("T1")
         self.assertIn("not found", str(ctx.exception))
