@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime, timezone
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +31,18 @@ def _receipt(sha, pr, dispatch):
     return {"event_type": "pr_merged", "merge_sha": sha, "pr_number": pr, "dispatch_id": dispatch}
 
 
+NOW = datetime(2026, 11, 13, 8, 10, tzinfo=timezone.utc)
+FRESH = "2026-11-13T08:05:00Z"  # younger than the 40 minute age limit at NOW
+
+
+def _heavy(_sha):
+    return mw.PROFILE_HEAVY
+
+
+def _cw(commits, runs, merges, *, profile_of=_heavy, now=NOW, **kwargs):
+    return mw.compute_window(commits, runs, merges, profile_of=profile_of, now=now, **kwargs)
+
+
 COMMITS = [M3, M2, M1, BASE]  # newest first
 RECEIPTS = [_receipt(M1, 101, "d-one"), _receipt(M2, 102, "d-two"), _receipt(M3, 103, "d-three")]
 
@@ -48,7 +61,7 @@ def test_break_in_the_middle_of_three_merges_is_red_with_its_own_pr():
         _run(M2, run_id=12, conclusion="failure"),
         _run(M3, run_id=13, status="in_progress", conclusion=None),
     ]
-    window = mw.compute_window(COMMITS, runs, RECEIPTS)
+    window = _cw(COMMITS, runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_RED
     assert [e.sha for e in window.entries] == [M1, M2, M3]  # oldest first
     assert window.first_red.sha == M2
@@ -60,13 +73,13 @@ def test_first_red_is_the_oldest_red_entry():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12, conclusion="failure"),
             _run(M3, run_id=13, status="queued", conclusion=None)]
-    assert mw.compute_window(COMMITS, runs, RECEIPTS).first_red.sha == M1
+    assert _cw(COMMITS, runs, RECEIPTS).first_red.sha == M1
 
 
 def test_red_followed_by_newer_green_is_outside_the_window():
     runs = [_run(BASE, run_id=10, conclusion="failure"), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12)]
-    window = mw.compute_window([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == ()
     assert window.base_sha == M2
@@ -74,34 +87,34 @@ def test_red_followed_by_newer_green_is_outside_the_window():
 
 def test_all_green_newest_commit_is_the_base_and_the_window_is_empty():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11), _run(M2, run_id=12)]
-    window = mw.compute_window([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == () and window.base_sha == M2
 
 
 def test_newest_merge_in_progress_on_green_base_is_running():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, status="in_progress", conclusion=None)]
-    window = mw.compute_window([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].state == mw.RUN_RUNNING
 
 
-def test_merge_commit_without_any_run_is_running():
-    window = mw.compute_window([M1, BASE], [_run(BASE, run_id=10)], RECEIPTS)
+def test_merge_commit_without_any_run_is_running_while_young():
+    window = _cw([M1, BASE], [_run(BASE, run_id=10)], RECEIPTS, commit_times={M1: FRESH})
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].run_id is None
 
 
 def test_red_wins_over_a_running_entry():
-    runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="cancelled"),
+    runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12, status="queued", conclusion=None)]
-    assert mw.compute_window([M2, M1, BASE], runs, RECEIPTS).verdict == mw.VERDICT_RED
+    assert _cw([M2, M1, BASE], runs, RECEIPTS).verdict == mw.VERDICT_RED
 
 
 def test_each_merge_maps_to_its_own_receipt():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, status="queued", conclusion=None),
             _run(M2, run_id=12, status="queued", conclusion=None), _run(M3, run_id=13, status="queued", conclusion=None)]
-    entries = _by_sha(mw.compute_window(COMMITS, runs, RECEIPTS))
+    entries = _by_sha(_cw(COMMITS, runs, RECEIPTS))
     assert [(entries[s].pr_number, entries[s].dispatch_id) for s in (M1, M2, M3)] == [
         (101, "d-one"), (102, "d-two"), (103, "d-three")]
     assert {e.mapping for e in entries.values()} == {mw.MAPPING_RECEIPT}
@@ -111,7 +124,7 @@ def test_merge_without_receipt_does_not_borrow_from_a_neighbour():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, status="queued", conclusion=None),
             _run(M2, run_id=12, status="queued", conclusion=None), _run(M3, run_id=13, status="queued", conclusion=None)]
     receipts = [_receipt(M1, 101, "d-one"), _receipt(M3, 103, "d-three")]
-    entries = _by_sha(mw.compute_window(COMMITS, runs, receipts))
+    entries = _by_sha(_cw(COMMITS, runs, receipts))
     assert entries[M2].pr_number is None
     assert entries[M2].dispatch_id is None
     assert entries[M2].mapping == mw.MAPPING_NO_RECEIPT
@@ -120,7 +133,7 @@ def test_merge_without_receipt_does_not_borrow_from_a_neighbour():
 
 def test_no_green_run_among_the_commits_is_history_incomplete():
     runs = [_run(M1, run_id=11, conclusion="failure"), _run(M2, run_id=12, status="in_progress", conclusion=None)]
-    window = mw.compute_window([M2, M1], runs, RECEIPTS)
+    window = _cw([M2, M1], runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_UNMEASURABLE
     assert window.reason == "history_incomplete"
 
@@ -129,7 +142,7 @@ def test_two_runs_for_one_sha_the_newest_counts():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="failure", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="success", created="2026-11-13T09:00:00Z")]
-    window = mw.compute_window([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, RECEIPTS)
     assert window.base_sha == M1
     assert window.verdict == mw.VERDICT_GREEN
 
@@ -138,7 +151,7 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="success", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="failure", created="2026-11-13T09:00:00Z")]
-    window = mw.compute_window([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, RECEIPTS)
     assert window.verdict == mw.VERDICT_RED
     assert window.first_red.run_id == 14
 
@@ -149,10 +162,11 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     {"databaseId": 5, "headSha": M1, "status": None, "conclusion": "success"},
     {"databaseId": 5, "headSha": M1},
 ])
-def test_unusable_run_in_the_window_is_unmeasurable_never_green(run):
-    window = mw.compute_window([M1, BASE], [_run(BASE, run_id=10), run], RECEIPTS)
-    assert window.verdict == mw.VERDICT_UNMEASURABLE
-    assert window.reason == "unusable_run"
+def test_unusable_run_in_the_window_is_a_named_nogo_never_green(run):
+    window = _cw([M1, BASE], [_run(BASE, run_id=10), run], RECEIPTS)
+    assert window.verdict == mw.VERDICT_NOGO
+    assert window.entries[0].state == mw.RUN_NOGO
+    assert window.entries[0].reason in {"no_conclusion", "unknown_status"}
 
 
 @pytest.mark.parametrize("run", [
@@ -161,7 +175,7 @@ def test_unusable_run_in_the_window_is_unmeasurable_never_green(run):
     {"databaseId": 5, "headSha": BASE, "status": "in_progress", "conclusion": "success"},
 ])
 def test_unusable_or_unfinished_run_is_never_a_base(run):
-    window = mw.compute_window([BASE], [run], RECEIPTS)
+    window = _cw([BASE], [run], RECEIPTS)
     assert window.verdict == mw.VERDICT_UNMEASURABLE
     assert window.reason == "history_incomplete"
 
@@ -177,16 +191,16 @@ def test_unusable_or_unfinished_run_is_never_a_base(run):
     ([M1], [], ["x"]),
 ])
 def test_unusable_input_is_unmeasurable(commits, runs, merges):
-    window = mw.compute_window(commits, runs, merges)
+    window = _cw(commits, runs, merges)
     assert window.verdict == mw.VERDICT_UNMEASURABLE
     assert window.reason == "invalid_input"
 
 
 def test_to_dict_is_deterministic_and_sorted():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure")]
-    window = mw.compute_window([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, RECEIPTS)
     first = json.dumps(window.to_dict(), sort_keys=False)
-    assert first == json.dumps(mw.compute_window([M1, BASE], runs, RECEIPTS).to_dict(), sort_keys=False)
+    assert first == json.dumps(_cw([M1, BASE], runs, RECEIPTS).to_dict(), sort_keys=False)
     assert list(window.to_dict()) == sorted(window.to_dict())
     assert window.to_dict()["first_red"]["sha"] == M1
     assert "vermoedelijk" in window.to_dict()["first_red_note"]
@@ -203,7 +217,9 @@ class FakeRunner:
     """Answers the commits call and the runs call; records every argv."""
 
     def __init__(self, commits=None, runs=None):
-        self.commits = commits if commits is not None else _proc("\n".join(COMMITS) + "\n")
+        self.commits = commits if commits is not None else _proc(
+            "".join(f"{sha}\t{FRESH}\n" for sha in COMMITS))
+        self.files = _proc("scripts/x.py\n")
         self.runs = runs if runs is not None else _proc(json.dumps([
             _run(BASE, run_id=10), _run(M1, run_id=11, status="queued", conclusion=None),
             _run(M2, run_id=12, conclusion="failure"),
@@ -212,6 +228,8 @@ class FakeRunner:
 
     def __call__(self, argv, *, timeout, cwd=None):
         self.calls.append((list(argv), timeout, cwd))
+        if argv[1] == "api" and "/commits/" in argv[2]:
+            return self.files
         reply = self.commits if argv[1] == "api" else self.runs
         if isinstance(reply, BaseException):
             raise reply
@@ -228,13 +246,14 @@ def test_adapter_reads_commits_runs_and_receipts(tmp_path):
     _write_receipts(tmp_path / "state", RECEIPTS + [{"event_type": "task_complete", "merge_sha": M3}],
                     junk=["not json"])
     runner = FakeRunner()
-    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=runner, limit=30)
+    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=runner, limit=30, now=NOW)
     assert window.verdict == mw.VERDICT_RED
     assert (window.first_red.pr_number, window.first_red.dispatch_id) == (102, "d-two")
     commits_argv, commits_timeout, commits_cwd = runner.calls[0]
     assert commits_argv[:3] == ["gh", "api", "repos/{owner}/{repo}/commits?sha=main&per_page=30"]
+    assert commits_argv[-1] == ".[] | [.sha, .commit.committer.date] | @tsv"
     assert commits_cwd == str(tmp_path) and commits_timeout == 15
-    runs_argv = runner.calls[1][0]
+    runs_argv = next(c[0] for c in runner.calls if c[0][1] == "run")
     assert runs_argv[runs_argv.index("--workflow") + 1] == "VNX CI"
     assert runs_argv[runs_argv.index("--event") + 1] == "push"
     assert runs_argv[runs_argv.index("--branch") + 1] == "main"
@@ -244,14 +263,14 @@ def test_adapter_reads_commits_runs_and_receipts(tmp_path):
 def test_adapter_workflow_name_follows_the_environment(tmp_path, monkeypatch):
     monkeypatch.setenv(mw.CI_WORKFLOW_NAME_ENV_VAR, "Other CI")
     runner = FakeRunner()
-    mw.read_window(tmp_path, runner=runner)
-    runs_argv = runner.calls[1][0]
+    mw.read_window(tmp_path, runner=runner, now=NOW)
+    runs_argv = next(c[0] for c in runner.calls if c[0][1] == "run")
     assert runs_argv[runs_argv.index("--workflow") + 1] == "Other CI"
 
 
 def test_missing_or_unreadable_receipt_file_gives_no_receipt_not_unmeasurable(tmp_path):
     for state_dir in (None, tmp_path / "absent"):
-        window = mw.read_window(tmp_path, state_dir=state_dir, runner=FakeRunner())
+        window = mw.read_window(tmp_path, state_dir=state_dir, runner=FakeRunner(), now=NOW)
         assert window.verdict == mw.VERDICT_RED
         assert window.first_red.mapping == mw.MAPPING_NO_RECEIPT
         assert window.first_red.pr_number is None
@@ -260,7 +279,7 @@ def test_missing_or_unreadable_receipt_file_gives_no_receipt_not_unmeasurable(tm
 def test_only_the_last_5000_receipt_lines_are_read(tmp_path):
     filler = [{"event_type": "task_complete"}] * mw.RECEIPT_TAIL_LINES
     _write_receipts(tmp_path / "state", [_receipt(M2, 102, "d-two")] + filler)
-    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=FakeRunner())
+    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=FakeRunner(), now=NOW)
     assert window.first_red.mapping == mw.MAPPING_NO_RECEIPT
 
 
@@ -274,7 +293,7 @@ _FAILURES = {
 @pytest.mark.parametrize("name", sorted(_FAILURES))
 def test_commits_call_failure_is_unmeasurable_with_reason(tmp_path, name):
     reply, reason = _FAILURES[name]
-    window = mw.read_window(tmp_path, runner=FakeRunner(commits=reply))
+    window = mw.read_window(tmp_path, runner=FakeRunner(commits=reply), now=NOW)
     assert window.verdict == mw.VERDICT_UNMEASURABLE
     assert window.reason == f"commits_{reason}"
 
@@ -282,22 +301,22 @@ def test_commits_call_failure_is_unmeasurable_with_reason(tmp_path, name):
 @pytest.mark.parametrize("name", sorted(_FAILURES))
 def test_runs_call_failure_is_unmeasurable_with_reason(tmp_path, name):
     reply, reason = _FAILURES[name]
-    window = mw.read_window(tmp_path, runner=FakeRunner(runs=reply))
+    window = mw.read_window(tmp_path, runner=FakeRunner(runs=reply), now=NOW)
     assert window.verdict == mw.VERDICT_UNMEASURABLE
     assert window.reason == f"runs_{reason}"
 
 
 def test_bad_json_on_the_runs_call_is_unmeasurable(tmp_path):
     for body in ("not json", "{}", "null"):
-        window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc(body)))
+        window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc(body)), now=NOW)
         assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "runs_bad_json")
 
 
 def test_empty_commits_output_is_unmeasurable(tmp_path):
-    window = mw.read_window(tmp_path, runner=FakeRunner(commits=_proc("\n")))
+    window = mw.read_window(tmp_path, runner=FakeRunner(commits=_proc("\n")), now=NOW)
     assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "commits_empty")
 
 
 def test_empty_run_list_is_history_incomplete_never_green(tmp_path):
-    window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc("[]")))
+    window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc("[]")), now=NOW)
     assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "history_incomplete")
