@@ -202,6 +202,10 @@ cap, the takeover chain and the plan-gate seats.
   not-yet-started obligation is **not** retired by a lighter profile (no code path ties `retired` to
   the profile), and an explicitly named stack is not re-judged against a profile that became stricter.
 
+### 2.5 The review scope (`VNX_REVIEW_SCOPE`)
+
+A profile key with three values (ADR-064 "De schakelaar", ADR-060 amendment): `full` (default: every round is a full review), `delta_shadow` (the full round decides, the shadow delta runs next to it and books in `review_gates/shadow/delta.ndjson`) and `delta` (the deciding delta; until deltareview DR-6 part 2 it behaves like `delta_shadow`). `review_scope.active_review_scope` reads it and answers `full` for an unset, empty, unknown or unreadable value and for a `delta` row without an approval id. The operator sets it as a `project_config` row through `config_store_db.set_config` with an approval id; writing `delta` is refused unless the DR-5 measurement over all shadow lines passes with a planted manifest, DR-7 is merged with its reconstruction test on `main`, and the latest `VNX CI` run on `main` concluded `success`; a check that cannot be made refuses. Rollback is the key on `full` or the row removed: the next request is a full review, no record is rewritten.
+
 ## 3. PR size + iteration caps
 
 - Target **300–450 changed lines** (tests included); **hard cap 450**, and **300 or less** on security, permission and auth paths (operator decision 2026-11-09, measured on 67 merges of 2026-11-08: 150–300 lines 0.8 h and 1.23 review rounds, 300–450 lines 0.6 h and 1.33 rounds, above 450 lines 1.5 h and 2.89 rounds). Serially dependent changes on the same files are bundled into one PR; independent PRs stay separate. In code, `check_pr_size` warns above 450 (GO, "large but not blocking") and holds above 600; above 450 split via track_dependencies. Exceptions (no cap): auto-generated migration SQL, single-bug-class test surface, mechanical renames. Put the LOC budget in the dispatch instruction.

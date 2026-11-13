@@ -41,6 +41,7 @@ import provider_switch
 import vertex_ai_runner as _vtx
 import gate_dispatch_table
 import review_delta_shadow
+import review_scope
 from gate_worktree import (
     create_gate_worktree,
     remove_gate_worktree,
@@ -1101,7 +1102,7 @@ class GateRunner:
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,
         )
-        if gate == "codex_gate":  # DR-4b: shadow delta next to the full round; never changes ``record`` (fail-open)
+        if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
             review_delta_shadow.run_shadow(
                 request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
                 run=lambda delta_prompt, cwd: self._run_with_stall_detection(

@@ -232,6 +232,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "row with an approval id since 2026-11-09; every other project has no row and "
         "keeps the risk rule.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # Deltareview DR-6 (ADR-064 "De schakelaar", ADR-060 amendment). Read by review_scope.active_review_scope.
+    "VNX_REVIEW_SCOPE": _e(
+        "VNX_REVIEW_SCOPE", "string", "", "gate",
+        "Review scope. full (default): every round is a full review. delta_shadow: the shadow delta runs next to "
+        "the full round. delta: the delta decides; writing it is refused without a passed DR-5 measurement, a merged "
+        "DR-7 and a green main CI. Unset, unknown or unreadable reads as full.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # The PR-size thresholds of scripts/pre_merge_gate.check_pr_size, per project (operator
     # decision 2026-11-09: the limit is configurable, not a hard 450). Same resolution path as
     # VNX_REVIEW_SEAT_RULE. The defaults here are the only copy of 450 and 600; a value that is
