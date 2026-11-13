@@ -814,14 +814,14 @@
     },
     {
       "file": "tests/test_envelope_claude_adapter_setting_sources.py",
-      "line": 19,
+      "line": 21,
       "mechanism": "direct-call",
       "module_target": "envelope_adapters_claude",
       "symbol": "ClaudeSubprocessAdapter"
     },
     {
       "file": "tests/test_envelope_claude_adapter_setting_sources.py",
-      "line": 20,
+      "line": 22,
       "mechanism": "direct-call",
       "module_target": "envelope_types",
       "symbol": "EnvelopeSpec"
@@ -2648,6 +2648,7 @@
     "envelope_adapters_claude::_carried_user_settings",
     "envelope_adapters_claude::_codex_skill_inputs",
     "envelope_adapters_claude::_materialize_shadow_skills",
+    "envelope_adapters_claude::_memory_excludes",
     "envelope_adapters_claude::_setting_sources",
     "envelope_adapters_claude::_switch_stamps",
     "envelope_adapters_claude::_worker_extra_env",
