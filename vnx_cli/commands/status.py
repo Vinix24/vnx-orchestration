@@ -182,6 +182,22 @@ def _render_tracks_table(state_dir: Path, project_id: str) -> str:
         conn.close()
 
 
+def _held_worktrees_line(project_dir: Path) -> str:
+    """OI-2811: one line counting dispatch worktrees whose HEAD no remote branch
+    contains (teardown keeps them), with the newest dispatch id."""
+    _engine.ensure_engine_on_path()
+    from pr_enforcement import unpublished_head_commit
+    root = project_dir / ".vnx-data" / "worktrees"
+    held = []
+    for wt in (root.glob("dispatch-*") if root.is_dir() else []):
+        if wt.is_dir() and unpublished_head_commit(wt):
+            held.append(wt)
+    if not held:
+        return "held worktrees: 0"
+    newest = max(held, key=lambda w: w.stat().st_mtime)
+    return f"held worktrees: {len(held)} (newest {newest.name[len('dispatch-'):]})"
+
+
 def vnx_status(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
     emit_json = getattr(args, "json", False)
@@ -311,6 +327,10 @@ def vnx_status(args) -> int:
                 print(f"    - {name}")
         else:
             print("  Recent completions: none")
+        try:
+            print(f"  {_held_worktrees_line(project_dir)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  held worktrees: unavailable ({exc})")
 
         if show_tracks:
             print()

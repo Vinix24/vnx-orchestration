@@ -1,0 +1,1 @@
+- A dispatch worktree whose HEAD no remote branch contains is kept whoever made the commit, and `vnx status` shows the held-worktree count (OI-2811).

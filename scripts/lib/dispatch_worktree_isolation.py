@@ -995,19 +995,19 @@ def create_dispatch_worktree(
     return wt_path.resolve()
 
 
-def _keep_unpublished_salvage(wt_path: Path, classification: str) -> str:
-    """OI-2744: an auto-salvage commit that no remote branch contains exists
-    only in this worktree's branch, so a "committed" worktree holding one is
-    kept (reap "dirty" locks it) instead of removed."""
+def _keep_unpublished_head(wt_path: Path, classification: str) -> str:
+    """OI-2811: a "committed" worktree whose HEAD no remote branch contains,
+    whoever made the commit, holds the only copy of that work, so it is kept
+    (reap "dirty" locks it) instead of removed."""
     if classification != "committed":
         return classification
-    from pr_enforcement import unpublished_salvage_commit  # noqa: PLC0415
-    sha = unpublished_salvage_commit(wt_path)
+    from pr_enforcement import head_commit_subject, unpublished_head_commit  # noqa: PLC0415
+    sha = unpublished_head_commit(wt_path)
     if not sha:
         return classification
     log.warning(
-        "remove_dispatch_worktree: keeping %s — salvage commit %s is not on origin (OI-2744)",
-        wt_path, sha[:12],
+        "remove_dispatch_worktree: keeping %s — HEAD commit %s (%r) is not on origin (OI-2811)",
+        wt_path, sha[:12], head_commit_subject(wt_path),
     )
     return "dirty"
 
@@ -1216,7 +1216,7 @@ def remove_dispatch_worktree(
         dispatch_id=safe_id,
     )
 
-    classification = _keep_unpublished_salvage(wt_path, classify(handle))
+    classification = _keep_unpublished_head(wt_path, classify(handle))
     log.info(
         "remove_dispatch_worktree: classified %s as %s (branch=%s base_sha=%s)",
         dispatch_id, classification, _claim_branch,
