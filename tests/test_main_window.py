@@ -47,6 +47,11 @@ COMMITS = [M3, M2, M1, BASE]  # newest first
 RECEIPTS = [_receipt(M1, 101, "d-one"), _receipt(M2, 102, "d-two"), _receipt(M3, 103, "d-three")]
 
 
+def _receipts_for(commits):
+    """The shared receipts whose merge commit is in this test's own commit list."""
+    return [r for r in RECEIPTS if r["merge_sha"] in commits]
+
+
 def _by_sha(window):
     return {e.sha: e for e in window.entries}
 
@@ -79,7 +84,7 @@ def test_first_red_is_the_oldest_red_entry():
 def test_red_followed_by_newer_green_is_outside_the_window():
     runs = [_run(BASE, run_id=10, conclusion="failure"), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12)]
-    window = _cw([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE]))
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == ()
     assert window.base_sha == M2
@@ -87,20 +92,20 @@ def test_red_followed_by_newer_green_is_outside_the_window():
 
 def test_all_green_newest_commit_is_the_base_and_the_window_is_empty():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11), _run(M2, run_id=12)]
-    window = _cw([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE]))
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == () and window.base_sha == M2
 
 
 def test_newest_merge_in_progress_on_green_base_is_running():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, status="in_progress", conclusion=None)]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].state == mw.RUN_RUNNING
 
 
 def test_merge_commit_without_any_run_is_running_while_young():
-    window = _cw([M1, BASE], [_run(BASE, run_id=10)], RECEIPTS, commit_times={M1: FRESH})
+    window = _cw([M1, BASE], [_run(BASE, run_id=10)], _receipts_for([M1, BASE]), commit_times={M1: FRESH})
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].run_id is None
 
@@ -108,7 +113,7 @@ def test_merge_commit_without_any_run_is_running_while_young():
 def test_red_wins_over_a_running_entry():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12, status="queued", conclusion=None)]
-    assert _cw([M2, M1, BASE], runs, RECEIPTS).verdict == mw.VERDICT_RED
+    assert _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE])).verdict == mw.VERDICT_RED
 
 
 def test_each_merge_maps_to_its_own_receipt():
@@ -142,7 +147,7 @@ def test_two_runs_for_one_sha_the_newest_counts():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="failure", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="success", created="2026-11-13T09:00:00Z")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.base_sha == M1
     assert window.verdict == mw.VERDICT_GREEN
 
@@ -151,7 +156,7 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="success", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="failure", created="2026-11-13T09:00:00Z")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_RED
     assert window.first_red.run_id == 14
 
@@ -163,7 +168,7 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     {"databaseId": 5, "headSha": M1},
 ])
 def test_unusable_run_in_the_window_is_a_named_nogo_never_green(run):
-    window = _cw([M1, BASE], [_run(BASE, run_id=10), run], RECEIPTS)
+    window = _cw([M1, BASE], [_run(BASE, run_id=10), run], _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_NOGO
     assert window.entries[0].state == mw.RUN_NOGO
     assert window.entries[0].reason in {"no_conclusion", "unknown_status"}
@@ -198,9 +203,9 @@ def test_unusable_input_is_unmeasurable(commits, runs, merges):
 
 def test_to_dict_is_deterministic_and_sorted():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     first = json.dumps(window.to_dict(), sort_keys=False)
-    assert first == json.dumps(_cw([M1, BASE], runs, RECEIPTS).to_dict(), sort_keys=False)
+    assert first == json.dumps(_cw([M1, BASE], runs, _receipts_for([M1, BASE])).to_dict(), sort_keys=False)
     assert list(window.to_dict()) == sorted(window.to_dict())
     assert window.to_dict()["first_red"]["sha"] == M1
     assert "vermoedelijk" in window.to_dict()["first_red_note"]
