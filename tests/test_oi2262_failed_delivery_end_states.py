@@ -680,3 +680,175 @@ def test_the_supersede_write_still_binds_the_state_it_was_read_in(store):
     assert outcome == {"action": "row_changed"}
     assert _row(store, dlv) == before
     assert _events(store, dlv, "deliverable_superseded") == []
+
+
+# ---------------------------------------------------------------------------
+# 5. OI-2803: a dead_letter base closes on its own round, behind the T0's reject
+# ---------------------------------------------------------------------------
+
+def _rejected_base(store: Path) -> str:
+    """The real path to dead_letter: the build failed, the T0 rejected it, the drain moved the row."""
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    assert _decide(store, dlv, "reject")[0] == 0
+    assert _row(store, dlv)["state"] == "dead_letter"
+    return dlv
+
+
+def test_a_dead_letter_base_with_a_reject_and_a_completed_round_closes_on_the_round(store):
+    dlv = _rejected_base(store)
+    round_id = _add_round(store, dlv, 2)
+    [decision] = _decisions(store, dlv)
+
+    rc, out, err = _close(store, dlv)
+
+    assert rc == 0, err
+    row = _row(store, dlv)
+    assert (row["state"], row["pr_ref"]) == ("expired", "#2262")
+    metadata = json.loads(row["metadata_json"])
+    assert (metadata["superseded_by"], metadata["superseded_from"]) == (round_id, "dead_letter")
+    assert metadata["superseded_decision_at"] == decision["timestamp"]
+    assert metadata["deliverable"] is True
+    [event] = _events(store, dlv, "deliverable_superseded")
+    assert (event["from_state"], event["to_state"], event["project_id"]) == ("dead_letter", "expired", PID)
+    assert round_id in out
+    assert _view(store, f"pr:{dlv}") == "done"
+
+
+def test_a_dead_letter_base_without_a_decision_log_is_refused(store):
+    dlv = _set_state(store, _add(store), "dead_letter")
+    _add_round(store, dlv, 2)
+    before = _row(store, dlv)
+    assert not (store / "t0_decision_log.jsonl").exists()
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "no T0 reject of this base is on record" in err and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_an_unreadable_decision_log_is_refused(store):
+    dlv = _set_state(store, _add(store), "dead_letter")
+    _add_round(store, dlv, 2)
+    (store / "t0_decision_log.jsonl").mkdir()
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "cannot be read" in err and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_no_decision_of_its_own_is_refused(store):
+    dlv = _set_state(store, _add(store), "dead_letter")
+    other = _set_state(store, _add(store), "failed_delivery")
+    assert _decide(store, other, "reject")[0] == 0  # a log exists, for another base
+    _add_round(store, dlv, 2)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "never decided on this base" in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_whose_newest_decision_is_accept_is_refused(store):
+    dlv = _set_state(store, _add(store), "dead_letter")
+    assert _decide(store, dlv, "accept")[0] == 0
+    _add_round(store, dlv, 2)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "newest decision on this base is not a reject" in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_a_reject_followed_by_an_accept_is_refused(store):
+    dlv = _rejected_base(store)
+    assert _decide(store, dlv, "accept", reason="reconsidered")[0] == 0
+    _add_round(store, dlv, 2)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "newest decision on this base is not a reject" in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_an_accept_followed_by_a_reject_closes(store):
+    dlv = _set_state(store, _add(store), "failed_delivery")
+    assert _decide(store, dlv, "accept")[0] == 0
+    assert _decide(store, dlv, "reject")[0] == 0
+    _add_round(store, dlv, 2)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 0, err
+    assert _row(store, dlv)["state"] == "expired"
+
+
+def test_a_dead_letter_base_with_a_reject_of_another_project_is_refused(store):
+    dlv = _set_state(store, _add(store), "dead_letter")
+    assert _decide(store, dlv, "reject", pid="other-proj")[0] == 0
+    _add_round(store, dlv, 2)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_a_reject_and_a_running_round_is_refused(store):
+    dlv = _rejected_base(store)
+    _add_round(store, dlv, 2, state="running")
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and f"no round {dlv}-rK is 'completed'" in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_a_reject_and_only_another_projects_round_is_refused(store):
+    dlv = _rejected_base(store)
+    _add_round(store, dlv, 2, project="other-proj")
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and f"no round {dlv}-rK is 'completed'" in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
+def test_a_dead_letter_base_with_a_reject_and_no_round_is_refused(store):
+    dlv = _rejected_base(store)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and f"no round {dlv}-rK is 'completed'" in err
+    assert _row(store, dlv) == before
+    assert _view(store, f"pr:{dlv}") == "failed"
+
+
+@pytest.mark.parametrize("state", ["failed_delivery", "timed_out"])
+def test_failed_delivery_and_timed_out_close_without_any_decision(store, state):
+    dlv = _set_state(store, _add(store), state)
+    round_id = _add_round(store, dlv, 2)
+    assert not (store / "t0_decision_log.jsonl").exists()
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 0, err
+    metadata = json.loads(_row(store, dlv)["metadata_json"])
+    assert (metadata["superseded_by"], metadata["superseded_from"]) == (round_id, state)
+    assert "superseded_decision_at" not in metadata

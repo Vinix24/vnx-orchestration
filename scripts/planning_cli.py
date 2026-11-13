@@ -76,6 +76,7 @@ from delivery_identity import delivery_identity_fields
 import plan_scope
 import provider_switch
 import schema_manifest
+import open_outcomes
 
 _HORIZON_ORDER = ["now", "next", "later"]
 _HORIZON_LABEL = {"now": "NOW", "next": "NEXT", "later": "LATER", None: "UNSCHEDULED"}
@@ -3467,6 +3468,7 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
             return _close_off_ready(
                 args, conn, project_id=project_id, dispatch_id=dispatch_id,
                 current_state=current_state, pr_ref=pr_ref, evidence_number=evidence_number,
+                state_dir=state_dir,
             )
 
         now = _now_utc()
@@ -3520,6 +3522,10 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
 #: States in which the deliverable's own attempt failed; only its own round can close one.
 SUPERSEDED_CLOSE_STATES = frozenset({"failed_delivery", "timed_out"})
+#: ``dead_letter`` joins them only behind the T0's own reject of that base (OI-2803): since
+#: OI-2262 the drain moves a base there on a reject, so the reject in the decision log is
+#: the evidence that the attempt was ended on purpose and not lost.
+DEAD_LETTER_STATE = "dead_letter"
 SUPERSEDED_EVENT = "deliverable_superseded"
 
 
@@ -3561,9 +3567,32 @@ def _read_superseded_row(
     ).fetchone()
 
 
+def _newest_reject(state_dir: Path, project_id: str, dispatch_id: str) -> dict:
+    """Whether the T0's newest decision for *dispatch_id* in the decision log is ``reject``.
+
+    Returns ``{"reason": None, "decided_at": <timestamp>}`` on a reject, else ``{"reason": key}``
+    with ``no_decision_log`` (no file), ``log_unreadable`` (the read raised), ``no_decision``
+    (the project never decided on this base) or ``newest_not_reject`` (the last word was an
+    accept). Fail-closed: only a positive ``reject`` passes; the log is read by
+    ``open_outcomes.read_outcome_decisions``, which keeps the last decision in file order.
+    """
+    log_path = state_dir / open_outcomes.DECISION_LOG_NAME
+    if not log_path.exists():
+        return {"reason": "no_decision_log"}
+    try:
+        decision = open_outcomes.read_outcome_decisions(log_path, project_id).get(dispatch_id)
+    except (OSError, ValueError):
+        return {"reason": "log_unreadable"}
+    if decision is None:
+        return {"reason": "no_decision"}
+    if decision.get("decision") != "reject":
+        return {"reason": "newest_not_reject"}
+    return {"reason": None, "decided_at": decision.get("timestamp")}
+
+
 def _book_superseded_attempt(
     conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
-    pr_ref: str, evidence_number: int,
+    pr_ref: str, evidence_number: int, extra_metadata: Optional[dict] = None,
 ) -> dict:
     """The work under the lock: find the round, merge the metadata, write the row and the event.
 
@@ -3587,7 +3616,7 @@ def _book_superseded_attempt(
     now = _now_utc()
     metadata.update(superseded_by=round_id, superseded_from=from_state,
                     superseded_evidence_pr=evidence_number, superseded_at=now,
-                    attestation="operator")
+                    attestation="operator", **(extra_metadata or {}))
     changed = conn.execute(
         """
         UPDATE dispatches
@@ -3615,7 +3644,7 @@ def _book_superseded_attempt(
 
 def _close_superseded_attempt(
     conn: sqlite3.Connection, *, project_id: str, dispatch_id: str, from_state: str,
-    pr_ref: str, evidence_number: int,
+    pr_ref: str, evidence_number: int, extra_metadata: Optional[dict] = None,
 ) -> dict:
     """Book a base on its own completed round: ``expired`` plus ``metadata_json.superseded_by``.
 
@@ -3632,7 +3661,7 @@ def _close_superseded_attempt(
     try:
         outcome = _book_superseded_attempt(
             conn, project_id=project_id, dispatch_id=dispatch_id, from_state=from_state,
-            pr_ref=pr_ref, evidence_number=evidence_number,
+            pr_ref=pr_ref, evidence_number=evidence_number, extra_metadata=extra_metadata,
         )
     except BaseException:
         conn.rollback()
@@ -3644,16 +3673,45 @@ def _close_superseded_attempt(
     return outcome
 
 
+def _superseded_refusal(action: str, dispatch_id: str, current_state: str) -> str:
+    """The named reason a supersede close was refused (``action`` is the outcome key)."""
+    reasons = {
+        "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
+                    "delivered this work (ADR-049: never closed on foreign evidence)",
+        "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
+        "row_changed": f"its state or its metadata_json changed under the read (it must still "
+                       f"be {current_state!r} with the metadata the write compared against)",
+        "no_decision_log": "there is no t0_decision_log.jsonl, so no T0 reject of this base "
+                           "is on record (OI-2803: a dead_letter base closes only behind that reject)",
+        "log_unreadable": "the t0_decision_log.jsonl cannot be read, so no T0 reject of this "
+                          "base can be shown (OI-2803)",
+        "no_decision": "the T0 never decided on this base in this project, so no reject of "
+                       "it is on record (OI-2803)",
+        "newest_not_reject": "the T0's newest decision on this base is not a reject "
+                             "(OI-2803: a dead_letter base closes only behind a reject)",
+    }
+    return reasons.get(action, "the transition was refused")
+
+
 def _close_off_ready(
     args: argparse.Namespace, conn: sqlite3.Connection, *, project_id: str, dispatch_id: str,
-    current_state: str, pr_ref: str, evidence_number: int,
+    current_state: str, pr_ref: str, evidence_number: int, state_dir: Path,
 ) -> int:
-    """A ``failed_delivery``/``timed_out`` base: booked on its own round, or refused by name."""
-    if current_state in SUPERSEDED_CLOSE_STATES:
-        outcome = _close_superseded_attempt(
-            conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
-            pr_ref=pr_ref, evidence_number=evidence_number,
-        )
+    """A ``failed_delivery``/``timed_out`` base, or a ``dead_letter`` one the T0 rejected: booked on its own round, or refused by name."""
+    if current_state in SUPERSEDED_CLOSE_STATES or current_state == DEAD_LETTER_STATE:
+        extra_metadata = None
+        outcome = {"action": "pending"}
+        if current_state == DEAD_LETTER_STATE:
+            reject = _newest_reject(state_dir, project_id, dispatch_id)
+            if reject["reason"] is None:
+                extra_metadata = {"superseded_decision_at": reject["decided_at"]}
+            else:
+                outcome = {"action": reject["reason"]}
+        if outcome["action"] == "pending":
+            outcome = _close_superseded_attempt(
+                conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
+                pr_ref=pr_ref, evidence_number=evidence_number, extra_metadata=extra_metadata,
+            )
         if outcome["action"] == "superseded":
             round_id = outcome["round"]
             if args.json:
@@ -3669,16 +3727,9 @@ def _close_off_ready(
                 print(f"  {current_state} -> expired; delivered by round {round_id} "
                       f"(operator attestation: PR {pr_ref})\n")
             return 0
-        reasons = {
-            "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
-                        "delivered this work (ADR-049: never closed on foreign evidence)",
-            "bad_metadata": "its metadata_json does not parse, so the row is not rewritten",
-            "row_changed": f"its state or its metadata_json changed under the read (it must still "
-                           f"be {current_state!r} with the metadata the write compared against)",
-        }
         print(
             f"deliverable close: cannot close {dispatch_id!r}: state {current_state!r}, and "
-            f"{reasons.get(outcome['action'], 'the transition was refused')}. No change made.",
+            f"{_superseded_refusal(outcome['action'], dispatch_id, current_state)}. No change made.",
             file=sys.stderr,
         )
         return 2
