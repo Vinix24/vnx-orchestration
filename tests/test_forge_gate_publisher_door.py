@@ -24,7 +24,7 @@ import forge_gate_publisher as fgp  # noqa: E402
 
 SHA = "a" * 40
 APP_ID = 4869217
-GATES = ["ci", "review", "adr", "contract_invalid", "branch_protection"]
+GATES = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main"]
 
 
 class FakeGitHub:
