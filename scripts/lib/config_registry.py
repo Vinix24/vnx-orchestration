@@ -124,6 +124,14 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "user,project,local restores today's "
         "argv exactly (no flag). An invalid value falls back to the default and is logged.",
         approval=True, subsystem="headless-builder-context", status="ACTIVATE",
+        read_site_wired=True, cockpit_canonical=True),
+    "VNX_DOC_STYLE_FILE": _e(
+        "VNX_DOC_STYLE_FILE", "string", "", "dispatch",
+        "Absolute or ~-relative path of a Markdown file with writing rules that staging appends "
+        "to every docs dispatch (task class 04_documentation or 06_design, or paths that are all "
+        "docs/** or *.md outside changelog.d/). Empty means off. A set path that cannot be read "
+        "(missing, not a file, empty) refuses staging of a docs dispatch.",
+        approval=True, subsystem="docs-style-file", status="ACTIVATE",
         read_site_wired=True),
     "VNX_DEFAULT_REVIEW_STACK": _e(
         "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
