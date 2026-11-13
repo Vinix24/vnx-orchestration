@@ -3570,16 +3570,19 @@ def _newest_reject(state_dir: Path, project_id: str, dispatch_id: str) -> dict:
     """Whether the T0's newest decision for *dispatch_id* in the decision log is ``reject``.
 
     Returns ``{"reason": None, "decided_at": <timestamp>}`` on a reject, else ``{"reason": key}``
-    with ``no_decision_log`` (no file), ``log_unreadable`` (the read raised), ``no_decision``
-    (the project never decided on this base) or ``newest_not_reject`` (the last word was an
-    accept). Fail-closed: only a positive ``reject`` passes; the log is read by
-    ``open_outcomes.read_outcome_decisions``, which keeps the last decision in file order.
+    with ``no_decision_log`` (no file), ``log_unreadable`` (the read raised; ``detail`` names the
+    line), ``no_decision`` (the project never decided on this base) or ``newest_not_reject``
+    (the last word was an accept). Fail-closed: only a positive ``reject`` passes; the log is
+    read by ``open_outcomes.read_outcome_decisions_strict``, which keeps the last decision in
+    file order and refuses on any line it cannot read, whichever dispatch it belongs to.
     """
     log_path = state_dir / open_outcomes.DECISION_LOG_NAME
     if not log_path.exists():
         return {"reason": "no_decision_log"}
     try:
-        decision = open_outcomes.read_outcome_decisions(log_path, project_id).get(dispatch_id)
+        decision = open_outcomes.read_outcome_decisions_strict(log_path, project_id).get(dispatch_id)
+    except open_outcomes.DecisionLogUnreadable as exc:
+        return {"reason": "log_unreadable", "detail": str(exc)}
     except (OSError, ValueError):
         return {"reason": "log_unreadable"}
     if decision is None:
@@ -3672,8 +3675,10 @@ def _close_superseded_attempt(
     return outcome
 
 
-def _superseded_refusal(action: str, dispatch_id: str, current_state: str) -> str:
-    """The named reason a supersede close was refused (``action`` is the outcome key)."""
+def _superseded_refusal(action: str, dispatch_id: str, current_state: str, detail: Optional[str] = None) -> str:
+    """The named reason a supersede close was refused (``action`` is the outcome key; ``detail`` names an unreadable line)."""
+    if action == "log_unreadable" and detail:
+        return f"{detail}, so no T0 reject of this base can be shown (OI-2803)"
     reasons = {
         "no_round": f"no round {dispatch_id}-rK is 'completed', so nothing of its own "
                     "delivered this work (ADR-049: never closed on foreign evidence)",
@@ -3705,7 +3710,7 @@ def _close_off_ready(
             if reject["reason"] is None:
                 extra_metadata = {"superseded_decision_at": reject["decided_at"]}
             else:
-                outcome = {"action": reject["reason"]}
+                outcome = {"action": reject["reason"], "detail": reject.get("detail")}
         if outcome["action"] == "pending":
             outcome = _close_superseded_attempt(
                 conn, project_id=project_id, dispatch_id=dispatch_id, from_state=current_state,
@@ -3728,7 +3733,7 @@ def _close_off_ready(
             return 0
         print(
             f"deliverable close: cannot close {dispatch_id!r}: state {current_state!r}, and "
-            f"{_superseded_refusal(outcome['action'], dispatch_id, current_state)}. No change made.",
+            f"{_superseded_refusal(outcome['action'], dispatch_id, current_state, outcome.get('detail'))}. No change made.",
             file=sys.stderr,
         )
         return 2

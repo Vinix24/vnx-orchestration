@@ -740,6 +740,31 @@ def test_a_dead_letter_base_with_an_unreadable_decision_log_is_refused(store):
     assert _events(store, dlv, "deliverable_superseded") == []
 
 
+def _append_raw(store: Path, raw: bytes) -> None:
+    with open(store / "t0_decision_log.jsonl", "ab") as fh:
+        fh.write(raw)
+
+
+@pytest.mark.parametrize("raw, reason", [
+    (b'{"decision_type": "outcome_decision", "dispatch_id": \n', "decision log unreadable at line 2"),
+    (b'\xff\xfe not utf-8\n', "decision log unreadable at line 2"),
+    (b'["decision", "reject"]\n', "decision log unreadable at line 2"),
+    (b'{"decision_type": "outcome_decision"}', "decision log has a partial last line"),
+    (b'{"dispatch_id": "someone-else", "decision": \n', "decision log unreadable at line 2"),
+], ids=["malformed-json", "invalid-utf8", "json-array", "partial-last-line", "malformed-line-of-another-dispatch"])
+def test_a_dead_letter_base_with_a_reject_and_an_unreadable_line_behind_it_is_refused(store, raw, reason):
+    dlv = _rejected_base(store)
+    _add_round(store, dlv, 2)
+    _append_raw(store, raw)
+    before = _row(store, dlv)
+
+    rc, _, err = _close(store, dlv)
+
+    assert rc == 2 and reason in err and "No change made." in err
+    assert _row(store, dlv) == before
+    assert _events(store, dlv, "deliverable_superseded") == []
+
+
 def test_a_dead_letter_base_with_no_decision_of_its_own_is_refused(store):
     dlv = _set_state(store, _add(store), "dead_letter")
     other = _set_state(store, _add(store), "failed_delivery")
