@@ -59,6 +59,7 @@ from dispatch_spec import (  # noqa: E402
 )
 from skill_prefix import resolve_skill_dir, skill_search_paths  # noqa: E402
 from stage_origin import record_declared_edge  # noqa: E402
+from rework_attribution import ROUND_CAUSES  # noqa: E402
 
 # Legacy provider/mode strings → the closed Provider enum value. dispatch_deliver.sh
 # emits tmux-mode strings (e.g. "codex_cli"); normalize them here so the door's
@@ -231,6 +232,16 @@ def resolve_parent_dispatch(
     return explicit
 
 
+def _require_round_cause(raw: Optional[str]) -> Optional[str]:
+    """The round cause (ADR-071), stripped and lowercased; a value outside ROUND_CAUSES is refused."""
+    cause = (raw or "").strip().lower()
+    if not cause:
+        return None
+    if cause not in ROUND_CAUSES:
+        raise ValueError(f"round_cause {raw!r} is not one of {', '.join(ROUND_CAUSES)}")
+    return cause
+
+
 def _stage_lineage(
     dispatch_id: str,
     work_ref: Optional[str],
@@ -238,10 +249,16 @@ def _stage_lineage(
     origin_oi: Optional[str],
     origin_pr: Optional[int],
     root: Path,
-) -> "tuple[Optional[str], Optional[str], dict]":
-    """``(parent_dispatch, edge_kind, evidence)``: the named origin (ADR-071 besluit 3) first, then
-    ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin."""
+    round_cause: Optional[str] = None,
+) -> "tuple[Optional[str], Optional[str], dict, Optional[str]]":
+    """``(parent_dispatch, edge_kind, evidence, edge_parent)``: the named origin (ADR-071 besluit 3) first,
+    then ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin.
+    ``evidence`` carries the validated ``round_cause``. ``edge_parent`` is the spec's parent, else the
+    delivery of a round or split id (the spec itself keeps no parent then)."""
+    from rework_metrics import delivery_of
     from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
+
+    cause = _require_round_cause(round_cause)
 
     origin, kind, evidence = resolve_origin(
         origin_oi, origin_pr, state_dir=root / "state", project_root=_project_root(),
@@ -250,7 +267,18 @@ def _stage_lineage(
     parent = resolve_parent_dispatch(dispatch_id, work_ref, explicit)
     if parent and not evidence:
         evidence = {"parent_dispatch": parent} if explicit else {"work_ref": (work_ref or "").strip()}
-    return parent, kind, evidence
+    delivery = delivery_of(dispatch_id)
+    edge_parent = parent or (delivery if delivery != dispatch_id else None)
+    if edge_parent and not evidence:
+        evidence = {"delivery": edge_parent}
+    return parent, kind, ({**evidence, "round_cause": cause} if cause else evidence), edge_parent
+
+
+def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str]) -> dict:
+    """The optional origin and round-cause keys of the spec; each only when set."""
+    return {**({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+            **({"origin_pr": origin_pr} if origin_pr else {}),
+            **({"round_cause": round_cause} if round_cause else {})}
 
 
 class UnknownSkillError(ValueError):
@@ -409,6 +437,7 @@ def stage_spec_bundle(
     track_id: Optional[str] = None,
     origin_oi: Optional[str] = None,
     origin_pr: Optional[int] = None,
+    round_cause: Optional[str] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
 
@@ -449,8 +478,8 @@ def stage_spec_bundle(
 
     # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
     # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
-    parent_dispatch, edge_kind, edge_evidence = _stage_lineage(
-        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root,
+    parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
+        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
     )
 
     # 3. anchor the pending root and create the bundle dir (symlink-escape guards).
@@ -509,14 +538,13 @@ def stage_spec_bundle(
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
-        **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
-        **({"origin_pr": origin_pr} if origin_pr else {}),
+        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause")),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
     record_declared_edge(
         data_root=root, project_id=effective_project_id, dispatch_id=dispatch_id,
-        predecessor=spec_payload["parent_dispatch"], kind=edge_kind, evidence=edge_evidence,
+        predecessor=edge_parent, kind=edge_kind, evidence=edge_evidence,
     )
     return spec_file
 
@@ -848,6 +876,7 @@ def _main_stage(argv: list) -> int:
     parser.add_argument("--track", default=None, dest="track_id")
     parser.add_argument("--origin-oi", default=None, dest="origin_oi")
     parser.add_argument("--origin-pr", default=None, dest="origin_pr", type=int)
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--data-dir", default=None, dest="data_dir", type=Path)
     args = parser.parse_args(argv)
 
@@ -889,6 +918,7 @@ def _main_stage(argv: list) -> int:
             track_id=args.track_id,
             origin_oi=args.origin_oi,
             origin_pr=args.origin_pr,
+            round_cause=args.round_cause,
             data_dir=args.data_dir,
         )
     except (ValueError, OSError) as exc:
@@ -925,13 +955,12 @@ def _main_legacy(argv: Optional[list] = None) -> int:
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
     parser.add_argument("--headless-reason", default=None, dest="headless_reason")
     parser.add_argument(
-        "--post-merge-verification",
-        action="store_true",
-        dest="post_merge_verification",
+        "--post-merge-verification", action="store_true", dest="post_merge_verification",
         help="Mark this dispatch as a post-merge verification: the door fails "
              "closed (refuses) while the local main checkout lags origin/main.",
     )
     parser.add_argument("--target-id-override", default=None, dest="target_id_override")
+    parser.add_argument("--round-cause", default=None, dest="round_cause")
     parser.add_argument("--dry-run", action="store_true", dest="dry_run")
     parser.add_argument(
         "--instruction-stdin", action="store_true", dest="instruction_stdin",
@@ -986,6 +1015,7 @@ def _main_legacy(argv: Optional[list] = None) -> int:
         headless_reason=args.headless_reason,
         post_merge_verification=args.post_merge_verification,
         target_id_override=args.target_id_override,
+        round_cause=args.round_cause,
         dry_run=args.dry_run,
     )
 

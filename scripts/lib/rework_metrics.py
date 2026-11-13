@@ -25,15 +25,22 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from receipt_outcome import _clean_pr, _parse_ts, noise_reason
 from review_rounds import RoundLedgerError, read_ledger
-from rework_attribution import load_edges
+from rework_attribution import ROUND_CAUSES, load_edges
 
 WINDOW_DAYS = 14
 MIN_N = 20
 PASSED_THROUGH_NOTE = (
     "upper bound: the fault may lie outside the diff the seat saw; not an error rate of the seat"
 )
-_DELIVERY = re.compile(r"^(dlv-[0-9a-f]+)((?:-r\d+|-a|-b)*)$")
-_ROUND_OR_SPLIT = re.compile(r"-r\d+|-b")
+_DELIVERY = re.compile(r"^(dlv-[0-9a-f]+)((?:-r\d+|-[a-z])*)$")
+_ROUND_OR_SPLIT = re.compile(r"-r\d+|-[b-z]")
+_TRAILING_SPLIT = re.compile(r"-[a-z]$")  # a split part with no round after it
+# The title rule of claudedocs/2026-11-07-naar-1-9/metingen/pr_grootte_uitsplitsing.py, byte for byte.
+GRENS = re.compile(r"450|line cap|under the cap|\bsplit\b|follow-up PR|to `?-b`?|moves? to `?-b", re.I)
+CI = re.compile(r"CI red|CI fix|mode tier|ratchet|function-size|function size|xdist|changelog fragment|"
+                r"main in the branch|merge main|beacon register test|census", re.I)
+CAUSE_COUNTS = ROUND_CAUSES + ("unknown",)
+CAUSE_SOURCES = ("declared", "title", "unknown")
 _BRANCH = re.compile(r"^dispatch/(.+)$")
 _MODEL_IN_REPORT = re.compile(r"\*\*Model\*\*:\s*([^\s*]+)|^Model:\s*(\S+)", re.M)
 _NOT_BUILD_PREFIXES = ("panel-", "plan-gate-", "plan-tiebreak-")
@@ -93,7 +100,10 @@ def _identities(receipts: List[Dict[str, Any]], project_id: str) -> Tuple[dict, 
         if reason:
             noise.setdefault(did, reason)
             continue
-        info = idents.setdefault(did, {"builder": None, "task_class": "unknown", "risk_class": "unknown", "prs": []})
+        info = idents.setdefault(did, {"builder": None, "task_class": "unknown", "risk_class": "unknown",
+                                       "prs": [], "prompt_path": ""})
+        if not info["prompt_path"] and isinstance(rec.get("final_prompt_path"), str):
+            info["prompt_path"] = rec["final_prompt_path"].strip()
         if info["task_class"] == "unknown" and rec.get("task_class"):
             info["task_class"] = str(rec["task_class"])
         if info["risk_class"] == "unknown" and rec.get("risk_class"):
@@ -235,14 +245,17 @@ def compute_metrics(
             continue
         rows[base] = {**fact, "builder": first["builder"] or "model=unknown", "task_class": first["task_class"],
                       "risk_class": first["risk_class"], "members": members}
+        rows[base]["prompts"] = {m: idents[m]["prompt_path"] for m in members}
     with closing(_ro(qi_db_path)) as conn:
         edges = [e for e in load_edges(conn, project_id) if e["class"] == "rework"]
-    fpy = _first_pass(rows, edges)
+    causes = {base: member_causes(row, edges) for base, row in rows.items()}
+    fpy = _first_pass(rows, causes)
     reworked = _reworked_origins(rows, edges, as_of)
     out = {"project_id": project_id, "as_of": as_of.isoformat(), "window_days": WINDOW_DAYS, "min_n": MIN_N,
            "exclusions": excluded, "unattributed": unattributed, "complete": True,
            "merge_sources": {s: sum(1 for r in rows.values() if r["merge_source"] == s) for s in ("receipt", "github")},
            "first_pass_yield": fpy,
+           "round_causes": _round_causes(rows, causes),
            "rework_14d": _rework_cells(rows, reworked, as_of),
            "passed_through": [], "passed_through_note": PASSED_THROUGH_NOTE}
     try:
@@ -260,15 +273,91 @@ def _mature(row: dict, as_of: datetime) -> bool:
     return row["merged_at"] <= as_of - timedelta(days=WINDOW_DAYS)
 
 
-def _first_pass(rows: dict, edges: List[dict]) -> List[dict]:
-    rounded = {delivery_of(e["origin"]) for e in edges if e["kind"] == "round"}
+_INSTRUCTION_MARKER = "DISPATCH INSTRUCTION:"
+
+
+def _title_of(path: str) -> Optional[str]:
+    """The first ``# `` line of the prompt file, read after the ``DISPATCH INSTRUCTION:`` line when the
+    file has one (a final prompt opens with the worker role, e.g. ``# Base Worker Context``), else from
+    the top. None when unreadable or without such a line."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except OSError:
+        return None
+    start = next((i + 1 for i, line in enumerate(lines) if line.strip() == _INSTRUCTION_MARKER), 0)
+    return next((line for line in lines[start:] if line.startswith("# ")), None)
+
+
+def _declared_causes(edges: List[dict]) -> Dict[str, str]:
+    """rework dispatch id -> the ``round_cause`` in the evidence of its ``round`` edge (a valid one only)."""
+    out: Dict[str, str] = {}
+    for e in edges:
+        if e["kind"] != "round":
+            continue
+        try:
+            evidence = json.loads(e.get("evidence_json") or "{}")
+        except (TypeError, ValueError):
+            # vnx-silent-except: malformed evidence declares nothing; the member falls to the title rule.
+            continue
+        cause = evidence.get("round_cause") if isinstance(evidence, dict) else None
+        if cause in ROUND_CAUSES:
+            out[e["rework"]] = cause
+    return out
+
+
+def _title_cause(member: str, prompt_path: str) -> Tuple[str, str]:
+    match = _DELIVERY.match(member)
+    if match and _TRAILING_SPLIT.search(match.group(2)):
+        return "grens", "title"
+    title = _title_of(prompt_path)
+    if title is None:
+        return "unknown", "unknown"
+    return ("grens" if GRENS.search(title) else "ci" if CI.search(title) else "review"), "title"
+
+
+def member_causes(row: dict, edges: List[dict]) -> Dict[str, Tuple[str, str]]:
+    """Round member -> (cause, source): declared in the edge evidence, else the title rule, else unknown."""
+    base = delivery_of(row["members"][0])
+    declared = _declared_causes([e for e in edges if delivery_of(e["origin"]) == base])
+    round_edges = {e["rework"] for e in edges if e["kind"] == "round" and delivery_of(e["origin"]) == base}
+    out: Dict[str, Tuple[str, str]] = {}
+    suffixed = {m for m in row["members"] if _suffix_breaks_first_pass(m)}
+    for member in sorted(suffixed | round_edges):
+        if member in declared:
+            out[member] = (declared[member], "declared")
+        elif _suffix_breaks_first_pass(member):
+            out[member] = _title_cause(member, row["prompts"].get(member, ""))
+        else:
+            out[member] = ("unknown", "unknown")
+    return out
+
+
+def _first_pass(rows: dict, causes: Dict[str, Dict[str, Tuple[str, str]]]) -> List[dict]:
+    """A hit has no member round whose cause is ``review`` or ``unknown``; ci, grens and operator do not count."""
     cells: dict = {}
     for base, row in rows.items():
         c = _cell(cells, (row["builder"], row["task_class"], row["risk_class"]))
         c["n"] += 1
-        if base not in rounded and not any(_suffix_breaks_first_pass(m) for m in row["members"]):
+        if not any(cause in ("review", "unknown") for cause, _ in causes[base].values()):
             c["hits"] += 1
     return _finish(cells, ("builder", "task_class", "risk_class"))
+
+
+def _round_causes(rows: dict, causes: Dict[str, Dict[str, Tuple[str, str]]]) -> Dict[str, Any]:
+    """Rounds per cause for each builder, task class and risk class, plus the totals per source."""
+    cells: Dict[tuple, Dict[str, int]] = {}
+    sources = {s: 0 for s in CAUSE_SOURCES}
+    for base, row in rows.items():
+        key = (row["builder"], row["task_class"], row["risk_class"])
+        for cause, source in causes[base].values():
+            counts = cells.setdefault(key, {c: 0 for c in CAUSE_COUNTS})
+            counts[cause] += 1
+            sources[source] += 1
+    table = [{"builder": b, "task_class": t, "risk_class": r, **cells[(b, t, r)]} for (b, t, r) in sorted(cells)]
+    return {"cells": table, "sources": sources}
 
 
 def _reworked_origins(rows: dict, edges: List[dict], as_of: datetime) -> set:
