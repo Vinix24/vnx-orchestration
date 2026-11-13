@@ -96,6 +96,27 @@ A raw `gh pr merge` runs none of this code; only GitHub's branch protection appl
 
 `vnx pr-ready <PR> [<PR> ...] [--json] [--verbose]` (`scripts/pr_ready.py`, `scripts/lib/pr_readiness.py` `assess`) lays out the evidence per PR before the door is called: a header line, `CI` (required contexts passed of total), `GATES` (each review seat, through the door's own seat evaluation since R5b: OK on head, OK via takeover, NOT on head, absent, UNMEASURABLE; plus a NO-GO line for every reviewer that rejected the head, also when another reviewer filled the seat its gate name stands for, so the review side says READY exactly when the door says GO), `COST` (what is still outstanding) and `VERDICT` (`READY`, `NOT READY` or `UNMEASURABLE`). Exit codes: 0 ready, 1 not ready, 2 unmeasurable (it beats not ready), 10 bad input. Nothing consults it: it reads the declared gates and the required branch-protection contexts, not the door's workflow-run check, and it runs neither the ADR, `contract_invalid`, door-integrity nor weakening checks. `READY` does not mean the door will merge.
 
+### 2.2.1 The main gate (ADR-073)
+
+`main` stands in `PREFLIGHT_ORDER` before `door`, always. Without `VNX_MAIN_UNVERIFIED_MAX` the gate writes `mode: off`, verdict GO, reason `niet geconfigureerd`, and the merge behaves as before: no `gh` read, no lock.
+
+With the key (per project, in `project_config`) the window is every merge since the last green VNX CI run with the heavy profile (`scripts/lib/main_window.py`). The gate is NO-GO on:
+
+- a red run, named "vermoedelijk, niet bewezen" with the run id;
+- a named run state: `stale_run`, `no_run` or `receipt_only_stale`;
+- an unmeasurable window (for example `history_incomplete`, `base_time_unknown`, `invalid_input`), an unreadable config (`config_unreadable`) or an exception while reading (`window_unreadable`);
+- running merges that reach N (`unverified_limit`).
+
+A merge known only from its `pr_merged` receipt counts: GitHub can lag behind the merge it just accepted.
+
+The lock is one flock per project, the file `main_admission.lock` in the state dir. When the window is on, the door takes it after the early `main` check and re-reads the window under it as the last check before it publishes the door permit and runs `gh pr merge` (`_locked_door_merge`, `_reread_main_gate`). The re-read sits before the permit, so a NO-GO there needs no permit revoke. A wait past `MAIN_LOCK_TIMEOUT_S` refuses with `main_lock_timeout` (the holder is named). A window that turned NO-GO under the lock refuses with `main_window_changed_under_lock`. The lock is released after the receipt. Both receipts carry `main_admission`, including `lock_wait_s`.
+
+`--override-main "<reason>"` covers only this gate, never the CI gate (`--override-reason`). An empty reason is refused. The reason lands on the receipt. The way back on a red main is a revert PR or a fix-forward PR merged with `--override-main revert_or_fix_forward`.
+
+Who sets the key: Vincent, or the T0 with his approval-id, through `config_store_db.set_config` (it writes an audit row). A builder never does.
+
+The probe `vnx main-window status [--json]` (`scripts/main_window_cli.py`) is read-only. It prints `verdict`, `mode`, `reason`, `base` (sha and run), `running` and `first red`, plus `config:` lines for an invalid config; `--json` gives the full admission record. Exit 0 is GO (also mode off), 1 NO-GO, 2 the probe could not run. A merge chain asks the probe and starts a merge only on GO. The door stays the guardrail, so a running window gives no string of `pr_merge_refused` receipts.
+
 ### 2.3 The CI sweep and what a green CI does not prove
 
 The Profile A job of `.github/workflows/vnx-ci.yml` runs pytest over `tests/` in two phases and skips every file listed in `scripts/ci/test_exclusions.txt`. The serial phase runs the entries of `scripts/ci/serial_tests.txt` with `-p no:xdist` (the file holds comments only, so the phase is inactive). The parallel phase runs the whole tree with `-n 4 --dist loadfile`, a 180 second limit per test, and is followed by the required completeness step (`scripts/ci/check_xdist_parity.py`). `VNX_CI_XDIST=0` falls back to one serial run. The full description is `docs/core/CI_PROFILE_A.md`. At base `d8b58c359` the exclusions file has 208 lines: 93 entries and 115 comment or blank lines. Format: one entry per line, `tests/<path>.py  # <OI or measurement>`; whole-line comments and blank lines are skipped. `scripts/ci/profile_a_pytest_args.sh`, which the job calls, strips the comment and passes `--ignore=<path>` to pytest, and it does not check that the path exists. `scripts/ci/check_test_exclusions.py` requires a reason, an existing path and no duplicate; it runs from `scripts/local-ci.sh`, and in CI only through `tests/test_ci_check_test_exclusions.py`, which is inside the sweep. Of the 1584 tracked `test_*.py` files under `tests/`, 93 (about 5.9 percent) are excluded. The reasons: 80 cite OI-1227 (red when run alone), 5 cite OI-1420 (green alone, red in the sweep), the other 8 cite a single OI or a measurement.

@@ -1,0 +1,1 @@
+- test: seven more CI-excluded test files (gemini prompt, receipt instruction hash, T0 skill consistency, terminal state reconciler, worker heartbeat, codex event normalizer, pool lease e2e) match the current code and leave the CI exclusion list (OI-2589, batch e).
