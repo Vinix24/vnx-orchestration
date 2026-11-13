@@ -265,25 +265,20 @@ def _cost_ledger(w, *deliveries):
     (events / "provider_costs.ndjson").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
-def test_md_renders_the_cost_section_and_json_carries_cost(tmp_path):
+def test_json_carries_cost(tmp_path):
     w = World(tmp_path)
     did = w.delivery("sonnet", "01_code_generation", "medium")
     w.delivery("sonnet", "01_code_generation", "medium")
     _cost_ledger(w, did)
-    md = w.cli("--md")
-    assert md.returncode == 0, md.stderr
-    assert "## Cost per delivery" in md.stdout
-    row = next(ln for ln in md.stdout.splitlines() if ln.startswith("| claude/sonnet") and "$1.5" in ln)
-    assert "unmeasured" in row and "nee (n < 20)" in row
-    assert "Incomplete deliveries (buiten de medianen): 1" in md.stdout and "without builder run" in md.stdout
-    assert "Reviewruns zonder koppeling" in md.stdout
-    cost = json.loads(w.cli("--json").stdout)["cost"]
+    proc = w.cli("--json")
+    assert proc.returncode == 0, proc.stderr
+    cost = json.loads(proc.stdout)["cost"]
     assert cost["cells"][0]["n"] == 2 and cost["cells"][0]["n_complete"] == 1
     assert cost["gaps"]["incomplete_deliveries"][0]["delivery"] != did
 
 
-def test_md_names_a_missing_cost_ledger_instead_of_a_table(tmp_path):
+def test_json_names_a_missing_cost_ledger(tmp_path):
     w = World(tmp_path)
     w.cohort("sonnet", "01_code_generation", "medium", 2, 0)
-    out = w.cli("--md").stdout
-    assert "## Cost per delivery" in out and "Geen kostenas: cost ledger not found" in out
+    cost = json.loads(w.cli("--json").stdout)["cost"]
+    assert cost["cells"] == [] and "cost ledger not found" in cost["ledger_error"]
