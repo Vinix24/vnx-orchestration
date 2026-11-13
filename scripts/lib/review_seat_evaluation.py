@@ -142,7 +142,8 @@ _FIRST_SEAT_CLASSES = frozenset({"low", "medium"})
 UNKNOWN = "unknown"
 
 #: The fixed names of the signals that ask the second seat (plan, Approach 1-5).
-SIGNAL_NAMES = ("real_warning", "security_path", "schema", "irreversible", "sample")
+#: ``caller_escalation`` (OI-2697) fires when the caller asked for a class above the derived one.
+SIGNAL_NAMES = ("real_warning", "security_path", "schema", "irreversible", "sample", "caller_escalation")
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,7 @@ def parse_full_fill_pairs(raw: Any) -> Tuple[Tuple[str, str], ...]:
 
 
 _KNOWN_CLASSES = frozenset({"low", "medium", "high", "critical"})
+_CLASS_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 _PASS = "pass"
 _FAIL = "fail"
 _SAMPLE_MODULUS = 5
@@ -431,6 +433,8 @@ class SeatSignalInput:
     seat1_reviewer_model: str = ""
     seat1_blocking_count: Optional[int] = None
     full_fill_pairs: Tuple[Tuple[str, str], ...] = ()
+    #: True only when the risk reading's known ``caller`` class is above its known ``derived`` class (OI-2697).
+    caller_escalated: bool = False
 
     def unknown_fields(self) -> Tuple[str, ...]:
         """The contract fields whose value is :data:`UNKNOWN`, by name, in contract order."""
@@ -478,7 +482,8 @@ def seats_for_signals(signal_input: SeatSignalInput) -> SignalSeatDecision:
     any contract field is :data:`UNKNOWN`, when seat 1 gave no outcome or a
     FAIL, when a takeover filled seat 1 and is no :func:`takeover_full_fill`, or
     when the risk class is unknown. A ``gate-merge`` path on its own is not a
-    signal. Pure: no I/O here — the caller reads the store and the key.
+    signal; a caller that deliberately asked for a class above the derived one
+    is (``caller_escalation``, OI-2697). Pure: no I/O here — the caller reads the store and the key.
     """
     stack = _seat_names(list(signal_input.stack))
     signals = _fired_signals(signal_input)
@@ -530,6 +535,21 @@ def signal_risk(risk: Any) -> Tuple[str, Tuple[Tuple[str, str], ...]]:
         return UNKNOWN, paths
     cls = str(risk.get("risk_class") or "").strip().lower()
     return (cls if cls in _KNOWN_CLASSES else UNKNOWN), paths
+
+
+def caller_escalated(risk: Any) -> bool:
+    """Whether the risk reading's ``caller`` class is a known class above its known ``derived`` class.
+
+    A missing, unknown or malformed ``caller`` or ``derived`` is ``False``: the
+    unknown-class cases stay with the fail-closed rules of ``risk_class``.
+    """
+    if not isinstance(risk, dict):
+        return False
+    caller = str(risk.get("caller") or "").strip().lower()
+    derived = str(risk.get("derived") or "").strip().lower()
+    if caller not in _CLASS_RANK or derived not in _CLASS_RANK:
+        return False
+    return _CLASS_RANK[caller] > _CLASS_RANK[derived]
 
 
 def _rounds_lines(rounds: Any) -> Tuple[Any, ...]:
@@ -599,6 +619,7 @@ def signal_input_for(
         seat1_reviewer_model=accepted.reviewer_model if accepted is not None else "",
         seat1_blocking_count=accepted.blocking_count if accepted is not None else None,
         full_fill_pairs=pairs,
+        caller_escalated=caller_escalated(risk),
     )
 
 
@@ -628,6 +649,8 @@ def _fired_signals(signal_input: SeatSignalInput) -> Tuple[str, ...]:
         fired.append("irreversible")
     if _sample_fires(signal_input.head_sha):
         fired.append("sample")
+    if signal_input.caller_escalated is True:
+        fired.append("caller_escalation")
     return tuple(fired)
 
 
