@@ -44,7 +44,9 @@ class TestProjectStatusHook:
         with patch("sys.argv", ["build_t0_state.py"]):
             rc = main()
 
-        assert rc == 0
+        # An empty tmp state has no beacons yet, so health is degraded: rc 1 by design
+        # (D1, OI-1437 follow-up). Only rc 2 means the build itself failed.
+        assert rc in (_bts._EXIT_OK, _bts._EXIT_HEALTH_DEGRADED)
         project_status = state_dir / "PROJECT_STATUS.md"
         assert project_status.exists(), (
             "PROJECT_STATUS.md was not generated — likely _REPO_ROOT NameError still present"

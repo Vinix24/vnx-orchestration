@@ -102,7 +102,6 @@
 # deepseek split entries were re-confirmed identical by this sweep.
 #
 #
-tests/integration/test_gemini_streaming_gated.py  # OI-1227: red solo — TestDefaultOffBehavior expects 'done' got 'failed' (1 failed, 6 passed)
 # tests/migrations/test_auto_apply.py — REPAIRED (dispatch 20260930-rel170-auto-apply-fail-closed):
 # the two red tests fed the full migrations dir to a fixture that only has 0020's
 # tables; they now hand auto_apply the real 0020 alone. 9/9 green solo.
@@ -113,12 +112,8 @@ tests/test_adr007_structural_conformance.py  # OI-1227: red solo — sqlite3: ca
 tests/test_agent_stream_sse.py  # OI-1227: hangs — exceeds 90s wall-cap solo (per-test --timeout=180), no output within cap
 tests/test_agent_validation.py  # OI-1227: red solo — T0IntelligenceGatherer: 'Developer' not valid (1 failed)
 tests/test_architecture_doc_drift.py  # ADR-053 (tsk-5): NOT red — this whole file already runs as its own blocking Profile A step "Run architecture doc drift guard unit tests" (.github/workflows/vnx-ci.yml:292) on every PR; the parallel-phase copy cost ~8 s and proved nothing extra. tests/test_ci_gates_still_exist.py fails if that step (or its command) disappears.
-tests/test_auto_report_integration.py  # OI-1227: red solo — manual report status parsed 'contract_invalid' not 'success' (1 failed, 38 passed)
-tests/test_behavior_contracts.py  # OI-1227: red solo — routing_policy lanes missing BehaviorContract: kimi x4 (1 failed, 22 passed)
-tests/test_bench_headless_routing.py  # OI-1227: red solo — 'claude-sonnet-4-6' not in HEADLESS_FORCED_MODELS (3 failed, 2 passed)
 tests/test_bench_seed_integrity.py  # OI-1227: red solo — expected 9 task verifiers, found 13 (1 failed, 13 passed)
 tests/test_billing_safety.py  # OI-951: doc/content drift the test already asserts against, red on main too
-tests/test_build_t0_state_exception_handling.py  # OI-1227: red solo — build_t0_state.py exited 1 on main (1 failed, 1 passed)
 tests/test_burnin_certification.py  # hangs without VNX_HEADLESS_CLI=echo; covered by burn-in-headless.yml
 tests/test_busy_terminal_certification.py  # OI-1227: red solo — rc_check_terminal call not found in busy-term dispatch (6 failed, 5 errors, 35 passed)
 tests/test_claude_github_review_linkage.py  # OI-1227: red solo — MagicMock not JSON serializable in request handler (3 failed, 33 passed)
@@ -169,11 +164,9 @@ tests/test_pool_provider_mix_integration.py  # OI-1227: red solo — terminal_le
 tests/test_pool_state_repo.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (6 failed, 3 passed)
 tests/test_pr10_provider_string_canon.py  # OI-1227: registry key 'deepseek_harness' != 'deepseek' (OI-867 deepseek proxy/harness split)
 tests/test_pr2_requeue_clear_context.py  # OI-1227: red solo — absent ClearContext defaults 'true' != 'false' (1 failed, 15 passed)
-tests/test_project_status_hook.py  # OI-1227: red solo — project-status hook subprocess rc != 0 (1 failed, 2 passed)
 tests/test_provider_dispatch_contract_integration.py  # OI-1227: red solo — litellm tool-shape lane None != 'openai_tools' (2 failed, 17 passed)
 tests/test_provider_dispatch_entry.py  # OI-1227: red solo — litellm route subprocess rc != 0 (1 failed, 17 passed)
 tests/test_quickstart_validation.py  # OI-1420 gemeten 21-08: slaagt solo, valt onder volle sweep (2 failed) op hetzelfde ADR-007 init-backfill project_id-conflict (env:VNX_PROJECT_ID='vnx-dev'); mode.json en .vnx-data/state worden nooit aangemaakt omdat `vnx init` fail-closed weigert
-tests/test_receipt_classifier.py  # OI-1227: red solo — classifier_providers.ollama_provider.subprocess missing (1 failed, 15 passed)
 tests/test_receipt_instruction_hash.py  # OI-1227: red solo — manifest sha256 read failed (2 failed, 7 passed)
 tests/test_receipt_v2_pr4_wiring.py  # OI-948: receipt v2 PR4/PR5: NoneType has no attribute status, red on main too
 tests/test_repo_map.py  # OI-1420 + D1 (OI-2589) gemeten run 42318233090 op ff7ef8d8 (Profile A parallel, 13 failed): 11x NameError '_TSParser' (TestExtractPythonSymbols, TestBuildDependencyGraph) en 2x ModuleNotFoundError 'networkx' (TestPersonalizedBoost); de runner heeft geen tree-sitter en geen networkx (bewust niet geïnstalleerd, zie profile-a-prelude/action.yml), lokaal groen: omgeving, geen codefout (CI image-klasse)
@@ -203,6 +196,5 @@ tests/test_w_init_project_id_threading.py  # OI-1227: red solo — migration lin
 tests/test_wave7_deepseek_smoke.py  # OI-1227: smoke routes litellm:deepseek on dispatch_allowed:false (OI-867 deepseek proxy/harness split)
 tests/test_week_1_skills.py  # OI-1227: red solo — vendored vnx-system dispatcher file not found (1 failed, 3 passed)
 tests/test_wheel_install.py  # OI-1227: red solo — wheel-install smoke exit 1 (1 failed)
-tests/test_wiring_completeness.py  # OI-1227: red solo — smart-router route not called (1 failed, 13 passed)
 tests/test_worker_heartbeat.py  # OI-1227: red solo — sqlite3 FOREIGN KEY constraint failed (1 failed, 20 passed)
 tests/unit/test_codex_event_normalizer.py  # OI-1227: red solo — unknown-event type expected 'error' got 'info' (4 failed, 31 passed)

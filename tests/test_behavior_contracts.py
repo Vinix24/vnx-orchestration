@@ -48,11 +48,27 @@ def _load_routing_lanes() -> list[str]:
     return lanes
 
 
+_CLI_LANES_DIR = _ROUTING_POLICY_PATH.parent / "provider_lanes"
+
+
+def _cli_lane_names() -> set[str]:
+    """CLI lanes (kimi, codex, ...) have their own module under provider_lanes/ and run
+    through their CLI, not through the litellm/claude path that reads BehaviorContracts."""
+    return {p.stem for p in _CLI_LANES_DIR.glob("*.py") if p.stem != "__init__"}
+
+
 class TestAllKnownLanesHaveContracts:
+    def test_cli_lane_register_includes_kimi(self):
+        assert "kimi" in _cli_lane_names()
+
     def test_routing_policy_lanes_covered(self):
-        """Every lane referenced in routing_policy.yaml must have a BehaviorContract."""
+        """Every non-CLI lane referenced in routing_policy.yaml must have a BehaviorContract."""
+        cli_lanes = _cli_lane_names()
         routing_lanes = _load_routing_lanes()
-        missing = [lane for lane in routing_lanes if lane not in CONTRACTS]
+        missing = [
+            lane for lane in routing_lanes
+            if lane not in CONTRACTS and lane not in cli_lanes
+        ]
         assert missing == [], f"Lanes in routing_policy.yaml missing contracts: {missing}"
 
     def test_ten_contracts_registered(self):

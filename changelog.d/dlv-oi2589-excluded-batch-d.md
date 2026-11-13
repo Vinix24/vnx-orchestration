@@ -1,0 +1,1 @@
+- Eight more CI-excluded test files (gemini streaming, auto-report, behavior contracts, bench headless routing, build_t0_state, project-status hook, receipt classifier, wiring completeness) check current behavior again and leave the exclusion list (OI-2589, batch d).
