@@ -49,6 +49,19 @@ def _table(title: str, rows: List[Dict[str, Any]], keys: List[str]) -> List[str]
     return lines + [""]
 
 
+def _causes_table(result: Dict[str, Any]) -> List[str]:
+    keys = ["builder", "task_class", "risk_class"]
+    causes = ["review", "ci", "grens", "operator", "unknown"]
+    lines = ["### Rondes per oorzaak", ""]
+    rows = result["round_causes"]["cells"]
+    if not rows:
+        return lines + ["Geen rondes.", ""]
+    lines += ["| " + " | ".join(keys + causes) + " |", "|" + "---|" * (len(keys) + len(causes))]
+    for row in rows:
+        lines.append("| " + " | ".join(str(row[k]) for k in keys + causes) + " |")
+    return lines + [""]
+
+
 def _pct_of(n: int, count: int) -> Optional[float]:
     return round(100.0 * count / n, 1) if n >= MIN_N else None
 
@@ -110,6 +123,7 @@ def _basis_lines(result: Dict[str, Any]) -> List[str]:
              f"- Uitgesloten per reden: {json.dumps(result['exclusions'], sort_keys=True)}.",
              f"- Unattributed: {len(result['unattributed'])} {json.dumps(reasons, sort_keys=True)}.",
              f"- Mergebron: {json.dumps(result['merge_sources'], sort_keys=True)}."]
+    lines.append(f"- Oorzaak van rondes per bron: {json.dumps(result['round_causes']['sources'], sort_keys=True)}.")
     if not result["complete"]:
         lines.append(f"- Onvolledig: {result.get('rounds_error', 'onbekende reden')}.")
     return lines
@@ -118,7 +132,9 @@ def _basis_lines(result: Dict[str, Any]) -> List[str]:
 def render_markdown(result: Dict[str, Any]) -> str:
     lines = [f"# Herwerkrapport {result['project_id']}", "", "## Basis", ""] + _basis_lines(result) + [""]
     lines += ["## Per bouwer", ""]
-    lines += _table("First-pass yield", result["first_pass_yield"], ["builder", "task_class", "risk_class"])
+    lines += _table("First-pass yield (telt alleen reviewrondes)", result["first_pass_yield"],
+                    ["builder", "task_class", "risk_class"])
+    lines += _causes_table(result)
     lines += _table("Herwerk binnen 14 dagen", result["rework_14d"], ["builder", "task_class", "risk_class"])
     lines += ["## Per stoel", "", f"Doorgelaten herwerk is een bovengrens: {result['passed_through_note']}.", ""]
     lines += _table("Doorgelaten herwerk", result["passed_through"],
