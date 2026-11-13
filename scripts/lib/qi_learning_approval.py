@@ -113,7 +113,7 @@ def _torn_tail_marker(offset: int, fragment: bytes) -> Dict[str, Any]:
 
 
 def _closes(marker: Dict[str, Any], offset: int, line: bytes) -> bool:
-    """Whether ``marker`` is the line ``_append_event`` writes after a torn ``line`` (no ``\\n``) at ``offset``.
+    """Whether ``marker`` is the line ``append_usage_event`` writes after a torn ``line`` (no ``\\n``) at ``offset``.
     Integers only: ``19.0 == 19`` in Python, and the writer never writes a float or a bool there."""
     return (bool(line) and marker == _torn_tail_marker(offset, line)
             and all(type(marker[key]) is int for key in ("offset", "length")))
@@ -177,8 +177,8 @@ def _torn_tail(fd: int, size: int) -> Tuple[int, bytes]:
     return start, os.pread(fd, size - start, start)
 
 
-def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
-    """One line under the log's flock. A torn last line is first closed with ``\\n`` and followed by a
+def append_usage_event(state_dir: Path, event: Dict[str, Any]) -> None:
+    """The only way to append to ``intelligence_usage.ndjson`` (OI-2714). One line under the log's flock. A torn last line is first closed with ``\\n`` and followed by a
     ``torn_tail_closed`` marker naming its offset, length and sha256, so ``_claimed_in_log`` can tell it from a
     corrupted line. Append-only (ADR-005): no byte is removed. One fsync covers all three."""
     with open(Path(state_dir) / USAGE_LOG_NAME, "a+b") as handle:
@@ -188,6 +188,11 @@ def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
         handle.write(closed + _canonical(event).encode("utf-8") + b"\n")
         handle.flush()
         os.fsync(handle.fileno())
+
+
+def _append_event(state_dir: Path, event: Dict[str, Any]) -> None:
+    """The seam ``claim_approval`` and ``write_record`` append through; ``append_usage_event`` does the work."""
+    append_usage_event(state_dir, event)
 
 
 def _guard_writes(state_dir: Path, path: Path) -> None:
