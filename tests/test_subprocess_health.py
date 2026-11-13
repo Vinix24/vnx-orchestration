@@ -195,12 +195,15 @@ class TestReceipts:
 class TestDeliverWithRecovery:
     """Test retry logic and receipt integration."""
 
-    def test_success_on_first_attempt(self, tmp_path):
+    def test_success_on_first_attempt(self, tmp_path, monkeypatch):
         """First attempt succeeds → done receipt, returns True."""
         from subprocess_dispatch import deliver_with_recovery
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # _write_receipt goes through append_receipt_payload, which resolves its
+        # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
         with (
             mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_ok_result()) as mock_deliver,
@@ -216,12 +219,15 @@ class TestDeliverWithRecovery:
         assert receipt["status"] == "done"
         assert receipt["attempt"] == 0
 
-    def test_retry_on_failure_then_success(self, tmp_path):
+    def test_retry_on_failure_then_success(self, tmp_path, monkeypatch):
         """First attempt fails, second succeeds → done receipt."""
         from subprocess_dispatch import deliver_with_recovery
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # _write_receipt goes through append_receipt_payload, which resolves its
+        # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
         with (
             mock.patch(
@@ -242,12 +248,15 @@ class TestDeliverWithRecovery:
         assert receipt["status"] == "done"
         assert receipt["attempt"] == 1
 
-    def test_max_retries_exhausted(self, tmp_path):
+    def test_max_retries_exhausted(self, tmp_path, monkeypatch):
         """All attempts fail → failed receipt, returns False."""
         from subprocess_dispatch import deliver_with_recovery
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # _write_receipt goes through append_receipt_payload, which resolves its
+        # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
         with (
             mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()) as mock_deliver,
@@ -265,12 +274,15 @@ class TestDeliverWithRecovery:
         assert receipt["attempt"] == 2
         assert "Exhausted 2 retries" in receipt["failure_reason"]
 
-    def test_exponential_backoff(self, tmp_path):
+    def test_exponential_backoff(self, tmp_path, monkeypatch):
         """Verify backoff doubles: 30s, 60s, 120s."""
         from subprocess_dispatch import deliver_with_recovery
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # _write_receipt goes through append_receipt_payload, which resolves its
+        # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
+        monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
 
         with (
             mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()),
