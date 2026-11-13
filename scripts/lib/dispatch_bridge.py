@@ -232,28 +232,6 @@ def resolve_parent_dispatch(
     return explicit
 
 
-def _stage_lineage(
-    dispatch_id: str,
-    work_ref: Optional[str],
-    parent_dispatch: Optional[str],
-    origin_oi: Optional[str],
-    origin_pr: Optional[int],
-    root: Path,
-) -> "tuple[Optional[str], Optional[str], dict]":
-    """``(parent_dispatch, edge_kind, evidence)``: the named origin (ADR-071 besluit 3) first, then
-    ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin."""
-    from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
-
-    origin, kind, evidence = resolve_origin(
-        origin_oi, origin_pr, state_dir=root / "state", project_root=_project_root(),
-    )
-    explicit = merge_origin_into_parent(dispatch_id, origin, parent_dispatch)
-    parent = resolve_parent_dispatch(dispatch_id, work_ref, explicit)
-    if parent and not evidence:
-        evidence = {"parent_dispatch": parent} if explicit else {"work_ref": (work_ref or "").strip()}
-    return parent, kind, evidence
-
-
 def _require_round_cause(raw: Optional[str]) -> Optional[str]:
     """The round cause (ADR-071), stripped and lowercased; a value outside ROUND_CAUSES is refused."""
     cause = (raw or "").strip().lower()
@@ -264,14 +242,43 @@ def _require_round_cause(raw: Optional[str]) -> Optional[str]:
     return cause
 
 
-def _edge_predecessor(dispatch_id: str, parent_dispatch: Optional[str]) -> "tuple[Optional[str], dict]":
-    """The predecessor of the declared edge: the spec's parent, else the delivery of a round/split id."""
+def _stage_lineage(
+    dispatch_id: str,
+    work_ref: Optional[str],
+    parent_dispatch: Optional[str],
+    origin_oi: Optional[str],
+    origin_pr: Optional[int],
+    root: Path,
+    round_cause: Optional[str] = None,
+) -> "tuple[Optional[str], Optional[str], dict, Optional[str]]":
+    """``(parent_dispatch, edge_kind, evidence, edge_parent)``: the named origin (ADR-071 besluit 3) first,
+    then ``resolve_parent_dispatch``'s one rule against ``work_ref``. ``edge_kind`` is None without an origin.
+    ``evidence`` carries the validated ``round_cause``. ``edge_parent`` is the spec's parent, else the
+    delivery of a round or split id (the spec itself keeps no parent then)."""
     from rework_metrics import delivery_of
+    from stage_origin import merge_origin_into_parent, resolve_origin  # noqa: PLC0415
 
-    if parent_dispatch:
-        return parent_dispatch, {}
+    cause = _require_round_cause(round_cause)
+
+    origin, kind, evidence = resolve_origin(
+        origin_oi, origin_pr, state_dir=root / "state", project_root=_project_root(),
+    )
+    explicit = merge_origin_into_parent(dispatch_id, origin, parent_dispatch)
+    parent = resolve_parent_dispatch(dispatch_id, work_ref, explicit)
+    if parent and not evidence:
+        evidence = {"parent_dispatch": parent} if explicit else {"work_ref": (work_ref or "").strip()}
     delivery = delivery_of(dispatch_id)
-    return (delivery, {"delivery": delivery}) if delivery != dispatch_id else (None, {})
+    edge_parent = parent or (delivery if delivery != dispatch_id else None)
+    if edge_parent and not evidence:
+        evidence = {"delivery": edge_parent}
+    return parent, kind, ({**evidence, "round_cause": cause} if cause else evidence), edge_parent
+
+
+def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str]) -> dict:
+    """The optional origin and round-cause keys of the spec; each only when set."""
+    return {**({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+            **({"origin_pr": origin_pr} if origin_pr else {}),
+            **({"round_cause": round_cause} if round_cause else {})}
 
 
 class UnknownSkillError(ValueError):
@@ -454,9 +461,6 @@ def stage_spec_bundle(
     # Rule 11 enforces, from the same constants (dispatch_spec).
     _require_deadline_in_range(deadline_seconds)
 
-    # 1a-bis. the round cause is checked before any write (ADR-071: review, ci, grens, operator).
-    round_cause = _require_round_cause(round_cause)
-
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
@@ -474,8 +478,8 @@ def stage_spec_bundle(
 
     # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
     # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
-    parent_dispatch, edge_kind, edge_evidence = _stage_lineage(
-        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root,
+    parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
+        dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
     )
 
     # 3. anchor the pending root and create the bundle dir (symlink-escape guards).
@@ -534,17 +538,13 @@ def stage_spec_bundle(
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
-        **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
-        **({"origin_pr": origin_pr} if origin_pr else {}),
-        **({"round_cause": round_cause} if round_cause else {}),
+        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause")),
     }
     spec_file = bundle_dir / "dispatch-spec.json"
     atomic_write_json(spec_file, spec_payload)
-    predecessor, suffix_evidence = _edge_predecessor(dispatch_id, spec_payload["parent_dispatch"])
     record_declared_edge(
         data_root=root, project_id=effective_project_id, dispatch_id=dispatch_id,
-        predecessor=predecessor, kind=edge_kind,
-        evidence={**(edge_evidence or suffix_evidence), **({"round_cause": round_cause} if round_cause else {})},
+        predecessor=edge_parent, kind=edge_kind, evidence=edge_evidence,
     )
     return spec_file
 
@@ -955,9 +955,7 @@ def _main_legacy(argv: Optional[list] = None) -> int:
     parser.add_argument("--allow-headless", action="store_true", dest="allow_headless")
     parser.add_argument("--headless-reason", default=None, dest="headless_reason")
     parser.add_argument(
-        "--post-merge-verification",
-        action="store_true",
-        dest="post_merge_verification",
+        "--post-merge-verification", action="store_true", dest="post_merge_verification",
         help="Mark this dispatch as a post-merge verification: the door fails "
              "closed (refuses) while the local main checkout lags origin/main.",
     )
