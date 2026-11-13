@@ -79,6 +79,34 @@ def test_corpus_class_distribution_noise_and_coverage(tmp_path, inventory):
     assert summary["noise_reasons"] == {"pytest": 1, "foreign_project": 1}
     assert summary["unreadable"] == 1
     assert summary["coverage"] == pytest.approx(2 / 3, abs=5e-5)
+def _ci_receipt(dispatch_id, status, ingested_at, **extra):
+    body = {"dispatch_id": dispatch_id, "status": status,
+            "ingested_at": ingested_at.isoformat()}
+    body.update(extra)
+    return body
+
+
+def test_contract_invalid_with_only_ingested_at_is_counted_in_the_window(tmp_path, inventory):
+    state_dir = tmp_path / "state"
+    _write_receipts(state_dir, _ci_receipt("d-ci", "contract_invalid", NOW - timedelta(hours=1)))
+    summary = inventory.corpus_summary(state_dir, "tproj", now=NOW)
+    assert summary["unreadable"] == 0 and summary["dispatches"] == 1
+
+
+def test_contract_invalid_with_ingested_at_outside_the_window_is_not_counted(tmp_path, inventory):
+    state_dir = tmp_path / "state"
+    _write_receipts(state_dir, _ci_receipt("d-ci", "contract_invalid", NOW - timedelta(hours=48)))
+    summary = inventory.corpus_summary(state_dir, "tproj", now=NOW)
+    assert summary["unreadable"] == 0 and summary["dispatches"] == 0
+
+
+def test_failed_receipt_without_timestamp_stays_unreadable_despite_ingested_at(tmp_path, inventory):
+    state_dir = tmp_path / "state"
+    _write_receipts(state_dir, _ci_receipt("d-failed", "failed", NOW - timedelta(hours=1)))
+    summary = inventory.corpus_summary(state_dir, "tproj", now=NOW)
+    assert summary["unreadable"] == 1 and summary["dispatches"] == 0
+
+
 def test_corpus_fails_closed_without_usable_evidence(tmp_path, inventory):
     missing = inventory.corpus_summary(tmp_path / "state", "tproj", now=NOW)
     assert missing["error"] == "missing" and missing["coverage"] is None

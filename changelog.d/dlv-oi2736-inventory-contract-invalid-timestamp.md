@@ -1,0 +1,1 @@
+- `vnx learning status` dates a contract_invalid receipt in the corpus block by its effective timestamp (`ingested_at` before `timestamp`), so a receipt that carries only `ingested_at` is counted in the window instead of as unreadable (OI-2736).
