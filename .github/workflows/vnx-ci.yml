@@ -595,32 +595,7 @@ jobs:
           rsync -a ./skills/ "$GITHUB_WORKSPACE/.claude/skills/"
 
       - name: Install ripgrep
-        run: |
-          set -euo pipefail
-          if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping download"
-            exit 0
-          fi
-          # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
-          # never fires, and apt-get against azure.archive.ubuntu.com stalls
-          # intermittently and hangs the job even with the timeout+retry from
-          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
-          # 32291338049 (main) both died in this exact step with exit 124, on
-          # different jobs each time. x86_64-unknown-linux-musl is statically
-          # linked — no glibc dependency, so it runs unchanged across any
-          # runner base-image drift.
-          RG_VERSION="15.2.0"
-          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
-          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
-          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
-          mkdir -p "$RG_DIR/bin"
-          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
-          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
-          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
-          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
-          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/install_ripgrep.sh
 
       - name: Legacy path gate
         run: |
@@ -853,32 +828,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install ripgrep
-        run: |
-          set -euo pipefail
-          if command -v rg >/dev/null 2>&1; then
-            echo "ripgrep already present on the runner image, skipping download"
-            exit 0
-          fi
-          # Pinned release + sha256-verified static binary instead of apt-get
-          # (OI-1362): ripgrep ships on NO ubuntu runner image, so this skip-tak
-          # never fires, and apt-get against azure.archive.ubuntu.com stalls
-          # intermittently and hangs the job even with the timeout+retry from
-          # #1608 — measured 2026-08-18/19: run 32294142912 (PR #1609) and run
-          # 32291338049 (main) both died in this exact step with exit 124, on
-          # different jobs each time. x86_64-unknown-linux-musl is statically
-          # linked — no glibc dependency, so it runs unchanged across any
-          # runner base-image drift.
-          RG_VERSION="15.2.0"
-          RG_SHA256="33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c"
-          RG_ARCHIVE="ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl.tar.gz"
-          RG_URL="https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/${RG_ARCHIVE}"
-          RG_DIR="${RUNNER_TEMP:-/tmp}/ripgrep-install"
-          mkdir -p "$RG_DIR/bin"
-          curl -sSL --retry 3 --fail -o "$RG_DIR/$RG_ARCHIVE" "$RG_URL"
-          echo "${RG_SHA256}  ${RG_DIR}/${RG_ARCHIVE}" | sha256sum -c -
-          tar -xzf "$RG_DIR/$RG_ARCHIVE" -C "$RG_DIR"
-          install -m 755 "$RG_DIR/ripgrep-${RG_VERSION}-x86_64-unknown-linux-musl/rg" "$RG_DIR/bin/rg"
-          echo "$RG_DIR/bin" >> "$GITHUB_PATH"
+        run: bash scripts/ci/install_ripgrep.sh
 
       - name: Ban repo-local VNX_STATE_DIR pins
         run: |
