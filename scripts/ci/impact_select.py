@@ -248,9 +248,30 @@ def _reaching(edges: dict[str, set[str]], targets: set[str]) -> set[str]:
     return seen
 
 
-def _result(graph: dict, exclusions: set[str], selected, reason, unreached) -> dict:
+def conftest_closure(graph: dict) -> set[str]:
+    """Repo files reached transitively from every ``conftest.py`` under ``tests/``.
+
+    Autouse fixtures import modules such as ``pr_merge`` inside their bodies, so
+    every test runs them; the graph draws no edge from a test to that closure
+    (OI-2788).  The import resolution is the graph's own, function bodies included.
+    """
+    starts = {n for n in graph["nodes"] if n.startswith("tests/") and n.rsplit("/", 1)[-1] == classifier.CONFTEST_NAME}
+    seen: set[str] = set()
+    queue = deque(starts)
+    while queue:
+        for dst in graph["edges"].get(queue.popleft(), ()):
+            if dst not in seen:
+                seen.add(dst)
+                queue.append(dst)
+    return seen
+
+
+def _result(graph: dict, exclusions: set[str], selected, reason, unreached, changed=()) -> dict:
     universe = set(graph["tests"])
+    closure = conftest_closure(graph)
     return {
+        "conftest_closure_version": hashlib.sha256("\n".join(sorted(closure)).encode()).hexdigest(),
+        "conftest_reached": any(p in closure for p in changed),
         "scope": "full" if reason else "impact",
         "expand_reason": reason,
         "selected": sorted(selected),
@@ -278,11 +299,11 @@ def select(root: Path, paths) -> dict:
         reasons.add("parse_error")
     reason = next((r for r in EXPAND_RULES if r in reasons), None)
     if reason:
-        return _result(graph, exclusions, universe, reason, [])
+        return _result(graph, exclusions, universe, reason, [], changed)
     targets = {p for p in changed if p in graph["nodes"]}
     selected = _reaching(graph["edges"], targets) & universe
     unreached = {p for p in targets if p not in universe and not (_reaching(graph["edges"], {p}) & universe)}
-    return _result(graph, exclusions, selected, None, unreached)
+    return _result(graph, exclusions, selected, None, unreached, changed)
 
 
 def _read_paths(args: list[str]) -> list[str]:
