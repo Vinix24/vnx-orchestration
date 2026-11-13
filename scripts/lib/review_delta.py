@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
 from review_changekind import ANCHOR_PRESENT, NO_CODE_CHANGE, REWORK, TRIVIAL_REBASE, ChangeKindRecord, Interdiff
 from review_findings import STATUS_FIXED, STATUS_OPEN, STATUS_REGRESSED, STATUS_UNVERIFIABLE, blocks
@@ -118,16 +118,23 @@ def _interdiff_block(diff: Interdiff) -> List[str]:
     return lines or ["  (no paths differ)"]
 
 
-def build_delta_prompt(record: DeltaInput) -> str:
-    """The delta brief; deterministic. Raises :class:`DeltaRefused` when a full review is forced."""
+# (untrusted content, verdict contract, instruction) -> the prompt; the gate runner's reviewer assembly
+Assemble = Callable[[str, str, str], str]
+
+
+def _plain(content: str, contract: str, instruction: str) -> str:
+    return "\n\n".join([instruction, content, contract])
+
+
+def build_delta_prompt(record: DeltaInput, assemble: Assemble = _plain) -> str:
+    """The delta brief through ``assemble``; deterministic. The deciding round and the shadow pass the reviewer assembly
+    of the full review, so the role policy and the untrusted-data rules stay. Raises :class:`DeltaRefused` when a full review is forced."""
     reason = full_review_reason(record)
     if reason is not None:
         raise DeltaRefused(reason)
     findings = sorted(record.open_findings, key=lambda f: f.id)
     callers = sorted({(c.path, c.symbol) for c in record.callers})
-    parts = [
-        f"You review a follow-up head of PR #{int(record.pr_number)} as seat {disarm(record.seat)}. "
-        "This is a fresh verdict on the exact head, not a carried one. Read the repo as it is on that head.",
+    content = [
         "Parent chain:\n"
         f"  parent head: {disarm(record.parent_head)}\n  parent verdict: {disarm(record.parent_verdict)}\n"
         f"  parent round: {disarm(record.parent_round_ref)}\n  new head: {disarm(record.head)}",
@@ -136,17 +143,20 @@ def build_delta_prompt(record: DeltaInput) -> str:
         "Open findings, by id:\n" + ("\n".join(
             f"  - {disarm(f.id)} [{disarm(f.severity)}] {disarm(f.path)} :: {disarm(f.symbolic_context) or '<module>'}: "
             f"{disarm(f.text)}" for f in findings) or "  (none)"),
-        "For every id above answer exactly one status: fixed, open or regressed. An id you leave out counts as open.",
-        "Judge the delta and every caller of what the delta touches, not only the changed lines. A changed caller can "
-        "misuse unchanged code. Callers at depth 1:\n"
-        + ("\n".join(f"  - {disarm(p)} :: {disarm(s)}" for p, s in callers) or "  (none found)"),
+        "Callers at depth 1:\n" + ("\n".join(f"  - {disarm(p)} :: {disarm(s)}" for p, s in callers) or "  (none found)"),
+    ]
+    return assemble(
+        "\n\n".join(content),
         "Answer with exactly one fenced block in the whole answer and nothing after it. Any other fenced block, "
         "before or after it, or any text after it, makes the verdict fail:\n"
         f"```{FENCE}\n"
         '{"verdict": "pass or fail", "findings": [{"id": "<sent id>", "status": "fixed|open|regressed"}], '
         '"new_findings": [{"file_path": "", "line": 0, "severity": "", "message": ""}]}\n```\n',
-    ]
-    return "\n\n".join(parts)
+        f"You review a follow-up head of PR #{int(record.pr_number)} as seat {disarm(record.seat)}. "
+        "This is a fresh verdict on the exact head, not a carried one. Read the repo as it is on that head. "
+        "For every id in the untrusted-data block answer exactly one status: fixed, open or regressed. An id you leave "
+        "out counts as open. Judge the delta and every caller of what the delta touches, not only the changed lines. "
+        "A changed caller can misuse unchanged code.")
 
 
 def _failed(reason: str, sent_ids: Sequence[str]) -> DeltaVerdict:

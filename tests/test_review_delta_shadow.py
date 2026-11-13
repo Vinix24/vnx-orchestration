@@ -59,7 +59,8 @@ def shadow(tmp_path, monkeypatch):
             return {"status": "completed", "stdout": answer or _answer("fixed"), "duration_seconds": 1.5}
 
         request = {"pr_number": PR, "commit_sha": HEAD_B, "branch": BRANCH, "risk_class": "medium", **payload}
-        return ds.run_shadow(request_payload=request, state_dir=state, project_root=tmp_path, run=run)
+        return ds.run_shadow(request_payload=request, state_dir=state, project_root=tmp_path, run=run,
+                             assemble=lambda c, k, i: f"{i}\n{c}\n{k}")
 
     go.calls = calls
     return go

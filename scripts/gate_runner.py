@@ -21,7 +21,7 @@ import sys
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -195,6 +195,15 @@ def resolve_review_interpreter() -> Optional[str]:
             proc.kill()
             proc.communicate()
     return None
+
+
+def _assemble_reviewer_prompt(pr: str, diff_text: str, verdict_contract: str, instruction: str) -> str:
+    """The codex reviewer prompt: untrusted-data sandwich (OI-1442), reviewer role policy and ADR rules, tests block.
+    The full review and the delta round (DR-6, deciding and shadow) all build it here."""
+    l3 = build_review_prompt(gate_name="reviewer", pr=pr, diff_text=diff_text, verdict_contract=verdict_contract,
+                             max_chars=0, agentic=True, instruction=instruction)
+    assembled = PromptAssembler().assemble(dispatch_metadata={"role": "reviewer"}, instruction=l3)
+    return format_for_provider(assembled, "codex")["pipe_input"] + _review_tests_block(resolve_review_interpreter())
 
 
 def _review_tests_block(interpreter: Optional[str]) -> str:
@@ -1105,6 +1114,7 @@ class GateRunner:
         if gate == "codex_gate" and review_scope.active_review_scope(self._state_dir).runs_shadow:  # DR-4b/DR-6: only under delta_shadow or delta; never changes ``record`` (fail-open)
             review_delta_shadow.run_shadow(
                 request_payload=request_payload, state_dir=self._state_dir, project_root=self._project_root,
+                assemble=partial(_assemble_reviewer_prompt, str(request_payload.get("pr_number"))),
                 run=lambda delta_prompt, cwd: self._run_with_stall_detection(
                     gate=gate, binary=binary, prompt=delta_prompt, timeout=gate_timeout(gate),
                     stall_threshold=gate_stall_threshold(gate), request_payload=dict(request_payload), cwd=cwd))
@@ -1476,27 +1486,14 @@ class GateRunner:
         diff_content = GateRunner._fetch_gh_pr_diff(pr_number)
         # OI-1851: uncapped, but the record still carries the real size.
         request_payload["diff_coverage"] = gate_depth.diff_coverage(diff_content, 0)
-        l3 = build_review_prompt(
-            gate_name="reviewer",
-            pr=str(pr_number),
-            diff_text=diff_content,
-            verdict_contract=_REVIEWER_VERDICT_TEMPLATE,
-            max_chars=0,
-            agentic=True,
+        return _assemble_reviewer_prompt(
+            str(pr_number), diff_content, _REVIEWER_VERDICT_TEMPLATE,
             instruction=(
                 f"Review the PR diff in the untrusted-data block, on branch {branch} "
                 f"(risk: {risk}). "
                 "Findings MUST cite specific NEW lines from this diff — "
                 "do not flag pre-existing code."
             ),
-        )
-        assembled = PromptAssembler().assemble(
-            dispatch_metadata={"role": "reviewer"},
-            instruction=l3,
-        )
-        return (
-            format_for_provider(assembled, "codex")["pipe_input"]
-            + _review_tests_block(resolve_review_interpreter())
         )
 
     @staticmethod
