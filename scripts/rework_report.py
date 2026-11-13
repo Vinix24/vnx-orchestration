@@ -187,6 +187,7 @@ def main(argv: "list[str] | None" = None) -> int:
     args = parser.parse_args(argv)
 
     from project_root import resolve_central_data_dir, resolve_project_id, resolve_project_root
+    from provider_costs import costs_path_in
     from review_rounds import ledger_path
     from rework_metrics import compute_metrics
 
@@ -196,13 +197,15 @@ def main(argv: "list[str] | None" = None) -> int:
     except (RuntimeError, ValueError) as exc:
         print(f"rework_report: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    state = (Path(args.data_dir) if args.data_dir else resolve_central_data_dir(project_id)) / "state"
+    data_dir = Path(args.data_dir) if args.data_dir else resolve_central_data_dir(project_id)
+    state = data_dir / "state"
     receipts, db = state / "t0_receipts.ndjson", state / "quality_intelligence.db"
     missing = [str(p) for p in (receipts, db) if not p.is_file()]
     if missing:
         print(f"rework_report: missing input: {', '.join(missing)}", file=sys.stderr)
         return EXIT_ERROR
-    result = compute_metrics(project_id, receipts, ledger_path(state / "review_gates"), db, as_of)
+    result = compute_metrics(project_id, receipts, ledger_path(state / "review_gates"), db, as_of,
+                             ledger_path=costs_path_in(data_dir))
     text = json.dumps(result, sort_keys=True, indent=2) + "\n" if args.json else render_markdown(result)
     if args.out:
         _write_atomic(Path(args.out), text)

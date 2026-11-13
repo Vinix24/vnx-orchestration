@@ -252,3 +252,33 @@ def test_missing_input_fails_closed(tmp_path, remove):
     (w.state / remove).unlink()
     proc = subprocess.run([sys.executable, str(SCRIPT), "--json", *args], capture_output=True, text=True)
     assert proc.returncode == 1 and "missing input" in proc.stderr and proc.stdout == ""
+
+
+def _cost_ledger(w, *deliveries):
+    events = w.data / "events"
+    events.mkdir(exist_ok=True)
+    rows = [{"schema": "provider_cost_run/1", "record_id": f"r{i}", "run_id": f"{PID}:envelope_govern:{did}:1",
+             "project_id": PID, "kind": "charge", "role": "builder", "provider": "claude", "model": "sonnet",
+             "tokens": {"input_uncached": 1, "cache_hit": 2, "cache_write_5m": 0, "cache_write_1h": 0, "output": 3},
+             "usage_completeness": "complete", "cost_usd": 0.0, "cost_source": "price_table@2026-09-29",
+             "billing": "subscription", "api_equivalent_usd": 1.5} for i, did in enumerate(deliveries)]
+    (events / "provider_costs.ndjson").write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_json_carries_cost(tmp_path):
+    w = World(tmp_path)
+    did = w.delivery("sonnet", "01_code_generation", "medium")
+    w.delivery("sonnet", "01_code_generation", "medium")
+    _cost_ledger(w, did)
+    proc = w.cli("--json")
+    assert proc.returncode == 0, proc.stderr
+    cost = json.loads(proc.stdout)["cost"]
+    assert cost["cells"][0]["n"] == 2 and cost["cells"][0]["n_complete"] == 1
+    assert cost["gaps"]["incomplete_deliveries"][0]["delivery"] != did
+
+
+def test_json_names_a_missing_cost_ledger(tmp_path):
+    w = World(tmp_path)
+    w.cohort("sonnet", "01_code_generation", "medium", 2, 0)
+    cost = json.loads(w.cli("--json").stdout)["cost"]
+    assert cost["cells"] == [] and "cost ledger not found" in cost["ledger_error"]
