@@ -113,7 +113,7 @@ def _probe_columns(conn: sqlite3.Connection) -> tuple:
     """Which optional ``dispatch_metadata`` columns this store has.
 
     Order: provider, model, project_id, outcome_report_path, outcome_status,
-    completed_at, session_id, parent_dispatch. A column-less (old) store reads
+    completed_at, session_id, parent_dispatch, difficulty_json. A column-less (old) store reads
     False for the missing ones and is left untouched.
     """
     cols = {row[1] for row in conn.execute("PRAGMA table_info(dispatch_metadata)").fetchall()}
@@ -121,6 +121,7 @@ def _probe_columns(conn: sqlite3.Connection) -> tuple:
         name in cols for name in (
             "provider", "model", "project_id", "outcome_report_path",
             "outcome_status", "completed_at", "session_id", "parent_dispatch",
+            "difficulty_json",
         )
     )
 
@@ -141,6 +142,7 @@ def upsert_dispatch_provider_row(
     project_id: Optional[str] = None,
     session_id: Optional[str] = None,
     parent_dispatch: Optional[str] = None,
+    difficulty_json: Optional[str] = None,
     timeout: float = DEFAULT_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
     """Create-if-absent and provider/model-stamp a ``dispatch_metadata`` row.
@@ -160,6 +162,9 @@ def upsert_dispatch_provider_row(
                Fill-once: ``COALESCE(parent_dispatch, ?)`` never overwrites an
                existing parent, and a write without a parent never clears one.
                Ignored when the column is absent.
+        difficulty_json: The difficulty recorded at staging (herwerk, ADR-071).
+               Fill-once exactly like ``parent_dispatch``; ignored when the
+               column is absent (store below migration v37).
         timeout: Total seconds to wait for sqlite locks before giving up on the
                whole write. Passed to ``sqlite3.connect`` as the initial busy
                timeout, then re-armed via ``PRAGMA busy_timeout`` before every
@@ -258,7 +263,7 @@ def upsert_dispatch_provider_row(
         if not _rearm_busy_timeout(conn):
             return _bail("schema probe")
         (has_provider, has_model, has_project, has_report_path, has_outcome,
-         has_completed, has_session_id, has_parent) = _probe_columns(conn)
+         has_completed, has_session_id, has_parent, has_difficulty) = _probe_columns(conn)
 
         # Tenant-stamp only when the column exists (old column-less stores are
         # left untouched). Fail-closed: an unresolvable tenant logs + skips the
@@ -287,6 +292,9 @@ def upsert_dispatch_provider_row(
         if has_parent and parent_dispatch:
             insert_cols.append("parent_dispatch")
             insert_vals.append(parent_dispatch)
+        if has_difficulty and difficulty_json:
+            insert_cols.append("difficulty_json")
+            insert_vals.append(difficulty_json)
         if has_project:
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
@@ -328,6 +336,9 @@ def upsert_dispatch_provider_row(
         if has_parent and parent_dispatch:
             set_clauses.append("parent_dispatch = COALESCE(parent_dispatch, ?)")
             params.append(parent_dispatch)
+        if has_difficulty and difficulty_json:
+            set_clauses.append("difficulty_json = COALESCE(difficulty_json, ?)")
+            params.append(difficulty_json)
         set_clauses.append("role = COALESCE(role, ?)")
         params.append(role or None)
         set_clauses.append("gate = COALESCE(gate, ?)")
@@ -414,6 +425,7 @@ def stamp_lane_start(
     pr_id: Optional[str] = None,
     parent_dispatch: Optional[str] = None,
     gate: Optional[str] = None,
+    difficulty_json: Optional[str] = None,
 ) -> bool:
     """Write the dispatch's ``dispatch_metadata`` row at the start of a lane.
 
@@ -434,6 +446,7 @@ def stamp_lane_start(
             gate=gate or None,
             pr_id=pr_id,
             parent_dispatch=(parent_dispatch or "").strip() or None,
+            difficulty_json=(difficulty_json or "").strip() or None,
         )
     except Exception as exc:  # vnx-silent-except: the lane start must never fail on a metadata write
         logger.warning(

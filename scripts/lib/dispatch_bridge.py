@@ -35,7 +35,7 @@ import logging
 import shutil
 import sys
 from pathlib import Path, PurePosixPath
-from typing import Optional
+from typing import Any, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -281,6 +281,41 @@ def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], roun
             **({"round_cause": round_cause} if round_cause else {})}
 
 
+DIFFICULTY_KEYS = ("line_budget", "plan_complexity", "route_reason", "file_count")
+PLAN_COMPLEXITIES = ("low", "medium", "high")
+ROUTE_REASON_MAX = 200
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _require_difficulty(difficulty: Optional[Mapping[str, Any]], path_count: int) -> dict:
+    """The spec's ``difficulty`` block (herwerk ADR-071, decision rule part b), validated.
+
+    Every key is present (``None`` for a value not given); ``file_count`` defaults to the number of
+    dispatch paths. An unknown key, a wrong type or a value out of range is refused, never dropped.
+    """
+    given = dict(difficulty) if difficulty is not None else {}
+    unknown = sorted(str(k) for k in given if k not in DIFFICULTY_KEYS)
+    if unknown:
+        raise ValueError(f"difficulty has unknown keys {unknown}; allowed: {', '.join(DIFFICULTY_KEYS)}")
+    budget, cx = given.get("line_budget"), given.get("plan_complexity")
+    reason, count = given.get("route_reason"), given.get("file_count", path_count)
+    if budget is not None and not (_is_int(budget) and budget > 0):
+        raise ValueError(f"difficulty.line_budget must be an int > 0, got {budget!r}")
+    if cx is not None and cx not in PLAN_COMPLEXITIES:
+        raise ValueError(f"difficulty.plan_complexity must be one of {', '.join(PLAN_COMPLEXITIES)}, got {cx!r}")
+    if reason is not None and not (isinstance(reason, str) and reason.strip() and len(reason) <= ROUTE_REASON_MAX):
+        raise ValueError(f"difficulty.route_reason must be a non-empty str of at most {ROUTE_REASON_MAX} chars")
+    if count is None:
+        count = path_count
+    if not (_is_int(count) and count >= 0):
+        raise ValueError(f"difficulty.file_count must be an int >= 0, got {count!r}")
+    return {"schema": 1, "line_budget": budget, "plan_complexity": cx,
+            "route_reason": reason, "file_count": count}
+
+
 class UnknownSkillError(ValueError):
     """A staged spec named a skill that exists in neither of the two skill trees.
 
@@ -524,8 +559,13 @@ def stage_spec_bundle(
     origin_oi: Optional[str] = None,
     origin_pr: Optional[int] = None,
     round_cause: Optional[str] = None,
+    difficulty: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
+
+    ``difficulty`` is validated like ``deadline_seconds`` and recorded on the spec; staging writes no
+    ``dispatch_metadata`` row (ADR-071 besluit 2: the row is born at the lane start, so a dispatch that
+    never fires leaves no row without an outcome).
 
     Bundle layout: <data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
@@ -537,6 +577,7 @@ def stage_spec_bundle(
     # 1a. deadline bounds validated at the trust boundary (this module is the FIRST writer of a
     # dispatch-spec.json): the validate() Rule 11 range, from the same constants (dispatch_spec).
     _require_deadline_in_range(deadline_seconds)
+    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths))
 
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
@@ -615,6 +656,7 @@ def stage_spec_bundle(
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
         **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause")),
+        "difficulty": difficulty_block,
         **style_fields,
     }
     spec_file = bundle_dir / "dispatch-spec.json"

@@ -182,3 +182,64 @@ def test_empty_required_field_is_swallowed_not_raised(tmp_path: Path) -> None:
     state_dir = _state(tmp_path)
     assert stamp_lane_start(state_dir, dispatch_id="", terminal="T1", provider="claude") is False
     assert _rows(state_dir, "") == []
+
+
+# --- difficulty_json (herwerk-per-model-en-reviewer): migration v37 and the fill-once writer ---
+
+def _v36_state(tmp_path: Path) -> Path:
+    state_dir = tmp_path / ".vnx-data" / "vnx-dev" / "state"
+    state_dir.mkdir(parents=True)
+    before = {k: v for k, v in quality_db_init.MIGRATIONS.items() if k < 37}
+    with patch.dict(quality_db_init.MIGRATIONS, before, clear=True):
+        assert quality_db_init.bootstrap_qi_db(
+            state_dir / "quality_intelligence.db", REPO / "schemas" / "quality_intelligence.sql")
+    return state_dir
+
+
+def _cols(state_dir: Path) -> set:
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(dispatch_metadata)")}
+    finally:
+        conn.close()
+
+
+def test_v37_adds_the_column_keeps_rows_and_is_idempotent(tmp_path: Path) -> None:
+    state_dir = _v36_state(tmp_path)
+    assert "difficulty_json" not in _cols(state_dir)
+    assert stamp_lane_start(state_dir, dispatch_id="dlv-old", terminal="T1", provider="claude")
+    conn = sqlite3.connect(str(state_dir / "quality_intelligence.db"))
+    try:
+        quality_db_init._migrate_v37(conn)
+        quality_db_init._migrate_v37(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    assert "difficulty_json" in _cols(state_dir)
+    rows = _rows(state_dir, "dlv-old")
+    assert len(rows) == 1 and rows[0]["difficulty_json"] is None
+
+
+def test_difficulty_is_stored_and_fill_once(tmp_path: Path) -> None:
+    state_dir = _state(tmp_path)
+    kw = dict(dispatch_id="dlv-diff", terminal="T1", provider="claude", model="sonnet")
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 3}', **kw)
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 9}', **kw)
+    assert stamp_lane_start(state_dir, **kw)
+    assert _rows(state_dir, "dlv-diff")[0]["difficulty_json"] == '{"file_count": 3}'
+
+
+def test_difficulty_fills_an_empty_slot_on_an_existing_row(tmp_path: Path) -> None:
+    state_dir = _state(tmp_path)
+    kw = dict(dispatch_id="dlv-late", terminal="T1", provider="claude")
+    assert stamp_lane_start(state_dir, **kw)
+    assert stamp_lane_start(state_dir, difficulty_json='{"file_count": 1}', **kw)
+    assert _rows(state_dir, "dlv-late")[0]["difficulty_json"] == '{"file_count": 1}'
+
+
+def test_store_without_the_column_takes_the_row_without_it(tmp_path: Path) -> None:
+    state_dir = _v36_state(tmp_path)
+    assert stamp_lane_start(state_dir, dispatch_id="dlv-v36", terminal="T1", provider="claude",
+                            difficulty_json='{"file_count": 2}') is True
+    assert len(_rows(state_dir, "dlv-v36")) == 1
+    assert "difficulty_json" not in _cols(state_dir)
