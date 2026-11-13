@@ -877,8 +877,7 @@ def _handle_dirty_substantive(
             "salvaged_untracked_files": list(untracked_paths[:25]),
             "salvaged_untracked_count": len(untracked_paths),
             "salvaged": pushed,
-            "salvage_pr_number": pr_number,
-            **_worktree_kept_fields(wt_path, pushed),
+            "salvage_pr_number": pr_number, **_worktree_kept_fields(wt_path, pushed),
         },
     )
     return PrEnforcementResult(
