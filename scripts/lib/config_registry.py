@@ -118,8 +118,10 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
         "Comma list passed as --setting-sources to headless claude builders (the claude_headless "
         "lane). Default project,local: the builder starts without the operator's user-level "
-        "CLAUDE.md, rules, skills, plugins and hooks, and carries only effortLevel and "
-        "cleanupPeriodDays from the user settings file. user,project,local restores today's "
+        "CLAUDE.md, rules, skills, plugins and hooks. It carries cleanupPeriodDays from the user "
+        "settings file and claudeMdExcludes for the user-level CLAUDE.md and rules that the "
+        "walk-up from the worktree to ~ would load as project memory; effortLevel is not carried. "
+        "user,project,local restores today's "
         "argv exactly (no flag). An invalid value falls back to the default and is logged.",
         approval=True, subsystem="headless-builder-context", status="ACTIVATE",
         read_site_wired=True),
