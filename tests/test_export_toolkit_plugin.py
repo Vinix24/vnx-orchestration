@@ -1197,3 +1197,44 @@ def test_the_real_meter_has_what_the_export_needs():
     manifest = json.loads((REAL_METER / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
     assert manifest["name"] == "context-meter" and manifest["description"]
     assert (REAL_METER / "tests" / "test_isolation.py").is_file()
+
+
+# --- OI-2154: a committed build artefact is refused, the scan reads every published file
+
+
+@pytest.mark.parametrize("rel,text", [
+    ("hooks/__pycache__/identity.txt", "%s\n" % LEAK),
+    ("hooks/run.cpython-312.pyc", "compiled\n"),
+    ("hooks/run.pyo", "optimised\n"),
+    (".pytest_cache/v/cache/lastfailed", "{}\n"),
+])
+def test_a_committed_build_artefact_is_refused_and_named(source, target, rel, text):
+    commit_source(source, files={rel: text})
+    sha = git(source, "rev-parse", "HEAD")
+    before = checkout_state(target)
+    refs = branch_tips(target)
+    result = export(source, target)
+    assert result.returncode != 0, result.stdout
+    assert "build artefact in the export source at %s: %s/%s" % (sha, OWNED, rel) in result.stderr
+    assert BRANCH not in branches(target)
+    assert branch_tips(target) == refs
+    assert checkout_state(target) == before
+
+
+def test_every_build_artefact_is_named_in_one_refusal(source, target):
+    commit_source(source, files={"a/__pycache__/x.txt": "x\n", "b.pyc": "y\n"})
+    result = export(source, target)
+    assert result.returncode != 0
+    assert "%s/a/__pycache__/x.txt" % OWNED in result.stderr and "%s/b.pyc" % OWNED in result.stderr
+
+
+def test_a_blob_that_is_not_utf8_is_still_scanned(source, target):
+    base = Path(source) / OWNED
+    path = base / "hooks" / "binary.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe bad byte then " + LEAK.encode() + b"\n")
+    commit_source(source)
+    result = export(source, target)
+    assert result.returncode == 1, result.stdout
+    assert "hooks/binary.txt:1" in result.stderr
+    assert BRANCH not in branches(target)
