@@ -420,7 +420,7 @@ def test_changed_lines_from_the_merge_fact_and_gap_when_absent(tmp_path):
     assert [c["quota_share"]["status"] for c in out["cost"]["cells"]] == ["unmeasured"] * 2
     (cell,) = _cost(out)
     assert cell["per_1000_n"] == 1 and cell["build_usd_per_1000_lines_median"] == 5.0
-    assert out["cost"]["gaps"]["no_changed_lines"] == 1
+    assert out["cost"]["gaps"]["no_changed_lines"] == 2  # the sonnet delivery without lines and the opus one
 
 
 @pytest.mark.parametrize("n,comparable", [(19, False), (20, True)])
