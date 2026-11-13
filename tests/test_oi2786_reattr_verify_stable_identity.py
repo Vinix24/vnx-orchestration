@@ -126,3 +126,42 @@ def test_mutable_columns_exist_in_the_schema():
         have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         assert cols - migrated <= have, (table, cols - migrated - have)
         assert not cols & {"id", "project_id", "valid_until"}
+
+
+def _variant(move, **changes):
+    """A hand-made copy of a planned move whose pre-image row carries ``changes``."""
+    row = {**move["pre_image"]["row"], **changes}
+    return {**move, "source_id": move["source_id"] + 100, "pre_image": {**move["pre_image"], "row": row},
+            "content_key": qtp.content_key(row)}
+
+
+def test_moves_differing_only_in_a_mutable_column_are_ambiguous(moved):
+    # Red run: on ad610769 this plan gave ok true, planned 2, present 2 from one destination row.
+    twin = _variant(moved["move"], confidence_score=0.3)
+    result = verify_plan([moved["move"], twin])
+    assert result["ok"] is False and result["present"] == 0
+    assert _reasons(result) == ["ambiguous_stable_identity"] * 2
+    assert all(f["source_ids"] == [moved["id"], twin["source_id"]] for f in result["failures"])
+
+
+def test_second_move_on_the_same_destination_row_is_reused(moved):
+    other = _variant(moved["move"])
+    del other["pre_image"]["row"]["title"]  # looser lookup: a different stable identity matching the same row
+    result = verify_plan([moved["move"], other])
+    assert result["ok"] is False and result["present"] == 1
+    assert _reasons(result) == ["destination_row_reused"]
+    failure = result["failures"][0]
+    assert failure["source_id"] == other["source_id"] and failure["already_assigned_to"] == moved["id"]
+    assert isinstance(failure["destination_row_id"], int)
+
+
+def test_two_identities_with_two_destination_rows_are_both_present(moved):
+    other = _variant(moved["move"], title="second")
+    cols = [c for c in other["pre_image"]["row"] if c not in ("id", "project_id")]
+    conn = sqlite3.connect(str(moved["dest"]))
+    conn.execute(f"INSERT INTO success_patterns ({', '.join(cols)}, project_id) "
+                 f"VALUES ({', '.join('?' for _ in cols)}, 'beta')", [other["pre_image"]["row"][c] for c in cols])
+    conn.commit()
+    conn.close()
+    result = verify_plan([moved["move"], other])
+    assert result["ok"] is True and result["present"] == 2 and result["failures"] == []

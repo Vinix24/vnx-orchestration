@@ -12,7 +12,7 @@ destination (``stable_key``, the content key without the columns a writer update
 ``project_id``), zero times in the source under the source project, and passes the consumer's selector predicate
 (``valid_until IS NULL OR valid_until > now``). Exit 1: a row failed or a database
 cannot be read. A found row whose mutable columns differ from the pre-image is listed under
-``mutated_since_move`` (old and new value per column); it is proven, not a failure. Exit 2: the plan is malformed, empty or missing.
+``mutated_since_move`` (old and new value per column); it is proven, not a failure. Two moves with one stable identity into one destination are ``ambiguous_stable_identity`` (read from the plan alone), and a destination row a second move also matches is ``destination_row_reused``. Exit 2: the plan is malformed, empty or missing.
 
 CLI:
   python3 scripts/learning_misfile_report.py report (--all | --db PATH) [--vnx-data-root DIR] --json
@@ -156,10 +156,12 @@ def _mutations(move: Dict[str, Any], dest_row: Dict[str, Any]) -> Dict[str, Dict
             for c in sorted(cols) if c in pre and c in dest_row and pre[c] != dest_row[c]}
 
 
-def verify_move(move: Dict[str, Any], mutated: Optional[List[Dict[str, Any]]] = None) -> Optional[Dict[str, Any]]:
+def verify_move(move: Dict[str, Any], mutated: Optional[List[Dict[str, Any]]] = None,
+                claimed: Optional[Dict[Any, Any]] = None) -> Optional[Dict[str, Any]]:
     """None when the move is proven done, else the failing row with its reason.
 
-    A proven row whose mutable columns changed since the move is appended to ``mutated``."""
+    A proven row whose mutable columns changed since the move is appended to ``mutated``.
+    ``claimed`` maps (database, table, row id) to the source id of the move that matched it first."""
     named = {k: move.get(k) for k in ("table", "source_id", "content_key")}
     key = stable_key(move["table"], move["pre_image"]["row"])
     columns = [c for c in move["pre_image"]["row"] if c not in IDENTITY_EXCLUDED]
@@ -180,15 +182,41 @@ def verify_move(move: Dict[str, Any], mutated: Optional[List[Dict[str, Any]]] = 
         return {**named, "reason": "source_unreadable", "detail": str(exc)}
     if left:
         return {**named, "reason": "still_in_source", "count": len(left)}
+    if claimed is not None:
+        owner_key = (move["destination_db"], move["table"], dest[0].get("id"))
+        if owner_key in claimed:
+            return {**named, "reason": "destination_row_reused", "destination_row_id": dest[0].get("id"),
+                    "already_assigned_to": claimed[owner_key]}
+        claimed[owner_key] = move.get("source_id")
     changed = _mutations(move, dest[0])
     if changed and mutated is not None:
         mutated.append({"table": move["table"], "source_id": move.get("source_id"), "columns": changed})
     return None
 
 
+def _ambiguous_moves(moves: List[Dict[str, Any]]) -> Dict[int, List[Any]]:
+    """Index of every move sharing its stable identity (table, destination, key) with another, to all source ids."""
+    groups: Dict[Any, List[int]] = {}
+    for i, m in enumerate(moves):
+        ident = (m["table"], m["destination_db"], m["destination_project_id"],
+                 stable_key(m["table"], m["pre_image"]["row"]))
+        groups.setdefault(ident, []).append(i)
+    return {i: [moves[j].get("source_id") for j in idx] for idx in groups.values() if len(idx) > 1 for i in idx}
+
+
 def verify_plan(moves: List[Dict[str, Any]]) -> Dict[str, Any]:
     mutated: List[Dict[str, Any]] = []
-    failures = [f for f in (verify_move(m, mutated) for m in moves) if f is not None]
+    claimed: Dict[Any, Any] = {}
+    ambiguous = _ambiguous_moves(moves)
+    failures: List[Dict[str, Any]] = []
+    for i, m in enumerate(moves):
+        if i in ambiguous:
+            failures.append({**{k: m.get(k) for k in ("table", "source_id", "content_key")},
+                             "reason": "ambiguous_stable_identity", "source_ids": ambiguous[i]})
+            continue
+        failure = verify_move(m, mutated, claimed)
+        if failure is not None:
+            failures.append(failure)
     planned, present = len(moves), len(moves) - len(failures)
     return {"ok": not failures and present == planned, "planned": planned, "present": present,
             "moved_total": planned, "failures": failures, "mutated_since_move": mutated}
