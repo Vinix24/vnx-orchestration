@@ -240,6 +240,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
@@ -3203,6 +3204,100 @@ def _run_main_preflight(
     return None
 
 
+#: The lock of the ``main`` window (ADR-073, part c): one per project, in the door's own state dir.
+MAIN_LOCK_FILE = "main_admission.lock"
+MAIN_LOCK_TIMEOUT_S = 600.0  # the length of one merge with its checks
+MAIN_LOCK_POLL_S = 0.5
+
+
+class MainLockTimeout(Exception):
+    """The lock stayed with another holder past ``MAIN_LOCK_TIMEOUT_S``; the message names it."""
+
+
+def _lock_holder_line(fh: Any) -> str:
+    fh.seek(0)
+    return fh.read().strip() or "onbekende houder"
+
+
+@contextlib.contextmanager
+def _main_admission_lock(args: argparse.Namespace, enabled: bool) -> Any:
+    """Hold the exclusive per-project lock around the re-read and the merge; yields the seconds waited.
+
+    Disabled (mode off) it opens nothing and yields 0. Waiting polls ``LOCK_NB`` up to
+    ``MAIN_LOCK_TIMEOUT_S``; a timeout raises ``MainLockTimeout`` with the holder line. The
+    lock is released in ``finally``, after the receipt the caller wrote inside the block.
+    """
+    if not enabled:
+        yield 0.0
+        return
+    path = Path(ensure_env()["VNX_STATE_DIR"]) / MAIN_LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    with open(path, "a+", encoding="utf-8") as fh:
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() - started >= MAIN_LOCK_TIMEOUT_S:
+                    raise MainLockTimeout(f"main_lock_timeout: houder {_lock_holder_line(fh)}") from None
+                time.sleep(MAIN_LOCK_POLL_S)
+        try:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"pid={os.getpid()} pr={args.pr} since={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
+            fh.flush()
+            yield time.monotonic() - started
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _reread_main_gate(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+    refuse: Callable[..., int], main_admission: Dict[str, Any],
+) -> Optional[int]:
+    """The ``main`` gate again, under the lock: the last word before the merge. A NO-GO is a refusal."""
+    gate = _run_main_gate(args, head_sha)
+    admission = dict(gate["admission"])
+    if gate["verdict"] != "GO":
+        admission["reason"] = f"main_window_changed_under_lock: {admission.get('reason')}"
+        gate["message"] = f"main_window_changed_under_lock: {gate['message']}"
+    main_admission.update(admission, overridden=gate["overridden"], override_reason=gate["override_reason"])
+    evaluated[:] = [r for r in evaluated if r.get("gate") != MAIN_GATE]
+    evaluated.append(_preflight_record(MAIN_GATE, gate, head_sha))
+    if gate["verdict"] != "GO":
+        return refuse(MAIN_GATE, gate, "main_gate")
+    return None
+
+
+def _locked_door_merge(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+    refuse: Callable[..., int], main_admission: Dict[str, Any], finish: Callable[[], int],
+) -> int:
+    """Run ``finish`` (door permit, merge, receipt) under the main lock when the window is on.
+
+    Mode off (``main_admission['mode'] == 'off'``) takes no lock and reads nothing again. Any
+    other mode, an unknown one included, locks: the window is re-read under the lock and a
+    NO-GO there refuses before the permit is published.
+    """
+    locked = main_admission.get("mode") != MAIN_ADMISSION_OFF["mode"]
+    main_admission["lock_wait_s"] = 0
+    try:
+        with _main_admission_lock(args, locked) as waited:
+            if locked:
+                main_admission["lock_wait_s"] = round(waited, 3)
+                refused = _reread_main_gate(args, evaluated, head_sha, refuse, main_admission)
+                if refused is not None:
+                    return refused
+            return finish()
+    except MainLockTimeout as exc:
+        main_admission.update(mode="on", verdict="NO-GO", reason=str(exc), overridden=False, override_reason=None)
+        gate = {"verdict": "NO-GO", "message": str(exc)}
+        evaluated[:] = [r for r in evaluated if r.get("gate") != MAIN_GATE]
+        evaluated.append(_preflight_record(MAIN_GATE, gate, head_sha))
+        return refuse(MAIN_GATE, gate, "main_gate")
+
+
 def _run_door(args: argparse.Namespace) -> int:
     """The seven preflights, then the merge, against the active target."""
     method = args.merge_method or "squash"
@@ -3296,6 +3391,23 @@ def _run_door(args: argparse.Namespace) -> int:
     # lands as UNKNOWN fields inside it.
     shadow_seat_rule = _door_shadow_seat_rule(args, head_sha, pr_data, review_gate)
 
+    # ── Door preflight and merge, under the main lock when the window is on ──
+    # The lock is taken after the early read and released only after the receipt; the
+    # window is read again under it right before the permit and the merge (ADR-073).
+    def finish() -> int:
+        return _door_permit_and_merge(args, evaluated, head_sha, refuse, main_admission, dict(
+            method=method, pr_data=pr_data, review_gate=review_gate, shadow_seat_rule=shadow_seat_rule,
+            contract_invalid_override=contract_invalid_override))
+
+    return _locked_door_merge(args, evaluated, head_sha, refuse, main_admission, finish)
+
+
+def _door_permit_and_merge(
+    args: argparse.Namespace, evaluated: list[Dict[str, Any]], head_sha: str,
+    refuse: Callable[..., int], main_admission: Dict[str, Any], ctx: Dict[str, Any],
+) -> int:
+    """The door preflight (the last one), the merge under its permit, and the CLI report."""
+    review_gate, pr_data, method = ctx["review_gate"], ctx["pr_data"], ctx["method"]
     # ── Door preflight (deur D4, ADR-061 §3-§5): the seventh and last ──────
     # Published right before the merge, and only when main requires it. From
     # here on only a confirmed merge leaves the permit standing.
@@ -3307,10 +3419,10 @@ def _run_door(args: argparse.Namespace) -> int:
     result = _merge_under_permit(args, door_gate, door_check, evaluated, head_sha, main_admission=main_admission, merge=lambda on_merged: merge_pr(
         pr_number=args.pr, dispatch_id=args.dispatch_id or "", merge_method=method,
         dry_run=args.dry_run, head_sha=head_sha, pr_data=pr_data,
-        contract_invalid_override=contract_invalid_override,
+        contract_invalid_override=ctx["contract_invalid_override"],
         preflight_gates=_preflight_ledger(evaluated), door_check=door_check, main_admission=main_admission,
         review_seats=review_gate.get("review_seats"),
-        shadow_seat_rule=shadow_seat_rule, on_merged=on_merged,
+        shadow_seat_rule=ctx["shadow_seat_rule"], on_merged=on_merged,
     ))
     result["target_repo"] = _ACTIVE_TARGET.repo if _ACTIVE_TARGET is not None else ""
     return _report_merge(args, result, method)
