@@ -347,7 +347,7 @@ class GateResultParserMixin:
             "claude_github_optional": ("VNX_CLAUDE_GITHUB_REVIEW_ENABLED", "0"),
         }
         if gate == "ci_gate":
-            import config_runtime  # noqa: PLC0415
+            import config_runtime
 
             env_var = "VNX_CI_GATE_REQUIRED"
             disabled = not config_runtime.get_bool(env_var)
