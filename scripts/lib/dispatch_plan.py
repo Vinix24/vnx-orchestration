@@ -517,8 +517,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         # continues and on which tier.
         parent_dispatch=snapshot.parent_dispatch,
         task_class=snapshot.task_class,
-        tier_from=snapshot.tier_from,
-        tier_to=snapshot.tier_to,
+        tier_from=snapshot.tier_from, tier_to=snapshot.tier_to,
         difficulty=snapshot.difficulty,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),

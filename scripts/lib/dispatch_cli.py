@@ -3109,8 +3109,7 @@ def build_runtime_snapshot(
         valid_task_classes=valid_task_classes,
         parent_dispatch=chain_parent,
         task_class=chain_task_class,
-        tier_from=chain_tier_from,
-        tier_to=chain_tier_to,
+        tier_from=chain_tier_from, tier_to=chain_tier_to,
         difficulty=spec.difficulty,
         worker_claude_override_reason=worker_claude_override_reason,
         # RS-2: the same root the role registry above came from, so a declared
