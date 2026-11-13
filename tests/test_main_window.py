@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Tests for scripts/lib/main_window.py: the pure core."""
+"""Tests for scripts/lib/main_window.py: the pure core and the gh adapter.
+
+The adapter runs with a fake runner: no real gh, no real git, no network.
+"""
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -185,3 +190,114 @@ def test_to_dict_is_deterministic_and_sorted():
     assert list(window.to_dict()) == sorted(window.to_dict())
     assert window.to_dict()["first_red"]["sha"] == M1
     assert "vermoedelijk" in window.to_dict()["first_red_note"]
+
+
+# ── gh adapter, fake runner ──────────────────────────────────────────────────
+
+
+def _proc(stdout="", returncode=0):
+    return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+
+class FakeRunner:
+    """Answers the commits call and the runs call; records every argv."""
+
+    def __init__(self, commits=None, runs=None):
+        self.commits = commits if commits is not None else _proc("\n".join(COMMITS) + "\n")
+        self.runs = runs if runs is not None else _proc(json.dumps([
+            _run(BASE, run_id=10), _run(M1, run_id=11, status="queued", conclusion=None),
+            _run(M2, run_id=12, conclusion="failure"),
+            _run(M3, run_id=13, status="in_progress", conclusion=None)]))
+        self.calls = []
+
+    def __call__(self, argv, *, timeout, cwd=None):
+        self.calls.append((list(argv), timeout, cwd))
+        reply = self.commits if argv[1] == "api" else self.runs
+        if isinstance(reply, BaseException):
+            raise reply
+        return reply
+
+
+def _write_receipts(state_dir, records, junk=()):
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(r) for r in records] + list(junk)
+    (state_dir / "t0_receipts.ndjson").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_adapter_reads_commits_runs_and_receipts(tmp_path):
+    _write_receipts(tmp_path / "state", RECEIPTS + [{"event_type": "task_complete", "merge_sha": M3}],
+                    junk=["not json"])
+    runner = FakeRunner()
+    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=runner, limit=30)
+    assert window.verdict == mw.VERDICT_RED
+    assert (window.first_red.pr_number, window.first_red.dispatch_id) == (102, "d-two")
+    commits_argv, commits_timeout, commits_cwd = runner.calls[0]
+    assert commits_argv[:3] == ["gh", "api", "repos/{owner}/{repo}/commits?sha=main&per_page=30"]
+    assert commits_cwd == str(tmp_path) and commits_timeout == 15
+    runs_argv = runner.calls[1][0]
+    assert runs_argv[runs_argv.index("--workflow") + 1] == "VNX CI"
+    assert runs_argv[runs_argv.index("--event") + 1] == "push"
+    assert runs_argv[runs_argv.index("--branch") + 1] == "main"
+    assert runs_argv[runs_argv.index("--limit") + 1] == "50"
+
+
+def test_adapter_workflow_name_follows_the_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv(mw.CI_WORKFLOW_NAME_ENV_VAR, "Other CI")
+    runner = FakeRunner()
+    mw.read_window(tmp_path, runner=runner)
+    runs_argv = runner.calls[1][0]
+    assert runs_argv[runs_argv.index("--workflow") + 1] == "Other CI"
+
+
+def test_missing_or_unreadable_receipt_file_gives_no_receipt_not_unmeasurable(tmp_path):
+    for state_dir in (None, tmp_path / "absent"):
+        window = mw.read_window(tmp_path, state_dir=state_dir, runner=FakeRunner())
+        assert window.verdict == mw.VERDICT_RED
+        assert window.first_red.mapping == mw.MAPPING_NO_RECEIPT
+        assert window.first_red.pr_number is None
+
+
+def test_only_the_last_5000_receipt_lines_are_read(tmp_path):
+    filler = [{"event_type": "task_complete"}] * mw.RECEIPT_TAIL_LINES
+    _write_receipts(tmp_path / "state", [_receipt(M2, 102, "d-two")] + filler)
+    window = mw.read_window(tmp_path, state_dir=tmp_path / "state", runner=FakeRunner())
+    assert window.first_red.mapping == mw.MAPPING_NO_RECEIPT
+
+
+_FAILURES = {
+    "missing": (FileNotFoundError("gh"), "gh_missing"),
+    "timeout": (subprocess.TimeoutExpired(cmd="gh", timeout=15), "gh_timeout"),
+    "nonzero": (_proc("", returncode=1), "gh_failed"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_FAILURES))
+def test_commits_call_failure_is_unmeasurable_with_reason(tmp_path, name):
+    reply, reason = _FAILURES[name]
+    window = mw.read_window(tmp_path, runner=FakeRunner(commits=reply))
+    assert window.verdict == mw.VERDICT_UNMEASURABLE
+    assert window.reason == f"commits_{reason}"
+
+
+@pytest.mark.parametrize("name", sorted(_FAILURES))
+def test_runs_call_failure_is_unmeasurable_with_reason(tmp_path, name):
+    reply, reason = _FAILURES[name]
+    window = mw.read_window(tmp_path, runner=FakeRunner(runs=reply))
+    assert window.verdict == mw.VERDICT_UNMEASURABLE
+    assert window.reason == f"runs_{reason}"
+
+
+def test_bad_json_on_the_runs_call_is_unmeasurable(tmp_path):
+    for body in ("not json", "{}", "null"):
+        window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc(body)))
+        assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "runs_bad_json")
+
+
+def test_empty_commits_output_is_unmeasurable(tmp_path):
+    window = mw.read_window(tmp_path, runner=FakeRunner(commits=_proc("\n")))
+    assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "commits_empty")
+
+
+def test_empty_run_list_is_history_incomplete_never_green(tmp_path):
+    window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc("[]")))
+    assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "history_incomplete")

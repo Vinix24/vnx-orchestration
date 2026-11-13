@@ -47,9 +47,20 @@ def _proc(returncode=0, stdout="", stderr=""):
     return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
 
 
-def _run_list_output(conclusion, status="completed", head_sha="a" * 40, created_at="2026-09-04T08:00:00Z"):
-    runs = [{"conclusion": conclusion, "status": status, "headSha": head_sha, "createdAt": created_at, "databaseId": 1}]
-    return _proc(0, json.dumps(runs), "")
+def _gh_replies(runs, commits=("c" * 40, "b" * 40, "a" * 40)):
+    """A fake subprocess.run for main_window: commits call, then runs call."""
+
+    def fake(argv, **_kwargs):
+        if argv[1] == "api":
+            return _proc(0, "\n".join(commits) + "\n", "")
+        return _proc(0, json.dumps(runs), "")
+
+    return fake
+
+
+def _ci_run(sha, run_id, conclusion="success", status="completed"):
+    return {"databaseId": run_id, "headSha": sha, "status": status, "conclusion": conclusion,
+            "createdAt": "2026-09-04T08:00:00Z", "attempt": 1}
 
 
 def _write_receipt_lines(path: Path, records: list[dict]) -> None:
@@ -107,55 +118,93 @@ def _gate_result(pr_number, gate, *, status, reason=None, blocking_findings=None
 
 
 class TestMainCiRed:
+    A, B, C = "a" * 40, "b" * 40, "c" * 40
+
+    def _check(self, tmp_path, runs, **kwargs):
+        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
+             patch("main_window.subprocess.run", side_effect=_gh_replies(runs)):
+            return check_main_ci_red(tmp_path, **kwargs)
+
     def test_gh_missing_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value=None):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
 
-    def test_success_conclusion_is_clear(self, tmp_path):
+    def test_gh_vanishing_during_the_read_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output("success")):
+             patch("main_window.subprocess.run", side_effect=FileNotFoundError("gh")):
             result = check_main_ci_red(tmp_path)
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert "commits_gh_missing" in result.message
+
+    def test_green_window_is_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2), _ci_run(self.C, 3)])
+        assert result.status == CheckStatus.CLEAR
+        assert result.evidence["window"]["verdict"] == "green"
+
+    def test_red_in_the_middle_of_the_window_is_triggered_with_its_cause(self, tmp_path):
+        state = tmp_path / "state"
+        state.mkdir()
+        _write_receipt_lines(state / "t0_receipts.ndjson", [
+            {"event_type": "pr_merged", "merge_sha": self.B, "pr_number": 7, "dispatch_id": "d-mid"},
+            {"event_type": "pr_merged", "merge_sha": self.C, "pr_number": 8, "dispatch_id": "d-top"},
+        ])
+        runs = [_ci_run(self.A, 1), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3, None, "in_progress")]
+        result = self._check(tmp_path, runs, state_dir=state)
+        assert result.status == CheckStatus.TRIGGERED
+        for needle in (self.B, "run 2", "PR #7", "d-mid", "2 merge", "niet bewezen"):
+            assert needle in result.message
+        assert result.evidence["window"]["first_red"]["sha"] == self.B
+
+    def test_red_without_receipt_names_no_receipt(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3, None, "queued")])
+        assert result.status == CheckStatus.TRIGGERED
+        assert "no_receipt" in result.message
+
+    def test_red_run_followed_by_a_newer_green_is_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1, "failure"), _ci_run(self.B, 2, "failure"), _ci_run(self.C, 3)])
         assert result.status == CheckStatus.CLEAR
 
-    def test_failure_conclusion_is_triggered(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output("failure")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.TRIGGERED
-        assert "failure" in result.message
+    def test_running_window_is_unmeasurable_not_clear(self, tmp_path):
+        result = self._check(tmp_path, [_ci_run(self.A, 1), _ci_run(self.B, 2), _ci_run(self.C, 3, None, "in_progress")])
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert result.evidence["window"]["verdict"] == "running"
 
-    def test_empty_run_list_is_unmeasurable(self, tmp_path):
+    def test_empty_run_list_is_unmeasurable_history_incomplete(self, tmp_path):
+        result = self._check(tmp_path, [])
+        assert result.status == CheckStatus.UNMEASURABLE
+        assert "history_incomplete" in result.message
+
+    def test_gh_nonzero_exit_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(0, "[]", "")):
+             patch("main_window.subprocess.run", return_value=_proc(1, "", "boom")):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
 
-    def test_in_progress_run_is_unmeasurable_not_clear(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_run_list_output(None, status="in_progress")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.UNMEASURABLE
+    def test_malformed_runs_json_is_unmeasurable(self, tmp_path):
+        def fake(argv, **_kwargs):
+            return _proc(0, "c" * 40 if argv[1] == "api" else "not json", "")
 
-    def test_gh_run_list_nonzero_exit_is_unmeasurable(self, tmp_path):
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(1, "", "boom")):
+             patch("main_window.subprocess.run", side_effect=fake):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
-
-    def test_malformed_json_is_unmeasurable(self, tmp_path):
-        with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", return_value=_proc(0, "not json", "")):
-            result = check_main_ci_red(tmp_path)
-        assert result.status == CheckStatus.UNMEASURABLE
+        assert "runs_bad_json" in result.message
 
     def test_timeout_is_unmeasurable(self, tmp_path):
         import subprocess as _sp
 
         with patch("stop_conditions.shutil.which", return_value="/usr/bin/gh"), \
-             patch("stop_conditions.subprocess.run", side_effect=_sp.TimeoutExpired(cmd="gh", timeout=15)):
+             patch("main_window.subprocess.run", side_effect=_sp.TimeoutExpired(cmd="gh", timeout=15)):
             result = check_main_ci_red(tmp_path)
         assert result.status == CheckStatus.UNMEASURABLE
+
+    def test_run_all_checks_hands_its_state_dir_to_the_window(self, tmp_path):
+        clear = StopConditionResult(check_id="x", status=CheckStatus.CLEAR, message="ok")
+        with patch("stop_conditions.check_main_ci_red", return_value=clear) as mocked, \
+             patch("stop_conditions.check_gh_auth_dead", return_value=clear):
+            run_all_checks(state_dir=tmp_path, project_root=tmp_path, write_halt=False)
+        assert mocked.call_args.kwargs["state_dir"] == tmp_path
 
 
 # ── check_gh_auth_dead (E4) ──────────────────────────────────────────────

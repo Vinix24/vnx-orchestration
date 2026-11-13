@@ -7,8 +7,13 @@ push run. The *base* is the newest commit whose run is completed and green. The
 points at the probable cause: the OLDEST red entry ("vermoedelijk", never
 "bewezen"; the run id is carried so a reader can repeat the run).
 
-``compute_window`` is pure, no I/O: commits + runs + ``pr_merged`` receipts
-in, a ``MainWindow`` out. The gh adapter follows in a next PR.
+Two layers:
+
+- ``compute_window``: pure, no I/O. Commits + runs + ``pr_merged`` receipts in,
+  a ``MainWindow`` out.
+- ``read_window``: the gh adapter. Reads commits, runs and receipts, then calls
+  the core. Whatever it cannot read is ``unmeasurable`` with the reason by
+  name, never ``green``.
 
 Two seams are kept single on purpose so a later admission contract can change
 them in one place: ``is_base`` (is this run a base?) and ``classify_run``
@@ -17,12 +22,21 @@ them in one place: ``is_base`` (is this run a base?) and ``classify_run``
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 DEFAULT_CI_WORKFLOW_NAME = "VNX CI"
 CI_WORKFLOW_NAME_ENV_VAR = "VNX_CI_WORKFLOW_NAME"
+DEFAULT_MAIN_BRANCH = "main"
+GH_TIMEOUT = 15
+DEFAULT_LIMIT = 30
+RUN_LIMIT_EXTRA = 20
+RECEIPT_TAIL_LINES = 5000
 
 VERDICT_RED = "red"
 VERDICT_RUNNING = "running"
@@ -36,6 +50,8 @@ RUN_UNKNOWN = "unknown"
 
 MAPPING_RECEIPT = "receipt"
 MAPPING_NO_RECEIPT = "no_receipt"
+
+Runner = Callable[..., "subprocess.CompletedProcess"]
 
 
 def resolve_ci_workflow_name(explicit: Optional[str] = None) -> str:
@@ -192,3 +208,96 @@ def compute_window(commits: List[str], runs: List[Dict[str, Any]], merges: List[
     if any(e.state == RUN_RUNNING for e in entries):
         return MainWindow(verdict=VERDICT_RUNNING, **common)
     return MainWindow(verdict=VERDICT_GREEN, **common)
+
+
+# ── gh adapter ───────────────────────────────────────────────────────────────
+
+
+def _subprocess_runner(argv: List[str], *, timeout: int, cwd: Optional[str] = None):
+    return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, cwd=cwd)
+
+
+def _gh_stdout(runner: Runner, argv: List[str], cwd: str) -> Tuple[Optional[str], Optional[str]]:
+    """(stdout, failure_reason). Exactly one of the two is None."""
+    try:
+        result = runner(argv, timeout=GH_TIMEOUT, cwd=cwd)
+    except FileNotFoundError:
+        return None, "gh_missing"
+    except subprocess.TimeoutExpired:
+        return None, "gh_timeout"
+    if result is None or result.returncode != 0 or not isinstance(result.stdout, str):
+        return None, "gh_failed"
+    return result.stdout, None
+
+
+def _read_commits(runner: Runner, root: str, gh_bin: str, branch: str, limit: int) -> Tuple[List[str], Optional[str]]:
+    argv = [gh_bin, "api", f"repos/{{owner}}/{{repo}}/commits?sha={branch}&per_page={limit}", "--jq", ".[].sha"]
+    out, failure = _gh_stdout(runner, argv, root)
+    if failure:
+        return [], f"commits_{failure}"
+    commits = [line.strip() for line in (out or "").splitlines() if line.strip()]
+    return (commits, None) if commits else ([], "commits_empty")
+
+
+def _read_runs(
+    runner: Runner, root: str, gh_bin: str, branch: str, workflow: str, limit: int
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    argv = [
+        gh_bin, "run", "list", "--branch", branch, "--workflow", workflow, "--event", "push",
+        "--limit", str(limit + RUN_LIMIT_EXTRA),
+        "--json", "databaseId,headSha,status,conclusion,createdAt,attempt",
+    ]
+    out, failure = _gh_stdout(runner, argv, root)
+    if failure:
+        return [], f"runs_{failure}"
+    try:
+        runs = json.loads(out or "")
+    except json.JSONDecodeError:
+        return [], "runs_bad_json"
+    if not isinstance(runs, list):
+        return [], "runs_bad_json"
+    return runs, None
+
+
+def _read_merge_receipts(state_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """pr_merged receipts with a merge_sha from the last RECEIPT_TAIL_LINES
+    lines. Unreadable or missing: an empty list (mappings become no_receipt)."""
+    if state_dir is None:
+        return []
+    path = Path(state_dir) / "t0_receipts.ndjson"
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            tail = deque(fh, maxlen=RECEIPT_TAIL_LINES)
+    except OSError:
+        return []
+    merges: List[Dict[str, Any]] = []
+    for line in tail:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # vnx-silent-except: a torn line carries no merge_sha; the entry maps as no_receipt
+        if isinstance(rec, dict) and rec.get("event_type") == "pr_merged" and rec.get("merge_sha"):
+            merges.append(rec)
+    return merges
+
+
+def read_window(
+    project_root: Path,
+    *,
+    state_dir: Optional[Path] = None,
+    runner: Optional[Runner] = None,
+    limit: int = DEFAULT_LIMIT,
+    branch: str = DEFAULT_MAIN_BRANCH,
+    workflow_name: Optional[str] = None,
+    gh_bin: str = "gh",
+) -> MainWindow:
+    """Read commits, VNX CI push runs and receipts, then compute the window."""
+    run = runner or _subprocess_runner
+    root = str(project_root)
+    commits, failure = _read_commits(run, root, gh_bin, branch, limit)
+    if failure:
+        return _unmeasurable(failure)
+    runs, failure = _read_runs(run, root, gh_bin, branch, resolve_ci_workflow_name(workflow_name), limit)
+    if failure:
+        return _unmeasurable(failure, len(commits))
+    return compute_window(commits, runs, _read_merge_receipts(state_dir))
