@@ -1,1 +1,1 @@
-- Eight more CI-excluded test files (identity, pattern stability, codex PR311 findings, registry integration, tmux adapter, session ids, strategy roadmap x2) now match the current code and leave the exclusion list (OI-2589).
+- Eight more CI-excluded test files (identity, pattern stability, codex PR311 findings, registry integration, tmux adapter, session ids, strategy roadmap x2) are fixed to match the current code; their exclusion lines leave `scripts/ci/test_exclusions.txt` in a closing PR (OI-2589).
