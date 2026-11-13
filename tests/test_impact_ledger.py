@@ -292,6 +292,35 @@ def test_report_excludes_an_unreadable_or_mismatched_shadow_record_by_name():
         "3/1": "missing:impact-shadow"}
 
 
+def _backtest(entry):
+    return dict(entry, source="backtest")
+
+
+def test_report_counts_live_and_backtest_apart_and_together():
+    miss = _shadow(2, failed=["tests/b.py::t"], misses=["tests/b.py::t"])
+    rep = ledger.report([_entry(1, _shadow(1, failed=["tests/a.py::t"])), _backtest(_entry(2, miss)),
+                         _backtest(_entry(3, _shadow(3, reduced=False))), _backtest(_entry(4, None)), _backtest({"_unreadable": 5})])
+    live, back = rep["by_source"]["live"], rep["by_source"]["backtest"]
+    assert live["counted"] == ["1/1"] and live["misses"] == [] and live["red_runs"] == {"counted": 1, "reduced": 1}
+    assert back["counted"] == ["2/1", "3/1"] and len(back["misses"]) == 1 and back["reduced_share"]["reduced"] == 1
+    assert back["red_runs"] == {"counted": 1, "reduced": 1}
+    assert {e["attempt"]: e["reason"] for e in back["excluded"]} == {"4/1": "missing:impact-shadow", "backtest line 5": "unreadable"}
+    assert rep["counted"] == ["1/1", "2/1", "3/1"] and rep["attempts_in_ledger"] == 5
+    assert rep["misses"] == back["misses"] and rep["red_runs"] == {"counted": 2, "reduced": 2}
+    assert rep["reduced_share"] == {"reduced": 2, "counted": 3, "fraction": 0.6667} and live["attempts_in_ledger"] == 1
+
+
+def test_report_treats_a_line_without_source_or_with_another_source_as_live():
+    rep = ledger.report([_entry(1, _shadow(1)), dict(_entry(2, _shadow(2)), source="other")])
+    assert rep["by_source"]["live"]["counted"] == ["1/1", "2/1"] and rep["by_source"]["backtest"]["counted"] == []
+
+
+def test_report_names_the_unreadable_inputs_of_a_backtest_record():
+    unreadable = {"schema": "impact_shadow/1", "reconstructible": False, "unreadable_inputs": ["base"]}
+    rep = ledger.report([_backtest(_entry(1, unreadable)), _entry(2, _shadow(2, reconstructible=False))])
+    assert [e["reason"] for e in rep["excluded"]] == ["onreconstrueerbaar", "onreconstrueerbaar:base"]
+
+
 @pytest.mark.parametrize("text", ["soon", "3x", "2026-13-45"])
 def test_parse_since_refuses_bad_input(text):
     with pytest.raises(ValueError):
