@@ -23,6 +23,7 @@ TREE = {
 }
 NODEIDS = ["tests/test_core.py::t", "tests/test_other.py::t", "tests/test_plain.py::t"]
 BASE = "b" * 40
+MAIN_AT_RUN = "a" * 40
 
 
 def sha(run_id) -> str:
@@ -67,18 +68,24 @@ class Gh:
 
 
 class Git:
-    """git calls of the backtest; ``paths`` is the changed files of every run, ``fail`` names the git commands that exit 1 (``fetch`` of main, ``fetch-head`` of the PR head)."""
+    """git calls of the backtest; ``paths`` is the changed files of every run, ``fail`` names the git commands that exit 1
+    (``fetch`` of main, ``fetch-head`` of the PR head).  ``rev_list`` answers the main-at-run lookup, ``merge_base`` the
+    merge-base of main-at-run and the head (default ``BASE``).  A merge-base against today's ``origin/main`` answers the head
+    itself: today's main already contains every PR head of these runs."""
 
-    def __init__(self, paths, fail=(), tree=None):
+    def __init__(self, paths, fail=(), tree=None, rev_list=MAIN_AT_RUN, merge_base=BASE):
         self.paths, self.fail, self.tree, self.calls = paths, set(fail), tree or TREE, []
+        self.rev_list, self.merge_base = rev_list, merge_base
 
     def __call__(self, argv):
         self.calls.append(list(argv))
         command = "fetch-head" if argv[1] == "fetch" and argv[-1] != "main" else argv[1]
         if command in self.fail:
             raise ledger.RunnerError(argv, 1, f"fatal: {command}")
+        if command == "rev-list":
+            return self.rev_list
         if command == "merge-base":
-            return BASE + "\n"
+            return argv[-1] + "\n" if argv[2] == "origin/main" else self.merge_base + "\n"
         if command == "diff":
             return "\n".join(self.paths) + "\n"
         if command == "archive":
@@ -143,6 +150,64 @@ def test_merge_base_failing_is_onreconstrueerbaar_naming_base(tmp_path):
     assert entry["inputs"]["base"] is None and entry["inputs"]["selector_version"] is None
     assert ledger.report([entry])["excluded"][0]["reason"] == "onreconstrueerbaar:base"
     assert not any(call[1] == "archive" for call in git.calls)
+
+
+def test_base_is_merge_base_of_main_at_run_creation_and_the_head_never_of_today_main(tmp_path):
+    git = Git(["scripts/lib/core.py"])
+    bt.backtest(tmp_path, Gh([run(1)], {1: {"tests/test_core.py::t": "pass"}}), git)
+    (entry,) = lines(tmp_path)
+    (rev_list,) = [c for c in git.calls if c[1] == "rev-list"]
+    assert rev_list == ["git", "rev-list", "-1", "--first-parent", "--before=2026-11-10T09:00:00+00:00", "origin/main"]
+    merge_bases = [c for c in git.calls if c[1] == "merge-base"]
+    assert merge_bases == [["git", "merge-base", MAIN_AT_RUN, sha(1)]]
+    assert entry["inputs"]["base"] == BASE and entry["shadow"]["reconstructible"] is True
+
+
+def test_a_head_that_today_main_already_contains_keeps_the_paths_of_its_historical_diff(tmp_path):
+    git = Git(["scripts/lib/core.py", "tests/test_core.py"])
+    bt.backtest(tmp_path, Gh([run(1)], {1: {"tests/test_core.py::t": "fail"}}), git)
+    (entry,) = lines(tmp_path)
+    assert entry["inputs"]["base"] == BASE != entry["inputs"]["candidate"]
+    assert entry["inputs"]["paths"] == ["scripts/lib/core.py", "tests/test_core.py"]
+    assert entry["shadow"]["reconstructible"] is True
+    diff = next(c for c in git.calls if c[1] == "diff")
+    assert diff == ["git", "diff", "--name-only", BASE, sha(1)]
+
+
+def test_a_run_without_a_readable_created_at_is_onreconstrueerbaar_naming_base(tmp_path):
+    for label, created in (("missing", None), ("empty", ""), ("garbage", "yesterday"), ("number", 5)):
+        broken = dict(run(1), createdAt=created)
+        if created is None:
+            del broken["createdAt"]
+        git = Git(["scripts/lib/core.py"])
+        bt.backtest(tmp_path / label, Gh([broken], {1: {"tests/test_core.py::t": "pass"}}), git)
+        (entry,) = lines(tmp_path / label)
+        assert entry["shadow"] == {"schema": "impact_shadow/1", "reconstructible": False, "unreadable_inputs": ["base"]}, label
+        assert entry["inputs"]["base"] is None
+        assert not any(c[1] in ("rev-list", "merge-base", "archive") for c in git.calls), label
+
+
+def test_an_empty_or_failing_rev_list_is_onreconstrueerbaar_naming_base_and_never_falls_back_to_today(tmp_path):
+    cases = {"empty": Git(["scripts/lib/core.py"], rev_list=""), "blank": Git(["scripts/lib/core.py"], rev_list="\n"),
+             "failing": Git(["scripts/lib/core.py"], fail=["rev-list"]), "not-a-sha": Git(["scripts/lib/core.py"], rev_list="fatal")}
+    for label, git in cases.items():
+        bt.backtest(tmp_path / label, Gh([run(1)], {1: {"tests/test_core.py::t": "pass"}}), git)
+        (entry,) = lines(tmp_path / label)
+        assert entry["shadow"]["unreadable_inputs"] == ["base"] and entry["inputs"]["base"] is None, label
+        assert not any(c[1] == "merge-base" for c in git.calls), label
+        assert ledger.report([entry])["excluded"][0]["reason"] == "onreconstrueerbaar:base"
+
+
+def test_a_base_equal_to_the_head_or_an_empty_path_list_makes_paths_unreadable(tmp_path):
+    equal = Git(["scripts/lib/core.py"], merge_base=sha(1))
+    empty = Git([])
+    for label, git in (("equal", equal), ("empty", empty)):
+        bt.backtest(tmp_path / label, Gh([run(1)], {1: {"tests/test_core.py::t": "pass"}}), git)
+        (entry,) = lines(tmp_path / label)
+        assert entry["shadow"]["reconstructible"] is False and entry["shadow"]["unreadable_inputs"] == ["paths"], label
+        assert ledger.report([entry])["excluded"][0]["reason"] == "onreconstrueerbaar:paths"
+        assert not any(c[1] == "archive" for c in git.calls), label
+    assert not any(c[1] == "diff" for c in equal.calls)
 
 
 def test_each_unreadable_input_is_named_never_guessed(tmp_path):

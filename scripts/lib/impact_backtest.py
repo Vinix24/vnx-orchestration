@@ -8,6 +8,9 @@ paths, selector version, graph version), runs TODAY's selector over the old tree
 CI evidence only.
 
 The candidate is the PR head (``candidate_kind: "pr_head"``); live CI uses the merge commit.
+The base is the merge-base of the head and ``origin/main`` as it stood when the run was created
+(last first-parent commit before ``createdAt``), never of today's main: main has absorbed many of
+these heads since, and against today's main such a head is its own base with zero paths.
 An input that cannot be read makes the line ``reconstructible: false`` and names the input,
 never a guess.  An absent artifact is a line with ``missing``.  Any other ``gh`` failure aborts
 the attempt without a line, so it is tried again next time.  Only runs that concluded
@@ -70,7 +73,30 @@ def _unpack_tree(git: ledger.Runner, sha: str, tmp: Path) -> Path:
     return tree
 
 
-def _git_inputs(git: ledger.Runner, sha, inputs: dict) -> Optional[str]:
+def _main_at_run(git: ledger.Runner, created_at) -> Optional[str]:
+    """The last first-parent commit of ``origin/main`` at the creation time of the run, else None."""
+    created = ledger.parse_time(created_at)
+    if created is None:
+        return None
+    try:
+        found = git(["git", "rev-list", "-1", "--first-parent", f"--before={created.isoformat()}", "origin/main"]).strip()
+    except ledger.RunnerError:
+        return None
+    return found if _SHA.fullmatch(found) else None
+
+
+def _base(git: ledger.Runner, sha: str, created_at) -> Optional[str]:
+    """Merge-base of the head and main as it was at ``created_at``; None when any step is unreadable."""
+    main_at_run = _main_at_run(git, created_at)
+    if main_at_run is None:
+        return None
+    try:
+        return git(["git", "merge-base", main_at_run, sha]).strip() or None
+    except ledger.RunnerError:
+        return None
+
+
+def _git_inputs(git: ledger.Runner, sha, created_at, inputs: dict) -> Optional[str]:
     """Fill candidate, base and paths; the name of the first input that cannot be read, else None."""
     if not isinstance(sha, str) or not _SHA.fullmatch(sha):
         return "candidate"
@@ -79,22 +105,24 @@ def _git_inputs(git: ledger.Runner, sha, inputs: dict) -> Optional[str]:
         git(["git", "fetch", "--no-tags", "origin", sha])
     except ledger.RunnerError:
         return "candidate"
-    try:
-        inputs["base"] = git(["git", "merge-base", "origin/main", sha]).strip() or None
-    except ledger.RunnerError:
-        inputs["base"] = None
+    inputs["base"] = _base(git, sha, created_at)
     if not inputs["base"]:
         return "base"
+    if inputs["base"] == sha:
+        return "paths"  # a pull request run always changes a path; a head that is its own base has no diff to read
     try:
         inputs["paths"] = [p for p in git(["git", "diff", "--name-only", inputs["base"], sha]).splitlines() if p.strip()]
     except ledger.RunnerError:
+        return "paths"
+    if not inputs["paths"]:
+        inputs["paths"] = None
         return "paths"
     return None
 
 
 def _record(git: ledger.Runner, run: dict, evidence_dir: Path, tmp: Path, inputs: dict):
     """``(record, None)`` or ``(None, name of the input that cannot be read)``."""
-    unreadable = _git_inputs(git, run.get("headSha"), inputs)
+    unreadable = _git_inputs(git, run.get("headSha"), run.get("createdAt"), inputs)
     if unreadable:
         return None, unreadable
     try:
