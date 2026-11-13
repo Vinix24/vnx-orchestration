@@ -288,6 +288,7 @@ def _classify_marker_failures(
 ) -> Optional[Dict[str, Optional[str]]]:
     """Classify the narrow marker refusal classes, in priority order.
 
+    api_blocked and paid_lane_budget_exceeded (OI-2796, OI-2783), then
     completion_without_execution, no_verdict, tool_missing and
     local_key_missing are matched here — before the broader auth/model keyword
     bags — because each carries a specific, non-overlapping phrase that a
@@ -296,6 +297,9 @@ def _classify_marker_failures(
     matched before the auth bag and never reclassified as auth_rejected (which
     would cool the lane down for everyone).
     """
+    refusal_failure = _classify_refusal_failures(signal_text, error)
+    if refusal_failure is not None:
+        return refusal_failure
     marker_classes = (
         ((_COMPLETION_WITHOUT_EXECUTION_MARKER,), "completion_without_execution"),
         (_NO_VERDICT_MARKERS, "no_verdict"),
@@ -334,6 +338,24 @@ def _classify_refusal_failures(
             ),
         }
     return None
+
+
+def _classify_credit_exhausted(
+    signal_text: str,
+    error: Optional[str],
+    completion: str,
+    provider: str,
+    sub_provider: Optional[str],
+) -> Optional[Dict[str, Optional[str]]]:
+    """Classify a provider/gateway balance or credit exhaustion, else None."""
+    if not any(kw in signal_text for kw in CREDIT_EXHAUSTED_KEYWORDS):
+        return None
+    source = _error_source(provider, sub_provider)
+    detail = _extract_detail(error if error else completion)
+    return {
+        "failure_class": "credit_exhausted",
+        "failure_reason": f"{source}: credit/balance exhausted — {detail}",
+    }
 
 
 def classify_failure(
@@ -398,13 +420,11 @@ def classify_failure(
     # ── credit / balance exhaustion ────────────────────────────────────────
     # Checked before model_keywords so glm-harness's outer "500" wrapper never
     # hides the real, actionable 402-credits cause nested inside it.
-    if any(kw in signal_text for kw in CREDIT_EXHAUSTED_KEYWORDS):
-        source = _error_source(provider, sub_provider)
-        detail = _extract_detail(error if error else completion)
-        return {
-            "failure_class": "credit_exhausted",
-            "failure_reason": f"{source}: credit/balance exhausted — {detail}",
-        }
+    credit_failure = _classify_credit_exhausted(
+        signal_text, error, completion, provider, sub_provider
+    )
+    if credit_failure is not None:
+        return credit_failure
 
     # ── narrow marker failures (checked before the auth/model keyword bags) ─
     # completion_without_execution / no_verdict / tool_missing / local_key_missing.
@@ -414,11 +434,6 @@ def classify_failure(
     marker_failure = _classify_marker_failures(signal_text, error, completion)
     if marker_failure is not None:
         return marker_failure
-
-    # ── edge block / paid-lane budget refusal (before the auth bag) ──────
-    refusal_failure = _classify_refusal_failures(signal_text, error)
-    if refusal_failure is not None:
-        return refusal_failure
 
     # ── auth rejection ───────────────────────────────────────────────────
     auth_keywords = (
