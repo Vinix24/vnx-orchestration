@@ -605,7 +605,6 @@ def stage_spec_bundle(
     instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
 
     # 6. assemble + write the spec atomically; instruction_file is the literal absolute child path.
-    norm_reason = (headless_reason or "").strip() or None
     spec_payload = {
         "schema_version": 1,
         "project_id": effective_project_id,
@@ -645,7 +644,7 @@ def stage_spec_bundle(
         "tags": list(tags),
         "instruction_sha256": instruction_sha256,
         "allow_headless": bool(allow_headless),
-        "headless_reason": norm_reason,
+        "headless_reason": (headless_reason or "").strip() or None,
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
