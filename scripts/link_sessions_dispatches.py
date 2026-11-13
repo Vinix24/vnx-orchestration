@@ -8,10 +8,13 @@ Performs three linkage passes:
   3. report_findings.dispatch_id from report metadata
 """
 
+import fcntl
 import json
+import logging
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -24,6 +27,12 @@ except Exception as exc:
     raise SystemExit(f"Failed to load vnx_paths, report_findings_migration, or token_harvest: {exc}")
 
 from completion_reading import completion_status, is_v3_end_line  # noqa: E402
+from append_receipt_internals.idempotency import _flock_until, _lock_file_for  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# Upper bound on waiting for the receipt append lock before the nightly backfill gives up.
+LEDGER_LOCK_TIMEOUT_SEC = 30.0
 
 # ADR-045 K-2c: the completion types this pass links, both shapes — a start line
 # and a report line never end a dispatch.
@@ -237,92 +246,65 @@ def backfill_session_dispatch_ids(conn: sqlite3.Connection) -> int:
     return linked
 
 
-def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
-    """Backfill ``token_usage`` in claude-harness receipts from session_analytics.
-
-    Walks ``t0_receipts.ndjson`` line by line.  For each receipt whose
-    provider is in ``token_harvest.CLAUDE_HARNESS_PROVIDERS`` (claude,
-    deepseek-harness, glm-harness — every lane that runs through the Claude
-    Code harness) and whose ``token_usage`` is null, empty, or marked
-    unavailable, looks up the matching row in ``session_analytics`` by
-    ``dispatch_id``. When token data is found, the receipt's ``token_usage``
-    is populated.
-
-    Lines that need no enrichment pass through verbatim.  The rewritten
-    file is staged in a ``.tmp`` sibling and atomically renamed on
-    success, so a mid-write crash leaves the original file intact.
-
-    Returns the count of enriched receipts.
-    """
-    if not RECEIPTS_FILE.exists():
-        return 0
-
-    # Build a lookup: dispatch_id -> token_usage dict from session_analytics.
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT dispatch_id, total_input_tokens, total_output_tokens, "
-        "       cache_creation_tokens, cache_read_tokens "
-        "FROM session_analytics "
-        "WHERE dispatch_id IS NOT NULL"
+def _needs_token_backfill(receipt: dict, session_tokens: dict) -> bool:
+    """True when a claude-harness receipt has no usable ``token_usage`` and a session row exists."""
+    provider = receipt.get("provider", "")
+    dispatch_id = receipt.get("dispatch_id", "")
+    token_usage = receipt.get("token_usage")
+    return bool(
+        provider in CLAUDE_HARNESS_PROVIDERS
+        and dispatch_id
+        and (
+            token_usage is None
+            or (isinstance(token_usage, dict) and (
+                token_usage.get("unavailable")
+                or (token_usage.get("input", 0) == 0
+                    and token_usage.get("output", 0) == 0)
+            ))
+        )
+        and dispatch_id in session_tokens
     )
-    session_tokens: dict[str, dict[str, int]] = {}
-    for row in cur.fetchall():
-        did, inp, out, cc, cr = row
-        if any(v is not None and v > 0 for v in (inp, out, cc, cr)):
-            session_tokens[did] = {
-                "input": int(inp or 0),
-                "output": int(out or 0),
-                "cache_creation_5m": int(cc or 0),
-                "cache_creation_1h": 0,
-                "cache_read": int(cr or 0),
-            }
 
-    if not session_tokens:
-        return 0
 
-    tmp_path = RECEIPTS_FILE.with_suffix(".ndjson.tmp")
-    enriched = 0
+def _enrich_ledger_line(raw: bytes, session_tokens: dict) -> tuple[bytes | None, bool]:
+    """Return ``(bytes to write, enriched)`` for one ledger line; ``None`` drops a blank line.
 
+    A line that is not enriched comes back exactly as read, minus its line
+    ending; only an enriched line is re-serialised.
+    """
+    body = raw.rstrip(b"\r\n")
+    if not body.strip():
+        return None, False
     try:
-        with open(RECEIPTS_FILE, "r", encoding="utf-8", errors="replace") as fin, \
-             open(tmp_path, "w", encoding="utf-8") as fout:
-            for line in fin:
-                line_stripped = line.strip()
-                if not line_stripped:
-                    continue
-                try:
-                    receipt = json.loads(line_stripped)
-                except json.JSONDecodeError:
-                    fout.write(line_stripped + "\n")
-                    continue
+        receipt = json.loads(body)
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError; the line stays as it is
+        return body, False
+    if not isinstance(receipt, dict) or not _needs_token_backfill(receipt, session_tokens):
+        return body, False
+    receipt["token_usage"] = session_tokens[receipt["dispatch_id"]]
+    return json.dumps(receipt, sort_keys=False, ensure_ascii=False).encode("utf-8"), True
 
-                provider = receipt.get("provider", "")
-                dispatch_id = receipt.get("dispatch_id", "")
-                token_usage = receipt.get("token_usage")
 
-                needs_backfill = (
-                    provider in CLAUDE_HARNESS_PROVIDERS
-                    and dispatch_id
-                    and (
-                        token_usage is None
-                        or (isinstance(token_usage, dict) and (
-                            token_usage.get("unavailable")
-                            or (token_usage.get("input", 0) == 0
-                                and token_usage.get("output", 0) == 0)
-                        ))
-                    )
-                    and dispatch_id in session_tokens
-                )
+def _rewrite_ledger_lines(session_tokens: dict) -> tuple[list[bytes], int]:
+    """Read the ledger once and return its output lines plus the count of enriched ones."""
+    out: list[bytes] = []
+    enriched = 0
+    with open(RECEIPTS_FILE, "rb") as fin:
+        for raw in fin:
+            data, was_enriched = _enrich_ledger_line(raw, session_tokens)
+            if data is not None:
+                out.append(data)
+            enriched += was_enriched
+    return out, enriched
 
-                if needs_backfill:
-                    receipt["token_usage"] = session_tokens[dispatch_id]
-                    enriched += 1
 
-                fout.write(json.dumps(receipt, sort_keys=False, ensure_ascii=False) + "\n")
-
-        # Atomic rename.
-        import os as _os
-        _os.replace(tmp_path, RECEIPTS_FILE)
+def _replace_ledger(lines: list[bytes]) -> None:
+    """Stage ``lines`` in a ``.tmp`` sibling and atomically rename it over the ledger."""
+    tmp_path = RECEIPTS_FILE.with_suffix(".ndjson.tmp")
+    try:
+        with open(tmp_path, "wb") as fout:
+            fout.write(b"".join(line + b"\n" for line in lines))
+        os.replace(tmp_path, RECEIPTS_FILE)
     except Exception:
         # Clean up the temp file on failure — never leave a partial.
         try:
@@ -331,7 +313,64 @@ def backfill_receipt_token_usage(conn: sqlite3.Connection) -> int:
             pass
         raise
 
-    return enriched
+
+def _session_token_lookup(conn: sqlite3.Connection) -> dict[str, dict[str, int]]:
+    """Map dispatch_id -> token_usage dict from session_analytics rows with any tokens."""
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT dispatch_id, total_input_tokens, total_output_tokens, "
+        "       cache_creation_tokens, cache_read_tokens "
+        "FROM session_analytics "
+        "WHERE dispatch_id IS NOT NULL"
+    )
+    session_tokens: dict[str, dict[str, int]] = {}
+    for did, inp, out, cc, cr in cur.fetchall():
+        if any(v is not None and v > 0 for v in (inp, out, cc, cr)):
+            session_tokens[did] = {
+                "input": int(inp or 0),
+                "output": int(out or 0),
+                "cache_creation_5m": int(cc or 0),
+                "cache_creation_1h": 0,
+                "cache_read": int(cr or 0),
+            }
+    return session_tokens
+
+
+def backfill_receipt_token_usage(conn: sqlite3.Connection,
+                                 lock_timeout_sec: float = LEDGER_LOCK_TIMEOUT_SEC) -> int:
+    """Backfill ``token_usage`` in claude-harness receipts from session_analytics (OI-1940).
+
+    No line to enrich means no rewrite: a read-only first pass finds out, and
+    nothing is written when it finds none.  The rewrite runs under the same
+    ``append_receipt.lock`` every receipt writer takes, bounded by
+    ``lock_timeout_sec`` (a lock not obtained logs a WARNING and returns 0),
+    and re-reads the ledger under it so a receipt appended meanwhile survives.
+    A line that is not enriched is written back byte for byte.
+
+    Returns the count of enriched receipts.
+    """
+    if not RECEIPTS_FILE.exists():
+        return 0
+    session_tokens = _session_token_lookup(conn)
+    if not session_tokens:
+        return 0
+    if _rewrite_ledger_lines(session_tokens)[1] == 0:
+        return 0
+
+    lock_path = _lock_file_for(RECEIPTS_FILE)
+    with open(lock_path, "a+") as lock_handle:
+        try:
+            deadline = time.monotonic() + lock_timeout_sec
+            if not _flock_until(lock_handle.fileno(), deadline):
+                logger.warning("backfill_receipt_token_usage: %s stayed taken for %ss; "
+                               "the receipt ledger was not touched", lock_path, lock_timeout_sec)
+                return 0
+            lines, enriched = _rewrite_ledger_lines(session_tokens)
+            if enriched:
+                _replace_ledger(lines)
+            return enriched
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
 
 def main():
