@@ -103,8 +103,8 @@ def _git(repo: Path, *args: str) -> Optional[str]:
     return done.stdout if done.returncode == 0 else None
 
 
-def parent_findings(repo: Path, parent: review_rounds.RoundLine) -> Optional[List[Dict[str, Any]]]:
-    """The parent's findings behind its recorded ids with id and symbolic context; ``None`` when an id is unresolved."""
+def parent_index(repo: Path, parent: review_rounds.RoundLine) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Every finding in the parent's report by id, with symbolic context; ``None`` when the report cannot be read."""
     try:
         text = Path(parent.report_path).read_text(encoding="utf-8", errors="replace")
         raw = extract_verdict_block(text).get("findings") or []
@@ -119,6 +119,14 @@ def parent_findings(repo: Path, parent: review_rounds.RoundLine) -> Optional[Lis
             found[fid] = {**finding, "id": fid, "symbolic_context": symbolic_context(source, finding.get("line"))}
         except (ValueError, TypeError, AttributeError, subprocess.SubprocessError):
             continue
+    return found
+
+
+def parent_findings(repo: Path, parent: review_rounds.RoundLine) -> Optional[List[Dict[str, Any]]]:
+    """The parent's findings behind its recorded ids with id and symbolic context; ``None`` when an id is unresolved."""
+    found = parent_index(repo, parent)
+    if found is None:
+        return None
     return [found[i] for i in parent.finding_ids] if all(i in found for i in parent.finding_ids) else None
 
 

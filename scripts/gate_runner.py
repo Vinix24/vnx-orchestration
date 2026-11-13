@@ -41,6 +41,7 @@ import provider_switch
 import vertex_ai_runner as _vtx
 import gate_dispatch_table
 import review_delta_shadow
+import review_delta_decide
 import review_scope
 from gate_worktree import (
     create_gate_worktree,
@@ -1059,8 +1060,10 @@ class GateRunner:
             )
 
         try:
+            plan = review_delta_decide.plan_round(  # DR-6: under delta the codex seat may decide with the delta round
+                gate=gate, prompt=prompt, request_payload=request_payload, state_dir=self._state_dir, worktree=worktree_path)
             result = self._run_with_stall_detection(
-                gate=gate, binary=binary, prompt=prompt,
+                gate=gate, binary=binary, prompt=plan.prompt,
                 timeout=gate_timeout(gate), stall_threshold=gate_stall_threshold(gate),
                 request_payload=request_payload,
                 cwd=worktree_path,
@@ -1097,7 +1100,7 @@ class GateRunner:
             )
         record = _art.materialize_artifacts(
             gate=gate, pr_number=pr_number, pr_id=pr_id,
-            stdout=result["stdout"], request_payload=request_payload,
+            stdout=plan.stdout_for(result["stdout"]), request_payload=plan.request_for(request_payload),
             duration_seconds=result["duration_seconds"],
             requests_dir=self._requests_dir, results_dir=self._results_dir,
             reports_dir=self._reports_dir,

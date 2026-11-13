@@ -1,0 +1,1 @@
+- Under `VNX_REVIEW_SCOPE=delta` the codex seat decides an eligible medium follow-up head with the delta round, and every other head stays a full round that names why in `full_review_reason` (deltareview DR-6, part 2).
