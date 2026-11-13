@@ -389,6 +389,16 @@ def _make_bundle_dir(root: Path, staging_id: str) -> Path:
     return bundle_dir
 
 
+def _require_staging_id(dispatch_id: str) -> str:
+    """The staging id (= the dispatch id) when it is a safe directory name, else ValueError."""
+    if not _ID_RE.match(dispatch_id or ""):
+        raise ValueError(
+            f"dispatch_id {dispatch_id!r} does not match the id regex; refusing to "
+            "stage a bundle with an unsafe directory name"
+        )
+    return dispatch_id
+
+
 _DOC_STYLE_KEY = "VNX_DOC_STYLE_FILE"
 _DOC_STYLE_HEADING = "## Writing style (VNX_DOC_STYLE_FILE)"
 _DOC_TASK_CLASSES = frozenset({"04_documentation", "06_design"})
@@ -522,12 +532,7 @@ def stage_spec_bundle(
     pending/), so the door's D11 staging gate is satisfied honestly.
     """
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
-    if not _ID_RE.match(dispatch_id or ""):
-        raise ValueError(
-            f"dispatch_id {dispatch_id!r} does not match the id regex; refusing to "
-            "stage a bundle with an unsafe directory name"
-        )
-    staging_id = dispatch_id
+    staging_id = _require_staging_id(dispatch_id)
 
     # 1a. deadline bounds validated at the trust boundary (this module is the FIRST writer of a
     # dispatch-spec.json): the validate() Rule 11 range, from the same constants (dispatch_spec).
