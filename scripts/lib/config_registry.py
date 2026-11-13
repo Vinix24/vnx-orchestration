@@ -131,7 +131,7 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "to every docs dispatch (task class 04_documentation or 06_design, or paths that are all "
         "docs/** or *.md outside changelog.d/). Empty means off. A set path that cannot be read "
         "(missing, not a file, empty) refuses staging of a docs dispatch.",
-        approval=True, subsystem="headless-builder-context", status="ACTIVATE",
+        approval=True, subsystem="docs-style-file", status="ACTIVATE",
         read_site_wired=True),
     "VNX_DEFAULT_REVIEW_STACK": _e(
         "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
