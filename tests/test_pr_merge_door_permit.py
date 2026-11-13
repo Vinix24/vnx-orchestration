@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deur D4: the door publishes ``vnx-gate/door`` as its sixth preflight, reads it back,
+"""Deur D4: the door publishes ``vnx-gate/door`` as its seventh preflight, reads it back,
 revokes it when the merge does not happen, and records all of it (ADR-061 §3-§5, contract (c)).
 
 GitHub is a fake behind ``forge_check_run._api_request`` (the one network seam), so the
@@ -29,7 +29,7 @@ from forge_protection_drift import YamlFetchResult  # noqa: E402
 from merge_target import MergeTarget  # noqa: E402
 
 SHA, PR, APP_ID = "d" * 40, 7, 4869217
-BEFORE_DOOR = ["ci", "review", "adr", "contract_invalid", "branch_protection"]
+BEFORE_DOOR = ["ci", "review", "adr", "contract_invalid", "branch_protection", "main"]
 DOOR_CHECK_KEYS = {
     "schema", "state", "check_name", "head_sha", "app_id", "check_run_id", "permit_id",
     "published_at", "read_back", "revoked", "revoke_outcome", "merge_outcome",
@@ -169,7 +169,7 @@ def test_merge_through_the_door_carries_a_permit(door: FakeGitHub) -> None:
     assert len(door.of("POST")) == 1 and not door.of("PATCH")
 
 
-def test_door_is_the_sixth_and_last_preflight() -> None:
+def test_door_is_the_seventh_and_last_preflight() -> None:
     assert pr_merge.PREFLIGHT_ORDER[-1] == "door"
     assert list(pr_merge.PREFLIGHT_ORDER[:-1]) == BEFORE_DOOR == fgp.door_evidence_gates()
 
