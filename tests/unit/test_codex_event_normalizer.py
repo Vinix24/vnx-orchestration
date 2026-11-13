@@ -335,28 +335,28 @@ class TestIntermediateTokenCountEvents:
             }
         }
         event = adapter._normalize(raw)
-        # Zero token count is not useful; falls through to unknown → error
-        assert event.event_type == "error"
+        # Zero token count is not useful; falls through to unknown → info
+        assert event.event_type == "info"
 
 
-# ── unknown event type → error ────────────────────────────────────────────────
+# ── unknown event type → info (non-fatal passthrough since cf28392d9) ────────────────────────────────────────────────
 
 class TestUnknownEvents:
-    def test_unknown_type_produces_error(self, adapter):
+    def test_unknown_type_produces_info(self, adapter):
         raw = {"type": "some_future_event", "data": "value"}
         event = adapter._normalize(raw)
-        assert_canonical(event, "error")
+        assert_canonical(event, "info")
         assert "some_future_event" in event.data.get("raw_type", "")
 
-    def test_empty_event_produces_error(self, adapter):
+    def test_empty_event_produces_info(self, adapter):
         raw = {}
         event = adapter._normalize(raw)
-        assert_canonical(event, "error")
+        assert_canonical(event, "info")
 
     def test_event_with_only_id(self, adapter):
         raw = {"id": "evt-123"}
         event = adapter._normalize(raw)
-        assert event.event_type == "error"
+        assert event.event_type == "info"
 
 
 # ── observability_tier is always 1 ───────────────────────────────────────────

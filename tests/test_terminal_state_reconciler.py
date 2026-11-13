@@ -305,8 +305,10 @@ def test_reconciler_split_brain_conflicting_claims(tmp_path: Path):
     }
     (tmp_path / "terminal_state.json").write_text(json.dumps(primary), encoding="utf-8")
 
+    # The claims only count while their lease is live, so pin the clock inside it.
     result = reconcile_terminal_state(
         tmp_path,
+        now=datetime(2026, 2, 10, 12, 0, 30, tzinfo=timezone.utc),
         tmux_probe=_tmux_stub,
         process_probe=_process_stub,
     )
@@ -450,7 +452,7 @@ def test_reconciler_expired_lease_allows_idle_with_stale_activity(tmp_path: Path
     assert result["terminals"]["T1"]["status"] == "idle"
 
 
-def test_reconciler_prefers_later_timeout_without_timestamp_over_older_complete(tmp_path: Path):
+def test_reconciler_prefers_timestamped_complete_over_later_timeout_without_timestamp(tmp_path: Path):
     _write_receipts(
         tmp_path / "t0_receipts.ndjson",
         [
@@ -476,4 +478,6 @@ def test_reconciler_prefers_later_timeout_without_timestamp_over_older_complete(
         process_probe=_process_stub,
     )
 
-    assert result["terminals"]["T1"]["status"] == "blocked"
+    # Since 0f341325d a receipt with a timestamp outranks one without, even
+    # when the timestamp-less one comes later in the file.
+    assert result["terminals"]["T1"]["status"] == "idle"
