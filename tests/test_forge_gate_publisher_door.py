@@ -38,10 +38,18 @@ class FakeGitHub:
         self.next_id = 900
         self.root: Path = Path()
         self.ledger = ""
+        self.by_id: Dict[int, Dict[str, Any]] = {}  # answers of GET /check-runs/<id>
+        self.lagging_lists = 0  # this many list reads answer with no runs, as a lagging GitHub does
 
     def __call__(self, method, url, *, headers, payload=None, timeout=30):
         body = json.loads(payload) if payload else None
         self.calls.append((method, url, body))
+        if method == "GET" and "/commits/" not in url:
+            run = self.by_id.get(int(url.rsplit("/", 1)[1]))
+            return (200, json.dumps(run)) if run is not None else (404, "{}")
+        if method == "GET" and self.lagging_lists > 0:
+            self.lagging_lists -= 1
+            return 200, json.dumps({"total_count": 0, "check_runs": []})
         if method == "GET":
             runs = self.runs
             if "filter=all" not in url:  # GitHub's default is filter=latest: one run per name
@@ -66,6 +74,12 @@ class FakeGitHub:
 
     def methods(self) -> List[str]:
         return [c[0] for c in self.calls]
+
+    def lists(self) -> int:
+        return sum(1 for c in self.calls if c[0] == "GET" and "/commits/" in c[1])
+
+    def gets_by_id(self) -> int:
+        return sum(1 for c in self.calls if c[0] == "GET" and "/commits/" not in c[1])
 
 
 def _door(run_id: int, conclusion: str = "success", app: int = APP_ID) -> Dict[str, Any]:
@@ -413,7 +427,7 @@ def test_cli_valid_evidence_prints_the_check_run_id(tmp_path: Path, capsys: pyte
 
 def test_cli_read_back_refusal_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture, gh: FakeGitHub, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        fgp, "read_back_door", lambda sha, rid, **k: (_ for _ in ()).throw(fgp.ForgeDoorRefused("weg"))
+        fgp, "read_back_door_counted", lambda sha, rid, **k: (_ for _ in ()).throw(fgp.ForgeDoorRefused("weg"))
     )
     rc, _, err = _cli(tmp_path, _evidence(), capsys, gh)
     assert rc == 1 and "weg" in err
@@ -796,3 +810,118 @@ def test_a_foreign_run_appearing_after_the_create_is_named_and_does_not_undo_the
     outcome = _receipts(gh.ledger)[-1]
     assert (outcome["status"], outcome["action"]) == ("success", "create")
     assert outcome["foreign_door_runs"] == [{"check_run_id": 70, "app_id": 1}]
+
+
+# --- read back under GitHub's read-after-write lag (OI-2787) ----------------------------
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> List[float]:
+    slept: List[float] = []
+    monkeypatch.setattr(fgp.time, "sleep", slept.append)
+    return slept
+
+
+def _by_id(run_id: int, sha: str = SHA, **over: Any) -> Dict[str, Any]:
+    return {**_door(run_id), "head_sha": sha, **over}
+
+
+def test_a_lagging_list_is_accepted_on_the_run_read_by_id(gh: FakeGitHub, sleeps: List[float]) -> None:
+    gh.runs, gh.by_id = [], {55: _by_id(55)}
+    run, attempts = fgp.read_back_door_counted(SHA, 55, project_root=gh.root)
+    assert (run["id"], attempts) == (55, 1)
+    assert sleeps == [] and gh.lists() == 1 and gh.gets_by_id() == 1
+
+
+def test_a_failed_get_then_a_second_list_with_the_run_is_accepted(gh: FakeGitHub, sleeps: List[float]) -> None:
+    gh.runs = [_door(55)]  # GET by id answers 404
+    empty = fgp.DoorRuns(own=[], foreign=[], app_id=APP_ID)
+    run, attempts = fgp.read_back_door_counted(SHA, 55, project_root=gh.root, listed=empty)
+    assert (run["id"], attempts) == (55, 2)
+    assert sleeps == [1.0] and gh.gets_by_id() == 1 and gh.lists() == 1
+
+
+def test_a_list_that_stays_empty_refuses_after_three_attempts(gh: FakeGitHub, sleeps: List[float]) -> None:
+    gh.runs = []
+    with pytest.raises(fgp.ForgeDoorRefused, match=r"staat niet op .* \(na 3 pogingen\)"):
+        fgp.read_back_door_counted(SHA, 55, project_root=gh.root)
+    assert sleeps == [1.0, 2.0] and gh.lists() == 3 and gh.gets_by_id() == 3
+
+
+def test_a_run_read_by_id_on_another_head_is_not_accepted(gh: FakeGitHub, sleeps: List[float]) -> None:
+    gh.runs, gh.by_id = [], {55: _by_id(55, sha="b" * 40)}
+    with pytest.raises(fgp.ForgeDoorRefused, match="na 3 pogingen"):
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+
+
+@pytest.mark.parametrize("over", [
+    {"app": {"id": 1}}, {"app": None}, {"name": "other"}, {"conclusion": "failure"},
+    {"conclusion": None}, {"id": 56}, {"head_sha": None},
+])
+def test_a_run_read_by_id_that_misses_one_point_is_not_accepted(
+    gh: FakeGitHub, sleeps: List[float], over: Dict[str, Any]
+) -> None:
+    gh.runs, gh.by_id = [], {55: _by_id(55, **over)}
+    with pytest.raises(fgp.ForgeDoorRefused, match="na 3 pogingen"):
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+
+
+def test_another_own_run_in_the_list_is_not_covered_by_the_get(gh: FakeGitHub, sleeps: List[float]) -> None:
+    gh.runs, gh.by_id = [_door(56)], {55: _by_id(55)}
+    with pytest.raises(fgp.ForgeDoorRefused, match="na 3 pogingen"):
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+    assert gh.gets_by_id() == 0
+
+
+@pytest.mark.parametrize("runs, match", [
+    ([_door(55), _door(56)], "2 deurruns"),
+    ([_door(55, app=1)], "andere App"),
+    ([_door(55, "failure")], "conclusion 'failure'"),
+])
+def test_the_other_refusals_are_immediate_without_get_or_sleep(
+    gh: FakeGitHub, sleeps: List[float], runs: List[Dict[str, Any]], match: str
+) -> None:
+    gh.runs, gh.by_id = runs, {55: _by_id(55)}
+    with pytest.raises(fgp.ForgeDoorRefused, match=match) as exc:
+        fgp.read_back_door(SHA, 55, project_root=gh.root)
+    assert "pogingen" not in str(exc.value)
+    assert sleeps == [] and gh.gets_by_id() == 0 and gh.lists() == 1
+
+
+def test_publish_survives_a_lagging_list_after_the_create(
+    gh: FakeGitHub, sleeps: List[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gh.by_id = {900: _by_id(900)}
+    real = fcr._api_request
+
+    def lag_after_post(method, url, *, headers, payload=None, timeout=30):
+        if method == "GET" and "/commits/" in url and "POST" in gh.methods():
+            gh.calls.append((method, url, None))
+            return 200, json.dumps({"total_count": 0, "check_runs": []})
+        return real(method, url, headers=headers, payload=payload, timeout=timeout)
+
+    monkeypatch.setattr(fcr, "_api_request", lag_after_post)
+    run_id = fgp.publish_door_permit(
+        _evidence(), sha=SHA, pr=7, project_root=gh.root, receipts_file=gh.ledger
+    )
+    assert run_id == 900 and "PATCH" not in gh.methods()
+    outcome = [r for r in _receipts(gh.ledger) if r.get("phase") == "outcome"][-1]
+    assert (outcome["status"], outcome["readback_attempts"]) == ("success", 1)
+
+
+def test_publish_that_never_sees_the_run_is_blocked_with_the_attempt_count(
+    gh: FakeGitHub, sleeps: List[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = fcr._api_request
+
+    def always_empty(method, url, *, headers, payload=None, timeout=30):
+        if method == "GET" and "/commits/" in url and "POST" in gh.methods():
+            gh.calls.append((method, url, None))
+            return 200, json.dumps({"total_count": 0, "check_runs": []})
+        return real(method, url, headers=headers, payload=payload, timeout=timeout)
+
+    monkeypatch.setattr(fcr, "_api_request", always_empty)
+    with pytest.raises(fgp.ForgeDoorRefused, match="na 3 pogingen"):
+        fgp.publish_door_permit(_evidence(), sha=SHA, pr=7, project_root=gh.root, receipts_file=gh.ledger)
+    outcome = [r for r in _receipts(gh.ledger) if r.get("phase") == "outcome"][-1]
+    assert outcome["status"] == "blocked" and "na 3 pogingen" in outcome["reason"]

@@ -1,0 +1,1 @@
+- The door re-reads a fresh permit run (by id, then the list, 3 attempts) before "not on the head" becomes a refusal, so it no longer revokes its own permit on GitHub's read-after-write lag, and the receipt names `readback_attempts` (OI-2787, ci-cost-and-merge-cadence PR 3b part a).

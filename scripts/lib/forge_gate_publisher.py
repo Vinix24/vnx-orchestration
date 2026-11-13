@@ -64,6 +64,7 @@ from forge_check_run import (  # noqa: E402
     ForgeCheckRunError,
     ForgeKeychainError,
     ForgePublishRefused,
+    get_check_run,
     list_check_runs,
     load_app_config,
     patch_check_run,
@@ -1618,6 +1619,10 @@ DOOR_EVIDENCE_SCHEMA = 1
 DOOR_EVIDENCE_SOURCE = "pr_merge._run_door"
 DOOR_REVOKE_ATTEMPTS = 3
 _DOOR_REVOKE_BACKOFF_SECONDS = (1.0, 3.0)
+# GitHub can answer the run list right after a create without the new run (read-after-write
+# lag): the read-back reads again before "not on the head" becomes a refusal (OI-2787).
+DOOR_READBACK_ATTEMPTS = 3
+_DOOR_READBACK_BACKOFF_SECONDS = (1.0, 2.0)
 REVOKED = "revoked"
 REVOKE_FAILED = "revoke_failed"
 
@@ -1895,7 +1900,9 @@ def publish_door_permit(
         heads.append(door_runs_on_head(sha, project_root=project_root))
         run_id, action = _apply_door_permit(heads[0], sha, pr, project_root)
         heads.append(door_runs_on_head(sha, project_root=project_root))
-        run = read_back_door(sha, run_id, project_root=project_root, listed=heads[1])
+        run, readback_attempts = read_back_door_counted(
+            sha, run_id, project_root=project_root, listed=heads[1]
+        )
     except ForgeCheckRunError as exc:
         _write_outcome_receipt(
             "door_permit_published",
@@ -1908,6 +1915,7 @@ def publish_door_permit(
     _write_outcome_receipt(
         "door_permit_published", status="success", action=action, check_run_id=run_id,
         conclusion=run.get("conclusion"), reason="permit gepubliceerd en teruggelezen",
+        readback_attempts=readback_attempts,
         **_foreign_field(heads), **base,
     )
     return run_id
@@ -1929,33 +1937,95 @@ def _foreign_field(heads: List[DoorRuns]) -> Dict[str, Any]:
     return {"foreign_door_runs": seen}
 
 
-def read_back_door(
-    sha: str, check_run_id: int, *, project_root: Path, listed: Optional[DoorRuns] = None
-) -> Dict[str, Any]:
-    """The door run on ``sha`` with this id, own App and ``success``, or a named refusal.
+class _DoorRunNotListed(ForgeDoorRefused):
+    """The id is in neither the own nor the foreign runs of the list: the one refusal that is re-read."""
 
-    ``listed`` is the list read AFTER the call, when the caller already holds it
-    (:func:`publish_door_permit` does, so its receipt names what this verdict
-    saw); without it the runs are read here. Split as the reader splits: more
-    than one own run refuses; the id must be one of the own runs, and an id that
-    is a foreign run (another App, or no ``app`` object) refuses. A foreign run
-    NEXT TO the own success run does not refuse: with an own run present the
-    reader classifies the own runs only (``classify_contexts``), so the context
-    reads green on that run and the permit is the run this call made or patched.
-    """
-    head = listed if listed is not None else door_runs_on_head(sha, project_root=project_root)
+
+def _classify_door_read(head: DoorRuns, sha: str, check_run_id: int) -> Dict[str, Any]:
+    """The verdict on one list: the own success run with this id, or a named refusal."""
     if len(head.own) > 1:
         raise ForgeDoorRefused(f"teruglezing: {len(head.own)} deurruns van de eigen App op {sha[:12]}")
     run = next((r for r in head.own if r.get("id") == check_run_id), None)
     if run is None:
         if any(r.get("id") == check_run_id for r in head.foreign):
             raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} is van een andere App")
-        raise ForgeDoorRefused(f"teruglezing: deurrun {check_run_id} staat niet op {sha[:12]}")
+        raise _DoorRunNotListed(f"teruglezing: deurrun {check_run_id} staat niet op {sha[:12]}")
     if run.get("conclusion") != CONCLUSION_SUCCESS:
         raise ForgeDoorRefused(
             f"teruglezing: deurrun {check_run_id} heeft conclusion {run.get('conclusion')!r}"
         )
     return run
+
+
+def _door_run_by_id(
+    head: DoorRuns, sha: str, check_run_id: int, project_root: Path
+) -> Optional[Dict[str, Any]]:
+    """The run read by id when it matches on every point, else ``None`` (never a refusal).
+
+    A lagging list can hide the run this call just made; the run itself is read
+    after the write. Accepted only on positive evidence: the same id, this head,
+    the own App, the door name and ``success``. Another own run in the list
+    stays a refusal path (two own runs), so it never gets here as a pass.
+    """
+    if any(r.get("id") != check_run_id for r in head.own):
+        return None
+    try:
+        run = get_check_run(check_run_id, project_root=project_root)
+    except ForgeCheckRunError as exc:
+        logger.warning("deurrun %s op id lezen faalde: %s", check_run_id, exc)
+        return None
+    app = run.get("app")
+    matches = (
+        run.get("id") == check_run_id
+        and run.get("head_sha") == sha
+        and isinstance(app, dict) and app.get("id") == head.app_id
+        and run.get("name") == DOOR_CHECK_NAME
+        and run.get("conclusion") == CONCLUSION_SUCCESS
+    )
+    return run if matches else None
+
+
+def read_back_door_counted(
+    sha: str, check_run_id: int, *, project_root: Path, listed: Optional[DoorRuns] = None
+) -> Tuple[Dict[str, Any], int]:
+    """The door run on ``sha`` with this id, own App and ``success``, plus the reads it took.
+
+    ``listed`` is the list read AFTER the call, when the caller already holds it
+    (:func:`publish_door_permit` does, so its receipt names what this verdict
+    saw); without it the runs are read here. Split as the reader splits: more
+    than one own run refuses; an id that is a foreign run (another App, or no
+    ``app`` object) refuses; a conclusion other than success refuses. A foreign
+    run NEXT TO the own success run does not refuse: with an own run present the
+    reader classifies the own runs only (``classify_contexts``), so the context
+    reads green on that run and the permit is the run this call made or patched.
+
+    Only "the id is not on the head" is re-read, because that is what GitHub's
+    read-after-write lag looks like (OI-2787): the run is read by id first and
+    accepted when it matches; otherwise the list is read again, up to
+    :data:`DOOR_READBACK_ATTEMPTS` reads with a backoff of 1 s then 2 s. The
+    refusal after the last read names the number of attempts.
+    """
+    head = listed if listed is not None else door_runs_on_head(sha, project_root=project_root)
+    attempt = 1
+    while True:
+        try:
+            return _classify_door_read(head, sha, check_run_id), attempt
+        except _DoorRunNotListed as exc:
+            by_id = _door_run_by_id(head, sha, check_run_id, project_root)
+            if by_id is not None:
+                return by_id, attempt
+            if attempt >= DOOR_READBACK_ATTEMPTS:
+                raise ForgeDoorRefused(f"{exc} (na {attempt} pogingen)") from exc
+            time.sleep(_DOOR_READBACK_BACKOFF_SECONDS[attempt - 1])
+            attempt += 1
+            head = door_runs_on_head(sha, project_root=project_root)
+
+
+def read_back_door(
+    sha: str, check_run_id: int, *, project_root: Path, listed: Optional[DoorRuns] = None
+) -> Dict[str, Any]:
+    """:func:`read_back_door_counted` without the attempt count."""
+    return read_back_door_counted(sha, check_run_id, project_root=project_root, listed=listed)[0]
 
 
 def _patch_door_failure(

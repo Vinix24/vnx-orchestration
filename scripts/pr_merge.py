@@ -2901,12 +2901,12 @@ def _publish_and_bind(
     run_id: Optional[int] = None
     try:
         run_id = forge_gate_publisher.publish_door_permit(evidence, sha=head_sha, pr=pr, project_root=root)
-        run = forge_gate_publisher.read_back_door(head_sha, run_id, project_root=root)
+        run, attempts = forge_gate_publisher.read_back_door_counted(head_sha, run_id, project_root=root)
         app_id = run["app"]["id"]
         permit = dict(
             check, state=DOOR_STATE_PERMITTED, app_id=app_id, check_run_id=run_id,
             permit_id=f"{app_id}:{head_sha}:{run_id}", published_at=utc_now_iso(),
-            read_back={"conclusion": run["conclusion"], "id": run["id"]},
+            read_back={"conclusion": run["conclusion"], "id": run["id"], "readback_attempts": attempts},
         )
         go = _door_gate("GO", f"{DOOR_CHECK_NAME} gepubliceerd en teruggelezen: {permit['permit_id']}")
     except ForgeCheckRunError as exc:
