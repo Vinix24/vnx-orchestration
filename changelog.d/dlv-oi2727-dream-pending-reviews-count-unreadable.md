@@ -1,0 +1,1 @@
+- `vnx dream status` names a pending-review file it cannot read instead of silently dropping it, so an empty pending list no longer hides a waiting cycle (OI-2727, ADR-066).
