@@ -256,6 +256,21 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "that is not a positive integer, or below VNX_PR_SIZE_WARN, falls back to 600 and is "
         "named in the gate detail.", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    # The admission contract of the main window (ADR-073 besluit 3 and 6), read by
+    # main_window.read_admission_config. Unset N is mode off: the gate records GO and the
+    # merge behaviour is unchanged.
+    "VNX_MAIN_UNVERIFIED_MAX": _e(
+        "VNX_MAIN_UNVERIFIED_MAX", "integer", "", "gate",
+        "Merges on main whose VNX CI run may still be running before the door refuses another "
+        "(ADR-073). Unset: mode off. A value that is not a positive integer reads as unset "
+        "(never 0) and is named in the record as invalid_config.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    "VNX_MAIN_RUN_MAX_AGE_MIN": _e(
+        "VNX_MAIN_RUN_MAX_AGE_MIN", "integer", "40", "gate",
+        "Minutes after which a queued or in-progress main run, or a merge commit without a "
+        "run, is a NO-GO (stale_run, no_run) instead of running. A value that is not a "
+        "positive integer falls back to 40 and is named.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE"),
     # OI-2701 (option a), read by review_seat_evaluation.approved_full_fill_pairs. Empty by
     # default: no project approves a takeover, so every project keeps today's behaviour.
     "VNX_REVIEW_TAKEOVER_FULL_FILL": _e(
