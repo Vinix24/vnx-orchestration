@@ -60,9 +60,9 @@ class RunnerError(RuntimeError):
         self.stderr = stderr
 
 
-def default_runner(argv: list) -> str:
+def default_runner(argv: list, cwd: Optional[Path] = None) -> str:
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300, cwd=cwd)
     except subprocess.TimeoutExpired as exc:
         raise RunnerError(argv, -1, f"timed out after {exc.timeout}s") from exc
     except OSError as exc:
@@ -116,7 +116,7 @@ def read_ledger(path: Path) -> list:
     return entries
 
 
-def _key(entry: dict) -> tuple:
+def entry_key(entry: dict) -> tuple:
     return (entry.get("run_id"), entry.get("run_attempt"))
 
 
@@ -135,7 +135,7 @@ def append_entry(path: Path, entry: dict) -> bool:
                     existing = json.loads(raw)
                 except ValueError:
                     continue
-                if isinstance(existing, dict) and _key(existing) == _key(entry):
+                if isinstance(existing, dict) and entry_key(existing) == entry_key(entry):
                     return False
             handle.write(line)
             handle.flush()
@@ -171,7 +171,24 @@ def _download(runner: Runner, run_id, name: str):
         return data, None
 
 
-def _timing(jobs: list, name: str) -> Optional[dict]:
+def discover(runner: Runner, limit: int, event: Optional[str] = None) -> tuple:
+    """``(repo, runs)``: the completed ``VNX CI`` runs, newest first, optionally of one event."""
+    repo = json.loads(runner(["gh", "repo", "view", "--json", "nameWithOwner"]))["nameWithOwner"]
+    argv = ["gh", "run", "list", "--workflow", WORKFLOW, "--status", "completed", "--limit", str(limit), "--json", RUN_FIELDS]
+    runs = json.loads(runner(argv + (["--event", event] if event else [])))
+    if not isinstance(runs, list):
+        raise ValueError("gh run list did not return a list")
+    return repo, runs
+
+
+def fetch_jobs(runner: Runner, repo: str, run_id, attempt) -> list:
+    """The job list of one attempt; a payload that is not a job list gives ``[]``."""
+    jobs = json.loads(runner(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"]))
+    jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
+    return jobs if isinstance(jobs, list) else []
+
+
+def timing(jobs: list, name: str) -> Optional[dict]:
     for job in jobs:
         if isinstance(job, dict) and job.get("name") == name:
             start, end = parse_time(job.get("started_at")), parse_time(job.get("completed_at"))
@@ -197,13 +214,11 @@ def _entry(runner: Runner, repo: str, run: dict, now: datetime) -> dict:
     run_id, attempt = run["databaseId"], run["attempt"]
     shadow = _download(runner, run_id, SHADOW_ARTIFACT)
     job = _download(runner, run_id, JOB_ARTIFACT)
-    jobs = json.loads(runner(["gh", "api", f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"]))
-    jobs = jobs.get("jobs") if isinstance(jobs, dict) else None
-    jobs = jobs if isinstance(jobs, list) else []
+    jobs = fetch_jobs(runner, repo, run_id, attempt)
     missing = []
     shadow = _attributed(shadow, attempt, "impact-shadow", missing)
     job = _attributed(job, attempt, "impact-shadow-job", missing)
-    profile_a, shadow_job = _timing(jobs, PROFILE_A_JOB), _timing(jobs, SHADOW_JOB)
+    profile_a, shadow_job = timing(jobs, PROFILE_A_JOB), timing(jobs, SHADOW_JOB)
     missing += [f"job:{n}" for n, t in (("profile-a", profile_a), ("impact-shadow", shadow_job)) if t is None]
     return {
         "schema": SCHEMA, "run_id": run_id, "run_attempt": attempt, "head_sha": run.get("headSha"),
@@ -220,16 +235,12 @@ def collect(state_dir: Path, runner: Runner = default_runner, since: Optional[da
     path = ledger_path(state_dir)
     result = {"added": [], "skipped": [], "failed": []}
     try:
-        repo = json.loads(runner(["gh", "repo", "view", "--json", "nameWithOwner"]))["nameWithOwner"]
-        runs = json.loads(runner(["gh", "run", "list", "--workflow", WORKFLOW, "--status", "completed",
-                                  "--limit", str(limit), "--json", RUN_FIELDS]))
-        if not isinstance(runs, list):
-            raise ValueError("gh run list did not return a list")
+        repo, runs = discover(runner, limit)
     except (RunnerError, ValueError, KeyError, TypeError) as exc:
         # No ledger line: discovery failed, so nothing is known about any attempt.
         result["failed"].append({"attempt": "discovery", "error": str(exc)})
         return result
-    stored = {_key(e) for e in read_ledger(path)}
+    stored = {entry_key(e) for e in read_ledger(path)}
     for run in runs:
         name = f"{run.get('databaseId')}/{run.get('attempt')}"
         created = parse_time(run.get("createdAt"))
@@ -257,11 +268,12 @@ def _exclusion(entry: dict) -> Optional[str]:
         return "unreadable"
     shadow = entry.get("shadow")
     if not isinstance(shadow, dict):
-        named = [m for m in (entry.get("missing") or []) if str(m).startswith("artifact:impact-shadow")
-                 and not str(m).startswith("artifact:impact-shadow-job")]
+        named = [m for m in (entry.get("missing") or []) if (str(m).startswith("artifact:impact-shadow")
+                 and not str(m).startswith("artifact:impact-shadow-job")) or str(m).startswith("artifact:profile-a-evidence")]
         return f"missing:{named[0][len('artifact:'):]}" if named else "missing:impact-shadow"
     if shadow.get("reconstructible") is not True:
-        return "onreconstrueerbaar"
+        named = shadow.get("unreadable_inputs")
+        return "onreconstrueerbaar" + (f":{','.join(map(str, named))}" if isinstance(named, list) and named else "")
     if shadow.get("attempt_valid") is not True:
         reasons = shadow.get("invalid_reasons")
         names = sorted({str(r.get("reason")) for r in reasons if isinstance(r, dict)}) if isinstance(reasons, list) else []
@@ -296,21 +308,29 @@ def _wall_clock(counted: list) -> dict:
             "profile_a_seconds": {"median": statistics.median(full) if rows else None, "sum": sum(full)}}
 
 
-def report(lines: list) -> dict:
+def _source(entry: dict) -> str:
+    """``backtest`` only when the line says so; a line without ``source`` is live."""
+    return "backtest" if entry.get("source") == "backtest" else "live"
+
+
+def _summary(lines: list) -> dict:
     counted, excluded = [], []
     for entry in lines:
         reason = _exclusion(entry)
         if reason is None:
             counted.append(entry)
         else:
-            excluded.append({"attempt": _name(entry) if "_unreadable" not in entry else f"line {entry['_unreadable']}",
-                             "reason": reason})
+            if "_unreadable" in entry:
+                label = f"line {entry['_unreadable']}"
+                name = f"backtest {label}" if _source(entry) == "backtest" else label
+            else:
+                name = _name(entry)
+            excluded.append({"attempt": name, "reason": reason})
     reduced = [e for e in counted if e["shadow"].get("reduced") is True]
     red = [e for e in counted if e["shadow"]["sets"]["F"]]
     misses = [{"test_id": test, "run_id": e.get("run_id"), "run_attempt": e.get("run_attempt")}
               for e in reduced for test in e["shadow"]["sets"]["misses"]]
     return {
-        "schema": "impact_report/1",
         "attempts_in_ledger": len(lines),
         "counted": [_name(e) for e in counted],
         "excluded": excluded,
@@ -320,6 +340,20 @@ def report(lines: list) -> dict:
         "red_runs": {"counted": len(red), "reduced": len([e for e in red if e in reduced])},
         "wall_clock": _wall_clock(counted),
     }
+
+
+def report(lines: list) -> dict:
+    """Every count over live and backtest lines together, and again per source (``by_source``).
+
+    An attempt that stands in both the live and the backtest ledger counts once, as live.
+    """
+    live = [e for e in lines if _source(e) == "live"]
+    stored = {entry_key(e) for e in live if "_unreadable" not in e}
+    backtest = [e for e in lines if _source(e) == "backtest"]
+    superseded = [_name(e) for e in backtest if "_unreadable" not in e and entry_key(e) in stored]
+    backtest = [e for e in backtest if "_unreadable" in e or entry_key(e) not in stored]
+    return {"schema": "impact_report/1", **_summary(live + backtest), "backtest_superseded_by_live": superseded,
+            "by_source": {"live": _summary(live), "backtest": _summary(backtest)}}
 
 
 def filter_since(lines: list, since: Optional[datetime]) -> list:
