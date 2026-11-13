@@ -282,3 +282,25 @@ def test_json_names_a_missing_cost_ledger(tmp_path):
     w.cohort("sonnet", "01_code_generation", "medium", 2, 0)
     cost = json.loads(w.cli("--json").stdout)["cost"]
     assert cost["cells"] == [] and "cost ledger not found" in cost["ledger_error"]
+
+
+def test_md_renders_the_cost_section(tmp_path):
+    w = World(tmp_path)
+    did = w.delivery("sonnet", "01_code_generation", "medium")
+    w.delivery("sonnet", "01_code_generation", "medium")
+    _cost_ledger(w, did)
+    md = w.cli("--md")
+    assert md.returncode == 0, md.stderr
+    assert "## Cost per delivery" in md.stdout
+    row = next(ln for ln in md.stdout.splitlines() if ln.startswith("| claude/sonnet") and "$1.5" in ln)
+    assert "unmeasured" in row and "nee (n < 20)" in row
+    assert "Incomplete deliveries (buiten de medianen): 1" in md.stdout and "without builder run" in md.stdout
+    assert "Reviewruns zonder koppeling" in md.stdout
+
+
+def test_md_names_a_missing_cost_ledger_instead_of_a_table(tmp_path):
+    w = World(tmp_path)
+    w.cohort("sonnet", "01_code_generation", "medium", 2, 0)
+    out = w.cli("--md").stdout
+    assert "## Cost per delivery" in out and "Geen kostenas: cost ledger not found" in out
+    assert "bouw p50 / p75" not in out
