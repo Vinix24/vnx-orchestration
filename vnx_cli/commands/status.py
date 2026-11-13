@@ -198,6 +198,14 @@ def _held_worktrees_line(project_dir: Path) -> str:
     return f"held worktrees: {len(held)} (newest {newest.name[len('dispatch-'):]})"
 
 
+def _held_worktrees_text(project_dir: Path) -> str:
+    """The held-worktrees line, or why it could not be measured (never raises)."""
+    try:
+        return _held_worktrees_line(project_dir)
+    except Exception as exc:  # noqa: BLE001
+        return f"held worktrees: unavailable ({exc})"
+
+
 def vnx_status(args) -> int:
     project_dir = Path(getattr(args, "project_dir", ".")).resolve()
     emit_json = getattr(args, "json", False)
@@ -310,7 +318,7 @@ def vnx_status(args) -> int:
     else:
         print(f"VNX status — {project_dir}")
         print()
-        print(f"  Active dispatches : {active_count}")
+        print(f"  Active dispatches : {active_count}\n  {_held_worktrees_text(project_dir)}")
         if agents_error is not None:
             print(f"  Agents            : unavailable ({agents_error})")
         else:
@@ -327,10 +335,6 @@ def vnx_status(args) -> int:
                 print(f"    - {name}")
         else:
             print("  Recent completions: none")
-        try:
-            print(f"  {_held_worktrees_line(project_dir)}")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  held worktrees: unavailable ({exc})")
 
         if show_tracks:
             print()
