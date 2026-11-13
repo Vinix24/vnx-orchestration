@@ -1,0 +1,1 @@
+- Seven more test files pass on main again and leave the CI exclusion list: the tests now match the current shutdown, skill, task-count, strict-diff, scoped auto-commit and head-sha behavior (OI-2589, batch b).

@@ -313,6 +313,8 @@ class TestRequestClaudeGitHubWithContract:
             captured["argv"] = list(cmd)
             mock_proc = MagicMock()
             mock_proc.returncode = 0
+            mock_proc.stdout = ""
+            mock_proc.stderr = ""
             return mock_proc
 
         monkeypatch.setattr(rgm.subprocess, "run", _capture)
@@ -636,10 +638,14 @@ class TestRequestClaudeGitHubInvalidPrNumber:
         gh_calls: list = []
 
         def _trace_run(cmd, *a, **kw):
-            if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "gh":
+            # Only ``gh pr comment`` is forbidden; the read-only ``gh pr view``
+            # head-sha lookup runs for the BLOCKED receipt payload (#1588).
+            if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["gh", "pr", "comment"]:
                 gh_calls.append(list(cmd))
             mock_proc = MagicMock()
             mock_proc.returncode = 0
+            mock_proc.stdout = ""
+            mock_proc.stderr = ""
             mock_proc.stdout = ""
             mock_proc.stderr = ""
             return mock_proc
@@ -693,10 +699,14 @@ class TestRequestClaudeGitHubInvalidPrNumber:
         gh_calls: list = []
 
         def _trace_run(cmd, *a, **kw):
-            if isinstance(cmd, (list, tuple)) and cmd and cmd[0] == "gh":
+            # Only ``gh pr comment`` is forbidden; the read-only ``gh pr view``
+            # head-sha lookup runs for the BLOCKED receipt payload (#1588).
+            if isinstance(cmd, (list, tuple)) and list(cmd[:3]) == ["gh", "pr", "comment"]:
                 gh_calls.append(list(cmd))
             mock_proc = MagicMock()
             mock_proc.returncode = 0
+            mock_proc.stdout = ""
+            mock_proc.stderr = ""
             return mock_proc
 
         monkeypatch.setattr(rgm.subprocess, "run", _trace_run)
