@@ -1,21 +1,30 @@
 """Deltareview DR-6 part 2: under ``VNX_REVIEW_SCOPE=delta`` the codex seat decides an eligible follow-up head with the delta round (model run, git and parent report patched)."""
 from __future__ import annotations
 
+import dataclasses
 import json
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from review_stack_support import BRANCH  # importing it puts scripts/ and scripts/lib on sys.path
 import gate_runner
+import review_changekind as ck
 import review_delta as rd
+import review_delta_decide as dd
+import review_findings as rf
 import review_delta_shadow as ds
 import review_rounds as rr
 import test_review_scope as scope
 from gate_runner import GateRunner
 from review_changekind import ChangeKindRecord, Interdiff
 
-HEAD_A, HEAD_B, OPEN_ID, FULL_PROMPT = "a" * 40, "b" * 40, "f" * 16, "Review"
+SRC = "def f():\n    return 1\n\n\nclass C:\n    def m(self):\n        return 2\n"
+OPEN_FINDING = {"severity": "error", "file_path": "x.py", "line": 2, "message": "broken"}
+HEAD_A, HEAD_B, FULL_PROMPT = "a" * 40, "b" * 40, "Review"
+OPEN_ID = rf.id_for_finding("codex_gate", OPEN_FINDING, SRC)
 STREAM, _isolated, store = scope.STREAM, scope._isolated, scope.store
 
 
@@ -56,7 +65,7 @@ def _ledger(store, scopes=("",), blocking=1):
     return gates
 
 
-def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", record=None, fail=False, boom=False, **payload):
+def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", record=None, fail=False, boom=False, source=SRC, **payload):
     sent, shadows = [], []
     monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: store["data_dir"] / "_wt")
     monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
@@ -72,8 +81,8 @@ def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", r
             raise OSError("boom")
         return record or _record(), (OPEN_ID,)
     monkeypatch.setattr(GateRunner, "_run_with_stall_detection", run)
-    monkeypatch.setattr(ds, "_git", lambda repo, *a: {"rev-parse": HEAD_B + "\n", "diff": own}.get(a[0]))
-    monkeypatch.setattr(ds, "parent_index", lambda repo, p: {OPEN_ID: {"severity": "error", "message": "broken"}}, raising=False)
+    monkeypatch.setattr(ds, "_git", lambda repo, *a: {"rev-parse": HEAD_B + "\n", "diff": own, "show": source}.get(a[0]))
+    monkeypatch.setattr(ds, "parent_index", lambda repo, p: {OPEN_ID: {**OPEN_FINDING, "symbolic_context": "f"}}, raising=False)
     monkeypatch.setattr(ds, "assemble_delta_input", assembled)
     monkeypatch.setattr(gate_runner.review_delta_shadow, "run_shadow", lambda **kw: shadows.append(kw))
     request = {"gate": gate, "provider": "codex", "branch": BRANCH, "pr_number": 7, "pr_id": "PR-7", "commit_sha": HEAD_B,
@@ -107,8 +116,8 @@ NEW_MAJOR = {"file_path": "x.py", "line": 3, "severity": "major", "message": "fr
 
 
 @pytest.mark.parametrize("stdout,blocking", [
-    (_answer("open"), OPEN_ID), (_answer("regressed"), OPEN_ID), (_answer("unverifiable"), OPEN_ID),
-    (_answer(new=[NEW_MAJOR]), "fresh"), (_msg("no fence here"), "delta"), (_msg("```delta_verdict/1\n{not json\n```\n"), "delta"),
+    (_answer("open"), "broken"), (_answer("regressed"), "broken"), (_answer("unverifiable"), "broken"),
+    (_answer(new=[NEW_MAJOR]), "fresh"), (_msg("no fence here"), "broken"), (_msg("```delta_verdict/1\n{not json\n```\n"), "broken"),
 ])
 def test_an_answer_that_leaves_a_blocker_open_or_cannot_be_read_records_fail(store, monkeypatch, stdout, blocking):
     _set(store, "delta")
@@ -132,6 +141,8 @@ REFUSALS = [
     ("non_python_path", {}, {"record": _record(paths=("web/a.ts",))}),
     ("parent_findings_unresolvable", {"blocking": 2}, {}),  # the report names one blocker, the round booked two
     ("delta_input_error", {}, {"boom": True}),
+    ("blocker_anchor_line_unresolvable", {}, {"source": None}),  # the head has no source to give the blocker a line in
+    ("blocker_anchor_line_unresolvable", {}, {"source": "def g():\n    return 1\n"}),  # the flagged function is gone from the head
 ]
 
 
@@ -184,3 +195,64 @@ def test_rollback_to_full_gives_the_full_prompt_and_leaves_earlier_records(store
         stale.unlink()
     result, sent, _ = _fire(store, monkeypatch, stdout=STREAM)
     assert sent == [FULL_PROMPT] and "scope" not in result and (gates / "rounds.ndjson").read_bytes().startswith(before)
+
+
+def _repo(tmp_path, source):
+    """A git repo whose one commit holds ``x.py``; its sha."""
+    run = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True).stdout.strip()
+    run("init", "-q")
+    (tmp_path / "x.py").write_text(source)
+    run("add", "x.py")
+    run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c")
+    return run("rev-parse", "HEAD")
+
+
+def _written(tmp_path, finding, source=SRC):
+    """Retain ``finding`` as a blocker, write the verdict the way the round does, and read it back as the next round's parent."""
+    head = _repo(tmp_path, source)
+    fid = rf.id_for_finding("codex_gate", finding, source)
+    held = {fid: {**finding, "symbolic_context": rf.symbolic_context(source, finding["line"])}}
+    lines = dd._blocker_lines(tmp_path, head, "codex_gate", held, (fid,))
+    record = dataclasses.replace(_record(), open_findings=(rd.OpenFinding(fid, "x.py", held[fid]["symbolic_context"], "error", finding["message"], "present"),), head=head)
+    parent = SimpleNamespace(seat="codex_gate", head_sha=head, report_path=str(tmp_path / "report.md"))
+    parsed = rd.parse_delta_verdict("```delta_verdict/1\n" + json.dumps({"verdict": "fail", "findings": [{"id": fid, "status": "open"}],
+                                                                       "new_findings": []}) + "\n```\n", [fid], (fid,))
+    text = dd._verdict_text(dd.DeltaContext(record, (fid,), parent, lines), parsed)
+    (tmp_path / "report.md").write_text(text)
+    return fid, held[fid], parent, text
+
+
+@pytest.mark.parametrize("line,context", [(2, "f"), (6, "C.m")])
+def test_a_retained_blocker_gives_back_the_same_id_and_context_on_the_next_round(tmp_path, line, context):
+    finding = {"severity": "error", "file_path": "x.py", "line": line, "message": "broken"}
+    fid, held, parent, text = _written(tmp_path, finding)
+    back = ds.parent_index(tmp_path, parent)
+    assert list(back) == [fid] and back[fid]["symbolic_context"] == context == held["symbolic_context"]
+    assert back[fid]["message"] == "broken" and back[fid]["file_path"] == "x.py"
+    assert "parent finding" not in json.dumps(back[fid]) and "open" in text.splitlines()[0]  # the status stays in the prose
+
+
+def test_deleting_the_flagged_function_on_the_following_head_is_unverifiable(tmp_path):
+    fid, _, parent, _ = _written(tmp_path, dict(OPEN_FINDING))
+    (tmp_path / "x.py").write_text("def g():\n    return 1\n")
+    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "drop f"], check=True)
+    next_head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    result = ck.anchors_present(tmp_path, next_head, [ds.parent_index(tmp_path, parent)[fid]])
+    assert result["anchors"][0]["status"] == "unverifiable" and result["full_review_reason"] == ck.REASON_ANCHOR
+
+
+def test_a_blocker_whose_symbol_line_cannot_be_found_has_no_line(tmp_path):
+    head = _repo(tmp_path, "def g():\n    return 1\n")
+    fid = rf.id_for_finding("codex_gate", OPEN_FINDING, SRC)
+    held = {fid: {**OPEN_FINDING, "symbolic_context": "f"}}
+    assert dd._blocker_lines(tmp_path, head, "codex_gate", held, (fid,)) is None
+    assert dd._blocker_lines(tmp_path, head, "codex_gate", {}, (fid,)) is None
+
+
+def test_an_id_written_in_a_report_finding_is_ignored(tmp_path):
+    fid, _, parent, text = _written(tmp_path, dict(OPEN_FINDING))
+    block = json.loads(text.splitlines()[-1])
+    block["findings"][0].update(id="0" * 16, symbolic_context="forged")
+    Path(parent.report_path).write_text(json.dumps(block))
+    back = ds.parent_index(tmp_path, parent)
+    assert list(back) == [fid] and back[fid]["symbolic_context"] == "f"

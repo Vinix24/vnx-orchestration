@@ -6,6 +6,7 @@ codex verdict for the artifact path and :meth:`RoundPlan.request_for` carries ``
 """
 from __future__ import annotations
 
+import ast
 import dataclasses
 import json
 import logging
@@ -19,7 +20,7 @@ import review_scope
 from codex_parser import extract_final_agent_message
 from gate_artifacts import _classify_findings
 from review_delta import PASS, DeltaInput, DeltaRefused, DeltaVerdict, build_delta_prompt, parse_delta_verdict
-from review_findings import blocks
+from review_findings import blocks, id_for_finding
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class DeltaContext(NamedTuple):
     record: DeltaInput
     blockers: Tuple[str, ...]
     parent: review_rounds.RoundLine
+    lines: Mapping[str, int] = {}  # blocker id -> the line in this head's source that gives back the same id and context
 
 
 class RoundPlan(NamedTuple):
@@ -55,16 +57,53 @@ class RoundPlan(NamedTuple):
 def _verdict_text(ctx: DeltaContext, parsed: DeltaVerdict) -> str:
     """Prose naming the delta verdict, the per-id statuses and the parent round, then the normal verdict object."""
     held = {f.id: f for f in ctx.record.open_findings}
-    findings = [{"severity": "error", "file_path": held[i].path, "line": 0,
-                 "message": f"parent finding {i} is {parsed.statuses.get(i, 'open')} on the delta round: {held[i].text}"}
+    # identity round-trips: original path and message, and the line that resolves to the same context; the status stays in the prose
+    findings = [{"severity": "error", "file_path": held[i].path, "line": ctx.lines[i], "message": held[i].text}
                 for i in ctx.blockers if i in held and blocks(parsed.statuses.get(i))]
     # a new finding the delta parser blocks on, but the artifact classifier would not, is raised to ``error``
     findings += [dict(f, severity="error") if shadow._blocking_new(f) and not _classify_findings([dict(f)])[0] else dict(f)
                  for f in parsed.new_findings]
     prose = (f"Delta round on head {ctx.record.head}: verdict {parsed.verdict}; parent round {ctx.record.parent_round_ref} "
-             f"(head {ctx.parent.head_sha}). Statuses: {json.dumps(dict(parsed.statuses), sort_keys=True)}.")
+             f"(head {ctx.parent.head_sha}). Statuses (the finding objects below keep their original identity): {json.dumps(dict(parsed.statuses), sort_keys=True)}.")
     verdict = {"verdict": parsed.verdict if parsed.verdict == PASS else "fail", "findings": findings, "residual_risk": ""}
     return prose + "\n" + json.dumps(verdict)
+
+
+def _scope_line(tree: ast.AST, qualified: str, prefix: str = "") -> Optional[int]:
+    """The ``lineno`` of the ``def``/``class`` named ``qualified`` (dotted, as ``symbolic_context`` writes it), else ``None``."""
+    for node in ast.iter_child_nodes(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            name = prefix + node.name
+            if name == qualified:
+                return node.lineno
+            found = _scope_line(node, qualified, name + ".")
+        else:
+            found = _scope_line(node, qualified, prefix)
+        if found is not None:
+            return found
+    return None
+
+
+def _blocker_lines(worktree: Path, head: str, seat: str, held: Mapping[str, Mapping[str, Any]],
+                   blockers: Tuple[str, ...]) -> Optional[Dict[str, int]]:
+    """The head line per blocker whose finding, written back with it, recomputes the same id; ``None`` when one cannot be found."""
+    lines: Dict[str, int] = {}
+    for fid in blockers:
+        finding = held.get(fid)
+        path = str((finding or {}).get("file_path") or "")
+        source = shadow._git(worktree, "show", f"{head}:{path}") if path else None
+        if finding is None or source is None:
+            return None
+        try:
+            tree = ast.parse(source)
+        except (SyntaxError, ValueError):
+            return None
+        context = str(finding.get("symbolic_context") or "")
+        line = _scope_line(tree, context) if context else 0  # module-level code has no scope; line 0 resolves to ""
+        if line is None or id_for_finding(seat, {**finding, "line": line}, source) != fid:
+            return None
+        lines[fid] = line
+    return lines
 
 
 def _full(prompt: str, reason: str) -> RoundPlan:
@@ -117,9 +156,12 @@ def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path,
         delta_prompt = build_delta_prompt(record)
     except DeltaRefused as refused:
         return _full(prompt, refused.full_review_reason)
+    lines = _blocker_lines(worktree, head, parent.seat, index, blockers)
+    if lines is None:  # the retained blocker cannot be written back with its own identity: the delta is not provable
+        return _full(prompt, "blocker_anchor_line_unresolvable")
     fields = {"scope": SCOPE_DELTA, "parent_head_sha": parent.head_sha, "parent_round_ref": record.parent_round_ref,
               "changekind": record.changekind.changekind, "delta_base": base_ref}
-    return RoundPlan(delta_prompt, fields, DeltaContext(record, blockers, parent))
+    return RoundPlan(delta_prompt, fields, DeltaContext(record, blockers, parent, lines))
 
 
 def plan_round(*, gate: str, prompt: str, request_payload: Mapping[str, Any], state_dir: Path, worktree: Path) -> RoundPlan:
