@@ -116,6 +116,7 @@ def gh(monkeypatch: pytest.MonkeyPatch, repo: Path, ledger: str) -> FakeGitHub:
     monkeypatch.setattr(fcr, "_installation_token_with_freshness", lambda **kw: ("tok", True))
     monkeypatch.setattr(fgp, "load_app_config", lambda: fcr.AppConfig(slug="vnx-gate", app_id=APP_ID))
     monkeypatch.setattr(fgp.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fgp, "_readback_sleep", lambda s: None)
     # conftest stubs the imported name for every test; this file wants the real
     # primitive over the patched network seam.
     monkeypatch.setattr(fgp, "publish_check_run", fcr.publish_check_run)
@@ -818,8 +819,16 @@ def test_a_foreign_run_appearing_after_the_create_is_named_and_does_not_undo_the
 @pytest.fixture
 def sleeps(monkeypatch: pytest.MonkeyPatch) -> List[float]:
     slept: List[float] = []
-    monkeypatch.setattr(fgp.time, "sleep", slept.append)
+    monkeypatch.setattr(fgp, "_readback_sleep", slept.append)
     return slept
+
+
+def test_the_sleep_seam_is_narrow_and_does_not_record_other_sleeps(sleeps: List[float]) -> None:
+    import time
+
+    time.sleep(0)
+    assert sleeps == []
+    assert fgp.time.sleep is time.sleep
 
 
 def _by_id(run_id: int, sha: str = SHA, **over: Any) -> Dict[str, Any]:

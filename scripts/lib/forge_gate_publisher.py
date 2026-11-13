@@ -1621,8 +1621,11 @@ DOOR_REVOKE_ATTEMPTS = 3
 _DOOR_REVOKE_BACKOFF_SECONDS = (1.0, 3.0)
 # GitHub can answer the run list right after a create without the new run (read-after-write
 # lag): the read-back reads again before "not on the head" becomes a refusal (OI-2787).
-DOOR_READBACK_ATTEMPTS = 3
 _DOOR_READBACK_BACKOFF_SECONDS = (1.0, 2.0)
+DOOR_READBACK_ATTEMPTS = len(_DOOR_READBACK_BACKOFF_SECONDS) + 1
+# The one sleep of the read-back. Tests replace this name, never ``time.sleep``: that is
+# the process-wide module attribute, so patching it records every other thread's sleep.
+_readback_sleep = time.sleep
 REVOKED = "revoked"
 REVOKE_FAILED = "revoke_failed"
 
@@ -2016,7 +2019,7 @@ def read_back_door_counted(
                 return by_id, attempt
             if attempt >= DOOR_READBACK_ATTEMPTS:
                 raise ForgeDoorRefused(f"{exc} (na {attempt} pogingen)") from exc
-            time.sleep(_DOOR_READBACK_BACKOFF_SECONDS[attempt - 1])
+            _readback_sleep(_DOOR_READBACK_BACKOFF_SECONDS[attempt - 1])
             attempt += 1
             head = door_runs_on_head(sha, project_root=project_root)
 
