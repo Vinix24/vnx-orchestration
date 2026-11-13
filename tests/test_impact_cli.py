@@ -12,9 +12,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 sys.path.insert(0, str(REPO_ROOT / "scripts" / "lib"))
 
+import impact_backtest  # noqa: E402
 import impact_cli  # noqa: E402
 import impact_ledger as ledger  # noqa: E402
 from test_impact_ledger import FakeGh, _job, _run, _shadow  # noqa: E402
+from test_impact_backtest import Git, Gh as BacktestGh, run as backtest_run  # noqa: E402
 from vnx_mode import TIER_STARTER_OPERATOR, VNXMode, check_command_allowed  # noqa: E402
 
 
@@ -54,6 +56,34 @@ def test_collect_exit_1_names_the_attempt_gh_could_not_read(tmp_path):
     gh = FakeGh([_run(1)], {}, fail_download=1)
     assert impact_cli.main(["collect", "--state-dir", str(tmp_path)], runner=gh, out=printed.append) == 1
     assert "1/1" in "\n".join(printed) and not ledger.ledger_path(tmp_path).exists()
+
+
+CASES = {"tests/test_other.py::t": "fail", "tests/test_core.py::t": "pass", "tests/test_plain.py::t": "pass"}
+
+
+def test_backtest_writes_its_own_ledger_and_report_reads_both(tmp_path):
+    _seed(tmp_path)
+    printed = []
+    gh = BacktestGh([backtest_run(7)], {7: CASES})
+    assert impact_cli.main(["backtest", "--state-dir", str(tmp_path)], runner=gh, git=Git(["scripts/lib/core.py"]), out=printed.append) == 0
+    assert printed == ["impact backtest ledger: added 1, already stored 0, failed 0"]
+    assert len(ledger.read_ledger(impact_backtest.backtest_path(tmp_path))) == 1 and len(ledger.read_ledger(ledger.ledger_path(tmp_path))) == 2
+    out = []
+    impact_cli.main(["report", "--json", "--state-dir", str(tmp_path)], out=out.append)
+    rep = json.loads(out[0])
+    assert rep["by_source"]["live"]["counted"] == ["1/1"] and rep["by_source"]["backtest"]["counted"] == ["7/1"]
+    assert rep["counted"] == ["1/1", "7/1"] and len(rep["by_source"]["backtest"]["misses"]) == 1
+    text = []
+    impact_cli.main(["report", "--state-dir", str(tmp_path)], out=text.append)
+    assert "- backtest: attempts 1, counted 1, excluded 0, reduced 1, misses 1, red runs 1 (reduced 1)" in text[0]
+    assert "- live: attempts 2, counted 1" in text[0] and "- together: attempts 3, counted 2" in text[0]
+
+
+def test_backtest_exit_1_names_the_attempt_gh_could_not_read_and_writes_no_line(tmp_path):
+    printed = []
+    gh = BacktestGh([backtest_run(7)], {}, failing={7: "HTTP 403: Attention Required"})
+    assert impact_cli.main(["backtest", "--state-dir", str(tmp_path)], runner=gh, git=Git([]), out=printed.append) == 1
+    assert "7/1" in "\n".join(printed) and not impact_backtest.backtest_path(tmp_path).exists()
 
 
 def test_bad_input_exits_two(tmp_path, capsys):
