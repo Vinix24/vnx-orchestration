@@ -1,0 +1,1 @@
+- fix(learning): reattr verify matches a moved row on its stable identity (without the columns a writer updates in place) and lists a row whose mutable columns changed since the move under `mutated_since_move`, instead of reporting it missing (OI-2786)
