@@ -10,6 +10,7 @@ import pytest
 
 import review_stack_support  # importing it puts scripts/ and scripts/lib on sys.path
 import config_registry
+import project_root
 import config_store_db
 import gate_runner
 import review_scope as rs
@@ -17,6 +18,7 @@ from gate_runner import GateRunner
 from review_stack_support import VNX_ROOT
 
 PROJECT, APPROVAL = "scope-project", "appr-scope"
+REAL_RESOLVE = project_root.resolve_project_root
 STREAM = (VNX_ROOT / "tests" / "fixtures" / "gate_verdict" / "pr-1869-codex_gate-bare-verdict.ndjson").read_text(encoding="utf-8")
 
 
@@ -30,6 +32,8 @@ def store(tmp_path, monkeypatch):
     built = review_stack_support.build_project_store(tmp_path, monkeypatch)
     (built["project_root"] / ".vnx-project-id").write_text(PROJECT + "\n")
     monkeypatch.delenv("VNX_REVIEW_SCOPE", raising=False)
+    monkeypatch.delenv("VNX_CANONICAL_ROOT", raising=False)
+    monkeypatch.setattr(project_root, "resolve_project_root", lambda *a: built["project_root"])
     built["db"] = built["state_dir"] / "runtime_coordination.db"
     return built
 
@@ -141,6 +145,7 @@ def test_a_write_of_delta_is_refused_when_a_check_cannot_be_made(store, monkeypa
 
 
 def test_the_activation_check_resolves_the_repo_cwd_first(store, monkeypatch):
+    monkeypatch.setattr(project_root, "resolve_project_root", REAL_RESOLVE)
     repo = store["project_root"]
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     seen = []
@@ -154,8 +159,6 @@ def test_the_activation_check_resolves_the_repo_cwd_first(store, monkeypatch):
 
 
 def test_a_write_of_delta_is_refused_when_the_root_cannot_be_resolved(store, monkeypatch, tmp_path):
-    import project_root
-
     _allow(monkeypatch)
     monkeypatch.setattr(project_root, "resolve_project_root", lambda *a: (_ for _ in ()).throw(RuntimeError("no root")))
     with pytest.raises(PermissionError, match="project root could not be resolved"):
