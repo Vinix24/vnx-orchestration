@@ -435,17 +435,14 @@ def classify_path(
         return "committed"
 
     remote_sha = remote_output.split()[0]
-    if remote_sha == local_sha:
-        return "pushed"
-    if current == "HEAD" and _origin_contains_head(wt, effective_branch):
-        # OI-2716: a detached HEAD that origin's dispatch branch already contains
-        # (the builder pushed it, then origin moved on) is delivered work.
-        return "pushed"
-    return "committed"
+    return "pushed" if (remote_sha == local_sha or _detached_head_on_origin(wt, current, effective_branch)) else "committed"
 
 
-def _origin_contains_head(wt: "Path | str", branch: str) -> bool:
-    """True only when ``origin/<branch>``, fetched fresh, contains the worktree HEAD."""
+def _detached_head_on_origin(wt: "Path | str", current: str, branch: str) -> bool:
+    """OI-2716: True only for a detached HEAD that ``origin/<branch>``, fetched
+    fresh, already contains (the builder pushed it, then origin moved on)."""
+    if current != "HEAD":
+        return False
     try:
         fetch = _run(
             ["git", "-C", str(wt), "fetch", "origin",
