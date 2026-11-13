@@ -58,6 +58,16 @@ def _is_noise_receipt(receipt: Dict, project_id: str) -> bool:
     return noise_reason(receipt, project_id or str(receipt.get("project_id") or "")) is not None
 
 
+def _parse_iso_timestamp(value: str) -> datetime:
+    """Parse an ISO-8601 string (``Z`` or offset, with or without sub-seconds).
+
+    A naive result is read as UTC. Raises ValueError when it cannot be parsed."""
+    ts = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
+
+
 def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[Dict]:
     """Load receipts from the last N hours from t0_receipts.ndjson.
 
@@ -70,6 +80,7 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
 
     cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
     receipts: List[Dict] = []
+    unparseable = 0
 
     try:
         with open(receipts_path, encoding="utf-8") as fh:
@@ -88,9 +99,11 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
                             epoch_sec = ts_raw / 1000.0 if ts_raw > 1e10 else float(ts_raw)
                             ts = datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
                         else:
-                            # Normalise: strip sub-seconds, ensure UTC
-                            ts_clean = str(ts_raw).replace("Z", "+00:00").split(".")[0] + "+00:00"
-                            ts = datetime.fromisoformat(ts_clean)
+                            try:
+                                ts = _parse_iso_timestamp(str(ts_raw))
+                            except ValueError:
+                                unparseable += 1
+                                continue
                         if ts > cutoff:
                             receipts.append(r)
                 except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
@@ -98,6 +111,11 @@ def _load_recent_receipts(state_dir: Path, hours: int = LOOKBACK_HOURS) -> List[
     except OSError:
         pass
 
+    if unparseable:
+        logger.warning(
+            "quality digest: skipped %d receipt line(s) with an unparseable timestamp in %s",
+            unparseable, receipts_path,
+        )
     return receipts
 
 
