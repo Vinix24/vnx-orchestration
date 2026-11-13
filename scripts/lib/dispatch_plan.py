@@ -15,7 +15,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 from dispatch_spec import (
     DispatchPath,
@@ -123,6 +123,7 @@ class RuntimeSnapshot:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    difficulty: Optional[Mapping[str, Any]] = None  # staged difficulty, copied from the spec
     # OI-943: worker-claude-override gate outcome, threaded from build_runtime_snapshot
     # so the door can persist target_slot + override reason onto the dispatch row.
     worker_claude_override_reason: Optional[str] = None
@@ -183,6 +184,7 @@ class ExecutionPlan:
     task_class: Optional[str] = None
     tier_from: Optional[str] = None
     tier_to: Optional[str] = None
+    difficulty: Optional[Mapping[str, Any]] = None  # advisory, NOT in digest()
     skill: Optional[str] = None         # RS-2: the verified skill slug carried to the prompt seam.
                                         # Only a slug resolve_skill_dir found reaches here. It IS in
                                         # digest(): a skill injects instructions, so a permit for one
@@ -517,6 +519,7 @@ def compile_plan(vspec: ValidatedSpec, snapshot: RuntimeSnapshot) -> ExecutionPl
         task_class=snapshot.task_class,
         tier_from=snapshot.tier_from,
         tier_to=snapshot.tier_to,
+        difficulty=snapshot.difficulty,
         instruction_sha256=vspec.instruction_sha256,
         warnings=tuple(warnings),
     )
