@@ -271,7 +271,9 @@ Run:
 
 If output is anything other than "success", do NOT merge. Investigate the cause, dispatch a fix-forward, re-run CI, and only merge when the workflow conclusion equals "success".
 
-RATIONALE: `gh pr checks` lists individual job names but the workflow as a whole can still produce a "failure" conclusion (e.g. multi-step Profile A whose Legacy path gate sub-step fails) while the visible names appear "pass". Multiple late-night merges on 2026-05-06/07 had VNX CI = failure that was missed by checking individual names only — Legacy path gate was tripping on a literal `.vnx-data/state/` string in build_current_state.py:263 that the rg-based gate flagged repository-wide on main, but did not flag in PR-scoped diffs.
+This still holds with the main window on: the `main` gate guards main, not the PR head.
+
+RATIONALE: `gh pr checks` lists job names; the workflow can still conclude "failure". Merges on 2026-05-06/07 missed it: the Legacy path gate flagged a `.vnx-data/state/` string repo-wide on main, not in PR diffs.
 
 ## Doubt Escalation Policy
 
@@ -425,7 +427,7 @@ Cite the policy code (A1, B2, etc) when invoking.
 - **D2**: File new OIs liberally — operator-approved.
 
 ### Stop conditions (wake operator)
-- **E1**: main branch broken after merge.
+- **E1**: main branch broken after merge. With `VNX_MAIN_UNVERIFIED_MAX` set, the door enforces it (gate `main`): the chain waits via `vnx main-window status`, not per main run. `--override-main` only with `revert_or_fix_forward` or an operator reason; see DISPATCH_RULES §2.2.1.
 - **E2**: Data loss risk (db migration, file deletion >100 lines).
 - **E3**: Secrets in logs/PRs.
 - **E4**: GitHub auth/quota fully dead (cannot proceed).
