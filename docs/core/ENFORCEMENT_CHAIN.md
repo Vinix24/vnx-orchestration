@@ -49,7 +49,7 @@ The project's review stack (default `codex_gate,deepseek_gate` since the operato
 | 4 | `contract_invalid` | `_run_contract_invalid_gate` | The latest deliverable-outcome receipt of the PR's dispatch is `contract_invalid` |
 | 5 | `branch_protection` | `_run_branch_protection_gate` | See below |
 
-The branch-protection preflight runs four steps: (a) the door's own files are unchanged (`_DOOR_INTEGRITY_PATHS`, eight files), (b) the protection YAML on `main` is read, (c) the live protection is compared to that YAML, (d) the YAML on the PR head must not weaken it.
+The branch-protection preflight runs four steps: (a) the door's own files are unchanged (`_DOOR_INTEGRITY_PATHS`, ten files, including `forge_gate_publisher.py` and `forge_check_run.py` since OI-2667), (b) the protection YAML on `main` is read, (c) the live protection is compared to that YAML, (d) the YAML on the PR head must not weaken it.
 
 After the preflights, `merge_pr` calls `_do_merge`, which runs `gh pr merge --match-head-commit <sha>` so GitHub refuses any other commit. Only when GitHub reports `MERGED` (`_pr_actually_merged`) does `_emit_receipt` write the binding `pr_merged` receipt. A raw `gh pr merge` runs none of these preflights. Branch protection is the answer to that (section 5).
 

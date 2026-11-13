@@ -1,0 +1,1 @@
+- The door-integrity check now covers `scripts/lib/forge_gate_publisher.py` and `scripts/lib/forge_check_run.py` (OI-2667); after merging a PR that touches either file, a dev checkout must be fast-forwarded (`ff_main_safe`) before the next merge, as for `pr_merge.py`.
