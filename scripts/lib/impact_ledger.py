@@ -17,10 +17,21 @@ from __future__ import annotations
 import fcntl
 import json
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+
+
+def _record_schemas() -> tuple:
+    """The two record schemas, imported from scripts/ci/impact_shadow.py (their single definition)."""
+    ci_dir = str(Path(__file__).resolve().parent.parent / "ci")
+    if ci_dir not in sys.path:
+        sys.path.insert(0, ci_dir)
+    import impact_shadow
+    return impact_shadow.SCHEMA, impact_shadow.JOB_SCHEMA
+
 
 SCHEMA = "impact_ledger/1"
 LEDGER_NAME = "impact_shadow.ndjson"
@@ -28,6 +39,12 @@ WORKFLOW = "VNX CI"
 PROFILE_A_JOB = "Profile A (doctor + core tests)"
 SHADOW_JOB = "Impact shadow (runs only S, never required)"
 SHADOW_ARTIFACT, JOB_ARTIFACT = "impact-shadow", "impact-shadow-job"
+# The record each artifact carries at its root: scripts/ci/impact_shadow_step.sh writes
+# OUT_DIR/record.json (--output "$OUT_DIR/record.json"), scripts/ci/impact_shadow_job.sh
+# writes OUT_DIR/job.json. The job artifact also holds evidence/args/run.json and more JSON.
+_SHADOW_RECORD_SCHEMA, _JOB_RECORD_SCHEMA = _record_schemas()
+ARTIFACT_RECORDS = {SHADOW_ARTIFACT: ("record.json", _SHADOW_RECORD_SCHEMA),
+                    JOB_ARTIFACT: ("job.json", _JOB_RECORD_SCHEMA)}
 RUN_FIELDS = "databaseId,attempt,headSha,headBranch,event,conclusion,createdAt"
 
 Runner = Callable[[list], str]
@@ -42,7 +59,12 @@ class RunnerError(RuntimeError):
 
 
 def default_runner(argv: list) -> str:
-    done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    try:
+        done = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired as exc:
+        raise RunnerError(argv, -1, f"timed out after {exc.timeout}s") from exc
+    except OSError as exc:
+        raise RunnerError(argv, -1, f"cannot run {argv[0]}: {exc}") from exc
     if done.returncode != 0:
         raise RunnerError(argv, done.returncode, done.stderr)
     return done.stdout
@@ -108,22 +130,30 @@ def append_entry(path: Path, entry: dict) -> bool:
 
 
 def _download(runner: Runner, run_id, name: str):
-    """The record.json/job.json of artifact ``name``, or None when the run has no such artifact."""
+    """``(record, problem)`` of artifact ``name``: the record is exactly its root record.json/job.json.
+
+    ``problem`` is None for a valid record, ``"missing"`` when the run has no such artifact or the
+    file is not there, ``"invalid_schema"`` when the file is unreadable, not an object or carries
+    another schema.  Never a glob, never the first JSON file found.
+    """
+    filename, schema = ARTIFACT_RECORDS[name]
     with tempfile.TemporaryDirectory(prefix="impact-ledger-") as tmp:
         try:
             runner(["gh", "run", "download", str(run_id), "-n", name, "-D", tmp])
         except RunnerError as exc:
             if "no valid artifact" in exc.stderr.lower():
-                return None
+                return None, "missing"
             raise
-        files = sorted(Path(tmp).rglob("*.json"))
-        if not files:
-            return None
+        target = Path(tmp) / filename
+        if not target.is_file():
+            return None, "missing"
         try:
-            data = json.loads(files[0].read_text(encoding="utf-8"))
-        except ValueError:
-            return None
-        return data if isinstance(data, dict) else None
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None, "invalid_schema"
+        if not isinstance(data, dict) or data.get("schema") != schema:
+            return None, "invalid_schema"
+        return data, None
 
 
 def _timing(jobs: list, name: str) -> Optional[dict]:
@@ -136,10 +166,11 @@ def _timing(jobs: list, name: str) -> Optional[dict]:
     return None
 
 
-def _attributed(record, attempt, label: str, missing: list):
+def _attributed(downloaded, attempt, label: str, missing: list):
     """The record when it is this attempt's; a record stamped with another attempt is not its evidence."""
+    record, problem = downloaded
     if record is None:
-        missing.append(f"artifact:{label}")
+        missing.append(f"artifact:{label}" + (f":{problem}" if problem != "missing" else ""))
         return None
     if str(record.get("run_attempt")) != str(attempt):
         missing.append(f"artifact:{label}:attempt_mismatch")
@@ -172,11 +203,18 @@ def collect(state_dir: Path, runner: Runner = default_runner, since: Optional[da
     """Append the attempts not yet in the ledger; returns ``{"added": [...], "skipped": [...], "failed": [...]}``."""
     now = now or datetime.now(timezone.utc)
     path = ledger_path(state_dir)
-    repo = json.loads(runner(["gh", "repo", "view", "--json", "nameWithOwner"]))["nameWithOwner"]
-    runs = json.loads(runner(["gh", "run", "list", "--workflow", WORKFLOW, "--status", "completed",
-                              "--limit", str(limit), "--json", RUN_FIELDS]))
-    stored = {_key(e) for e in read_ledger(path)}
     result = {"added": [], "skipped": [], "failed": []}
+    try:
+        repo = json.loads(runner(["gh", "repo", "view", "--json", "nameWithOwner"]))["nameWithOwner"]
+        runs = json.loads(runner(["gh", "run", "list", "--workflow", WORKFLOW, "--status", "completed",
+                                  "--limit", str(limit), "--json", RUN_FIELDS]))
+        if not isinstance(runs, list):
+            raise ValueError("gh run list did not return a list")
+    except (RunnerError, ValueError, KeyError, TypeError) as exc:
+        # No ledger line: discovery failed, so nothing is known about any attempt.
+        result["failed"].append({"attempt": "discovery", "error": str(exc)})
+        return result
+    stored = {_key(e) for e in read_ledger(path)}
     for run in runs:
         name = f"{run.get('databaseId')}/{run.get('attempt')}"
         created = parse_time(run.get("createdAt"))
@@ -187,7 +225,7 @@ def collect(state_dir: Path, runner: Runner = default_runner, since: Optional[da
             continue
         try:
             written = append_entry(path, _entry(runner, repo, run, now))
-        except (RunnerError, ValueError, KeyError) as exc:
+        except (RunnerError, ValueError, KeyError, TypeError) as exc:
             result["failed"].append({"attempt": name, "error": str(exc)})
             continue
         result["added" if written else "skipped"].append(name)
