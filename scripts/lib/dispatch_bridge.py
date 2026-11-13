@@ -571,8 +571,7 @@ def stage_spec_bundle(
     # 1. staging_id is DERIVED from dispatch_id and validated BEFORE any path join.
     staging_id = _require_staging_id(dispatch_id)
 
-    # 1a. deadline bounds validated at the trust boundary (this module is the FIRST writer of a
-    # dispatch-spec.json): the validate() Rule 11 range, from the same constants (dispatch_spec).
+    # 1a. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
     _require_deadline_in_range(deadline_seconds)
     difficulty_block = _require_difficulty(difficulty, len(dispatch_paths))
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
@@ -589,8 +588,7 @@ def stage_spec_bundle(
     instruction_text, style_fields = _apply_doc_style(
         instruction_text, task_class, dispatch_paths, effective_project_id, root)
 
-    # 2a. resolve the lineage BEFORE any write (D2, dlv-e5bdf6c502cf; ADR-071 besluit 3): work_ref
-    # or a named origin (origin_oi / origin_pr) fills parent_dispatch; a contradiction is refused.
+    # 2a. resolve the lineage BEFORE any write (D2, ADR-071 besluit 3): work_ref or a named origin fills parent_dispatch.
     parent_dispatch, edge_kind, edge_evidence, edge_parent = _stage_lineage(
         dispatch_id, work_ref, parent_dispatch, origin_oi, origin_pr, root, round_cause,
     )
@@ -605,8 +603,7 @@ def stage_spec_bundle(
     # 5. pre-bind the content hash over the exact written bytes (closes TOCTOU pre-door).
     instruction_sha256 = hashlib.sha256(instruction_text.encode("utf-8")).hexdigest()
 
-    # 6. assemble + write the spec atomically. instruction_file is the literal
-    #    absolute child path — a real regular file, no symlink.
+    # 6. assemble + write the spec atomically; instruction_file is the literal absolute child path.
     norm_reason = (headless_reason or "").strip() or None
     spec_payload = {
         "schema_version": 1,
