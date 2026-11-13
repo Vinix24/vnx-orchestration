@@ -34,6 +34,7 @@ PASSED_THROUGH_NOTE = (
 )
 _DELIVERY = re.compile(r"^(dlv-[0-9a-f]+)((?:-r\d+|-[a-z])*)$")
 _ROUND_OR_SPLIT = re.compile(r"-r\d+|-[b-z]")
+_TRAILING_SPLIT = re.compile(r"-[a-z]$")  # a split part with no round after it
 # The title rule of claudedocs/2026-11-07-naar-1-9/metingen/pr_grootte_uitsplitsing.py, byte for byte.
 GRENS = re.compile(r"450|line cap|under the cap|\bsplit\b|follow-up PR|to `?-b`?|moves? to `?-b", re.I)
 CI = re.compile(r"CI red|CI fix|mode tier|ratchet|function-size|function size|xdist|changelog fragment|"
@@ -309,8 +310,7 @@ def _declared_causes(edges: List[dict]) -> Dict[str, str]:
 
 def _title_cause(member: str, prompt_path: str) -> Tuple[str, str]:
     match = _DELIVERY.match(member)
-    tokens = re.findall(r"-r\d+|-[a-z]", match.group(2)) if match else []
-    if tokens and not tokens[-1].startswith("-r"):
+    if match and _TRAILING_SPLIT.search(match.group(2)):
         return "grens", "title"
     title = _title_of(prompt_path)
     if title is None:
