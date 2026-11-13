@@ -652,6 +652,17 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     (tests/test_pr_merge_target_repo.py, tests/test_merge_target.py) put the real
     function back or run it against a stub ``gh`` on PATH: same function-scoped
     ``monkeypatch`` instance, later call wins.
+
+    DR-7 round 2: ``pr_merge._git_in_target`` is refused here as well, because
+    the merge-tree record that runs after a confirmed merge reads git in the
+    pinned target — the suite's own checkout for every ``main()``-route test.
+    That was a real ``git fetch origin`` per successful merge test (up to twice,
+    a network dependency that also moved the checkout's remote-tracking refs).
+    The refused runner returns a failed ``CompletedProcess`` (128, fixed stderr)
+    without starting a process, so such a record books
+    ``merge_tree_unavailable`` and the suite stays offline and isolated. The
+    tests that drive a real throwaway repository
+    (tests/test_pr_merge_merged_tree.py) put the real runner back over it.
     """
     try:
         import pr_merge
@@ -659,6 +670,8 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
         # Same reason as the two stubs beside this one: pr_merge is only
         # importable once a pr_merge test module has put scripts/ on sys.path.
         return
+    import subprocess
+
     from merge_target import MergeTarget
 
     monkeypatch.setattr(
@@ -666,6 +679,15 @@ def _stub_merge_target_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
         "resolve_merge_target",
         lambda engine_root, **_kwargs: MergeTarget(project_root=Path(engine_root), repo="vnx-test/target"),
     )
+
+    def refused_git_in_target(args, timeout=None):
+        return subprocess.CompletedProcess(
+            ["git", *args], 128, stdout="",
+            stderr="git is offline in the unit-test run "
+                   "(tests/conftest.py::_stub_merge_target_resolution)",
+        )
+
+    monkeypatch.setattr(pr_merge, "_git_in_target", refused_git_in_target)
 
 
 @pytest.fixture(autouse=True)
