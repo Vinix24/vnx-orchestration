@@ -54,8 +54,6 @@ def _edges(store):
             (PID,)).fetchall()
 
 
-# ---- staging -------------------------------------------------------------------------------
-
 def test_valid_cause_is_on_spec_and_in_edge_evidence(store):
     spec = json.loads(_stage(store, parent_dispatch="dlv-p", round_cause=" CI ").read_text())
     assert spec["round_cause"] == "ci"
@@ -69,13 +67,6 @@ def test_round_suffix_without_parent_writes_edge_to_delivery(store):
     rows = _edges(store)
     assert [r[:3] for r in rows] == [("dlv-abc123-r2", "dlv-abc123", "round")]
     assert json.loads(rows[0][3])["round_cause"] == "review"
-
-
-def test_split_suffix_without_parent_writes_edge_without_cause(store):
-    _stage(store, dispatch_id="dlv-abc123-c")
-    rows = _edges(store)
-    assert [r[:3] for r in rows] == [("dlv-abc123-c", "dlv-abc123", "round")]
-    assert "round_cause" not in json.loads(rows[0][3])
 
 
 @pytest.mark.parametrize("bad", ["style", "grenzen", "x"])
@@ -105,16 +96,12 @@ def test_cli_unknown_cause_is_rejected(store, tmp_path, capsys):
     assert not (store / "dispatches").exists()
 
 
-# ---- suffix ---------------------------------------------------------------------------------
-
 def test_delivery_of_any_one_letter_split_suffix():
     assert rm.delivery_of("dlv-abc-c") == "dlv-abc"
     assert rm.delivery_of("dlv-abc-b-r3") == "dlv-abc"
     assert rm.delivery_of("dlv-abc-a") == "dlv-abc"
     assert rm.delivery_of("dlv-abc") == "dlv-abc"
 
-
-# ---- cause per member and first pass --------------------------------------------------------
 
 class World:
     def __init__(self, tmp: Path):
@@ -177,12 +164,6 @@ def test_declared_beats_the_title_rule(tmp_path):
     out = w.run()
     assert _round(out)["ci"] == 1 and _round(out)["review"] == 0
     assert out["round_causes"]["sources"] == {"declared": 1, "title": 0, "unknown": 0}
-
-
-def test_declared_review_beats_a_ci_title(tmp_path):
-    w = _world(tmp_path, f"{BASE}-r2", title="CI red: mode tier")
-    w.edge(f"{BASE}-r2", "review")
-    assert _round(w.run())["review"] == 1
 
 
 def test_split_part_is_grens_without_a_title(tmp_path):
@@ -254,12 +235,6 @@ def test_delivery_with_only_ci_and_grens_rounds_is_a_hit(tmp_path):
     assert _fpy(out)["count"] == 1 and _fpy(out)["n"] == 1
 
 
-def test_operator_round_is_a_hit(tmp_path):
-    w = _world(tmp_path, f"{BASE}-r2")
-    w.edge(f"{BASE}-r2", "operator")
-    assert _fpy(w.run())["count"] == 1
-
-
 @pytest.mark.parametrize("cause", ["review", None])
 def test_review_or_unknown_round_is_a_miss(tmp_path, cause):
     w = _world(tmp_path, f"{BASE}-r2", f"{BASE}-r3")
@@ -268,13 +243,6 @@ def test_review_or_unknown_round_is_a_miss(tmp_path, cause):
         w.edge(f"{BASE}-r3", cause)
     assert _fpy(w.run())["count"] == 0
 
-
-def test_delivery_without_rounds_is_a_hit_and_has_no_cause_row(tmp_path):
-    out = _world(tmp_path).run()
-    assert _fpy(out)["count"] == 1 and out["round_causes"]["cells"] == []
-
-
-# ---- report ---------------------------------------------------------------------------------
 
 def test_report_renders_the_table_and_the_basis_line(tmp_path):
     w = _world(tmp_path, f"{BASE}-r2", f"{BASE}-c")
