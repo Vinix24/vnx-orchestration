@@ -260,3 +260,11 @@ def test_the_shadow_does_not_run_under_full_and_runs_under_delta_shadow_and_stop
     _set(store, "delta_shadow")
     _remove(store)
     assert _fire(store, monkeypatch) == []
+
+
+def test_the_gate_runner_hands_the_shadow_the_shared_reviewer_assembly(store, monkeypatch):
+    _set(store, "delta_shadow")
+    (call,) = _fire(store, monkeypatch)
+    args = ("diff --git a/x.py b/x.py\n+print(1)\n", "contract", "instruction")
+    assert call["assemble"](*args) == gate_runner._assemble_reviewer_prompt("7", *args)
+    assert "# Role: Reviewer" in call["assemble"](*args)
