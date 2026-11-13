@@ -127,6 +127,76 @@ def test_no_proposal_below_n_20_or_small_difference(tmp_path):
     assert w.cli("--md").stdout.count("Bouwer:") == 0
 
 
+def _builder_props(out: str) -> list:
+    return [ln for ln in out.splitlines() if ln.startswith("- Bouwer:")]
+
+
+def test_no_proposal_when_the_intervals_overlap_at_the_edge(tmp_path):
+    from rework_metrics import wilson_interval
+    assert wilson_interval(10, 20)[0] < wilson_interval(2, 20)[1]  # 0.299 < 0.301: they overlap
+    w = World(tmp_path)
+    w.cohort("sonnet", "01_code_generation", "medium", 20, 2)
+    w.cohort("opus", "01_code_generation", "medium", 20, 10)
+    out = w.cli("--md").stdout
+    assert "10.0% (3-30%, n=20)" in out and "50.0% (30-70%, n=20)" in out
+    assert _builder_props(out) == []
+    assert "geen voorstel" in out
+
+
+def test_proposal_names_both_intervals_when_they_separate(tmp_path):
+    w = World(tmp_path)
+    w.cohort("sonnet", "01_code_generation", "medium", 20, 0)
+    w.cohort("opus", "01_code_generation", "medium", 20, 10)
+    props = _builder_props(w.cli("--md").stdout)
+    assert len(props) == 1
+    assert "naar claude/sonnet" in props[0]
+    assert "0.0% (0-16%, n=20)" in props[0] and "50.0% (30-70%, n=20)" in props[0]
+    assert "overlappen niet" in props[0]
+
+
+def test_below_n_20_carries_counts_only_and_no_proposal(tmp_path):
+    w = World(tmp_path)
+    w.cohort("sonnet", "01_code_generation", "medium", 19, 0)
+    w.cohort("opus", "01_code_generation", "medium", 19, 19)
+    proc = w.cli("--json")
+    rows = [r for r in json.loads(proc.stdout)["rework_14d"] if r["task_class"] == "01_code_generation"]
+    assert rows and all(r["pct"] is None and "ci95" not in r for r in rows)
+    out = w.cli("--md").stdout
+    assert _builder_props(out) == [] and "(n=19" not in out and "%" not in out.split("## Per bouwer")[1]
+
+
+def test_builder_row_without_ci95_never_proposes():
+    import rework_report
+    rows = [{"builder": "a", "task_class": "t", "risk_class": "medium", "n": 25, "count": 0, "pct": 0.0},
+            {"builder": "b", "task_class": "t", "risk_class": "medium", "n": 25, "count": 25, "pct": 100.0}]
+    assert rework_report._builder_proposals(rows) == []
+
+
+def _seat(reviewer, model, n, count):
+    return {"reviewer": reviewer, "model": model, "task_class": "t", "risk_class": "medium", "n": n, "count": count}
+
+
+def test_seat_overlap_gives_no_proposal_and_separation_names_both_intervals():
+    import rework_report
+    assert rework_report._seat_proposals([_seat("codex_gate", "m1", 20, 2), _seat("kimi_gate", "m2", 20, 10)]) == []
+    props = rework_report._seat_proposals([_seat("codex_gate", "m1", 20, 0), _seat("kimi_gate", "m2", 20, 10)])
+    assert len(props) == 1
+    assert "kimi_gate/m2 meer door dan codex_gate/m1" in props[0]
+    assert "50.0% (30-70%, n=20)" in props[0] and "0.0% (0-16%, n=20)" in props[0]
+
+
+def test_seat_below_n_20_gives_no_proposal():
+    import rework_report
+    assert rework_report._seat_proposals([_seat("codex_gate", "m1", 19, 0), _seat("kimi_gate", "m2", 19, 19)]) == []
+
+
+def test_min_diff_pp_is_gone_from_scripts():
+    import rework_report
+    assert not hasattr(rework_report, "MIN_DIFF_PP")
+    for path in (REPO_ROOT / "scripts").rglob("*.py"):
+        assert "MIN_DIFF_PP" not in path.read_text(encoding="utf-8"), path
+
+
 def _violations(source: str) -> list:
     found = []
     tree = ast.parse(source)

@@ -10,12 +10,14 @@ writes nothing. Definitions are those of ADR-071 besluit 5, 6, 10, 11, 12 and 14
   the model of its first dispatch; two models for one dispatch id give ``model=conflict``;
 * an origin counts in a 14-day measure only when merged at least 14 days before ``as_of``;
   younger ones are ``immature`` per cell; ``churn`` edges never count;
-* a cell below ``MIN_N`` carries counts and ``pct: None``.
+* a cell below ``MIN_N`` carries counts and ``pct: None`` and no ``ci95``; from ``MIN_N`` up a cell
+  carries ``ci95: [low, high]``, the 95% Wilson interval of the same ``count`` and ``n`` as its ``pct``.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from contextlib import closing
@@ -163,6 +165,17 @@ def _resolve_delivery(members: List[str], idents: dict, merged_by_pr: dict,
     return (best, "") if best else (None, reason)
 
 
+def wilson_interval(count: int, n: int, z: float = 1.96) -> Optional[tuple]:
+    """95% Wilson score interval ``(low, high)`` as fractions rounded to 3 decimals; ``None`` for ``n == 0``."""
+    if n <= 0:
+        return None
+    p = count / n
+    denom = 1.0 + z * z / n
+    centre = (p + z * z / (2.0 * n)) / denom
+    half = z * math.sqrt(p * (1.0 - p) / n + z * z / (4.0 * n * n)) / denom
+    return (round(max(0.0, centre - half), 3), round(min(1.0, centre + half), 3))
+
+
 def _cell(cells: dict, key: tuple) -> dict:
     return cells.setdefault(key, {"n": 0, "hits": 0, "immature": 0})
 
@@ -174,6 +187,8 @@ def _finish(cells: dict, fields: Tuple[str, ...]) -> List[dict]:
         row = dict(zip(fields, key))
         row.update(n=c["n"], count=c["hits"], immature=c["immature"],
                    pct=round(100.0 * c["hits"] / c["n"], 1) if c["n"] >= MIN_N else None)
+        if c["n"] >= MIN_N:
+            row["ci95"] = list(wilson_interval(c["hits"], c["n"]))
         out.append(row)
     return out
 
