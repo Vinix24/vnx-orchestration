@@ -47,6 +47,11 @@ COMMITS = [M3, M2, M1, BASE]  # newest first
 RECEIPTS = [_receipt(M1, 101, "d-one"), _receipt(M2, 102, "d-two"), _receipt(M3, 103, "d-three")]
 
 
+def _receipts_for(commits):
+    """The shared receipts whose merge commit is in this test's own commit list."""
+    return [r for r in RECEIPTS if r["merge_sha"] in commits]
+
+
 def _by_sha(window):
     return {e.sha: e for e in window.entries}
 
@@ -79,7 +84,7 @@ def test_first_red_is_the_oldest_red_entry():
 def test_red_followed_by_newer_green_is_outside_the_window():
     runs = [_run(BASE, run_id=10, conclusion="failure"), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12)]
-    window = _cw([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE]))
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == ()
     assert window.base_sha == M2
@@ -87,20 +92,20 @@ def test_red_followed_by_newer_green_is_outside_the_window():
 
 def test_all_green_newest_commit_is_the_base_and_the_window_is_empty():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11), _run(M2, run_id=12)]
-    window = _cw([M2, M1, BASE], runs, RECEIPTS)
+    window = _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE]))
     assert window.verdict == mw.VERDICT_GREEN
     assert window.entries == () and window.base_sha == M2
 
 
 def test_newest_merge_in_progress_on_green_base_is_running():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, status="in_progress", conclusion=None)]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].state == mw.RUN_RUNNING
 
 
 def test_merge_commit_without_any_run_is_running_while_young():
-    window = _cw([M1, BASE], [_run(BASE, run_id=10)], RECEIPTS, commit_times={M1: FRESH})
+    window = _cw([M1, BASE], [_run(BASE, run_id=10)], _receipts_for([M1, BASE]), commit_times={M1: FRESH})
     assert window.verdict == mw.VERDICT_RUNNING
     assert window.entries[0].run_id is None
 
@@ -108,7 +113,7 @@ def test_merge_commit_without_any_run_is_running_while_young():
 def test_red_wins_over_a_running_entry():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure"),
             _run(M2, run_id=12, status="queued", conclusion=None)]
-    assert _cw([M2, M1, BASE], runs, RECEIPTS).verdict == mw.VERDICT_RED
+    assert _cw([M2, M1, BASE], runs, _receipts_for([M2, M1, BASE])).verdict == mw.VERDICT_RED
 
 
 def test_each_merge_maps_to_its_own_receipt():
@@ -142,7 +147,7 @@ def test_two_runs_for_one_sha_the_newest_counts():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="failure", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="success", created="2026-11-13T09:00:00Z")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.base_sha == M1
     assert window.verdict == mw.VERDICT_GREEN
 
@@ -151,7 +156,7 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     runs = [_run(BASE, run_id=10),
             _run(M1, run_id=11, conclusion="success", created="2026-11-13T08:00:00Z"),
             _run(M1, run_id=14, conclusion="failure", created="2026-11-13T09:00:00Z")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_RED
     assert window.first_red.run_id == 14
 
@@ -163,7 +168,7 @@ def test_two_runs_for_one_sha_newest_red_beats_older_green():
     {"databaseId": 5, "headSha": M1},
 ])
 def test_unusable_run_in_the_window_is_a_named_nogo_never_green(run):
-    window = _cw([M1, BASE], [_run(BASE, run_id=10), run], RECEIPTS)
+    window = _cw([M1, BASE], [_run(BASE, run_id=10), run], _receipts_for([M1, BASE]))
     assert window.verdict == mw.VERDICT_NOGO
     assert window.entries[0].state == mw.RUN_NOGO
     assert window.entries[0].reason in {"no_conclusion", "unknown_status"}
@@ -198,9 +203,9 @@ def test_unusable_input_is_unmeasurable(commits, runs, merges):
 
 def test_to_dict_is_deterministic_and_sorted():
     runs = [_run(BASE, run_id=10), _run(M1, run_id=11, conclusion="failure")]
-    window = _cw([M1, BASE], runs, RECEIPTS)
+    window = _cw([M1, BASE], runs, _receipts_for([M1, BASE]))
     first = json.dumps(window.to_dict(), sort_keys=False)
-    assert first == json.dumps(_cw([M1, BASE], runs, RECEIPTS).to_dict(), sort_keys=False)
+    assert first == json.dumps(_cw([M1, BASE], runs, _receipts_for([M1, BASE])).to_dict(), sort_keys=False)
     assert list(window.to_dict()) == sorted(window.to_dict())
     assert window.to_dict()["first_red"]["sha"] == M1
     assert "vermoedelijk" in window.to_dict()["first_red_note"]
@@ -320,3 +325,105 @@ def test_empty_commits_output_is_unmeasurable(tmp_path):
 def test_empty_run_list_is_history_incomplete_never_green(tmp_path):
     window = mw.read_window(tmp_path, runner=FakeRunner(runs=_proc("[]")), now=NOW)
     assert (window.verdict, window.reason) == (mw.VERDICT_UNMEASURABLE, "history_incomplete")
+
+
+# ── receipt-only merges (the GitHub read-after-write gap, ci-cost 3b part d) ──
+
+M9 = "9" * 40
+BASE_TIME = "2026-11-13T08:00:00Z"
+_RUNS_TWO = [_run(BASE, run_id=10), _run(M1, run_id=11)]
+_TIMES = {BASE: BASE_TIME, M1: "2026-11-13T08:02:00Z"}
+
+
+def _m1_light(sha):
+    """M1 is a green light-profile entry, not the base: BASE stays the heavy base."""
+    return mw.PROFILE_LIGHT if sha == M1 else mw.PROFILE_HEAVY
+
+
+def _cwo(merges, **kwargs):
+    return _cw([M1, BASE], _RUNS_TWO, merges, profile_of=_m1_light, **kwargs)
+
+
+def _late_receipt(sha=M9, **extra):
+    rec = _receipt(sha, 109, "d-nine")
+    rec.update({"timestamp": FRESH, **extra})
+    return rec
+
+
+def test_a_young_receipt_only_merge_is_running_and_blocks_the_next_admission():
+    window = _cwo([_late_receipt()], commit_times=_TIMES)
+    assert window.verdict == mw.VERDICT_RUNNING
+    entry = _by_sha(window)[M9]
+    assert (entry.state, entry.run_id, entry.status, entry.conclusion) == (mw.RUN_RUNNING, None, None, None)
+    assert (entry.pr_number, entry.dispatch_id, entry.mapping) == (109, "d-nine", mw.MAPPING_RECEIPT)
+    assert [e.sha for e in window.entries] == [M1, M9]  # receipt-only merges come last
+    admission = mw.admit(window, max_unverified=1)
+    assert admission.verdict == mw.NO_GO and admission.reason.startswith("unverified_limit")
+
+
+def test_a_receipt_older_than_the_base_commit_is_ignored():
+    rec = _late_receipt(timestamp="2026-11-13T07:59:59Z")
+    assert _cwo([rec], commit_times=_TIMES).verdict == mw.VERDICT_GREEN
+    equal = _late_receipt(timestamp=BASE_TIME)
+    assert _cwo([equal], commit_times=_TIMES).verdict == mw.VERDICT_GREEN
+
+
+def test_a_receipt_for_a_sha_in_the_commit_list_is_one_entry():
+    window = _cwo([_late_receipt(sha=M1)], commit_times=_TIMES)
+    assert [e.sha for e in window.entries] == [M1]
+    assert window.verdict == mw.VERDICT_GREEN
+    below_base = _cwo([_late_receipt(sha=BASE)], commit_times=_TIMES)
+    assert [e.sha for e in below_base.entries] == [M1]
+
+
+@pytest.mark.parametrize("stamp", [None, "", "yesterday", 42])
+def test_a_receipt_only_merge_with_an_unreadable_time_counts(stamp):
+    rec = _late_receipt()
+    rec["timestamp"] = stamp
+    window = _cwo([rec], commit_times=_TIMES)
+    assert window.verdict == mw.VERDICT_RUNNING
+    entry = _by_sha(window)[M9]
+    assert (entry.state, entry.reason) == (mw.RUN_RUNNING, mw.RUNNING_REASON_RECEIPT_TIME_UNREADABLE)
+    missing = _late_receipt()
+    del missing["timestamp"]
+    assert _by_sha(_cwo([missing], commit_times=_TIMES))[M9].reason == \
+        mw.RUNNING_REASON_RECEIPT_TIME_UNREADABLE
+
+
+@pytest.mark.parametrize("times", [None, {}, {M1: "x"}, {BASE: "not a date"}, {BASE: None}])
+def test_an_unreadable_base_time_with_a_receipt_only_merge_is_unmeasurable(times):
+    window = _cwo([_late_receipt()], commit_times=times)
+    assert window.verdict == mw.VERDICT_UNMEASURABLE
+    assert window.reason == mw.UNMEASURABLE_REASON_BASE_TIME_UNKNOWN
+    assert mw.admit(window, max_unverified=1).reason == "base_time_unknown"
+
+
+def test_an_unreadable_base_time_without_a_receipt_only_merge_changes_nothing():
+    assert _cwo([_late_receipt(sha=M1)], commit_times=None).verdict == mw.VERDICT_GREEN
+    assert _cwo([], commit_times={}).verdict == mw.VERDICT_GREEN
+
+
+def test_a_receipt_only_merge_past_the_age_limit_is_a_named_nogo():
+    rec = _late_receipt(timestamp="2026-11-13T07:20:00Z")  # 50 min before NOW, after the base
+    times = {BASE: "2026-11-13T07:00:00Z", M1: "2026-11-13T07:01:00Z"}
+    window = _cwo([rec], commit_times=times)
+    assert window.verdict == mw.VERDICT_NOGO
+    assert (_by_sha(window)[M9].state, _by_sha(window)[M9].reason) == (mw.RUN_NOGO, mw.NOGO_REASON_RECEIPT_ONLY_STALE)
+    assert mw.admit(window, max_unverified=3).reason == f"receipt_only_stale: {M9}"
+
+
+def test_receipt_only_merges_are_ordered_by_receipt_time_oldest_first():
+    newer = _late_receipt(sha="8" * 40, timestamp="2026-11-13T08:07:00Z")
+    older = _late_receipt(sha=M9, timestamp="2026-11-13T08:04:00Z")
+    window = _cwo([newer, older], commit_times=_TIMES)
+    assert [e.sha for e in window.entries] == [M1, M9, "8" * 40]
+
+
+def test_adapter_counts_a_merge_github_does_not_list_yet(tmp_path):
+    _write_receipts(tmp_path / "state", [_late_receipt()])
+    commits = _proc(f"{M1}\t{_TIMES[M1]}\n{BASE}\t{BASE_TIME}\n")
+    runs = _proc(json.dumps(_RUNS_TWO))
+    window = mw.read_window(tmp_path, state_dir=tmp_path / "state",
+                            runner=FakeRunner(commits=commits, runs=runs), now=NOW)
+    assert window.verdict == mw.VERDICT_RUNNING
+    assert M9 in _by_sha(window)
