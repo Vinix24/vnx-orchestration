@@ -1,0 +1,1 @@
+- Headless claude builders now start with `--setting-sources project,local`, carrying only `effortLevel` and `cleanupPeriodDays` from the user settings, which saves about 39,000 start tokens per build; `VNX_BUILDER_SETTING_SOURCES=user,project,local` restores the old argv.

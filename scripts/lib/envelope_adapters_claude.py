@@ -10,9 +10,11 @@ docstring for the split's seam order.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from envelope_types import EnvelopeSpec, _AdapterResult
 
@@ -196,6 +198,52 @@ def _materialize_shadow_skills(spec: EnvelopeSpec, cwd: Optional[Path]) -> None:
         logger.warning("agent skill materialisation for role %r: %s", spec.role, type(exc).__name__)
 
 
+_SETTING_LEVELS = {"user", "project", "local"}
+_SETTING_KEY = "VNX_BUILDER_SETTING_SOURCES"
+
+
+def _setting_sources() -> List[str]:
+    import config_registry
+    import config_runtime
+
+    config_runtime.autowire()
+    raw, _src = config_registry.resolve_with_source(_SETTING_KEY)
+    items = [p.strip() for p in str(raw or "").split(",") if p.strip()]
+    if items and len(set(items)) == len(items) and set(items) <= _SETTING_LEVELS:
+        return items
+    logger.warning("%s: invalid value %r, using project,local", _SETTING_KEY, raw)
+    return ["project", "local"]
+
+
+def _carried_user_settings() -> Optional[List[str]]:
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
+    path = Path(cfg) / "settings.json"
+    if not path.exists():
+        return []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("user settings is not a JSON object")
+    args: List[str] = []
+    effort, days = data.get("effortLevel"), data.get("cleanupPeriodDays")
+    if isinstance(effort, str) and effort:
+        args += ["--effort", effort]
+    if isinstance(days, int) and not isinstance(days, bool):
+        args += ["--settings", json.dumps({"cleanupPeriodDays": days}, sort_keys=True)]
+    return args
+
+
+def _builder_cli_args() -> List[str]:
+    try:
+        sources = _setting_sources()
+        if set(sources) == _SETTING_LEVELS:
+            return []
+        carried = [] if "user" in sources else _carried_user_settings()
+        return ["--setting-sources", ",".join(sources)] + (carried or [])
+    except Exception as exc:  # fail to today's posture: a spawn never fails on this helper
+        logger.warning("%s: %s: %s, builder keeps the user level", _SETTING_KEY, type(exc).__name__, exc)
+        return []
+
+
 class ClaudeSubprocessAdapter:
     """Wraps spawn_claude — reuses existing spawn without reimplementation.
 
@@ -237,6 +285,7 @@ class ClaudeSubprocessAdapter:
                 # K-4c (ADR-045 §5): hands the caller the child's pid the moment
                 # claude actually spawned, so it can record start-time evidence.
                 extra_env=extra_env, on_spawn=on_spawn,
+                extra_cli_args=_builder_cli_args() or None,
             )
         except BrokenPipeError as exc:
             return _AdapterResult(
