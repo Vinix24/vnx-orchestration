@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -192,8 +193,40 @@ class TestReceipts:
 # ===================================================================
 
 
+def _record_own_sleeps():
+    """Patch time.sleep and record only the calls made by the calling thread.
+
+    time.sleep is process-wide, so a foreign thread (leaked from another test
+    in an xdist worker) can call the patched sleep too; its calls are not the
+    retry back-off these tests are about.
+    """
+    own = threading.get_ident()
+    calls: list = []
+
+    def _sleep(seconds):
+        if threading.get_ident() == own:
+            calls.append(seconds)
+
+    return calls, mock.patch("subprocess_dispatch.time.sleep", side_effect=_sleep)
+
+
 class TestDeliverWithRecovery:
     """Test retry logic and receipt integration."""
+
+    @pytest.fixture(autouse=True)
+    def _background_sleeper(self):
+        """A foreign thread that calls time.sleep in a loop, like a leaked thread in a full xdist worker."""
+        stop = threading.Event()
+
+        def _loop():
+            while not stop.is_set():
+                time.sleep(0)
+
+        thread = threading.Thread(target=_loop, daemon=True)
+        thread.start()
+        yield
+        stop.set()
+        thread.join(timeout=5)
 
     def test_success_on_first_attempt(self, tmp_path, monkeypatch):
         """First attempt succeeds → done receipt, returns True."""
@@ -228,6 +261,7 @@ class TestDeliverWithRecovery:
         # _write_receipt goes through append_receipt_payload, which resolves its
         # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        sleeps, sleep_patch = _record_own_sleeps()
 
         with (
             mock.patch(
@@ -235,14 +269,14 @@ class TestDeliverWithRecovery:
                 side_effect=[_fail_result(), _ok_result()],
             ) as mock_deliver,
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
-            mock.patch("subprocess_dispatch.time.sleep") as mock_sleep,
+            sleep_patch,
         ):
             result = deliver_with_recovery("T1", "do work", "sonnet", "d1", max_retries=3)
 
         assert result is True
         assert mock_deliver.call_count == 2
         # First retry backoff: 30s * 2^0 = 30s
-        mock_sleep.assert_called_once_with(30)
+        assert sleeps == [30]
 
         receipt = json.loads((state_dir / "t0_receipts.ndjson").read_text().strip())
         assert receipt["status"] == "done"
@@ -283,19 +317,16 @@ class TestDeliverWithRecovery:
         # _write_receipt goes through append_receipt_payload, which resolves its
         # store from VNX_STATE_DIR (since #368 split); point it at the tmp dir.
         monkeypatch.setenv("VNX_STATE_DIR", str(state_dir))
+        sleeps, sleep_patch = _record_own_sleeps()
 
         with (
             mock.patch("subprocess_dispatch.deliver_via_subprocess", return_value=_fail_result()),
             mock.patch("subprocess_dispatch._default_state_dir", return_value=state_dir),
-            mock.patch("subprocess_dispatch.time.sleep") as mock_sleep,
+            sleep_patch,
         ):
             deliver_with_recovery("T1", "do work", "sonnet", "d1", max_retries=3)
 
-        assert mock_sleep.call_args_list == [
-            mock.call(30),
-            mock.call(60),
-            mock.call(120),
-        ]
+        assert sleeps == [30, 60, 120]
 
 
 # ===================================================================
