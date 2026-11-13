@@ -1,0 +1,1 @@
+- Impact report (impactselectie-in-schaduw PR 4b, split c): `vnx impact report` counts live and backtest ledger lines apart (`by_source`) and together, an attempt in both counts once as live, and an unreconstructible record names its unreadable input; `impact_ledger` exposes `discover`, `fetch_jobs`, `timing` and `entry_key` for the backtest (dlv-cde4f9c66c0b-c).

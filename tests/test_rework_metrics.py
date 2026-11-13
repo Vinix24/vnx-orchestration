@@ -57,11 +57,11 @@ class World:
                                  "blocking_count": blockers, "report_path": "", "dispatch_id": "",
                                  "recorded_at": "2026-11-01T00:00:00Z", "reviewer_model": model})
 
-    def run(self, github=None):
+    def run(self, github=None, ledger=None):
         from rework_metrics import compute_metrics
         self.receipts.write_text("".join(json.dumps(x) + "\n" for x in self.lines), encoding="utf-8")
         self.rounds.write_text("".join(json.dumps(x) + "\n" for x in self.round_lines), encoding="utf-8")
-        return compute_metrics(PID, self.receipts, self.rounds, self.db, AS_OF, github)
+        return compute_metrics(PID, self.receipts, self.rounds, self.db, AS_OF, github, ledger_path=ledger)
 
 
 def _cell(out, key, **match):
@@ -269,3 +269,193 @@ def test_unreadable_rounds_ledger_marks_run_incomplete(tmp_path):
 def test_module_has_no_write_path():
     text = (REPO_ROOT / "scripts" / "lib" / "rework_metrics.py").read_text(encoding="utf-8")
     assert not re.search(r"open\([^)]*[\"'][wax]\+?b?[\"']|write_text|INSERT|UPDATE|DELETE|\.commit\(", text)
+
+
+# --- cost axis (herwerk-per-model-en-reviewer) ---------------------------------------------------------
+
+def _run_line(producer, ref, attempt=1, role="builder", usd=1.0, kind="charge", source="price_table@2026-09-29",
+              execution_id=None, project=PID, supersedes=None):
+    rec = {"schema": "provider_cost_run/1", "record_id": f"{producer}-{ref}-{attempt}-{kind}-{usd}",
+           "run_id": f"{project}:{producer}:{ref}:{attempt}", "project_id": project, "kind": kind,
+           "role": role, "provider": "claude", "model": "sonnet",
+           "tokens": {"input_uncached": 10, "cache_hit": 20, "cache_write_5m": 0, "cache_write_1h": 0, "output": 5},
+           "usage_completeness": "complete", "cost_usd": 0.0 if source.startswith("price") else None,
+           "cost_source": source, "billing": "subscription", "api_equivalent_usd": usd if source.startswith("price") else None}
+    if execution_id:
+        rec["execution_id"] = execution_id
+    if supersedes:
+        rec["supersedes"] = supersedes
+    return rec
+
+
+def _ledger(tmp_path, *records):
+    path = tmp_path / "events" / "provider_costs.ndjson"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def _gate_result(tmp_path, pr, seat, execution_id):
+    results = tmp_path / "results"
+    results.mkdir(exist_ok=True)
+    (results / f"pr-{pr}-{seat}.json").write_text(
+        json.dumps({"pr_number": pr, "gate": seat, "execution_id": execution_id}), encoding="utf-8")
+
+
+def _delivery(w, did, pr, days_ago=30, **kw):
+    w.build(did, pr, **kw)
+    w.merge(pr, did, days_ago)
+
+
+def _cost(out, builder="claude/sonnet"):
+    return [c for c in out["cost"]["cells"] if c["builder"] == builder]
+
+
+def test_build_cost_sums_both_members_and_a_correction_replaces_its_run(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    w.build("dlv-aaaa00000001-r2", 10)
+    ledger = _ledger(
+        tmp_path,
+        _run_line("envelope_govern", "dlv-aaaa00000001", usd=1.0),
+        _run_line("envelope_govern", "dlv-aaaa00000001-r2", usd=5.0),
+        _run_line("envelope_govern", "dlv-aaaa00000001-r2", usd=2.0, kind="correction", supersedes="x"))
+    out = w.run(ledger=ledger)
+    (d,) = out["cost"]["deliveries"]
+    assert d["incomplete"] == [] and d["build"]["runs"] == 2
+    assert d["build"]["api_equivalent_usd"] == 3.0
+    assert d["build"]["tokens"]["cache_hit"] == 40
+
+
+def test_member_without_builder_run_is_incomplete_and_out_of_the_medians(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    w.build("dlv-aaaa00000001-r2", 10)
+    _delivery(w, "dlv-bbbb00000002", 11)
+    ledger = _ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001", usd=9.0),
+                     _run_line("envelope_govern", "dlv-bbbb00000002", usd=1.0))
+    out = w.run(ledger=ledger)
+    gaps = out["cost"]["gaps"]["incomplete_deliveries"]
+    assert [g["delivery"] for g in gaps] == ["dlv-aaaa00000001"]
+    assert "dlv-aaaa00000001-r2" in gaps[0]["why"][0]
+    (cell,) = _cost(out)
+    assert (cell["n"], cell["n_complete"], cell["build_usd_median"]) == (2, 1, 1.0)
+
+
+def test_unpriced_builder_run_is_a_gap_not_zero(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    ledger = _ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001", source="unavailable:no_usage"))
+    out = w.run(ledger=ledger)
+    (cell,) = _cost(out)
+    assert cell["n_complete"] == 0 and cell["build_usd_median"] is None
+    assert "without price" in out["cost"]["gaps"]["incomplete_deliveries"][0]["why"][0]
+
+
+def test_review_runs_per_seat_unavailable_and_other_pr_not_attributed(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    _gate_result(tmp_path, 10, "deepseek_gate", "e" * 32)
+    ledger = _ledger(
+        tmp_path,
+        _run_line("envelope_govern", "dlv-aaaa00000001"),
+        _run_line("codex_gate", "pr-10", role="review", usd=0.2),
+        _run_line("codex_gate", "pr-10", attempt=2, role="review", usd=0.4),
+        _run_line("codex_gate", "pr-99", role="review", usd=7.0),
+        _run_line("deepseek_gate", "e" * 32, role="review", source="unavailable:no_usage"),
+        _run_line("deepseek_gate", "f" * 32, role="review", source="unavailable:no_usage"))
+    out = w.run(ledger=ledger)
+    (d,) = out["cost"]["deliveries"]
+    assert d["review"]["codex_gate"] == {"runs": 2, "unavailable_runs": 0, "api_equivalent_usd": 0.6}
+    assert d["review"]["deepseek_gate"] == {"runs": 1, "unavailable_runs": 1, "api_equivalent_usd": None}
+    gaps = out["cost"]["gaps"]
+    assert gaps["other_pr_review_runs"] == {"codex_gate": 1}
+    assert gaps["unattributed_review_runs"] == {"deepseek_gate": 1}
+    assert gaps["unavailable_review_runs"] == {"deepseek_gate": 1}
+    seat = _cost(out)[0]["review"]["deepseek_gate"]
+    assert seat["api_equivalent_usd_median"] is None and seat["unavailable_runs"] == 1
+    assert _cost(out)[0]["review"]["codex_gate"]["api_equivalent_usd_median"] == 0.6
+
+
+def test_gate_result_of_another_pr_or_malformed_links_nothing(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    results = tmp_path / "results"
+    results.mkdir()
+    (results / "pr-10-deepseek_gate.json").write_text(
+        json.dumps({"pr_number": 11, "execution_id": "e" * 32}), encoding="utf-8")
+    (results / "pr-10-kimi_gate.json").write_text("{not json", encoding="utf-8")
+    ledger = _ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001"),
+                     _run_line("deepseek_gate", "e" * 32, role="review"),
+                     _run_line("kimi_gate", "d" * 32, role="review"))
+    out = w.run(ledger=ledger)
+    assert out["cost"]["deliveries"][0]["review"] == {}
+    assert out["cost"]["gaps"]["unattributed_review_runs"] == {"deepseek_gate": 1, "kimi_gate": 1}
+
+
+def test_lead_time_is_first_member_receipt_to_merge_in_minutes(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10, days_ago=1)
+    w.build("dlv-aaaa00000001-r2", 10)
+    w.lines[0]["timestamp"] = (AS_OF - timedelta(days=1, minutes=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    w.lines[-1]["timestamp"] = (AS_OF - timedelta(days=1, minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ledger = _ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001"),
+                     _run_line("envelope_govern", "dlv-aaaa00000001-r2"))
+    out = w.run(ledger=ledger)
+    assert out["cost"]["deliveries"][0]["lead_time_min"] == 90.0
+    assert _cost(out)[0]["lead_time_median_min"] == 90.0
+
+
+def test_changed_lines_from_the_merge_fact_and_gap_when_absent(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    _delivery(w, "dlv-bbbb00000002", 11)
+    w.lines[1]["additions"], w.lines[1]["deletions"] = 300, 100
+    ledger = _ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001", usd=2.0),
+                     _run_line("envelope_govern", "dlv-bbbb00000002", usd=3.0))
+    _delivery(w, "dlv-cccc00000003", 12, model="opus")
+    ledger = _ledger(tmp_path, *[json.loads(x) for x in ledger.read_text().splitlines()],
+                     _run_line("envelope_govern", "dlv-cccc00000003"))
+    out = w.run(ledger=ledger)
+    assert [c["quota_share"]["status"] for c in out["cost"]["cells"]] == ["unmeasured"] * 2
+    (cell,) = _cost(out)
+    assert cell["per_1000_n"] == 1 and cell["build_usd_per_1000_lines_median"] == 5.0
+    assert out["cost"]["gaps"]["no_changed_lines"] == 2  # the sonnet delivery without lines and the opus one
+
+
+@pytest.mark.parametrize("n,comparable", [(19, False), (20, True)])
+def test_cell_is_comparable_from_n_20_and_shows_medians_below(tmp_path, n, comparable):
+    w = World(tmp_path)
+    runs = []
+    for i in range(n):
+        did = f"dlv-{i + 1:012x}"
+        _delivery(w, did, 100 + i)
+        runs.append(_run_line("envelope_govern", did, usd=float(i + 1)))
+    out = w.run(ledger=_ledger(tmp_path, *runs))
+    (cell,) = _cost(out)
+    assert cell["n_complete"] == n and cell["comparable"] is comparable
+    assert cell["quota_share"] == {"status": "unmeasured", "reason": "no per-run weekly quota source"}
+    assert cell["build_usd_median"] == (n + 1) / 2 and cell["build_usd_p75"] is not None
+
+
+def test_other_project_runs_and_missing_ledger_are_not_counted(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    out = w.run(ledger=_ledger(tmp_path, _run_line("envelope_govern", "dlv-aaaa00000001", project="other")))
+    assert out["cost"]["deliveries"][0]["incomplete"]
+    missing = w.run(ledger=tmp_path / "nope.ndjson")
+    assert missing["cost"]["cells"] == [] and "not found" in missing["cost"]["ledger_error"]
+    assert missing["cost"]["quota_share"]["status"] == "unmeasured"
+
+
+def test_metered_run_counts_its_cost_usd_not_a_zero_api_equivalent(tmp_path):
+    w = World(tmp_path)
+    _delivery(w, "dlv-aaaa00000001", 10)
+    metered = _run_line("envelope_govern", "dlv-aaaa00000001", usd=0.0)
+    metered.update(billing="metered", cost_usd=0.5, api_equivalent_usd=None)
+    review = _run_line("codex_gate", "pr-10", role="review")
+    review.update(billing="metered", cost_usd=0.25, api_equivalent_usd=None)
+    out = w.run(ledger=_ledger(tmp_path, metered, review))
+    (d,) = out["cost"]["deliveries"]
+    assert d["build"]["api_equivalent_usd"] == 0.5
+    assert d["review"]["codex_gate"]["api_equivalent_usd"] == 0.25

@@ -195,16 +195,35 @@ def iter_complete_lines(path: Path) -> Iterator[Dict[str, Any]]:
                 yield obj
 
 
-def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
-    """Map dispatch_id -> the last outcome decision of ``project_id`` in file order.
+class DecisionLogUnreadable(ValueError):
+    """The decision log holds a line the strict read cannot take; ``str(exc)`` names it."""
 
-    An empty ``project_id`` reads nothing: a decision is only ever taken as
-    one of a named project (ADR-007).
+
+def iter_strict_lines(path: Path) -> Iterator[Dict[str, Any]]:
+    """Yield each JSON object of ``path``, or raise ``DecisionLogUnreadable`` on the first line that is none.
+
+    The reader for an authorization that must not skip what it cannot read: a line that is
+    not valid UTF-8, not valid JSON or not a JSON object fails the read with its line
+    number, and a last line without a newline (a writer mid-append) fails it as partial.
+    A missing file raises ``OSError``.
     """
+    with open(path, "rb") as fh:
+        for number, raw in enumerate(fh, start=1):
+            if not raw.endswith(b"\n"):
+                raise DecisionLogUnreadable("decision log has a partial last line")
+            try:
+                obj = json.loads(raw.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise DecisionLogUnreadable(f"decision log unreadable at line {number}") from None
+            if not isinstance(obj, dict):
+                raise DecisionLogUnreadable(f"decision log unreadable at line {number}")
+            yield obj
+
+
+def _last_outcome_decisions(records: Iterator[Dict[str, Any]], project_id: str) -> Dict[str, Dict[str, Any]]:
+    """Fold ``records`` into dispatch_id -> the last outcome decision of ``project_id`` (file order)."""
     decisions: Dict[str, Dict[str, Any]] = {}
-    if not project_id:
-        return decisions
-    for record in iter_complete_lines(Path(log_path)):
+    for record in records:
         if record.get("decision_type") != OUTCOME_DECISION_TYPE:
             continue
         if record.get("project_id") != project_id:
@@ -216,6 +235,24 @@ def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[st
             continue
         decisions[did.strip()] = record
     return decisions
+
+
+def read_outcome_decisions(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
+    """Map dispatch_id -> the last outcome decision of ``project_id`` in file order.
+
+    An empty ``project_id`` reads nothing: a decision is only ever taken as
+    one of a named project (ADR-007). Lenient: a line it cannot read is skipped.
+    """
+    if not project_id:
+        return {}
+    return _last_outcome_decisions(iter_complete_lines(Path(log_path)), project_id)
+
+
+def read_outcome_decisions_strict(log_path: Path, project_id: str) -> Dict[str, Dict[str, Any]]:
+    """``read_outcome_decisions`` for an authorization: any unreadable line raises ``DecisionLogUnreadable``."""
+    if not project_id:
+        return {}
+    return _last_outcome_decisions(iter_strict_lines(Path(log_path)), project_id)
 
 
 def _decision_identity(dispatch_id: str) -> Dict[str, str]:

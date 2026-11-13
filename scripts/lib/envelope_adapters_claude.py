@@ -215,21 +215,43 @@ def _setting_sources() -> List[str]:
     return ["project", "local"]
 
 
-def _carried_user_settings() -> Optional[List[str]]:
+def _memory_excludes() -> List[str]:
+    """``claudeMdExcludes`` entries for the user-level CLAUDE.md and rules.
+
+    A worktree lives under ``$HOME``, so the CLI's walk-up from the working directory reads
+    ``~/.claude/CLAUDE.md`` and ``~/.claude/rules/*.md`` as project memory whatever
+    ``--setting-sources`` says (claude-code#87590). Both the home ``.claude`` and the config
+    dir in use are listed, each also in its ``resolve()`` form (symlinked config dirs).
+    """
+    dirs = [Path.home() / ".claude"]
+    cfg = os.environ.get("CLAUDE_CONFIG_DIR")
+    if cfg:
+        dirs.append(Path(cfg))
+    found = set()
+    for d in dirs:
+        for base in (str(d), str(d.resolve())):
+            found.update((base + "/CLAUDE.md", base + "/rules/**"))
+    return sorted(found)
+
+
+def _carried_user_settings() -> List[str]:
+    """``--settings`` JSON: ``cleanupPeriodDays`` from the user file plus the memory excludes.
+
+    ``effortLevel`` is deliberately not carried: Opus 5.5 and later models ignore that user
+    key and start at their own default, and ``--effort`` would raise the builder above it.
+    """
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     path = Path(cfg) / "settings.json"
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        raise ValueError("user settings is not a JSON object")
-    args: List[str] = []
-    effort, days = data.get("effortLevel"), data.get("cleanupPeriodDays")
-    if isinstance(effort, str) and effort:
-        args += ["--effort", effort]
-    if isinstance(days, int) and not isinstance(days, bool):
-        args += ["--settings", json.dumps({"cleanupPeriodDays": days}, sort_keys=True)]
-    return args
+    settings: Dict[str, Any] = {}
+    if path.exists():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("user settings is not a JSON object")
+        days = data.get("cleanupPeriodDays")
+        if isinstance(days, int) and not isinstance(days, bool):
+            settings["cleanupPeriodDays"] = days
+    settings["claudeMdExcludes"] = _memory_excludes()
+    return ["--settings", json.dumps(settings, sort_keys=True)]
 
 
 def _builder_cli_args() -> List[str]:
@@ -238,7 +260,7 @@ def _builder_cli_args() -> List[str]:
         if set(sources) == _SETTING_LEVELS:
             return []
         carried = [] if "user" in sources else _carried_user_settings()
-        return ["--setting-sources", ",".join(sources)] + (carried or [])
+        return ["--setting-sources", ",".join(sources)] + carried
     except Exception as exc:  # fail to today's posture: a spawn never fails on this helper
         logger.warning("%s: %s: %s, builder keeps the user level", _SETTING_KEY, type(exc).__name__, exc)
         return []

@@ -164,7 +164,7 @@ def test_merge_through_the_door_carries_a_permit(door: FakeGitHub) -> None:
     assert check.get("state") == "permitted"
     assert check.get("permit_id") == f"{APP_ID}:{SHA}:900"
     assert (check["check_run_id"], check["app_id"], check["head_sha"]) == (900, APP_ID, SHA)
-    assert check["read_back"] == {"conclusion": "success", "id": 900} and check["published_at"]
+    assert check["read_back"] == {"conclusion": "success", "id": 900, "readback_attempts": 1} and check["published_at"]
     assert (check["revoked"], check["revoke_outcome"], check["merge_outcome"]) == (False, "not_needed", "merged")
     assert len(door.of("POST")) == 1 and not door.of("PATCH")
 
