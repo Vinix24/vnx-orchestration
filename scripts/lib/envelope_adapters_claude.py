@@ -304,6 +304,7 @@ class ClaudeSubprocessAdapter:
                 "cache_hit": int(
                     raw_usage.get("cache_read_input_tokens", 0) or 0
                 ),
+                "cache_write": int(raw_usage.get("cache_creation_input_tokens", 0) or 0),
             }
         refused = getattr(result, "spawn_refused", None)
         common = {
