@@ -1,0 +1,1 @@
+- CI cost (impactselectie-in-schaduw PR 4a): `vnx impact collect` keeps the shadow artifacts of every VNX CI run attempt in `state/impact_shadow.ndjson` before GitHub deletes them after 90 days. `vnx impact report` shows the misses of reduced selections, the reduced share, the red runs and the wall clock beside Profile A.
