@@ -179,6 +179,13 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "Must match gate_request_handler._DEFAULT_REVIEW_GATE_TAKEOVER_CHAIN verbatim "
         "(pinned by test_beta3_e1_review_gate_chain.py).", approval=True,
         subsystem="governance-enforcement-stack", status="LIVE"),
+    "VNX_SALVAGE_PUSH_TIMEOUT_S": _e(
+        "VNX_SALVAGE_PUSH_TIMEOUT_S", "string", "900", "dispatch",
+        "Seconds the door's push of a dispatch branch may take (OI-2744). A project whose "
+        "pre-push hook runs its CI script needs more than the old 120 s; on a timeout the "
+        "worktree with the salvage commit is kept. A value that is not a positive int falls back to 900.",
+        approval=True,
+        subsystem="governance-enforcement-stack", status="LIVE"),
     # OI-2288: the codex review seat's reasoning effort, read by
     # gate_runner.resolve_codex_review_effort at every codex_gate launch. Listed
     # read-only (writable=False): like the codex model pins this module's header
