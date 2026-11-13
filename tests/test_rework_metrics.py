@@ -9,6 +9,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 for _p in (REPO_ROOT / "scripts", REPO_ROOT / "scripts" / "lib"):
     if str(_p) not in sys.path:
@@ -133,6 +135,31 @@ def test_n_rule_19_has_no_percentage_20_has(tmp_path):
             w.merge(100 + i, did, 30)
         cell = _cell(w.run(), "first_pass_yield", builder="claude/sonnet")
         assert (cell["n"], cell["pct"]) == (count, expected)
+
+
+def test_wilson_interval_values_and_edges():
+    from rework_metrics import wilson_interval
+    assert wilson_interval(10, 20) == pytest.approx((0.299, 0.701), abs=0.001)
+    assert wilson_interval(0, 20)[0] == 0.0
+    assert wilson_interval(20, 20)[1] == 1.0
+    assert wilson_interval(0, 0) is None
+    assert wilson_interval(2, 20) == (0.028, 0.301)
+
+
+def test_ci95_comes_from_the_same_count_and_n_as_pct_and_only_from_n_20(tmp_path):
+    from rework_metrics import wilson_interval
+    for count in (19, 20):
+        (tmp_path / f"n{count}").mkdir()
+        w = World(tmp_path / f"n{count}")
+        for i in range(count):
+            did = f"dlv-{i:012x}"
+            w.build(did, 100 + i)
+            w.merge(100 + i, did, 30)
+        cell = _cell(w.run(), "first_pass_yield", builder="claude/sonnet")
+        if count < 20:
+            assert cell["pct"] is None and "ci95" not in cell
+        else:
+            assert cell["ci95"] == list(wilson_interval(cell["count"], cell["n"]))
 
 
 def test_benchmark_dispatch_is_excluded_and_counted(tmp_path):
