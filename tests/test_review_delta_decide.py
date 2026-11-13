@@ -26,6 +26,7 @@ OPEN_FINDING = {"severity": "error", "file_path": "x.py", "line": 2, "message": 
 HEAD_A, HEAD_B, FULL_PROMPT = "a" * 40, "b" * 40, "Review"
 OPEN_ID = rf.id_for_finding("codex_gate", OPEN_FINDING, SRC)
 STREAM, _isolated, store = scope.STREAM, scope._isolated, scope.store
+_set = lambda store, value: scope._set(store, value, planted_manifest=Path("m.json"))
 
 
 @pytest.fixture(autouse=True)
@@ -33,17 +34,12 @@ def _evidence(monkeypatch):
     scope._allow(monkeypatch)  # activation evidence is part 1's concern
 
 
-def _set(store, value):
-    scope._set(store, value, planted_manifest=Path("m.json"))
-
-
 def _msg(text):
     return STREAM.rstrip("\n") + "\n" + json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": text}}) + "\n"
 
 
 def _answer(status="fixed", new=()):
-    block = {"verdict": "pass", "findings": [{"id": OPEN_ID, "status": status}], "new_findings": list(new)}
-    return _msg("```delta_verdict/1\n" + json.dumps(block) + "\n```\n")
+    return _msg("```delta_verdict/1\n" + json.dumps({"verdict": "pass", "findings": [{"id": OPEN_ID, "status": status}], "new_findings": list(new)}) + "\n```\n")
 
 
 def _record(kind="NO_CODE_CHANGE", reason=None, anchor="present", paths=("x.py",)):
@@ -51,8 +47,10 @@ def _record(kind="NO_CODE_CHANGE", reason=None, anchor="present", paths=("x.py",
                          Interdiff(frozenset(paths), {}), (rd.OpenFinding(OPEN_ID, "x.py", "f", "error", "broken", anchor),), ())
 
 
-def _ledger(store, scopes=("",), blocking=1):
-    """Parent rounds on heads of their own; the last one failed with ``blocking`` blockers."""
+def _ledger(store, scopes=("",), blocking=1, mode="delta"):
+    """Set the scope ``mode`` (None leaves it unset), then write parent rounds on heads of their own; the last failed with ``blocking`` blockers."""
+    if mode:
+        _set(store, mode)
     gates = store["state_dir"] / "review_gates"
     gates.mkdir(parents=True, exist_ok=True)
     project = rr.store_project_id(gates)
@@ -69,13 +67,11 @@ def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", r
     sent, shadows = [], []
     monkeypatch.setattr(gate_runner, "create_gate_worktree", lambda **kw: store["data_dir"] / "_wt")
     monkeypatch.setattr(gate_runner, "remove_gate_worktree", lambda *a, **kw: None)
-
     def run(self, **kw):
         sent.append(kw["prompt"])
         done = {"status": "failed", "reason": "timeout", "reason_detail": "deadline", "stdout": ""} if fail else \
             {"status": "completed", "stdout": stdout or _answer()}
         return {"stderr": "", "duration_seconds": 1.0, "partial_output_lines": 1, "runner_pid": 1, "returncode": 0, **done}
-
     def assembled(*a):
         if boom:
             raise OSError("boom")
@@ -94,37 +90,28 @@ def _fire(store, monkeypatch, *, gate="codex_gate", stdout=None, own="x.py\n", r
 
 
 def _line(store):
-    lines = rr.read_ledger(rr.ledger_path(store["state_dir"] / "review_gates")).lines
-    return [l for l in lines if l.head_sha == HEAD_B]
+    return [l for l in rr.read_ledger(rr.ledger_path(store["state_dir"] / "review_gates")).lines if l.head_sha == HEAD_B]
 
 
 def test_delta_sends_the_delta_prompt_for_an_eligible_head_and_a_pass_books_one_codex_verdict(store, monkeypatch):
-    _set(store, "delta")
     _ledger(store)
     result, sent, shadows = _fire(store, monkeypatch)
-    assert len(sent) == 1 and "follow-up head of PR #7" in sent[0] and OPEN_ID in sent[0] and not shadows
-    assert rr.ledger_verdict(result) == "pass" and not result["blocking_findings"]
-    assert (result["scope"], result["parent_head_sha"], result["parent_round_ref"]) == ("delta", HEAD_A, "parent.md")
-    assert (result["changekind"], result["delta_base"]) == ("NO_CODE_CHANGE", "origin/main")
+    assert len(sent) == 1 and "follow-up head of PR #7" in sent[0] and OPEN_ID in sent[0] and not shadows and rr.ledger_verdict(result) == "pass" and not result["blocking_findings"]
+    assert (result["scope"], result["parent_head_sha"], result["parent_round_ref"], result["changekind"], result["delta_base"]) == \
+        ("delta", HEAD_A, "parent.md", "NO_CODE_CHANGE", "origin/main")
     (line,) = _line(store)
     assert (line.verdict, line.scope, line.parent_head_sha, line.parent_round_ref) == ("pass", "delta", HEAD_A, "parent.md")
-    report = Path(result["report_path"]).read_text()
-    assert "Delta round" in report and OPEN_ID in report and "parent.md" in report
-
-
-NEW_MAJOR = {"file_path": "x.py", "line": 3, "severity": "major", "message": "fresh"}
+    assert all(t in Path(result["report_path"]).read_text() for t in ("Delta round", OPEN_ID, "parent.md"))
 
 
 @pytest.mark.parametrize("stdout,blocking", [
     (_answer("open"), "broken"), (_answer("regressed"), "broken"), (_answer("unverifiable"), "broken"),
-    (_answer(new=[NEW_MAJOR]), "fresh"), (_msg("no fence here"), "broken"), (_msg("```delta_verdict/1\n{not json\n```\n"), "broken"),
+    (_answer(new=[{"file_path": "x.py", "line": 3, "severity": "major", "message": "fresh"}]), "fresh"), (_msg("no fence here"), "broken"), (_msg("```delta_verdict/1\n{not json\n```\n"), "broken"),
 ])
 def test_an_answer_that_leaves_a_blocker_open_or_cannot_be_read_records_fail(store, monkeypatch, stdout, blocking):
-    _set(store, "delta")
     _ledger(store)
     result, sent, _ = _fire(store, monkeypatch, stdout=stdout)
-    assert "follow-up head" in sent[0] and rr.ledger_verdict(result) == "fail"
-    assert any(blocking in f["message"] for f in result["blocking_findings"])
+    assert "follow-up head" in sent[0] and rr.ledger_verdict(result) == "fail" and any(blocking in f["message"] for f in result["blocking_findings"])
     assert _line(store)[0].verdict == "fail" and _line(store)[0].scope == "delta"
 
 
@@ -148,45 +135,34 @@ REFUSALS = [
 
 @pytest.mark.parametrize("reason,ledger,fire", REFUSALS)
 def test_a_head_that_fails_besluit_2_runs_the_full_prompt_and_names_why(store, monkeypatch, reason, ledger, fire):
-    _set(store, "delta")
     _ledger(store, **ledger)
     result, sent, shadows = _fire(store, monkeypatch, stdout=STREAM, **fire)
     assert sent == [FULL_PROMPT] and not shadows
-    assert (result["scope"], result["full_review_reason"]) == ("full", reason)
-    assert (_line(store)[0].scope, _line(store)[0].full_review_reason) == ("full", reason)
+    assert (result["scope"], result["full_review_reason"]) == ("full", reason) == (_line(store)[0].scope, _line(store)[0].full_review_reason)
 
 
 @pytest.mark.parametrize("gate", ["kimi_gate", "deepseek_gate", "glm_gate"])
 def test_the_second_seat_always_runs_the_full_prompt(store, monkeypatch, gate):
-    _set(store, "delta")
     _ledger(store)
     result, sent, _ = _fire(store, monkeypatch, gate=gate, stdout=STREAM)
     assert sent == [FULL_PROMPT] and "scope" not in result and "full_review_reason" not in result
 
 
-def test_full_writes_no_scope_field_and_sends_no_delta_prompt(store, monkeypatch):
-    _ledger(store)
+@pytest.mark.parametrize("mode,shadow_runs", [(None, 0), ("delta_shadow", 1)])
+def test_full_and_delta_shadow_decide_with_the_full_round_and_write_no_scope_field(store, monkeypatch, mode, shadow_runs):
+    _ledger(store, mode=mode)
     result, sent, shadows = _fire(store, monkeypatch, stdout=STREAM)
-    assert sent == [FULL_PROMPT] and not shadows and _line(store)[0].scope == ""
+    assert sent == [FULL_PROMPT] and len(shadows) == shadow_runs and _line(store)[0].scope == ""
     assert not ({"scope", "full_review_reason", "parent_head_sha"} & set(result))
 
 
-def test_delta_shadow_still_decides_with_the_full_round_and_runs_the_shadow(store, monkeypatch):
-    _set(store, "delta_shadow")
-    _ledger(store)
-    result, sent, shadows = _fire(store, monkeypatch, stdout=STREAM)
-    assert sent == [FULL_PROMPT] and len(shadows) == 1 and "scope" not in result
-
-
 def test_a_failed_delta_run_is_booked_as_a_failure(store, monkeypatch):
-    _set(store, "delta")
     _ledger(store)
     result, sent, _ = _fire(store, monkeypatch, fail=True)
     assert "follow-up head" in sent[0] and result["status"] != "completed" and rr.ledger_verdict(result) == "" and not _line(store)
 
 
 def test_rollback_to_full_gives_the_full_prompt_and_leaves_earlier_records(store, monkeypatch):
-    _set(store, "delta")
     gates = _ledger(store)
     _fire(store, monkeypatch)
     before = (gates / "rounds.ndjson").read_bytes()
@@ -197,14 +173,17 @@ def test_rollback_to_full_gives_the_full_prompt_and_leaves_earlier_records(store
     assert sent == [FULL_PROMPT] and "scope" not in result and (gates / "rounds.ndjson").read_bytes().startswith(before)
 
 
+def _git(path, *a):
+    return subprocess.run(["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t", *a], check=True, capture_output=True, text=True).stdout.strip()
+
+
 def _repo(tmp_path, source):
     """A git repo whose one commit holds ``x.py``; its sha."""
-    run = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True, text=True).stdout.strip()
-    run("init", "-q")
+    _git(tmp_path, "init", "-q")
     (tmp_path / "x.py").write_text(source)
-    run("add", "x.py")
-    run("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c")
-    return run("rev-parse", "HEAD")
+    _git(tmp_path, "add", "x.py")
+    _git(tmp_path, "commit", "-q", "-m", "c")
+    return _git(tmp_path, "rev-parse", "HEAD")
 
 
 def _written(tmp_path, finding, source=SRC):
@@ -215,17 +194,15 @@ def _written(tmp_path, finding, source=SRC):
     lines = dd._blocker_lines(tmp_path, head, "codex_gate", held, (fid,))
     record = dataclasses.replace(_record(), open_findings=(rd.OpenFinding(fid, "x.py", held[fid]["symbolic_context"], "error", finding["message"], "present"),), head=head)
     parent = SimpleNamespace(seat="codex_gate", head_sha=head, report_path=str(tmp_path / "report.md"))
-    parsed = rd.parse_delta_verdict("```delta_verdict/1\n" + json.dumps({"verdict": "fail", "findings": [{"id": fid, "status": "open"}],
-                                                                       "new_findings": []}) + "\n```\n", [fid], (fid,))
-    text = dd._verdict_text(dd.DeltaContext(record, (fid,), parent, lines), parsed)
+    block = {"verdict": "fail", "findings": [{"id": fid, "status": "open"}], "new_findings": []}
+    text = dd._verdict_text(dd.DeltaContext(record, (fid,), parent, lines), rd.parse_delta_verdict("```delta_verdict/1\n" + json.dumps(block) + "\n```\n", [fid], (fid,)))
     (tmp_path / "report.md").write_text(text)
     return fid, held[fid], parent, text
 
 
 @pytest.mark.parametrize("line,context", [(2, "f"), (6, "C.m")])
 def test_a_retained_blocker_gives_back_the_same_id_and_context_on_the_next_round(tmp_path, line, context):
-    finding = {"severity": "error", "file_path": "x.py", "line": line, "message": "broken"}
-    fid, held, parent, text = _written(tmp_path, finding)
+    fid, held, parent, text = _written(tmp_path, dict(OPEN_FINDING, line=line))
     back = ds.parent_index(tmp_path, parent)
     assert list(back) == [fid] and back[fid]["symbolic_context"] == context == held["symbolic_context"]
     assert back[fid]["message"] == "broken" and back[fid]["file_path"] == "x.py"
@@ -235,18 +212,16 @@ def test_a_retained_blocker_gives_back_the_same_id_and_context_on_the_next_round
 def test_deleting_the_flagged_function_on_the_following_head_is_unverifiable(tmp_path):
     fid, _, parent, _ = _written(tmp_path, dict(OPEN_FINDING))
     (tmp_path / "x.py").write_text("def g():\n    return 1\n")
-    subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "drop f"], check=True)
-    next_head = subprocess.run(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    result = ck.anchors_present(tmp_path, next_head, [ds.parent_index(tmp_path, parent)[fid]])
+    _git(tmp_path, "commit", "-qam", "drop f")
+    result = ck.anchors_present(tmp_path, _git(tmp_path, "rev-parse", "HEAD"), [ds.parent_index(tmp_path, parent)[fid]])
     assert result["anchors"][0]["status"] == "unverifiable" and result["full_review_reason"] == ck.REASON_ANCHOR
 
 
 def test_a_blocker_whose_symbol_line_cannot_be_found_has_no_line(tmp_path):
     head = _repo(tmp_path, "def g():\n    return 1\n")
-    fid = rf.id_for_finding("codex_gate", OPEN_FINDING, SRC)
-    held = {fid: {**OPEN_FINDING, "symbolic_context": "f"}}
-    assert dd._blocker_lines(tmp_path, head, "codex_gate", held, (fid,)) is None
-    assert dd._blocker_lines(tmp_path, head, "codex_gate", {}, (fid,)) is None
+    held = {OPEN_ID: {**OPEN_FINDING, "symbolic_context": "f"}}
+    assert dd._blocker_lines(tmp_path, head, "codex_gate", held, (OPEN_ID,)) is None
+    assert dd._blocker_lines(tmp_path, head, "codex_gate", {}, (OPEN_ID,)) is None
 
 
 def test_an_id_written_in_a_report_finding_is_ignored(tmp_path):
