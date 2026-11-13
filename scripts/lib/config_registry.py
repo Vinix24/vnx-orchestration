@@ -266,6 +266,16 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "approves nobody, as does a malformed entry (logged); any other takeover keeps every "
         "seat.", approval=True,
         subsystem="governance-enforcement-stack", status="ACTIVATE"),
+    # ADR-074 (impactselectie in schaduw). No production code reads this key until PR 3 of the track
+    # impactselectie-in-schaduw: the hook contract is fixed in the ADR first. Empty means every PR
+    # runs the full suite.
+    "VNX_CI_IMPACT_CMD": _e(
+        "VNX_CI_IMPACT_CMD", "string", "", "gate",
+        "Per-project impact-selection hook (ADR-074). Changed paths in; test files plus graph "
+        "version out; exit 0. Any other outcome (non-zero exit, unparseable output, time-out) means "
+        "the full run. The VNX value points to scripts/ci/impact_select.py. Empty (the default) "
+        "selects nothing and every PR runs the full suite.", approval=True,
+        subsystem="governance-enforcement-stack", status="ACTIVATE", read_site_wired=False),
     "VNX_CI_GATE_REQUIRED": _e(
         "VNX_CI_GATE_REQUIRED", "bool", "1", "gate",
         "Require the CI gate before merge.", approval=True,
