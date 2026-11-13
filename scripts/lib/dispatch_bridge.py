@@ -274,9 +274,10 @@ def _stage_lineage(
     return parent, kind, ({**evidence, "round_cause": cause} if cause else evidence), edge_parent
 
 
-def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str]) -> dict:
-    """The optional origin and round-cause keys of the spec; each only when set."""
-    return {**({"origin_oi": origin_oi.strip()} if origin_oi else {}),
+def _spec_origin_fields(origin_oi: Optional[str], origin_pr: Optional[int], round_cause: Optional[str],
+                        difficulty: Optional[dict] = None) -> dict:
+    """The optional origin and round-cause keys of the spec (each only when set), and its ``difficulty`` block."""
+    return {"difficulty": difficulty, **({"origin_oi": origin_oi.strip()} if origin_oi else {}),
             **({"origin_pr": origin_pr} if origin_pr else {}),
             **({"round_cause": round_cause} if round_cause else {})}
 
@@ -290,12 +291,13 @@ def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _require_difficulty(difficulty: Optional[Mapping[str, Any]], path_count: int) -> dict:
+def _require_difficulty(difficulty: Optional[Mapping[str, Any]], path_count: int, deadline_seconds: int) -> dict:
     """The spec's ``difficulty`` block (herwerk ADR-071, decision rule part b), validated.
 
     Every key is present (``None`` for a value not given); ``file_count`` defaults to the number of
     dispatch paths. An unknown key, a wrong type or a value out of range is refused, never dropped.
     """
+    _require_deadline_in_range(deadline_seconds)
     given = dict(difficulty) if difficulty is not None else {}
     unknown = sorted(str(k) for k in given if k not in DIFFICULTY_KEYS)
     if unknown:
@@ -572,8 +574,7 @@ def stage_spec_bundle(
     staging_id = _require_staging_id(dispatch_id)
 
     # 1a. deadline and difficulty validated at the trust boundary (the FIRST writer of a dispatch-spec.json).
-    _require_deadline_in_range(deadline_seconds)
-    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths))
+    difficulty_block = _require_difficulty(difficulty, len(dispatch_paths), deadline_seconds)
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
@@ -648,8 +649,7 @@ def stage_spec_bundle(
         "post_merge_verification": bool(post_merge_verification),
         "irreversible": bool(irreversible),
         "permission_policy_digest": permission_policy_digest,
-        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause")),
-        "difficulty": difficulty_block,
+        **_spec_origin_fields(origin_oi, origin_pr, edge_evidence.get("round_cause"), difficulty_block),
         **style_fields,
     }
     spec_file = bundle_dir / "dispatch-spec.json"
