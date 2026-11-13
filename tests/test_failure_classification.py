@@ -953,5 +953,106 @@ class TestLocalKeyMissing(unittest.TestCase):
         self.assertIsNone(escalation.tier_to)
 
 
+# ---------------------------------------------------------------------------
+# OI-2796 / OI-2783: a Cloudflare edge block and a paid-lane budget refusal get
+# their own class. Fixtures are the measured texts, verbatim.
+# ---------------------------------------------------------------------------
+
+_CLOUDFLARE_LINE = "Failed to authenticate. API Error: 403 Attention Required! | Cloudflare"
+_DUTCH_COMPLETION = (
+    "Ik begin met het lezen van de relevante code. Daarna pas ik de classificatie aan "
+    "en schrijf ik de tests voor beide paden.\n" + _CLOUDFLARE_LINE
+)
+
+
+class TestApiBlockedAndPaidLaneBudget(unittest.TestCase):
+    """The two failures no longer land in auth_rejected / unknown."""
+
+    def _classify(self, **kw):
+        from failure_classification import classify_failure
+
+        base = dict(status="failure", provider="claude", returncode=1)
+        base.update(kw)
+        return classify_failure(**base)
+
+    def test_cloudflare_line_as_error_is_api_blocked(self):
+        result = self._classify(error=_CLOUDFLARE_LINE)
+        self.assertEqual(result["failure_class"], "api_blocked")
+
+    def test_cloudflare_line_in_completion_is_api_blocked(self):
+        result = self._classify(completion_text=_DUTCH_COMPLETION)
+        self.assertEqual(result["failure_class"], "api_blocked")
+
+    def test_api_blocked_reason_names_the_next_step(self):
+        result = self._classify(error=_CLOUDFLARE_LINE)
+        reason = result["failure_reason"]
+        self.assertIn("transient", reason)
+        self.assertIn("dispatch/<dispatch_id>", reason)
+        self.assertIn("-r2", reason)
+
+    def test_cloudflare_without_attention_required_is_not_api_blocked(self):
+        result = self._classify(error="API Error: 403 forbidden by Cloudflare")
+        self.assertNotEqual(result["failure_class"], "api_blocked")
+        self.assertEqual(result["failure_class"], "auth_rejected")
+
+    def test_attention_required_without_cloudflare_is_not_api_blocked(self):
+        result = self._classify(error="Attention Required! 403 forbidden")
+        self.assertNotEqual(result["failure_class"], "api_blocked")
+
+    def test_plain_401_stays_auth_rejected(self):
+        result = self._classify(error="API Error: 401 Unauthorized")
+        self.assertEqual(result["failure_class"], "auth_rejected")
+
+    def test_codex_usage_limit_stays_credit_exhausted(self):
+        result = self._classify(
+            error="You've hit your usage limit. Try again later.", provider="codex",
+        )
+        self.assertEqual(result["failure_class"], "credit_exhausted")
+
+    def test_budget_refusal_is_paid_lane_budget_exceeded(self):
+        from paid_lane_budget import PaidLaneBudgetExceededError
+
+        error = str(PaidLaneBudgetExceededError("deepseek-harness", 6.175145, 5.0))
+        result = self._classify(error=error, provider="deepseek-harness")
+        self.assertEqual(result["failure_class"], "paid_lane_budget_exceeded")
+        reason = result["failure_reason"]
+        self.assertIn("deepseek-harness", reason)
+        self.assertIn("6.175145", reason)
+        self.assertIn("5.000000", reason)
+        self.assertIn("subscription lane", reason)
+        self.assertIn("00:00Z", reason)
+
+    def test_budget_prefix_in_a_completion_is_not_a_refusal(self):
+        """Only the caller-supplied error carries the refusal prefix."""
+        from paid_lane_budget import PAID_LANE_BUDGET_REFUSAL_PREFIX
+
+        result = self._classify(
+            completion_text=(
+                f"{PAID_LANE_BUDGET_REFUSAL_PREFIX} is what the log said earlier "
+                "in this long completion text."
+            ),
+        )
+        self.assertNotEqual(result["failure_class"], "paid_lane_budget_exceeded")
+
+    def test_both_classes_are_in_the_closed_set(self):
+        from failure_classification import FAILURE_CLASSES
+
+        self.assertIn("api_blocked", FAILURE_CLASSES)
+        self.assertIn("paid_lane_budget_exceeded", FAILURE_CLASSES)
+
+    def test_neither_class_joins_the_blocking_cooldown_or_exhaustion_sets(self):
+        from dispatch_cli import _BLOCKING_FAILURE_CLASSES
+        from provider_dispatch import _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES
+        from stop_conditions import EXHAUSTION_FAILURE_CLASSES
+
+        for guard in (
+            _BLOCKING_FAILURE_CLASSES,
+            _PROVIDER_LANE_COOLDOWN_FAILURE_CLASSES,
+            EXHAUSTION_FAILURE_CLASSES,
+        ):
+            self.assertNotIn("api_blocked", guard)
+            self.assertNotIn("paid_lane_budget_exceeded", guard)
+
+
 if __name__ == "__main__":
     unittest.main()
