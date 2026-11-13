@@ -64,7 +64,7 @@ De haak woont in config_registry, per project, niet in een bestand `.vnx/ci.yaml
 - **Elke andere uitkomst betekent de volle run:** een exit-code anders dan 0, uitvoer die niet te parsen is, een time-out, een lege of ontbrekende graafversie.
 - **De VNX-waarde** wijst naar `scripts/ci/impact_select.py` (PR 2).
 - **De fabric dwingt af wat eromheen gebeurt** (record, vergelijking, scope, receipt) en schrijft geen selector voor andere projecten. Mission-control en SEOcrawler leveren een eigen `impact_cmd` pas na de meting op vnx-dev, in een latere track.
-- De sleutel is `approval=True`, standaard leeg, en heeft tot PR 5 geen leesplek in productiecode.
+- De sleutel is `approval=True`, standaard leeg, en heeft tot PR 3 geen leesplek in productiecode.
 
 ### 6. De expansieregels
 
@@ -125,16 +125,12 @@ De conftest-sluiting is de verzameling repo-modules die transitief door elke `co
 
 De schaduw meet beide varianten naast elkaar: de graaf-alleen-variant (S) en de conftest-variant (S wordt U wanneer een geraakt pad in de sluiting zit). Ze beslist niets. Activering, en met welke variant, blijft het besluit van de operator na de meting.
 
-### 15. De schaduwstap en de schaduwjob
-
-De stap `Impact shadow record (never fails the job)` in Profile A en de job `Impact shadow (runs only S, never required)` kunnen nooit een check rood maken: stap en job staan op `continue-on-error`, de scripts (`scripts/ci/impact_shadow_step.sh`, `scripts/ci/impact_shadow_job.sh`) eindigen op alle paden met exit 0 en geen enkele job heeft de schaduwjob in `needs`. De job draait geen pytest wanneer S niet verkleind is (`no_selection`, `expand:<reden>`, `empty_selection` of `not_reduced`), want de besparing is dan nul per definitie, en schrijft dan een record `impact_shadow_job/1` met `ran: false` en de reden. De schaduw draait de VNX-selector `scripts/ci/impact_select.py` rechtstreeks: een CI-run heeft geen projectconfigstore en tijdens de schaduw mag de sleutel niet veranderen wat er draait, dus de leesplek van `VNX_CI_IMPACT_CMD` komt met het activeringspad (PR 5).
-
 ## Gevolgen
 
 - Tijdens de schaduw wint de pijp niets. De stap kost seconden, de schaduwjob loopt naast de volle job. Runners wachten niet (0,03 min mediaan op 13-11), dus de job vertraagt niets.
 - De meting voorspelt de winst per PR-run tegen de nulmeting van 15,8 min per Profile A-run (13-11). Na een eventuele activering volgt de werkelijke meting tegen 90 PR-CI-minuten per 1000 regels (klasse 300-450).
 - Het ijkpunt van 50 PR's hangt aan de terugtoets (PR 4b) plus de live schaduw.
-- De sleutel `VNX_CI_IMPACT_CMD` staat in het register zonder leesplek (`read_site_wired=False`). De leesplek komt met het activeringspad (PR 5), zie besluit 15: de schaduw draait de VNX-selector rechtstreeks.
+- De sleutel `VNX_CI_IMPACT_CMD` staat in het register zonder leesplek (`read_site_wired=False`). PR 3 voegt die toe.
 - Zonder vensterpoort uit ADR-073 is er geen blokkade bij rood, en dan wordt PR 5 niet gebouwd.
 
 ## Terugweg

@@ -18,7 +18,7 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 CI_DIR = REPO / "scripts" / "ci"
 WORKFLOW = REPO / ".github" / "workflows" / "vnx-ci.yml"
-SCRIPTS = ("impact_shadow_inputs.sh", "impact_shadow_step.sh", "impact_shadow_job.sh")
+SCRIPTS = ("impact_shadow_inputs.sh", "impact_shadow_step.sh")
 STEP = "Impact shadow record (never fails the job)"
 COMPLETENESS = "Check the xdist completeness (required)"
 EVIDENCE_UPLOAD = "Upload Profile A evidence (JUnit XML + manifest + completeness verdict)"
@@ -60,29 +60,6 @@ def test_step_upload_is_non_fatal(jobs):
     assert upload["continue-on-error"] is True and upload["timeout-minutes"] == 5
     assert LIGHT in upload["if"] and "always()" in upload["if"]
     assert upload["with"]["if-no-files-found"] == "warn" and upload["with"]["overwrite"] is True
-
-
-def test_shadow_job_cannot_turn_a_check_red(jobs):
-    job = jobs["impact-shadow"]
-    assert job["name"] == "Impact shadow (runs only S, never required)"
-    assert job["runs-on"] == "ubuntu-24.04"
-    assert job["continue-on-error"] is True
-    assert job["timeout-minutes"] == 38
-    assert "needs" not in job
-    for other, body in jobs.items():
-        needs = body.get("needs") or []
-        assert "impact-shadow" not in ([needs] if isinstance(needs, str) else needs), other
-
-
-def test_shadow_job_steps(jobs):
-    job = jobs["impact-shadow"]
-    assert job["steps"][0]["with"]["fetch-depth"] == 0
-    assert job["steps"][1]["uses"] == "./.github/actions/profile-a-prelude"
-    run = [s for s in job["steps"] if "impact_shadow_job.sh" in s.get("run", "")]
-    assert len(run) == 1 and LIGHT in run[0]["if"] and run[0]["continue-on-error"] is True
-    uploads = [s for s in job["steps"] if (s.get("with") or {}).get("name") == "impact-shadow-job"]
-    assert len(uploads) == 1 and uploads[0]["continue-on-error"] is True
-    assert uploads[0]["with"]["if-no-files-found"] == "warn"
 
 
 def test_other_profile_a_steps_keep_their_conditions(jobs):
@@ -226,12 +203,3 @@ def test_step_writes_no_record_and_exits_zero_when_impact_shadow_crashes(tree, r
 def test_step_exits_zero_without_arguments(tree, repo):
     done = run(tree / "impact_shadow_step.sh", repo)
     assert done.returncode == 0 and "no record" in done.stdout
-
-
-def test_job_exits_zero_and_says_so_when_the_record_cannot_be_written(tree, repo, tmp_path):
-    """The stub shadow crashes on `job` and on `plan`: the job still exits 0 and names the failure."""
-    commit(repo, "a.txt")
-    summary = tmp_path / "summary.md"
-    done = run(tree / "impact_shadow_job.sh", repo, str(tmp_path / "out"), GITHUB_EVENT_NAME="push", GITHUB_STEP_SUMMARY=str(summary))
-    assert done.returncode == 0
-    assert summary.read_text().startswith("impact shadow job: no record (impact_shadow.py job:")

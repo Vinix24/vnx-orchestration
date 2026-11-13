@@ -11,12 +11,6 @@ graph-only variant and the conftest variant side by side (OI-2788).
 Exit 0 whenever a record was written, also an invalid attempt (``attempt_valid``
 false, with the reasons).  A crash exits non-zero; the caller runs it under
 ``continue-on-error``.
-
-Three subcommands serve the shadow job that runs only S (besluit 3 and 7c):
-``plan`` (does the job run pytest, or why not), ``shape`` (rewrite the Profile A
-argument vectors to the files of S - X) and ``job`` (the ``impact_shadow_job/1``
-record with the completeness variant against S).  The record CLI without a
-subcommand is unchanged.
 """
 
 from __future__ import annotations
@@ -34,7 +28,6 @@ import check_xdist_parity as parity
 import classify_ci_profile as classifier
 
 SCHEMA = "impact_shadow/1"
-JOB_SCHEMA = "impact_shadow_job/1"
 NOT_INVESTIGATED = "niet onderzocht"
 NOT_COVERED = "niet gedekt"
 SELECTION_KEYS = ("selected", "selector_version", "graph_version", "conftest_closure_version", "conftest_reached")
@@ -193,161 +186,7 @@ def run(args: argparse.Namespace) -> dict:
     return build_record(selection, evidence, exclusions, known, identity)
 
 
-def _load_selection(path: str | None):
-    """The selector JSON as a dict, or None when it is missing, unreadable or not an object."""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (TypeError, OSError, ValueError):
-        return None
-    return data if isinstance(data, dict) else None
-
-
-def _is_int(value) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def skip_reason(selection) -> str | None:
-    """Why the job does not run pytest, or None when it runs S.  Anything unreadable is ``no_selection``."""
-    if not isinstance(selection, dict):
-        return "no_selection"
-    scope = selection.get("scope")
-    if scope == "full":
-        reason = selection.get("expand_reason")
-        return f"expand:{reason}" if isinstance(reason, str) and reason else "expand:unknown"
-    selected, excluded = selection.get("selected"), selection.get("selected_excluded")
-    counts = (selection.get("universe_count"), selection.get("excluded_count"))
-    lists_ok = all(isinstance(v, list) and all(isinstance(f, str) for f in v) for v in (selected, excluded))
-    if scope != "impact" or not lists_ok or not all(_is_int(c) for c in counts):
-        return "no_selection"
-    runnable = set(selected) - set(excluded)
-    if not runnable:
-        return "empty_selection"
-    return "not_reduced" if len(runnable) >= counts[0] - counts[1] else None
-
-
-def runnable_files(selection: dict) -> set:
-    """S - X: the selected test files that are not excluded."""
-    return set(selection["selected"]) - set(selection["selected_excluded"])
-
-
-def _read_vector(path: Path) -> list:
-    return path.read_bytes().decode("utf-8").split("\0")[:-1]
-
-
-def _write_vector(path: Path, vector: list) -> None:
-    write_atomic(path, "".join(f"{a}\0" for a in vector))
-
-
-def _shape_serial(path: Path, root: str, runnable: set) -> tuple:
-    """Keep the serial entries whose file is in S - X; returns (phase kept, whole-file serial entries)."""
-    prefix = f"{root}/"
-    vector = _read_vector(path)
-    positional = [a for a in vector if not a.startswith("-") and a.startswith(prefix)]
-    whole = {a[len(prefix):] for a in positional if "::" not in a}
-    kept = [a for a in positional if a[len(prefix):].split("::", 1)[0] in runnable]
-    if not kept:
-        path.unlink()
-        return False, whole
-    _write_vector(path, [a for a in vector if a not in positional] + kept)
-    return True, whole
-
-
-def shape_args(args_dir: Path, root: str, runnable: set) -> list:
-    """Replace the test-tree target by the files of S - X, keep every option; returns the phases left."""
-    phases, whole = [], set()
-    if (args_dir / "serial.args").exists():
-        kept, whole = _shape_serial(args_dir / "serial.args", root, runnable)
-        phases += ["serial"] if kept else []
-    for name in ("parallel", "full"):
-        path = args_dir / f"{name}.args"
-        if not path.exists():
-            continue
-        files = sorted(runnable - whole) if name == "parallel" else sorted(runnable)
-        vector = _read_vector(path)
-        if f"{root}/tests" not in vector:
-            raise ValueError(f"{path.name} has no {root}/tests target")
-        if not files:
-            path.unlink()
-            continue
-        at = vector.index(f"{root}/tests")
-        _write_vector(path, vector[:at] + [f"{root}/{f}" for f in files] + vector[at + 1:])
-        phases.append(name)
-    return phases
-
-
-def build_job_record(selection, evidence: dict | None, identity: dict, reason: str | None) -> dict:
-    """The ``impact_shadow_job/1`` record; deterministic for the same input."""
-    ran = reason is None
-    sel = selection if isinstance(selection, dict) else {}
-    runnable = runnable_files(sel) if ran else set()
-    ev = evidence or {"E": set(), "F": set(), "problems": []}
-    not_run = sorted(runnable - ev["E"])
-    outside = sorted(ev["E"] - set(sel["selected"])) if ran else []
-    return {
-        "schema": JOB_SCHEMA,
-        **identity,
-        "selector_version": sel.get("selector_version"),
-        "graph_version": sel.get("graph_version"),
-        "ran": ran,
-        "skip_reason": reason,
-        "sets": {"E": sorted(ev["E"]), "F": sorted(ev["F"]), "S_minus_X": sorted(runnable)},
-        "not_run": not_run,
-        "outside_selection": outside,
-        "invalid_reasons": ev["problems"],
-        "complete": ran and not not_run and not outside and not ev["problems"],
-    }
-
-
-def _job_args(argv: list) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="impact_shadow.py job")
-    for flag in ("--output", "--run-id", "--run-attempt", "--base", "--candidate"):
-        parser.add_argument(flag, required=True)
-    for flag in ("--selection", "--evidence", "--failed-reason"):
-        parser.add_argument(flag)
-    parser.add_argument("--wall-seconds", type=int)
-    parser.add_argument("--phase-exit", action="append", default=[])
-    return parser.parse_args(argv)
-
-
-def job_main(argv: list) -> int:
-    args = _job_args(argv)
-    selection = _load_selection(args.selection)
-    reason = args.failed_reason or skip_reason(selection)
-    evidence = read_evidence(Path(args.evidence), (args.run_id, args.run_attempt)) if reason is None else None
-    exits = {k: int(v) for k, _, v in (e.partition("=") for e in args.phase_exit)}
-    identity = {"run_id": args.run_id, "run_attempt": args.run_attempt, "base_sha": args.base,
-                "candidate_sha": args.candidate, "wall_seconds": args.wall_seconds, "phase_exit_codes": exits}
-    record = build_job_record(selection, evidence, identity, reason)
-    write_atomic(Path(args.output), json.dumps(record, indent=2, sort_keys=True) + "\n")
-    print(f"impact shadow job: ran {str(record['ran']).lower()}, skip_reason {reason}, wall_seconds {args.wall_seconds}, "
-          f"E {len(record['sets']['E'])}, complete {str(record['complete']).lower()}")
-    return 0
-
-
-def plan_main(argv: list) -> int:
-    parser = argparse.ArgumentParser(prog="impact_shadow.py plan")
-    parser.add_argument("--selection", required=True)
-    print(skip_reason(_load_selection(parser.parse_args(argv).selection)) or "run")
-    return 0
-
-
-def shape_main(argv: list) -> int:
-    parser = argparse.ArgumentParser(prog="impact_shadow.py shape")
-    for flag in ("--selection", "--args-dir", "--root"):
-        parser.add_argument(flag, required=True)
-    args = parser.parse_args(argv)
-    selection = _load_selection(args.selection)
-    if skip_reason(selection) is not None:
-        raise ValueError(f"nothing to shape: {skip_reason(selection)}")
-    print(" ".join(shape_args(Path(args.args_dir), args.root, runnable_files(selection))))
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    subcommands = {"job": job_main, "plan": plan_main, "shape": shape_main}
-    if argv and argv[0] in subcommands:
-        return subcommands[argv[0]](argv[1:])
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for flag in ("--selection", "--evidence", "--run-id", "--run-attempt", "--base", "--candidate", "--paths-file", "--output"):
         parser.add_argument(flag, required=True)
