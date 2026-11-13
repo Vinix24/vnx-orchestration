@@ -345,8 +345,12 @@ jobs:
   # It decides nothing: continue-on-error on the job and on the steps, scripts
   # that exit 0, no `needs` in either direction and no entry in any required
   # check list.
+  # Pull requests only: the conclusion of VNX CI on main paces the merge chain
+  # and this job ended 12 minutes after the last required job there (measured
+  # 13-11, run 43417417804). The shadow STEP in Profile A stays on every event.
   impact-shadow:
     name: Impact shadow (runs only S, never required)
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-24.04
     continue-on-error: true
     # The Profile A bound: the job runs a subset, so it never needs more.
