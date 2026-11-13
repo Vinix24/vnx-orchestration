@@ -127,6 +127,10 @@ SUBSYSTEM_DESCRIPTIONS: Dict[str, str] = {
         "Dispatch lifecycle in the receipt ledger (ADR-045): one start line, "
         "one end line per attempt, and a report that is never a second outcome."
     ),
+    "headless-builder-context": (
+        "Settings levels a claude_headless builder loads (--setting-sources); "
+        "default project,local, user,project,local restores the old argv."
+    ),
     "agent-layout": (
         "Agent-as-folder skill layout (track agents-als-map-fase-1): off or "
         "shadow; `on` is phase 2 and reads as off."
@@ -189,6 +193,9 @@ _ROW_ORDER: List[str] = [
     # lifecycle guard, but no writer emits a lifecycle line until K-act -- so it
     # is wired-and-dormant, not claimed LIVE.
     "ledger-lifecycle",
+    # doorloop-en-effectiviteit-dagelijks (lean builder context): the key is read
+    # by the claude_headless adapter at every spawn, no effectiveness probe yet.
+    "headless-builder-context",
     # SCOPE
     "plan-gate-panel",
     "plan-gate-task-class-scope",

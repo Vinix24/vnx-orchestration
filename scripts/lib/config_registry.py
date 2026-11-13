@@ -114,6 +114,15 @@ CONFIG_REGISTRY: Dict[str, ConfigEntry] = {
         "VNX_HEADLESS_ROUTING", "string", "0", "dispatch",
         "Headless dispatch routing mode.",
         subsystem="headless-dispatch-routing", status="ACTIVATE"),
+    "VNX_BUILDER_SETTING_SOURCES": _e(
+        "VNX_BUILDER_SETTING_SOURCES", "string", "project,local", "dispatch",
+        "Comma list passed as --setting-sources to headless claude builders (the claude_headless "
+        "lane). Default project,local: the builder starts without the operator's user-level "
+        "CLAUDE.md, rules, skills, plugins and hooks, and carries only effortLevel and "
+        "cleanupPeriodDays from the user settings file. user,project,local restores today's "
+        "argv exactly (no flag). An invalid value falls back to the default and is logged.",
+        approval=True, subsystem="headless-builder-context", status="ACTIVATE",
+        read_site_wired=True),
     "VNX_DEFAULT_REVIEW_STACK": _e(
         "VNX_DEFAULT_REVIEW_STACK", "string", "codex_gate,deepseek_gate", "gate",
         "Comma-separated default review-gate stack. Operator decision 2026-11-11: the Kimi "
