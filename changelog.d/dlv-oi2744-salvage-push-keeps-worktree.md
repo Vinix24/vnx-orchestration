@@ -1,0 +1,1 @@
+- A pre-push hook that needs minutes no longer loses the door's salvage commit: the push timeout is the setting `VNX_SALVAGE_PUSH_TIMEOUT_S` (default 900 s, was 120 s), and a worktree whose salvage commit is on no remote branch is kept, with `worktree_kept` on the receipt (OI-2744).

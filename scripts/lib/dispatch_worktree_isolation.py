@@ -1200,6 +1200,17 @@ def remove_dispatch_worktree(
     )
 
     classification = classify(handle)
+    # OI-2744: an auto-salvage commit that no remote branch contains exists only
+    # in this worktree's branch; keep the worktree (reap "dirty" locks it).
+    if classification == "committed":
+        from pr_enforcement import unpublished_salvage_commit  # noqa: PLC0415
+        _kept_sha = unpublished_salvage_commit(wt_path)
+        if _kept_sha:
+            log.warning(
+                "remove_dispatch_worktree: keeping %s — salvage commit %s is not on origin (OI-2744)",
+                wt_path, _kept_sha[:12],
+            )
+            classification = "dirty"
     log.info(
         "remove_dispatch_worktree: classified %s as %s (branch=%s base_sha=%s)",
         dispatch_id, classification, _claim_branch,
