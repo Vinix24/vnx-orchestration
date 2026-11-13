@@ -162,9 +162,7 @@ def upsert_dispatch_provider_row(
                Fill-once: ``COALESCE(parent_dispatch, ?)`` never overwrites an
                existing parent, and a write without a parent never clears one.
                Ignored when the column is absent.
-        difficulty_json: The difficulty recorded at staging (herwerk, ADR-071).
-               Fill-once exactly like ``parent_dispatch``; ignored when the
-               column is absent (store below migration v37).
+        difficulty_json: Difficulty recorded at staging; fill-once, ignored below v37.
         timeout: Total seconds to wait for sqlite locks before giving up on the
                whole write. Passed to ``sqlite3.connect`` as the initial busy
                timeout, then re-armed via ``PRAGMA busy_timeout`` before every
@@ -283,18 +281,14 @@ def upsert_dispatch_provider_row(
         if has_provider:
             insert_cols.append("provider")
             insert_vals.append(provider)
-        if has_model and model:
-            insert_cols.append("model")
-            insert_vals.append(model)
-        if has_session_id and session_id:
-            insert_cols.append("session_id")
-            insert_vals.append(session_id)
-        if has_parent and parent_dispatch:
-            insert_cols.append("parent_dispatch")
-            insert_vals.append(parent_dispatch)
-        if has_difficulty and difficulty_json:
-            insert_cols.append("difficulty_json")
-            insert_vals.append(difficulty_json)
+        # Optional, fill-once columns: written only when the store has them and a value is given.
+        fills = [("model", has_model, model), ("session_id", has_session_id, session_id),
+                 ("parent_dispatch", has_parent, parent_dispatch),
+                 ("difficulty_json", has_difficulty, difficulty_json)]
+        for col, present, value in fills:
+            if present and value:
+                insert_cols.append(col)
+                insert_vals.append(value)
         if has_project:
             insert_cols.append("project_id")
             insert_vals.append(resolved_project_id)
@@ -327,18 +321,10 @@ def upsert_dispatch_provider_row(
         if has_provider:
             set_clauses.append("provider = ?")
             params.append(provider)
-        if has_model and model:
-            set_clauses.append("model = COALESCE(model, ?)")
-            params.append(model)
-        if has_session_id and session_id:
-            set_clauses.append("session_id = COALESCE(session_id, ?)")
-            params.append(session_id)
-        if has_parent and parent_dispatch:
-            set_clauses.append("parent_dispatch = COALESCE(parent_dispatch, ?)")
-            params.append(parent_dispatch)
-        if has_difficulty and difficulty_json:
-            set_clauses.append("difficulty_json = COALESCE(difficulty_json, ?)")
-            params.append(difficulty_json)
+        for col, present, value in fills:
+            if present and value:
+                set_clauses.append(f"{col} = COALESCE({col}, ?)")
+                params.append(value)
         set_clauses.append("role = COALESCE(role, ?)")
         params.append(role or None)
         set_clauses.append("gate = COALESCE(gate, ?)")

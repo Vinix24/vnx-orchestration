@@ -562,10 +562,7 @@ def stage_spec_bundle(
     difficulty: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write a non-forgeable staged spec bundle; return the dispatch-spec.json path.
-
-    ``difficulty`` is validated like ``deadline_seconds`` and recorded on the spec; staging writes no
-    ``dispatch_metadata`` row (ADR-071 besluit 2: the row is born at the lane start, so a dispatch that
-    never fires leaves no row without an outcome).
+    ``difficulty`` is validated and recorded on the spec; staging writes no ``dispatch_metadata`` row (ADR-071 besluit 2: the lane start births it).
 
     Bundle layout: <data_dir>/dispatches/pending/<dispatch_id>/{instruction.md,
     dispatch-spec.json}. The bundle is genuinely promoted (physically under
@@ -578,7 +575,6 @@ def stage_spec_bundle(
     # dispatch-spec.json): the validate() Rule 11 range, from the same constants (dispatch_spec).
     _require_deadline_in_range(deadline_seconds)
     difficulty_block = _require_difficulty(difficulty, len(dispatch_paths))
-
     # 1a-ter. a named skill must exist in a skill tree BEFORE the bundle is written.
     skill = _require_known_skill(skill)
     permission_policy_digest = policy_digest_for_role(role)  # P5: proven BEFORE any write
