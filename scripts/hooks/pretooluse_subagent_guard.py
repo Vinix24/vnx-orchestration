@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""pretooluse_subagent_guard.py — PreToolUse hook core: subagent (Task tool) gate.
+"""pretooluse_subagent_guard.py — PreToolUse hook core: subagent (Agent and Task tool) gate.
 
 OI-1643: the previous bash-only hook (pretooluse_block_subagent.sh) emitted
 the deprecated flat ``{"decision":"block",...}`` form. Claude Code's
 PreToolUse event reads ``hookSpecificOutput.permissionDecision`` instead, so
 that output was silently ignored and every Task call was allowed through —
-the rule existed on paper only. This module is the corrected core:
+the rule existed on paper only. This module is the corrected core.
+
+OI-2798: since Claude Code 2.1.63 the subagent tool is called ``Agent``;
+``Task`` survives only as an alias in permission rules and agent definitions.
+The guard therefore decides for both names (``BLOCKED_TOOLS``), and the deny
+reason and the audit line name the tool that was actually called:
 
   - No marker, an unreadable/malformed marker, an expired marker, or a marker
     with an empty ``reason`` all deny. Deny is the only default.
@@ -38,6 +43,7 @@ if str(_LIB_DIR) not in sys.path:
 from vnx_paths import resolve_paths  # noqa: E402
 from atomic_io import audit_event_append  # noqa: E402
 
+BLOCKED_TOOLS = frozenset({"Agent", "Task"})
 MARKER_FILENAME = "subagents_allowed.json"
 AUDIT_EVENT_TYPE = "subagent_use"
 PROMPT_EXCERPT_LEN = 200
@@ -82,7 +88,9 @@ def _load_marker(state_dir: Path) -> Tuple[Optional[dict], Optional[str]]:
     return data, None
 
 
-def evaluate(marker: Optional[dict], load_error: Optional[str]) -> Tuple[bool, str, Optional[str]]:
+def evaluate(
+    marker: Optional[dict], load_error: Optional[str], tool_name: str = "Task"
+) -> Tuple[bool, str, Optional[str]]:
     """Return (allowed, reason, marker_reason). marker_reason is set only when
     the marker was structurally valid enough to carry a reason string."""
     if load_error:
@@ -95,7 +103,7 @@ def evaluate(marker: Optional[dict], load_error: Optional[str]) -> Tuple[bool, s
     if marker is None:
         return (
             False,
-            "Subagents (Task tool) zijn standaard geblokkeerd — Task-aanroepen laten geen "
+            f"Subagents ({tool_name} tool) zijn standaard geblokkeerd — {tool_name}-aanroepen laten geen "
             f"governance-receipt achter. Sta tijdelijk toe met: {_ALLOW_CLI_HINT}",
             None,
         )
@@ -135,11 +143,14 @@ def evaluate(marker: Optional[dict], load_error: Optional[str]) -> Tuple[bool, s
     )
 
 
-def _append_audit(state_dir: Path, session_id: str, prompt: str, marker_reason: str) -> None:
+def _append_audit(
+    state_dir: Path, tool_name: str, session_id: str, prompt: str, marker_reason: str
+) -> None:
     audit_event_append(
         state_dir,
         AUDIT_EVENT_TYPE,
         {
+            "tool_name": tool_name,
             "session_id": session_id,
             "prompt_excerpt": prompt[:PROMPT_EXCERPT_LEN],
             "reason": marker_reason,
@@ -150,7 +161,8 @@ def _append_audit(state_dir: Path, session_id: str, prompt: str, marker_reason: 
 def build_decision(payload: dict) -> dict:
     state_dir = resolve_state_dir()
     marker, load_error = _load_marker(state_dir)
-    allowed, reason, marker_reason = evaluate(marker, load_error)
+    tool_name = str(payload.get("tool_name") or "")
+    allowed, reason, marker_reason = evaluate(marker, load_error, tool_name)
 
     if allowed:
         session_id = str(payload.get("session_id") or "")
@@ -159,7 +171,7 @@ def build_decision(payload: dict) -> dict:
         if isinstance(tool_input, dict):
             prompt = str(tool_input.get("prompt") or "")
         try:
-            _append_audit(state_dir, session_id, prompt, marker_reason or "")
+            _append_audit(state_dir, tool_name, session_id, prompt, marker_reason or "")
         except OSError as exc:
             allowed = False
             reason = (
@@ -184,7 +196,7 @@ def main() -> int:
     except json.JSONDecodeError:
         payload = {}
 
-    if not isinstance(payload, dict) or payload.get("tool_name") != "Task":
+    if not isinstance(payload, dict) or payload.get("tool_name") not in BLOCKED_TOOLS:
         return 0  # Not our concern — allow silently, no stdout.
 
     decision = build_decision(payload)
