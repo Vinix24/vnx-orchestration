@@ -3,7 +3,7 @@
 ``full`` is the default and the only answer a reader gives when the key cannot be trusted: unset, empty, unknown,
 unreadable, or ``delta`` on a row without an approval id. ``delta_shadow`` runs the shadow delta next to the full
 round. ``delta`` may only be written after a passed DR-5 measurement, a merged DR-7 and a green main CI
-(:func:`require_activation`); until part 2 it behaves like ``delta_shadow``.
+(:func:`require_activation`); it decides eligible heads (``review_delta_decide``) and runs no shadow.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ class ReviewScope(NamedTuple):
 
     @property
     def runs_shadow(self) -> bool:
-        return self.value in (DELTA_SHADOW, DELTA)
+        return self.value == DELTA_SHADOW
 
 
 def _approval_id(state_dir: Path, project_id: str) -> str:
