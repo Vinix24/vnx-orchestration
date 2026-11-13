@@ -2469,6 +2469,60 @@ def _branch_overlaps(pr_number: int, branch: str) -> list[Dict[str, Any]]:
         return []
 
 
+def _book_confirmed_merge(
+    result: Dict[str, Any],
+    *,
+    pr_number: int,
+    dispatch_id: str,
+    merge_method: str,
+    head_sha: str,
+    receipts_file: Optional[str],
+    contract_invalid_override: Optional[Dict[str, Any]],
+    preflight_gates: Optional[list[Dict[str, Any]]],
+    review_seats: Optional[Dict[str, Any]],
+    shadow_seat_rule: Optional[Dict[str, Any]],
+    door_check: Optional[Dict[str, Any]],
+) -> None:
+    """Record a merge GitHub already confirmed: merge-tree record, receipt, register event.
+
+    Runs only after a confirmed merge (and after ``on_merged``), never on a
+    dry run or a failed merge. It fills ``result`` in place: ``merge_tree``,
+    ``dispatch_id``, ``receipt_*`` and ``register_ok``. None of it can refuse
+    or undo a merge that already happened.
+    """
+    # DR-7 (requirement 9): which commit and which tree landed on main, next to
+    # the head the gates tested. Evidence only — it can never refuse a merge
+    # that already happened, and every unreadable part is named on the record.
+    result["merge_tree"] = _merge_tree_record(pr_number, head_sha)
+
+    # Derive internal PR-N label from title for dual-scheme receipt
+    pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
+    if not dispatch_id:
+        dispatch_id = _lookup_dispatch_id_by_pr_number(pr_number)
+    result["dispatch_id"] = dispatch_id
+
+    # Emit receipt to t0_receipts.ndjson (binding, OI-1518: see _write_merged_receipt).
+    # The register event after it stays best-effort and is not touched.
+    _write_merged_receipt(
+        result, pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
+        pr_title=result["pr_title"], branch=result["branch"],
+        pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
+        receipts_file=receipts_file,
+        contract_invalid_override=contract_invalid_override,
+        preflight_gates=preflight_gates,
+        review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
+        shadow_seat_rule=shadow_seat_rule, door_check=door_check,
+        merge_tree=result["merge_tree"],
+    )
+
+    # Emit event to dispatch_register.ndjson (best-effort)
+    result["register_ok"] = _emit_register_event(
+        pr_number=pr_number,
+        dispatch_id=dispatch_id,
+        merge_method=merge_method,
+    )
+
+
 def merge_pr(
     pr_number: int,
     *,
@@ -2583,36 +2637,12 @@ def merge_pr(
     if on_merged is not None:
         on_merged()  # deur D4: confirmed before any bookkeeping, so nothing below can revoke the permit
 
-    # DR-7 (requirement 9): which commit and which tree landed on main, next to
-    # the head the gates tested. Evidence only — it can never refuse a merge
-    # that already happened, and every unreadable part is named on the record.
-    result["merge_tree"] = _merge_tree_record(pr_number, head_sha)
-
-    # Derive internal PR-N label from title for dual-scheme receipt
-    pr_id = _extract_pr_id(result["pr_title"] or result["branch"])
-    if not dispatch_id:
-        dispatch_id = _lookup_dispatch_id_by_pr_number(pr_number)
-    result["dispatch_id"] = dispatch_id
-
-    # Emit receipt to t0_receipts.ndjson (binding, OI-1518: see _write_merged_receipt).
-    # The register event after it stays best-effort and is not touched.
-    _write_merged_receipt(
+    _book_confirmed_merge(
         result, pr_number=pr_number, dispatch_id=dispatch_id, merge_method=merge_method,
-        pr_title=result["pr_title"], branch=result["branch"],
-        pr_id=pr_id or "", pr_id_resolution="" if pr_id else "unmatched",
-        receipts_file=receipts_file,
+        head_sha=head_sha, receipts_file=receipts_file,
         contract_invalid_override=contract_invalid_override,
-        preflight_gates=preflight_gates,
-        review_seats=review_seats or _unjudged_seats_record(pr_number, head_sha, "not_evaluated"),
+        preflight_gates=preflight_gates, review_seats=review_seats,
         shadow_seat_rule=shadow_seat_rule, door_check=door_check,
-        merge_tree=result["merge_tree"],
-    )
-
-    # Emit event to dispatch_register.ndjson (best-effort)
-    result["register_ok"] = _emit_register_event(
-        pr_number=pr_number,
-        dispatch_id=dispatch_id,
-        merge_method=merge_method,
     )
 
     return result
