@@ -3466,9 +3466,8 @@ def cmd_deliverable_close(args: argparse.Namespace) -> int:
 
         if current_state != "ready":
             return _close_off_ready(
-                args, conn, project_id=project_id, dispatch_id=dispatch_id,
+                args, conn, project_id=project_id, dispatch_id=dispatch_id, state_dir=state_dir,
                 current_state=current_state, pr_ref=pr_ref, evidence_number=evidence_number,
-                state_dir=state_dir,
             )
 
         now = _now_utc()
