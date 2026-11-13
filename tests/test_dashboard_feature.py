@@ -212,7 +212,7 @@ class TestJumpAPI(unittest.TestCase):
 
     def test_jump_terminal_function_calls_tmux(self):
         """_jump_terminal calls tmux has-session, select-window, select-pane."""
-        mod = self._import_serve_dashboard()
+        import api_operator as mod  # _jump_terminal runs in api_operator
 
         # Mock subprocess.run: first call = has-session (success), rest = select-window/pane (success)
         mock_result = MagicMock()
@@ -220,7 +220,7 @@ class TestJumpAPI(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir, \
              patch.object(mod, "CANONICAL_STATE_DIR", Path(tmpdir)), \
-             patch("serve_dashboard.subprocess") as mock_sub:
+             patch("api_operator.subprocess") as mock_sub:
             mock_sub.run.return_value = mock_result
             mock_sub.CalledProcessError = subprocess.CalledProcessError
             result = mod._jump_terminal("T2")
@@ -453,8 +453,8 @@ class TestDispatchesAPI(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_scan_dispatches_empty_directory(self):
         """Empty or missing dispatch directories return empty stages."""
@@ -926,8 +926,8 @@ class TestFormatDuration(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_seconds(self):
         mod = self._import_serve_dashboard()
@@ -952,8 +952,8 @@ class TestParseDispatchHeader(unittest.TestCase):
     def _import_serve_dashboard(self):
         if str(DASHBOARD_DIR) not in sys.path:
             sys.path.insert(0, str(DASHBOARD_DIR))
-        import serve_dashboard
-        return serve_dashboard
+        import api_operator
+        return api_operator
 
     def test_parses_standard_header(self):
         mod = self._import_serve_dashboard()
