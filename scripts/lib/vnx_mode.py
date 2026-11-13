@@ -65,9 +65,6 @@ TIER_STARTER_OPERATOR: FrozenSet[str] = frozenset({
     # `vnx main-window` (ADR-073 besluit 8) is the read-only probe of the window on main;
     # in no tier the mode gate refuses it as an unknown name (OI-2456).
     "main-window",
-    # `vnx impact` (ADR-074 besluit 8): collect keeps the CI shadow artifacts in a local ledger,
-    # report only reads it. In no tier the mode gate refuses it as an unknown name (OI-2456).
-    "impact",
 })
 
 TIER_OPERATOR_ONLY: FrozenSet[str] = frozenset({

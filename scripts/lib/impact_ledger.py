@@ -3,9 +3,9 @@
 ``collect`` reads the completed runs of workflow ``VNX CI`` through ONE injectable
 ``gh`` runner and appends one ``impact_ledger/1`` line per run attempt to
 ``state/impact_shadow.ndjson``.  GitHub deletes artifacts after 90 days; the ledger
-is the evidence, the artifact only the way in.  ``report`` is pure over the ledger
-lines: what counted, what did not (by name), the reduced share, the misses of the
-reduced attempts, the red runs and the wall clock.
+is the evidence, the artifact only the way in.  The report over the ledger lines
+(what counted, what did not, the reduced share, the misses, the red runs and the
+wall clock) and the ``vnx impact`` command follow in impactselectie-in-schaduw PR 4a-2.
 
 Fail-closed: an artifact that is absent is written down as ``missing``; any other
 failure of ``gh`` (rate limit, Cloudflare 403, network) aborts that attempt without a
@@ -16,10 +16,9 @@ from __future__ import annotations
 
 import fcntl
 import json
-import statistics
 import subprocess
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -30,7 +29,6 @@ PROFILE_A_JOB = "Profile A (doctor + core tests)"
 SHADOW_JOB = "Impact shadow (runs only S, never required)"
 SHADOW_ARTIFACT, JOB_ARTIFACT = "impact-shadow", "impact-shadow-job"
 RUN_FIELDS = "databaseId,attempt,headSha,headBranch,event,conclusion,createdAt"
-DONE_CONCLUSIONS = ("success", "failure")
 
 Runner = Callable[[list], str]
 
@@ -58,19 +56,6 @@ def parse_time(value) -> Optional[datetime]:
     except ValueError:
         return None
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def parse_since(text: Optional[str], now: Optional[datetime] = None) -> Optional[datetime]:
-    """``Nd`` (N days back), a date or an ISO datetime; ValueError on anything else."""
-    if not text:
-        return None
-    now = now or datetime.now(timezone.utc)
-    if text.endswith("d") and text[:-1].isdigit():
-        return now - timedelta(days=int(text[:-1]))
-    parsed = parse_time(text)
-    if parsed is None:
-        raise ValueError(f"--since {text!r}: use Nd, YYYY-MM-DD or an ISO datetime")
-    return parsed
 
 
 def ledger_path(state_dir: Path) -> Path:
@@ -207,90 +192,3 @@ def collect(state_dir: Path, runner: Runner = default_runner, since: Optional[da
             continue
         result["added" if written else "skipped"].append(name)
     return result
-
-
-def _name(entry: dict) -> str:
-    return f"{entry.get('run_id')}/{entry.get('run_attempt')}"
-
-
-def _exclusion(entry: dict) -> Optional[str]:
-    """Why an attempt does not count, or None when it does.  Only positive evidence counts."""
-    if "_unreadable" in entry:
-        return "unreadable"
-    shadow = entry.get("shadow")
-    if not isinstance(shadow, dict):
-        named = [m for m in (entry.get("missing") or []) if str(m).startswith("artifact:impact-shadow")
-                 and not str(m).startswith("artifact:impact-shadow-job")]
-        return f"missing:{named[0][len('artifact:'):]}" if named else "missing:impact-shadow"
-    if shadow.get("reconstructible") is not True:
-        return "onreconstrueerbaar"
-    if shadow.get("attempt_valid") is not True:
-        reasons = shadow.get("invalid_reasons")
-        names = sorted({str(r.get("reason")) for r in reasons if isinstance(r, dict)}) if isinstance(reasons, list) else []
-        return f"invalid:{','.join(names) or 'attempt_valid_not_true'}"
-    if entry.get("run_conclusion") not in DONE_CONCLUSIONS:
-        return "not_completed"
-    profile_a = entry.get("profile_a_job")
-    if not isinstance(profile_a, dict) or not profile_a.get("conclusion"):
-        return "missing:job:profile-a"
-    if profile_a.get("conclusion") not in DONE_CONCLUSIONS:
-        return "not_completed"
-    sets = shadow.get("sets")
-    if not isinstance(sets, dict) or not isinstance(sets.get("misses"), list) or not isinstance(sets.get("F"), list):
-        return "invalid:sets_unreadable"
-    return None
-
-
-def _is_number(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
-
-
-def _wall_clock(counted: list) -> dict:
-    rows = []
-    for entry in counted:
-        job, profile_a = entry.get("job"), entry.get("profile_a_job") or {}
-        if (isinstance(job, dict) and job.get("ran") is True and job.get("complete") is True
-                and _is_number(job.get("wall_seconds")) and _is_number(profile_a.get("seconds"))):
-            rows.append((_name(entry), job["wall_seconds"], profile_a["seconds"]))
-    shadow, full = [r[1] for r in rows], [r[2] for r in rows]
-    return {"n": len(rows), "attempts": [r[0] for r in rows],
-            "shadow_job_seconds": {"median": statistics.median(shadow) if rows else None, "sum": sum(shadow)},
-            "profile_a_seconds": {"median": statistics.median(full) if rows else None, "sum": sum(full)}}
-
-
-def report(lines: list) -> dict:
-    counted, excluded = [], []
-    for entry in lines:
-        reason = _exclusion(entry)
-        if reason is None:
-            counted.append(entry)
-        else:
-            excluded.append({"attempt": _name(entry) if "_unreadable" not in entry else f"line {entry['_unreadable']}",
-                             "reason": reason})
-    reduced = [e for e in counted if e["shadow"].get("reduced") is True]
-    red = [e for e in counted if e["shadow"]["sets"]["F"]]
-    misses = [{"test_id": test, "run_id": e.get("run_id"), "run_attempt": e.get("run_attempt")}
-              for e in reduced for test in e["shadow"]["sets"]["misses"]]
-    return {
-        "schema": "impact_report/1",
-        "attempts_in_ledger": len(lines),
-        "counted": [_name(e) for e in counted],
-        "excluded": excluded,
-        "reduced_share": {"reduced": len(reduced), "counted": len(counted),
-                          "fraction": round(len(reduced) / len(counted), 4) if counted else None},
-        "misses": misses,
-        "red_runs": {"counted": len(red), "reduced": len([e for e in red if e in reduced])},
-        "wall_clock": _wall_clock(counted),
-    }
-
-
-def filter_since(lines: list, since: Optional[datetime]) -> list:
-    """Lines created on or after ``since``; a line whose date cannot be read stays (it is named, not hidden)."""
-    if since is None:
-        return lines
-    kept = []
-    for entry in lines:
-        created = parse_time(entry.get("created_at"))
-        if created is None or created >= since:
-            kept.append(entry)
-    return kept

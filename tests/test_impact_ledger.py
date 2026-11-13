@@ -1,12 +1,10 @@
-"""impact_ledger: collect (fake gh runner, tmp_path ledger) and report (pure), ADR-074 besluit 7 and 8."""
+"""impact_ledger: collect (fake gh runner, tmp_path ledger), ADR-074 besluit 7 and 8."""
 
 from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
-
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts" / "lib"))
 
@@ -119,77 +117,7 @@ def test_collect_names_a_missing_profile_a_job(tmp_path):
     assert entry["profile_a_job"] is None and entry["missing"] == ["job:profile-a"]
 
 
-def _entry(run_id, shadow, job=None, *, conclusion="success", profile_a_seconds=2400, profile_a_conclusion="success"):
-    return {"run_id": run_id, "run_attempt": 1, "run_conclusion": conclusion, "shadow": shadow, "job": job, "missing": [],
-            "profile_a_job": {"conclusion": profile_a_conclusion, "seconds": profile_a_seconds}}
-
-
-def test_report_excludes_by_name_with_reason():
-    rep = ledger.report([
-        _entry(1, _shadow(1)),
-        _entry(2, _shadow(2, reconstructible=False)),
-        _entry(3, _shadow(3, valid=False)),
-        _entry(4, None),
-        _entry(5, _shadow(5), conclusion="cancelled"),
-        _entry(6, _shadow(6), profile_a_conclusion=None),
-        _entry(7, _shadow(7, reconstructible=None)),
-        {"_unreadable": 9},
-    ])
-    assert rep["counted"] == ["1/1"]
-    assert {e["attempt"]: e["reason"] for e in rep["excluded"]} == {
-        "2/1": "onreconstrueerbaar", "3/1": "invalid:stale_evidence", "4/1": "missing:impact-shadow",
-        "5/1": "not_completed", "6/1": "missing:job:profile-a", "7/1": "onreconstrueerbaar", "line 9": "unreadable"}
-
-
-def test_report_treats_unknown_or_malformed_fields_as_not_counted():
-    broken_sets = _shadow(1)
-    broken_sets["sets"] = {"F": None}
-    rep = ledger.report([_entry(1, broken_sets), _entry(2, _shadow(2, valid=None)), _entry(3, "not-a-dict")])
-    assert rep["counted"] == []
-    assert [e["reason"] for e in rep["excluded"]] == ["invalid:sets_unreadable", "invalid:stale_evidence", "missing:impact-shadow"]
-
-
-def test_report_misses_only_over_reduced_attempts():
-    rep = ledger.report([
-        _entry(1, _shadow(1, reduced=False, failed=["tests/test_a.py::t"], misses=["tests/test_a.py::t"])),
-        _entry(2, _shadow(2, reduced=True, failed=["tests/test_b.py::t"], misses=["tests/test_b.py::t"])),
-    ])
-    assert rep["misses"] == [{"test_id": "tests/test_b.py::t", "run_id": 2, "run_attempt": 1}]
-    assert rep["reduced_share"] == {"reduced": 1, "counted": 2, "fraction": 0.5}
-
-
-def test_report_counts_red_runs_on_their_own():
-    rep = ledger.report([_entry(1, _shadow(1, failed=["tests/x.py::t"])), _entry(2, _shadow(2, reduced=False, failed=["tests/y.py::t"])),
-                         _entry(3, _shadow(3))])
-    assert rep["red_runs"] == {"counted": 2, "reduced": 1} and rep["misses"] == []
-
-
-def test_report_wall_clock_leaves_out_a_job_that_did_not_run_but_still_counts_it():
-    rep = ledger.report([
-        _entry(1, _shadow(1), _job(1, wall=300), profile_a_seconds=2400),
-        _entry(2, _shadow(2), _job(2, wall=500), profile_a_seconds=3000),
-        _entry(3, _shadow(3), _job(3, wall=0, ran=False, complete=False), profile_a_seconds=9999),
-        _entry(4, _shadow(4), _job(4, complete=False), profile_a_seconds=9999),
-    ])
-    assert len(rep["counted"]) == 4
-    wall = rep["wall_clock"]
-    assert wall["n"] == 2 and wall["attempts"] == ["1/1", "2/1"]
-    assert wall["shadow_job_seconds"] == {"median": 400, "sum": 800}
-    assert wall["profile_a_seconds"] == {"median": 2700, "sum": 5400}
-
-
-def test_report_over_nothing_is_empty_not_an_error():
-    rep = ledger.report([])
-    assert rep["counted"] == [] and rep["reduced_share"]["fraction"] is None and rep["wall_clock"]["shadow_job_seconds"]["median"] is None
-
-
 def test_read_ledger_names_an_unreadable_line(tmp_path):
     path = ledger.ledger_path(tmp_path)
     path.write_text('{"run_id": 1, "run_attempt": 1}\nnot json\n[1]\n', encoding="utf-8")
     assert [e.get("_unreadable") for e in ledger.read_ledger(path)] == [None, 2, 3]
-
-
-@pytest.mark.parametrize("text", ["soon", "3x", "2026-13-45"])
-def test_parse_since_refuses_bad_input(text):
-    with pytest.raises(ValueError):
-        ledger.parse_since(text)

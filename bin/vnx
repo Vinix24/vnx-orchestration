@@ -386,9 +386,6 @@ Gate commands (pre-merge verification):
                         Open PR N, reviewed before the round ledger, as the operator:
                         an attested line in review_gates/rounds.ndjson plus a receipt;
                         the B3 cap starts at zero there; idempotent
-  impact collect|report [--since <date|Nd>]
-                        The impact shadow ledger (state/impact_shadow.ndjson) from the CI artifacts,
-                        and its report: misses, reduced share, wall clock (ADR-074; report is read-only)
   roadmap <sub>       Roadmap orchestration and auto-next feature loading
   context-manifest    Read the context-manifest sidecar per provider (read-only)
                         Options: --json, --by provider, --state-dir <dir>
@@ -2726,9 +2723,6 @@ main() {
       ;;
     review)
       "$VNX_PYTHON" "$VNX_HOME/scripts/review_rounds_cli.py" "$@"
-      ;;
-    impact)
-      "$VNX_PYTHON" "$VNX_HOME/scripts/impact_cli.py" "$@"
       ;;
     dispatch)
       cmd_dispatch "$@"
