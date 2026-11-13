@@ -1,0 +1,1 @@
+- Five more CI-excluded dashboard test files (kanban and open-items-gate certification, serve_dashboard API, conversation resume, dashboard feature) follow the handlers into api_operator and leave the Profile A exclusion list (OI-2589).

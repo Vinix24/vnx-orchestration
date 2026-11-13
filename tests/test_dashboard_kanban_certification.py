@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "dashboard"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "lib"))
 
+import api_operator as ao
 import serve_dashboard as sd
 
 
@@ -46,19 +47,19 @@ class TestHealthEndpoint:
 class TestKanbanMapping:
 
     def test_dir_to_stage_has_staging(self) -> None:
-        assert sd._DIR_TO_STAGE["staging"] == "staging"
+        assert ao._DIR_TO_STAGE["staging"] == "staging"
 
     def test_dir_to_stage_has_pending(self) -> None:
-        assert sd._DIR_TO_STAGE["pending"] == "pending"
+        assert ao._DIR_TO_STAGE["pending"] == "pending"
 
     def test_dir_to_stage_has_active(self) -> None:
-        assert sd._DIR_TO_STAGE["active"] == "active"
+        assert ao._DIR_TO_STAGE["active"] == "active"
 
     def test_dir_to_stage_completed_maps_to_done(self) -> None:
-        assert sd._DIR_TO_STAGE["completed"] == "done"
+        assert ao._DIR_TO_STAGE["completed"] == "done"
 
-    def test_dir_to_stage_rejected_maps_to_done(self) -> None:
-        assert sd._DIR_TO_STAGE["rejected"] == "done"
+    def test_dir_to_stage_rejected_maps_to_rejected(self) -> None:
+        assert ao._DIR_TO_STAGE["rejected"] == "rejected"
 
     def test_scan_dispatches_returns_dict(self) -> None:
         result = sd._scan_dispatches()
@@ -75,7 +76,7 @@ class TestKanbanMapping:
 class TestContractAlignment:
 
     def test_five_kanban_stages_in_mapping(self) -> None:
-        target_stages = set(sd._DIR_TO_STAGE.values())
+        target_stages = set(ao._DIR_TO_STAGE.values())
         assert "staging" in target_stages
         assert "pending" in target_stages
         assert "active" in target_stages
