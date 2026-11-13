@@ -312,15 +312,14 @@ def test_list_members_pid_none_when_not_set(tmp_path):
     db = _setup_db(tmp_path)
     repo = _make_repo(db)
     now = time.time()
-    repo.add_member("default", "T-nopid-01", "claude", "backend-developer", now)
 
+    # The membership row references terminal_leases (933a7b83c enforces the
+    # FK on (terminal_id, project_id)), so the lease has to exist first.
     conn = sqlite3.connect(str(db))
-    conn.execute(
-        "INSERT OR IGNORE INTO terminal_leases (terminal_id, project_id, state, lease_token) "
-        "VALUES ('T-nopid-01', 'vnx-dev', 'active', 'tok-1')",
-    )
-    conn.commit()
+    insert_lease(conn, "T-nopid-01")
     conn.close()
+
+    repo.add_member("default", "T-nopid-01", "claude", "backend-developer", now)
 
     members = repo.list_members("default")
     assert len(members) == 1
