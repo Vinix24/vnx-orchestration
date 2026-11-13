@@ -291,7 +291,7 @@ class TestPatternUsageAggregation(unittest.TestCase):
                 # audit row, but the per-pattern usage upsert lives entirely
                 # in quality_intelligence.db. Call the internal helper so the
                 # test exercises the path that matters.
-                selector._record_pattern_usage(result)
+                selector.record_injection(result)
         finally:
             selector.close()
 

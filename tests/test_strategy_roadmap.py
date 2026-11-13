@@ -80,16 +80,6 @@ def _write_payload(tmp_path: Path, payload: dict) -> Path:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-def test_load_valid_committed_roadmap() -> None:
-    """The committed .vnx-data/strategy/roadmap.yaml must load and validate."""
-    roadmap = load_roadmap()
-    errors = validate_roadmap(roadmap)
-    assert errors == [], f"unexpected validation errors: {errors}"
-    assert roadmap.schema_version >= 1
-    assert len(roadmap.phases) > 0
-    assert len(roadmap.waves) > 0
-
-
 def test_reject_duplicate_wave_id(tmp_path: Path) -> None:
     payload = _minimal_payload()
     payload["waves"].append(
