@@ -1,0 +1,1 @@
+- The seven dispatcher test files that were CI-excluded for OI-1227 now check the current dispatcher code and run in Profile A again (OI-2704).
