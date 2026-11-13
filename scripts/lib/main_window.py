@@ -73,6 +73,9 @@ VERDICT_NOGO = "nogo"
 # Conclusions that are a named NO-GO; every other non-success, non-failure word is one too.
 NOGO_REASON_STALE = "stale_run"
 NOGO_REASON_NO_RUN = "no_run"
+NOGO_REASON_RECEIPT_ONLY_STALE = "receipt_only_stale"
+RUNNING_REASON_RECEIPT_TIME_UNREADABLE = "receipt_time_unreadable"
+UNMEASURABLE_REASON_BASE_TIME_UNKNOWN = "base_time_unknown"
 
 ProfileOf = Callable[[str], str]
 Runner = Callable[..., "subprocess.CompletedProcess"]
@@ -264,6 +267,49 @@ def _entry(
     )
 
 
+def _receipt_only_entry(
+    receipt: Dict[str, Any], base_time: datetime, *, now: datetime, max_age_min: int
+) -> Optional[WindowEntry]:
+    """The entry of a merge GitHub does not list yet, or None when the receipt
+    predates (or equals) the base. An unreadable receipt time counts as running."""
+    stamp = receipt.get("timestamp")
+    moment = _parse_time(stamp)
+    if moment is None:
+        state, reason = RUN_RUNNING, RUNNING_REASON_RECEIPT_TIME_UNREADABLE
+    elif moment <= base_time:
+        return None
+    elif _younger_than_limit(stamp, now, max_age_min):
+        state, reason = RUN_RUNNING, None
+    else:
+        state, reason = RUN_NOGO, NOGO_REASON_RECEIPT_ONLY_STALE
+    return WindowEntry(
+        sha=receipt["merge_sha"], run_id=None, status=None, conclusion=None, state=state,
+        pr_number=receipt.get("pr_number"), dispatch_id=receipt.get("dispatch_id"),
+        mapping=MAPPING_RECEIPT, reason=reason,
+    )
+
+
+def _receipt_only_entries(
+    commits: List[str], receipt_by_sha: Dict[str, Dict[str, Any]], base_time: Any,
+    *, now: datetime, max_age_min: int,
+) -> Tuple[Optional[Tuple[WindowEntry, ...]], Optional[str]]:
+    """``(entries, failure)``: merges known only from their ``pr_merged`` receipt,
+    newer than the base, oldest receipt first. Without such a merge nothing is
+    asked of the base time; with one and no readable base time the window cannot
+    place the receipt, so ``failure`` names it."""
+    known = set(commits)
+    only = [r for sha, r in receipt_by_sha.items() if sha not in known]
+    if not only:
+        return (), None
+    base_moment = _parse_time(base_time)
+    if base_moment is None:
+        return None, UNMEASURABLE_REASON_BASE_TIME_UNKNOWN
+    entries = [(r, _receipt_only_entry(r, base_moment, now=now, max_age_min=max_age_min)) for r in only]
+    latest = datetime.max.replace(tzinfo=timezone.utc)  # an unreadable time sorts last: it is the newest unknown
+    entries.sort(key=lambda pair: _parse_time(pair[0].get("timestamp")) or latest)
+    return tuple(e for _, e in entries if e is not None), None
+
+
 def _inputs_usable(commits: Any, runs: Any, merges: Any) -> bool:
     if not isinstance(commits, list) or not commits:
         return False
@@ -285,7 +331,10 @@ def compute_window(
     """Commits (newest first) + VNX CI push runs + pr_merged receipts -> window.
 
     ``profile_of(sha)`` says ``heavy``, ``light`` or ``unknown``; it is asked only
-    for green candidates, newest first, until the first heavy one."""
+    for green candidates, newest first, until the first heavy one. A merge known
+    only from its ``pr_merged`` receipt (not in ``commits`` yet: the GitHub
+    read-after-write gap) and newer than the base counts too, so it cannot hide
+    from the next admission."""
     if not _inputs_usable(commits, runs, merges):
         return _unmeasurable("invalid_input", len(commits) if isinstance(commits, list) else 0)
     run_by_sha = _newest_run_per_sha(runs)
@@ -306,6 +355,11 @@ def compute_window(
                now=now, max_age_min=max_age_min, commit_time=times.get(sha))
         for sha in reversed(commits[:base_idx])
     )
+    extra, failure = _receipt_only_entries(
+        commits, receipt_by_sha, times.get(base_sha), now=now, max_age_min=max_age_min)
+    if extra is None:
+        return _unmeasurable(failure or UNMEASURABLE_REASON_BASE_TIME_UNKNOWN, len(commits))
+    entries = entries + extra
     common = dict(
         base_sha=base_sha, base_run_id=run_by_sha[base_sha].get("databaseId"),
         entries=entries, commits_read=len(commits),
@@ -404,7 +458,9 @@ def _read_runs(
 
 def _read_merge_receipts(state_dir: Optional[Path]) -> List[Dict[str, Any]]:
     """pr_merged receipts with a merge_sha from the last RECEIPT_TAIL_LINES
-    lines. Unreadable or missing: an empty list (mappings become no_receipt)."""
+    lines. A receipt whose SHA GitHub does not list yet still counts as a merge
+    (the read-after-write gap). Unreadable or missing: an empty list (mappings
+    become no_receipt)."""
     if state_dir is None:
         return []
     path = Path(state_dir) / "t0_receipts.ndjson"
