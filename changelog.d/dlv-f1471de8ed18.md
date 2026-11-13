@@ -1,0 +1,1 @@
+- rework_report: a cost axis per accepted delivery (build tokens and API-equivalent, review runs and cost per seat, lead time) per builder x task_class x risk, every gap named (herwerk-per-model-en-reviewer).
