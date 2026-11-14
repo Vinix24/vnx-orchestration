@@ -1899,11 +1899,7 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     project_id = args.project_id
     track_id = args.track_id
 
-    try:
-        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
-    except Exception as exc:
-        logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
-        repo_root = None
+    repo_root = _close_repo_root(args)
 
     attest_reason = getattr(args, "attest", None)
     if getattr(args, "pr", None) and attest_reason is None:
@@ -1932,23 +1928,10 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     )
     evidence_merged_pr_numbers = close_evidence["merged_pr_numbers"]
 
-    try:
-        # Dry-run is READ-ONLY: peek computes derived_status without persisting.
-        # --apply reconciles fresh (and persists derived_status) right before the
-        # write, so the transition acts on current state. Both paths receive the
-        # gathered evidence set so the derivation matches what the close path sees.
-        if args.apply:
-            result = track_reconciler.reconcile_track(
-                state_dir, track_id, project_id, repo_root=repo_root,
-                _merged_pr_numbers=evidence_merged_pr_numbers,
-            )
-        else:
-            result = track_reconciler.peek_derived_status(
-                state_dir, track_id, project_id, repo_root=repo_root,
-                _merged_pr_numbers=evidence_merged_pr_numbers,
-            )
-    except Exception as exc:
-        print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
+    reconciled, result = _close_reconcile(
+        args, state_dir, track_id, project_id, repo_root, evidence_merged_pr_numbers,
+    )
+    if not reconciled:
         return 1
 
     derived = result["derived_status"]
@@ -1970,50 +1953,17 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
     # knows to re-run when gh is back. consulted_gh is False both when gh was
     # unreachable AND when
     # the track has no pr_ref to verify; only flag the former.
-    gh_unavailable = (
-        not close_evidence["consulted_gh"]
-        and close_evidence["gh_health"] in ("absent", "auth_failed", "timeout")
-        and bool(close_evidence["pr_numbers"])
-    )
+    gh_unavailable = _close_gh_unavailable(close_evidence)
     if gh_unavailable:
         payload["gh_health"] = close_evidence["gh_health"]
 
     def _emit(action: str, applied: bool, message: str, rc: int) -> int:
         payload["action"] = action
         payload["applied"] = applied
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close — {track_id} (project '{project_id}')\n")
-            print(f"  declared={declared or '-'}  derived={derived}")
-            ev = payload.get("evidence")
-            if ev:
-                print(
-                    f"  evidence: completed={ev['completed']} "
-                    f"failed_terminal={ev['failed_terminal']} in_flight={ev['in_flight']} "
-                    f"pr_ref={ev['pr_ref'] or '-'} pr_merged={ev['pr_merged']}"
-                )
-                if not ev["has_success_signal"]:
-                    print("  ! WARNING: derived 'done' has NO success signal "
-                          "(no completed dispatch, no merged PR) — likely all-failed. "
-                          "Confirm this is really done before --apply.")
-            print(f"  {message}\n")
-            # OI-1071: surface the gh-unavailable degradation so a 'not terminal'
-            # refusal never reads as "not done" when its real cause is "could not
-            # reach GitHub".
-            if gh_unavailable:
-                print(
-                    f"  ! NOTE: could not consult GitHub (gh={close_evidence['gh_health']}); "
-                    f"derived_status used local evidence only. If the track's PRs merged "
-                    f"via a bare `gh pr merge`, re-run when gh is reachable."
-                )
-            # Surface D5's blocker hint when close is blocked (guarded: no crash
-            # until D5 lands format_blocking_hint + blocking_detail).
-            if action == "noop_not_terminal" and derived == "blocked":
-                _fmt = getattr(track_reconciler, "format_blocking_hint", None)
-                detail = result.get("blocking_detail") if isinstance(result, dict) else None
-                if _fmt and detail:
-                    print(_fmt(detail))
+        _close_render(
+            args, payload, track_id, project_id, declared, derived, result,
+            close_evidence, gh_unavailable, action, message,
+        )
         return rc
 
     if derived != target:
@@ -2080,6 +2030,93 @@ def cmd_objective_close(args: argparse.Namespace) -> int:
         repo_root=repo_root,
         merged_pr_numbers=evidence_merged_pr_numbers,
     )
+    return _close_emit_library_result(lib, args, payload, declared, derived, path, target, _emit)
+
+
+def _close_repo_root(args):
+    """The repo root for ROADMAP source-3, or ``None`` (logged) when it cannot be resolved."""
+    try:
+        repo_root = _resolve_repo_root(getattr(args, "repo_root", ""))
+    except Exception as exc:
+        logger.warning("close: cannot resolve repo root, ROADMAP source-3 disabled: %s", exc)
+        repo_root = None
+    return repo_root
+
+
+def _close_reconcile(args, state_dir, track_id, project_id, repo_root, evidence_merged_pr_numbers):
+    """``(True, result)`` from the reconcile (``--apply``) or peek (dry-run); ``(False, None)`` on failure."""
+    try:
+        # Dry-run is READ-ONLY: peek computes derived_status without persisting.
+        # --apply reconciles fresh (and persists derived_status) right before the
+        # write, so the transition acts on current state. Both paths receive the
+        # gathered evidence set so the derivation matches what the close path sees.
+        if args.apply:
+            result = track_reconciler.reconcile_track(
+                state_dir, track_id, project_id, repo_root=repo_root,
+                _merged_pr_numbers=evidence_merged_pr_numbers,
+            )
+        else:
+            result = track_reconciler.peek_derived_status(
+                state_dir, track_id, project_id, repo_root=repo_root,
+                _merged_pr_numbers=evidence_merged_pr_numbers,
+            )
+    except Exception as exc:
+        print(f"objective close failed: cannot reconcile {track_id}: {exc}", file=sys.stderr)
+        return False, None
+    return True, result
+
+
+def _close_gh_unavailable(close_evidence) -> bool:
+    """True when the track has PRs to verify but gh was unreachable (local evidence only)."""
+    return (
+        not close_evidence["consulted_gh"]
+        and close_evidence["gh_health"] in ("absent", "auth_failed", "timeout")
+        and bool(close_evidence["pr_numbers"])
+    )
+
+
+def _close_render(
+    args, payload, track_id, project_id, declared, derived, result,
+    close_evidence, gh_unavailable, action, message,
+) -> None:
+    """Print the ``objective close`` outcome: the JSON payload, or the operator text."""
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective close — {track_id} (project '{project_id}')\n")
+        print(f"  declared={declared or '-'}  derived={derived}")
+        ev = payload.get("evidence")
+        if ev:
+            print(
+                f"  evidence: completed={ev['completed']} "
+                f"failed_terminal={ev['failed_terminal']} in_flight={ev['in_flight']} "
+                f"pr_ref={ev['pr_ref'] or '-'} pr_merged={ev['pr_merged']}"
+            )
+            if not ev["has_success_signal"]:
+                print("  ! WARNING: derived 'done' has NO success signal "
+                      "(no completed dispatch, no merged PR) — likely all-failed. "
+                      "Confirm this is really done before --apply.")
+        print(f"  {message}\n")
+        # OI-1071: surface the gh-unavailable degradation so a 'not terminal'
+        # refusal never reads as "not done" when its real cause is "could not
+        # reach GitHub".
+        if gh_unavailable:
+            print(
+                f"  ! NOTE: could not consult GitHub (gh={close_evidence['gh_health']}); "
+                f"derived_status used local evidence only. If the track's PRs merged "
+                f"via a bare `gh pr merge`, re-run when gh is reachable."
+            )
+        # Surface D5's blocker hint when close is blocked (guarded: no crash
+        # until D5 lands format_blocking_hint + blocking_detail).
+        if action == "noop_not_terminal" and derived == "blocked":
+            _fmt = getattr(track_reconciler, "format_blocking_hint", None)
+            detail = result.get("blocking_detail") if isinstance(result, dict) else None
+            if _fmt and detail:
+                print(_fmt(detail))
+
+
+def _close_emit_library_result(lib, args, payload, declared, derived, path, target, _emit) -> int:
+    """Map ``close_track_if_done``'s result onto ``objective close``'s action, message and rc."""
     lib_action = lib.get("action")
 
     # Merge updated fields from the library result into payload for JSON output.
