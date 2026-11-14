@@ -115,10 +115,36 @@ def test_summary_dry_run_capped_with_errors_exits_one(calls, capsys):
 def test_verbose_sets_info_logging(calls, monkeypatch):
     import logging
 
-    levels = []
-    monkeypatch.setattr(
-        logging, "basicConfig", lambda **kw: levels.append(kw["level"])
-    )
+    kwargs = []
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: kwargs.append(kw))
     cli.main(["--verbose"])
     cli.main([])
-    assert levels == [logging.INFO, logging.WARNING]
+    assert [kw["level"] for kw in kwargs] == [logging.INFO, logging.WARNING]
+    for kw in kwargs:
+        assert kw["stream"] is sys.stderr
+        assert kw["format"] == "%(levelname)s %(name)s %(message)s"
+
+
+def test_paths_expand_user_and_empty_is_none(calls, monkeypatch, tmp_path):
+    seen, _ = calls
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert cli.main(["--repo-root", "~/r", "--data-dir", ""]) == 0
+    assert seen[0]["repo_root"] == tmp_path / "r"
+    assert seen[0]["data_dir"] is None
+
+
+def test_sweep_exception_propagates_and_prints_nothing(monkeypatch, capsys):
+    def boom(**kwargs):
+        raise RuntimeError("sweep failed")
+
+    monkeypatch.setattr(cli, "sweep", boom)
+    with pytest.raises(RuntimeError):
+        cli.main([])
+    assert capsys.readouterr().out == ""
+
+
+def test_json_with_errors_exits_one(calls, capsys):
+    _, result = calls
+    result.errors.append("x")
+    assert cli.main(["--json"]) == 1
+    assert json.loads(capsys.readouterr().out)["errors"] == ["x"]
