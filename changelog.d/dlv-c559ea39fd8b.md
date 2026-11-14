@@ -1,0 +1,1 @@
+- Golf schoon R27: `verify_pr_closure` and `verify_closure` in `scripts/closure_verifier.py` are under 100 executable lines by extract-method, with characterisation tests; behaviour unchanged.
