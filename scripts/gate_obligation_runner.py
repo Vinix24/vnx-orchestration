@@ -1457,6 +1457,25 @@ def _resolve_github_owner_repo(state_dir: Path) -> Optional[str]:
     return None
 
 
+def _pr_from_registration(state_dir: Path, record: Dict[str, Any]) -> Optional[int]:
+    """The PR the dispatch registration names, or None (OI-1751).
+
+    In order: the stamped ``pr_number``, the door-registered spec ``pr_id``
+    (records that predate the stamp carry only that), then the receipt
+    pipeline's ``dispatch_metadata``. Only a positive int or a PR-shaped pr_id
+    counts; the ``dispatch/<id>`` branch is the caller's fallback, never the link.
+    """
+    pr_number = record.get("pr_number")
+    if isinstance(pr_number, int) and not isinstance(pr_number, bool) and pr_number > 0:
+        return pr_number
+    pr_id = record.get("pr_id")
+    from_pr_id = pr_number_from_pr_id(pr_id) if isinstance(pr_id, str) else None
+    if from_pr_id:
+        return from_pr_id
+    dispatch_id = str(record.get("dispatch_id") or "")
+    return _pr_from_dispatch_metadata(state_dir, dispatch_id) if dispatch_id else None
+
+
 def resolve_pr_number(
     state_dir: Path, record: Dict[str, Any], snapshot: Optional[_GithubSnapshot] = None,
 ) -> PrResolution:
@@ -1465,26 +1484,26 @@ def resolve_pr_number(
     Returns a :class:`PrResolution` carrying one of three statuses so the caller
     can record the distinction in the obligation's state:
 
-      - ``resolved``   — a PR number is known (record, dispatch metadata, GitHub).
+      - ``resolved``   — a PR number is known (dispatch registration first, then
+                         the ``dispatch/<id>`` head branch on GitHub).
       - ``awaiting``   — the repo resolves and ``gh`` works, but no PR exists yet
                          for the head branch: a genuine wait, stays ``pending``.
       - ``unresolvable`` — the environment is wrong (no GitHub owner/repo, no
                          checkout, gh missing): a fault, recorded distinctly.
     """
-    pr_number = record.get("pr_number")
-    if isinstance(pr_number, int) and pr_number > 0:
-        return PrResolution(RESOLUTION_RESOLVED, pr_number=pr_number)
+    from_registration = _pr_from_registration(state_dir, record)
+    if from_registration:
+        return PrResolution(RESOLUTION_RESOLVED, pr_number=from_registration)
     dispatch_id = str(record.get("dispatch_id") or "")
     if not dispatch_id:
         return PrResolution(
             RESOLUTION_UNRESOLVABLE,
             reason="obligation has no dispatch_id to resolve a PR for",
         )
-
-    from_metadata = _pr_from_dispatch_metadata(state_dir, dispatch_id)
-    if from_metadata:
-        return PrResolution(RESOLUTION_RESOLVED, pr_number=from_metadata)
-
+    _LOG.info(
+        "no dispatch registration names a PR for %s; falling back to head branch dispatch/%s",
+        dispatch_id, dispatch_id,
+    )
     owner_repo = _resolve_github_owner_repo(state_dir)
     if not owner_repo:
         return PrResolution(
