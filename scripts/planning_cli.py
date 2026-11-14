@@ -1639,20 +1639,8 @@ def _close_with_attest(
     through tracks.transition_phase (the single-writer). This is an explicit
     operator override; it does NOT resolve blocker open-items.
     """
-    if not args.apply:
-        print(
-            "objective close --attest: --apply is required to write an attestation. "
-            "No change made.",
-            file=sys.stderr,
-        )
-        return 2
-    approval_id = (args.approval_id or "").strip()
-    if not approval_id:
-        print(
-            "objective close --attest: --approval-id is required (the operator's gate token). "
-            "No change made.",
-            file=sys.stderr,
-        )
+    approval_id = _attest_approval_id(args)
+    if approval_id is None:
         return 2
 
     track = tracks_lib.get_track(state_dir, track_id, project_id)
@@ -1676,37 +1664,27 @@ def _close_with_attest(
 
     if declared == target:
         payload["action"] = "noop_already_closed"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(f"  already closed (phase={declared}).\n")
+        _attest_render(args, payload, track_id, project_id, f"  already closed (phase={declared}).\n")
         return 0
 
     # Respect the same deliberate stop-signal as the evidence-grounded path.
     if declared == "parked" and not getattr(args, "include_parked", False):
         payload["action"] = "rejected_parked"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                "  track is PARKED (a deliberate stop). Pass --include-parked to close "
-                "it anyway, or un-park it first. No change made.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            "  track is PARKED (a deliberate stop). Pass --include-parked to close "
+            "it anyway, or un-park it first. No change made.\n",
+        )
         return 2
 
     path = _phase_path_to(declared, target)
     if path is None:
         payload["action"] = "rejected_no_path"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: no legal transition path {declared} -> {target} "
-                f"(ALLOWED_TRANSITIONS). No change made.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: no legal transition path {declared} -> {target} "
+            f"(ALLOWED_TRANSITIONS). No change made.\n",
+        )
         return 2
     payload["path"] = [declared, *path]
 
@@ -1715,48 +1693,20 @@ def _close_with_attest(
     # stamp. Both APPEND to the refs already on the track, never replace them.
     existing_ref = track.get("pr_ref")
     raw_pr_args = list(getattr(args, "pr", None) or [])
-    resolved_pr_ref: Optional[str] = None
-    ref_tokens = _existing_pr_ref_tokens(existing_ref)
-    if raw_pr_args:
-        resolved_pr_ref, _, _ = _merge_pr_refs(None, raw_pr_args)
-        if resolved_pr_ref is None:
-            payload["action"] = "rejected_invalid_pr"
-            if args.json:
-                print(json.dumps(payload, indent=2, default=str))
-            else:
-                print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-                print(
-                    f"  ERROR: no valid PR refs provided via --pr: {raw_pr_args!r}. "
-                    "No change made.\n"
-                )
-            return 2
-        _, pr_added, _ = _merge_pr_refs(existing_ref, raw_pr_args)
-        ref_tokens.extend(pr_added)
-    else:
-        stamp = f"ops-attest:{date.today().isoformat()}"
-        if stamp not in ref_tokens:
-            ref_tokens.append(stamp)
-
-    # Stamp the explicit attestation on the track.
-    attest_ref = ",".join(ref_tokens)
-    conn = _db_conn(state_dir)
-    try:
-        conn.execute(
-            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
-            (attest_ref, track_id, project_id),
+    ref_tokens, resolved_pr_ref = _attest_ref_tokens(existing_ref, raw_pr_args)
+    if ref_tokens is None:
+        payload["action"] = "rejected_invalid_pr"
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: no valid PR refs provided via --pr: {raw_pr_args!r}. "
+            "No change made.\n",
         )
-        conn.commit()
-    finally:
-        conn.close()
+        return 2
 
-    # Audit the operator attestation (reason + approval_id + full PR provenance:
-    # raw --pr args as given, and the resolved ref actually stamped).
-    tracks_lib._emit_track_event(
-        state_dir,
-        "track_ops_attest",
-        track_id,
-        project_id,
-        "operator",
+    # Stamp the explicit attestation on the track, then audit it.
+    attest_ref = ",".join(ref_tokens)
+    _attest_stamp(
+        state_dir, track_id, project_id, attest_ref,
         {
             "reason": reason,
             "approval_id": approval_id,
@@ -1768,6 +1718,118 @@ def _close_with_attest(
     )
 
     # Walk the legal phase path via the single-writer.
+    walk_exit = _attest_walk(
+        args, payload, state_dir, track_id, project_id,
+        declared=declared, target=target, path=path, reason=reason, approval_id=approval_id,
+    )
+    if walk_exit is not None:
+        return walk_exit
+
+    # Best-effort refresh of derived_status now that phase is 'done'.
+    try:
+        track_reconciler.reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
+    except Exception:
+        logger.warning("close --attest: derived refresh failed after transition", exc_info=True)
+
+    payload["action"] = "closed"
+    payload["applied"] = True
+    payload["declared_phase"] = target
+    payload["pr_ref"] = attest_ref
+
+    _attest_render(
+        args, payload, track_id, project_id,
+        f"  attested: {reason}",
+        f"  pr_ref set: {attest_ref}",
+        f"  closed: {' -> '.join([declared, *path])} "
+        f"(actor=operator, approval={approval_id}).\n",
+    )
+    return 0
+
+
+def _attest_approval_id(args: argparse.Namespace) -> Optional[str]:
+    """The operator's gate token for ``close --attest``; None after naming the refusal."""
+    if not args.apply:
+        print(
+            "objective close --attest: --apply is required to write an attestation. "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return None
+    approval_id = (args.approval_id or "").strip()
+    if not approval_id:
+        print(
+            "objective close --attest: --approval-id is required (the operator's gate token). "
+            "No change made.",
+            file=sys.stderr,
+        )
+        return None
+    return approval_id
+
+
+def _attest_render(args: argparse.Namespace, payload: dict[str, Any], track_id: str,
+                   project_id: str, *lines: str) -> None:
+    """Print one ``close --attest`` outcome: the payload as JSON, or the header and lines."""
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
+        for line in lines:
+            print(line)
+
+
+def _attest_ref_tokens(
+    existing_ref: Optional[str], raw_pr_args: list[str]
+) -> tuple[Optional[list[str]], Optional[str]]:
+    """The pr_ref tokens ``close --attest`` stamps, and the resolved --pr ref.
+
+    The real PR(s) (via --pr, normalized and deduplicated like `link-pr`) when
+    given, else the fail-open ops-attest date stamp. Both APPEND to the refs
+    already on the track, never replace them. The tokens are None when --pr
+    was given but held no valid ref.
+    """
+    resolved_pr_ref: Optional[str] = None
+    ref_tokens = _existing_pr_ref_tokens(existing_ref)
+    if raw_pr_args:
+        resolved_pr_ref, _, _ = _merge_pr_refs(None, raw_pr_args)
+        if resolved_pr_ref is None:
+            return None, None
+        _, pr_added, _ = _merge_pr_refs(existing_ref, raw_pr_args)
+        ref_tokens.extend(pr_added)
+    else:
+        stamp = f"ops-attest:{date.today().isoformat()}"
+        if stamp not in ref_tokens:
+            ref_tokens.append(stamp)
+    return ref_tokens, resolved_pr_ref
+
+
+def _attest_stamp(
+    state_dir: Path, track_id: str, project_id: str, attest_ref: str, details: dict[str, Any]
+) -> None:
+    """Write the attested pr_ref on the track, then emit the ``track_ops_attest`` audit event.
+
+    The event carries the reason, the approval_id and the full PR provenance:
+    the raw --pr args as given, and the resolved ref actually stamped.
+    """
+    conn = _db_conn(state_dir)
+    try:
+        conn.execute(
+            "UPDATE tracks SET pr_ref = ? WHERE track_id = ? AND project_id = ?",
+            (attest_ref, track_id, project_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    tracks_lib._emit_track_event(
+        state_dir, "track_ops_attest", track_id, project_id, "operator", details,
+    )
+
+
+def _attest_walk(
+    args: argparse.Namespace, payload: dict[str, Any], state_dir: Path, track_id: str,
+    project_id: str, *, declared: str, target: str, path: list[str], reason: str,
+    approval_id: str,
+) -> Optional[int]:
+    """Walk the attested phase path; None when it reached the target, else exit 2."""
     cur = declared
     try:
         for step in path:
@@ -1782,61 +1844,27 @@ def _close_with_attest(
         payload["declared_phase"] = cur
         payload["action"] = "rejected_not_found"
         payload["error"] = str(exc)
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(f"  ERROR: {exc}\n")
+        _attest_render(args, payload, track_id, project_id, f"  ERROR: {exc}\n")
         return 2
     except tracks_lib.InvalidTransitionError as exc:
         payload["declared_phase"] = cur
         payload["action"] = "rejected_walk_failed"
         payload["error"] = str(exc)
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: transition failed at '{cur}': {exc}. "
-                f"Track left at '{cur}'.\n"
-            )
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: transition failed at '{cur}': {exc}. Track left at '{cur}'.\n",
+        )
         return 2
     except Exception as exc:
         payload["declared_phase"] = cur
         payload["action"] = "rejected_walk_failed"
         payload["error"] = f"{type(exc).__name__}: {exc}"
-        if args.json:
-            print(json.dumps(payload, indent=2, default=str))
-        else:
-            print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-            print(
-                f"  ERROR: transition failed at '{cur}': {exc}. "
-                f"Track left at '{cur}'.\n"
-            )
-        return 2
-
-    # Best-effort refresh of derived_status now that phase is 'done'.
-    try:
-        track_reconciler.reconcile_track(state_dir, track_id, project_id, repo_root=repo_root)
-    except Exception:
-        logger.warning("close --attest: derived refresh failed after transition", exc_info=True)
-
-    payload["action"] = "closed"
-    payload["applied"] = True
-    payload["declared_phase"] = target
-    payload["pr_ref"] = attest_ref
-
-    if args.json:
-        print(json.dumps(payload, indent=2, default=str))
-    else:
-        print(f"\nvnx objective close --attest — {track_id} (project '{project_id}')\n")
-        print(f"  attested: {reason}")
-        print(f"  pr_ref set: {attest_ref}")
-        print(
-            f"  closed: {' -> '.join([declared, *path])} "
-            f"(actor=operator, approval={approval_id}).\n"
+        _attest_render(
+            args, payload, track_id, project_id,
+            f"  ERROR: transition failed at '{cur}': {exc}. Track left at '{cur}'.\n",
         )
-    return 0
+        return 2
+    return None
 
 
 def cmd_objective_close(args: argparse.Namespace) -> int:
