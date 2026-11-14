@@ -148,6 +148,16 @@ def test_main_fatal_and_exhausted_errors(monkeypatch, tmp_path):
     assert [s[1] for s in seen if s[0] == "sleep"] == [2.0, 4.0, 8.0, 16.0]
 
 
+@pytest.mark.parametrize("payload,message", [
+    ({"prompt": "p"}, "model field required"),
+    ({"model": "m"}, "prompt field required"),
+    ({"model": "m", "prompt": "p", "cwd": "/no/such/dir"}, "cwd must be an existing directory: '/no/such/dir'"),
+])
+def test_main_rejects_an_unusable_request(monkeypatch, payload, message):
+    rc, events, _ = _run_main(monkeypatch, payload, [])
+    assert (rc, events) == (1, [{"error_type": "runner_error", "message": message}])
+
+
 def _reconcile(calls, terminals, tmux=None, reasons=("r1",)):
     def fake(state_root, *, config, repair):
         calls.append((config.stale_after_seconds, config.receipt_scan_lines,
