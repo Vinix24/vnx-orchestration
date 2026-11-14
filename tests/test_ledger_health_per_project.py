@@ -15,6 +15,7 @@ import os
 import plistlib
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -116,7 +117,10 @@ class TestA2UnregisteredCloneIsRefused:
         assert "not a central install" in capsys.readouterr().out
 
     def test_reload_plist_exits_nonzero_with_nothing_written(self, host):
-        env = {"HOME": str(host.home), "PATH": os.environ["PATH"], "VNX_HOME": str(host.engine)}
+        env = {
+            "HOME": str(host.home), "PATH": os.environ["PATH"], "VNX_HOME": str(host.engine),
+            "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
+        }
         result = subprocess.run(
             ["bash", str(RELOAD), LABEL, "alpha"], capture_output=True, text=True, env=env, timeout=60
         )
@@ -128,7 +132,10 @@ class TestA2UnregisteredCloneIsRefused:
 
     def test_reload_plist_installs_from_a_registered_engine(self, host):
         register_engine(host.home, host.engine, "alpha")
-        env = {"HOME": str(host.home), "PATH": os.environ["PATH"], "VNX_HOME": str(host.engine)}
+        env = {
+            "HOME": str(host.home), "PATH": os.environ["PATH"], "VNX_HOME": str(host.engine),
+            "VNX_LAUNCHD_GUARD_TEMP_ROOTS": os.environ["VNX_LAUNCHD_GUARD_TEMP_ROOTS"],
+        }
         result = subprocess.run(
             ["bash", str(RELOAD), LABEL, "alpha"], capture_output=True, text=True, env=env, timeout=60
         )
@@ -201,6 +208,48 @@ class TestA3InstallGuardRoots:
         engine = make_central_engine(tmp_path / ".vnx-data" / "worktrees" / "dispatch-x")
         reason = guard.refusal_reason(engine)
         assert reason is not None and ".vnx-data/worktrees" in reason
+
+
+def _packaged_engine(base: Path) -> Path:
+    engine = base / "venv" / "lib" / "site-packages" / "vnx_orchestration"
+    (engine / "scripts").mkdir(parents=True)
+    (engine.parent / "vnx_cli").mkdir()
+    return engine
+
+
+class TestA3TempDirEngineIsRefused:
+    """OI-2834: a packaged engine in a scratch venv must never install a job."""
+
+    def test_packaged_engine_under_the_temp_dir_is_refused(self, guard, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS")
+        engine = _packaged_engine(tmp_path)
+        reason = guard.refusal_reason(engine)
+        assert reason is not None and "temporary directory" in reason
+
+    def test_same_layout_outside_every_temp_root_is_allowed(self, guard, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS")
+        monkeypatch.setattr(guard, "_temp_roots", lambda: [Path("/nonexistent-root")])
+        assert guard.refusal_reason(_packaged_engine(tmp_path)) is None
+
+    def test_a_temp_root_that_is_a_symlink_is_still_caught(self, guard, tmp_path, monkeypatch):
+        real_tmp = tmp_path / "real-tmp"
+        engine = _packaged_engine(real_tmp)
+        link = tmp_path / "link-tmp"
+        link.symlink_to(real_tmp, target_is_directory=True)
+        monkeypatch.setenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS", str(link))
+        reason = guard.refusal_reason(engine)
+        assert reason is not None and str(real_tmp.resolve()) in reason
+
+    def test_central_install_under_the_temp_dir_is_refused(self, guard, tmp_path, monkeypatch):
+        monkeypatch.delenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS")
+        make_central_engine(tmp_path / "central")
+        assert guard.refusal_reason(tmp_path / "central") is not None
+
+    def test_the_default_roots_name_the_system_temp_dirs(self, guard, monkeypatch):
+        monkeypatch.delenv("VNX_LAUNCHD_GUARD_TEMP_ROOTS")
+        roots = guard._temp_roots()
+        assert Path(tempfile.gettempdir()).resolve() in roots
+        assert Path("/private/var/folders").resolve() in roots
 
 
 class TestA4LeftoverPlaceholdersNeverInstall:

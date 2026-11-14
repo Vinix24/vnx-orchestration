@@ -46,6 +46,7 @@ clean_env() {
     env -u PYTHONPATH -u VNX_HOME -u VNX_BIN -u VNX_EXECUTABLE \
         -u VNX_DATA_DIR -u VNX_STATE_DIR -u VNX_DATA_DIR_EXPLICIT \
         -u PROJECT_ROOT -u VNX_PROJECT_ROOT -u VNX_CANONICAL_ROOT \
+        -u VNX_LAUNCHD_GUARD_TEMP_ROOTS \
         "$@"
 }
 
@@ -84,6 +85,34 @@ DIST_DIR="$TMPROOT/dist"
 VENV="$TMPROOT/venv"
 SCRATCH="$TMPROOT/project"
 mkdir -p "$DIST_DIR" "$SCRATCH"
+
+# --- launchd isolation (OI-2834) ----------------------------------------------
+# `launchctl` keys on the uid, not on HOME: a job a `vnx init` here loaded would land in
+# the operator's real gui domain, with a VNX_HOME inside this scratch venv that is gone
+# on exit. Layer 1 is the engine-root guard (a root under the temp dir is refused);
+# layer 2 is this shim, first on PATH for every `vnx` call below. Same behaviour as
+# the pytest shim in tests/conftest.py: read verbs go to the real launchctl, every
+# other verb is refused with exit 78.
+REAL_LAUNCHD_DIR="${HOME}/Library/LaunchAgents"
+LAUNCHD_BEFORE="$TMPROOT/launchd_before.txt"
+if [ "$(uname -s)" = "Darwin" ]; then
+    REAL_LAUNCHCTL="$(command -v launchctl || true)"
+    [ -n "$REAL_LAUNCHCTL" ] || fail "launchctl not found on a Darwin host"
+    SHIM_DIR="$TMPROOT/launchctl-shim"
+    mkdir -p "$SHIM_DIR"
+    cat > "$SHIM_DIR/launchctl" <<SHIMEOF
+#!/bin/sh
+case "\$1" in
+  list|print|print-disabled|blame|version|help|error) exec "$REAL_LAUNCHCTL" "\$@" ;;
+esac
+echo "[smoke launchctl shim] launchctl \$* refused: the wheel smoke must not change the operator's launchd domain" >&2
+exit 78
+SHIMEOF
+    chmod +x "$SHIM_DIR/launchctl"
+    export PATH="$SHIM_DIR:$PATH"
+    ls "$REAL_LAUNCHD_DIR" 2>/dev/null | grep '^com\.vnx\.' | sort > "$LAUNCHD_BEFORE" || true
+    log "launchctl shim active ($SHIM_DIR); $(wc -l < "$LAUNCHD_BEFORE" | tr -d ' ') com.vnx.* plists in the real LaunchAgents"
+fi
 
 # --- build -----------------------------------------------------------------
 log "building wheel (no build isolation) ..."
@@ -170,6 +199,14 @@ if ! clean_env "$VENV/bin/vnx" doctor --project-dir "$SCRATCH" >"$TMPROOT/doctor
 fi
 ok "vnx doctor exit 0"
 
+# The packaged engine sits in a scratch venv under the temp dir: the init above must
+# name its launchd installs as skipped and write nothing to the real LaunchAgents.
+if [ "$(uname -s)" = "Darwin" ]; then
+    grep -q 'skipped .* launchd agent: engine root is under the temporary directory' "$TMPROOT/init.log" \
+        || { cat "$TMPROOT/init.log" >&2; fail "vnx init did not report the launchd install as skipped (temp-dir engine root)"; }
+    ok "vnx init skipped the launchd install (engine root under the temp dir)"
+fi
+
 # --- G3b: packaged VNX_HOME + schema resolution ----------------------------
 log "asserting packaged VNX_HOME + schema read (bootstrap_qi_db) ..."
 PROOF="$TMPROOT/schema_proof.py"
@@ -243,11 +280,17 @@ pip2_env() {
         -u VNX_DATA_DIR -u VNX_STATE_DIR -u VNX_DATA_DIR_EXPLICIT \
         -u VNX_DATA_HOME -u XDG_DATA_HOME -u VNX_PROJECT_ID \
         -u PROJECT_ROOT -u VNX_PROJECT_ROOT -u VNX_CANONICAL_ROOT \
+        -u VNX_LAUNCHD_GUARD_TEMP_ROOTS \
         HOME="$CLEAN_HOME" "$@"
 }
 
 pip2_env "$VENV/bin/vnx" init --project-dir "$CLEAN_PROJECT" >"$TMPROOT/pip2_init.log" 2>&1 \
     || { cat "$TMPROOT/pip2_init.log" >&2; fail "clean-HOME vnx init failed"; }
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    grep -q 'skipped .* launchd agent: engine root is under the temporary directory' "$TMPROOT/pip2_init.log" \
+        || { cat "$TMPROOT/pip2_init.log" >&2; fail "clean-HOME vnx init did not report the launchd install as skipped"; }
+fi
 
 # Assertion 1: NO project-local .vnx-data/ was created (clean footprint).
 [ ! -e "$CLEAN_PROJECT/.vnx-data" ] \
@@ -374,6 +417,15 @@ CLEAN_VER="$(pip2_env "$VENV/bin/vnx" --version)"
 [ "$CLEAN_VER" = "vnx $META_VER" ] \
     || fail "clean-HOME vnx --version ('$CLEAN_VER') != 'vnx $META_VER'"
 ok "vnx --version correct in clean HOME: $CLEAN_VER"
+
+# Assertion 6 (darwin): nothing new in the operator's real LaunchAgents.
+if [ "$(uname -s)" = "Darwin" ]; then
+    LAUNCHD_AFTER="$TMPROOT/launchd_after.txt"
+    ls "$REAL_LAUNCHD_DIR" 2>/dev/null | grep '^com\.vnx\.' | sort > "$LAUNCHD_AFTER" || true
+    diff "$LAUNCHD_BEFORE" "$LAUNCHD_AFTER" >&2 \
+        || fail "the smoke changed the com.vnx.* plists in $REAL_LAUNCHD_DIR"
+    ok "real $REAL_LAUNCHD_DIR com.vnx.* listing unchanged"
+fi
 
 echo
 ok "PR-PIP-1 wheel-install smoke PASSED ($(basename "$WHEEL"), v$META_VER)"
