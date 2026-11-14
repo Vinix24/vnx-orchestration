@@ -12,7 +12,7 @@ import itertools
 import re
 import subprocess
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Mapping, Optional, Sequence, Set
 
 from gate_reanchor import (MODULE_LEVEL, WHOLE_MODULE, ImportGraph, ReanchorError, Symbol,
@@ -29,6 +29,8 @@ REASON_SECURITY_PATH = "security_path"
 REASON_INPUT_SET = "input_set_touched"
 REASON_REBASE_REWORK = "rebase_with_rework"
 REASON_ANCHOR = "anchor_unverifiable"
+REASON_NO_SYMBOL_PROVIDER = "no_symbol_provider"
+NO_SUFFIX = "(no suffix)"
 
 #: ``git patch-id`` prints nothing for an empty diff; an empty own diff has this id.
 EMPTY_PATCH_ID = "0" * 40
@@ -150,12 +152,54 @@ def _scope_sources(source: str) -> Dict[str, List[str]]:
     return out
 
 
+def path_suffix(path: str) -> str:
+    """The suffix of ``path``, or ``NO_SUFFIX`` for a path without one."""
+    return Path(path).suffix or NO_SUFFIX
+
+
+def _is_changelog_fragment(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return len(parts) == 2 and parts[0] == "changelog.d" and PurePosixPath(parts[1]).suffix == ".md"
+
+
+INERT_CHANGELOG = "changelog fragment"
+#: Content type -> (path matcher, scope sources). Only a type listed here is known; every other path is
+#: ``no_symbol_provider`` and forces a full review (OI-2784). A ``None`` provider is an inert type: no symbols, no
+#: callers, it cannot change any code. A provider for ``.ts`` or ``.md`` is one entry here.
+SYMBOL_PROVIDERS: Mapping[str, tuple[Callable[[str], bool], Optional[Callable[[str], Dict[str, List[str]]]]]] = {
+    ".py": (lambda p: path_suffix(p) == ".py", _scope_sources),
+    INERT_CHANGELOG: (_is_changelog_fragment, None),  # only ``changelog.d/<name>.md`` at the repo root
+}
+
+
+def content_type(path: str) -> Optional[str]:
+    """The registry key whose matcher takes ``path``, or ``None`` when its symbols cannot be computed."""
+    return next((key for key, (matches, _) in SYMBOL_PROVIDERS.items() if matches(path)), None)
+
+
+def has_symbol_provider(path: str) -> bool:
+    """True when the symbols of ``path`` are known: computed by a provider, or none because the type is inert."""
+    return content_type(path) is not None
+
+
+def is_inert(path: str) -> bool:
+    key = content_type(path)
+    return key is not None and SYMBOL_PROVIDERS[key][1] is None
+
+
+def no_provider_paths(paths: Iterable[str]) -> Dict[str, str]:
+    """``{path: suffix}`` for every path whose symbols cannot be computed."""
+    return {p: path_suffix(p) for p in sorted(set(paths)) if not has_symbol_provider(p)}
+
+
 def _changed_symbols(repo: Path, old_tree: str, new_tree: str, path: str, run: Runner) -> FrozenSet[Symbol]:
     module = Path(path).stem
-    if not path.endswith(".py"):
+    key = content_type(path)
+    provider = SYMBOL_PROVIDERS[key][1] if key is not None else None
+    if provider is None:  # inert, or no proof either way: classify_change makes the latter REWORK/no_symbol_provider
         return frozenset()
     try:
-        old, new = (_scope_sources(run(repo, ["show", f"{t}:{path}"])) for t in (old_tree, new_tree))
+        old, new = (provider(run(repo, ["show", f"{t}:{path}"])) for t in (old_tree, new_tree))
     except (ChangeKindError, SyntaxError, ValueError):
         return frozenset({(module, WHOLE_MODULE)})  # unknown becomes blocking, never invisible
     return frozenset((module, n) for n in set(old) | set(new) if old.get(n) != new.get(n))
@@ -169,7 +213,8 @@ def interdiff(repo: Path, base_ref: str, parent_head: str, head: str, run: Runne
 
 
 def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> FrozenSet[str]:
-    """The own diff plus the files that import a module of that diff (depth 1)."""
+    """The own diff plus the files that import a module of that diff (depth 1). Callers are known for Python only; a
+    path without a symbol provider adds no callers here and forces the full review in :func:`classify_change`."""
     paths = set(own_diff_paths)
     try:
         graph = build_import_graph(repo, head)
@@ -182,7 +227,7 @@ def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> Froz
     for src, deps in graph.edges.items():
         for dep in deps:
             reverse.setdefault(dep, set()).add(src)
-    stems = {Path(p).stem for p in paths if p.endswith(".py")}
+    stems = {Path(p).stem for p in paths if has_symbol_provider(p) and not is_inert(p)}
     reached = reachable_modules(stems, ImportGraph(edges=reverse), depth=1)
     return frozenset(paths | {p for p in listing if p.endswith(".py") and Path(p).stem in reached})
 
@@ -195,23 +240,30 @@ class ChangeKindRecord:
     security_paths: Mapping[str, str]
     plan_scope_rule_version: str
     full_review_reason: Optional[str] = None
+    #: ``{path: suffix}`` of own diff, interdiff and base move without a symbol provider; non-empty means REWORK.
+    no_provider_paths: Mapping[str, str] = field(default_factory=dict)
 
 
 def decide(merge_base_equal: bool, tree_equal: bool, replay_clean: bool, base_move_paths: Iterable[str],
-           input_set: Iterable[str], security_paths: Mapping[str, str]) -> tuple[str, Optional[str]]:
+           input_set: Iterable[str], security_paths: Mapping[str, str],
+           no_provider: Optional[Mapping[str, str]] = None) -> tuple[str, Optional[str]]:
     """Pure rule: (changekind, full_review_reason). Positive evidence only: each tree fact is a real bool;
-    ``tree_equal`` holds ``head^{tree}`` against the parent's tree (same base) or the replayed tree (moved base)."""
+    ``tree_equal`` holds ``head^{tree}`` against the parent's tree (same base) or the replayed tree (moved base).
+    ``no_provider``: paths whose symbols and callers cannot be computed; ``None`` is not known, so cannot_prove."""
     facts = (merge_base_equal, tree_equal, replay_clean)
-    if not isinstance(security_paths, Mapping) or not all(isinstance(f, bool) for f in facts):
+    if not isinstance(security_paths, Mapping) or not isinstance(no_provider, Mapping) \
+            or not all(isinstance(f, bool) for f in facts):
         return REWORK, REASON_CANNOT_PROVE
     if security_paths:
         return REWORK, REASON_SECURITY_PATH
+    if no_provider:
+        return REWORK, REASON_NO_SYMBOL_PROVIDER
     if merge_base_equal:
         # Same base: a different tree is a real fix commit, a delta may judge it.
         return (NO_CODE_CHANGE, None) if tree_equal else (REWORK, None)
     if not (replay_clean and tree_equal):
         return REWORK, REASON_REBASE_REWORK
-    if set(base_move_paths) & set(input_set):
+    if {p for p in base_move_paths if not is_inert(p)} & set(input_set):  # an inert file has no callers to break
         return REWORK, REASON_INPUT_SET
     return TRIVIAL_REBASE, None
 
@@ -226,12 +278,14 @@ def classify_change(repo: Path, base_ref: str, parent_head: str, head: str,
         return ChangeKindRecord(REWORK, None, None, {}, rule, REASON_CANNOT_PROVE)
     try:
         cmp = compare(repo, base_ref, parent_head, head, run)
+        own = _names(run(repo, ["diff", "--name-only", "-z", "--no-renames", _merge_base(repo, base_ref, head, run), head]))
     except ChangeKindError:
         return ChangeKindRecord(REWORK, parent_pid, head_pid, {}, rule, REASON_CANNOT_PROVE)
     security = {p: k for p in sorted(cmp.changed_paths | cmp.base_move_paths) if (k := security_path_kind(p)) is not None}
+    blind = no_provider_paths(own | cmp.changed_paths | cmp.base_move_paths)
     kind, reason = decide(cmp.merge_base_equal, cmp.tree == cmp.head_tree, cmp.replay_clean,
-                          cmp.base_move_paths, seat_input_set, security)
-    return ChangeKindRecord(kind, parent_pid, head_pid, security, rule, reason)
+                          cmp.base_move_paths, seat_input_set, security, blind)
+    return ChangeKindRecord(kind, parent_pid, head_pid, security, rule, reason, blind)
 
 
 def _qualified_names(node: ast.AST, prefix: str = "") -> Set[str]:

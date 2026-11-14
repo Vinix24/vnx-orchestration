@@ -18,6 +18,7 @@ import review_delta_shadow as shadow
 import review_rounds
 import review_scope
 from codex_parser import extract_final_agent_message
+from review_changekind import has_symbol_provider
 from gate_artifacts import _classify_findings
 from review_delta import PASS, Assemble, DeltaInput, DeltaRefused, DeltaVerdict, build_delta_prompt, parse_delta_verdict
 from review_findings import blocks, id_for_finding
@@ -150,7 +151,7 @@ def _decide(request_payload: Mapping[str, Any], gates_dir: Path, worktree: Path,
     base_ref = str(request_payload.get("base_ref") or "origin/main")
     record, blockers = shadow.assemble_delta_input(worktree, base_ref, int(request_payload["pr_number"]), head, parent)
     paths = (*_own_paths(worktree, base_ref, head), *record.interdiff.paths)
-    if any(not p.endswith(".py") for p in paths):  # symbols and callers are computed for Python only (OI-2784)
+    if not all(has_symbol_provider(p) for p in paths):  # symbols and callers need a provider (OI-2784)
         return _full(prompt, "non_python_path")
     try:
         delta_prompt = build_delta_prompt(record, assemble)

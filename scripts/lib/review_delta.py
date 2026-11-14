@@ -12,7 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 
-from review_changekind import ANCHOR_PRESENT, NO_CODE_CHANGE, REWORK, TRIVIAL_REBASE, ChangeKindRecord, Interdiff
+from review_changekind import (ANCHOR_PRESENT, NO_CODE_CHANGE, REWORK, TRIVIAL_REBASE, ChangeKindRecord, Interdiff,
+                               content_type, has_symbol_provider, is_inert, path_suffix)
 from review_findings import STATUS_FIXED, STATUS_OPEN, STATUS_REGRESSED, STATUS_UNVERIFIABLE, blocks
 
 FENCE = "delta_verdict/1"
@@ -113,6 +114,12 @@ def disarm(text: Any) -> str:
 def _interdiff_block(diff: Interdiff) -> List[str]:
     lines = []
     for path in sorted(diff.paths):
+        if not has_symbol_provider(path):  # silence here would read as proof of no change (OI-2784)
+            lines.append(f"  - {disarm(path)}: symbols not computed for this file type ({disarm(path_suffix(path))})")
+            continue
+        if is_inert(path):
+            lines.append(f"  - {disarm(path)}: {content_type(path)} (no callers)")
+            continue
         symbols = sorted(name for _, name in diff.symbols.get(path, frozenset()))
         lines.append(f"  - {disarm(path)}: " + (", ".join(disarm(s) for s in symbols) or "no symbol-level change found"))
     return lines or ["  (no paths differ)"]

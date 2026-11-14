@@ -57,6 +57,8 @@ Een vervolgronde is alleen delta wanneer al deze voorwaarden gelden. Anders is h
 
 De tweede stoel (tweede-stoel-op-signaal) blijft in fase 1 en 2 altijd een volle review.
 
+De delta is alleen bewijsbaar voor een bestandstype met een symboolprovider, en dat is nu alleen Python (`.py`). Een pad zonder provider in de eigen diff, de interdiff of de basisverschuiving geeft `REWORK` met `full_review_reason: no_symbol_provider`. Het record noemt het pad en de suffix (`no_provider_paths`) en de prompt zegt `symbols not computed for this file type (<suffix>)`. Zo blijft het tot er een provider per inhoudstype is: één regel in `SYMBOL_PROVIDERS` in `scripts/lib/review_changekind.py` (OI-2784). Eén type is inert en geldt als bekend: een changelog-fragment, alleen `changelog.d/<naam>.md` direct onder de repo-root, want het heeft geen aanroepers en kan geen gedrag van code veranderen; het dwingt geen volle ronde af, telt in de basisverschuiving niet als aanraking van de input-set en de prompt zegt `changelog fragment (no callers)`.
+
 *Reden:* bij elke twijfel kiest de regel de duurdere en veiligere uitkomst. Dat is dezelfde richting als fail-expand bij Turborepo en als `gate_reanchor`.
 
 ### Besluit 3. Stabiele finding-ids
