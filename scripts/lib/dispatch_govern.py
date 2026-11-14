@@ -779,63 +779,7 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
     )
 
     if candidate_path is not None:
-        try:
-            candidate = candidate_path.read_text(encoding="utf-8")
-            # plan-reviewer role: the worker writes a free-form review that ends with
-            # a vnx-plan-verdict fence.  It intentionally lacks ## Changes / ## Verification
-            # / ## Open Items — applying standard contract validation would always fail and
-            # trigger synthesis, which strips the fence and breaks parse_verdict in the
-            # plan-gate panel.  Accept the report as authored when it is non-empty and
-            # contains the verdict fence opener; do not overwrite it with a git-diff body.
-            if spec.role == _PLAN_REVIEWER_ROLE:
-                _verdict_marker = "```vnx-plan-verdict"
-                if candidate.strip() and _verdict_marker in candidate:
-                    body = candidate
-                    contract_status = "authored"
-                    logger.info(
-                        "govern: plan-reviewer report accepted as authored for dispatch=%s"
-                        " (verdict fence present, standard contract validation skipped)",
-                        dispatch_id,
-                    )
-                else:
-                    logger.info(
-                        "govern: plan-reviewer report exists but has no verdict fence for"
-                        " dispatch=%s — synthesizing (parse_error will surface to panel)",
-                        dispatch_id,
-                    )
-            elif spec.role in _FREEFORM_ROLES:
-                # e.g. deliberation-panelist (OI-811): the diverge/contrarian/verify/
-                # synthesis stage worker writes free-form panel analysis — no
-                # ## Changes/## Verification headings, and no plan-verdict fence either.
-                # Accept any non-empty authored text as-is.
-                if candidate.strip():
-                    body = candidate
-                    contract_status = "authored"
-                    logger.info(
-                        "govern: %s report accepted as authored for dispatch=%s"
-                        " (free-form role, standard contract validation skipped)",
-                        spec.role, dispatch_id,
-                    )
-                else:
-                    logger.info(
-                        "govern: %s report exists but is empty for dispatch=%s —"
-                        " synthesizing",
-                        spec.role, dispatch_id,
-                    )
-            else:
-                bv = validate_body(candidate, pr_id=spec.pr_id)
-                if bv.valid and not bv.placeholder:
-                    # Authored report passes — use it.
-                    body = candidate
-                    contract_status = "authored"
-                else:
-                    logger.info(
-                        "govern: worker report exists but invalid (missing=%s placeholder=%s)"
-                        " for dispatch=%s — synthesizing",
-                        bv.missing, bv.placeholder, dispatch_id,
-                    )
-        except OSError as exc:
-            logger.warning("govern: could not read worker report for %s: %s", dispatch_id, exc)
+        body, contract_status = _read_authored_candidate(spec, candidate_path, validate_body)
 
     # -- a2. Relocate an adopted stray report to the central path -------------
     # Only a VALIDATED authored candidate gets relocated — an invalid stray
@@ -948,6 +892,23 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         emit_frontmatter = frontmatter
         emit_body = body
 
+    return _emit_and_receipt(
+        spec, raw, lane, emit_unified_report,
+        status=status, emit_frontmatter=emit_frontmatter, emit_body=emit_body,
+        contract_status=contract_status, permission_enforcement=permission_enforcement,
+        receipt_status=receipt_status, final_bv=final_bv,
+        _report_relocated_from=_report_relocated_from,
+    )
+
+
+def _emit_and_receipt(
+    spec: GovernSpec, raw: GovernRaw, lane: str, emit_unified_report, *,
+    status: str, emit_frontmatter: dict, emit_body: str, contract_status: str,
+    permission_enforcement: str, receipt_status: str, final_bv: object,
+    _report_relocated_from: Optional[str],
+) -> GovernedOutcome:
+    """Step d: emit the report, then write the receipt (also when the emit fails)."""
+    dispatch_id = spec.dispatch_id
     try:
         report_path = emit_unified_report(
             dispatch_id=dispatch_id,
@@ -998,6 +959,71 @@ def _govern_impl(spec: GovernSpec, raw: GovernRaw, lane: str) -> GovernedOutcome
         body_result=final_bv,
         permission_enforcement=permission_enforcement,
     )
+
+
+def _read_authored_candidate(spec: GovernSpec, candidate_path: Path, validate_body) -> tuple:
+    """Step a: read the worker report; ``(body, contract_status)``, body None = synthesize."""
+    dispatch_id = spec.dispatch_id
+    body: Optional[str] = None
+    contract_status = "synthesized"
+    try:
+        candidate = candidate_path.read_text(encoding="utf-8")
+        # plan-reviewer role: the worker writes a free-form review that ends with
+        # a vnx-plan-verdict fence.  It intentionally lacks ## Changes / ## Verification
+        # / ## Open Items — applying standard contract validation would always fail and
+        # trigger synthesis, which strips the fence and breaks parse_verdict in the
+        # plan-gate panel.  Accept the report as authored when it is non-empty and
+        # contains the verdict fence opener; do not overwrite it with a git-diff body.
+        if spec.role == _PLAN_REVIEWER_ROLE:
+            _verdict_marker = "```vnx-plan-verdict"
+            if candidate.strip() and _verdict_marker in candidate:
+                body = candidate
+                contract_status = "authored"
+                logger.info(
+                    "govern: plan-reviewer report accepted as authored for dispatch=%s"
+                    " (verdict fence present, standard contract validation skipped)",
+                    dispatch_id,
+                )
+            else:
+                logger.info(
+                    "govern: plan-reviewer report exists but has no verdict fence for"
+                    " dispatch=%s — synthesizing (parse_error will surface to panel)",
+                    dispatch_id,
+                )
+        elif spec.role in _FREEFORM_ROLES:
+            # e.g. deliberation-panelist (OI-811): the diverge/contrarian/verify/
+            # synthesis stage worker writes free-form panel analysis — no
+            # ## Changes/## Verification headings, and no plan-verdict fence either.
+            # Accept any non-empty authored text as-is.
+            if candidate.strip():
+                body = candidate
+                contract_status = "authored"
+                logger.info(
+                    "govern: %s report accepted as authored for dispatch=%s"
+                    " (free-form role, standard contract validation skipped)",
+                    spec.role, dispatch_id,
+                )
+            else:
+                logger.info(
+                    "govern: %s report exists but is empty for dispatch=%s —"
+                    " synthesizing",
+                    spec.role, dispatch_id,
+                )
+        else:
+            bv = validate_body(candidate, pr_id=spec.pr_id)
+            if bv.valid and not bv.placeholder:
+                # Authored report passes — use it.
+                body = candidate
+                contract_status = "authored"
+            else:
+                logger.info(
+                    "govern: worker report exists but invalid (missing=%s placeholder=%s)"
+                    " for dispatch=%s — synthesizing",
+                    bv.missing, bv.placeholder, dispatch_id,
+                )
+    except OSError as exc:
+        logger.warning("govern: could not read worker report for %s: %s", dispatch_id, exc)
+    return body, contract_status
 
 
 def _synthesize(spec: GovernSpec, raw: GovernRaw) -> str:
