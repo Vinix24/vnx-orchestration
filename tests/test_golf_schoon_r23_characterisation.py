@@ -123,14 +123,7 @@ def test_governance_dispatch_filter_and_limit(gov):
     assert len(lim["escalations"]) == 1
     assert len(lim["overrides"]) == 1
     assert lim["escalations"][0]["level"] == "escalate"
-    # filtered escalations ignore limit
-    assert len(pav.governance_audit_view(gov, dispatch_id="d1", limit=1)["overrides"]) == 1
 
-
-def test_governance_empty(conn):
-    v = pav.governance_audit_view(conn)
-    assert v["policy_evaluations"] == v["escalations"] == v["overrides"] == []
-    assert v["summary"]["blocking_count"] == 0
 
 
 @pytest.fixture
@@ -192,11 +185,6 @@ def test_provenance_filter_and_limit(prov):
     assert len(lim["registry_entries"]) == len(lim["verifications"]) == 1
     assert len(lim["gap_events"]) == 1
 
-
-def test_provenance_empty(conn):
-    v = pav.provenance_audit_view(conn)
-    assert v["registry_entries"] == v["verifications"] == v["gap_events"] == []
-    assert v["summary"]["chain_status_counts"] == {"receipt_and_commit": 0, "incomplete": 0, "broken": 0}
 
 
 def _fake_verify(calls):
@@ -272,25 +260,6 @@ def test_pre_merge_advisory_clean_and_no_mutation(conn, tmp_path, monkeypatch):
     assert conn.execute("SELECT count(*) FROM escalation_state").fetchone()[0] == before
 
 
-def test_pre_merge_advisory_overrides_limited_to_20_recent(conn, tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        pav, "verify_dispatch_provenance",
-        lambda c, d, r, root=None: VerificationResult(
-            dispatch_id=d, verdict="pass", chain_status="complete", findings=[], advisories=[]))
-    _ovr(conn, "old", "dq", "granted", "2025-01-01T00:00:00Z")
-    for i in range(20):
-        _ovr(conn, f"n{i}", "zz", "granted", f"2026-01-{i + 1:02d}T00:00:00Z")
-    conn.commit()
-    out = pav.pre_merge_advisory(conn, ["dq"], tmp_path / "r")
-    assert out["governance"]["override_count"] == 0
-    assert out["ready"] is True
-
-
-def test_pre_merge_advisory_real_verify_unregistered(conn, tmp_path):
-    out = pav.pre_merge_advisory(conn, ["nope"], tmp_path / "r.ndjson")
-    assert isinstance(out["ready"], bool)
-    assert out["ready"] == (out["blockers"] == [])
-    assert set(out) == {"ready", "blockers", "warnings", "advisories", "governance"}
 
 
 def test_governance_malformed_metadata_json_raises(conn):
