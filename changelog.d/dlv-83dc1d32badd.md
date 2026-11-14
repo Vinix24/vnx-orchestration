@@ -1,0 +1,1 @@
+- `ReportParser.extract_metadata` split into eight private step helpers by extract-method, behaviour unchanged (golf schoon R15).
