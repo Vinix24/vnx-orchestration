@@ -29,6 +29,8 @@ REASON_SECURITY_PATH = "security_path"
 REASON_INPUT_SET = "input_set_touched"
 REASON_REBASE_REWORK = "rebase_with_rework"
 REASON_ANCHOR = "anchor_unverifiable"
+REASON_NO_SYMBOL_PROVIDER = "no_symbol_provider"
+NO_SUFFIX = "(no suffix)"
 
 #: ``git patch-id`` prints nothing for an empty diff; an empty own diff has this id.
 EMPTY_PATCH_ID = "0" * 40
@@ -150,12 +152,32 @@ def _scope_sources(source: str) -> Dict[str, List[str]]:
     return out
 
 
+#: Suffix -> scope sources of a file. Only a suffix listed here can prove a symbol-level change; every other path is
+#: ``no_symbol_provider`` and forces a full review (OI-2784). A provider for ``.ts`` or ``.md`` is one entry here.
+SYMBOL_PROVIDERS: Mapping[str, Callable[[str], Dict[str, List[str]]]] = {".py": _scope_sources}
+
+
+def path_suffix(path: str) -> str:
+    """The suffix the registry is keyed on, or ``NO_SUFFIX`` for a path without one."""
+    return Path(path).suffix or NO_SUFFIX
+
+
+def has_symbol_provider(path: str) -> bool:
+    return path_suffix(path) in SYMBOL_PROVIDERS
+
+
+def no_provider_paths(paths: Iterable[str]) -> Dict[str, str]:
+    """``{path: suffix}`` for every path whose symbols cannot be computed."""
+    return {p: path_suffix(p) for p in sorted(set(paths)) if not has_symbol_provider(p)}
+
+
 def _changed_symbols(repo: Path, old_tree: str, new_tree: str, path: str, run: Runner) -> FrozenSet[Symbol]:
     module = Path(path).stem
-    if not path.endswith(".py"):
+    provider = SYMBOL_PROVIDERS.get(path_suffix(path))
+    if provider is None:  # no proof either way; classify_change makes such a path REWORK/no_symbol_provider
         return frozenset()
     try:
-        old, new = (_scope_sources(run(repo, ["show", f"{t}:{path}"])) for t in (old_tree, new_tree))
+        old, new = (provider(run(repo, ["show", f"{t}:{path}"])) for t in (old_tree, new_tree))
     except (ChangeKindError, SyntaxError, ValueError):
         return frozenset({(module, WHOLE_MODULE)})  # unknown becomes blocking, never invisible
     return frozenset((module, n) for n in set(old) | set(new) if old.get(n) != new.get(n))
@@ -169,7 +191,8 @@ def interdiff(repo: Path, base_ref: str, parent_head: str, head: str, run: Runne
 
 
 def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> FrozenSet[str]:
-    """The own diff plus the files that import a module of that diff (depth 1)."""
+    """The own diff plus the files that import a module of that diff (depth 1). Callers are known for Python only; a
+    path without a symbol provider adds no callers here and forces the full review in :func:`classify_change`."""
     paths = set(own_diff_paths)
     try:
         graph = build_import_graph(repo, head)
@@ -182,7 +205,7 @@ def seat_input_set(repo: Path, head: str, own_diff_paths: Iterable[str]) -> Froz
     for src, deps in graph.edges.items():
         for dep in deps:
             reverse.setdefault(dep, set()).add(src)
-    stems = {Path(p).stem for p in paths if p.endswith(".py")}
+    stems = {Path(p).stem for p in paths if has_symbol_provider(p)}
     reached = reachable_modules(stems, ImportGraph(edges=reverse), depth=1)
     return frozenset(paths | {p for p in listing if p.endswith(".py") and Path(p).stem in reached})
 
@@ -195,17 +218,24 @@ class ChangeKindRecord:
     security_paths: Mapping[str, str]
     plan_scope_rule_version: str
     full_review_reason: Optional[str] = None
+    #: ``{path: suffix}`` of own diff, interdiff and base move without a symbol provider; non-empty means REWORK.
+    no_provider_paths: Mapping[str, str] = field(default_factory=dict)
 
 
 def decide(merge_base_equal: bool, tree_equal: bool, replay_clean: bool, base_move_paths: Iterable[str],
-           input_set: Iterable[str], security_paths: Mapping[str, str]) -> tuple[str, Optional[str]]:
+           input_set: Iterable[str], security_paths: Mapping[str, str],
+           no_provider: Optional[Mapping[str, str]] = None) -> tuple[str, Optional[str]]:
     """Pure rule: (changekind, full_review_reason). Positive evidence only: each tree fact is a real bool;
-    ``tree_equal`` holds ``head^{tree}`` against the parent's tree (same base) or the replayed tree (moved base)."""
+    ``tree_equal`` holds ``head^{tree}`` against the parent's tree (same base) or the replayed tree (moved base).
+    ``no_provider``: paths whose symbols and callers cannot be computed; ``None`` is not known, so cannot_prove."""
     facts = (merge_base_equal, tree_equal, replay_clean)
-    if not isinstance(security_paths, Mapping) or not all(isinstance(f, bool) for f in facts):
+    if not isinstance(security_paths, Mapping) or not isinstance(no_provider, Mapping) \
+            or not all(isinstance(f, bool) for f in facts):
         return REWORK, REASON_CANNOT_PROVE
     if security_paths:
         return REWORK, REASON_SECURITY_PATH
+    if no_provider:
+        return REWORK, REASON_NO_SYMBOL_PROVIDER
     if merge_base_equal:
         # Same base: a different tree is a real fix commit, a delta may judge it.
         return (NO_CODE_CHANGE, None) if tree_equal else (REWORK, None)
@@ -226,12 +256,14 @@ def classify_change(repo: Path, base_ref: str, parent_head: str, head: str,
         return ChangeKindRecord(REWORK, None, None, {}, rule, REASON_CANNOT_PROVE)
     try:
         cmp = compare(repo, base_ref, parent_head, head, run)
+        own = _names(run(repo, ["diff", "--name-only", "-z", "--no-renames", _merge_base(repo, base_ref, head, run), head]))
     except ChangeKindError:
         return ChangeKindRecord(REWORK, parent_pid, head_pid, {}, rule, REASON_CANNOT_PROVE)
     security = {p: k for p in sorted(cmp.changed_paths | cmp.base_move_paths) if (k := security_path_kind(p)) is not None}
+    blind = no_provider_paths(own | cmp.changed_paths | cmp.base_move_paths)
     kind, reason = decide(cmp.merge_base_equal, cmp.tree == cmp.head_tree, cmp.replay_clean,
-                          cmp.base_move_paths, seat_input_set, security)
-    return ChangeKindRecord(kind, parent_pid, head_pid, security, rule, reason)
+                          cmp.base_move_paths, seat_input_set, security, blind)
+    return ChangeKindRecord(kind, parent_pid, head_pid, security, rule, reason, blind)
 
 
 def _qualified_names(node: ast.AST, prefix: str = "") -> Set[str]:

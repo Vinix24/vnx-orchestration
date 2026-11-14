@@ -148,7 +148,7 @@ def test_seat_input_set_adds_importers_and_fails_on_an_unknown_import_edge(repo)
     ((False, True, "yes"), {}, CANNOT), ((True, True, True), None, CANNOT),
 ])
 def test_decide_pure_and_fail_closed_on_unknown_facts(facts, security, want):
-    assert rc.decide(*facts, ["x.py"], {"in.py"}, security) == want
+    assert rc.decide(*facts, ["x.py"], {"in.py"}, security, {}) == want
 
 
 def test_vanished_function_is_unverifiable_and_forces_full_review(repo):

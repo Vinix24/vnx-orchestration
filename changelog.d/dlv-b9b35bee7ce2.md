@@ -1,0 +1,1 @@
+- The delta review no longer treats a non-Python file as proof of no change: a path without a symbol provider in the own diff, the interdiff or the base move forces a full round with `full_review_reason: no_symbol_provider`, the record names the path and its suffix, and the delta prompt says `symbols not computed for this file type (<suffix>)` (OI-2784).
