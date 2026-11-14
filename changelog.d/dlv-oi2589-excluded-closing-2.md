@@ -1,1 +1,2 @@
 - ci: 28 exclusion lines of batches h to k leave scripts/ci/test_exclusions.txt now that their fixes are on main, so Profile A runs those files again (OI-2589, closing PR 2).
+- test: the one unconditional skip in tests/test_w_init_project_id_threading.py now names OI-2080 and is a key of the Profile A skip set (OI-2589, closing PR 2, round 2).

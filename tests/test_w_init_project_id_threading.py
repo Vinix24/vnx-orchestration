@@ -381,7 +381,7 @@ class TestMigrationLinter:
         violations = ml.scan(tmp_path, strict=True, allowlist=ml.ALLOWLISTED_FILES)
         assert len(violations) == 1
 
-    @pytest.mark.skip(reason="OI-2589: real defect, see report")
+    @pytest.mark.skip(reason="OI-2080: the repo carries DEFAULT 'vnx-dev' (migration 0032, migration_inventory docstring); the linter flags it until OI-2080 is fixed")
     def test_passes_actual_repo_in_normal_mode(self):
         """The real repo passes the linter in normal mode (no new violations)."""
         violations = ml.scan(_PROJECT_ROOT)
